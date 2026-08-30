@@ -154,6 +154,143 @@ jobs:
         if: always()
         run: rm -f -- "${release_signing_key}" "${RUNNER_TEMP}/release-signing.pub.pem"
 
+  build-controller-images:
+    name: Build & Attest Controller Images
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release-publishing
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      CONTROLLER_IMAGE_PREFIX: ghcr.io/gentlekingson/ocservia
+      BUILDX_BUILDER: controller-release-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify runner prerequisites
+        run: scripts/ci-preflight.sh
+      - name: Resolve release identity
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "refusing to publish Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          source_commit="$(git rev-parse HEAD)"
+          if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" != "${GITHUB_SHA}" ]]; then
+            echo "checked out source does not match the release commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          {
+            echo "release_tag=${RELEASE_TAG}"
+            echo "version=${version}"
+            echo "source_commit=${source_commit}"
+          } >>"${GITHUB_ENV}"
+      - name: Login to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+      - name: Prepare pinned BuildKit builder
+        run: |
+          set -euo pipefail
+          docker buildx create \
+            --driver docker-container \
+            --driver-opt "image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8" \
+            --name "${BUILDX_BUILDER}" \
+            --bootstrap \
+            --use
+      - name: Build and publish Controller images
+        id: controller-build
+        run: |
+          set -euo pipefail
+          output_dir="${RUNNER_TEMP}/controller-release"
+          mkdir -p "${output_dir}"
+          build_image() {
+            local name="$1" dockerfile="$2" image metadata digest
+            local -a build_args=(
+              --builder "${BUILDX_BUILDER}"
+              --platform linux/amd64
+              --pull
+              --push
+              --metadata-file "${RUNNER_TEMP}/controller-${name}.metadata.json"
+              --label "org.opencontainers.image.version=${version}"
+              --label "org.opencontainers.image.revision=${source_commit}"
+              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${release_tag}"
+              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${version}"
+              --file "${dockerfile}"
+            )
+            image="${CONTROLLER_IMAGE_PREFIX}/${name}"
+            metadata="${RUNNER_TEMP}/controller-${name}.metadata.json"
+            if [[ "${name}" == control ]]; then
+              build_args+=(--build-arg "VERSION=${version}" --build-arg "COMMIT=${source_commit}")
+            fi
+            docker buildx build "${build_args[@]}" "${GITHUB_WORKSPACE}"
+            digest="$(jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "${metadata}")"
+            printf '%s\t%s\n' "${name}" "${image}@${digest}" >>"${output_dir}/image-refs.tsv"
+            printf '%s_digest=%s\n' "${name}" "${digest}" >>"${GITHUB_OUTPUT}"
+          }
+          build_image gateway deploy/production/gateway.Dockerfile
+          build_image control control-plane/Dockerfile
+          build_image transport rust/transportd.Dockerfile
+          build_image backup deploy/production/backup.Dockerfile
+          scripts/generate-controller-release-manifest.mjs \
+            --output "${output_dir}/controller-release.json" \
+            --release-version "${version}" \
+            --release-tag "${release_tag}" \
+            --source-commit "${source_commit}" \
+            --migration-dir control-plane/migrations \
+            --image "gateway=$(awk -F '\t' '$1 == \"gateway\" { print $2 }' "${output_dir}/image-refs.tsv")" \
+            --image "control=$(awk -F '\t' '$1 == \"control\" { print $2 }' "${output_dir}/image-refs.tsv")" \
+            --image "transport=$(awk -F '\t' '$1 == \"transport\" { print $2 }' "${output_dir}/image-refs.tsv")" \
+            --image "backup=$(awk -F '\t' '$1 == \"backup\" { print $2 }' "${output_dir}/image-refs.tsv")" \
+            --image "postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f" \
+            --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
+          (cd "${output_dir}" && sha256sum controller-release.json >controller-release.json.sha256)
+      - name: Attest gateway image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/gateway
+          subject-digest: ${{ steps.controller-build.outputs.gateway_digest }}
+          push-to-registry: true
+      - name: Attest control image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/control
+          subject-digest: ${{ steps.controller-build.outputs.control_digest }}
+          push-to-registry: true
+      - name: Attest transport image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/transport
+          subject-digest: ${{ steps.controller-build.outputs.transport_digest }}
+          push-to-registry: true
+      - name: Attest backup image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/backup
+          subject-digest: ${{ steps.controller-build.outputs.backup_digest }}
+          push-to-registry: true
+      - name: Upload Controller release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: controller-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/controller-release/*
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove Controller BuildKit builder
+        if: always()
+        run: docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1 || true
+
   validate-release-packages:
     name: Validate Multi-Arch Package Set
     needs: build-agent-packages
@@ -197,7 +334,7 @@ jobs:
 
   publish-release-packages:
     name: Sign & Publish Release Assets
-    needs: validate-release-packages
+    needs: [validate-release-packages, build-controller-images]
     if: github.event_name == 'release'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -219,6 +356,11 @@ jobs:
           pattern: agent-packages-*
           path: ${{ runner.temp }}/assets
           merge-multiple: true
+      - name: Collect Controller release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          name: controller-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assets
       - name: Resolve package version & source epoch
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -308,6 +450,8 @@ jobs:
             "${assets}/ocservia-agent_${version}_arm64.deb" \
             "${assets}/ocservia-agent-${version}-1.x86_64.rpm" \
             "${assets}/ocservia-agent-${version}-1.aarch64.rpm" \
+            "${assets}/controller-release.json" \
+            "${assets}/controller-release.json.sha256" \
             "${assets}/SHA256SUMS" \
             "${assets}/SHA256SUMS.sig" \
             "${assets}/release-signing.pub.pem"

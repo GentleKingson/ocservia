@@ -16,6 +16,14 @@ Provision the backup bind mount for the non-root PostgreSQL UID before startup. 
 sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
 ```
 
+Formal GitHub Releases publish `controller-release.json` and its
+`controller-release.json.sha256` checksum alongside the Agent assets. The
+manifest is the canonical release mapping: copy all six image references from
+its `images` object without replacing any digest with a tag. The gateway,
+control, transport, and backup references are first-party images in
+`ghcr.io/gentlekingson/ocservia`; PostgreSQL and OpenTelemetry remain pinned
+third-party images.
+
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
 Backups retain the configured number of verified base backups. WAL cleanup is anchored to the oldest retained base backup, so point-in-time recovery remains possible across the retained window without allowing the local archive to grow forever. Monitor backup-worker health and the `LATEST` timestamp, copy each completed base backup plus its required WAL range to protected off-host storage, and confirm the off-host copy before reducing local retention.
