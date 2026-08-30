@@ -101,6 +101,7 @@ const manifest = {
   release_version: values.releaseVersion,
   release_tag: values.releaseTag,
   source_commit: values.sourceCommit,
+  platform: "linux/amd64",
   database_migration: deriveMigrationHead(path.resolve(values.migrationDir)),
   images: Object.fromEntries(imageNames.map((name) => [name, values.images.get(name)])),
 };

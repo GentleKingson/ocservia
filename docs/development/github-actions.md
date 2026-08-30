@@ -325,7 +325,8 @@ stays a dry run and never uploads release assets.
   `scripts/validate-release-packages.sh`: presence and naming of the six
   packages, both signed triples verified against the pinned fingerprint,
   `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
-  identical embedded payloads, and a canonical `SHA256SUMS`.
+  identical embedded payloads, and a canonical `SHA256SUMS` covering those
+  six packages plus `controller-release.json` on formal Controller releases.
 - Every build job signs with an ephemeral key generated on the runner, so a
   `workflow_dispatch` run never touches the production signing credential,
   and the validate job checks the internal consistency of the signed set

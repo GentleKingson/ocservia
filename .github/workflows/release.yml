@@ -256,6 +256,15 @@ jobs:
             --image "postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f" \
             --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
           (cd "${output_dir}" && sha256sum controller-release.json >controller-release.json.sha256)
+      - name: Verify anonymous Controller image reads
+        run: |
+          set -euo pipefail
+          for name in gateway control transport backup; do
+            curl --fail --silent --show-error --head \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/gentlekingson/ocservia/${name}/manifests/${release_tag}" \
+              >/dev/null
+          done
       - name: Attest gateway image provenance
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
@@ -421,7 +430,8 @@ jobs:
         env:
           AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
         run: |
-          WRITE_SHA256SUMS=1 ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
+          CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 WRITE_SHA256SUMS=1 \
+            ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
             scripts/validate-release-packages.sh
       - name: Sign unified checksum manifest
         run: |
@@ -432,7 +442,8 @@ jobs:
             -out "${RUNNER_TEMP}/assets/release-signing.pub.pem" >/dev/null 2>&1
       - name: Verify signed release manifest
         run: |
-          ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
+          CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 ASSET_DIR="${RUNNER_TEMP}/assets" \
+            VERSION="${version}" \
             scripts/validate-release-packages.sh
       - name: Publish assets to GitHub Release
         env:

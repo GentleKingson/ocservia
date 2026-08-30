@@ -45,6 +45,7 @@ jq -e '
   .release_version == "0.2.0" and
   .release_tag == "v0.2.0" and
   .source_commit == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
+  .platform == "linux/amd64" and
   .database_migration == 28 and
   (.images | keys == ["backup", "control", "gateway", "otel", "postgres", "transport"]) and
   (.images | to_entries | all(.value | test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
@@ -69,7 +70,8 @@ bad_tag_args=("${common_args[@]}")
 bad_tag_args[3]=v0.2.1
 assert_rejected release-tag "${bad_tag_args[@]}" "${image_args[@]}"
 
-ruby -r yaml - "${ROOT}/.github/workflows/release.yml" <<'RUBY'
+ruby -r yaml - "${ROOT}/.github/workflows/release.yml" \
+  "${ROOT}/docs/operations/production-deployment.md" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
 controller = jobs.fetch("build-controller-images")
@@ -91,10 +93,17 @@ abort("Controller release must use the verified actions/attest pin") unless
 run_steps = Array(controller.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
 abort("Controller release must generate its canonical manifest") unless
   run_steps.include?("scripts/generate-controller-release-manifest.mjs")
+abort("Controller release must declare its supported platform") unless
+  run_steps.include?("--platform linux/amd64")
 abort("Controller manifest publishing must wait for the controller image job") unless
   Array(jobs.fetch("publish-release-packages").fetch("needs")).include?("build-controller-images")
 abort("workflow dispatch must not publish Controller images") if
   controller.fetch("if").include?("workflow_dispatch")
+abort("Controller release must check anonymous image reads") unless
+  run_steps.include?("curl") && run_steps.include?("manifests/${release_tag}")
+docs = File.read(ARGV.fetch(1))
+abort("production docs must declare the Controller image visibility prerequisite") unless
+  docs.include?("be public") && docs.include?("linux/amd64")
 RUBY
 
 echo "Controller release manifest tests passed"

@@ -22,7 +22,16 @@ manifest is the canonical release mapping: copy all six image references from
 its `images` object without replacing any digest with a tag. The gateway,
 control, transport, and backup references are first-party images in
 `ghcr.io/gentlekingson/ocservia`; PostgreSQL and OpenTelemetry remain pinned
-third-party images.
+third-party images. The four first-party GHCR packages must already exist and
+be public before the first formal release; the release workflow performs an
+anonymous registry read check and fails closed if any image cannot be pulled
+without credentials. The PR1 Controller bundle currently supports
+`linux/amd64` only, and the manifest records that platform explicitly.
+
+The signed `SHA256SUMS` also includes `controller-release.json`, so verify the
+published `SHA256SUMS.sig` with the release public key before trusting the
+manifest. The separate `controller-release.json.sha256` is an additional
+byte-integrity check.
 
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
