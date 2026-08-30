@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${ROOT}/deploy/production/compose.sh}"
 CURRENT_RELEASE=""
+PREVIOUS_RELEASE=""
 PENDING_RELEASE=""
 STAGED_RELEASE=""
 CANONICAL_RELEASE=""
@@ -12,7 +13,7 @@ CANONICAL_RELEASE=""
 umask 077
 
 usage() {
-  echo "usage: $0 install --release-file /path/controller-release.json" >&2
+  echo "usage: $0 {install|upgrade} --release-file /path/controller-release.json" >&2
   exit 2
 }
 
@@ -146,13 +147,8 @@ validate_source_tree() {
   [[ -z "${dirty}" ]] || fail "checkout has untracked changes"
 }
 
-stage_and_validate_manifest() {
-  local manifest_filter
-  STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
-    fail "cannot allocate release state staging file"
-  chmod 600 "${STAGED_RELEASE}"
-  cat -- "${RELEASE_FILE}" >"${STAGED_RELEASE}" || fail "cannot read release file"
-
+validate_manifest_file() {
+  local label="$1" path="$2" manifest_filter
   # jq variables in this filter are intentionally not shell variables.
   # shellcheck disable=SC2016
   manifest_filter='
@@ -174,25 +170,36 @@ stage_and_validate_manifest() {
         all(.[]; matches("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
     end
   '
-  jq -e -s "${manifest_filter}" "${STAGED_RELEASE}" >/dev/null ||
-    fail "release manifest is invalid"
+  jq -e -s "${manifest_filter}" "${path}" >/dev/null ||
+    fail "${label} is invalid"
 
   CANONICAL_RELEASE="$(mktemp "${STATE_ROOT}/.canonical-release.json.XXXXXX")" ||
     fail "cannot allocate manifest validation file"
   chmod 600 "${CANONICAL_RELEASE}"
-  jq -s '.[0]' "${STAGED_RELEASE}" >"${CANONICAL_RELEASE}" ||
-    fail "release manifest is not valid JSON"
-  cmp -s "${STAGED_RELEASE}" "${CANONICAL_RELEASE}" ||
-    fail "release manifest is not in canonical form"
+  jq -s '.[0]' "${path}" >"${CANONICAL_RELEASE}" ||
+    fail "${label} is not valid JSON"
+  cmp -s "${path}" "${CANONICAL_RELEASE}" ||
+    fail "${label} is not in canonical form"
+  rm -f -- "${CANONICAL_RELEASE}"
+  CANONICAL_RELEASE=""
+}
+
+stage_and_validate_manifest() {
+  STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
+    fail "cannot allocate release state staging file"
+  chmod 600 "${STAGED_RELEASE}"
+  cat -- "${RELEASE_FILE}" >"${STAGED_RELEASE}" || fail "cannot read release file"
+  validate_manifest_file "release manifest" "${STAGED_RELEASE}"
 }
 
 map_manifest_images() {
-  OCSERV_GATEWAY_IMAGE="$(jq -er -s '.[0].images.gateway' "${STAGED_RELEASE}")"
-  OCSERV_CONTROL_IMAGE="$(jq -er -s '.[0].images.control' "${STAGED_RELEASE}")"
-  OCSERV_TRANSPORT_IMAGE="$(jq -er -s '.[0].images.transport' "${STAGED_RELEASE}")"
-  OCSERV_BACKUP_IMAGE="$(jq -er -s '.[0].images.backup' "${STAGED_RELEASE}")"
-  OCSERV_POSTGRES_IMAGE="$(jq -er -s '.[0].images.postgres' "${STAGED_RELEASE}")"
-  OCSERV_OTEL_IMAGE="$(jq -er -s '.[0].images.otel' "${STAGED_RELEASE}")"
+  local manifest="$1"
+  OCSERV_GATEWAY_IMAGE="$(jq -er -s '.[0].images.gateway' "${manifest}")"
+  OCSERV_CONTROL_IMAGE="$(jq -er -s '.[0].images.control' "${manifest}")"
+  OCSERV_TRANSPORT_IMAGE="$(jq -er -s '.[0].images.transport' "${manifest}")"
+  OCSERV_BACKUP_IMAGE="$(jq -er -s '.[0].images.backup' "${manifest}")"
+  OCSERV_POSTGRES_IMAGE="$(jq -er -s '.[0].images.postgres' "${manifest}")"
+  OCSERV_OTEL_IMAGE="$(jq -er -s '.[0].images.otel' "${manifest}")"
   export OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE
   export OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
 }
@@ -220,6 +227,102 @@ cleanup() {
   exit "${status}"
 }
 
+validate_current_release() {
+  if [[ -L "${CURRENT_RELEASE}" ]]; then
+    fail "current release state is a symlink; refusing to upgrade"
+  fi
+  [[ -e "${CURRENT_RELEASE}" ]] || fail "current release state is missing; refusing to upgrade"
+  validate_state_file_path "current release state" "${CURRENT_RELEASE}"
+  validate_manifest_file "current release state" "${CURRENT_RELEASE}"
+}
+
+validate_previous_release() {
+  if [[ -L "${PREVIOUS_RELEASE}" ]]; then
+    fail "previous release state must not be a symlink"
+  elif [[ -e "${PREVIOUS_RELEASE}" ]]; then
+    validate_state_file_path "previous release state" "${PREVIOUS_RELEASE}"
+    validate_manifest_file "previous release state" "${PREVIOUS_RELEASE}"
+  fi
+}
+
+compare_decimal_strings() {
+  local left="$1" right="$2"
+  while [[ "${#left}" -gt 1 && "${left}" == 0* ]]; do left="${left#0}"; done
+  while [[ "${#right}" -gt 1 && "${right}" == 0* ]]; do right="${right#0}"; done
+  if ((${#left} < ${#right})); then
+    echo -1
+  elif ((${#left} > ${#right})); then
+    echo 1
+  elif [[ "${left}" == "${right}" ]]; then
+    echo 0
+  elif [[ "${left}" < "${right}" ]]; then
+    echo -1
+  else
+    echo 1
+  fi
+}
+
+compare_semver() {
+  local left="$1" right="$2" left_major left_minor left_patch right_major right_minor right_patch part
+  IFS=. read -r left_major left_minor left_patch <<<"${left}"
+  IFS=. read -r right_major right_minor right_patch <<<"${right}"
+  for part in "${left_major}" "${left_minor}" "${left_patch}" "${right_major}" "${right_minor}" "${right_patch}"; do
+    [[ "${part}" =~ ^[0-9]+$ ]] || return 2
+  done
+  local comparison
+  comparison="$(compare_decimal_strings "${left_major}" "${right_major}")"
+  if [[ "${comparison}" != 0 ]]; then echo "${comparison}"; return; fi
+  comparison="$(compare_decimal_strings "${left_minor}" "${right_minor}")"
+  if [[ "${comparison}" != 0 ]]; then echo "${comparison}"; return; fi
+  compare_decimal_strings "${left_patch}" "${right_patch}"
+}
+
+check_current_database_and_backup_health() {
+  local health_json
+  if ! health_json="$("${COMPOSE_LAUNCHER}" ps --format json postgres backup)"; then
+    fail "cannot inspect current PostgreSQL and backup health; current release remains unchanged"
+  fi
+  if ! jq -e '
+    if type != "array" then false
+    else
+      . as $services |
+      ["postgres", "backup"] |
+      all(.[];
+        . as $service |
+        any($services[]; .Service == $service and .State == "running" and .Health == "healthy"))
+    end
+  ' <<<"${health_json}" >/dev/null; then
+    fail "current PostgreSQL and backup services are not healthy; current release remains unchanged"
+  fi
+}
+
+commit_upgrade_state() {
+  local previous_staged
+  previous_staged="$(mktemp "${STATE_ROOT}/.previous-release.json.XXXXXX")" ||
+    fail "cannot allocate previous release state staging file"
+  chmod 600 "${previous_staged}"
+  cat -- "${CURRENT_RELEASE}" >"${previous_staged}" || {
+    rm -f -- "${previous_staged}"
+    fail "cannot stage previous release state"
+  }
+
+  if [[ -L "${CURRENT_RELEASE}" || -L "${PREVIOUS_RELEASE}" ]]; then
+    rm -f -- "${previous_staged}"
+    fail "release state path became a symlink; target release was not confirmed"
+  fi
+  if ! mv -- "${STAGED_RELEASE}" "${CURRENT_RELEASE}"; then
+    rm -f -- "${previous_staged}"
+    fail "cannot commit current release state; target release was not confirmed"
+  fi
+  STAGED_RELEASE=""
+  if ! mv -- "${previous_staged}" "${PREVIOUS_RELEASE}"; then
+    if ! mv -- "${previous_staged}" "${CURRENT_RELEASE}"; then
+      fail "release state rollover failed after activation; target release was not confirmed"
+    fi
+    fail "release state rollover failed after activation; target release was not confirmed"
+  fi
+}
+
 install_controller() {
   local release_version
   prepare_state_root
@@ -235,7 +338,7 @@ install_controller() {
 
   validate_release_file_path "${RELEASE_FILE}"
   stage_and_validate_manifest
-  map_manifest_images
+  map_manifest_images "${STAGED_RELEASE}"
   release_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
   validate_source_tree
   validate_prerequisites
@@ -261,11 +364,64 @@ install_controller() {
   echo "Controller ${release_version} installed"
 }
 
-if (($# != 3)) || [[ "$1" != "install" || "$2" != "--release-file" ]]; then
+upgrade_controller() {
+  local current_version target_version comparison
+  prepare_state_root
+  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
+  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
+  acquire_lock
+
+  validate_current_release
+  validate_previous_release
+  validate_release_file_path "${RELEASE_FILE}"
+  stage_and_validate_manifest
+  current_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
+  target_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
+  comparison="$(compare_semver "${target_version}" "${current_version}")" ||
+    fail "release versions are not valid SemVer"
+
+  case "${comparison}" in
+    -1) fail "upgrade does not perform downgrade" ;;
+    0)
+      if cmp -s "${CURRENT_RELEASE}" "${STAGED_RELEASE}"; then
+        echo "Controller ${target_version} is already current; no-op"
+        return
+      fi
+      fail "target release version matches current but the manifest differs"
+      ;;
+    1) ;;
+    *) fail "release versions are not valid SemVer" ;;
+  esac
+
+  validate_prerequisites
+  map_manifest_images "${CURRENT_RELEASE}"
+  check_current_database_and_backup_health
+
+  map_manifest_images "${STAGED_RELEASE}"
+  if ! "${COMPOSE_LAUNCHER}" config --quiet; then
+    fail "production preflight failed for target release; current release remains unchanged"
+  fi
+  if ! "${COMPOSE_LAUNCHER}" pull; then
+    fail "target image pull failed; current release remains unchanged"
+  fi
+  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
+    fail "upgrade activation started but was not confirmed successful; current release state remains unchanged; do not automatically rollback old images" 1
+  fi
+
+  commit_upgrade_state
+  echo "Controller ${target_version} upgraded"
+}
+
+if (($# != 3)) || [[ "$2" != "--release-file" ]] ||
+  [[ "$1" != "install" && "$1" != "upgrade" ]]; then
   usage
 fi
 
 RELEASE_FILE="$3"
 normalize_release_file_path
 trap cleanup EXIT
-install_controller
+if [[ "$1" == "install" ]]; then
+  install_controller
+else
+  upgrade_controller
+fi
