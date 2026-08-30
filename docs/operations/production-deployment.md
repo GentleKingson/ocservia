@@ -61,7 +61,8 @@ deploy/production/controller.sh upgrade \
 ```
 
 Upgrade validates the confirmed current state and target first, checks the
-current PostgreSQL and backup health, renders the target Compose configuration,
+target `source_commit` against a clean checkout before any Compose operation,
+checks the current PostgreSQL and backup health, renders the target Compose configuration,
 pulls target images while the current release is still running, and then runs
 the existing migration and `up -d --wait` dependency graph. Only after that
 activation succeeds does it atomically roll the complete manifests into
