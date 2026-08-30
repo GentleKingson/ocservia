@@ -43,7 +43,7 @@ EOF
 chmod 0755 "${bin}/compose.sh"
 
 digest="sha256:$(printf 'b%.0s' {1..64})"
-commit="$(printf 'a%.0s' {1..40})"
+commit="$(git -C "${ROOT}" rev-parse HEAD)"
 release_file="${fixture}/release/controller-release.json"
 node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --output "${release_file}" \
@@ -70,8 +70,8 @@ run_controller() {
 }
 
 expect_failure() {
-  local state="$1" selected="$2" expected_message="$3"
-  shift 3
+  local state="$1" selected="$2" expected_message="$3" pending_expected="$4"
+  shift 4
   mkdir -m 700 -- "${state}"
   if run_controller "${state}" "${selected}" "$@" >"${state}/output.log" 2>&1; then
     echo "expected controller install to fail: ${expected_message}" >&2
@@ -79,12 +79,19 @@ expect_failure() {
   fi
   grep -Fq "${expected_message}" "${state}/output.log"
   test ! -e "${state}/current-release.json"
+  if [[ "${pending_expected}" == true ]]; then
+    test -f "${state}/pending-release.json"
+    cmp -s "${release_file}" "${state}/pending-release.json"
+  else
+    test ! -e "${state}/pending-release.json"
+  fi
 }
 
 valid_state="${fixture}/valid"
 mkdir -m 700 -- "${valid_state}"
 run_controller "${valid_state}" "${release_file}" env
 test -f "${valid_state}/current-release.json"
+test ! -e "${valid_state}/pending-release.json"
 cmp -s "${release_file}" "${valid_state}/current-release.json"
 test "$(stat -c '%u:%a' "${valid_state}")" = "$(id -u):700"
 test "$(stat -c '%u:%a' "${valid_state}/current-release.json")" = "$(id -u):600"
@@ -104,6 +111,7 @@ relative_state="${fixture}/relative"
 mkdir -m 700 -- "${relative_state}"
 (cd "${fixture}/release" && run_controller "${relative_state}" controller-release.json env)
 cmp -s "${release_file}" "${relative_state}/current-release.json"
+test ! -e "${relative_state}/pending-release.json"
 
 if run_controller "${valid_state}" "${release_file}" env >"${fixture}/already-installed.log" 2>&1; then
   echo "already-installed Controller was accepted" >&2
@@ -114,27 +122,32 @@ test "$(wc -l <"${valid_state}/compose.log")" -eq 3
 
 unsupported="${fixture}/unsupported.json"
 jq '.manifest_version = 2' "${release_file}" >"${unsupported}"
-expect_failure "${fixture}/unsupported" "${unsupported}" 'release manifest is invalid' env
+expect_failure "${fixture}/unsupported" "${unsupported}" 'release manifest is invalid' false env
 
 missing_image="${fixture}/missing-image.json"
 jq 'del(.images.gateway)' "${release_file}" >"${missing_image}"
-expect_failure "${fixture}/missing-image" "${missing_image}" 'release manifest is invalid' env
+expect_failure "${fixture}/missing-image" "${missing_image}" 'release manifest is invalid' false env
 
 mutable_image="${fixture}/mutable-image.json"
 jq '.images.gateway = "ghcr.io/gentlekingson/ocservia/gateway:latest"' "${release_file}" >"${mutable_image}"
-expect_failure "${fixture}/mutable-image" "${mutable_image}" 'release manifest is invalid' env
+expect_failure "${fixture}/mutable-image" "${mutable_image}" 'release manifest is invalid' false env
 
 malformed_digest="${fixture}/malformed-digest.json"
 jq '.images.control = "ghcr.io/gentlekingson/ocservia/control@sha256:deadbeef"' "${release_file}" >"${malformed_digest}"
-expect_failure "${fixture}/malformed-digest" "${malformed_digest}" 'release manifest is invalid' env
+expect_failure "${fixture}/malformed-digest" "${malformed_digest}" 'release manifest is invalid' false env
 
 malformed_json="${fixture}/malformed-json.json"
 printf '%s\n' '{' >"${malformed_json}"
-expect_failure "${fixture}/malformed-json" "${malformed_json}" 'release manifest is invalid' env
+expect_failure "${fixture}/malformed-json" "${malformed_json}" 'release manifest is invalid' false env
 
 symlink_release="${fixture}/release-symlink.json"
 ln -s "${release_file}" "${symlink_release}"
-expect_failure "${fixture}/symlink-release" "${symlink_release}" 'must not contain symlink ancestry' env
+expect_failure "${fixture}/symlink-release" "${symlink_release}" 'must not contain symlink ancestry' false env
+
+source_mismatch="${fixture}/source-mismatch.json"
+jq --arg source "$(printf 'c%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${source_mismatch}"
+expect_failure "${fixture}/source-mismatch" "${source_mismatch}" \
+  'checkout HEAD does not match release manifest source_commit' false env
 
 config_state="${fixture}/config-failure"
 mkdir -m 700 -- "${config_state}"
@@ -143,6 +156,8 @@ if run_controller "${config_state}" "${release_file}" env MOCK_CONFIG_EXIT=1 >"$
   exit 1
 fi
 test ! -e "${config_state}/current-release.json"
+test -f "${config_state}/pending-release.json"
+cmp -s "${release_file}" "${config_state}/pending-release.json"
 test "$(wc -l <"${config_state}/compose.log")" -eq 1
 
 pull_state="${fixture}/pull-failure"
@@ -152,6 +167,8 @@ if run_controller "${pull_state}" "${release_file}" env MOCK_PULL_EXIT=1 >"${pul
   exit 1
 fi
 test ! -e "${pull_state}/current-release.json"
+test -f "${pull_state}/pending-release.json"
+cmp -s "${release_file}" "${pull_state}/pending-release.json"
 test "$(wc -l <"${pull_state}/compose.log")" -eq 2
 
 up_state="${fixture}/up-failure"
@@ -161,7 +178,32 @@ if run_controller "${up_state}" "${release_file}" env MOCK_UP_EXIT=1 >"${up_stat
   exit 1
 fi
 test ! -e "${up_state}/current-release.json"
+test -f "${up_state}/pending-release.json"
+cmp -s "${release_file}" "${up_state}/pending-release.json"
 test "$(wc -l <"${up_state}/compose.log")" -eq 3
+
+retry_state="${fixture}/retry"
+mkdir -m 700 -- "${retry_state}"
+if run_controller "${retry_state}" "${release_file}" env MOCK_UP_EXIT=1 >"${retry_state}/first.log" 2>&1; then
+  echo "initial retry fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+test -f "${retry_state}/pending-release.json"
+
+different_pending="${fixture}/different-pending.json"
+other_digest="sha256:$(printf 'c%.0s' {1..64})"
+jq --arg image "ghcr.io/gentlekingson/ocservia/gateway@${other_digest}" \
+  '.images.gateway = $image' "${release_file}" >"${different_pending}"
+if run_controller "${retry_state}" "${different_pending}" env >"${retry_state}/different.log" 2>&1; then
+  echo "different pending release was accepted" >&2
+  exit 1
+fi
+grep -Fq 'a different pending release exists; only the same manifest may be retried' "${retry_state}/different.log"
+test "$(wc -l <"${retry_state}/compose.log")" -eq 3
+
+run_controller "${retry_state}" "${release_file}" env
+cmp -s "${release_file}" "${retry_state}/current-release.json"
+test ! -e "${retry_state}/pending-release.json"
 
 lock_state="${fixture}/lock"
 mkdir -m 700 -- "${lock_state}"

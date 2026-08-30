@@ -116,6 +116,8 @@ classify_path() {
       run_g6_smoke=true ;;
     deploy/production/rotate-postgres-credentials.sh|deploy/production/postgres-init/*|deploy/production/backup-entrypoint.sh|deploy/production/backup.Dockerfile)
       run_production_relays=true; run_credential_rotation=true ;;
+    deploy/production/controller.sh)
+      run_production_relays=true; run_contracts_policy=true ;;
     deploy/production/*|deploy/production/**/*)
       run_production_relays=true ;;
     deploy/compose/*|deploy/compose/**/*)

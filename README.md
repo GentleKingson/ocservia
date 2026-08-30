@@ -216,8 +216,8 @@ deploy/production/compose.sh config --quiet
 deploy/production/compose.sh up -d
 ```
 
-For a fresh Controller host, use the lifecycle entrypoint with the published
-release manifest:
+For a fresh Controller host, use the lifecycle entrypoint from the matching
+clean release checkout with the published release manifest:
 
 ```bash
 deploy/production/controller.sh install --release-file /path/to/controller-release.json

@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${ROOT}/deploy/production/compose.sh}"
 CURRENT_RELEASE=""
+PENDING_RELEASE=""
 STAGED_RELEASE=""
 CANONICAL_RELEASE=""
 
@@ -99,6 +100,18 @@ validate_release_file_path() {
     fail "release file must not be group/world writable"
 }
 
+validate_state_file_path() {
+  local label="$1" path="$2" state_uid state_mode
+  if [[ -L "${path}" ]]; then
+    fail "${label} must not be a symlink"
+  fi
+  [[ -f "${path}" ]] || fail "${label} must be a regular file"
+  require_absolute_canonical_path "${label}" "${path}"
+  IFS=: read -r state_uid state_mode < <(stat -c '%u:%a' "${path}")
+  [[ "${state_uid}" == "$(id -u)" && "${state_mode}" == "600" ]] ||
+    fail "${label} must be launcher-owned with mode 0600"
+}
+
 normalize_release_file_path() {
   local path="${RELEASE_FILE}"
   if [[ "${path}" != /* ]]; then
@@ -113,6 +126,24 @@ normalize_release_file_path() {
     path="$(pwd -P)/${path}"
   fi
   RELEASE_FILE="${path}"
+}
+
+validate_source_tree() {
+  local manifest_commit current_commit dirty
+  manifest_commit="$(jq -er -s '.[0].source_commit' "${STAGED_RELEASE}")"
+  if ! current_commit="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)"; then
+    fail "Controller release must be installed from a Git checkout"
+  fi
+  [[ "${current_commit}" == "${manifest_commit}" ]] ||
+    fail "checkout HEAD does not match release manifest source_commit"
+  if ! git -C "${ROOT}" diff --quiet --exit-code -- .; then
+    fail "checkout has unstaged changes; refusing to install a release"
+  fi
+  if ! git -C "${ROOT}" diff --cached --quiet --exit-code -- .; then
+    fail "checkout has staged changes; refusing to install a release"
+  fi
+  dirty="$(git -C "${ROOT}" status --porcelain --untracked-files=all)"
+  [[ -z "${dirty}" ]] || fail "checkout has untracked changes"
 }
 
 stage_and_validate_manifest() {
@@ -193,6 +224,7 @@ install_controller() {
   local release_version
   prepare_state_root
   CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
+  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
 
   if [[ -L "${CURRENT_RELEASE}" ]]; then
@@ -205,7 +237,19 @@ install_controller() {
   stage_and_validate_manifest
   map_manifest_images
   release_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
+  validate_source_tree
   validate_prerequisites
+
+  if [[ -L "${PENDING_RELEASE}" ]]; then
+    fail "pending release state must not be a symlink"
+  elif [[ -e "${PENDING_RELEASE}" ]]; then
+    validate_state_file_path "pending release state" "${PENDING_RELEASE}"
+    cmp -s "${PENDING_RELEASE}" "${STAGED_RELEASE}" ||
+      fail "a different pending release exists; only the same manifest may be retried"
+  else
+    mv -- "${STAGED_RELEASE}" "${PENDING_RELEASE}" || fail "cannot persist pending release state"
+    STAGED_RELEASE=""
+  fi
 
   "${COMPOSE_LAUNCHER}" config --quiet
   "${COMPOSE_LAUNCHER}" pull
@@ -213,7 +257,7 @@ install_controller() {
 
   [[ ! -e "${CURRENT_RELEASE}" && ! -L "${CURRENT_RELEASE}" ]] ||
     fail "current release state appeared during install"
-  mv -- "${STAGED_RELEASE}" "${CURRENT_RELEASE}" || fail "cannot commit current release state"
+  mv -- "${PENDING_RELEASE}" "${CURRENT_RELEASE}" || fail "cannot commit current release state"
   STAGED_RELEASE=""
   echo "Controller ${release_version} installed"
 }
