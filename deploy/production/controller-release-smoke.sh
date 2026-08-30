@@ -36,11 +36,28 @@ jq -e -s '
   length == 1 and
   (.[0] | type == "object" and
     (.release_version | type == "string") and
-    (.source_commit | type == "string"))
+    (.source_commit | type == "string") and
+    (.images | type == "object"))
 ' "${RELEASE_FILE}" >/dev/null || fail "release file is invalid"
 expected_version="$(jq -er '.release_version' "${RELEASE_FILE}")"
 expected_commit="$(jq -er '.source_commit' "${RELEASE_FILE}")"
 [[ "${expected_commit}" =~ ^[0-9a-f]{40}$ ]] || fail "release source_commit is invalid"
+
+for image in gateway control transport backup postgres otel; do
+  case "${image}" in
+    gateway) variable=OCSERV_GATEWAY_IMAGE ;;
+    control) variable=OCSERV_CONTROL_IMAGE ;;
+    transport) variable=OCSERV_TRANSPORT_IMAGE ;;
+    backup) variable=OCSERV_BACKUP_IMAGE ;;
+    postgres) variable=OCSERV_POSTGRES_IMAGE ;;
+    otel) variable=OCSERV_OTEL_IMAGE ;;
+  esac
+  if ! value="$(jq -er --arg image "${image}" '.images[$image]' "${RELEASE_FILE}")" ||
+    [[ ! "${value}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+    fail "release image ${image} is invalid"
+  fi
+  export "${variable}=${value}"
+done
 
 if [[ -z "${PUBLIC_URL}" ]]; then
   [[ -n "${OCSERV_PUBLIC_HOST:-}" ]] || fail "OCSERV_PUBLIC_HOST or OCSERV_CONTROLLER_PUBLIC_URL is required"

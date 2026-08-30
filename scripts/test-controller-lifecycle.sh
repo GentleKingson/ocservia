@@ -133,6 +133,13 @@ seed_upgrade_state() {
   fi
 }
 
+seed_pending_state() {
+  local state="$1" manifest="$2"
+  jq -s '{manifest: .[0], phase: "smoke", failure: null}' "${manifest}" \
+    >"${state}/pending-release.json"
+  chmod 600 "${state}/pending-release.json"
+}
+
 expect_upgrade_failure() {
   local state="$1" selected="$2" expected_message="$3"
   shift 3
@@ -179,6 +186,18 @@ fi
 grep -Fq 'Controller is already installed; use upgrade' "${fixture}/already-installed.log"
 test "$(wc -l <"${valid_state}/compose.log")" -eq 3
 
+completed_install_state="${fixture}/completed-install"
+seed_upgrade_state "${completed_install_state}"
+seed_pending_state "${completed_install_state}" "${release_file}"
+if run_controller "${completed_install_state}" "${release_file}" env \
+  >"${completed_install_state}/output.log" 2>&1; then
+  echo "completed install reconciliation was rejected" >&2
+  exit 1
+fi
+grep -Fq 'Controller is already installed; use upgrade' "${completed_install_state}/output.log"
+test ! -e "${completed_install_state}/pending-release.json"
+test ! -e "${completed_install_state}/compose.log"
+
 unsupported="${fixture}/unsupported.json"
 jq '.manifest_version = 2' "${release_file}" >"${unsupported}"
 malformed_digest="${fixture}/malformed-digest.json"
@@ -206,6 +225,21 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --image "backup=ghcr.io/gentlekingson/ocservia/backup@${next_digest}" \
   --image "postgres=docker.io/library/postgres@${next_digest}" \
   --image "otel=docker.io/otel/opentelemetry-collector@${next_digest}"
+
+third_digest="sha256:$(printf 'd%.0s' {1..64})"
+third_release_file="${fixture}/release/controller-release-third.json"
+node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
+  --output "${third_release_file}" \
+  --release-version 0.4.0 \
+  --release-tag v0.4.0 \
+  --source-commit "${commit}" \
+  --migration-dir "${ROOT}/control-plane/migrations" \
+  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${third_digest}" \
+  --image "control=ghcr.io/gentlekingson/ocservia/control@${third_digest}" \
+  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${third_digest}" \
+  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${third_digest}" \
+  --image "postgres=docker.io/library/postgres@${third_digest}" \
+  --image "otel=docker.io/otel/opentelemetry-collector@${third_digest}"
 
 target_source_mismatch="${fixture}/release/controller-release-source-mismatch.json"
 jq --arg source "$(printf 'd%.0s' {1..40})" '.source_commit = $source' \
@@ -236,6 +270,17 @@ test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 4
 [[ "$(sed -n '2p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '3p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '4p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
+
+completed_upgrade_state="${fixture}/completed-upgrade"
+seed_upgrade_state "${completed_upgrade_state}"
+cp -- "${next_release_file}" "${completed_upgrade_state}/current-release.json"
+cp -- "${release_file}" "${completed_upgrade_state}/previous-release.json"
+chmod 600 "${completed_upgrade_state}/current-release.json" "${completed_upgrade_state}/previous-release.json"
+seed_pending_state "${completed_upgrade_state}" "${next_release_file}"
+run_controller_upgrade "${completed_upgrade_state}" "${third_release_file}" env
+cmp -s "${third_release_file}" "${completed_upgrade_state}/current-release.json"
+cmp -s "${next_release_file}" "${completed_upgrade_state}/previous-release.json"
+test ! -e "${completed_upgrade_state}/pending-release.json"
 
 downgrade_state="${fixture}/downgrade"
 seed_upgrade_state "${downgrade_state}"

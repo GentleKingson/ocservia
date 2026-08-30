@@ -18,6 +18,10 @@ printf '%s\n' \
   '{"Service":"control-plane","State":"running","Health":"healthy"}' \
   '{"Service":"transportd","State":"running","Health":"healthy"}' \
   '{"Service":"backup","State":"running","Health":"healthy"}'
+for variable in OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE \
+  OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE; do
+  [[ "${!variable}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+done
 EOF
 chmod 0755 "${bin}/compose.sh"
 
@@ -35,7 +39,14 @@ EOF
 chmod 0755 "${bin}/curl"
 
 release_file="${fixture}/release/controller-release.json"
-jq -n '{release_version:"0.3.0", source_commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
+jq -n '{release_version:"0.3.0", source_commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", images:{
+  gateway:"registry.example/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  control:"registry.example/control@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  transport:"registry.example/transport@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  backup:"registry.example/backup@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  postgres:"registry.example/postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  otel:"registry.example/otel@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}}' \
   >"${release_file}"
 
 PATH="${bin}:${PATH}" \

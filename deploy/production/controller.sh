@@ -263,6 +263,21 @@ validate_previous_release() {
   fi
 }
 
+reconcile_completed_pending() {
+  if [[ ! -e "${CURRENT_RELEASE}" || -L "${CURRENT_RELEASE}" ||
+    ! -e "${PENDING_RELEASE}" || -L "${PENDING_RELEASE}" ]]; then
+    return
+  fi
+  validate_state_file_path "current release state" "${CURRENT_RELEASE}"
+  validate_state_file_path "pending release state" "${PENDING_RELEASE}"
+  if jq -e --slurpfile current "${CURRENT_RELEASE}" \
+    'type == "object" and
+      ((if has("manifest") then .manifest else . end) == $current[0])' \
+    "${PENDING_RELEASE}" >/dev/null; then
+    rm -- "${PENDING_RELEASE}" || fail "cannot reconcile completed pending release state"
+  fi
+}
+
 write_pending_state() {
   local manifest="$1" phase="$2" pending_staged
   pending_staged="$(mktemp "${STATE_ROOT}/.pending-release.json.XXXXXX")" || return 1
@@ -459,6 +474,7 @@ install_controller() {
   CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
   PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
+  reconcile_completed_pending
 
   if [[ -L "${CURRENT_RELEASE}" ]]; then
     fail "current release state is a symlink; refusing to install"
@@ -499,6 +515,7 @@ upgrade_controller() {
   PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
   PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
   acquire_lock
+  reconcile_completed_pending
 
   validate_current_release
   validate_previous_release
