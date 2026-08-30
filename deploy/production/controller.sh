@@ -282,7 +282,7 @@ check_current_database_and_backup_health() {
   if ! health_json="$("${COMPOSE_LAUNCHER}" ps --format json postgres backup)"; then
     fail "cannot inspect current PostgreSQL and backup health; current release remains unchanged"
   fi
-  if ! jq -e '
+  if ! jq -s -e '
     if type != "array" then false
     else
       . as $services |
@@ -375,6 +375,7 @@ upgrade_controller() {
   validate_previous_release
   validate_release_file_path "${RELEASE_FILE}"
   stage_and_validate_manifest
+  validate_source_tree
   current_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
   target_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
   comparison="$(compare_semver "${target_version}" "${current_version}")" ||

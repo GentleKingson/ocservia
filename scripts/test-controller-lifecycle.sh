@@ -41,7 +41,9 @@ case "${1:-}" in
     if [[ -n "${MOCK_PS_JSON:-}" ]]; then
       printf '%s\n' "${MOCK_PS_JSON}"
     else
-      printf '%s\n' '[{"Service":"postgres","State":"running","Health":"healthy"},{"Service":"backup","State":"running","Health":"healthy"}]'
+      printf '%s\n' \
+        '{"Service":"postgres","State":"running","Health":"healthy"}' \
+        '{"Service":"backup","State":"running","Health":"healthy"}'
     fi
     exit "${MOCK_PS_EXIT:-0}"
     ;;
@@ -187,6 +189,16 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --image "postgres=docker.io/library/postgres@${next_digest}" \
   --image "otel=docker.io/otel/opentelemetry-collector@${next_digest}"
 
+target_source_mismatch="${fixture}/release/controller-release-source-mismatch.json"
+jq --arg source "$(printf 'd%.0s' {1..40})" '.source_commit = $source' \
+  "${next_release_file}" >"${target_source_mismatch}"
+
+target_source_state="${fixture}/target-source-mismatch"
+seed_upgrade_state "${target_source_state}"
+expect_upgrade_failure "${target_source_state}" "${target_source_mismatch}" \
+  'checkout HEAD does not match release manifest source_commit' env
+test ! -e "${target_source_state}/compose.log"
+
 upgrade_success_state="${fixture}/upgrade-success"
 seed_upgrade_state "${upgrade_success_state}"
 run_controller_upgrade "${upgrade_success_state}" "${next_release_file}" env
@@ -259,11 +271,14 @@ done
 for unhealthy_case in postgres backup; do
   unhealthy_state="${fixture}/unhealthy-${unhealthy_case}"
   seed_upgrade_state "${unhealthy_state}"
-  unhealthy_json='[{"Service":"postgres","State":"running","Health":"healthy"},{"Service":"backup","State":"running","Health":"healthy"}]'
+  unhealthy_json='{"Service":"postgres","State":"running","Health":"healthy"}
+{"Service":"backup","State":"running","Health":"healthy"}'
   if [[ "${unhealthy_case}" == postgres ]]; then
-    unhealthy_json='[{"Service":"postgres","State":"running","Health":"unhealthy"},{"Service":"backup","State":"running","Health":"healthy"}]'
+    unhealthy_json='{"Service":"postgres","State":"running","Health":"unhealthy"}
+{"Service":"backup","State":"running","Health":"healthy"}'
   else
-    unhealthy_json='[{"Service":"postgres","State":"running","Health":"healthy"},{"Service":"backup","State":"running","Health":"unhealthy"}]'
+    unhealthy_json='{"Service":"postgres","State":"running","Health":"healthy"}
+{"Service":"backup","State":"running","Health":"unhealthy"}'
   fi
   expect_upgrade_failure "${unhealthy_state}" "${next_release_file}" 'current PostgreSQL and backup services are not healthy' \
     env MOCK_PS_JSON="${unhealthy_json}"
