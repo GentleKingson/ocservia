@@ -47,11 +47,16 @@ The entrypoint requires Docker Compose v2 with
 `current-release.json`, validates that the checkout HEAD and clean working tree
 match the manifest `source_commit`, runs the guarded Compose preflight, pulls
 the six digest-pinned images, and starts the dependency graph with
-`up -d --wait`. Before the first Compose operation it atomically records the
-complete manifest as `pending-release.json`. A failed install leaves that
-intent in place; only a retry with the identical manifest may continue. After
-a successful install it atomically renames the pending state to
-`current-release.json`, both with mode `0600`. It does not create or rotate
+`up -d --wait`. It then runs
+`deploy/production/controller-release-smoke.sh`, which reuses Compose health,
+probes the public HTTPS `/api/v1/readyz` and `/api/v1/version` routes, verifies
+the target version and source commit, and retains the existing transport socket
+and backup freshness health boundaries. Before activation it atomically records
+the target and lifecycle phase in `pending-release.json`. A failed install or
+upgrade retains that file with failure evidence; only a retry with the
+identical target may continue. Only after the smoke passes is the manifest
+committed as `current-release.json` (and, for upgrades,
+`previous-release.json`), all with mode `0600`. It does not create or rotate
 secrets, certificates, or identity keys. To upgrade an installed Controller,
 provide a newer canonical manifest:
 
@@ -64,8 +69,8 @@ Upgrade validates the confirmed current state and target first, checks the
 target `source_commit` against a clean checkout before any Compose operation,
 checks the current PostgreSQL and backup health, renders the target Compose configuration,
 pulls target images while the current release is still running, and then runs
-the existing migration and `up -d --wait` dependency graph. Only after that
-activation succeeds does it atomically roll the complete manifests into
+the existing migration and `up -d --wait` dependency graph. Release smoke
+must pass before it atomically rolls the complete manifests into
 `previous-release.json` and `current-release.json`. An equal-version manifest
 that is identical to the current state is a no-op; downgrade attempts are
 rejected. Failures after activation return non-zero without redeploying old

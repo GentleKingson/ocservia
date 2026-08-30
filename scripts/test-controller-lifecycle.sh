@@ -52,6 +52,15 @@ esac
 EOF
 chmod 0755 "${bin}/compose.sh"
 
+cat >"${bin}/controller-release-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${CONTROLLER_TEST_SMOKE_LOG}"
+[[ "${1:-}" == "--release-file" && -f "${2:-}" ]]
+exit "${MOCK_SMOKE_EXIT:-0}"
+EOF
+chmod 0755 "${bin}/controller-release-smoke.sh"
+
 digest="sha256:$(printf 'b%.0s' {1..64})"
 commit="$(git -C "${ROOT}" rev-parse HEAD)"
 release_file="${fixture}/release/controller-release.json"
@@ -74,8 +83,10 @@ run_controller_command() {
   PATH="${bin}:${PATH}" \
     CONTROLLER_TEST_LOG="${state}/compose.log" \
     CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
+    CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
     OCSERV_CONTROLLER_STATE_ROOT="${state}" \
     OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
+    OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
     "$@" "${CONTROLLER}" "${command}" --release-file "${selected}"
 }
 
@@ -85,6 +96,12 @@ run_controller() {
 
 run_controller_upgrade() {
   run_controller_command "$1" "$2" upgrade "${@:3}"
+}
+
+assert_pending_release() {
+  local expected="$1" pending="$2"
+  jq -e --slurpfile expected "${expected}" \
+    '(.manifest == $expected[0])' "${pending}" >/dev/null
 }
 
 expect_failure() {
@@ -99,7 +116,7 @@ expect_failure() {
   test ! -e "${state}/current-release.json"
   if [[ "${pending_expected}" == true ]]; then
     test -f "${state}/pending-release.json"
-    cmp -s "${release_file}" "${state}/pending-release.json"
+    assert_pending_release "${release_file}" "${state}/pending-release.json"
   else
     test ! -e "${state}/pending-release.json"
   fi
@@ -140,6 +157,7 @@ test "$(find "${valid_state}" -maxdepth 1 -name '.current-release.json.*' -print
 test "$(sed -n '1p' "${valid_state}/compose.log")" = "config --quiet"
 test "$(sed -n '2p' "${valid_state}/compose.log")" = "pull"
 test "$(sed -n '3p' "${valid_state}/compose.log")" = "up -d --wait"
+grep -Fq -- '--release-file ' "${valid_state}/smoke.log"
 IFS=$'\t' read -r gateway control transport backup postgres otel <"${valid_state}/compose-env.log"
 test "${gateway}" = "ghcr.io/gentlekingson/ocservia/gateway@${digest}"
 test "${control}" = "ghcr.io/gentlekingson/ocservia/control@${digest}"
@@ -210,6 +228,8 @@ test "$(sed -n '1p' "${upgrade_success_state}/compose.log")" = "ps --format json
 test "$(sed -n '2p' "${upgrade_success_state}/compose.log")" = "config --quiet"
 test "$(sed -n '3p' "${upgrade_success_state}/compose.log")" = "pull"
 test "$(sed -n '4p' "${upgrade_success_state}/compose.log")" = "up -d --wait"
+test "$(wc -l <"${upgrade_success_state}/smoke.log")" -eq 1
+grep -Fq -- '--release-file ' "${upgrade_success_state}/smoke.log"
 test "$(find "${upgrade_success_state}" -maxdepth 1 -name '.*release.json.*' -print | wc -l)" -eq 0
 test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 4
 [[ "$(sed -n '1p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
@@ -252,6 +272,7 @@ for failure_case in config pull up; do
   fi
   cmp -s "${release_file}" "${failure_state}/current-release.json"
   cmp -s "${release_file}" "${failure_state}/previous-release.json"
+  assert_pending_release "${next_release_file}" "${failure_state}/pending-release.json"
   case "${failure_case}" in
     config)
       grep -Fq 'production preflight failed for target release' "${failure_state}/output.log"
@@ -267,6 +288,21 @@ for failure_case in config pull up; do
       ;;
   esac
 done
+
+smoke_failure_state="${fixture}/upgrade-smoke-failure"
+seed_upgrade_state "${smoke_failure_state}" "${release_file}"
+if run_controller_upgrade "${smoke_failure_state}" "${next_release_file}" env MOCK_SMOKE_EXIT=1 \
+  >"${smoke_failure_state}/output.log" 2>&1; then
+  echo "upgrade smoke failure was accepted" >&2
+  exit 1
+fi
+grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${smoke_failure_state}/output.log"
+cmp -s "${release_file}" "${smoke_failure_state}/current-release.json"
+cmp -s "${release_file}" "${smoke_failure_state}/previous-release.json"
+assert_pending_release "${next_release_file}" "${smoke_failure_state}/pending-release.json"
+test "$(jq -r '.phase' "${smoke_failure_state}/pending-release.json")" = failed
+test "$(jq -r '.failure.message' "${smoke_failure_state}/pending-release.json")" = \
+  'release smoke failed; confirmed release state remains unchanged'
 
 for unhealthy_case in postgres backup; do
   unhealthy_state="${fixture}/unhealthy-${unhealthy_case}"
@@ -318,7 +354,7 @@ if run_controller "${config_state}" "${release_file}" env MOCK_CONFIG_EXIT=1 >"$
 fi
 test ! -e "${config_state}/current-release.json"
 test -f "${config_state}/pending-release.json"
-cmp -s "${release_file}" "${config_state}/pending-release.json"
+assert_pending_release "${release_file}" "${config_state}/pending-release.json"
 test "$(wc -l <"${config_state}/compose.log")" -eq 1
 
 pull_state="${fixture}/pull-failure"
@@ -329,7 +365,7 @@ if run_controller "${pull_state}" "${release_file}" env MOCK_PULL_EXIT=1 >"${pul
 fi
 test ! -e "${pull_state}/current-release.json"
 test -f "${pull_state}/pending-release.json"
-cmp -s "${release_file}" "${pull_state}/pending-release.json"
+assert_pending_release "${release_file}" "${pull_state}/pending-release.json"
 test "$(wc -l <"${pull_state}/compose.log")" -eq 2
 
 up_state="${fixture}/up-failure"
@@ -340,8 +376,20 @@ if run_controller "${up_state}" "${release_file}" env MOCK_UP_EXIT=1 >"${up_stat
 fi
 test ! -e "${up_state}/current-release.json"
 test -f "${up_state}/pending-release.json"
-cmp -s "${release_file}" "${up_state}/pending-release.json"
+assert_pending_release "${release_file}" "${up_state}/pending-release.json"
 test "$(wc -l <"${up_state}/compose.log")" -eq 3
+
+install_smoke_failure_state="${fixture}/install-smoke-failure"
+mkdir -m 700 -- "${install_smoke_failure_state}"
+if run_controller "${install_smoke_failure_state}" "${release_file}" env MOCK_SMOKE_EXIT=1 \
+  >"${install_smoke_failure_state}/output.log" 2>&1; then
+  echo "install smoke failure was accepted" >&2
+  exit 1
+fi
+grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${install_smoke_failure_state}/output.log"
+test ! -e "${install_smoke_failure_state}/current-release.json"
+assert_pending_release "${release_file}" "${install_smoke_failure_state}/pending-release.json"
+test "$(jq -r '.phase' "${install_smoke_failure_state}/pending-release.json")" = failed
 
 retry_state="${fixture}/retry"
 mkdir -m 700 -- "${retry_state}"
@@ -350,6 +398,7 @@ if run_controller "${retry_state}" "${release_file}" env MOCK_UP_EXIT=1 >"${retr
   exit 1
 fi
 test -f "${retry_state}/pending-release.json"
+assert_pending_release "${release_file}" "${retry_state}/pending-release.json"
 
 different_pending="${fixture}/different-pending.json"
 other_digest="sha256:$(printf 'c%.0s' {1..64})"
