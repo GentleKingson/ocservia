@@ -8,13 +8,14 @@ the required checks for the exact pull-request commit.
 
 ## Execution graph
 
-The primary workflow has 15 worker job definitions plus a `CI Relevance`
+The primary workflow has 16 worker job definitions plus a `CI Relevance`
 classifier job. The PostgreSQL matrix expands one definition into separate
-PostgreSQL 17 and 18 executions, so a full run has 16 worker executions.
+PostgreSQL 17 and 18 executions, so a full run has 17 worker executions.
 Three lightweight result aggregators preserve the stable required-check
-names. Workers start independently after the relevance classifier except
-that the two PostgreSQL workers and Local Slice additionally wait for the
-commit-bound runtime artifact.
+names. Conditional workers start after the relevance classifier except that
+the two PostgreSQL workers and Local Slice additionally wait for the
+commit-bound runtime artifact. Secret Scan starts independently and is always
+required by the quality aggregate.
 
 | Worker execution | Coverage | Bootstrap profile | Timeout | Required-check aggregator |
 | --- | --- | --- | --- | --- |
@@ -29,10 +30,11 @@ commit-bound runtime artifact.
 | Local Slice | Go, PostgreSQL, UDS, and Rust-stub integration | none | 15 minutes | Backend Integration |
 | Web Static and Unit | Web format, type, unit, build, and audit checks | `web` | 20 minutes | Web & Smoke |
 | Browser E2E | Isolated Compose Playwright desktop and mobile E2E | none | 25 minutes | Web & Smoke |
-| P1 Smoke | P1 harness tests and the unchanged 24-Agent smoke profile | none | 20 minutes | Web & Smoke |
+| P1 Smoke | P1 harness tests and the unchanged 24-Agent smoke profile | none | 20 minutes | Backend Integration |
 | Contracts and Policy | Repository policy, docs, workflow policy, generation, lint, and breaking-change checks | `contracts` | 20 minutes | Quality, Security & Native |
 | Rust Validation | Rust format, clippy, workspace tests, audit, and agent/transport boundaries | `rust-validation` | 25 minutes | Backend Integration and Quality, Security & Native |
-| Security and Licenses | Secret and license policy checks | `security` | 20 minutes | Quality, Security & Native |
+| Secret Scan | Full-history repository gitleaks scan | `g6-secret-scan` | 20 minutes | Quality, Security & Native |
+| License Policy | Go, Rust, and Web dependency license policy | `security` | 20 minutes | Quality, Security & Native |
 | Native Ocserv | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture | `native` | 20 minutes | Quality, Security & Native |
 
 Rust Validation executes once and feeds two aggregators. Each aggregator has a
@@ -43,34 +45,32 @@ skip, fails the aggregator. The workflow uses no workflow-level path filters.
 
 ### Change relevance
 
-The `CI Relevance` job classifies each pull-request change set with the
-repository-owned `scripts/ci-relevance.sh` and publishes one authorization
-flag per worker family (`run_backend`, `run_database`, `run_rust`,
-`run_native`, `run_web`, `run_browser`, `run_p1_smoke`). A worker runs only
-when its flag is true. Contracts and Policy and Security and Licenses are
-structurally outside the classifier's authority: they carry no relevance
-condition, start without waiting for the classifier, and the quality
-aggregate accepts only their success — never a classifier-authorized skip —
-because one of them runs the classifier's own tests. The classifier
-authorizes reduced validation for exactly two high-confidence categories:
+The repository-owned `scripts/ci-relevance.sh` publishes one authorization
+flag for every conditional worker. It ORs the impact domains of all recognized
+paths, so a Web plus Rust change runs the Web, Browser, and Rust workers rather
+than full CI. Ordinary documentation runs Contracts and Policy plus the
+structurally always-on Secret Scan. Web unit/config-only inputs run Web Static
+and Unit; Web runtime, build, dependency, and Playwright inputs also run
+Browser E2E. P1 Smoke is a backend/runtime responsibility and is not activated
+by Web changes.
 
-- Documentation-only changes (ordinary documentation paths, mirroring the G6
-  smoke relevance classifier, with `docs/acceptance/**` excluded) keep
-  Contracts and Policy plus Security and Licenses and skip the remaining
-  fourteen worker executions. Documentation policy checks and the repository
-  secret and license scan stay authoritative for documentation edits.
-- Web-only changes (`web/**`) keep Web Static and Unit, Browser E2E, P1
-  Smoke, Contracts and Policy, and Security and Licenses, and skip the
-  backend, database, Rust, and native workers.
+Database packages and migrations alone activate PostgreSQL 17/18, and
+PostgreSQL or Local Slice relevance explicitly implies Build Runtime
+Artifacts. Native, production relay, credential rotation, stage-contract,
+license, and G6 smoke flags each follow the inputs consumed by their own
+harness. Machine-readable G6 acceptance contracts activate Contracts and
+Policy plus G6 Smoke, while ordinary release-readiness Markdown does not.
+Secret Scan remains always-on and keeps the full-history `gitleaks git`
+semantics; License Policy runs only for dependency manifests, lockfiles, or
+license-policy inputs.
 
-Everything else runs full validation: Go, Rust, migrations, workflow and
-deployment changes, bootstrap and toolchain pins, acceptance contracts, and
-any path the classifier does not recognize. Mixed categories, deleted and
-renamed files that touch reduced and full categories at once, and empty or
-unresolvable diffs also fail closed to full validation. Push and
-manual-dispatch runs always request full validation, and the classifier
-invariantly keeps the database flag a subset of the backend flag because the
-PostgreSQL workers consume the commit-bound runtime artifact.
+Pull requests are classified with `base...head` three-dot semantics, so base
+branch changes after the PR branch point are excluded. Pushes to `main` use
+`github.event.before..github.sha` two-dot semantics and are incrementally
+routed. Manual dispatch remains full validation. Invalid or all-zero SHAs,
+unresolvable merge bases, failed or empty diffs, global toolchain changes, the
+primary CI routing authority, and unknown paths fail closed to full CI.
+Known mixed changes never become full merely because they are mixed.
 
 The focused I10 journal tests remain in the Rust workspace run. The I11
 Go/Rust tests remain in the dedicated language workers, while its boundary
@@ -136,9 +136,9 @@ exactly one explicit profile:
 | `web` | Node, pinned npm, and `npm ci` dependencies | Web Static and Unit |
 | `contracts` | Node/npm, Buf, OpenAPI Generator, oasdiff, host Java, and Web dependencies | Contracts and Policy |
 | `rust-validation` | Rust, rustfmt, clippy, cargo-audit, cargo-deny, and sccache | Rust Validation |
-| `security` | Go, Node/npm, Rust, gitleaks, cargo-deny, sccache, and Web dependencies | Security and Licenses |
+| `security` | Go, Node/npm, Rust, cargo-deny, sccache, and Web dependencies | License Policy |
 | `native` | Rust and sccache | Native Ocserv |
-| `g6-secret-scan` | gitleaks and host `jq`/`openssl` | G6 Readiness Secret Scan; G6 Harness Smoke Secret Scan |
+| `g6-secret-scan` | gitleaks and host `jq`/`openssl` | CI Secret Scan; G6 Readiness Secret Scan; G6 Harness Smoke Secret Scan |
 | `native-packages` | Rust and nfpm (Linux `aarch64` mirrors only this profile) | Release Packages build matrix |
 
 Stage contracts, credential rotation, Local Slice, Browser E2E, and P1 Smoke
@@ -160,7 +160,7 @@ cache miss is supported because bootstrap revalidates versions and checksums.
 | `web` | Web Static and Unit | Web Static and Unit |
 | `contracts` | Contracts and Policy | Contracts and Policy |
 | `rust-validation` | Rust Validation | Rust Validation |
-| `security` | Security and Licenses | Security and Licenses |
+| `security` | License Policy | License Policy |
 | `native` | Native Ocserv | Native Ocserv |
 
 The release-packages workflow writes its own `native-packages` tool cache from
@@ -168,21 +168,21 @@ its per-architecture build matrix jobs.
 
 The shared Go cache contains `.cache/go-build`, `.cache/go-mod`, and
 `.cache/gopath`. Build Runtime Artifacts, Go Static and Unit, Go Race,
-PostgreSQL 17/18, I18 Production Relays, and Security and Licenses restore it.
+PostgreSQL 17/18, I18 Production Relays, and License Policy restore it.
 Its primary key includes the exact commit and Go dependency inputs, with
 dependency and platform prefix fallbacks. Go Static and Unit is its only
 writer.
 
 The shared npm cache contains `.cache/npm`. Web Static and Unit, Contracts and
-Policy, and Security and Licenses restore it; Web Static and Unit is its only
+Policy, and License Policy restore it; Web Static and Unit is its only
 writer. All explicit tool, Go, and npm cache writes require a successful push
 to `main` and a primary-key miss. Pull-request workers are restore-only. CI
 does not cache `node_modules`, credentials, environment files, logs, test
 artifacts, or `rust/target`.
 
 Rust compiler outputs use sccache instead of archiving `rust/target`. Build
-Runtime Artifacts, I18 Production Relays, Rust Validation, Security and
-Licenses, and Native Ocserv:
+Runtime Artifacts, I18 Production Relays, Rust Validation, License Policy, and
+Native Ocserv:
 
 - request repository-pinned sccache `0.17.0` through the SHA-pinned sccache
   Action;
@@ -239,8 +239,8 @@ Uploads use SHA-pinned Actions, one-day retention, and names bound to the run
 | Native Ocserv | `native-ocserv-<run>-<attempt>` |
 | P1 Full Validation | `p1-full-<run>-<attempt>` |
 
-Security and Licenses has no separate diagnostic artifact; its secret and
-license results remain in the job log. Browser E2E and P1 Smoke use distinct
+Secret Scan and License Policy have no separate diagnostic artifact; their
+results remain in the job log. Browser E2E and P1 Smoke use distinct
 `RUN_ID`, Compose project, and artifact paths. Docker and native scripts capture
 diagnostics before scoped cleanup, preserve the original test result, and turn
 their own leftovers into failures.
@@ -266,9 +266,10 @@ Branch protection requires only the three stable result aggregators:
 
 The worker names are visible checks but are not configured individually as
 required checks. Backend Integration waits for its nine worker job definitions,
-including both PostgreSQL matrix executions. Web & Smoke waits for its three
-workers. Quality, Security & Native waits for Contracts and Policy, the shared
-Rust Validation execution, Security and Licenses, and Native Ocserv.
+including both PostgreSQL matrix executions and P1 Smoke. Web & Smoke waits for
+its two Web workers. Quality, Security & Native waits for Contracts and Policy,
+the shared Rust Validation execution, Secret Scan, License Policy, and Native
+Ocserv.
 
 Do not rename an aggregator until the branch ruleset has first been migrated to
 a successful check with the replacement name. A change is fully validated only

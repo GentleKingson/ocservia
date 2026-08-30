@@ -35,37 +35,37 @@ end
 worker_jobs = %w[
   runtime-artifacts go-standard go-race database stage-contracts
   production-relays credential-rotation local-slice web-validation browser-e2e
-  p1-smoke contracts-policy rust-validation security-license native-ocserv
+  p1-smoke contracts-policy rust-validation security-scan license native-ocserv
 ]
 relevance_job = "ci-relevance"
 worker_relevance_flags = {
-  "runtime-artifacts" => "run_backend",
-  "go-standard" => "run_backend",
-  "go-race" => "run_backend",
+  "runtime-artifacts" => "run_runtime_artifacts",
+  "go-standard" => "run_go_standard",
+  "go-race" => "run_go_race",
   "database" => "run_database",
-  "stage-contracts" => "run_backend",
-  "production-relays" => "run_backend",
-  "credential-rotation" => "run_backend",
-  "local-slice" => "run_backend",
+  "stage-contracts" => "run_stage_contracts",
+  "production-relays" => "run_production_relays",
+  "credential-rotation" => "run_credential_rotation",
+  "local-slice" => "run_local_slice",
   "web-validation" => "run_web",
   "browser-e2e" => "run_browser",
   "p1-smoke" => "run_p1_smoke",
+  "contracts-policy" => "run_contracts_policy",
   "rust-validation" => "run_rust",
+  "license" => "run_license",
   "native-ocserv" => "run_native"
 }
-# The policy and security workers are structurally outside the classifier's
-# skip authority: one of them runs the classifier's own tests, so a buggy or
-# tampered classifier must never be able to switch them off or make their
-# skip acceptable. They start immediately and only success counts.
-always_on_workers = %w[contracts-policy security-license]
+# Secret scanning is structurally always-on. Every other worker has one
+# explicit classifier authorization flag.
+always_on_workers = %w[security-scan]
 gate_needs = {
   "backend-integration" => %w[
     ci-relevance runtime-artifacts go-standard go-race database stage-contracts
-    production-relays credential-rotation local-slice rust-validation
+    production-relays credential-rotation local-slice p1-smoke rust-validation
   ],
-  "web-smoke" => %w[ci-relevance web-validation browser-e2e p1-smoke],
+  "web-smoke" => %w[ci-relevance web-validation browser-e2e],
   "quality-security-native" => %w[
-    ci-relevance contracts-policy rust-validation security-license native-ocserv
+    ci-relevance contracts-policy rust-validation security-scan license native-ocserv
   ]
 }
 expected_jobs = worker_jobs + gate_needs.keys + [relevance_job]
@@ -88,8 +88,7 @@ end
 allowed_worker_dependencies = {
   "database" => ["ci-relevance", "runtime-artifacts"],
   "local-slice" => ["ci-relevance", "runtime-artifacts"],
-  "contracts-policy" => [],
-  "security-license" => []
+  "security-scan" => []
 }
 worker_jobs.each do |job_id|
   actual = Array(jobs.fetch(job_id)["needs"])
@@ -101,7 +100,12 @@ relevance = jobs.fetch(relevance_job)
 reject("the relevance classifier must use ubuntu-24.04") unless relevance.fetch("runs-on") == "ubuntu-24.04"
 reject("the relevance classifier must have a timeout") unless relevance.fetch("timeout-minutes") > 0
 reject("the relevance classifier must always run") if relevance.key?("if")
-expected_relevance_outputs = (%w[category reason] + worker_relevance_flags.values.uniq).sort
+expected_relevance_outputs = (%w[
+  category reason changed_count full run_backend run_go_standard run_go_race
+  run_runtime_artifacts run_database run_local_slice run_stage_contracts
+  run_production_relays run_credential_rotation run_web run_browser run_p1_smoke
+  run_contracts_policy run_rust run_native run_license run_g6_smoke
+]).sort
 reject("the relevance classifier outputs drifted") unless
   relevance.fetch("outputs").keys.sort == expected_relevance_outputs
 relevance_steps = Array(relevance.fetch("steps"))
@@ -116,8 +120,8 @@ expected_gate_names = {
   "web-smoke" => "Web & Smoke",
   "quality-security-native" => "Quality, Security & Native"
 }
-reject("GitHub Actions guide must describe all 16 worker executions") unless
-  actions_doc.include?("15 worker job definitions") && actions_doc.include?("16 worker executions")
+reject("GitHub Actions guide must describe all 17 worker executions") unless
+  actions_doc.include?("16 worker job definitions") && actions_doc.include?("17 worker executions")
 expected_gate_names.each_value do |name|
   reject("GitHub Actions guide is missing required-check aggregator #{name}") unless
     actions_doc.include?("- `#{name}`")
@@ -136,20 +140,17 @@ gate_needs.each do |job_id, expected_needs|
   run_text = Array(job.fetch("steps")).map { |step| step["run"].to_s }.join("\n")
   reject("#{job_id} must accept successful or classifier-authorized skipped workers") unless
     run_text.include?('== "success"') && run_text.include?('== "skipped"') &&
-    run_text.include?('== "false"')
+    run_text.include?('== "true"') && run_text.include?('== "false"')
   reject("#{job_id} must fail for every other worker result") unless run_text.include?("exit 1")
   reject("#{job_id} must not blindly accept skipped workers") if
     run_text.include?("success | skipped")
   if job_id == "quality-security-native"
-    # The policy and security workers may never be skipped on the
-    # classifier's word: their rows must carry the never-skippable marker,
-    # not a relevance flag reference.
-    reject("the quality aggregate must hard-require the policy worker") unless
-      run_text.include?("contracts-policy|${CONTRACTS_POLICY}|true")
+    reject("the quality aggregate must classifier-gate the policy worker") unless
+      run_text.include?("contracts-policy|${CONTRACTS_POLICY}|${CONTRACTS_POLICY_RELEVANT}")
     reject("the quality aggregate must hard-require the security worker") unless
-      run_text.include?("security-license|${SECURITY_LICENSE}|true")
-    reject("the quality aggregate must not gate policy or security on the classifier") if
-      run_text.include?("run_contracts") || run_text.include?("run_security")
+      run_text.include?("security-scan|${SECURITY_SCAN}|true")
+    reject("the quality aggregate must classifier-gate licenses") unless
+      run_text.include?("license|${LICENSE}|${LICENSE_RELEVANT}")
   end
   (expected_needs - [relevance_job]).each do |dependency|
     reject("#{job_id} must aggregate #{dependency}") unless run_text.include?(dependency)
@@ -173,10 +174,11 @@ execution_profiles = {
   "web-validation" => "web",
   "contracts-policy" => "contracts",
   "rust-validation" => "rust-validation",
-  "security-license" => "security",
+  "license" => "security",
   "native-ocserv" => "native"
 }
-(["all"] + execution_profiles.values).uniq.each do |profile|
+uncached_profiles = {"security-scan" => "g6-secret-scan"}
+(["all"] + execution_profiles.values + uncached_profiles.values).uniq.each do |profile|
   reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(/^  #{Regexp.escape(profile)}\)$/)
 end
 {
@@ -211,8 +213,12 @@ execution_profiles.each do |job_id, profile|
   expected = "scripts/bootstrap.sh #{profile}"
   reject("#{job_id} must run exactly #{expected}") unless bootstrap_calls.fetch(job_id) == [expected]
 end
+uncached_profiles.each do |job_id, profile|
+  expected = "scripts/bootstrap.sh #{profile}"
+  reject("#{job_id} must run exactly #{expected}") unless bootstrap_calls.fetch(job_id) == [expected]
+end
 
-unexpected_bootstrap = bootstrap_calls.keys - execution_profiles.keys
+unexpected_bootstrap = bootstrap_calls.keys - execution_profiles.keys - uncached_profiles.keys
 reject("unexpected workflow bootstrap caller: #{unexpected_bootstrap.join(', ')}") unless unexpected_bootstrap.empty?
 reject("workflow contains a bare bootstrap invocation") if
   bootstrap_calls.values.flatten.any? { |command| command.match?(/\A(?:\.\/)?scripts\/bootstrap\.sh\z/) }
@@ -267,7 +273,7 @@ tooling_writers = {
   "web" => "web-validation",
   "contracts" => "contracts-policy",
   "rust-validation" => "rust-validation",
-  "security" => "security-license",
+  "security" => "license",
   "native" => "native-ocserv"
 }
 tooling_writers.each do |profile, job_id|
@@ -282,7 +288,7 @@ tooling_writers.each do |profile, job_id|
     restore && saves.first.fetch("with").fetch("key").include?("cache-primary-key")
 end
 
-go_jobs = %w[runtime-artifacts go-standard go-race database production-relays security-license]
+go_jobs = %w[runtime-artifacts go-standard go-race database production-relays license]
 go_keys = go_jobs.map do |job_id|
   candidates = cache_restore.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("go-v4-") }
   reject("#{job_id} must restore one shared Go cache") unless candidates.length == 1
@@ -301,7 +307,7 @@ reject("Go jobs do not share one cache namespace") unless go_keys.uniq.length ==
 reject("only go-standard may publish the shared Go cache") unless
   cache_save.keys.select { |job_id| cache_save[job_id].any? { |step| paths(step).include?(".cache/go-build") } } == ["go-standard"]
 
-npm_jobs = %w[web-validation contracts-policy security-license]
+npm_jobs = %w[web-validation contracts-policy license]
 npm_keys = npm_jobs.map do |job_id|
   candidates = cache_restore.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("npm-v4-") }
   reject("#{job_id} must restore one shared npm cache") unless candidates.length == 1
@@ -320,7 +326,7 @@ all_cached_paths = cache_restore.values.flatten.flat_map { |step| paths(step) }
 reject("Rust target archives must be replaced by sccache") if all_cached_paths.include?("rust/target")
 reject("workflow must not cache node_modules") if all_cached_paths.any? { |path| path.include?("node_modules") }
 
-sccache_jobs = %w[runtime-artifacts production-relays rust-validation security-license native-ocserv]
+sccache_jobs = %w[runtime-artifacts production-relays rust-validation license native-ocserv]
 sccache_action = "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba"
 sccache_jobs.each do |job_id|
   job = jobs.fetch(job_id)

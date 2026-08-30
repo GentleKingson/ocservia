@@ -22,13 +22,25 @@ jobs:
     outputs:
       category: ${{ steps.relevance.outputs.category }}
       reason: ${{ steps.relevance.outputs.reason }}
+      changed_count: ${{ steps.relevance.outputs.changed_count }}
+      full: ${{ steps.relevance.outputs.full }}
       run_backend: ${{ steps.relevance.outputs.run_backend }}
+      run_go_standard: ${{ steps.relevance.outputs.run_go_standard }}
+      run_go_race: ${{ steps.relevance.outputs.run_go_race }}
+      run_runtime_artifacts: ${{ steps.relevance.outputs.run_runtime_artifacts }}
       run_database: ${{ steps.relevance.outputs.run_database }}
+      run_local_slice: ${{ steps.relevance.outputs.run_local_slice }}
+      run_stage_contracts: ${{ steps.relevance.outputs.run_stage_contracts }}
+      run_production_relays: ${{ steps.relevance.outputs.run_production_relays }}
+      run_credential_rotation: ${{ steps.relevance.outputs.run_credential_rotation }}
       run_rust: ${{ steps.relevance.outputs.run_rust }}
       run_native: ${{ steps.relevance.outputs.run_native }}
       run_web: ${{ steps.relevance.outputs.run_web }}
       run_browser: ${{ steps.relevance.outputs.run_browser }}
       run_p1_smoke: ${{ steps.relevance.outputs.run_p1_smoke }}
+      run_contracts_policy: ${{ steps.relevance.outputs.run_contracts_policy }}
+      run_license: ${{ steps.relevance.outputs.run_license }}
+      run_g6_smoke: ${{ steps.relevance.outputs.run_g6_smoke }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -37,14 +49,14 @@ jobs:
       - name: Classify the change set
         id: relevance
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || github.sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}"
 
   runtime-artifacts:
     name: Build Runtime Artifacts
     needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_backend == 'true'
+    if: needs.ci-relevance.outputs.run_runtime_artifacts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -115,7 +127,7 @@ jobs:
   go-standard:
     name: Go Static and Unit
     needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_backend == 'true'
+    if: needs.ci-relevance.outputs.run_go_standard == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -182,7 +194,7 @@ jobs:
   go-race:
     name: Go Race
     needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_backend == 'true'
+    if: needs.ci-relevance.outputs.run_go_race == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -298,7 +310,7 @@ jobs:
   stage-contracts:
     name: I14-I19 Contracts
     needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_backend == 'true'
+    if: needs.ci-relevance.outputs.run_stage_contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -330,7 +342,7 @@ jobs:
   production-relays:
     name: I18 Production Relays
     needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_backend == 'true'
+    if: needs.ci-relevance.outputs.run_production_relays == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -395,7 +407,7 @@ jobs:
   credential-rotation:
     name: PostgreSQL Credential Rotation
     needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_backend == 'true'
+    if: needs.ci-relevance.outputs.run_credential_rotation == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -421,7 +433,7 @@ jobs:
   local-slice:
     name: Local Slice
     needs: [ci-relevance, runtime-artifacts]
-    if: needs.ci-relevance.outputs.run_backend == 'true'
+    if: needs.ci-relevance.outputs.run_local_slice == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -582,6 +594,8 @@ jobs:
 
   contracts-policy:
     name: Contracts and Policy
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_contracts_policy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -630,7 +644,6 @@ jobs:
           scripts/test-g6-evidence-pipeline.sh
           scripts/test-g6-secret-scan-config.sh
           scripts/test-g6-runtime-adapters.sh
-          scripts/test-g6-smoke-relevance.sh
           scripts/test-g6-readiness-hang-guards.sh
           scripts/test-g6-cache-credentials.sh
           scripts/test-g6-buildx-cache-fallback.sh
@@ -742,8 +755,26 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
 
-  security-license:
-    name: Security and Licenses
+  security-scan:
+    name: Secret Scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Bootstrap pinned secret-scan tools
+        run: scripts/bootstrap.sh g6-secret-scan
+      - name: Secret scan
+        run: scripts/security-check.sh
+
+  license:
+    name: License Policy
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_license == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -793,8 +824,6 @@ jobs:
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned security tools
         run: scripts/bootstrap.sh security
-      - name: Secret scan
-        run: scripts/security-check.sh
       - name: License checks
         run: scripts/license-check.sh
       - name: Save verified tools
@@ -906,27 +935,30 @@ jobs:
       - production-relays
       - credential-rotation
       - local-slice
+      - p1-smoke
       - rust-validation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       CI_RELEVANCE: ${{ needs.ci-relevance.result }}
       RUNTIME_ARTIFACTS: ${{ needs.runtime-artifacts.result }}
-      RUNTIME_ARTIFACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
+      RUNTIME_ARTIFACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_runtime_artifacts }}
       GO_STANDARD: ${{ needs.go-standard.result }}
-      GO_STANDARD_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
+      GO_STANDARD_RELEVANT: ${{ needs.ci-relevance.outputs.run_go_standard }}
       GO_RACE: ${{ needs.go-race.result }}
-      GO_RACE_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
+      GO_RACE_RELEVANT: ${{ needs.ci-relevance.outputs.run_go_race }}
       DATABASE: ${{ needs.database.result }}
       DATABASE_RELEVANT: ${{ needs.ci-relevance.outputs.run_database }}
       STAGE_CONTRACTS: ${{ needs.stage-contracts.result }}
-      STAGE_CONTRACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
+      STAGE_CONTRACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_stage_contracts }}
       PRODUCTION_RELAYS: ${{ needs.production-relays.result }}
-      PRODUCTION_RELAYS_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
+      PRODUCTION_RELAYS_RELEVANT: ${{ needs.ci-relevance.outputs.run_production_relays }}
       CREDENTIAL_ROTATION: ${{ needs.credential-rotation.result }}
-      CREDENTIAL_ROTATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
+      CREDENTIAL_ROTATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_credential_rotation }}
       LOCAL_SLICE: ${{ needs.local-slice.result }}
-      LOCAL_SLICE_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
+      LOCAL_SLICE_RELEVANT: ${{ needs.ci-relevance.outputs.run_local_slice }}
+      P1_SMOKE: ${{ needs.p1-smoke.result }}
+      P1_SMOKE_RELEVANT: ${{ needs.ci-relevance.outputs.run_p1_smoke }}
       RUST_VALIDATION: ${{ needs.rust-validation.result }}
       RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
     steps:
@@ -937,7 +969,7 @@ jobs:
             exit 1
           fi
           while IFS='|' read -r worker result authorized; do
-            if [[ "${result}" == "success" ]]; then
+            if [[ "${result}" == "success" && "${authorized}" == "true" ]]; then
               continue
             fi
             if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
@@ -954,6 +986,7 @@ jobs:
           production-relays|${PRODUCTION_RELAYS}|${PRODUCTION_RELAYS_RELEVANT}
           credential-rotation|${CREDENTIAL_ROTATION}|${CREDENTIAL_ROTATION_RELEVANT}
           local-slice|${LOCAL_SLICE}|${LOCAL_SLICE_RELEVANT}
+          p1-smoke|${P1_SMOKE}|${P1_SMOKE_RELEVANT}
           rust-validation|${RUST_VALIDATION}|${RUST_VALIDATION_RELEVANT}
           CHECKS
 
@@ -964,7 +997,6 @@ jobs:
       - ci-relevance
       - web-validation
       - browser-e2e
-      - p1-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -973,8 +1005,6 @@ jobs:
       WEB_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_web }}
       BROWSER_E2E: ${{ needs.browser-e2e.result }}
       BROWSER_E2E_RELEVANT: ${{ needs.ci-relevance.outputs.run_browser }}
-      P1_SMOKE: ${{ needs.p1-smoke.result }}
-      P1_SMOKE_RELEVANT: ${{ needs.ci-relevance.outputs.run_p1_smoke }}
     steps:
       - name: Aggregate Web and smoke results
         run: |
@@ -983,7 +1013,7 @@ jobs:
             exit 1
           fi
           while IFS='|' read -r worker result authorized; do
-            if [[ "${result}" == "success" ]]; then
+            if [[ "${result}" == "success" && "${authorized}" == "true" ]]; then
               continue
             fi
             if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
@@ -994,7 +1024,6 @@ jobs:
           done <<CHECKS
           web-validation|${WEB_VALIDATION}|${WEB_VALIDATION_RELEVANT}
           browser-e2e|${BROWSER_E2E}|${BROWSER_E2E_RELEVANT}
-          p1-smoke|${P1_SMOKE}|${P1_SMOKE_RELEVANT}
           CHECKS
 
   quality-security-native:
@@ -1004,16 +1033,20 @@ jobs:
       - ci-relevance
       - contracts-policy
       - rust-validation
-      - security-license
+      - security-scan
+      - license
       - native-ocserv
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       CI_RELEVANCE: ${{ needs.ci-relevance.result }}
       CONTRACTS_POLICY: ${{ needs.contracts-policy.result }}
+      CONTRACTS_POLICY_RELEVANT: ${{ needs.ci-relevance.outputs.run_contracts_policy }}
       RUST_VALIDATION: ${{ needs.rust-validation.result }}
       RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
-      SECURITY_LICENSE: ${{ needs.security-license.result }}
+      SECURITY_SCAN: ${{ needs.security-scan.result }}
+      LICENSE: ${{ needs.license.result }}
+      LICENSE_RELEVANT: ${{ needs.ci-relevance.outputs.run_license }}
       NATIVE_OCSERV: ${{ needs.native-ocserv.result }}
       NATIVE_OCSERV_RELEVANT: ${{ needs.ci-relevance.outputs.run_native }}
     steps:
@@ -1023,13 +1056,11 @@ jobs:
             echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
             exit 1
           fi
-          # The policy and security workers are structurally outside the
-          # classifier's skip authority: the literal true below marks them as
-          # never skippable, so this aggregate only ever accepts their
-          # success. A classifier bug must not be able to switch off the
-          # worker that tests the classifier.
+          # Secret scanning is structurally outside classifier skip authority.
+          # Every conditional worker must either succeed or be skipped with an
+          # explicit false relevance flag.
           while IFS='|' read -r worker result authorized; do
-            if [[ "${result}" == "success" ]]; then
+            if [[ "${result}" == "success" && "${authorized}" == "true" ]]; then
               continue
             fi
             if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
@@ -1038,8 +1069,9 @@ jobs:
             echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
             exit 1
           done <<CHECKS
-          contracts-policy|${CONTRACTS_POLICY}|true
+          contracts-policy|${CONTRACTS_POLICY}|${CONTRACTS_POLICY_RELEVANT}
           rust-validation|${RUST_VALIDATION}|${RUST_VALIDATION_RELEVANT}
-          security-license|${SECURITY_LICENSE}|true
+          security-scan|${SECURITY_SCAN}|true
+          license|${LICENSE}|${LICENSE_RELEVANT}
           native-ocserv|${NATIVE_OCSERV}|${NATIVE_OCSERV_RELEVANT}
           CHECKS

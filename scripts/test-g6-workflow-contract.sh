@@ -16,6 +16,10 @@ abort("smoke caller must remain pull_request-only") unless smoke.fetch(true).key
 end
 abort("formal caller must stay thin") unless formal.fetch("jobs").keys == ["g6-harness-core"]
 abort("smoke caller must keep relevance and one reusable core call") unless smoke.fetch("jobs").keys.sort == %w[g6-harness-core g6-smoke-relevance]
+smoke_relevance = smoke.fetch("jobs").fetch("g6-smoke-relevance")
+abort("smoke caller must use the unified three-dot impact classifier") unless
+  Array(smoke_relevance.fetch("steps")).any? { |step| step.fetch("run", "").include?("scripts/ci-relevance.sh pull_request") } &&
+    smoke_relevance.fetch("outputs").fetch("relevant").include?("run_g6_smoke")
 abort("core must remain workflow_call-only") unless core.fetch(true).keys == ["workflow_call"]
 inputs = core.fetch(true).fetch("workflow_call").fetch("inputs")
 abort("core inputs drifted") unless inputs.keys.sort == %w[authority candidate_sha profile smoke_relevant]
@@ -187,6 +191,10 @@ abort("the Rust cache provisioner must have exactly push, schedule, and dispatch
   provision.fetch(true).keys.sort == %w[push schedule workflow_dispatch]
 abort("the provisioner push trigger must fire for main only") unless
   provision.fetch(true).fetch("push").fetch("branches") == ["main"]
+provision_paths = provision.fetch(true).fetch("push").fetch("paths")
+%w[rust/** toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh .github/actions/g6-cache-credentials/**].each do |path|
+  abort("the provisioner is missing cache input #{path}") unless provision_paths.include?(path)
+end
 abort("the provisioner must keep a scheduled refresh") unless
   provision.fetch(true).fetch("schedule").is_a?(Array) &&
     provision.fetch(true).fetch("schedule").all? { |entry| entry.key?("cron") }
