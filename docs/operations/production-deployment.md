@@ -52,9 +52,24 @@ complete manifest as `pending-release.json`. A failed install leaves that
 intent in place; only a retry with the identical manifest may continue. After
 a successful install it atomically renames the pending state to
 `current-release.json`, both with mode `0600`. It does not create or rotate
-secrets, certificates, or identity keys. `controller.sh install` is
-intentionally fresh-install-only; upgrade, rollback, and uninstall are
-separate deferred lifecycle operations.
+secrets, certificates, or identity keys. To upgrade an installed Controller,
+provide a newer canonical manifest:
+
+```bash
+deploy/production/controller.sh upgrade \
+  --release-file /path/to/controller-release.json
+```
+
+Upgrade validates the confirmed current state and target first, checks the
+target `source_commit` against a clean checkout before any Compose operation,
+checks the current PostgreSQL and backup health, renders the target Compose configuration,
+pulls target images while the current release is still running, and then runs
+the existing migration and `up -d --wait` dependency graph. Only after that
+activation succeeds does it atomically roll the complete manifests into
+`previous-release.json` and `current-release.json`. An equal-version manifest
+that is identical to the current state is a no-op; downgrade attempts are
+rejected. Failures after activation return non-zero without redeploying old
+images, running down migrations, or changing confirmed release state.
 
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
