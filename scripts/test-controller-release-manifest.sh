@@ -99,8 +99,12 @@ abort("Controller manifest publishing must wait for the controller image job") u
   Array(jobs.fetch("publish-release-packages").fetch("needs")).include?("build-controller-images")
 abort("workflow dispatch must not publish Controller images") if
   controller.fetch("if").include?("workflow_dispatch")
-abort("Controller release must check anonymous image reads") unless
-  run_steps.include?("curl") && run_steps.include?("manifests/${release_tag}")
+abort("Controller release must use the GHCR anonymous token flow") unless
+  run_steps.include?("https://ghcr.io/token") &&
+    run_steps.include?("scope=repository:gentlekingson/ocservia/${name}:pull") &&
+    run_steps.include?("Authorization: Bearer") &&
+    run_steps.include?("manifests/${digest}") &&
+    !run_steps.include?("manifests/${release_tag}")
 docs = File.read(ARGV.fetch(1))
 abort("production docs must declare the Controller image visibility prerequisite") unless
   docs.include?("be public") && docs.include?("linux/amd64")

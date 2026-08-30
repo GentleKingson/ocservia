@@ -257,12 +257,29 @@ jobs:
             --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
           (cd "${output_dir}" && sha256sum controller-release.json >controller-release.json.sha256)
       - name: Verify anonymous Controller image reads
+        env:
+          GATEWAY_DIGEST: ${{ steps.controller-build.outputs.gateway_digest }}
+          CONTROL_DIGEST: ${{ steps.controller-build.outputs.control_digest }}
+          TRANSPORT_DIGEST: ${{ steps.controller-build.outputs.transport_digest }}
+          BACKUP_DIGEST: ${{ steps.controller-build.outputs.backup_digest }}
         run: |
           set -euo pipefail
-          for name in gateway control transport backup; do
+          for image in \
+            "gateway=${GATEWAY_DIGEST}" \
+            "control=${CONTROL_DIGEST}" \
+            "transport=${TRANSPORT_DIGEST}" \
+            "backup=${BACKUP_DIGEST}"; do
+            name="${image%%=*}"
+            digest="${image#*=}"
+            token="$(curl --fail --silent --show-error --get \
+              --data-urlencode 'service=ghcr.io' \
+              --data-urlencode "scope=repository:gentlekingson/ocservia/${name}:pull" \
+              'https://ghcr.io/token' \
+              | jq -er '(.token // .access_token) | strings | select(length > 0)')"
             curl --fail --silent --show-error --head \
               --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
-              "https://ghcr.io/v2/gentlekingson/ocservia/${name}/manifests/${release_tag}" \
+              --header "Authorization: Bearer ${token}" \
+              "https://ghcr.io/v2/gentlekingson/ocservia/${name}/manifests/${digest}" \
               >/dev/null
           done
       - name: Attest gateway image provenance
