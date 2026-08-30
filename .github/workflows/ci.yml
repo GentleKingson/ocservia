@@ -596,6 +596,7 @@ jobs:
           scripts/test-g6-release-identity.sh
           scripts/test-g6-install-release.sh
           scripts/test-controller-release-manifest.sh
+          scripts/test-controller-lifecycle.sh
           scripts/test-release-checksum-manifest.sh
           scripts/test-g6-timing.sh
           scripts/test-g6-evidence-pipeline.sh

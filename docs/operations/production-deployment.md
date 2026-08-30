@@ -33,6 +33,29 @@ published `SHA256SUMS.sig` with the release public key before trusting the
 manifest. The separate `controller-release.json.sha256` is an additional
 byte-integrity check.
 
+For a fresh Controller host, install the exact release selected by the local
+manifest through the lifecycle entrypoint:
+
+```bash
+deploy/production/controller.sh install \
+  --release-file /path/to/controller-release.json
+```
+
+The entrypoint requires Docker Compose v2 with
+`docker compose up --wait` support. It takes an exclusive local lock in
+`/var/lib/ocservia-controller`, rejects an existing
+`current-release.json`, validates that the checkout HEAD and clean working tree
+match the manifest `source_commit`, runs the guarded Compose preflight, pulls
+the six digest-pinned images, and starts the dependency graph with
+`up -d --wait`. Before the first Compose operation it atomically records the
+complete manifest as `pending-release.json`. A failed install leaves that
+intent in place; only a retry with the identical manifest may continue. After
+a successful install it atomically renames the pending state to
+`current-release.json`, both with mode `0600`. It does not create or rotate
+secrets, certificates, or identity keys. `controller.sh install` is
+intentionally fresh-install-only; upgrade, rollback, and uninstall are
+separate deferred lifecycle operations.
+
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
 Backups retain the configured number of verified base backups. WAL cleanup is anchored to the oldest retained base backup, so point-in-time recovery remains possible across the retained window without allowing the local archive to grow forever. Monitor backup-worker health and the `LATEST` timestamp, copy each completed base backup plus its required WAL range to protected off-host storage, and confirm the off-host copy before reducing local retention.

@@ -116,6 +116,8 @@ classify_path() {
       run_g6_smoke=true ;;
     deploy/production/rotate-postgres-credentials.sh|deploy/production/postgres-init/*|deploy/production/backup-entrypoint.sh|deploy/production/backup.Dockerfile)
       run_production_relays=true; run_credential_rotation=true ;;
+    deploy/production/controller.sh)
+      run_production_relays=true; run_contracts_policy=true ;;
     deploy/production/*|deploy/production/**/*)
       run_production_relays=true ;;
     deploy/compose/*|deploy/compose/**/*)
@@ -127,7 +129,7 @@ classify_path() {
 
     scripts/ci-relevance.sh)
       fail_closed ci_relevance_authority_changed ;;
-    scripts/test-ci-relevance.sh|scripts/test-bootstrap-profiles.sh|scripts/test-ci-runtime-artifact.sh|scripts/ci-runtime-artifact.sh|scripts/test-toolchain-consistency.sh|scripts/test-controller-release-manifest.sh|scripts/test-release-checksum-manifest.sh|scripts/release-checksum-manifest.sh|scripts/generate-controller-release-manifest.mjs)
+    scripts/test-ci-relevance.sh|scripts/test-bootstrap-profiles.sh|scripts/test-ci-runtime-artifact.sh|scripts/ci-runtime-artifact.sh|scripts/test-toolchain-consistency.sh|scripts/test-controller-release-manifest.sh|scripts/test-controller-lifecycle.sh|scripts/test-release-checksum-manifest.sh|scripts/release-checksum-manifest.sh|scripts/generate-controller-release-manifest.mjs)
       run_contracts_policy=true ;;
     scripts/g6-*|scripts/*g6*)
       run_contracts_policy=true; run_g6_smoke=true ;;

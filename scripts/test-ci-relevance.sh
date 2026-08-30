@@ -22,7 +22,8 @@ paths=(
   deploy/production/rotate-postgres-credentials.sh openapi/openapi.yaml
   proto/ocserv/platform/agent/v1/agent.proto tools/g6-harness/internal/smoke/pipeline.go
   deploy/systemd/ocservia-agent.service .github/workflows/g6-harness-smoke.yml
-  .github/workflows/release.yml scripts/ci-relevance.sh web/package.json
+  .github/workflows/release.yml scripts/ci-relevance.sh scripts/test-controller-lifecycle.sh web/package.json
+  deploy/production/controller.sh
   scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
   control-plane/Dockerfile
 )
@@ -118,6 +119,10 @@ out="$(case_commit workflow .github/workflows/g6-harness-smoke.yml)"
 expect_only "${out}" run_contracts_policy run_g6_smoke
 out="$(case_commit release_workflow .github/workflows/release.yml)"
 expect_only "${out}" run_contracts_policy
+out="$(case_commit controller_lifecycle scripts/test-controller-lifecycle.sh)"
+expect_only "${out}" run_contracts_policy
+out="$(case_commit controller_entrypoint deploy/production/controller.sh)"
+expect_only "${out}" run_contracts_policy run_production_relays
 out="$(case_commit real_e2e_script scripts/real-e2e-node.sh)"
 expect_only "${out}" run_contracts_policy
 out="$(case_commit real_e2e_deploy deploy/real-e2e/controller.compose.yaml)"
