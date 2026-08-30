@@ -36,7 +36,8 @@ Each release publishes the verified archive plus native installers for both
 architectures: `ocservia-agent-<version>-linux-{amd64,arm64}.tar.gz` with its
 `.sha256`/`.sha256.sig` sidecars, `ocservia-agent_<version>_{amd64,arm64}.deb`,
 `ocservia-agent-<version>-1.{x86_64,aarch64}.rpm`, one `SHA256SUMS` covering
-the six packages, its Ed25519 `SHA256SUMS.sig`, and `release-signing.pub.pem`.
+the six packages, and, on formal Controller releases, `controller-release.json`,
+its Ed25519 `SHA256SUMS.sig`, and `release-signing.pub.pem`.
 All of them trust the same release key whose DER SHA-256 fingerprint is pinned
 out of band.
 

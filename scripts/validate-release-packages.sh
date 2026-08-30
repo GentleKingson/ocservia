@@ -6,6 +6,10 @@ ASSET_DIR="${ASSET_DIR:?ASSET_DIR is required}"
 VERSION="${VERSION:?VERSION is required}"
 AGENT_TRUSTED_KEY_SHA256="${AGENT_TRUSTED_KEY_SHA256:-}"
 WRITE_SHA256SUMS="${WRITE_SHA256SUMS:-}"
+CONTROLLER_RELEASE_MANIFEST_REQUIRED="${CONTROLLER_RELEASE_MANIFEST_REQUIRED:-}"
+
+# shellcheck source=scripts/release-checksum-manifest.sh
+source "${ROOT}/scripts/release-checksum-manifest.sh"
 
 if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
   echo "VERSION must be SemVer" >&2
@@ -140,8 +144,8 @@ verify_arch_triple amd64 "${tar_amd64}" "x86-64"
 verify_arch_triple arm64 "${tar_arm64}" "aarch64"
 echo "signed archive triples, package architectures, and embedded payloads validated"
 
-mapfile -t ordered < <(printf '%s\n' "${package_files[@]:0:6}" | LC_ALL=C sort)
-canonical_manifest="$(cd -- "${ASSET_DIR}" && sha256sum -- "${ordered[@]}")"
+canonical_manifest="$(release_checksum_manifest "${ASSET_DIR}" "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" \
+  "${package_files[@]:0:6}")"
 if [[ ! -f "${ASSET_DIR}/SHA256SUMS" ]]; then
   if [[ "${WRITE_SHA256SUMS}" == "1" ]]; then
     printf '%s\n' "${canonical_manifest}" >"${ASSET_DIR}/SHA256SUMS"
@@ -151,7 +155,7 @@ if [[ ! -f "${ASSET_DIR}/SHA256SUMS" ]]; then
   fi
 fi
 [[ "$(cat -- "${ASSET_DIR}/SHA256SUMS")" == "${canonical_manifest}" ]] \
-  || { echo "SHA256SUMS does not canonically cover exactly the six release packages" >&2; exit 1; }
+  || { echo "SHA256SUMS does not canonically cover the expected release assets" >&2; exit 1; }
 if [[ -f "${ASSET_DIR}/SHA256SUMS.sig" ]]; then
   verified=false
   for pub in "${ASSET_DIR}/${tar_amd64}.sha256.pub.pem" "${ASSET_DIR}/${tar_arm64}.sha256.pub.pem"; do
