@@ -258,7 +258,6 @@ install_controller() {
   [[ ! -e "${CURRENT_RELEASE}" && ! -L "${CURRENT_RELEASE}" ]] ||
     fail "current release state appeared during install"
   mv -- "${PENDING_RELEASE}" "${CURRENT_RELEASE}" || fail "cannot commit current release state"
-  STAGED_RELEASE=""
   echo "Controller ${release_version} installed"
 }
 

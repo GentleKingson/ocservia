@@ -204,6 +204,7 @@ test "$(wc -l <"${retry_state}/compose.log")" -eq 3
 run_controller "${retry_state}" "${release_file}" env
 cmp -s "${release_file}" "${retry_state}/current-release.json"
 test ! -e "${retry_state}/pending-release.json"
+test "$(find "${retry_state}" -maxdepth 1 -name '.current-release.json.*' -print | wc -l)" -eq 0
 
 lock_state="${fixture}/lock"
 mkdir -m 700 -- "${lock_state}"
