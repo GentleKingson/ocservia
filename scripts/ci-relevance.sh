@@ -124,7 +124,9 @@ classify_path() {
     deploy/real-e2e/*|deploy/g6-ha-pitr/*|deploy/g6-ha-pitr/**/*)
       run_contracts_policy=true ;;
 
-    scripts/ci-relevance.sh|scripts/test-ci-relevance.sh|scripts/test-bootstrap-profiles.sh|scripts/test-ci-runtime-artifact.sh|scripts/ci-runtime-artifact.sh|scripts/test-toolchain-consistency.sh)
+    scripts/ci-relevance.sh)
+      fail_closed ci_relevance_authority_changed ;;
+    scripts/test-ci-relevance.sh|scripts/test-bootstrap-profiles.sh|scripts/test-ci-runtime-artifact.sh|scripts/ci-runtime-artifact.sh|scripts/test-toolchain-consistency.sh)
       run_contracts_policy=true ;;
     scripts/g6-*|scripts/*g6*)
       run_contracts_policy=true; run_g6_smoke=true ;;

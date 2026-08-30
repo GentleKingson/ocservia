@@ -116,6 +116,9 @@ out="$(case_commit workflow .github/workflows/g6-harness-smoke.yml)"
 expect_only "${out}" run_contracts_policy run_g6_smoke
 out="$(case_commit release_workflow .github/workflows/release.yml)"
 expect_only "${out}" run_contracts_policy
+out="$(case_commit classifier_authority scripts/ci-relevance.sh)"
+expect_only "${out}" "${flags[@]}"
+expect_flag "${out}" reason ci_relevance_authority_changed
 
 # 21-23. Known mixed changes are the OR-union, never a category fallback.
 out="$(case_commit docs_go docs/development/guide.md control-plane/internal/domain/helper.go)"
