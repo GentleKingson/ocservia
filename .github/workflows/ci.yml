@@ -340,6 +340,10 @@ jobs:
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned Go and Rust tools
         run: scripts/bootstrap.sh go-rust-integration
+      - name: Controller Docker Compose lifecycle semantics
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
+        run: scripts/test-controller-compose-lifecycle.sh
       - name: Production topology, relays, backup, and package checks
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
