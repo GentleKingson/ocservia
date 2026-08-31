@@ -86,21 +86,31 @@ deploy/production/controller.sh rollback
 
 Rollback uses only the protected `previous-release.json`; it never accepts an
 operator-selected manifest. The current and previous manifests must differ,
-the previous version must be lower, their `database_migration` values must be
-identical, and the current checkout must be clean and match the current
-manifest. The previous `source_commit` must be present locally, and the
-production Compose launcher, Compose file, and every relative host-mounted
-production descriptor/configuration path discovered from that Compose file
-must be unchanged between the two source commits. This first version therefore
-fails closed when the deployment contract changed. It performs no down
-migration or database restore.
+the previous version must be lower, and the current checkout must be clean and
+match the current manifest. The previous `source_commit` must be present
+locally, and the production Compose launcher, Compose file, and every relative
+host-mounted production descriptor/configuration path discovered from that
+Compose file must be unchanged between the two source commits. Same-schema
+rollback remains supported. When `database_migration` differs, the current
+Controller image runs a read-only compatibility preflight through the protected
+Compose path before any previous image is activated. The preflight validates the
+authoritative compatibility row, the migration history, and
+`previous.database_migration >= minimum_compatible_controller_schema` and
+`previous.database_migration <= current_schema`. Missing, malformed,
+inconsistent, unreachable, or otherwise non-permitting compatibility metadata
+fails closed. This first version also fails closed when the deployment contract
+changed. It performs no down migration or database restore.
 
-Rollback renders and pulls the previous digest-pinned images, starts the
-Compose graph with `up -d --wait`, and requires the functional release smoke to
-confirm the previous version and source commit before exchanging confirmed
-state. A failure after activation leaves confirmed state unchanged and retains
-pending failure evidence for a same-target retry; it does not automatically
-redeploy the current images. Cross-schema rollback is deferred. PostgreSQL
+Rollback renders and pulls the previous digest-pinned images, then requires the
+functional release smoke to confirm the previous version and source commit
+before exchanging confirmed state. Same-schema rollback starts the normal
+Compose graph with `up -d --wait`. Cross-schema rollback uses the read-only
+compatibility result and starts every runtime service except `migrate` with
+`up -d --wait --no-deps`, so the previous Controller's normal migration runner
+is not executed against a newer database schema. This activation does not run a
+down migration or change database state. A failure after activation leaves
+confirmed state unchanged and retains pending failure evidence for a same-target
+retry; it does not automatically redeploy the current images. PostgreSQL
 backup/PITR is the disaster-recovery boundary, not an application rollback
 mechanism.
 

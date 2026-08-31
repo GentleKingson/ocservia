@@ -310,6 +310,40 @@ func TestMigrateOnlyAcceptsRuntimeRole(t *testing.T) {
 	}
 }
 
+func TestSchemaCompatibilityCheckAcceptsExpectedSchema(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://owner@db/test"}
+		value, ok := values[key]
+		return value, ok
+	}
+	config, err := Load([]string{"--schema-compatibility-check=29"}, lookup)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.SchemaCompatibilityCheck != 29 || config.MigrateOnly {
+		t.Fatalf("unexpected schema compatibility check config: %+v", config)
+	}
+}
+
+func TestSchemaCompatibilityCheckRejectsInvalidModes(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		values := map[string]string{
+			"OCSERV_DATABASE_URL":          "postgres://owner@db/test",
+			"OCSERV_RUNTIME_DATABASE_ROLE": "ocservia_app",
+		}
+		value, ok := values[key]
+		return value, ok
+	}
+	for _, args := range [][]string{
+		{"--schema-compatibility-check=-1"},
+		{"--migrate-only", "--schema-compatibility-check=29"},
+	} {
+		if _, err := Load(args, lookup); err == nil {
+			t.Fatalf("Load(%v) accepted an invalid schema compatibility mode", args)
+		}
+	}
+}
+
 func TestLocalSimulatorIsRejectedInProduction(t *testing.T) {
 	lookup := func(key string) (string, bool) {
 		values := map[string]string{

@@ -504,6 +504,14 @@ check_current_database_and_backup_health() {
   fi
 }
 
+check_rollback_database_compatibility() {
+  local previous_migration="$1"
+  if ! "${COMPOSE_LAUNCHER}" run --rm --no-deps migrate \
+    "--schema-compatibility-check=${previous_migration}"; then
+    fail "database compatibility preflight failed for rollback target; current release remains unchanged"
+  fi
+}
+
 production_descriptor_paths() {
   local compose_file="${ROOT}/deploy/production/compose.yaml"
   printf '%s\n' \
@@ -711,8 +719,6 @@ rollback_controller() {
 
   current_migration="$(jq -er -s '.[0].database_migration' "${CURRENT_RELEASE}")"
   previous_migration="$(jq -er -s '.[0].database_migration' "${PREVIOUS_RELEASE}")"
-  [[ "${current_migration}" == "${previous_migration}" ]] ||
-    fail "cross-schema rollback is not supported; database_migration differs"
   validate_production_deployment_contract "${current_commit}" "${previous_commit}"
 
   STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
@@ -726,6 +732,9 @@ rollback_controller() {
   validate_prerequisites
   map_manifest_images "${CURRENT_RELEASE}"
   check_current_database_and_backup_health
+  if [[ "${current_migration}" != "${previous_migration}" ]]; then
+    check_rollback_database_compatibility "${previous_migration}"
+  fi
   map_manifest_images "${STAGED_RELEASE}"
   if ! "${COMPOSE_LAUNCHER}" config --quiet; then
     fail "production preflight failed for rollback target; current release remains unchanged"
@@ -734,7 +743,15 @@ rollback_controller() {
     fail "rollback target image pull failed; current release remains unchanged"
   fi
   mark_pending_phase rollback-activation "${CURRENT_RELEASE}"
-  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
+  if [[ "${current_migration}" != "${previous_migration}" ]]; then
+    # The compatibility preflight already validated the database. Do not let
+    # the previous Controller image run the normal migration service against
+    # a newer schema during this activation.
+    if ! "${COMPOSE_LAUNCHER}" up -d --wait --no-deps \
+      postgres backup otel-collector transportd control-plane gateway; then
+      fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
+    fi
+  elif ! "${COMPOSE_LAUNCHER}" up -d --wait; then
     fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
   fi
 

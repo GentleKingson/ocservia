@@ -36,7 +36,12 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
 case "${1:-}" in
   config) exit "${MOCK_CONFIG_EXIT:-0}" ;;
   pull) exit "${MOCK_PULL_EXIT:-0}" ;;
-  up) exit "${MOCK_UP_EXIT:-0}" ;;
+  up)
+    if [[ "${MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION:-0}" == 1 ]]; then
+      [[ "$*" == "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway" ]]
+    fi
+    exit "${MOCK_UP_EXIT:-0}"
+    ;;
   down)
     [[ "${COMPOSE_PROJECT_NAME:-}" == ocservia-production ]]
     exit "${MOCK_DOWN_EXIT:-0}"
@@ -50,6 +55,17 @@ case "${1:-}" in
         '{"Service":"backup","State":"running","Health":"healthy"}'
     fi
     exit "${MOCK_PS_EXIT:-0}"
+    ;;
+  run)
+    [[ "${2:-}" == "--rm" && "${3:-}" == "--no-deps" && "${4:-}" == "migrate" && "${5:-}" == --schema-compatibility-check=* ]]
+    requested_schema="${5#*=}"
+    [[ "${requested_schema}" =~ ^[0-9]+$ ]]
+    if [[ "${MOCK_SCHEMA_QUERY_EXIT:-0}" != 0 || "${MOCK_SCHEMA_METADATA_EXIT:-0}" != 0 ]]; then
+      exit 1
+    fi
+    current_schema="${MOCK_SCHEMA_CURRENT:-30}"
+    minimum_schema="${MOCK_SCHEMA_MINIMUM:-29}"
+    (( requested_schema >= minimum_schema && requested_schema <= current_schema ))
     ;;
   *) exit 97 ;;
 esac
@@ -414,18 +430,109 @@ grep -Fq 'previous release version must be lower' "${not_older_state}/output.log
 test ! -e "${not_older_state}/compose.log"
 
 different_schema_previous="${fixture}/release/controller-release-schema-different.json"
-jq '.database_migration += 1' "${release_file}" >"${different_schema_previous}"
+cross_schema_current="${fixture}/release/controller-release-schema-current.json"
+jq '.database_migration += 1' "${next_release_file}" >"${cross_schema_current}"
+cp -- "${release_file}" "${different_schema_previous}"
 schema_state="${fixture}/rollback-schema-different"
 seed_upgrade_state "${schema_state}"
-cp -- "${next_release_file}" "${schema_state}/current-release.json"
+cp -- "${cross_schema_current}" "${schema_state}/current-release.json"
 cp -- "${different_schema_previous}" "${schema_state}/previous-release.json"
 chmod 600 "${schema_state}/current-release.json" "${schema_state}/previous-release.json"
-if run_controller_rollback "${schema_state}" env >"${schema_state}/output.log" 2>&1; then
+if run_controller_rollback "${schema_state}" env MOCK_SCHEMA_METADATA_EXIT=1 >"${schema_state}/output.log" 2>&1; then
   echo "cross-schema rollback was accepted" >&2
   exit 1
 fi
-grep -Fq 'cross-schema rollback is not supported' "${schema_state}/output.log"
-test ! -e "${schema_state}/compose.log"
+grep -Fq 'database compatibility preflight failed for rollback target' "${schema_state}/output.log"
+cmp -s "${cross_schema_current}" "${schema_state}/current-release.json"
+cmp -s "${different_schema_previous}" "${schema_state}/previous-release.json"
+test "$(sed -n '1p' "${schema_state}/compose.log")" = "ps --format json postgres backup"
+test "$(sed -n '2p' "${schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=29"
+test "$(wc -l <"${schema_state}/compose.log")" -eq 2
+
+compatible_cross_schema_state="${fixture}/rollback-compatible-cross-schema"
+seed_upgrade_state "${compatible_cross_schema_state}"
+cp -- "${cross_schema_current}" "${compatible_cross_schema_state}/current-release.json"
+cp -- "${different_schema_previous}" "${compatible_cross_schema_state}/previous-release.json"
+chmod 600 "${compatible_cross_schema_state}/current-release.json" "${compatible_cross_schema_state}/previous-release.json"
+run_controller_rollback "${compatible_cross_schema_state}" env MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1
+cmp -s "${different_schema_previous}" "${compatible_cross_schema_state}/current-release.json"
+cmp -s "${cross_schema_current}" "${compatible_cross_schema_state}/previous-release.json"
+test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=29"
+test "$(sed -n '3p' "${compatible_cross_schema_state}/compose.log")" = "config --quiet"
+test "$(sed -n '4p' "${compatible_cross_schema_state}/compose.log")" = "pull"
+test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
+test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '2p')" = "ghcr.io/gentlekingson/ocservia/control@${next_digest}"
+test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '5p')" = "ghcr.io/gentlekingson/ocservia/control@${digest}"
+
+minimum_schema_state="${fixture}/rollback-schema-minimum"
+seed_upgrade_state "${minimum_schema_state}"
+cp -- "${cross_schema_current}" "${minimum_schema_state}/current-release.json"
+cp -- "${different_schema_previous}" "${minimum_schema_state}/previous-release.json"
+chmod 600 "${minimum_schema_state}/current-release.json" "${minimum_schema_state}/previous-release.json"
+if run_controller_rollback "${minimum_schema_state}" env MOCK_SCHEMA_MINIMUM=30 >"${minimum_schema_state}/output.log" 2>&1; then
+  echo "rollback below compatibility minimum was accepted" >&2
+  exit 1
+fi
+grep -Fq 'database compatibility preflight failed for rollback target' "${minimum_schema_state}/output.log"
+cmp -s "${cross_schema_current}" "${minimum_schema_state}/current-release.json"
+cmp -s "${different_schema_previous}" "${minimum_schema_state}/previous-release.json"
+test "$(wc -l <"${minimum_schema_state}/compose.log")" -eq 2
+
+current_schema_state="${fixture}/rollback-schema-current"
+seed_upgrade_state "${current_schema_state}"
+cp -- "${cross_schema_current}" "${current_schema_state}/current-release.json"
+cp -- "${different_schema_previous}" "${current_schema_state}/previous-release.json"
+chmod 600 "${current_schema_state}/current-release.json" "${current_schema_state}/previous-release.json"
+if run_controller_rollback "${current_schema_state}" env MOCK_SCHEMA_CURRENT=28 >"${current_schema_state}/output.log" 2>&1; then
+  echo "rollback above the current database schema was accepted" >&2
+  exit 1
+fi
+grep -Fq 'database compatibility preflight failed for rollback target' "${current_schema_state}/output.log"
+cmp -s "${cross_schema_current}" "${current_schema_state}/current-release.json"
+cmp -s "${different_schema_previous}" "${current_schema_state}/previous-release.json"
+test "$(wc -l <"${current_schema_state}/compose.log")" -eq 2
+
+missing_compatibility_state="${fixture}/rollback-schema-missing"
+seed_upgrade_state "${missing_compatibility_state}"
+cp -- "${cross_schema_current}" "${missing_compatibility_state}/current-release.json"
+cp -- "${different_schema_previous}" "${missing_compatibility_state}/previous-release.json"
+chmod 600 "${missing_compatibility_state}/current-release.json" "${missing_compatibility_state}/previous-release.json"
+if run_controller_rollback "${missing_compatibility_state}" env MOCK_SCHEMA_QUERY_EXIT=1 >"${missing_compatibility_state}/output.log" 2>&1; then
+  echo "rollback with missing compatibility metadata was accepted" >&2
+  exit 1
+fi
+grep -Fq 'database compatibility preflight failed for rollback target' "${missing_compatibility_state}/output.log"
+cmp -s "${cross_schema_current}" "${missing_compatibility_state}/current-release.json"
+cmp -s "${different_schema_previous}" "${missing_compatibility_state}/previous-release.json"
+test "$(wc -l <"${missing_compatibility_state}/compose.log")" -eq 2
+
+malformed_compatibility_state="${fixture}/rollback-schema-malformed"
+seed_upgrade_state "${malformed_compatibility_state}"
+cp -- "${cross_schema_current}" "${malformed_compatibility_state}/current-release.json"
+cp -- "${different_schema_previous}" "${malformed_compatibility_state}/previous-release.json"
+chmod 600 "${malformed_compatibility_state}/current-release.json" "${malformed_compatibility_state}/previous-release.json"
+if run_controller_rollback "${malformed_compatibility_state}" env MOCK_SCHEMA_METADATA_EXIT=1 >"${malformed_compatibility_state}/output.log" 2>&1; then
+  echo "rollback with malformed compatibility metadata was accepted" >&2
+  exit 1
+fi
+grep -Fq 'database compatibility preflight failed for rollback target' "${malformed_compatibility_state}/output.log"
+cmp -s "${cross_schema_current}" "${malformed_compatibility_state}/current-release.json"
+cmp -s "${different_schema_previous}" "${malformed_compatibility_state}/previous-release.json"
+test "$(wc -l <"${malformed_compatibility_state}/compose.log")" -eq 2
+
+query_failure_state="${fixture}/rollback-schema-query-failure"
+seed_upgrade_state "${query_failure_state}"
+cp -- "${cross_schema_current}" "${query_failure_state}/current-release.json"
+cp -- "${different_schema_previous}" "${query_failure_state}/previous-release.json"
+chmod 600 "${query_failure_state}/current-release.json" "${query_failure_state}/previous-release.json"
+if run_controller_rollback "${query_failure_state}" env MOCK_SCHEMA_QUERY_EXIT=1 >"${query_failure_state}/output.log" 2>&1; then
+  echo "rollback after compatibility query failure was accepted" >&2
+  exit 1
+fi
+grep -Fq 'database compatibility preflight failed for rollback target' "${query_failure_state}/output.log"
+cmp -s "${cross_schema_current}" "${query_failure_state}/current-release.json"
+cmp -s "${different_schema_previous}" "${query_failure_state}/previous-release.json"
+test "$(wc -l <"${query_failure_state}/compose.log")" -eq 2
 
 incompatible_pending_state="${fixture}/rollback-incompatible-pending"
 seed_upgrade_state "${incompatible_pending_state}"
@@ -504,6 +611,24 @@ for rollback_failure in config pull up; do
       ;;
   esac
 done
+
+rollback_cross_schema_smoke_failure_state="${fixture}/rollback-cross-schema-smoke-failure"
+seed_upgrade_state "${rollback_cross_schema_smoke_failure_state}"
+cp -- "${cross_schema_current}" "${rollback_cross_schema_smoke_failure_state}/current-release.json"
+cp -- "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
+chmod 600 "${rollback_cross_schema_smoke_failure_state}/current-release.json" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
+if run_controller_rollback "${rollback_cross_schema_smoke_failure_state}" env \
+  MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 MOCK_SMOKE_EXIT=1 \
+  >"${rollback_cross_schema_smoke_failure_state}/output.log" 2>&1; then
+  echo "cross-schema rollback smoke failure was accepted" >&2
+  exit 1
+fi
+grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${rollback_cross_schema_smoke_failure_state}/output.log"
+cmp -s "${cross_schema_current}" "${rollback_cross_schema_smoke_failure_state}/current-release.json"
+cmp -s "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
+assert_pending_release "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_state}/pending-release.json"
+assert_pending_previous_release "${cross_schema_current}" "${rollback_cross_schema_smoke_failure_state}/pending-release.json"
+test "$(jq -r '.phase' "${rollback_cross_schema_smoke_failure_state}/pending-release.json")" = failed
 
 rollback_smoke_failure_state="${fixture}/rollback-smoke-failure"
 seed_upgrade_state "${rollback_smoke_failure_state}"
