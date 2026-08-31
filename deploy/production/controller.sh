@@ -19,6 +19,7 @@ umask 077
 
 usage() {
   echo "usage: $0 {install|upgrade} --release-file /path/controller-release.json" >&2
+  echo "       $0 rollback" >&2
   exit 2
 }
 
@@ -140,8 +141,8 @@ normalize_release_file_path() {
 }
 
 validate_source_tree() {
-  local manifest_commit current_commit dirty
-  manifest_commit="$(jq -er -s '.[0].source_commit' "${STAGED_RELEASE}")"
+  local manifest="${1:-${STAGED_RELEASE}}" manifest_commit current_commit dirty
+  manifest_commit="$(jq -er -s '.[0].source_commit' "${manifest}")"
   if ! current_commit="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)"; then
     fail "Controller release must be installed from a Git checkout"
   fi
@@ -384,7 +385,7 @@ validate_pending_release() {
 }
 
 ensure_pending_release() {
-  local previous_manifest="${1:-}"
+  local previous_manifest="${1:-}" require_previous="${2:-false}"
   if [[ -L "${PENDING_RELEASE}" ]]; then
     fail "pending release state must not be a symlink"
   elif [[ -e "${PENDING_RELEASE}" ]]; then
@@ -399,6 +400,9 @@ ensure_pending_release() {
       ! jq -e --slurpfile expected "${previous_manifest}" \
         '.previous_manifest == $expected[0]' "${PENDING_RELEASE}" >/dev/null; then
       fail "pending release previous state does not match current release"
+    fi
+    if [[ "${require_previous}" == true ]] && ! jq -e 'has("previous_manifest")' "${PENDING_RELEASE}" >/dev/null; then
+      fail "pending release transaction is not compatible with rollback"
     fi
     PENDING_ACTIVE=true
     write_pending_state "${STAGED_RELEASE}" "preflight" "${previous_manifest}" ||
@@ -494,6 +498,26 @@ check_current_database_and_backup_health() {
   fi
 }
 
+production_descriptor_paths() {
+  local compose_file="${ROOT}/deploy/production/compose.yaml"
+  printf '%s\n' \
+    "deploy/production/compose.sh" \
+    "deploy/production/compose.yaml"
+  grep -Eo '\./[^[:space:]:]+' "${compose_file}" | sort -u | while IFS= read -r source; do
+    printf 'deploy/production/%s\n' "${source#./}"
+  done
+}
+
+validate_production_deployment_contract() {
+  local current_commit="$1" previous_commit="$2" descriptor
+  while IFS= read -r descriptor; do
+    [[ -n "${descriptor}" ]] || continue
+    if ! git -C "${ROOT}" diff --quiet --exit-code "${previous_commit}" "${current_commit}" -- "${descriptor}"; then
+      fail "production deployment descriptor changed since previous release: ${descriptor}"
+    fi
+  done < <(production_descriptor_paths)
+}
+
 commit_upgrade_state() {
   local previous_staged
   previous_staged="$(mktemp "${STATE_ROOT}/.previous-release.json.XXXXXX")" ||
@@ -520,6 +544,37 @@ commit_upgrade_state() {
     fail "release state rollover failed after activation; target release was not confirmed"
   fi
   rm -- "${PENDING_RELEASE}" || fail "cannot remove pending release state after upgrade"
+  PENDING_ACTIVE=false
+}
+
+commit_rollback_state() {
+  local current_staged
+  validate_state_file_path "current release state" "${CURRENT_RELEASE}"
+  validate_state_file_path "previous release state" "${PREVIOUS_RELEASE}"
+  current_staged="$(mktemp "${STATE_ROOT}/.previous-release.json.XXXXXX")" ||
+    fail "cannot allocate current release rollback state staging file"
+  chmod 600 "${current_staged}"
+  cat -- "${CURRENT_RELEASE}" >"${current_staged}" || {
+    rm -f -- "${current_staged}"
+    fail "cannot stage current release rollback state"
+  }
+
+  if [[ -L "${CURRENT_RELEASE}" || -L "${PREVIOUS_RELEASE}" ]]; then
+    rm -f -- "${current_staged}"
+    fail "release state path became a symlink; rollback target was not confirmed"
+  fi
+  if ! mv -- "${STAGED_RELEASE}" "${CURRENT_RELEASE}"; then
+    rm -f -- "${current_staged}"
+    fail "cannot commit rollback current release state"
+  fi
+  STAGED_RELEASE=""
+  if ! mv -- "${current_staged}" "${PREVIOUS_RELEASE}"; then
+    if ! mv -- "${current_staged}" "${CURRENT_RELEASE}"; then
+      fail "rollback state rollover failed after activation; rollback target was not confirmed"
+    fi
+    fail "rollback state rollover failed after activation; rollback target was not confirmed"
+  fi
+  rm -- "${PENDING_RELEASE}" || fail "cannot remove pending rollback state"
   PENDING_ACTIVE=false
 }
 
@@ -618,16 +673,90 @@ upgrade_controller() {
   echo "Controller ${target_version} upgraded"
 }
 
-if (($# != 3)) || [[ "$2" != "--release-file" ]] ||
-  [[ "$1" != "install" && "$1" != "upgrade" ]]; then
-  usage
-fi
+rollback_controller() {
+  local current_version previous_version comparison current_commit previous_commit
+  local current_migration previous_migration target_version
+  prepare_state_root
+  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
+  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
+  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
+  acquire_lock
+  reconcile_completed_pending
 
-RELEASE_FILE="$3"
-normalize_release_file_path
-trap cleanup EXIT
-if [[ "$1" == "install" ]]; then
-  install_controller
-else
-  upgrade_controller
-fi
+  validate_current_release
+  validate_previous_release
+  [[ -e "${PREVIOUS_RELEASE}" ]] || fail "previous release state is missing; refusing to rollback"
+  if cmp -s "${CURRENT_RELEASE}" "${PREVIOUS_RELEASE}"; then
+    fail "current and previous release states must not be identical"
+  fi
+
+  current_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
+  previous_version="$(jq -er -s '.[0].release_version' "${PREVIOUS_RELEASE}")"
+  comparison="$(compare_semver "${previous_version}" "${current_version}")" ||
+    fail "release versions are not valid SemVer"
+  [[ "${comparison}" == -1 ]] ||
+    fail "previous release version must be lower than current release version"
+
+  validate_source_tree "${CURRENT_RELEASE}"
+  current_commit="$(jq -er -s '.[0].source_commit' "${CURRENT_RELEASE}")"
+  previous_commit="$(jq -er -s '.[0].source_commit' "${PREVIOUS_RELEASE}")"
+  git -C "${ROOT}" cat-file -e "${previous_commit}^{commit}" 2>/dev/null ||
+    fail "previous release source_commit cannot be resolved locally"
+
+  current_migration="$(jq -er -s '.[0].database_migration' "${CURRENT_RELEASE}")"
+  previous_migration="$(jq -er -s '.[0].database_migration' "${PREVIOUS_RELEASE}")"
+  [[ "${current_migration}" == "${previous_migration}" ]] ||
+    fail "cross-schema rollback is not supported; database_migration differs"
+  validate_production_deployment_contract "${current_commit}" "${previous_commit}"
+
+  STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
+    fail "cannot allocate rollback target staging file"
+  chmod 600 "${STAGED_RELEASE}"
+  cat -- "${PREVIOUS_RELEASE}" >"${STAGED_RELEASE}" || fail "cannot stage rollback target"
+  validate_manifest_file "rollback target release" "${STAGED_RELEASE}"
+  target_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
+
+  ensure_pending_release "${CURRENT_RELEASE}" true
+  validate_prerequisites
+  map_manifest_images "${CURRENT_RELEASE}"
+  check_current_database_and_backup_health
+  map_manifest_images "${STAGED_RELEASE}"
+  if ! "${COMPOSE_LAUNCHER}" config --quiet; then
+    fail "production preflight failed for rollback target; current release remains unchanged"
+  fi
+  if ! "${COMPOSE_LAUNCHER}" pull; then
+    fail "rollback target image pull failed; current release remains unchanged"
+  fi
+  mark_pending_phase rollback-activation "${CURRENT_RELEASE}"
+  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
+    fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
+  fi
+
+  mark_pending_phase rollback-smoke "${CURRENT_RELEASE}"
+  run_release_smoke
+  commit_rollback_state
+  echo "Controller rolled back to ${target_version}"
+}
+
+case "${1:-}" in
+  rollback)
+    (($# == 1)) || usage
+    trap cleanup EXIT
+    rollback_controller
+    ;;
+  install|upgrade)
+    (($# == 3)) || usage
+    [[ "$2" == "--release-file" ]] || usage
+    RELEASE_FILE="$3"
+    normalize_release_file_path
+    trap cleanup EXIT
+    if [[ "$1" == "install" ]]; then
+      install_controller
+    else
+      upgrade_controller
+    fi
+    ;;
+  *)
+    usage
+    ;;
+esac
