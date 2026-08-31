@@ -78,6 +78,32 @@ that is identical to the current state is a no-op; downgrade attempts are
 rejected. Failures after activation return non-zero without redeploying old
 images, running down migrations, or changing confirmed release state.
 
+To roll back the last confirmed Controller release, run:
+
+```bash
+deploy/production/controller.sh rollback
+```
+
+Rollback uses only the protected `previous-release.json`; it never accepts an
+operator-selected manifest. The current and previous manifests must differ,
+the previous version must be lower, their `database_migration` values must be
+identical, and the current checkout must be clean and match the current
+manifest. The previous `source_commit` must be present locally, and the
+production Compose launcher, Compose file, and every relative host-mounted
+production descriptor/configuration path discovered from that Compose file
+must be unchanged between the two source commits. This first version therefore
+fails closed when the deployment contract changed. It performs no down
+migration or database restore.
+
+Rollback renders and pulls the previous digest-pinned images, starts the
+Compose graph with `up -d --wait`, and requires the functional release smoke to
+confirm the previous version and source commit before exchanging confirmed
+state. A failure after activation leaves confirmed state unchanged and retains
+pending failure evidence for a same-target retry; it does not automatically
+redeploy the current images. Cross-schema rollback is deferred. PostgreSQL
+backup/PITR is the disaster-recovery boundary, not an application rollback
+mechanism.
+
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
 Backups retain the configured number of verified base backups. WAL cleanup is anchored to the oldest retained base backup, so point-in-time recovery remains possible across the retained window without allowing the local archive to grow forever. Monitor backup-worker health and the `LATEST` timestamp, copy each completed base backup plus its required WAL range to protected off-host storage, and confirm the off-host copy before reducing local retention.

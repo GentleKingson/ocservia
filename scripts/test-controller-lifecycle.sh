@@ -98,6 +98,19 @@ run_controller_upgrade() {
   run_controller_command "$1" "$2" upgrade "${@:3}"
 }
 
+run_controller_rollback() {
+  local state="$1"
+  shift
+  PATH="${bin}:${PATH}" \
+    CONTROLLER_TEST_LOG="${state}/compose.log" \
+    CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
+    CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
+    OCSERV_CONTROLLER_STATE_ROOT="${state}" \
+    OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
+    OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
+    "$@" "${CONTROLLER}" rollback
+}
+
 assert_pending_release() {
   local expected="$1" pending="$2"
   jq -e --slurpfile expected "${expected}" \
@@ -297,6 +310,203 @@ test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 4
 [[ "$(sed -n '2p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '3p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '4p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
+
+rollback_success_state="${fixture}/rollback-success"
+seed_upgrade_state "${rollback_success_state}"
+cp -- "${next_release_file}" "${rollback_success_state}/current-release.json"
+cp -- "${release_file}" "${rollback_success_state}/previous-release.json"
+chmod 600 "${rollback_success_state}/current-release.json" "${rollback_success_state}/previous-release.json"
+run_controller_rollback "${rollback_success_state}" env
+cmp -s "${release_file}" "${rollback_success_state}/current-release.json"
+cmp -s "${next_release_file}" "${rollback_success_state}/previous-release.json"
+test ! -e "${rollback_success_state}/pending-release.json"
+test "$(sed -n '1p' "${rollback_success_state}/compose.log")" = "ps --format json postgres backup"
+test "$(sed -n '2p' "${rollback_success_state}/compose.log")" = "config --quiet"
+test "$(sed -n '3p' "${rollback_success_state}/compose.log")" = "pull"
+test "$(sed -n '4p' "${rollback_success_state}/compose.log")" = "up -d --wait"
+test "$(wc -l <"${rollback_success_state}/smoke.log")" -eq 1
+[[ "$(sed -n '1p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
+[[ "$(sed -n '2p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
+[[ "$(sed -n '3p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
+[[ "$(sed -n '4p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
+test "$(wc -l <"${rollback_success_state}/compose-env.log")" -eq 4
+
+missing_previous_state="${fixture}/rollback-missing-previous"
+seed_upgrade_state "${missing_previous_state}"
+if run_controller_rollback "${missing_previous_state}" env >"${missing_previous_state}/output.log" 2>&1; then
+  echo "rollback without previous state was accepted" >&2
+  exit 1
+fi
+grep -Fq 'previous release state is missing' "${missing_previous_state}/output.log"
+test ! -e "${missing_previous_state}/compose.log"
+
+malformed_previous_state="${fixture}/rollback-malformed-previous"
+seed_upgrade_state "${malformed_previous_state}"
+printf '%s\n' '{' >"${malformed_previous_state}/previous-release.json"
+chmod 600 "${malformed_previous_state}/previous-release.json"
+if run_controller_rollback "${malformed_previous_state}" env >"${malformed_previous_state}/output.log" 2>&1; then
+  echo "malformed rollback previous state was accepted" >&2
+  exit 1
+fi
+grep -Fq 'previous release state is invalid' "${malformed_previous_state}/output.log"
+test ! -e "${malformed_previous_state}/compose.log"
+
+symlink_previous_state="${fixture}/rollback-symlink-previous"
+seed_upgrade_state "${symlink_previous_state}"
+ln -s "${release_file}" "${symlink_previous_state}/previous-release.json"
+if run_controller_rollback "${symlink_previous_state}" env >"${symlink_previous_state}/output.log" 2>&1; then
+  echo "symlink rollback previous state was accepted" >&2
+  exit 1
+fi
+grep -Fq 'previous release state must not be a symlink' "${symlink_previous_state}/output.log"
+test ! -e "${symlink_previous_state}/compose.log"
+
+same_release_state="${fixture}/rollback-same-release"
+seed_upgrade_state "${same_release_state}"
+cp -- "${release_file}" "${same_release_state}/previous-release.json"
+chmod 600 "${same_release_state}/previous-release.json"
+if run_controller_rollback "${same_release_state}" env >"${same_release_state}/output.log" 2>&1; then
+  echo "rollback of the same release was accepted" >&2
+  exit 1
+fi
+grep -Fq 'current and previous release states must not be identical' "${same_release_state}/output.log"
+test ! -e "${same_release_state}/compose.log"
+
+not_older_state="${fixture}/rollback-not-older"
+seed_upgrade_state "${not_older_state}"
+cp -- "${next_release_file}" "${not_older_state}/previous-release.json"
+chmod 600 "${not_older_state}/previous-release.json"
+if run_controller_rollback "${not_older_state}" env >"${not_older_state}/output.log" 2>&1; then
+  echo "rollback to a newer release was accepted" >&2
+  exit 1
+fi
+grep -Fq 'previous release version must be lower' "${not_older_state}/output.log"
+test ! -e "${not_older_state}/compose.log"
+
+different_schema_previous="${fixture}/release/controller-release-schema-different.json"
+jq '.database_migration += 1' "${release_file}" >"${different_schema_previous}"
+schema_state="${fixture}/rollback-schema-different"
+seed_upgrade_state "${schema_state}"
+cp -- "${next_release_file}" "${schema_state}/current-release.json"
+cp -- "${different_schema_previous}" "${schema_state}/previous-release.json"
+chmod 600 "${schema_state}/current-release.json" "${schema_state}/previous-release.json"
+if run_controller_rollback "${schema_state}" env >"${schema_state}/output.log" 2>&1; then
+  echo "cross-schema rollback was accepted" >&2
+  exit 1
+fi
+grep -Fq 'cross-schema rollback is not supported' "${schema_state}/output.log"
+test ! -e "${schema_state}/compose.log"
+
+incompatible_pending_state="${fixture}/rollback-incompatible-pending"
+seed_upgrade_state "${incompatible_pending_state}"
+cp -- "${next_release_file}" "${incompatible_pending_state}/current-release.json"
+cp -- "${release_file}" "${incompatible_pending_state}/previous-release.json"
+chmod 600 "${incompatible_pending_state}/current-release.json" "${incompatible_pending_state}/previous-release.json"
+seed_pending_state "${incompatible_pending_state}" "${release_file}"
+if run_controller_rollback "${incompatible_pending_state}" env >"${incompatible_pending_state}/output.log" 2>&1; then
+  echo "incompatible pending rollback transaction was accepted" >&2
+  exit 1
+fi
+grep -Fq 'pending release transaction is not compatible with rollback' "${incompatible_pending_state}/output.log"
+test ! -e "${incompatible_pending_state}/compose.log"
+
+descriptor_change_commit="$(git -C "${ROOT}" log -1 --format='%H' -- deploy/production/compose.yaml)"
+descriptor_previous_commit="$(git -C "${ROOT}" rev-parse "${descriptor_change_commit}^")"
+descriptor_previous="${fixture}/release/controller-release-descriptor-previous.json"
+jq --arg source "${descriptor_previous_commit}" '.source_commit = $source' "${release_file}" >"${descriptor_previous}"
+descriptor_state="${fixture}/rollback-descriptor-change"
+seed_upgrade_state "${descriptor_state}"
+cp -- "${next_release_file}" "${descriptor_state}/current-release.json"
+cp -- "${descriptor_previous}" "${descriptor_state}/previous-release.json"
+chmod 600 "${descriptor_state}/current-release.json" "${descriptor_state}/previous-release.json"
+if run_controller_rollback "${descriptor_state}" env >"${descriptor_state}/output.log" 2>&1; then
+  echo "changed production deployment descriptor was accepted" >&2
+  exit 1
+fi
+grep -Fq 'production deployment descriptor changed since previous release' "${descriptor_state}/output.log"
+test ! -e "${descriptor_state}/compose.log"
+
+unresolvable_previous="${fixture}/release/controller-release-unresolvable-previous.json"
+jq --arg source "$(printf 'e%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${unresolvable_previous}"
+unresolvable_state="${fixture}/rollback-unresolvable-previous"
+seed_upgrade_state "${unresolvable_state}"
+cp -- "${next_release_file}" "${unresolvable_state}/current-release.json"
+cp -- "${unresolvable_previous}" "${unresolvable_state}/previous-release.json"
+chmod 600 "${unresolvable_state}/current-release.json" "${unresolvable_state}/previous-release.json"
+if run_controller_rollback "${unresolvable_state}" env >"${unresolvable_state}/output.log" 2>&1; then
+  echo "unresolvable rollback source commit was accepted" >&2
+  exit 1
+fi
+grep -Fq 'previous release source_commit cannot be resolved locally' "${unresolvable_state}/output.log"
+test ! -e "${unresolvable_state}/compose.log"
+
+for rollback_failure in config pull up; do
+  failure_state="${fixture}/rollback-${rollback_failure}-failure"
+  seed_upgrade_state "${failure_state}"
+  cp -- "${next_release_file}" "${failure_state}/current-release.json"
+  cp -- "${release_file}" "${failure_state}/previous-release.json"
+  chmod 600 "${failure_state}/current-release.json" "${failure_state}/previous-release.json"
+  case "${rollback_failure}" in
+    config) failure_env=(MOCK_CONFIG_EXIT=1) ;;
+    pull) failure_env=(MOCK_PULL_EXIT=1) ;;
+    up) failure_env=(MOCK_UP_EXIT=1) ;;
+  esac
+  if run_controller_rollback "${failure_state}" env "${failure_env[@]}" >"${failure_state}/output.log" 2>&1; then
+    echo "rollback ${rollback_failure} failure was accepted" >&2
+    exit 1
+  fi
+  cmp -s "${next_release_file}" "${failure_state}/current-release.json"
+  cmp -s "${release_file}" "${failure_state}/previous-release.json"
+  assert_pending_release "${release_file}" "${failure_state}/pending-release.json"
+  assert_pending_previous_release "${next_release_file}" "${failure_state}/pending-release.json"
+  case "${rollback_failure}" in
+    config)
+      grep -Fq 'production preflight failed for rollback target' "${failure_state}/output.log"
+      test "$(wc -l <"${failure_state}/compose.log")" -eq 2
+      ;;
+    pull)
+      grep -Fq 'rollback target image pull failed' "${failure_state}/output.log"
+      test "$(wc -l <"${failure_state}/compose.log")" -eq 3
+      ;;
+    up)
+      grep -Fq 'rollback activation started but was not confirmed successful' "${failure_state}/output.log"
+      test "$(wc -l <"${failure_state}/compose.log")" -eq 4
+      ;;
+  esac
+done
+
+rollback_smoke_failure_state="${fixture}/rollback-smoke-failure"
+seed_upgrade_state "${rollback_smoke_failure_state}"
+cp -- "${next_release_file}" "${rollback_smoke_failure_state}/current-release.json"
+cp -- "${release_file}" "${rollback_smoke_failure_state}/previous-release.json"
+chmod 600 "${rollback_smoke_failure_state}/current-release.json" "${rollback_smoke_failure_state}/previous-release.json"
+if run_controller_rollback "${rollback_smoke_failure_state}" env MOCK_SMOKE_EXIT=1 \
+  >"${rollback_smoke_failure_state}/output.log" 2>&1; then
+  echo "rollback smoke failure was accepted" >&2
+  exit 1
+fi
+grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${rollback_smoke_failure_state}/output.log"
+cmp -s "${next_release_file}" "${rollback_smoke_failure_state}/current-release.json"
+cmp -s "${release_file}" "${rollback_smoke_failure_state}/previous-release.json"
+assert_pending_release "${release_file}" "${rollback_smoke_failure_state}/pending-release.json"
+assert_pending_previous_release "${next_release_file}" "${rollback_smoke_failure_state}/pending-release.json"
+test "$(jq -r '.phase' "${rollback_smoke_failure_state}/pending-release.json")" = failed
+
+rollback_retry_state="${fixture}/rollback-retry"
+seed_upgrade_state "${rollback_retry_state}"
+cp -- "${next_release_file}" "${rollback_retry_state}/current-release.json"
+cp -- "${release_file}" "${rollback_retry_state}/previous-release.json"
+chmod 600 "${rollback_retry_state}/current-release.json" "${rollback_retry_state}/previous-release.json"
+if run_controller_rollback "${rollback_retry_state}" env MOCK_UP_EXIT=1 >"${rollback_retry_state}/first.log" 2>&1; then
+  echo "initial rollback retry fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+test -f "${rollback_retry_state}/pending-release.json"
+assert_pending_release "${release_file}" "${rollback_retry_state}/pending-release.json"
+run_controller_rollback "${rollback_retry_state}" env
+cmp -s "${release_file}" "${rollback_retry_state}/current-release.json"
+cmp -s "${next_release_file}" "${rollback_retry_state}/previous-release.json"
+test ! -e "${rollback_retry_state}/pending-release.json"
 
 completed_upgrade_state="${fixture}/completed-upgrade"
 seed_upgrade_state "${completed_upgrade_state}"
