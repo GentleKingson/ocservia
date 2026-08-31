@@ -43,7 +43,7 @@ required by the quality aggregate.
 | Go Race Tests | Full Go race suite | `go-test` | 20 minutes | Backend Integration |
 | PostgreSQL 17 Migration & Integration | PostgreSQL 17 migrations, rollback, runtime, and failure behavior | `go-test` | 25 minutes | Backend Integration |
 | PostgreSQL 18 Migration & Integration | PostgreSQL 18 coverage plus the legacy full upgrade fixture | `go-test` | 25 minutes | Backend Integration |
-| Production Topology & Relay Contracts | Production topology, controlled relay failover, backup restore, and Agent package lifecycle | `go-rust-integration` | 25 minutes | Backend Integration |
+| Production Topology & Relay Contracts | Production topology, controlled relay failover, backup restore, Agent package lifecycle, and Docker-backed Controller lifecycle semantics | `go-rust-integration` | 25 minutes | Backend Integration |
 | PostgreSQL Credential Rotation Integration | Application and backup credential rotation | none | 15 minutes | Backend Integration |
 | Control Plane ↔ Transport Local Integration | Go, PostgreSQL, UDS, and Rust-stub integration | none | 15 minutes | Backend Integration |
 | Web Quality, Unit & Build | Web format, type, unit, build, and audit checks | `web` | 20 minutes | Web & Smoke |
@@ -74,7 +74,7 @@ by Web changes.
 
 Database packages and migrations alone activate PostgreSQL 17/18, and
 PostgreSQL or local-integration relevance explicitly implies Build Shared Runtime
-Artifacts. Native, production relay, credential rotation, stage-contract,
+Artifacts. Native, production relay/Controller lifecycle, credential rotation, stage-contract,
 license, and G6 smoke flags each follow the inputs consumed by their own
 harness. Machine-readable G6 acceptance contracts activate Contracts and
 Policy plus G6 Smoke, while ordinary release-readiness Markdown does not.

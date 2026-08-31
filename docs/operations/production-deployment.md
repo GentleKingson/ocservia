@@ -179,6 +179,13 @@ recovery.
 
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
+Lifecycle acceptance keeps separate evidence for five boundaries: Compose
+container health and dependency readiness; functional release identity from the
+release smoke; application rollback of the last confirmed release; database
+compatibility from the `controller_schema_compatibility` contract; and
+disaster recovery from verified PostgreSQL backup/PITR. Passing one boundary
+does not establish the others.
+
 Backups retain the configured number of verified base backups. WAL cleanup is anchored to the oldest retained base backup, so point-in-time recovery remains possible across the retained window without allowing the local archive to grow forever. Monitor backup-worker health and the `LATEST` timestamp, copy each completed base backup plus its required WAL range to protected off-host storage, and confirm the off-host copy before reducing local retention.
 
 Set `postgres.pgpass` to `postgres:5432:replication:ocservia_backup:<password>` using the same protected backup-role password supplied during first database initialization. The `replication` database field is required for `pg_basebackup` replication-protocol authentication. The backup entrypoint copies the read-only Compose secret into a private mode-0600 passfile before invoking libpq tools.
