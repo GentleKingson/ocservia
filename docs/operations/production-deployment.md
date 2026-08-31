@@ -48,8 +48,9 @@ export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-sig
 
 The key path must be absolute and canonical, have no symlink ancestry, be a
 regular root- or launcher-owned file, and not be group/world writable. The
-release bundle evidence (`controller-release.json`, `SHA256SUMS`,
-`SHA256SUMS.sig`, and `controller-release.json.sha256`) must meet the same
+release bundle evidence (the selected
+`controller-release-<amd64|arm64>.json` manifest, `SHA256SUMS`,
+`SHA256SUMS.sig`, and the manifest's `.sha256` checksum) must meet the same
 ownership and permission requirements, and the bundle directory plus every
 ancestor directory up to `/` must be root- or launcher-owned and not
 group/world writable. These boundary checks keep the verified bytes from
@@ -74,7 +75,7 @@ manifest through the lifecycle entrypoint:
 
 ```bash
 deploy/production/controller.sh install \
-  --release-file /path/to/controller-release.json
+  --release-file /path/to/controller-release-<amd64|arm64>.json
 ```
 
 The entrypoint requires Docker Compose v2 with
@@ -100,7 +101,7 @@ provide a newer canonical manifest:
 
 ```bash
 deploy/production/controller.sh upgrade \
-  --release-file /path/to/controller-release.json
+  --release-file /path/to/controller-release-<amd64|arm64>.json
 ```
 
 Upgrade validates the confirmed current state and target first, checks the

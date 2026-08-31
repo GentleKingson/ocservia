@@ -20,7 +20,7 @@ PURGE_DATA=false
 umask 077
 
 usage() {
-  echo "usage: $0 {install|upgrade} --release-file /path/controller-release.json" >&2
+  echo "usage: $0 {install|upgrade} --release-file /path/controller-release-<amd64|arm64>.json" >&2
   echo "       $0 rollback" >&2
   echo "       $0 start" >&2
   echo "       $0 uninstall [--purge-data]" >&2
