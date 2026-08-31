@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const imageNames = ["gateway", "control", "transport", "backup", "postgres", "otel"];
+const supportedPlatforms = ["linux/amd64", "linux/arm64"];
 const imageDigestPattern = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
 const semverPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 const commitPattern = /^[0-9a-f]{40}$/;
@@ -17,7 +18,8 @@ function usage() {
   console.error(
     "usage: generate-controller-release-manifest.mjs --output <path|-> " +
       "--release-version <version> --release-tag <tag> --source-commit <sha> " +
-      "[--migration-dir <path>] --image <name=ref> ...",
+      "--platform <linux/amd64|linux/arm64> [--migration-dir <path>] " +
+      "--image <name=ref> ...",
   );
   process.exit(2);
 }
@@ -38,7 +40,7 @@ function parseArguments(argv) {
       values.images.set(name, ref);
       continue;
     }
-    if (["--output", "--release-version", "--release-tag", "--source-commit", "--migration-dir"].includes(argument)) {
+    if (["--output", "--release-version", "--release-tag", "--source-commit", "--platform", "--migration-dir"].includes(argument)) {
       const value = argv[++index];
       if (!value) usage();
       const key = {
@@ -46,6 +48,7 @@ function parseArguments(argv) {
         "--release-version": "releaseVersion",
         "--release-tag": "releaseTag",
         "--source-commit": "sourceCommit",
+        "--platform": "platform",
         "--migration-dir": "migrationDir",
       }[argument];
       if (values[key] !== undefined && key !== "migrationDir") fail(`${argument} was provided more than once`);
@@ -84,12 +87,15 @@ function deriveMigrationHead(directory) {
 }
 
 const values = parseArguments(process.argv.slice(2));
-if (!values.output || !values.releaseVersion || !values.releaseTag || !values.sourceCommit) usage();
+if (!values.output || !values.releaseVersion || !values.releaseTag || !values.sourceCommit || !values.platform) usage();
 if (!semverPattern.test(values.releaseVersion)) fail(`release version is not plain SemVer: ${values.releaseVersion}`);
 if (values.releaseTag !== `v${values.releaseVersion}`) {
   fail(`release tag must be v${values.releaseVersion}`);
 }
 if (!commitPattern.test(values.sourceCommit)) fail("source commit must be a lowercase 40-character Git SHA");
+if (!supportedPlatforms.includes(values.platform)) {
+  fail(`platform must be one of the supported release platforms (${supportedPlatforms.join(", ")}): ${values.platform}`);
+}
 for (const name of imageNames) {
   if (!values.images.has(name)) fail(`missing production image: ${name}`);
   const ref = values.images.get(name);
@@ -101,7 +107,7 @@ const manifest = {
   release_version: values.releaseVersion,
   release_tag: values.releaseTag,
   source_commit: values.sourceCommit,
-  platform: "linux/amd64",
+  platform: values.platform,
   database_migration: deriveMigrationHead(path.resolve(values.migrationDir)),
   images: Object.fromEntries(imageNames.map((name) => [name, values.images.get(name)])),
 };

@@ -40,6 +40,10 @@ if [[ "${1:-}" == compose && "${2:-}" == up && "${3:-}" == --help ]]; then
   printf '%s\n' '      --wait                         Wait for services to be running|healthy'
   exit 0
 fi
+if [[ "${1:-}" == version ]]; then
+  printf '%s\n' "${MOCK_DOCKER_ARCH:-amd64}"
+  exit 0
+fi
 exit 0
 EOF
 chmod 0755 "${bin}/docker"
@@ -109,6 +113,23 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --release-tag v0.2.0 \
   --source-commit "${commit}" \
   --migration-dir "${ROOT}/control-plane/migrations" \
+  --platform linux/amd64 \
+  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${digest}" \
+  --image "control=ghcr.io/gentlekingson/ocservia/control@${digest}" \
+  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${digest}" \
+  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${digest}" \
+  --image "postgres=docker.io/library/postgres@${digest}" \
+  --image "otel=docker.io/otel/opentelemetry-collector@${digest}"
+refresh_bundle_dir "${fixture}/release"
+
+arm64_release_file="${fixture}/release/controller-release-arm64.json"
+node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
+  --output "${arm64_release_file}" \
+  --release-version 0.2.0 \
+  --release-tag v0.2.0 \
+  --source-commit "${commit}" \
+  --migration-dir "${ROOT}/control-plane/migrations" \
+  --platform linux/arm64 \
   --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${digest}" \
   --image "control=ghcr.io/gentlekingson/ocservia/control@${digest}" \
   --image "transport=ghcr.io/gentlekingson/ocservia/transport@${digest}" \
@@ -265,6 +286,30 @@ test "${backup}" = "ghcr.io/gentlekingson/ocservia/backup@${digest}"
 test "${postgres}" = "docker.io/library/postgres@${digest}"
 test "${otel}" = "docker.io/otel/opentelemetry-collector@${digest}"
 
+platform_mismatch_state="${fixture}/platform-mismatch"
+expect_failure "${platform_mismatch_state}" "${arm64_release_file}" \
+  'release manifest platform linux/arm64 does not match the Docker host platform linux/amd64' false env
+test ! -e "${platform_mismatch_state}/compose.log"
+
+host_platform_mismatch_state="${fixture}/host-platform-mismatch"
+expect_failure "${host_platform_mismatch_state}" "${release_file}" \
+  'release manifest platform linux/amd64 does not match the Docker host platform linux/arm64' false \
+  env MOCK_DOCKER_ARCH=arm64
+test ! -e "${host_platform_mismatch_state}/compose.log"
+
+unsupported_host_state="${fixture}/unsupported-host-arch"
+expect_failure "${unsupported_host_state}" "${release_file}" \
+  'Docker server architecture is not a supported Controller platform: riscv64' false \
+  env MOCK_DOCKER_ARCH=riscv64
+test ! -e "${unsupported_host_state}/compose.log"
+
+arm64_host_state="${fixture}/arm64-host"
+mkdir -m 700 -- "${arm64_host_state}"
+run_controller "${arm64_host_state}" "${arm64_release_file}" env MOCK_DOCKER_ARCH=arm64
+test -f "${arm64_host_state}/current-release.json"
+cmp -s "${arm64_release_file}" "${arm64_host_state}/current-release.json"
+test ! -e "${arm64_host_state}/pending-release.json"
+
 relative_state="${fixture}/relative"
 mkdir -m 700 -- "${relative_state}"
 (cd "${fixture}/release" && run_controller "${relative_state}" controller-release.json env)
@@ -312,6 +357,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --release-tag v0.3.0 \
   --source-commit "${commit}" \
   --migration-dir "${ROOT}/control-plane/migrations" \
+  --platform linux/amd64 \
   --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${next_digest}" \
   --image "control=ghcr.io/gentlekingson/ocservia/control@${next_digest}" \
   --image "transport=ghcr.io/gentlekingson/ocservia/transport@${next_digest}" \
@@ -327,6 +373,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --release-tag v0.4.0 \
   --source-commit "${commit}" \
   --migration-dir "${ROOT}/control-plane/migrations" \
+  --platform linux/amd64 \
   --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${third_digest}" \
   --image "control=ghcr.io/gentlekingson/ocservia/control@${third_digest}" \
   --image "transport=ghcr.io/gentlekingson/ocservia/transport@${third_digest}" \
@@ -342,6 +389,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --release-tag v0.1.0 \
   --source-commit "${commit}" \
   --migration-dir "${ROOT}/control-plane/migrations" \
+  --platform linux/amd64 \
   --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${stale_digest}" \
   --image "control=ghcr.io/gentlekingson/ocservia/control@${stale_digest}" \
   --image "transport=ghcr.io/gentlekingson/ocservia/transport@${stale_digest}" \

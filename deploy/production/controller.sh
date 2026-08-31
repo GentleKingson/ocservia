@@ -20,7 +20,7 @@ PURGE_DATA=false
 umask 077
 
 usage() {
-  echo "usage: $0 {install|upgrade} --release-file /path/controller-release.json" >&2
+  echo "usage: $0 {install|upgrade} --release-file /path/controller-release-<amd64|arm64>.json" >&2
   echo "       $0 rollback" >&2
   echo "       $0 start" >&2
   echo "       $0 uninstall [--purge-data]" >&2
@@ -189,7 +189,7 @@ validate_manifest_file() {
       ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
       ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+$") and . == ("v" + $manifest.release_version)) and
       ($manifest.source_commit | matches("^[0-9a-f]{40}$")) and
-      ($manifest.platform == "linux/amd64") and
+      ($manifest.platform | IN("linux/amd64", "linux/arm64")) and
       ($manifest.database_migration | positive_integer) and
       ($manifest.images | type == "object" and
         keys == ["backup", "control", "gateway", "otel", "postgres", "transport"] and
@@ -228,6 +228,24 @@ map_manifest_images() {
   OCSERV_OTEL_IMAGE="$(jq -er -s '.[0].images.otel' "${manifest}")"
   export OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE
   export OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
+}
+
+check_manifest_platform() {
+  local manifest="$1" manifest_platform host_platform server_arch
+  manifest_platform="$(jq -er -s '.[0].platform' "${manifest}")"
+  # Ask the Docker daemon, not the host kernel: the daemon resolves and
+  # activates the release images, so its architecture decides which variant
+  # Compose pulls.
+  if ! server_arch="$(docker version --format '{{.Server.Arch}}')"; then
+    fail "cannot determine the Docker server architecture"
+  fi
+  case "${server_arch}" in
+    amd64) host_platform="linux/amd64" ;;
+    arm64|aarch64) host_platform="linux/arm64" ;;
+    *) fail "Docker server architecture is not a supported Controller platform: ${server_arch}" ;;
+  esac
+  [[ "${manifest_platform}" == "${host_platform}" ]] ||
+    fail "release manifest platform ${manifest_platform} does not match the Docker host platform ${host_platform}"
 }
 
 validate_prerequisites() {
@@ -625,6 +643,7 @@ install_controller() {
   release_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
   validate_source_tree
   validate_prerequisites
+  check_manifest_platform "${STAGED_RELEASE}"
 
   ensure_pending_release
 
@@ -679,6 +698,7 @@ upgrade_controller() {
   esac
 
   validate_prerequisites
+  check_manifest_platform "${STAGED_RELEASE}"
   map_manifest_images "${CURRENT_RELEASE}"
   check_current_database_and_backup_health
 
@@ -744,6 +764,7 @@ rollback_controller() {
 
   ensure_pending_release "${CURRENT_RELEASE}" true
   validate_prerequisites
+  check_manifest_platform "${STAGED_RELEASE}"
   map_manifest_images "${CURRENT_RELEASE}"
   check_current_database_and_backup_health
   if [[ "${current_migration}" != "${previous_migration}" ]]; then
@@ -868,6 +889,7 @@ start_controller() {
   validate_uninstall_state
   validate_source_tree "${CURRENT_RELEASE}"
   validate_prerequisites
+  check_manifest_platform "${CURRENT_RELEASE}"
   map_manifest_images "${CURRENT_RELEASE}"
   release_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
 
