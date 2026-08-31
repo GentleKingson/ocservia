@@ -82,6 +82,15 @@ expect_failure unsafe-key-mode 'trusted public key must not be group/world writa
 chmod 644 "${trusted_public_key}"
 
 write_valid_bundle
+chmod 666 "${bundle}/SHA256SUMS"
+expect_failure unsafe-sums-mode 'SHA256SUMS must not be group/world writable'
+
+write_valid_bundle
+chmod 770 "${bundle}"
+expect_failure unsafe-bundle-dir-mode 'release manifest path ancestry must not be group/world writable'
+chmod 700 "${bundle}"
+
+write_valid_bundle
 printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  another.json' \
   >"${bundle}/SHA256SUMS"
 openssl pkeyutl -sign -rawin -inkey "${trusted_key}" \

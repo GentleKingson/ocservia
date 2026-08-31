@@ -290,11 +290,11 @@ grep -Fq 'Controller is already installed; use upgrade' "${completed_install_sta
 test ! -e "${completed_install_state}/pending-release.json"
 test ! -e "${completed_install_state}/compose.log"
 
-unsupported="${fixture}/unsupported.json"
+unsupported="${fixture}/release/unsupported.json"
 jq '.manifest_version = 2' "${release_file}" >"${unsupported}"
-malformed_digest="${fixture}/malformed-digest.json"
+malformed_digest="${fixture}/release/malformed-digest.json"
 jq '.images.control = "ghcr.io/gentlekingson/ocservia/control@sha256:deadbeef"' "${release_file}" >"${malformed_digest}"
-refresh_bundle_dir "${fixture}"
+refresh_bundle_dir "${fixture}/release"
 
 if ! run_controller_upgrade "${valid_state}" "${release_file}" env >"${fixture}/same-release.log" 2>&1; then
   echo "same-release upgrade was rejected" >&2
@@ -828,30 +828,30 @@ done
 
 expect_failure "${fixture}/unsupported" "${unsupported}" 'release manifest is invalid' false env
 
-missing_image="${fixture}/missing-image.json"
+missing_image="${fixture}/release/missing-image.json"
 jq 'del(.images.gateway)' "${release_file}" >"${missing_image}"
-refresh_bundle_dir "${fixture}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/missing-image" "${missing_image}" 'release manifest is invalid' false env
 
-mutable_image="${fixture}/mutable-image.json"
+mutable_image="${fixture}/release/mutable-image.json"
 jq '.images.gateway = "ghcr.io/gentlekingson/ocservia/gateway:latest"' "${release_file}" >"${mutable_image}"
-refresh_bundle_dir "${fixture}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/mutable-image" "${mutable_image}" 'release manifest is invalid' false env
 
 expect_failure "${fixture}/malformed-digest" "${malformed_digest}" 'release manifest is invalid' false env
 
-malformed_json="${fixture}/malformed-json.json"
+malformed_json="${fixture}/release/malformed-json.json"
 printf '%s\n' '{' >"${malformed_json}"
-refresh_bundle_dir "${fixture}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/malformed-json" "${malformed_json}" 'release manifest is invalid' false env
 
 symlink_release="${fixture}/release-symlink.json"
 ln -s "${release_file}" "${symlink_release}"
 expect_failure "${fixture}/symlink-release" "${symlink_release}" 'must not contain symlink ancestry' false env
 
-source_mismatch="${fixture}/source-mismatch.json"
+source_mismatch="${fixture}/release/source-mismatch.json"
 jq --arg source "$(printf 'c%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${source_mismatch}"
-refresh_bundle_dir "${fixture}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/source-mismatch" "${source_mismatch}" \
   'checkout HEAD does not match release manifest source_commit' false env
 
@@ -909,10 +909,11 @@ fi
 test -f "${retry_state}/pending-release.json"
 assert_pending_release "${release_file}" "${retry_state}/pending-release.json"
 
-different_pending="${fixture}/different-pending.json"
+different_pending="${fixture}/release/different-pending.json"
 other_digest="sha256:$(printf 'c%.0s' {1..64})"
 jq --arg image "ghcr.io/gentlekingson/ocservia/gateway@${other_digest}" \
   '.images.gateway = $image' "${release_file}" >"${different_pending}"
+refresh_bundle_dir "${fixture}/release"
 if run_controller "${retry_state}" "${different_pending}" env >"${retry_state}/different.log" 2>&1; then
   echo "different pending release was accepted" >&2
   exit 1

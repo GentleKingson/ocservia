@@ -30,7 +30,7 @@ require_canonical_file() {
   [[ "${resolved}" == "${path}" ]] || fail "${label} must not contain symlink ancestry"
 }
 
-require_trusted_public_key() {
+require_protected_file() {
   local label="$1" path="$2" uid mode ancestor ancestor_uid ancestor_mode
 
   require_canonical_file "${label}" "${path}"
@@ -59,8 +59,8 @@ for tool in awk cat dirname grep id openssl realpath sha256sum stat; do
   require_tool "${tool}"
 done
 
-require_trusted_public_key "trusted public key" "${TRUSTED_PUBLIC_KEY}"
-require_canonical_file "release manifest" "${MANIFEST}"
+require_protected_file "trusted public key" "${TRUSTED_PUBLIC_KEY}"
+require_protected_file "release manifest" "${MANIFEST}"
 
 bundle_dir="$(dirname -- "${MANIFEST}")"
 manifest_name="$(basename -- "${MANIFEST}")"
@@ -74,9 +74,9 @@ case "${TRUSTED_PUBLIC_KEY}" in
     ;;
 esac
 
-require_canonical_file "SHA256SUMS" "${sums}"
-require_canonical_file "SHA256SUMS.sig" "${signature}"
-require_canonical_file "release manifest checksum" "${manifest_checksum}"
+require_protected_file "SHA256SUMS" "${sums}"
+require_protected_file "SHA256SUMS.sig" "${signature}"
+require_protected_file "release manifest checksum" "${manifest_checksum}"
 
 key_description="$(openssl pkey -pubin -in "${TRUSTED_PUBLIC_KEY}" -text_pub -noout 2>/dev/null)" ||
   fail "trusted public key is not a readable public key"

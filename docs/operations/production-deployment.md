@@ -38,7 +38,13 @@ export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-sig
 ```
 
 The key path must be absolute and canonical, have no symlink ancestry, be a
-regular root- or launcher-owned file, and not be group/world writable. Do not
+regular root- or launcher-owned file, and not be group/world writable. The
+release bundle evidence (`controller-release.json`, `SHA256SUMS`,
+`SHA256SUMS.sig`, and `controller-release.json.sha256`) must meet the same
+ownership and permission requirements, and the bundle directory plus every
+ancestor directory up to `/` must be root- or launcher-owned and not
+group/world writable. These boundary checks keep the verified bytes from
+being swapped between signature verification and use. Do not
 select the public key copied from the same release bundle as the trust anchor:
 an attacker who replaces the manifest, checksum, signature, and key together
 would otherwise be able to validate the replacement bundle with its own key.
