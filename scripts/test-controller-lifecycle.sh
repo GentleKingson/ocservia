@@ -134,10 +134,22 @@ seed_upgrade_state() {
 }
 
 seed_pending_state() {
-  local state="$1" manifest="$2"
-  jq -s '{manifest: .[0], phase: "smoke", failure: null}' "${manifest}" \
-    >"${state}/pending-release.json"
+  local state="$1" manifest="$2" previous="${3:-}"
+  if [[ -n "${previous}" ]]; then
+    jq -s --slurpfile previous "${previous}" \
+      '{manifest: .[0], previous_manifest: $previous[0], phase: "smoke", failure: null}' \
+      "${manifest}" >"${state}/pending-release.json"
+  else
+    jq -s '{manifest: .[0], phase: "smoke", failure: null}' "${manifest}" \
+      >"${state}/pending-release.json"
+  fi
   chmod 600 "${state}/pending-release.json"
+}
+
+assert_pending_previous_release() {
+  local expected="$1" pending="$2"
+  jq -e --slurpfile expected "${expected}" \
+    '(.previous_manifest == $expected[0])' "${pending}" >/dev/null
 }
 
 expect_upgrade_failure() {
@@ -241,6 +253,21 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --image "postgres=docker.io/library/postgres@${third_digest}" \
   --image "otel=docker.io/otel/opentelemetry-collector@${third_digest}"
 
+stale_digest="sha256:$(printf 'a%.0s' {1..64})"
+stale_release_file="${fixture}/release/controller-release-stale.json"
+node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
+  --output "${stale_release_file}" \
+  --release-version 0.1.0 \
+  --release-tag v0.1.0 \
+  --source-commit "${commit}" \
+  --migration-dir "${ROOT}/control-plane/migrations" \
+  --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${stale_digest}" \
+  --image "control=ghcr.io/gentlekingson/ocservia/control@${stale_digest}" \
+  --image "transport=ghcr.io/gentlekingson/ocservia/transport@${stale_digest}" \
+  --image "backup=ghcr.io/gentlekingson/ocservia/backup@${stale_digest}" \
+  --image "postgres=docker.io/library/postgres@${stale_digest}" \
+  --image "otel=docker.io/otel/opentelemetry-collector@${stale_digest}"
+
 target_source_mismatch="${fixture}/release/controller-release-source-mismatch.json"
 jq --arg source "$(printf 'd%.0s' {1..40})" '.source_commit = $source' \
   "${next_release_file}" >"${target_source_mismatch}"
@@ -276,11 +303,21 @@ seed_upgrade_state "${completed_upgrade_state}"
 cp -- "${next_release_file}" "${completed_upgrade_state}/current-release.json"
 cp -- "${release_file}" "${completed_upgrade_state}/previous-release.json"
 chmod 600 "${completed_upgrade_state}/current-release.json" "${completed_upgrade_state}/previous-release.json"
-seed_pending_state "${completed_upgrade_state}" "${next_release_file}"
+seed_pending_state "${completed_upgrade_state}" "${next_release_file}" "${release_file}"
 run_controller_upgrade "${completed_upgrade_state}" "${third_release_file}" env
 cmp -s "${third_release_file}" "${completed_upgrade_state}/current-release.json"
 cmp -s "${next_release_file}" "${completed_upgrade_state}/previous-release.json"
 test ! -e "${completed_upgrade_state}/pending-release.json"
+
+partial_upgrade_state="${fixture}/partial-upgrade"
+seed_upgrade_state "${partial_upgrade_state}" "${stale_release_file}"
+cp -- "${next_release_file}" "${partial_upgrade_state}/current-release.json"
+seed_pending_state "${partial_upgrade_state}" "${next_release_file}" "${release_file}"
+run_controller_upgrade "${partial_upgrade_state}" "${next_release_file}" env
+cmp -s "${next_release_file}" "${partial_upgrade_state}/current-release.json"
+cmp -s "${release_file}" "${partial_upgrade_state}/previous-release.json"
+test ! -e "${partial_upgrade_state}/pending-release.json"
+test ! -e "${partial_upgrade_state}/compose.log"
 
 downgrade_state="${fixture}/downgrade"
 seed_upgrade_state "${downgrade_state}"
@@ -318,6 +355,7 @@ for failure_case in config pull up; do
   cmp -s "${release_file}" "${failure_state}/current-release.json"
   cmp -s "${release_file}" "${failure_state}/previous-release.json"
   assert_pending_release "${next_release_file}" "${failure_state}/pending-release.json"
+  assert_pending_previous_release "${release_file}" "${failure_state}/pending-release.json"
   case "${failure_case}" in
     config)
       grep -Fq 'production preflight failed for target release' "${failure_state}/output.log"
@@ -345,6 +383,7 @@ grep -Fq 'release smoke failed; confirmed release state remains unchanged' "${sm
 cmp -s "${release_file}" "${smoke_failure_state}/current-release.json"
 cmp -s "${release_file}" "${smoke_failure_state}/previous-release.json"
 assert_pending_release "${next_release_file}" "${smoke_failure_state}/pending-release.json"
+assert_pending_previous_release "${release_file}" "${smoke_failure_state}/pending-release.json"
 test "$(jq -r '.phase' "${smoke_failure_state}/pending-release.json")" = failed
 test "$(jq -r '.failure.message' "${smoke_failure_state}/pending-release.json")" = \
   'release smoke failed; confirmed release state remains unchanged'

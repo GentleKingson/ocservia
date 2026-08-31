@@ -56,8 +56,10 @@ the target and lifecycle phase in `pending-release.json`. A failed install or
 upgrade retains that file with failure evidence; only a retry with the
 identical target may continue. Only after the smoke passes is the manifest
 committed as `current-release.json` (and, for upgrades,
-`previous-release.json`), all with mode `0600`. It does not create or rotate
-secrets, certificates, or identity keys. To upgrade an installed Controller,
+`previous-release.json`), all with mode `0600`. Upgrade pending evidence also
+records the pre-activation current manifest so recovery can restore the
+previous-release state before clearing completed evidence. It does not create
+or rotate secrets, certificates, or identity keys. To upgrade an installed Controller,
 provide a newer canonical manifest:
 
 ```bash
