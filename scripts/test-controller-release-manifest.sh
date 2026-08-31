@@ -13,6 +13,7 @@ common_args=(
   --release-tag v0.2.0
   --source-commit "${commit}"
   --migration-dir "${ROOT}/control-plane/migrations"
+  --platform linux/amd64
 )
 image_args=(
   --image "gateway=ghcr.io/gentlekingson/ocservia/gateway@${digest}"
@@ -51,6 +52,25 @@ jq -e '
   (.images | to_entries | all(.value | test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
 ' "${fixture}/manifest-a.json" >/dev/null
 
+arm64_args=("${common_args[@]}")
+arm64_args[9]=linux/arm64
+node "${GENERATOR}" --output "${fixture}/manifest-arm64.json" "${arm64_args[@]}" "${image_args[@]}"
+jq -e '.platform == "linux/arm64"' "${fixture}/manifest-arm64.json" >/dev/null
+platform_changes="$(diff -u "${fixture}/manifest-a.json" "${fixture}/manifest-arm64.json" \
+  | grep -E '^[+-][^+-]' || true)"
+if [[ "${platform_changes}" != $'-  "platform": "linux/amd64",\n+  "platform": "linux/arm64",' ]]; then
+  echo "platform manifests must differ only in the platform field:" >&2
+  printf '%s\n' "${platform_changes}" >&2
+  exit 1
+fi
+
+unsupported_platform_args=("${common_args[@]}")
+unsupported_platform_args[9]=linux/ppc64le
+assert_rejected unsupported-platform "${unsupported_platform_args[@]}" "${image_args[@]}"
+
+missing_platform_args=("${common_args[@]:0:8}")
+assert_rejected missing-platform "${missing_platform_args[@]}" "${image_args[@]}"
+
 missing_image_args=("${image_args[@]:0:6}" "${image_args[@]:8}")
 assert_rejected missing-image "${common_args[@]}" "${missing_image_args[@]}"
 
@@ -75,39 +95,84 @@ ruby -r yaml - "${ROOT}/.github/workflows/release.yml" \
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
 controller = jobs.fetch("build-controller-images")
+publish = jobs.fetch("publish-release-packages")
 abort("Controller image job must be release-only") unless controller.fetch("if") == "github.event_name == 'release'"
-abort("Controller image permissions are too broad") unless controller.fetch("permissions") == {
-  "contents" => "read",
-  "packages" => "write",
-  "id-token" => "write",
-  "attestations" => "write"
+# The build legs must stay source-only: no registry credential may exist
+# before the reviewer-gated publishing job.
+abort("Controller image build legs must only read source") unless controller.fetch("permissions") == {
+  "contents" => "read"
 }
+abort("Controller image build legs must not run in a protected environment") if
+  controller.key?("environment")
+gated = jobs.values.select { |job| job["environment"] == "release-publishing" }
+abort("Exactly one release-publishing gated job must exist") unless gated.length == 1
+abort("The release-publishing environment must gate the publish job only") unless gated.first == publish
+matrix_includes = Array(controller.fetch("strategy").fetch("matrix").fetch("include"))
+controller_arches = matrix_includes.map { |entry| entry["controller_arch"] }.sort
+abort("Controller image build must target amd64 and arm64") unless controller_arches == %w[amd64 arm64]
+matrix_includes.each do |entry|
+  expected_runner = entry["controller_arch"] == "amd64" ? "ubuntu-24.04" : "ubuntu-24.04-arm"
+  abort("Controller #{entry['controller_arch']} leg must build natively on #{expected_runner}") unless
+    entry["runs_on"] == expected_runner
+end
 uses = Array(controller.fetch("steps")).map { |step| step["uses"] }.compact
 uses.each do |use|
   abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
 end
-attest = uses.select { |use| use.start_with?("actions/attest@") }
+run_steps = Array(controller.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+abort("Controller image legs must build one matrix platform per leg") unless
+  run_steps.include?('--platform "linux/${{ matrix.controller_arch }}"')
+abort("Controller image legs must export OCI archives instead of pushing") unless
+  run_steps.include?("type=oci,dest=")
+%w[docker\ login push=true imagetools].each do |forbidden|
+  abort("Controller image legs must not write to a registry: #{forbidden}") if
+    run_steps.include?(forbidden)
+end
+
+abort("Controller publishing must wait for the image build legs") unless
+  Array(publish.fetch("needs")).include?("build-controller-images")
+abort("Controller publishing permissions are too broad") unless publish.fetch("permissions") == {
+  "contents" => "write",
+  "packages" => "write",
+  "id-token" => "write",
+  "attestations" => "write"
+}
+publish_uses = Array(publish.fetch("steps")).map { |step| step["uses"] }.compact
+publish_uses.each do |use|
+  abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
+end
+attest = publish_uses.select { |use| use.start_with?("actions/attest@") }
 abort("Controller release must attest four first-party images") unless attest.length == 4
 abort("Controller release must use the verified actions/attest pin") unless
   attest.all? { |use| use == "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d" }
-run_steps = Array(controller.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
-abort("Controller release must generate its canonical manifest") unless
-  run_steps.include?("scripts/generate-controller-release-manifest.mjs")
-abort("Controller release must declare its supported platform") unless
-  run_steps.include?("--platform linux/amd64")
-abort("Controller manifest publishing must wait for the controller image job") unless
-  Array(jobs.fetch("publish-release-packages").fetch("needs")).include?("build-controller-images")
+publish_steps = Array(publish.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+abort("Controller publishing must load the built image archives") unless
+  publish_steps.include?("docker load --input")
+abort("Controller publishing must push the per-platform images") unless
+  publish_steps.include?("docker push")
+abort("Controller publishing must merge per-platform digests into one index") unless
+  publish_steps.include?("docker buildx imagetools create")
+abort("Controller release must generate its canonical manifests") unless
+  publish_steps.include?("scripts/generate-controller-release-manifest.mjs") &&
+    publish_steps.include?("--platform \"linux/${platform}\"") &&
+    publish_steps.include?("controller-release-amd64.json") &&
+    publish_steps.include?("controller-release-arm64.json") &&
+    publish_steps.include?("controller-release.json")
+%w[linux/amd64 linux/arm64].each do |platform|
+  abort("Controller release must fail closed when an index lacks #{platform}") unless
+    publish_steps.include?("grep -Fxq '#{platform}'")
+end
 abort("workflow dispatch must not publish Controller images") if
   controller.fetch("if").include?("workflow_dispatch")
 abort("Controller release must use the GHCR anonymous token flow") unless
-  run_steps.include?("https://ghcr.io/token") &&
-    run_steps.include?("scope=repository:gentlekingson/ocservia/${name}:pull") &&
-    run_steps.include?("Authorization: Bearer") &&
-    run_steps.include?("manifests/${digest}") &&
-    !run_steps.include?("manifests/${release_tag}")
+  publish_steps.include?("https://ghcr.io/token") &&
+    publish_steps.include?("scope=repository:gentlekingson/ocservia/${name}:pull") &&
+    publish_steps.include?("Authorization: Bearer") &&
+    publish_steps.include?("manifests/${digest}") &&
+    !publish_steps.include?("manifests/${release_tag}")
 docs = File.read(ARGV.fetch(1))
 abort("production docs must declare the Controller image visibility prerequisite") unless
-  docs.include?("be public") && docs.include?("linux/amd64")
+  docs.include?("be public") && docs.include?("linux/amd64") && docs.include?("linux/arm64")
 RUBY
 
 echo "Controller release manifest tests passed"
