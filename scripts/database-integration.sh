@@ -179,6 +179,21 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-migrate.log" 2>&1
+  compatibility_before="$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc \
+    "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")"
+  OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
+    "${BIN}" --schema-compatibility-check=29 \
+    >"${TMP_ROOT}/pg${major}-schema-compatibility-check.log" 2>&1
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc \
+    "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")" = "${compatibility_before}"
+  if OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
+    "${BIN}" --schema-compatibility-check=28 \
+    >"${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log" 2>&1; then
+    echo "schema compatibility check accepted a Controller below the declared minimum" >&2
+    exit 1
+  fi
+  grep -Fq 'schema compatibility does not allow Controller schema 28' \
+    "${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log"
 
   clean_database="ocservia_clean23_${major}"
   clone_database "${container}" ocservia "${clean_database}"

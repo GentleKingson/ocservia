@@ -86,14 +86,20 @@ deploy/production/controller.sh rollback
 
 Rollback uses only the protected `previous-release.json`; it never accepts an
 operator-selected manifest. The current and previous manifests must differ,
-the previous version must be lower, their `database_migration` values must be
-identical, and the current checkout must be clean and match the current
-manifest. The previous `source_commit` must be present locally, and the
-production Compose launcher, Compose file, and every relative host-mounted
-production descriptor/configuration path discovered from that Compose file
-must be unchanged between the two source commits. This first version therefore
-fails closed when the deployment contract changed. It performs no down
-migration or database restore.
+the previous version must be lower, and the current checkout must be clean and
+match the current manifest. The previous `source_commit` must be present
+locally, and the production Compose launcher, Compose file, and every relative
+host-mounted production descriptor/configuration path discovered from that
+Compose file must be unchanged between the two source commits. Same-schema
+rollback remains supported. When `database_migration` differs, the current
+Controller image runs a read-only compatibility preflight through the protected
+Compose path before any previous image is activated. The preflight validates the
+authoritative compatibility row, the migration history, and
+`previous.database_migration >= minimum_compatible_controller_schema` and
+`previous.database_migration <= current_schema`. Missing, malformed,
+inconsistent, unreachable, or otherwise non-permitting compatibility metadata
+fails closed. This first version also fails closed when the deployment contract
+changed. It performs no down migration or database restore.
 
 Rollback renders and pulls the previous digest-pinned images, starts the
 Compose graph with `up -d --wait`, and requires the functional release smoke to

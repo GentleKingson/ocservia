@@ -34,6 +34,7 @@ const (
 type Config struct {
 	Role                     Role
 	MigrateOnly              bool
+	SchemaCompatibilityCheck int64
 	RuntimeDBRole            string
 	Environment              string
 	HTTPAddress              string
@@ -273,6 +274,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
+	schemaCompatibilityCheck := fs.Int64("schema-compatibility-check", 0, "validate the stored Controller schema compatibility contract for a schema version, then exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -281,6 +283,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	cfg.Role = Role(*role)
 	cfg.MigrateOnly = *migrateOnly
+	cfg.SchemaCompatibilityCheck = *schemaCompatibilityCheck
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -301,6 +304,12 @@ func (c Config) Validate() error {
 	}
 	if c.MigrateOnly && strings.TrimSpace(c.RuntimeDBRole) == "" {
 		return errors.New("OCSERV_RUNTIME_DATABASE_ROLE is required with --migrate-only")
+	}
+	if c.SchemaCompatibilityCheck < 0 {
+		return errors.New("--schema-compatibility-check must be positive")
+	}
+	if c.MigrateOnly && c.SchemaCompatibilityCheck > 0 {
+		return errors.New("--migrate-only and --schema-compatibility-check are mutually exclusive")
 	}
 	u, err := url.Parse(c.DatabaseURL)
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" {
@@ -351,10 +360,11 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	if c.Environment == "production" && !c.MigrateOnly && c.CommandSigningKeyFile == "" {
+	oneShotDatabaseCommand := c.MigrateOnly || c.SchemaCompatibilityCheck > 0
+	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}
-	if c.Environment == "production" && !c.MigrateOnly && (!c.TransportIdentitySet || c.TransportUID == uint32(os.Geteuid())) {
+	if c.Environment == "production" && !oneShotDatabaseCommand && (!c.TransportIdentitySet || c.TransportUID == uint32(os.Geteuid())) {
 		return errors.New("production transport UDS requires an explicit, distinct transport UID/GID")
 	}
 	if c.BreakGlassEnabled && len(c.BreakGlassTokenHash) != 32 {

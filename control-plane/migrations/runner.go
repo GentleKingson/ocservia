@@ -141,7 +141,7 @@ func ValidateControllerSchema(ctx context.Context, pool *pgxpool.Pool, expectedS
 		return SchemaCompatibility{}, fmt.Errorf("acquire schema validation connection: %w", err)
 	}
 	defer conn.Release()
-	tx, err := conn.Begin(ctx)
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return SchemaCompatibility{}, fmt.Errorf("begin schema validation: %w", err)
 	}

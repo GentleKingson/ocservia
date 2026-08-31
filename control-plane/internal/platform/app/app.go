@@ -59,6 +59,13 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	defer pool.Close()
 	databaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if cfg.SchemaCompatibilityCheck > 0 {
+		if _, err := migrations.ValidateControllerSchema(databaseCtx, pool, cfg.SchemaCompatibilityCheck); err != nil {
+			return fmt.Errorf("validate schema compatibility: %w", err)
+		}
+		logger.Info("database schema compatibility check passed", "schema", cfg.SchemaCompatibilityCheck)
+		return nil
+	}
 	if cfg.MigrateOnly {
 		auditManager, err := newAuditManager(pool, cfg)
 		if err != nil {
