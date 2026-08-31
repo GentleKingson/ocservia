@@ -85,20 +85,34 @@ through apt, and — only when Docker is absent entirely — Docker Engine, the
 CLI, containerd, Buildx, and the Compose plugin from Docker's official apt
 repository, never the `get.docker.com` convenience script. An existing
 compatible Docker installation is preserved without reinstall or upgrade; an
-existing runtime that conflicts with the lifecycle, such as `docker.io`,
-`podman-docker`, or a standalone `docker-compose` without the Compose v2
-plugin, fails closed with an actionable message and is never uninstalled. The
-bootstrap creates `/var/lib/ocservia-controller` (or the configured
-`OCSERV_CONTROLLER_STATE_ROOT`) with mode `0700` owned by the invoking `sudo`
-user exactly as `controller.sh` requires, and `--backup-dir` creates the
-backup bind mount with the required `999:999` mode-`0700` contract; existing
-directories with the wrong owner or mode are reported, not repaired. The
-bootstrap never modifies the Docker permission model or socket, never starts a
-Docker TCP listener, never edits the firewall (it only warns when `ufw` is
-active, because published ports bypass it), and never creates or rotates any
-secret, key, token, or password. Both commands end with a read-only summary of
-the operator prerequisites that remain, such as `OCSERV_SECRET_DIR`,
-`OCSERV_BACKUP_DIR`, and `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY`.
+existing runtime that conflicts with the lifecycle — the official Docker
+conflict set such as `docker.io`, `docker-doc`, `podman-docker`, `containerd`,
+`runc`, and Ubuntu's `docker-compose`/`docker-compose-v2` while the Compose v2
+plugin is unavailable, or a standalone `docker-compose` in the same situation —
+fails closed with an actionable message and is never uninstalled.
+
+The launcher model is explicit: the lifecycle runs as the `sudo`-invoking user
+of the bootstrap, or as root when the bootstrap itself runs as root. That
+launcher user must already have Docker daemon access — deliberately configured
+by the operator following Docker's official post-install steps — or the whole
+flow must run as root. Both `check` and `install` verify the launcher can
+actually reach the Docker daemon (`install` probes the `sudo`-invoking user
+through `runuser`) and fail closed with remediation before any lifecycle
+directory is created, because the bootstrap never modifies the Docker
+permission model, group membership, or socket.
+
+The bootstrap creates `/var/lib/ocservia-controller` (or the configured
+`OCSERV_CONTROLLER_STATE_ROOT`) under the exact `controller.sh` state contract —
+absolute canonical path, no symlink ancestry, no group/world-writable
+ancestors, and mode `0700` owned by precisely the launcher user — and
+`--backup-dir` creates the backup bind mount with the required `999:999`
+mode-`0700` contract; existing directories with the wrong owner or mode are
+reported, not repaired. The bootstrap never starts a Docker TCP listener,
+never edits the firewall (it only warns when `ufw` is active, because
+published ports bypass it), and never creates or rotates any secret, key,
+token, or password. Both commands end with a read-only summary of the operator
+prerequisites that remain, such as `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`,
+and `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY`.
 
 For a fresh Controller host, install the exact release selected by the local
 manifest through the lifecycle entrypoint:

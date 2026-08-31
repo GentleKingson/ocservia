@@ -10,8 +10,15 @@
 # Docker permission model or the firewall, never upgrades, reinstalls, or
 # removes an existing container runtime, and never uses the get.docker.com
 # convenience script. Detected conflicts fail closed with an actionable
-# message. controller.sh keeps its own prerequisite checks as the final
-# fail-closed boundary; this script only prepares the host.
+# message.
+#
+# Launcher model: the Controller lifecycle runs as the sudo-invoking user
+# (or as root when the bootstrap itself runs as root). That launcher user must
+# already have Docker daemon access — configured deliberately by the operator
+# per Docker's official post-install steps — or the whole flow must run as
+# root; check and install verify the launcher's Docker access and fail closed
+# with remediation. controller.sh keeps its own prerequisite checks as the
+# final fail-closed boundary; this script only prepares the host.
 #
 # Supported hosts: Ubuntu 24.04 on amd64 or arm64.
 #
@@ -122,11 +129,21 @@ resolve_launcher() {
 
 detect_conflicts() {
   local package
-  for package in docker.io docker-doc podman-docker; do
+  # Official Docker Ubuntu conflicts that always break the lifecycle contract.
+  for package in docker.io docker-doc podman-docker containerd runc; do
     if package_installed "${package}"; then
       record_failure "conflicting package '${package}' is installed; remove it deliberately (this bootstrap never uninstalls an existing runtime); see https://docs.docker.com/engine/install/ubuntu/"
     fi
   done
+  # Ubuntu's own compose packages only conflict while the Compose v2 plugin
+  # this lifecycle requires is unavailable.
+  if ! compose_plugin_available; then
+    for package in docker-compose docker-compose-v2; do
+      if package_installed "${package}"; then
+        record_failure "conflicting package '${package}' is installed while the Docker Compose v2 plugin is unavailable; align the existing installation deliberately (this bootstrap never uninstalls an existing runtime)"
+      fi
+    done
+  fi
   if command -v docker-compose >/dev/null 2>&1; then
     if compose_plugin_available; then
       echo "note: a standalone 'docker-compose' binary is on PATH alongside the Compose v2 plugin; the Controller lifecycle uses 'docker compose' and no action was taken"
@@ -204,12 +221,18 @@ validate_docker_readiness() {
 }
 
 check_docker() {
+  local info_output
   if ! docker_client_present; then
     record_failure "Docker is required but not installed; run 'bootstrap-host.sh install' to install it from the official Docker apt repository"
     return
   fi
   if ! docker_daemon_active; then
-    record_failure "Docker daemon is not active; start it with 'sudo systemctl enable --now docker'"
+    info_output="$(docker info 2>&1 || true)"
+    if grep -q 'permission denied' <<<"${info_output}"; then
+      record_failure "the invoking user cannot access the Docker daemon; either run the Controller lifecycle as root, or deliberately grant this user Docker access per Docker's official post-install steps — this bootstrap never modifies the Docker permission model or group membership"
+    else
+      record_failure "Docker daemon is not active; start it with 'sudo systemctl enable --now docker'"
+    fi
   else
     echo "docker: server $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo present)"
   fi
@@ -220,6 +243,24 @@ check_docker() {
   echo "compose: $(docker compose version)"
   compose_supports_wait ||
     record_failure "Docker Compose must support 'docker compose up --wait'"
+}
+
+verify_launcher_docker_access() {
+  [[ "${launcher_user}" != root ]] || return 0
+  if (( EUID != 0 )); then
+    # The invoking user is the launcher; check_docker already probed daemon
+    # access directly and classified permission failures.
+    return 0
+  fi
+  command -v runuser >/dev/null 2>&1 || {
+    record_failure "runuser (util-linux) is required to verify Docker access for the launcher user ${launcher_user}"
+    return 0
+  }
+  if runuser -u "${launcher_user}" -- env PATH="${PATH}" docker info >/dev/null 2>&1; then
+    echo "launcher access: ${launcher_user} can reach the Docker daemon"
+  else
+    record_failure "launcher user ${launcher_user} cannot access the Docker daemon; either deliberately grant it Docker access per Docker's official post-install steps, or run this bootstrap and the Controller lifecycle as root instead of via sudo — this bootstrap never modifies the Docker permission model or group membership"
+  fi
 }
 
 check_base_tools() {
@@ -235,12 +276,77 @@ check_base_tools() {
   fi
 }
 
-state_root_stat() {
-  stat -c '%u:%a' "${STATE_ROOT}"
+# The state root contract mirrors controller.sh prepare_state_root exactly so
+# a bootstrap pass can never be followed by a lifecycle ownership failure.
+state_root_absolute_canonical() {
+  local resolved
+  if [[ "${STATE_ROOT}" != /* ]]; then
+    record_failure "state root ${STATE_ROOT} must be an absolute path"
+    return 1
+  fi
+  case "${STATE_ROOT}" in
+    /|*/|*/../*|*/..|*/./*|*/.)
+      record_failure "state root ${STATE_ROOT} must be a canonical path without traversal"
+      return 1 ;;
+  esac
+  if ! resolved="$(realpath -e -- "${STATE_ROOT}" 2>/dev/null)"; then
+    record_failure "state root ${STATE_ROOT} does not exist"
+    return 1
+  fi
+  if [[ "${resolved}" != "${STATE_ROOT}" ]]; then
+    record_failure "state root ${STATE_ROOT} must not contain symlink ancestry"
+    return 1
+  fi
+  return 0
+}
+
+validate_lifecycle_ancestry() {
+  local ancestor="$1" stat_line ancestor_uid ancestor_mode
+  while true; do
+    if [[ "$(realpath -e -- "${ancestor}" 2>/dev/null)" != "${ancestor}" ]]; then
+      record_failure "state root ancestry must not contain symlinks: ${ancestor}"
+      return 1
+    fi
+    stat_line="$(stat -c '%u:%a' "${ancestor}")"
+    ancestor_uid="${stat_line%%:*}"
+    ancestor_mode="${stat_line##*:}"
+    if [[ "${ancestor_uid}" != 0 && "${ancestor_uid}" != "${launcher_uid}" ]]; then
+      record_failure "state root ancestry must be root- or launcher-owned: ${ancestor} (uid ${ancestor_uid})"
+      return 1
+    fi
+    if (( (8#${ancestor_mode} & 8#022) != 0 )); then
+      record_failure "state root ancestry must not be group/world writable: ${ancestor} (mode ${ancestor_mode})"
+      return 1
+    fi
+    [[ "${ancestor}" == "/" ]] && break
+    ancestor="$(dirname -- "${ancestor}")"
+  done
+  return 0
+}
+
+state_root_ownership() {
+  local stat_line uid mode
+  stat_line="$(stat -c '%u:%a' "${STATE_ROOT}")"
+  uid="${stat_line%%:*}"
+  mode="${stat_line##*:}"
+  if [[ "${uid}" != "${launcher_uid}" || "${mode}" != 700 ]]; then
+    record_failure "state root ${STATE_ROOT} must be owned by the launcher user (uid ${launcher_uid}) with mode 0700 (found uid ${uid}, mode ${mode}), exactly as controller.sh requires"
+    return 1
+  fi
+  return 0
 }
 
 check_state_root() {
-  local stat_line uid mode
+  # The path contract applies whether or not the directory exists yet.
+  if [[ "${STATE_ROOT}" != /* ]]; then
+    record_failure "state root ${STATE_ROOT} must be an absolute path"
+    return
+  fi
+  case "${STATE_ROOT}" in
+    /|*/|*/../*|*/..|*/./*|*/.)
+      record_failure "state root ${STATE_ROOT} must be a canonical path without traversal"
+      return ;;
+  esac
   if [[ ! -e "${STATE_ROOT}" && ! -L "${STATE_ROOT}" ]]; then
     record_pending "lifecycle state root ${STATE_ROOT} is not provisioned yet; 'bootstrap-host.sh install' (or controller.sh) creates it"
     return
@@ -249,34 +355,35 @@ check_state_root() {
     record_failure "state root ${STATE_ROOT} must be a real directory and not a symlink"
     return
   fi
-  stat_line="$(state_root_stat)"
-  uid="${stat_line%%:*}"
-  mode="${stat_line##*:}"
-  if [[ "${mode}" != 700 || ( "${uid}" != 0 && "${uid}" != "${launcher_uid}" ) ]]; then
-    record_failure "state root ${STATE_ROOT} must be mode 0700 owned by root or the launcher user (found uid ${uid}, mode ${mode})"
-    return
+  state_root_absolute_canonical || return
+  validate_lifecycle_ancestry "${STATE_ROOT}" || return
+  if state_root_ownership; then
+    echo "state root validated: ${STATE_ROOT} (launcher-owned, mode 0700)"
   fi
-  echo "state root validated: ${STATE_ROOT} (mode 0700)"
 }
 
 ensure_state_root() {
-  local stat_line uid mode parent
+  local parent
   if [[ -L "${STATE_ROOT}" ]]; then
     fail "state root ${STATE_ROOT} must not be a symlink"
   fi
   if [[ -e "${STATE_ROOT}" ]]; then
     [[ -d "${STATE_ROOT}" ]] || fail "state root ${STATE_ROOT} must be a directory"
-    stat_line="$(state_root_stat)"
-    uid="${stat_line%%:*}"
-    mode="${stat_line##*:}"
-    if [[ "${mode}" != 700 || ( "${uid}" != 0 && "${uid}" != "${launcher_uid}" ) ]]; then
-      fail "existing state root ${STATE_ROOT} must be mode 0700 owned by root or ${launcher_user} (uid ${launcher_uid}); fix it deliberately — ownership is only set when this bootstrap creates the directory"
-    fi
-    echo "state root validated: ${STATE_ROOT} (mode 0700)"
+    state_root_absolute_canonical || return 1
+    validate_lifecycle_ancestry "${STATE_ROOT}" || return 1
+    state_root_ownership || return 1
+    echo "state root validated: ${STATE_ROOT} (launcher-owned, mode 0700)"
     return
   fi
+  [[ "${STATE_ROOT}" == /* ]] || fail "state root ${STATE_ROOT} must be an absolute path"
+  case "${STATE_ROOT}" in
+    /|*/|*/../*|*/..|*/./*|*/.) fail "state root ${STATE_ROOT} must be a canonical path without traversal" ;;
+  esac
   parent="$(dirname -- "${STATE_ROOT}")"
   [[ -d "${parent}" ]] || fail "state root parent ${parent} does not exist; create it first"
+  [[ "$(realpath -e -- "${parent}")" == "${parent}" ]] ||
+    fail "state root parent ${parent} must not contain symlink ancestry"
+  validate_lifecycle_ancestry "${parent}" || return 1
   mkdir -m 0700 -- "${STATE_ROOT}"
   chown "${launcher_uid}:${launcher_gid}" -- "${STATE_ROOT}"
   echo "state root created: ${STATE_ROOT} (owner ${launcher_user}, mode 0700)"
@@ -329,8 +436,8 @@ print_operator_prerequisites() {
     secret_stat="$(stat -c '%u:%a' "${secret_dir}" 2>/dev/null || echo unknown)"
     secret_uid="${secret_stat%%:*}"
     secret_mode="${secret_stat##*:}"
-    if [[ "${secret_mode}" != 700 || ( "${secret_uid}" != 0 && "${secret_uid}" != "${launcher_uid}" ) ]]; then
-      record_pending "OCSERV_SECRET_DIR (${secret_dir}) must be launcher- or root-owned with mode 0700 (found ${secret_stat})"
+    if [[ "${secret_uid}" != "${launcher_uid}" || "${secret_mode}" != 700 ]]; then
+      record_pending "OCSERV_SECRET_DIR (${secret_dir}) must be launcher-owned (uid ${launcher_uid}) with mode 0700, matching the compose.sh contract (found ${secret_stat})"
     else
       echo "- OCSERV_SECRET_DIR (${secret_dir}) is a compliant directory; the launcher still validates every secret file"
     fi
@@ -393,6 +500,7 @@ run_check() {
   resolve_launcher
   detect_conflicts
   check_docker
+  verify_launcher_docker_access
   check_base_tools
   check_state_root
   if [[ -n "${BACKUP_DIR}" ]]; then
@@ -421,8 +529,17 @@ run_install() {
   fi
   revive_docker_daemon
   validate_docker_readiness
+  verify_launcher_docker_access
+  if ((${#failures[@]} > 0)); then
+    echo "controller host bootstrap: refusing to create lifecycle directories while host prerequisite failures remain" >&2
+    exit 1
+  fi
 
-  ensure_state_root
+  ensure_state_root ||
+    {
+      echo "controller host bootstrap: the state root does not satisfy the controller.sh contract" >&2
+      exit 1
+    }
   if [[ -n "${BACKUP_DIR}" ]]; then
     ensure_backup_dir
   fi

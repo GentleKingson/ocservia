@@ -15,7 +15,9 @@ stat -c '%u' . >/dev/null 2>&1 || {
   exit 1
 }
 
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-bootstrap-test.XXXXXX")"
+# Keep the fixture under HOME: /tmp is world-writable (mode 1777), which the
+# state root ancestry contract must reject.
+fixture="$(mktemp -d "${HOME}/.ocservia-bootstrap-test.XXXXXX")"
 
 can_root() {
   (( EUID == 0 )) || sudo -n true >/dev/null 2>&1
@@ -47,6 +49,7 @@ logs="${fixture}/logs"
 dpkg_db="${fixture}/dpkg-packages"
 docker_template="${fixture}/docker-template"
 docker_unready="${fixture}/docker-unready"
+docker_denied="${fixture}/docker-denied"
 compose_no_wait="${fixture}/compose-no-wait"
 os_release="${fixture}/os/ubuntu-24.04"
 apt_log="${logs}/apt.log"
@@ -63,7 +66,7 @@ die() {
 }
 
 mkdir -m 700 -- "${bin}" "${logs}" "${fixture}/os"
-mkdir -p -- "${work}"
+install -d -m 0755 -- "${work}"
 
 # The bootstrap child must only see the mocked docker/apt/dpkg-query commands,
 # so it runs with a restricted PATH: the mock bin first, then a symlink farm of
@@ -71,8 +74,17 @@ mkdir -p -- "${work}"
 # real Docker on the host must stay invisible to the docker-absent scenarios.
 rootfs_bin="${fixture}/rootfs-bin"
 mkdir -p -- "${rootfs_bin}"
-for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm; do
-  ln -s "$(command -v "${tool}")" "${rootfs_bin}/${tool}"
+link_tool() {
+  local tool="$1" path
+  path="$(command -v "${tool}" || true)"
+  if [[ -z "${path}" && -x "/usr/sbin/${tool}" ]]; then
+    path="/usr/sbin/${tool}"
+  fi
+  [[ -n "${path}" ]] || die "required test tool not found: ${tool}"
+  ln -s "${path}" "${rootfs_bin}/${tool}"
+}
+for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm realpath env runuser; do
+  link_tool "${tool}"
 done
 
 cat >"${fixture}/os/ubuntu-24.04" <<'EOF'
@@ -97,11 +109,18 @@ EOF
 cat >"${docker_template}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ -e "${BOOTSTRAP_TEST_DOCKER_UNREADY:-/nonexistent-ocservia-flag}" ]]; then
-  echo "docker mock: daemon unavailable" >&2
-  exit 1
-fi
 command="${1:-}"
+if [[ "${command}" == info ]]; then
+  if [[ -e "${BOOTSTRAP_TEST_DOCKER_UNREADY:-/nonexistent-ocservia-flag}" ]]; then
+    echo "docker mock: daemon unavailable" >&2
+    exit 1
+  fi
+  if [[ -e "${BOOTSTRAP_TEST_DOCKER_DENIED:-/nonexistent-ocservia-flag}" ]] && [[ "$(id -u)" != 0 ]]; then
+    echo "docker mock: permission denied while trying to connect to the Docker daemon socket" >&2
+    exit 1
+  fi
+  exit 0
+fi
 case "${command}" in
   info) exit 0 ;;
   version)
@@ -225,12 +244,12 @@ reset_scenario() {
     rm -rf -- "${work}"
   fi
   rm -f -- "${bin}/docker" "${bin}/docker-compose" "${dpkg_db}"
-  mkdir -p -- "${work}/apt/sources"
+  install -d -m 0755 -- "${work}/apt/sources"
   : >"${apt_log}"
   : >"${curl_log}"
   : >"${systemctl_log}"
   : >"${dpkg_db}"
-  rm -f -- "${docker_unready}" "${compose_no_wait}"
+  rm -f -- "${docker_unready}" "${docker_denied}" "${compose_no_wait}"
   EXTRA_ENV=()
   os_release="${fixture}/os/ubuntu-24.04"
 }
@@ -266,6 +285,7 @@ run_bootstrap() {
     "BOOTSTRAP_TEST_SYSTEMCTL_LOG=${systemctl_log}"
     "BOOTSTRAP_TEST_DOCKER_TEMPLATE=${docker_template}"
     "BOOTSTRAP_TEST_DOCKER_UNREADY=${docker_unready}"
+    "BOOTSTRAP_TEST_DOCKER_DENIED=${docker_denied}"
     "BOOTSTRAP_TEST_COMPOSE_NO_WAIT=${compose_no_wait}"
   )
   if [[ "${prefix}" == sudo ]]; then
@@ -375,6 +395,29 @@ assert_output "docker-compose"
 assert_log_empty "${apt_log}"
 echo "standalone docker-compose without the plugin fails closed"
 
+# 7a. check detects the containerd conflict before any host mutation.
+reset_scenario
+install_docker_mock
+mark_all_tools_installed
+printf '%s\n' containerd >>"${dpkg_db}"
+capture self check
+assert_status 1 "the containerd conflict must fail the host check"
+assert_output "containerd"
+assert_log_empty "${apt_log}"
+echo "conflicting containerd package fails closed without mutation"
+
+# 7b. check detects Ubuntu's docker-compose-v2 package without the plugin.
+reset_scenario
+install_docker_mock
+mark_all_tools_installed
+printf '%s\n' docker-compose-v2 >>"${dpkg_db}"
+EXTRA_ENV=("BOOTSTRAP_TEST_NO_COMPOSE=1")
+capture self check
+assert_status 1 "docker-compose-v2 without the plugin must fail the host check"
+assert_output "docker-compose-v2"
+assert_log_empty "${apt_log}"
+echo "conflicting docker-compose-v2 package without the plugin fails closed"
+
 # 8. check passes on a provisioned host and lists operator prerequisites.
 reset_scenario
 install_docker_mock
@@ -412,6 +455,68 @@ assert_output "999:999"
 assert_log_empty "${apt_log}"
 echo "check rejects a backup directory with the wrong ownership"
 
+# 10a. check classifies a Docker socket permission denial for the invoking
+# user and fails closed with remediation. The mock denial applies to non-root
+# users only, mirroring root's unconditional Docker access.
+if (( EUID != 0 )); then
+  reset_scenario
+  install_docker_mock
+  mark_all_tools_installed
+  install -d -m 0700 -- "${work}/state-root"
+  : >"${docker_denied}"
+  capture self check
+  assert_status 1 "a launcher without Docker daemon access must fail the check"
+  assert_output "cannot access the Docker daemon"
+  assert_output "never modifies the Docker permission model"
+  assert_log_empty "${apt_log}"
+  echo "check reports a Docker permission denial for the invoking user"
+fi
+
+# 10b. a relative state root is rejected like controller.sh rejects it.
+reset_scenario
+install_docker_mock
+mark_all_tools_installed
+EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=relative/state-root")
+capture self check
+assert_status 1 "a relative state root must fail the host check"
+assert_output "must be an absolute path"
+echo "check rejects a relative state root"
+
+# 10c. a non-canonical state root path is rejected.
+reset_scenario
+install_docker_mock
+mark_all_tools_installed
+install -d -m 0700 -- "${work}/state-root"
+EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/state-root/")
+capture self check
+assert_status 1 "a non-canonical state root must fail the host check"
+assert_output "canonical path without traversal"
+echo "check rejects a non-canonical state root path"
+
+# 10d. a group/world-writable state root ancestor is rejected.
+reset_scenario
+install_docker_mock
+mark_all_tools_installed
+install -d -m 0777 -- "${work}/loose"
+install -d -m 0700 -- "${work}/loose/state-root"
+EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/loose/state-root")
+capture self check
+assert_status 1 "a world-writable ancestor must fail the host check"
+assert_output "group/world writable"
+echo "check rejects a group/world-writable state root ancestor"
+
+# 10e. a symlinked state root ancestor is rejected.
+reset_scenario
+install_docker_mock
+mark_all_tools_installed
+install -d -m 0700 -- "${work}/real/state-root"
+ln -s -- real "${work}/link"
+EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/link/state-root")
+capture self check
+assert_status 1 "symlink ancestry must fail the host check"
+assert_output "symlink ancestry"
+echo "check rejects symlinked state root ancestry"
+
 # 11. install refuses to run without root.
 if (( EUID != 0 )); then
   reset_scenario
@@ -444,6 +549,9 @@ if can_root; then
     die "backup directory ownership or mode is wrong"
   assert_output "Controller host prerequisites satisfied"
   assert_output "OCSERV_SECRET_DIR is not set"
+  if (( EUID != 0 )); then
+    assert_output "launcher access"
+  fi
   echo "install on a bare host installs prerequisites and creates directories"
 
   # 13. a repeated install is a no-op (idempotency).
@@ -499,6 +607,55 @@ if can_root; then
   assert_status 1 "an existing wrong state root owner must fail"
   assert_output "state root"
   echo "install refuses an existing state root owned by another user"
+
+  # 17a. install fails closed when the launcher cannot reach the Docker
+  # daemon, before any lifecycle directory is created.
+  if (( EUID != 0 )); then
+    reset_scenario
+    install_docker_mock
+    mark_all_tools_installed
+    : >"${docker_denied}"
+    capture sudo install
+    assert_status 1 "install must fail when the launcher lacks Docker access"
+    assert_output "cannot access the Docker daemon"
+    assert_output "never modifies the Docker permission model"
+    [[ ! -e "${work}/state-root" ]] ||
+      die "install created the state root despite the launcher access failure"
+    echo "install fails closed on missing launcher Docker access"
+
+    # 17b. a root-run check also probes the sudo-invoking launcher.
+    capture sudo check
+    assert_status 1 "a root check must probe the sudo-invoking launcher"
+    assert_output "cannot access the Docker daemon"
+    echo "root check probes the sudo-invoking launcher Docker access"
+
+    # 17c. a root-owned state root fails a launcher-user check, matching the
+    # exact controller.sh ownership contract.
+    reset_scenario
+    install_docker_mock
+    mark_all_tools_installed
+    rm -f -- "${docker_denied}"
+    as_root install -d -m 0700 -o 0 -g 0 -- "${work}/state-root"
+    capture self check
+    assert_status 1 "a root-owned state root must fail the launcher check"
+    assert_output "launcher user"
+    echo "check rejects a root-owned state root for a launcher user"
+  else
+    echo "launcher-user ownership and access cases skipped: running as root without sudo"
+  fi
+
+  # 18. install refuses to create a state root under unsafe ancestry.
+  reset_scenario
+  install_docker_mock
+  mark_all_tools_installed
+  install -d -m 0777 -- "${work}/loose"
+  EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/loose/state-root")
+  capture sudo install
+  assert_status 1 "an unsafe ancestor must fail install"
+  assert_output "group/world writable"
+  [[ ! -e "${work}/loose/state-root" ]] ||
+    die "install created a state root under unsafe ancestry"
+  echo "install refuses to create a state root under unsafe ancestry"
 else
   echo "root-path install cases skipped: no passwordless sudo available" >&2
 fi

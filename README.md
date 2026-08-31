@@ -218,7 +218,8 @@ deploy/production/compose.sh up -d
 
 For a fresh Controller host, first prepare the Ubuntu 24.04 (amd64 or arm64)
 host prerequisites with the bootstrap, which installs only missing host
-software and non-secret directories and never creates secrets:
+software and non-secret directories, never creates secrets, and verifies the
+launcher user can reach the Docker daemon:
 
 ```bash
 deploy/production/bootstrap-host.sh check
