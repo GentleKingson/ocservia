@@ -22,8 +22,8 @@ paths=(
   deploy/production/rotate-postgres-credentials.sh openapi/openapi.yaml
   proto/ocserv/platform/agent/v1/agent.proto tools/g6-harness/internal/smoke/pipeline.go
   deploy/systemd/ocservia-agent.service .github/workflows/g6-harness-smoke.yml
-  .github/workflows/release.yml scripts/ci-relevance.sh scripts/test-controller-release-smoke.sh scripts/test-controller-release-bundle.sh scripts/verify-controller-release-bundle.sh scripts/test-controller-lifecycle.sh scripts/test-controller-compose-lifecycle.sh web/package.json
-  deploy/production/controller.sh deploy/production/controller-release-smoke.sh
+  .github/workflows/release.yml scripts/ci-relevance.sh scripts/test-controller-release-smoke.sh scripts/test-controller-release-bundle.sh scripts/verify-controller-release-bundle.sh scripts/test-controller-lifecycle.sh scripts/test-controller-compose-lifecycle.sh scripts/test-controller-host-bootstrap.sh web/package.json
+  deploy/production/controller.sh deploy/production/controller-release-smoke.sh deploy/production/bootstrap-host.sh
   scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
   control-plane/Dockerfile
 )
@@ -122,6 +122,10 @@ expect_only "${out}" run_contracts_policy
 out="$(case_commit controller_lifecycle scripts/test-controller-lifecycle.sh)"
 expect_only "${out}" run_contracts_policy
 out="$(case_commit controller_compose_lifecycle scripts/test-controller-compose-lifecycle.sh)"
+expect_only "${out}" run_production_relays
+out="$(case_commit controller_bootstrap_test scripts/test-controller-host-bootstrap.sh)"
+expect_only "${out}" run_production_relays
+out="$(case_commit controller_bootstrap_host deploy/production/bootstrap-host.sh)"
 expect_only "${out}" run_production_relays
 out="$(case_commit controller_release_smoke scripts/test-controller-release-smoke.sh)"
 expect_only "${out}" run_contracts_policy

@@ -216,9 +216,17 @@ deploy/production/compose.sh config --quiet
 deploy/production/compose.sh up -d
 ```
 
-For a fresh Controller host, use the lifecycle entrypoint from the matching
-clean release checkout with the published release manifest for the host
-architecture:
+For a fresh Controller host, first prepare the Ubuntu 24.04 (amd64 or arm64)
+host prerequisites with the bootstrap, which installs only missing host
+software and non-secret directories and never creates secrets:
+
+```bash
+deploy/production/bootstrap-host.sh check
+sudo deploy/production/bootstrap-host.sh install --backup-dir "$OCSERV_BACKUP_DIR"
+```
+
+Then use the lifecycle entrypoint from the matching clean release checkout
+with the published release manifest for the host architecture:
 
 ```bash
 # amd64 host
