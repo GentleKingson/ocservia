@@ -16,20 +16,29 @@ Provision the backup bind mount for the non-root PostgreSQL UID before startup. 
 sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
 ```
 
-Formal GitHub Releases publish `controller-release.json` and its
-`controller-release.json.sha256` checksum alongside the Agent assets. The
-manifest is the canonical release mapping: copy all six image references from
-its `images` object without replacing any digest with a tag. The gateway,
-control, transport, and backup references are first-party images in
-`ghcr.io/gentlekingson/ocservia`; PostgreSQL and OpenTelemetry remain pinned
-third-party images. The four first-party GHCR packages must already exist and
-be public before the first formal release; the release workflow performs an
-anonymous registry read check and fails closed if any image cannot be pulled
-without credentials. The PR1 Controller bundle currently supports
-`linux/amd64` only, and the manifest records that platform explicitly.
+Formal GitHub Releases publish the Controller release manifests
+`controller-release-amd64.json` and `controller-release-arm64.json` with their
+`.sha256` checksums alongside the Agent assets, plus the byte-identical
+`controller-release.json` alias of the amd64 manifest for existing operators.
+Each manifest is the canonical release mapping for its platform: copy all six
+image references from its `images` object without replacing any digest with a
+tag. The gateway, control, transport, and backup references are first-party
+multi-platform images in `ghcr.io/gentlekingson/ocservia` whose digest points at
+one image index covering `linux/amd64` and `linux/arm64`; PostgreSQL and
+OpenTelemetry remain pinned third-party multi-platform images. The four
+first-party GHCR packages must already exist and be public before the first
+formal release; the release workflow performs an anonymous registry read check
+and fails closed if any image index cannot be pulled without credentials or is
+missing either architecture. The Controller bundle supports `linux/amd64` and
+`linux/arm64`, and each manifest records its platform explicitly. Before any
+Compose activation the lifecycle entrypoint asks the Docker daemon for its
+server architecture and fails closed when the manifest platform does not match
+the Docker host platform, so install the manifest variant that matches the
+host.
 
-The signed `SHA256SUMS` also includes `controller-release.json`, and the separate
-`controller-release.json.sha256` is an additional byte-integrity check. Before
+The signed `SHA256SUMS` also includes all three Controller manifests, and each
+separate `controller-release*.json.sha256` is an additional byte-integrity
+check. Before
 using a release bundle, provision the release-signing public key through an
 independent protected channel and point the lifecycle entrypoint at it:
 
@@ -39,8 +48,9 @@ export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-sig
 
 The key path must be absolute and canonical, have no symlink ancestry, be a
 regular root- or launcher-owned file, and not be group/world writable. The
-release bundle evidence (`controller-release.json`, `SHA256SUMS`,
-`SHA256SUMS.sig`, and `controller-release.json.sha256`) must meet the same
+release bundle evidence (the selected
+`controller-release-<amd64|arm64>.json` manifest, `SHA256SUMS`,
+`SHA256SUMS.sig`, and the manifest's `.sha256` checksum) must meet the same
 ownership and permission requirements, and the bundle directory plus every
 ancestor directory up to `/` must be root- or launcher-owned and not
 group/world writable. These boundary checks keep the verified bytes from
@@ -64,8 +74,13 @@ For a fresh Controller host, install the exact release selected by the local
 manifest through the lifecycle entrypoint:
 
 ```bash
+# amd64 host
 deploy/production/controller.sh install \
-  --release-file /path/to/controller-release.json
+  --release-file /path/to/controller-release-amd64.json
+
+# arm64 host
+deploy/production/controller.sh install \
+  --release-file /path/to/controller-release-arm64.json
 ```
 
 The entrypoint requires Docker Compose v2 with
@@ -90,8 +105,13 @@ or rotate secrets, certificates, or identity keys. To upgrade an installed Contr
 provide a newer canonical manifest:
 
 ```bash
+# amd64 host
 deploy/production/controller.sh upgrade \
-  --release-file /path/to/controller-release.json
+  --release-file /path/to/controller-release-amd64.json
+
+# arm64 host
+deploy/production/controller.sh upgrade \
+  --release-file /path/to/controller-release-arm64.json
 ```
 
 Upgrade validates the confirmed current state and target first, checks the

@@ -155,19 +155,22 @@ jobs:
         run: rm -f -- "${release_signing_key}" "${RUNNER_TEMP}/release-signing.pub.pem"
 
   build-controller-images:
-    name: Build & Attest Controller Images
+    name: Build Controller Images (${{ matrix.controller_arch }})
     if: github.event_name == 'release'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
-    environment: release-publishing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - controller_arch: amd64
+            runs_on: ubuntu-24.04
+          - controller_arch: arm64
+            runs_on: ubuntu-24.04-arm
     permissions:
       contents: read
-      packages: write
-      id-token: write
-      attestations: write
     env:
-      CONTROLLER_IMAGE_PREFIX: ghcr.io/gentlekingson/ocservia
-      BUILDX_BUILDER: controller-release-${{ github.run_id }}-${{ github.run_attempt }}
+      BUILDX_BUILDER: controller-release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.controller_arch }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -182,7 +185,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "refusing to publish Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
+            echo "refusing to build Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
             exit 1
           fi
           version="${RELEASE_TAG#v}"
@@ -196,10 +199,6 @@ jobs:
             echo "version=${version}"
             echo "source_commit=${source_commit}"
           } >>"${GITHUB_ENV}"
-      - name: Login to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
       - name: Prepare pinned BuildKit builder
         run: |
           set -euo pipefail
@@ -209,108 +208,50 @@ jobs:
             --name "${BUILDX_BUILDER}" \
             --bootstrap \
             --use
-      - name: Build and publish Controller images
-        id: controller-build
+      # Each leg builds natively (no QEMU) and exports an OCI archive per
+      # image. Nothing is written to GHCR here: the legs hold only source
+      # read, and every production registry write happens inside the single
+      # reviewer-gated publish job.
+      - name: Build Controller images
         run: |
           set -euo pipefail
-          output_dir="${RUNNER_TEMP}/controller-release"
+          output_dir="${RUNNER_TEMP}/controller-images"
           mkdir -p "${output_dir}"
           build_image() {
-            local name="$1" dockerfile="$2" image metadata digest
+            local name="$1" dockerfile="$2" archive metadata
             local -a build_args=(
               --builder "${BUILDX_BUILDER}"
-              --platform linux/amd64
+              --platform "linux/${{ matrix.controller_arch }}"
+              --provenance=false
               --pull
-              --push
+              --output "type=oci,dest=${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
               --metadata-file "${RUNNER_TEMP}/controller-${name}.metadata.json"
               --label "org.opencontainers.image.version=${version}"
               --label "org.opencontainers.image.revision=${source_commit}"
-              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${release_tag}"
-              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${version}"
+              --tag "ghcr.io/gentlekingson/ocservia/${name}:${version}-linux-${{ matrix.controller_arch }}"
               --file "${dockerfile}"
             )
-            image="${CONTROLLER_IMAGE_PREFIX}/${name}"
             metadata="${RUNNER_TEMP}/controller-${name}.metadata.json"
             if [[ "${name}" == control ]]; then
               build_args+=(--build-arg "VERSION=${version}" --build-arg "COMMIT=${source_commit}")
             fi
             docker buildx build "${build_args[@]}" "${GITHUB_WORKSPACE}"
-            digest="$(jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "${metadata}")"
-            printf '%s\t%s\n' "${name}" "${image}@${digest}" >>"${output_dir}/image-refs.tsv"
-            printf '%s_digest=%s\n' "${name}" "${digest}" >>"${GITHUB_OUTPUT}"
+            archive="${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
+            [[ -s "${archive}" ]] || {
+              echo "Controller image archive is missing or empty: ${archive}" >&2
+              exit 1
+            }
+            jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "${metadata}" >/dev/null
           }
           build_image gateway deploy/production/gateway.Dockerfile
           build_image control control-plane/Dockerfile
           build_image transport rust/transportd.Dockerfile
           build_image backup deploy/production/backup.Dockerfile
-          scripts/generate-controller-release-manifest.mjs \
-            --output "${output_dir}/controller-release.json" \
-            --release-version "${version}" \
-            --release-tag "${release_tag}" \
-            --source-commit "${source_commit}" \
-            --migration-dir control-plane/migrations \
-            --image "gateway=$(awk -F '\t' '$1 == \"gateway\" { print $2 }' "${output_dir}/image-refs.tsv")" \
-            --image "control=$(awk -F '\t' '$1 == \"control\" { print $2 }' "${output_dir}/image-refs.tsv")" \
-            --image "transport=$(awk -F '\t' '$1 == \"transport\" { print $2 }' "${output_dir}/image-refs.tsv")" \
-            --image "backup=$(awk -F '\t' '$1 == \"backup\" { print $2 }' "${output_dir}/image-refs.tsv")" \
-            --image "postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f" \
-            --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
-          (cd "${output_dir}" && sha256sum controller-release.json >controller-release.json.sha256)
-      - name: Verify anonymous Controller image reads
-        env:
-          GATEWAY_DIGEST: ${{ steps.controller-build.outputs.gateway_digest }}
-          CONTROL_DIGEST: ${{ steps.controller-build.outputs.control_digest }}
-          TRANSPORT_DIGEST: ${{ steps.controller-build.outputs.transport_digest }}
-          BACKUP_DIGEST: ${{ steps.controller-build.outputs.backup_digest }}
-        run: |
-          set -euo pipefail
-          for image in \
-            "gateway=${GATEWAY_DIGEST}" \
-            "control=${CONTROL_DIGEST}" \
-            "transport=${TRANSPORT_DIGEST}" \
-            "backup=${BACKUP_DIGEST}"; do
-            name="${image%%=*}"
-            digest="${image#*=}"
-            token="$(curl --fail --silent --show-error --get \
-              --data-urlencode 'service=ghcr.io' \
-              --data-urlencode "scope=repository:gentlekingson/ocservia/${name}:pull" \
-              'https://ghcr.io/token' \
-              | jq -er '(.token // .access_token) | strings | select(length > 0)')"
-            curl --fail --silent --show-error --head \
-              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
-              --header "Authorization: Bearer ${token}" \
-              "https://ghcr.io/v2/gentlekingson/ocservia/${name}/manifests/${digest}" \
-              >/dev/null
-          done
-      - name: Attest gateway image provenance
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
-        with:
-          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/gateway
-          subject-digest: ${{ steps.controller-build.outputs.gateway_digest }}
-          push-to-registry: true
-      - name: Attest control image provenance
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
-        with:
-          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/control
-          subject-digest: ${{ steps.controller-build.outputs.control_digest }}
-          push-to-registry: true
-      - name: Attest transport image provenance
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
-        with:
-          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/transport
-          subject-digest: ${{ steps.controller-build.outputs.transport_digest }}
-          push-to-registry: true
-      - name: Attest backup image provenance
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
-        with:
-          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/backup
-          subject-digest: ${{ steps.controller-build.outputs.backup_digest }}
-          push-to-registry: true
-      - name: Upload Controller release bundle
+      - name: Upload Controller image archives
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: controller-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/controller-release/*
+          name: controller-images-${{ matrix.controller_arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/controller-images/*.tar
           retention-days: 7
           if-no-files-found: error
       - name: Remove Controller BuildKit builder
@@ -363,10 +304,15 @@ jobs:
     needs: [validate-release-packages, build-controller-images]
     if: github.event_name == 'release'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 45
     environment: release-publishing
     permissions:
       contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      CONTROLLER_IMAGE_PREFIX: ghcr.io/gentlekingson/ocservia
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -382,11 +328,12 @@ jobs:
           pattern: agent-packages-*
           path: ${{ runner.temp }}/assets
           merge-multiple: true
-      - name: Collect Controller release bundle
+      - name: Collect Controller image archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
-          name: controller-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/assets
+          pattern: controller-images-*
+          path: ${{ runner.temp }}/controller-images
+          merge-multiple: true
       - name: Resolve package version & source epoch
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -398,6 +345,7 @@ jobs:
           {
             echo "version=${RELEASE_TAG#v}"
             echo "release_tag=${RELEASE_TAG}"
+            echo "source_commit=$(git rev-parse HEAD)"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
       - name: Restore native-package tool cache
@@ -409,6 +357,151 @@ jobs:
           key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap pinned nfpm tool
         run: scripts/bootstrap.sh native-packages
+      - name: Login to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+      # First production registry write of the release: everything before this
+      # job ran source-only, so the reviewer approves the exact images and
+      # packages that are about to become public.
+      - name: Push Controller images & assemble multi-platform indexes
+        id: controller-index
+        run: |
+          set -euo pipefail
+          images_dir="${RUNNER_TEMP}/controller-images"
+          output_dir="${RUNNER_TEMP}/controller-release"
+          mkdir -p "${output_dir}"
+          for name in gateway control transport backup; do
+            refs=()
+            for arch in amd64 arm64; do
+              archive="${images_dir}/${name}-linux-${arch}.tar"
+              [[ -s "${archive}" ]] || {
+                echo "Controller image archive is missing or empty: ${archive}" >&2
+                exit 1
+              }
+              # The build legs baked this tag into the archive; loading
+              # restores it, and the per-arch companion tag stays in GHCR as
+              # the visible composition input of the final index.
+              arch_tag="${CONTROLLER_IMAGE_PREFIX}/${name}:${version}-linux-${arch}"
+              docker load --input "${archive}" >/dev/null
+              docker image inspect "${arch_tag}" >/dev/null 2>&1 || {
+                echo "loaded Controller image archive did not restore ${arch_tag}" >&2
+                exit 1
+              }
+              push_output="$(docker push "${arch_tag}")"
+              digest="$(grep -oE 'digest: sha256:[0-9a-f]{64}' <<<"${push_output}" | head -1 | cut -d' ' -f2)"
+              if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "could not read the pushed digest for ${arch_tag}" >&2
+                exit 1
+              fi
+              refs+=("${CONTROLLER_IMAGE_PREFIX}/${name}@${digest}")
+            done
+            docker buildx imagetools create \
+              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${release_tag}" \
+              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${version}" \
+              "${refs[0]}" \
+              "${refs[1]}"
+            image_ref="${CONTROLLER_IMAGE_PREFIX}/${name}:${release_tag}"
+            index_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${image_ref}")"
+            if [[ ! "${index_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "could not read a valid index digest for ${name}: ${index_digest:-<empty>}" >&2
+              exit 1
+            fi
+            platforms="$(docker buildx imagetools inspect --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}' "${image_ref}" | sort -u)"
+            grep -Fxq 'linux/amd64' <<<"${platforms}" || {
+              echo "Controller image index for ${name} is missing linux/amd64" >&2
+              exit 1
+            }
+            grep -Fxq 'linux/arm64' <<<"${platforms}" || {
+              echo "Controller image index for ${name} is missing linux/arm64" >&2
+              exit 1
+            }
+            printf '%s\t%s\n' "${name}" "${CONTROLLER_IMAGE_PREFIX}/${name}@${index_digest}" >>"${output_dir}/image-refs.tsv"
+            printf '%s_digest=%s\n' "${name}" "${index_digest}" >>"${GITHUB_OUTPUT}"
+          done
+      - name: Generate Controller release manifests
+        run: |
+          set -euo pipefail
+          output_dir="${RUNNER_TEMP}/controller-release"
+          image_ref() {
+            awk -F '\t' -v name="$1" '$1 == name { print $2 }' "${output_dir}/image-refs.tsv"
+          }
+          for platform in amd64 arm64; do
+            scripts/generate-controller-release-manifest.mjs \
+              --output "${output_dir}/controller-release-${platform}.json" \
+              --platform "linux/${platform}" \
+              --release-version "${version}" \
+              --release-tag "${release_tag}" \
+              --source-commit "${source_commit}" \
+              --migration-dir control-plane/migrations \
+              --image "gateway=$(image_ref gateway)" \
+              --image "control=$(image_ref control)" \
+              --image "transport=$(image_ref transport)" \
+              --image "backup=$(image_ref backup)" \
+              --image "postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f" \
+              --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
+          done
+          # Compatibility alias: existing amd64 operators keep consuming
+          # controller-release.json unchanged.
+          cp -- "${output_dir}/controller-release-amd64.json" "${output_dir}/controller-release.json"
+          cd "${output_dir}"
+          sha256sum controller-release.json >controller-release.json.sha256
+          sha256sum controller-release-amd64.json >controller-release-amd64.json.sha256
+          sha256sum controller-release-arm64.json >controller-release-arm64.json.sha256
+          cp -- controller-release.json controller-release.json.sha256 \
+            controller-release-amd64.json controller-release-amd64.json.sha256 \
+            controller-release-arm64.json controller-release-arm64.json.sha256 \
+            "${RUNNER_TEMP}/assets/"
+      - name: Verify anonymous Controller image reads
+        env:
+          GATEWAY_DIGEST: ${{ steps.controller-index.outputs.gateway_digest }}
+          CONTROL_DIGEST: ${{ steps.controller-index.outputs.control_digest }}
+          TRANSPORT_DIGEST: ${{ steps.controller-index.outputs.transport_digest }}
+          BACKUP_DIGEST: ${{ steps.controller-index.outputs.backup_digest }}
+        run: |
+          set -euo pipefail
+          for image in \
+            "gateway=${GATEWAY_DIGEST}" \
+            "control=${CONTROL_DIGEST}" \
+            "transport=${TRANSPORT_DIGEST}" \
+            "backup=${BACKUP_DIGEST}"; do
+            name="${image%%=*}"
+            digest="${image#*=}"
+            token="$(curl --fail --silent --show-error --get \
+              --data-urlencode 'service=ghcr.io' \
+              --data-urlencode "scope=repository:gentlekingson/ocservia/${name}:pull" \
+              'https://ghcr.io/token' \
+              | jq -er '(.token // .access_token) | strings | select(length > 0)')"
+            curl --fail --silent --show-error --head \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+              --header "Authorization: Bearer ${token}" \
+              "https://ghcr.io/v2/gentlekingson/ocservia/${name}/manifests/${digest}" \
+              >/dev/null
+          done
+      - name: Attest gateway image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/gateway
+          subject-digest: ${{ steps.controller-index.outputs.gateway_digest }}
+          push-to-registry: true
+      - name: Attest control image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/control
+          subject-digest: ${{ steps.controller-index.outputs.control_digest }}
+          push-to-registry: true
+      - name: Attest transport image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/transport
+          subject-digest: ${{ steps.controller-index.outputs.transport_digest }}
+          push-to-registry: true
+      - name: Attest backup image provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/backup
+          subject-digest: ${{ steps.controller-index.outputs.backup_digest }}
+          push-to-registry: true
       - name: Load release signing key
         env:
           AGENT_SIGNING_KEY_SECRET: ${{ secrets.AGENT_SIGNING_KEY }}
@@ -480,6 +573,10 @@ jobs:
             "${assets}/ocservia-agent-${version}-1.aarch64.rpm" \
             "${assets}/controller-release.json" \
             "${assets}/controller-release.json.sha256" \
+            "${assets}/controller-release-amd64.json" \
+            "${assets}/controller-release-amd64.json.sha256" \
+            "${assets}/controller-release-arm64.json" \
+            "${assets}/controller-release-arm64.json.sha256" \
             "${assets}/SHA256SUMS" \
             "${assets}/SHA256SUMS.sig" \
             "${assets}/release-signing.pub.pem"

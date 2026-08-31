@@ -20,7 +20,11 @@ for file in "${package_files[@]}"; do
 done
 
 printf '{"release":"v%s"}\n' "${version}" >"${fixture}/controller-release.json"
-(cd "${fixture}" && sha256sum controller-release.json >controller-release.json.sha256)
+printf '{"release":"v%s","platform":"amd64"}\n' "${version}" >"${fixture}/controller-release-amd64.json"
+printf '{"release":"v%s","platform":"arm64"}\n' "${version}" >"${fixture}/controller-release-arm64.json"
+(cd "${fixture}" && sha256sum controller-release.json >controller-release.json.sha256 \
+  && sha256sum controller-release-amd64.json >controller-release-amd64.json.sha256 \
+  && sha256sum controller-release-arm64.json >controller-release-arm64.json.sha256)
 
 canonical="$("${CHECKSUM_MANIFEST}" "${fixture}" 1 "${package_files[@]}")"
 printf '%s\n' "${canonical}" >"${fixture}/SHA256SUMS"
@@ -37,6 +41,22 @@ if "${CHECKSUM_MANIFEST}" "${fixture}" 1 "${package_files[@]}" >/dev/null 2>&1; 
   echo "tampered controller manifest must fail its sidecar checksum" >&2
   exit 1
 fi
+
+(cd "${fixture}" && sha256sum controller-release.json >controller-release.json.sha256)
+partial_dir="$(mktemp -d)"
+for file in controller-release-amd64.json controller-release-arm64.json \
+  controller-release-amd64.json.sha256 controller-release-arm64.json.sha256; do
+  mv -- "${fixture}/${file}" "${partial_dir}/${file}"
+done
+if "${CHECKSUM_MANIFEST}" "${fixture}" 1 "${package_files[@]}" >/dev/null 2>&1; then
+  echo "a partial controller manifest set must be rejected" >&2
+  exit 1
+fi
+for file in controller-release-amd64.json controller-release-arm64.json \
+  controller-release-amd64.json.sha256 controller-release-arm64.json.sha256; do
+  mv -- "${partial_dir}/${file}" "${fixture}/${file}"
+done
+rm -rf -- "${partial_dir}"
 
 (cd "${fixture}" && sha256sum controller-release.json >controller-release.json.sha256)
 tampered_canonical="$("${CHECKSUM_MANIFEST}" "${fixture}" 1 "${package_files[@]}")"

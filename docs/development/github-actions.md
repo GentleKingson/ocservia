@@ -326,7 +326,24 @@ stays a dry run and never uploads release assets.
   packages, both signed triples verified against the pinned fingerprint,
   `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
   identical embedded payloads, and a canonical `SHA256SUMS` covering those
-  six packages plus `controller-release.json` on formal Controller releases.
+  six packages plus the three Controller manifests
+  (`controller-release.json`, `controller-release-amd64.json`,
+  `controller-release-arm64.json`) on formal Controller releases.
+- The Controller image build runs only for release events as a two-leg
+  matrix on native runners (`ubuntu-24.04` for `amd64`,
+  `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
+  builder. Each leg exports its four first-party images as OCI archives
+  and holds only source-read permissions: no registry write of any kind
+  happens before approval. The single `release-publishing`-gated publish
+  job then loads both legs' archives, pushes the per-platform images under
+  `<version>-linux-<arch>` companion tags, merges them with
+  `docker buildx imagetools create` into one tagged multi-platform index
+  per image, fails closed when an index lacks either architecture,
+  generates the platform manifests, re-checks anonymous GHCR reads of the
+  image indexes, pushes the four `actions/attest` provenance attestations
+  against the final index digests, and finally signs and uploads the whole
+  release asset set. Every production registry write therefore happens
+  behind exactly one reviewer checkpoint.
 - Every build job signs with an ephemeral key generated on the runner, so a
   `workflow_dispatch` run never touches the production signing credential,
   and the validate job checks the internal consistency of the signed set
