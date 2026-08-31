@@ -14,6 +14,25 @@ trap 'rm -rf -- "${fixture}"' EXIT
 bin="${fixture}/bin"
 mkdir -m 700 -- "${bin}" "${fixture}/release"
 
+trusted_key="${fixture}/release-signing.key"
+trusted_public_key="${fixture}/release-signing.pub.pem"
+openssl genpkey -algorithm ED25519 -out "${trusted_key}" >/dev/null 2>&1
+openssl pkey -in "${trusted_key}" -pubout -out "${trusted_public_key}" >/dev/null 2>&1
+chmod 600 "${trusted_key}"
+chmod 644 "${trusted_public_key}"
+
+refresh_bundle_dir() {
+  local bundle_dir="$1" manifest
+  for manifest in "${bundle_dir}"/*.json; do
+    [[ -f "${manifest}" && ! -L "${manifest}" ]] || continue
+    (cd "${bundle_dir}" && sha256sum -- "$(basename "${manifest}")") >"${manifest}.sha256"
+  done
+  (cd "${bundle_dir}" && sha256sum -- *.json) >"${bundle_dir}/SHA256SUMS"
+  openssl pkeyutl -sign -rawin -inkey "${trusted_key}" \
+    -in "${bundle_dir}/SHA256SUMS" -out "${bundle_dir}/SHA256SUMS.sig"
+  chmod 600 "${bundle_dir}/SHA256SUMS" "${bundle_dir}/SHA256SUMS.sig"
+}
+
 cat >"${bin}/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -96,6 +115,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
   --image "backup=ghcr.io/gentlekingson/ocservia/backup@${digest}" \
   --image "postgres=docker.io/library/postgres@${digest}" \
   --image "otel=docker.io/otel/opentelemetry-collector@${digest}"
+refresh_bundle_dir "${fixture}/release"
 
 run_controller_command() {
   local state="$1" selected="$2" command="$3"
@@ -105,6 +125,7 @@ run_controller_command() {
     CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
     CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
     OCSERV_CONTROLLER_STATE_ROOT="${state}" \
+    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${trusted_public_key}" \
     OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
     OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
     "$@" "${CONTROLLER}" "${command}" --release-file "${selected}"
@@ -269,10 +290,11 @@ grep -Fq 'Controller is already installed; use upgrade' "${completed_install_sta
 test ! -e "${completed_install_state}/pending-release.json"
 test ! -e "${completed_install_state}/compose.log"
 
-unsupported="${fixture}/unsupported.json"
+unsupported="${fixture}/release/unsupported.json"
 jq '.manifest_version = 2' "${release_file}" >"${unsupported}"
-malformed_digest="${fixture}/malformed-digest.json"
+malformed_digest="${fixture}/release/malformed-digest.json"
 jq '.images.control = "ghcr.io/gentlekingson/ocservia/control@sha256:deadbeef"' "${release_file}" >"${malformed_digest}"
+refresh_bundle_dir "${fixture}/release"
 
 if ! run_controller_upgrade "${valid_state}" "${release_file}" env >"${fixture}/same-release.log" 2>&1; then
   echo "same-release upgrade was rejected" >&2
@@ -330,6 +352,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
 target_source_mismatch="${fixture}/release/controller-release-source-mismatch.json"
 jq --arg source "$(printf 'd%.0s' {1..40})" '.source_commit = $source' \
   "${next_release_file}" >"${target_source_mismatch}"
+refresh_bundle_dir "${fixture}/release"
 
 target_source_state="${fixture}/target-source-mismatch"
 seed_upgrade_state "${target_source_state}"
@@ -356,6 +379,37 @@ test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 4
 [[ "$(sed -n '2p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '3p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '4p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
+
+tampered_bundle_manifest="${fixture}/release/controller-release-tampered.json"
+cp -- "${release_file}" "${tampered_bundle_manifest}"
+printf '%s\n' tampered >>"${tampered_bundle_manifest}"
+bundle_verification_failure_state="${fixture}/bundle-verification-failure"
+mkdir -m 700 -- "${bundle_verification_failure_state}"
+if run_controller "${bundle_verification_failure_state}" "${tampered_bundle_manifest}" env \
+  >"${bundle_verification_failure_state}/output.log" 2>&1; then
+  echo "tampered Controller release bundle was accepted" >&2
+  exit 1
+fi
+grep -Fq 'release bundle authenticity verification failed' \
+  "${bundle_verification_failure_state}/output.log"
+test ! -e "${bundle_verification_failure_state}/compose.log"
+
+protected_bundle_dir="${fixture}/protected-release-assets"
+mkdir -m 700 -- "${protected_bundle_dir}"
+cp -- "${next_release_file}" "${protected_bundle_dir}/controller-release.json"
+cp -- "${release_file}" "${protected_bundle_dir}/controller-release-previous.json"
+protected_rollback_state="${fixture}/protected-state-rollback"
+seed_upgrade_state "${protected_rollback_state}"
+cp -- "${next_release_file}" "${protected_rollback_state}/current-release.json"
+cp -- "${release_file}" "${protected_rollback_state}/previous-release.json"
+chmod 600 "${protected_rollback_state}/current-release.json" "${protected_rollback_state}/previous-release.json"
+protected_start_state="${fixture}/protected-state-start"
+seed_upgrade_state "${protected_start_state}"
+rm -rf -- "${protected_bundle_dir}"
+run_controller_rollback "${protected_rollback_state}" env
+test ! -e "${protected_rollback_state}/pending-release.json"
+run_controller_start "${protected_start_state}"
+test ! -e "${protected_start_state}/pending-release.json"
 
 rollback_success_state="${fixture}/rollback-success"
 seed_upgrade_state "${rollback_success_state}"
@@ -433,6 +487,7 @@ different_schema_previous="${fixture}/release/controller-release-schema-differen
 cross_schema_current="${fixture}/release/controller-release-schema-current.json"
 jq '.database_migration += 1' "${next_release_file}" >"${cross_schema_current}"
 cp -- "${release_file}" "${different_schema_previous}"
+refresh_bundle_dir "${fixture}/release"
 schema_state="${fixture}/rollback-schema-different"
 seed_upgrade_state "${schema_state}"
 cp -- "${cross_schema_current}" "${schema_state}/current-release.json"
@@ -565,6 +620,7 @@ test ! -e "${descriptor_state}/compose.log"
 
 unresolvable_previous="${fixture}/release/controller-release-unresolvable-previous.json"
 jq --arg source "$(printf 'e%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${unresolvable_previous}"
+refresh_bundle_dir "${fixture}/release"
 unresolvable_state="${fixture}/rollback-unresolvable-previous"
 seed_upgrade_state "${unresolvable_state}"
 cp -- "${next_release_file}" "${unresolvable_state}/current-release.json"
@@ -772,26 +828,30 @@ done
 
 expect_failure "${fixture}/unsupported" "${unsupported}" 'release manifest is invalid' false env
 
-missing_image="${fixture}/missing-image.json"
+missing_image="${fixture}/release/missing-image.json"
 jq 'del(.images.gateway)' "${release_file}" >"${missing_image}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/missing-image" "${missing_image}" 'release manifest is invalid' false env
 
-mutable_image="${fixture}/mutable-image.json"
+mutable_image="${fixture}/release/mutable-image.json"
 jq '.images.gateway = "ghcr.io/gentlekingson/ocservia/gateway:latest"' "${release_file}" >"${mutable_image}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/mutable-image" "${mutable_image}" 'release manifest is invalid' false env
 
 expect_failure "${fixture}/malformed-digest" "${malformed_digest}" 'release manifest is invalid' false env
 
-malformed_json="${fixture}/malformed-json.json"
+malformed_json="${fixture}/release/malformed-json.json"
 printf '%s\n' '{' >"${malformed_json}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/malformed-json" "${malformed_json}" 'release manifest is invalid' false env
 
 symlink_release="${fixture}/release-symlink.json"
 ln -s "${release_file}" "${symlink_release}"
 expect_failure "${fixture}/symlink-release" "${symlink_release}" 'must not contain symlink ancestry' false env
 
-source_mismatch="${fixture}/source-mismatch.json"
+source_mismatch="${fixture}/release/source-mismatch.json"
 jq --arg source "$(printf 'c%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${source_mismatch}"
+refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/source-mismatch" "${source_mismatch}" \
   'checkout HEAD does not match release manifest source_commit' false env
 
@@ -849,10 +909,11 @@ fi
 test -f "${retry_state}/pending-release.json"
 assert_pending_release "${release_file}" "${retry_state}/pending-release.json"
 
-different_pending="${fixture}/different-pending.json"
+different_pending="${fixture}/release/different-pending.json"
 other_digest="sha256:$(printf 'c%.0s' {1..64})"
 jq --arg image "ghcr.io/gentlekingson/ocservia/gateway@${other_digest}" \
   '.images.gateway = $image' "${release_file}" >"${different_pending}"
+refresh_bundle_dir "${fixture}/release"
 if run_controller "${retry_state}" "${different_pending}" env >"${retry_state}/different.log" 2>&1; then
   echo "different pending release was accepted" >&2
   exit 1
