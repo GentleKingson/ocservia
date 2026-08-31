@@ -98,7 +98,8 @@ fi
 grep -Fq 'host replication ocservia_backup all scram-sha-256' \
   "${ROOT}/deploy/production/postgres-init/001-runtime-role.sh"
 
-"${ROOT}/deploy/production/compose.sh" config --format json \
+COMPOSE_PROJECT_NAME=unexpected \
+  "${ROOT}/deploy/production/compose.sh" config --format json \
   >"${ARTIFACT_DIR}/platform-compose.json"
 "${ROOT}/deploy/production/relay/compose.sh" config --format json \
   >"${ARTIFACT_DIR}/relay-compose.json"
@@ -128,6 +129,8 @@ import sys
 
 platform = json.loads(pathlib.Path(sys.argv[1]).read_text())
 relay = json.loads(pathlib.Path(sys.argv[2]).read_text())
+
+assert platform["name"] == "ocservia-production"
 
 def hardened(service):
     assert service.get("read_only") is True

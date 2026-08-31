@@ -80,7 +80,7 @@ for argument in "$@"; do
   esac
 done
 
-compose=(docker compose -f "${ROOT}/deploy/production/compose.yaml")
+compose=(docker compose -p ocservia-production -f "${ROOT}/deploy/production/compose.yaml")
 if [[ "${prepare_transport_runtime}" == true ]]; then
   "${compose[@]}" stop control-plane transportd
   "${compose[@]}" run --rm --no-deps transport-runtime-init
