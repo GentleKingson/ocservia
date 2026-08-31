@@ -344,6 +344,10 @@ jobs:
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
         run: scripts/test-controller-compose-lifecycle.sh
+      - name: Controller host bootstrap prerequisites
+        run: |
+          scripts/test-controller-host-bootstrap.sh
+          deploy/production/bootstrap-host.sh check
       - name: Production topology, relays, backup, and package checks
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
