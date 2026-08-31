@@ -467,8 +467,11 @@ reject("release tool cache must not save before native build success") unless
   build_steps.index(release_build) < build_steps.index(save)
 publish = release_jobs.fetch("publish-release-packages")
 reject("release publishing environment changed") unless publish.fetch("environment") == "release-publishing"
+# The exact publishing permission set is pinned by
+# test-controller-release-manifest.sh; here it must only stay job-local with
+# release-asset write access.
 reject("release publishing must retain contents write as a job-local permission") unless
-  publish.fetch("permissions") == {"contents" => "write"}
+  publish.fetch("permissions").fetch("contents", nil) == "write"
 RUBY
 
 for script in \
