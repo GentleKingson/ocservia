@@ -76,7 +76,10 @@ services:
     tmpfs:
       - /var/lib/ocservia-backup:uid=999,gid=999,mode=0700
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
+      # The initdb temporary server listens on the Unix socket only, so the
+      # healthcheck must go through TCP to avoid passing before init completes
+      # and dependents start into a connection-refused window.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ocservia_owner -d ocservia"]
       interval: 1s
       timeout: 2s
       retries: 30
