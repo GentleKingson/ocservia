@@ -96,7 +96,19 @@ workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
 controller = jobs.fetch("build-controller-images")
 publish = jobs.fetch("publish-release-packages")
-abort("Controller image job must be release-only") unless controller.fetch("if") == "github.event_name == 'release'"
+# Immutable-release publication model: the workflow owns the whole
+# draft -> upload -> publish lifecycle (draft releases fire no workflow
+# events), so it must be triggered by pushing the version tag itself and
+# must never react to release publication.
+triggers = workflow.key?("on") ? workflow.fetch("on") : workflow.fetch(true)
+push_trigger = triggers.fetch("push")
+abort("Release workflow must trigger only on version tag pushes") unless
+  !push_trigger.key?("branches") && push_trigger.fetch("tags") == ["v*.*.*"]
+abort("Release workflow must not trigger on release publication") if triggers.key?("release")
+abort("Controller image job must run only for tag-push release runs") unless
+  controller.fetch("if") == "github.event_name == 'push'"
+abort("Controller publishing must run only for tag-push release runs") unless
+  publish.fetch("if") == "github.event_name == 'push'"
 # The build legs must stay source-only: no registry credential may exist
 # before the reviewer-gated publishing job.
 abort("Controller image build legs must only read source") unless controller.fetch("permissions") == {
@@ -162,6 +174,18 @@ abort("Controller release must generate its canonical manifests") unless
   abort("Controller release must fail closed when an index lacks #{platform}") unless
     publish_steps.include?("grep -Fxq '#{platform}'")
 end
+create_at = publish_steps.index("gh release create")
+upload_at = publish_steps.index("gh release upload")
+publish_at = publish_steps.index("--draft=false")
+abort("Controller publishing must create a draft, upload every asset, then publish") unless
+  !create_at.nil? && !upload_at.nil? && !publish_at.nil? &&
+  create_at < upload_at && upload_at < publish_at
+abort("Controller publishing must never clobber release assets") if
+  publish_steps.include?("--clobber")
+abort("Controller release must verify the published release attestation") unless
+  publish_steps.include?("gh release verify")
+abort("Controller release must fail closed on a mutable release") unless
+  publish_steps.include?("--jq .immutable")
 abort("workflow dispatch must not publish Controller images") if
   controller.fetch("if").include?("workflow_dispatch")
 abort("Controller release must use the GHCR anonymous token flow") unless
