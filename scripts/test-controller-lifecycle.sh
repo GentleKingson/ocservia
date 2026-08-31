@@ -36,7 +36,12 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
 case "${1:-}" in
   config) exit "${MOCK_CONFIG_EXIT:-0}" ;;
   pull) exit "${MOCK_PULL_EXIT:-0}" ;;
-  up) exit "${MOCK_UP_EXIT:-0}" ;;
+  up)
+    if [[ "${MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION:-0}" == 1 ]]; then
+      [[ "$*" == "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway" ]]
+    fi
+    exit "${MOCK_UP_EXIT:-0}"
+    ;;
   down)
     [[ "${COMPOSE_PROJECT_NAME:-}" == ocservia-production ]]
     exit "${MOCK_DOWN_EXIT:-0}"
@@ -449,13 +454,13 @@ seed_upgrade_state "${compatible_cross_schema_state}"
 cp -- "${cross_schema_current}" "${compatible_cross_schema_state}/current-release.json"
 cp -- "${different_schema_previous}" "${compatible_cross_schema_state}/previous-release.json"
 chmod 600 "${compatible_cross_schema_state}/current-release.json" "${compatible_cross_schema_state}/previous-release.json"
-run_controller_rollback "${compatible_cross_schema_state}" env
+run_controller_rollback "${compatible_cross_schema_state}" env MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1
 cmp -s "${different_schema_previous}" "${compatible_cross_schema_state}/current-release.json"
 cmp -s "${cross_schema_current}" "${compatible_cross_schema_state}/previous-release.json"
 test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=29"
 test "$(sed -n '3p' "${compatible_cross_schema_state}/compose.log")" = "config --quiet"
 test "$(sed -n '4p' "${compatible_cross_schema_state}/compose.log")" = "pull"
-test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait"
+test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
 
 minimum_schema_state="${fixture}/rollback-schema-minimum"
 seed_upgrade_state "${minimum_schema_state}"
@@ -610,7 +615,8 @@ seed_upgrade_state "${rollback_cross_schema_smoke_failure_state}"
 cp -- "${cross_schema_current}" "${rollback_cross_schema_smoke_failure_state}/current-release.json"
 cp -- "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
 chmod 600 "${rollback_cross_schema_smoke_failure_state}/current-release.json" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
-if run_controller_rollback "${rollback_cross_schema_smoke_failure_state}" env MOCK_SMOKE_EXIT=1 \
+if run_controller_rollback "${rollback_cross_schema_smoke_failure_state}" env \
+  MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 MOCK_SMOKE_EXIT=1 \
   >"${rollback_cross_schema_smoke_failure_state}/output.log" 2>&1; then
   echo "cross-schema rollback smoke failure was accepted" >&2
   exit 1

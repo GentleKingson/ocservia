@@ -101,12 +101,16 @@ inconsistent, unreachable, or otherwise non-permitting compatibility metadata
 fails closed. This first version also fails closed when the deployment contract
 changed. It performs no down migration or database restore.
 
-Rollback renders and pulls the previous digest-pinned images, starts the
-Compose graph with `up -d --wait`, and requires the functional release smoke to
-confirm the previous version and source commit before exchanging confirmed
-state. A failure after activation leaves confirmed state unchanged and retains
-pending failure evidence for a same-target retry; it does not automatically
-redeploy the current images. Cross-schema rollback is deferred. PostgreSQL
+Rollback renders and pulls the previous digest-pinned images, then requires the
+functional release smoke to confirm the previous version and source commit
+before exchanging confirmed state. Same-schema rollback starts the normal
+Compose graph with `up -d --wait`. Cross-schema rollback uses the read-only
+compatibility result and starts every runtime service except `migrate` with
+`up -d --wait --no-deps`, so the previous Controller's normal migration runner
+is not executed against a newer database schema. This activation does not run a
+down migration or change database state. A failure after activation leaves
+confirmed state unchanged and retains pending failure evidence for a same-target
+retry; it does not automatically redeploy the current images. PostgreSQL
 backup/PITR is the disaster-recovery boundary, not an application rollback
 mechanism.
 

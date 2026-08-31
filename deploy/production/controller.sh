@@ -743,7 +743,15 @@ rollback_controller() {
     fail "rollback target image pull failed; current release remains unchanged"
   fi
   mark_pending_phase rollback-activation "${CURRENT_RELEASE}"
-  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
+  if [[ "${current_migration}" != "${previous_migration}" ]]; then
+    # The compatibility preflight already validated the database. Do not let
+    # the previous Controller image run the normal migration service against
+    # a newer schema during this activation.
+    if ! "${COMPOSE_LAUNCHER}" up -d --wait --no-deps \
+      postgres backup otel-collector transportd control-plane gateway; then
+      fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
+    fi
+  elif ! "${COMPOSE_LAUNCHER}" up -d --wait; then
     fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
   fi
 
