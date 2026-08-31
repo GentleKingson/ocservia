@@ -65,6 +65,16 @@ die() {
 mkdir -m 700 -- "${bin}" "${logs}" "${fixture}/os"
 mkdir -p -- "${work}"
 
+# The bootstrap child must only see the mocked docker/apt/dpkg-query commands,
+# so it runs with a restricted PATH: the mock bin first, then a symlink farm of
+# bash plus the real coreutils binaries the bootstrap and the mocks need. A
+# real Docker on the host must stay invisible to the docker-absent scenarios.
+rootfs_bin="${fixture}/rootfs-bin"
+mkdir -p -- "${rootfs_bin}"
+for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm; do
+  ln -s "$(command -v "${tool}")" "${rootfs_bin}/${tool}"
+done
+
 cat >"${fixture}/os/ubuntu-24.04" <<'EOF'
 PRETTY_NAME="Ubuntu 24.04 LTS"
 NAME="Ubuntu"
@@ -244,7 +254,7 @@ run_bootstrap() {
   local prefix="$1"
   shift
   local pairs=(
-    "PATH=${bin}:${PATH}"
+    "PATH=${bin}:${rootfs_bin}"
     "OCSERV_BOOTSTRAP_OS_RELEASE=${os_release}"
     "OCSERV_BOOTSTRAP_APT_KEYRING_DIR=${work}/apt/keyrings"
     "OCSERV_BOOTSTRAP_APT_SOURCES_DIR=${work}/apt/sources"
