@@ -115,6 +115,19 @@ run_controller_rollback() {
     "$@" "${CONTROLLER}" rollback
 }
 
+run_controller_start() {
+  local state="$1"
+  shift
+  PATH="${bin}:${PATH}" \
+    CONTROLLER_TEST_LOG="${state}/compose.log" \
+    CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
+    CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
+    OCSERV_CONTROLLER_STATE_ROOT="${state}" \
+    OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
+    OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
+    "${CONTROLLER}" start "$@"
+}
+
 run_controller_uninstall() {
   local state="$1"
   shift
@@ -770,6 +783,19 @@ if run_controller "${symlink_state}" "${release_file}" env >"${fixture}/symlink-
 fi
 grep -Fq 'state root must not be a symlink' "${fixture}/symlink-state.log"
 
+uninstall_source_mismatch_state="${fixture}/uninstall-source-mismatch"
+mkdir -m 700 -- "${uninstall_source_mismatch_state}"
+cp -- "${source_mismatch}" "${uninstall_source_mismatch_state}/current-release.json"
+chmod 600 "${uninstall_source_mismatch_state}/current-release.json"
+if run_controller_uninstall "${uninstall_source_mismatch_state}" \
+  >"${uninstall_source_mismatch_state}/output.log" 2>&1; then
+  echo "uninstall with a mismatched checkout was accepted" >&2
+  exit 1
+fi
+grep -Fq 'checkout HEAD does not match release manifest source_commit' \
+  "${uninstall_source_mismatch_state}/output.log"
+test ! -e "${uninstall_source_mismatch_state}/compose.log"
+
 uninstall_state="${fixture}/uninstall-default"
 seed_upgrade_state "${uninstall_state}" "${next_release_file}"
 uninstall_backup="${uninstall_state}/operator-backups"
@@ -789,6 +815,21 @@ test "$(cat "${uninstall_secret}/sentinel")" = secret
 OCSERV_BACKUP_DIR="${uninstall_backup}" OCSERV_SECRET_DIR="${uninstall_secret}" \
   run_controller_uninstall "${uninstall_state}"
 test "$(sed -n '2p' "${uninstall_state}/compose.log")" = "down"
+
+start_state="${fixture}/start"
+seed_upgrade_state "${start_state}"
+run_controller_start "${start_state}"
+test "$(sed -n '1p' "${start_state}/compose.log")" = "up -d --wait"
+test "$(wc -l <"${start_state}/smoke.log")" -eq 1
+grep -Fq -- '--release-file ' "${start_state}/smoke.log"
+IFS=$'\t' read -r start_gateway start_control start_transport start_backup start_postgres start_otel \
+  <"${start_state}/compose-env.log"
+test "${start_gateway}" = "ghcr.io/gentlekingson/ocservia/gateway@${digest}"
+test "${start_control}" = "ghcr.io/gentlekingson/ocservia/control@${digest}"
+test "${start_transport}" = "ghcr.io/gentlekingson/ocservia/transport@${digest}"
+test "${start_backup}" = "ghcr.io/gentlekingson/ocservia/backup@${digest}"
+test "${start_postgres}" = "docker.io/library/postgres@${digest}"
+test "${start_otel}" = "docker.io/otel/opentelemetry-collector@${digest}"
 
 uninstall_failure_state="${fixture}/uninstall-failure"
 seed_upgrade_state "${uninstall_failure_state}" "${next_release_file}"

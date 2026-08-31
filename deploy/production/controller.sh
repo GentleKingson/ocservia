@@ -21,6 +21,7 @@ umask 077
 usage() {
   echo "usage: $0 {install|upgrade} --release-file /path/controller-release.json" >&2
   echo "       $0 rollback" >&2
+  echo "       $0 start" >&2
   echo "       $0 uninstall [--purge-data]" >&2
   exit 2
 }
@@ -425,7 +426,8 @@ mark_pending_phase() {
 }
 
 run_release_smoke() {
-  if ! "${SMOKE_SCRIPT}" --release-file "${STAGED_RELEASE}"; then
+  local release_file="${1:-${STAGED_RELEASE}}"
+  if ! "${SMOKE_SCRIPT}" --release-file "${release_file}"; then
     fail "release smoke failed; confirmed release state remains unchanged" 1
   fi
 }
@@ -800,6 +802,7 @@ uninstall_controller() {
   acquire_lock
   reconcile_completed_pending
   validate_uninstall_state
+  validate_source_tree "${CURRENT_RELEASE}"
   validate_prerequisites false
   map_manifest_images "${CURRENT_RELEASE}"
 
@@ -823,11 +826,37 @@ uninstall_controller() {
   fi
 }
 
+start_controller() {
+  local release_version
+  prepare_state_root
+  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
+  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
+  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
+  acquire_lock
+  reconcile_completed_pending
+  validate_uninstall_state
+  validate_source_tree "${CURRENT_RELEASE}"
+  validate_prerequisites
+  map_manifest_images "${CURRENT_RELEASE}"
+  release_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
+
+  if ! COMPOSE_PROJECT_NAME=ocservia-production "${COMPOSE_LAUNCHER}" up -d --wait; then
+    fail "start activation was not confirmed successful; confirmed release state remains unchanged" 1
+  fi
+  run_release_smoke "${CURRENT_RELEASE}"
+  echo "Controller ${release_version} started"
+}
+
 case "${1:-}" in
   rollback)
     (($# == 1)) || usage
     trap cleanup EXIT
     rollback_controller
+    ;;
+  start)
+    (($# == 1)) || usage
+    trap cleanup EXIT
+    start_controller
     ;;
   install|upgrade)
     (($# == 3)) || usage

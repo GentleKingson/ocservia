@@ -126,11 +126,19 @@ containers and networks.
 
 Do not use `install` to restart a Controller whose confirmed state was retained
 by the default uninstall; `install` correctly refuses an existing current
-release. Start that same release again with the protected launcher:
+release. Start that same release through the lifecycle entrypoint:
 
 ```bash
-deploy/production/compose.sh up -d
+deploy/production/controller.sh start
 ```
+
+`start` reads the retained `current-release.json`, reconstructs all six digest
+image variables, validates that the checkout still matches the confirmed
+release descriptor, and runs the protected Compose launcher with
+`up -d --wait` followed by release smoke. The protected secret directory,
+backup directory, and other required production configuration variables must
+still be available in the environment; image variables no longer need to be
+reconstructed manually. `start` does not change confirmed release state.
 
 To explicitly delete Controller-owned local persistent data as part of the
 uninstall, run:
