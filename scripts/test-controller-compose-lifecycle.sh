@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "Controller Compose lifecycle tests require Docker" >&2
   exit 2
 fi
 command -v jq >/dev/null 2>&1 || {
   echo "Controller Compose lifecycle tests require jq" >&2
+  exit 2
+}
+command -v curl >/dev/null 2>&1 || {
+  echo "Controller Compose lifecycle tests require curl" >&2
   exit 2
 }
 docker compose version >/dev/null
@@ -118,5 +124,46 @@ if docker volume inspect "${volume_b}" >/dev/null 2>&1; then
 fi
 docker volume inspect "${volume_a}" >/dev/null
 echo "down --volumes removed only the selected Compose project's named volume"
+
+# The production gateway image must actually start: its USER directive once
+# referenced an account the upstream image never created, and no other test
+# boots a container from deploy/production/gateway.Dockerfile.
+gateway_tag="ocservia-gateway-startup-$$"
+gateway_container="ocservia-gateway-startup-container-$$"
+gateway_port=18043
+cat >"${fixture}/smoke-Caddyfile" <<'EOF'
+{
+	admin off
+	auto_https off
+}
+
+:8443 {
+	respond "gateway-smoke-ok" 200
+}
+EOF
+docker build --pull --tag "${gateway_tag}" --file "${ROOT}/deploy/production/gateway.Dockerfile" "${ROOT}" >/dev/null
+docker run --detach --name "${gateway_container}" \
+  --publish "127.0.0.1:${gateway_port}:8443" \
+  --volume "${fixture}/smoke-Caddyfile:/etc/caddy/Caddyfile:ro" \
+  "${gateway_tag}" >/dev/null
+trap 'docker rm -f "${gateway_container}" >/dev/null 2>&1 || true; cleanup' EXIT INT TERM
+for _ in $(seq 1 30); do
+  if [[ "$(curl --silent --max-time 2 "http://127.0.0.1:${gateway_port}/" 2>/dev/null || true)" == "gateway-smoke-ok" ]]; then
+    break
+  fi
+  sleep 1
+done
+response="$(curl --fail --silent --max-time 5 "http://127.0.0.1:${gateway_port}/")"
+[[ "${response}" == "gateway-smoke-ok" ]] || {
+  echo "gateway startup smoke did not serve the expected response" >&2
+  docker logs "${gateway_container}" >&2 || true
+  exit 1
+}
+gateway_uid="$(docker exec "${gateway_container}" id -u)"
+[[ "${gateway_uid}" != "0" ]] || {
+  echo "gateway container must not run as root" >&2
+  exit 1
+}
+echo "gateway image served a request as uid ${gateway_uid}"
 
 echo "Controller Docker Compose lifecycle tests passed"
