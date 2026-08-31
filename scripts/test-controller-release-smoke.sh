@@ -31,7 +31,7 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${SMOKE_TEST_CURL_LOG}"
 url="${*: -1}"
 case "${url}" in
-  */api/v1/readyz) printf '%s\n' '{"status":"ok","schema_version":28}' ;;
+  */api/v1/readyz) printf '%s\n' '{"status":"ok","schema_version":29}' ;;
   */api/v1/version) printf '%s\n' '{"version":"0.3.0","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
   *) exit 22 ;;
 esac

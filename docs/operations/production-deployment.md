@@ -104,6 +104,19 @@ redeploy the current images. Cross-schema rollback is deferred. PostgreSQL
 backup/PITR is the disaster-recovery boundary, not an application rollback
 mechanism.
 
+Database compatibility is authoritative in the singleton
+`controller_schema_compatibility` row created by migration `000029`. Its
+`current_schema` must agree with the applied migration history, and a Controller
+is ready only when its expected schema is within the declared range
+`minimum_compatible_controller_schema <= expected <= current_schema`. The
+baseline is exact. A future migration may lower the minimum only after proving
+that the older Controller does not depend on the changed database shape;
+additive changes are not automatically compatible. Destructive cleanup belongs
+to a later contract phase after consumers have moved to the expanded shape.
+Missing, malformed, or undeclared future metadata keeps the Controller
+unready. This metadata is not a backup; use PostgreSQL backup/PITR for disaster
+recovery.
+
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
 Backups retain the configured number of verified base backups. WAL cleanup is anchored to the oldest retained base backup, so point-in-time recovery remains possible across the retained window without allowing the local archive to grow forever. Monitor backup-worker health and the `LATEST` timestamp, copy each completed base backup plus its required WAL range to protected off-host storage, and confirm the off-host copy before reducing local retention.
