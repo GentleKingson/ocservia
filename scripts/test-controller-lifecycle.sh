@@ -461,6 +461,8 @@ test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm
 test "$(sed -n '3p' "${compatible_cross_schema_state}/compose.log")" = "config --quiet"
 test "$(sed -n '4p' "${compatible_cross_schema_state}/compose.log")" = "pull"
 test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
+test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '2p')" = "ghcr.io/gentlekingson/ocservia/control@${next_digest}"
+test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '5p')" = "ghcr.io/gentlekingson/ocservia/control@${digest}"
 
 minimum_schema_state="${fixture}/rollback-schema-minimum"
 seed_upgrade_state "${minimum_schema_state}"
