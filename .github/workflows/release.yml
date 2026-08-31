@@ -1,9 +1,10 @@
 name: Agent Release Packages
-run-name: Agent Packages · ${{ github.event.release.tag_name || inputs.version || github.sha }}
+run-name: Agent Packages · ${{ github.event_name == 'push' && github.ref_name || inputs.version || github.sha }}
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
@@ -15,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-packages-${{ github.event.release.id || github.run_id }}
+  group: release-packages-${{ github.event_name == 'push' && github.ref_name || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -53,7 +54,7 @@ jobs:
         run: scripts/bootstrap.sh native-packages
       - name: Resolve package version & source epoch
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           version=""
@@ -156,7 +157,7 @@ jobs:
 
   build-controller-images:
     name: Build Controller Images (${{ matrix.controller_arch }})
-    if: github.event_name == 'release'
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
     strategy:
@@ -181,7 +182,7 @@ jobs:
         run: scripts/ci-preflight.sh
       - name: Resolve release identity
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -280,7 +281,7 @@ jobs:
           merge-multiple: true
       - name: Resolve package version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           version=""
@@ -302,7 +303,7 @@ jobs:
   publish-release-packages:
     name: Sign & Publish Release Assets
     needs: [validate-release-packages, build-controller-images]
-    if: github.event_name == 'release'
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release-publishing
@@ -313,6 +314,7 @@ jobs:
       attestations: write
     env:
       CONTROLLER_IMAGE_PREFIX: ghcr.io/gentlekingson/ocservia
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -320,6 +322,15 @@ jobs:
           persist-credentials: false
       - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
+      - name: Verify gh CLI release verification support
+        # The publish tail depends on `gh release verify` (gh >= 2.93.0) to
+        # check the release attestation GitHub generates for immutable
+        # releases; fail before any production write if it is unavailable.
+        run: |
+          gh release verify --help >/dev/null 2>&1 || {
+            echo "runner gh CLI does not provide 'gh release verify' (requires gh >= 2.93.0)" >&2
+            exit 1
+          }
       - name: Install rpm inspection tools
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends rpm cpio
       - name: Collect built packages
@@ -336,7 +347,7 @@ jobs:
           merge-multiple: true
       - name: Resolve package version & source epoch
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: |
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "refusing to publish release packages for non-SemVer tag ${RELEASE_TAG}" >&2
@@ -555,12 +566,34 @@ jobs:
           CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 ASSET_DIR="${RUNNER_TEMP}/assets" \
             VERSION="${version}" \
             scripts/validate-release-packages.sh
-      - name: Publish assets to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare draft release
+        # GitHub locks assets of an immutable release at publication, so the
+        # complete asset set must exist before publishing. Publish the draft
+        # below only after every asset has been uploaded. A published release
+        # for this tag is never touched; only a leftover draft from an
+        # earlier failed attempt is discarded and recreated.
         run: |
+          set -euo pipefail
+          if gh release view "${release_tag}" --json isDraft >/dev/null 2>&1; then
+            if [[ "$(gh release view "${release_tag}" --json isDraft --jq .isDraft)" != "true" ]]; then
+              echo "release ${release_tag} already exists and is published; refusing to modify a published release" >&2
+              exit 1
+            fi
+            echo "deleting the leftover draft release ${release_tag} from an earlier attempt" >&2
+            gh release delete "${release_tag}" --yes
+          fi
+          gh release create "${release_tag}" \
+            --draft \
+            --verify-tag \
+            --title "${release_tag}" \
+            --notes "Published from tag ${release_tag} by the Agent Release Packages workflow; release notes are attached after publication."
+      - name: Upload assets to the draft release
+        # No --clobber: uploading must fail on any asset-name collision
+        # instead of silently replacing published bytes.
+        run: |
+          set -euo pipefail
           assets="${RUNNER_TEMP}/assets"
-          gh release upload "${release_tag}" --clobber \
+          gh release upload "${release_tag}" \
             "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz" \
             "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz.sha256" \
             "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz.sha256.sig" \
@@ -581,6 +614,35 @@ jobs:
             "${assets}/SHA256SUMS.sig" \
             "${assets}/release-signing.pub.pem"
           gh release view "${release_tag}" --json assets --jq '.assets[].name'
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          if [[ "$(gh release view "${release_tag}" --json isDraft --jq .isDraft)" != "true" ]]; then
+            echo "release ${release_tag} is no longer a draft; refusing to publish over it" >&2
+            exit 1
+          fi
+          gh release edit "${release_tag}" --draft=false
+      - name: Verify release attestation & immutability
+        # Publishing an immutable release makes GitHub generate a signed
+        # release attestation covering the tag, commit, and every asset;
+        # verify it and assert the release reports itself immutable.
+        run: |
+          set -euo pipefail
+          attempt=1
+          until gh release verify "${release_tag}"; do
+            if (( attempt >= 5 )); then
+              echo "gh release verify failed for ${release_tag}: the release attestation is missing or invalid" >&2
+              exit 1
+            fi
+            echo "release attestation not verifiable yet (attempt ${attempt}/5); retrying shortly" >&2
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+          immutable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" --jq .immutable)"
+          if [[ "${immutable}" != "true" ]]; then
+            echo "release ${release_tag} is not immutable: enable repository release immutability (Settings -> Releases) before publishing" >&2
+            exit 1
+          fi
       - name: Remove release signing key
         if: always()
         run: rm -f -- "${release_signing_key}"

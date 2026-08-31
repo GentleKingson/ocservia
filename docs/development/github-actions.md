@@ -299,9 +299,14 @@ explicitly recorded as pending.
 ## Release packages workflow
 
 `.github/workflows/release.yml` builds the Agent distribution outside the
-primary CI graph. It triggers on a published release (tags matching
-`^v[0-9]+\.[0-9]+\.[0-9]+$`) and on manual `workflow_dispatch`, which always
-stays a dry run and never uploads release assets.
+primary CI graph. It triggers when a lightweight `vX.Y.Z` tag (matching
+`^v[0-9]+\.[0-9]+\.[0-9]+$`) is pushed, and on manual `workflow_dispatch`,
+which always stays a dry run and never uploads release assets. Publishing
+requires repository release immutability to be enabled first (Settings →
+Releases → Enable release immutability, or `gh api -X PUT
+/repos/{owner}/{repo}/immutable-releases`); the setting only applies to
+releases published after it is enabled, so the mutable v0.1.x baseline used
+by the upgrade smoke is unaffected.
 
 - The build job runs as a two-leg matrix on native runners
   (`ubuntu-24.04` for `amd64`, `ubuntu-24.04-arm` for `arm64`, no emulation).
@@ -329,8 +334,8 @@ stays a dry run and never uploads release assets.
   six packages plus the three Controller manifests
   (`controller-release.json`, `controller-release-amd64.json`,
   `controller-release-arm64.json`) on formal Controller releases.
-- The Controller image build runs only for release events as a two-leg
-  matrix on native runners (`ubuntu-24.04` for `amd64`,
+- The Controller image build runs only for tag-push release runs as a
+  two-leg matrix on native runners (`ubuntu-24.04` for `amd64`,
   `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
   builder. Each leg exports its four first-party images as OCI archives
   and holds only source-read permissions: no registry write of any kind
@@ -348,12 +353,22 @@ stays a dry run and never uploads release assets.
   `workflow_dispatch` run never touches the production signing credential,
   and the validate job checks the internal consistency of the signed set
   without the production pin.
-- The publish job runs only for release events behind the protected
+- The publish job runs only for tag-push release runs behind the protected
   `release-publishing` environment with `contents: write`: it re-signs both
   archive checksum triples with the release key, rebuilds the native
   packages with the release trust anchor, validates the whole set against
   the `AGENT_TRUSTED_KEY_SHA256` pin, signs the unified `SHA256SUMS`, and
-  only then uploads the assets to the release.
+  only then publishes through the immutable-release sequence: create a
+  draft release for the tag, upload the complete asset set without
+  `--clobber` (name collisions fail instead of overwriting), publish the
+  draft, and verify the release attestation GitHub generated at
+  publication with `gh release verify` plus an `immutable: true` assertion
+  on the published release. A published release is never modified: if the
+  tag already has a published release the job refuses, and a leftover
+  draft from an earlier failed attempt is the only thing it discards and
+  recreates. Because immutable releases lock assets and the tag at
+  publication, release notes are attached by a maintainer afterwards —
+  title and notes remain editable on an immutable release.
 
 ## Deferred native validation
 
