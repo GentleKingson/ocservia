@@ -104,6 +104,66 @@ redeploy the current images. Cross-schema rollback is deferred. PostgreSQL
 backup/PITR is the disaster-recovery boundary, not an application rollback
 mechanism.
 
+To stop and remove the production Controller runtime without deleting its
+persistent data, run:
+
+```bash
+deploy/production/controller.sh uninstall
+```
+
+Uninstall takes the lifecycle lock, validates the confirmed release state, and
+calls the protected Compose launcher with `down`. This removes the Controller
+containers and project networks while retaining the `postgres-data`,
+`transport-runtime`, and `trust-runtime` named volumes. It also retains
+`current-release.json`, `previous-release.json` when present, the configured
+backup bind mount, and `OCSERV_SECRET_DIR` including PKI, signing keys, and
+Iroh identities. The command does not require `--release-file`; it reads the
+image digests from the confirmed current state. The same production environment
+and protected secret files required by `compose.sh` are still required so the
+launcher can safely resolve and validate the Compose project. Repeating this
+command after a successful uninstall is a safe no-op for the already-removed
+containers and networks.
+
+Do not use `install` to restart a Controller whose confirmed state was retained
+by the default uninstall; `install` correctly refuses an existing current
+release. Start that same release through the lifecycle entrypoint:
+
+```bash
+deploy/production/controller.sh start
+```
+
+`start` reads the retained `current-release.json`, reconstructs all six digest
+image variables, validates that the checkout still matches the confirmed
+release descriptor, and runs the protected Compose launcher with
+`up -d --wait` followed by release smoke. The protected secret directory,
+backup directory, and other required production configuration variables must
+still be available in the environment; image variables no longer need to be
+reconstructed manually. `start` does not change confirmed release state.
+
+To explicitly delete Controller-owned local persistent data as part of the
+uninstall, run:
+
+```bash
+deploy/production/controller.sh uninstall --purge-data
+```
+
+After `down --volumes` succeeds for the fixed `ocservia-production` Compose
+project, this removes the project named volumes, including PostgreSQL data and
+the transport/trust runtime volumes, and removes the local Controller release
+state. It does not remove `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, protected
+off-host backups, operator-created TLS/PKI/key material, the repository
+checkout, Docker images, or unrelated Docker volumes. The lifecycle lock is
+retained so a later invocation cannot create an unprotected replacement state
+root. This is local data deletion, not secure erase and not disaster-recovery
+backup deletion; restore PostgreSQL from the existing backup/PITR procedure
+when needed.
+
+Both forms refuse to run while a pending install, upgrade, or rollback
+transaction exists. A Compose shutdown failure leaves confirmed state and data
+untouched. A failed volume purge is reported as partial and retains lifecycle
+state; a failed state cleanup reports the residual state paths instead of
+claiming that purge completed.
+
 Database compatibility is authoritative in the singleton
 `controller_schema_compatibility` row created by migration `000029`. Its
 `current_schema` must agree with the applied migration history, and a Controller
