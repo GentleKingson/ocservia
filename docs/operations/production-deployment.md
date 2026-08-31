@@ -74,8 +74,13 @@ For a fresh Controller host, install the exact release selected by the local
 manifest through the lifecycle entrypoint:
 
 ```bash
+# amd64 host
 deploy/production/controller.sh install \
-  --release-file /path/to/controller-release-<amd64|arm64>.json
+  --release-file /path/to/controller-release-amd64.json
+
+# arm64 host
+deploy/production/controller.sh install \
+  --release-file /path/to/controller-release-arm64.json
 ```
 
 The entrypoint requires Docker Compose v2 with
@@ -100,8 +105,13 @@ or rotate secrets, certificates, or identity keys. To upgrade an installed Contr
 provide a newer canonical manifest:
 
 ```bash
+# amd64 host
 deploy/production/controller.sh upgrade \
-  --release-file /path/to/controller-release-<amd64|arm64>.json
+  --release-file /path/to/controller-release-amd64.json
+
+# arm64 host
+deploy/production/controller.sh upgrade \
+  --release-file /path/to/controller-release-arm64.json
 ```
 
 Upgrade validates the confirmed current state and target first, checks the

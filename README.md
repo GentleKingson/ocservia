@@ -221,7 +221,13 @@ clean release checkout with the published release manifest for the host
 architecture:
 
 ```bash
-deploy/production/controller.sh install --release-file /path/to/controller-release-<amd64|arm64>.json
+# amd64 host
+deploy/production/controller.sh install \
+  --release-file /path/to/controller-release-amd64.json
+
+# arm64 host
+deploy/production/controller.sh install \
+  --release-file /path/to/controller-release-arm64.json
 ```
 
 Direct `docker compose` invocation is not the supported production path because the launcher enforces image, secret, ownership, mode, path, and runtime-initialization requirements.
