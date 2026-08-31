@@ -92,7 +92,21 @@ by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives
 only the runtime role credentials. Migration execution uses a PostgreSQL
 advisory lock, validates the complete applied history, and grants the runtime
 role ordinary data access while limiting `audit_events` to `SELECT` and
-`INSERT`. Readiness requires the database schema to match the binary exactly.
+`INSERT`. Migration `000029` creates the authoritative singleton
+`controller_schema_compatibility` row with an exact range. Readiness accepts a
+Controller expected schema only when
+`minimum_compatible_controller_schema <= expected <= current_schema` and the
+applied migration history agrees with `current_schema`; missing, malformed, or
+unaccounted-for future metadata fails closed. Every later migration starts with
+an exact range and must explicitly declare a lower minimum in its own
+transaction after compatibility review.
+
+An additive migration is not automatically backward-compatible: verify all old
+Controller queries and writes before lowering the minimum. Destructive cleanup
+must follow an expand, deploy/migrate, and contract sequence, such as a
+post-deployment migration after all consumers stop depending on the old shape.
+The compatibility row is not a backup. PostgreSQL backups and PITR remain the
+disaster-recovery mechanism.
 
 Run the browser-to-simulator E2E with `make e2e`. The script scopes every
 container, network, and volume to `COMPOSE_PROJECT` and removes them on success,

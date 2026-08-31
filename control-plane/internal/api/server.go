@@ -262,8 +262,8 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is not ready", "database dependency is unavailable")
 		return
 	}
-	version, err := migrations.CurrentSchemaVersion(ctx, s.pool)
-	if err != nil || version != s.expectedSchema {
+	compatibility, err := migrations.ValidateControllerSchema(ctx, s.pool, s.expectedSchema)
+	if err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/schema-unavailable", "Service is not ready", "database schema is unavailable")
 		return
 	}
@@ -272,7 +272,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/event-stream-unavailable", "Service is not ready", "event stream watcher is recovering")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schema_version": version})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schema_version": compatibility.CurrentSchema})
 }
 
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {

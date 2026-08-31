@@ -76,12 +76,12 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		logger.Info("database migrations complete")
 		return nil
 	}
-	if err := migrations.ValidateCurrentSchema(databaseCtx, pool); err != nil {
-		return fmt.Errorf("validate database schema: %w", err)
-	}
 	expectedSchemaVersion, err := migrations.LatestSchemaVersion()
 	if err != nil {
 		return err
+	}
+	if _, err := migrations.ValidateControllerSchema(databaseCtx, pool, expectedSchemaVersion); err != nil {
+		return fmt.Errorf("validate database schema: %w", err)
 	}
 	auditManager, err := newAuditManager(pool, cfg)
 	if err != nil {

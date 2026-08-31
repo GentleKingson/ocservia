@@ -37,6 +37,27 @@ type appliedMigration struct {
 
 type Preflight func(context.Context, pgx.Tx, int64) error
 
+const controllerSchemaCompatibilityMigrationVersion int64 = 29
+
+type SchemaCompatibility struct {
+	CurrentSchema                     int64
+	MinimumCompatibleControllerSchema int64
+}
+
+func (c SchemaCompatibility) Validate() error {
+	if c.CurrentSchema < 1 || c.MinimumCompatibleControllerSchema < 1 {
+		return errors.New("schema compatibility metadata contains a non-positive version")
+	}
+	if c.MinimumCompatibleControllerSchema > c.CurrentSchema {
+		return fmt.Errorf("schema compatibility minimum %d exceeds current schema %d", c.MinimumCompatibleControllerSchema, c.CurrentSchema)
+	}
+	return nil
+}
+
+func (c SchemaCompatibility) Allows(expectedSchema int64) bool {
+	return expectedSchema >= c.MinimumCompatibleControllerSchema && expectedSchema <= c.CurrentSchema
+}
+
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -94,30 +115,60 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, preflights ...Preflight) e
 			return err
 		}
 	}
+	if len(migrations) > 0 && migrations[len(migrations)-1].Version >= controllerSchemaCompatibilityMigrationVersion {
+		if _, err := validateStoredSchemaCompatibility(ctx, conn); err != nil {
+			return fmt.Errorf("validate schema compatibility: %w", err)
+		}
+	}
 	return nil
 }
 
 func ValidateCurrentSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	expectedSchema, err := LatestSchemaVersion()
+	if err != nil {
+		return err
+	}
+	_, err = ValidateControllerSchema(ctx, pool, expectedSchema)
+	return err
+}
+
+func ValidateControllerSchema(ctx context.Context, pool *pgxpool.Pool, expectedSchema int64) (SchemaCompatibility, error) {
+	if expectedSchema < 1 {
+		return SchemaCompatibility{}, errors.New("expected schema version must be positive")
+	}
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("acquire schema validation connection: %w", err)
+		return SchemaCompatibility{}, fmt.Errorf("acquire schema validation connection: %w", err)
 	}
 	defer conn.Release()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return SchemaCompatibility{}, fmt.Errorf("begin schema validation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	known, err := loadMigrations()
 	if err != nil {
-		return err
+		return SchemaCompatibility{}, err
 	}
-	applied, err := readAppliedMigrations(ctx, conn)
+	applied, err := readAppliedMigrations(ctx, tx)
 	if err != nil {
-		return err
+		return SchemaCompatibility{}, err
 	}
-	if err := validateAppliedMigrations(known, applied); err != nil {
-		return err
+	if err := validateControllerAppliedMigrations(known, applied); err != nil {
+		return SchemaCompatibility{}, err
 	}
-	if len(applied) != len(known) {
-		return fmt.Errorf("database schema is behind: found %d of %d migrations", len(applied), len(known))
+	compatibility, err := validateStoredSchemaCompatibility(ctx, tx)
+	if err != nil {
+		return SchemaCompatibility{}, err
 	}
-	return nil
+	if !compatibility.Allows(expectedSchema) {
+		return SchemaCompatibility{}, fmt.Errorf("schema compatibility does not allow Controller schema %d: supported range is %d through %d", expectedSchema, compatibility.MinimumCompatibleControllerSchema, compatibility.CurrentSchema)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SchemaCompatibility{}, fmt.Errorf("commit schema validation: %w", err)
+	}
+	return compatibility, nil
 }
 
 func LatestSchemaVersion() (int64, error) {
@@ -136,6 +187,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 	statements := []string{
 		"GRANT USAGE ON SCHEMA public TO " + identifier,
 		"GRANT SELECT ON schema_migrations TO " + identifier,
+		"GRANT SELECT ON controller_schema_compatibility TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces, nodes, operations TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON enrollment_tokens, node_endpoint_keys, node_capabilities TO " + identifier,
 		"GRANT SELECT, INSERT ON node_sealing_keys TO " + identifier,
@@ -187,8 +239,13 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 	return nil
 }
 
-func readAppliedMigrations(ctx context.Context, conn *pgxpool.Conn) ([]appliedMigration, error) {
-	rows, err := conn.Query(ctx, "SELECT version, name, checksum FROM schema_migrations ORDER BY version")
+type queryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func readAppliedMigrations(ctx context.Context, db queryer) ([]appliedMigration, error) {
+	rows, err := db.Query(ctx, "SELECT version, name, checksum FROM schema_migrations ORDER BY version")
 	if err != nil {
 		return nil, fmt.Errorf("read applied migrations: %w", err)
 	}
@@ -232,12 +289,68 @@ func validateAppliedMigrations(known []Migration, applied []appliedMigration) er
 }
 
 func CurrentSchemaVersion(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	return readCurrentSchemaVersion(ctx, pool)
+}
+
+func readCurrentSchemaVersion(ctx context.Context, db queryer) (int64, error) {
 	var version int64
-	err := pool.QueryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version)
+	err := db.QueryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("read schema version: %w", err)
 	}
 	return version, nil
+}
+
+func readSchemaCompatibility(ctx context.Context, db queryer) (SchemaCompatibility, error) {
+	var compatibility SchemaCompatibility
+	err := db.QueryRow(ctx, `
+		SELECT "current_schema", minimum_compatible_controller_schema
+		FROM controller_schema_compatibility
+		WHERE singleton
+	`).Scan(&compatibility.CurrentSchema, &compatibility.MinimumCompatibleControllerSchema)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SchemaCompatibility{}, errors.New("schema compatibility metadata is missing")
+	}
+	if err != nil {
+		return SchemaCompatibility{}, fmt.Errorf("read schema compatibility metadata: %w", err)
+	}
+	if err := compatibility.Validate(); err != nil {
+		return SchemaCompatibility{}, err
+	}
+	return compatibility, nil
+}
+
+func validateStoredSchemaCompatibility(ctx context.Context, db queryer) (SchemaCompatibility, error) {
+	compatibility, err := readSchemaCompatibility(ctx, db)
+	if err != nil {
+		return SchemaCompatibility{}, err
+	}
+	currentSchema, err := readCurrentSchemaVersion(ctx, db)
+	if err != nil {
+		return SchemaCompatibility{}, err
+	}
+	if currentSchema != compatibility.CurrentSchema {
+		return SchemaCompatibility{}, fmt.Errorf("schema compatibility current schema %d does not match applied schema version %d", compatibility.CurrentSchema, currentSchema)
+	}
+	return compatibility, nil
+}
+
+func validateControllerAppliedMigrations(known []Migration, applied []appliedMigration) error {
+	if len(known) == 0 {
+		return errors.New("no embedded migrations")
+	}
+	if len(applied) < len(known) {
+		return fmt.Errorf("database schema is behind: found %d of %d migrations", len(applied), len(known))
+	}
+	if err := validateAppliedMigrations(known, applied[:len(known)]); err != nil {
+		return err
+	}
+	for index := len(known); index < len(applied); index++ {
+		if applied[index].Version <= applied[index-1].Version {
+			return fmt.Errorf("applied migrations do not form an ordered prefix: version %d follows version %d", applied[index].Version, applied[index-1].Version)
+		}
+	}
+	return nil
 }
 
 func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration Migration, preflights []Preflight) error {
@@ -255,8 +368,30 @@ func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration Migration
 			return fmt.Errorf("preflight migration %d: %w", migration.Version, err)
 		}
 	}
+	if migration.Version > controllerSchemaCompatibilityMigrationVersion {
+		result, err := tx.Exec(ctx, `
+			UPDATE controller_schema_compatibility
+			SET "current_schema" = $1, minimum_compatible_controller_schema = $1
+			WHERE singleton
+		`, migration.Version)
+		if err != nil {
+			return fmt.Errorf("prepare schema compatibility for migration %d: %w", migration.Version, err)
+		}
+		if result.RowsAffected() != 1 {
+			return fmt.Errorf("prepare schema compatibility for migration %d: metadata row is missing", migration.Version)
+		}
+	}
 	if _, err := tx.Exec(ctx, migration.SQL); err != nil {
 		return fmt.Errorf("apply migration %d: %w", migration.Version, err)
+	}
+	if migration.Version >= controllerSchemaCompatibilityMigrationVersion {
+		compatibility, err := readSchemaCompatibility(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("validate schema compatibility for migration %d: %w", migration.Version, err)
+		}
+		if compatibility.CurrentSchema != migration.Version {
+			return fmt.Errorf("validate schema compatibility for migration %d: current schema is %d", migration.Version, compatibility.CurrentSchema)
+		}
 	}
 	if _, err := tx.Exec(ctx, "INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)", migration.Version, migration.Name, migration.Checksum[:]); err != nil {
 		return fmt.Errorf("record migration %d: %w", migration.Version, err)
