@@ -37,6 +37,10 @@ case "${1:-}" in
   config) exit "${MOCK_CONFIG_EXIT:-0}" ;;
   pull) exit "${MOCK_PULL_EXIT:-0}" ;;
   up) exit "${MOCK_UP_EXIT:-0}" ;;
+  down)
+    [[ "${COMPOSE_PROJECT_NAME:-}" == ocservia-production ]]
+    exit "${MOCK_DOWN_EXIT:-0}"
+    ;;
   ps)
     if [[ -n "${MOCK_PS_JSON:-}" ]]; then
       printf '%s\n' "${MOCK_PS_JSON}"
@@ -109,6 +113,19 @@ run_controller_rollback() {
     OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
     OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
     "$@" "${CONTROLLER}" rollback
+}
+
+run_controller_uninstall() {
+  local state="$1"
+  shift
+  PATH="${bin}:${PATH}" \
+    CONTROLLER_TEST_LOG="${state}/compose.log" \
+    CONTROLLER_TEST_ENV_LOG="${state}/compose-env.log" \
+    CONTROLLER_TEST_SMOKE_LOG="${state}/smoke.log" \
+    OCSERV_CONTROLLER_STATE_ROOT="${state}" \
+    OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
+    OCSERV_CONTROLLER_SMOKE_SH="${bin}/controller-release-smoke.sh" \
+    "${CONTROLLER}" uninstall "$@"
 }
 
 assert_pending_release() {
@@ -752,5 +769,157 @@ if run_controller "${symlink_state}" "${release_file}" env >"${fixture}/symlink-
   exit 1
 fi
 grep -Fq 'state root must not be a symlink' "${fixture}/symlink-state.log"
+
+uninstall_state="${fixture}/uninstall-default"
+seed_upgrade_state "${uninstall_state}" "${next_release_file}"
+uninstall_backup="${uninstall_state}/operator-backups"
+uninstall_secret="${uninstall_state}/operator-secrets"
+mkdir -m 700 -- "${uninstall_backup}" "${uninstall_secret}"
+printf '%s\n' backup >"${uninstall_backup}/sentinel"
+printf '%s\n' secret >"${uninstall_secret}/sentinel"
+OCSERV_BACKUP_DIR="${uninstall_backup}" OCSERV_SECRET_DIR="${uninstall_secret}" \
+  run_controller_uninstall "${uninstall_state}"
+test "$(sed -n '1p' "${uninstall_state}/compose.log")" = "down"
+test "$(wc -l <"${uninstall_state}/compose.log")" -eq 1
+cmp -s "${release_file}" "${uninstall_state}/current-release.json"
+cmp -s "${next_release_file}" "${uninstall_state}/previous-release.json"
+test -f "${uninstall_state}/lifecycle.lock"
+test "$(cat "${uninstall_backup}/sentinel")" = backup
+test "$(cat "${uninstall_secret}/sentinel")" = secret
+OCSERV_BACKUP_DIR="${uninstall_backup}" OCSERV_SECRET_DIR="${uninstall_secret}" \
+  run_controller_uninstall "${uninstall_state}"
+test "$(sed -n '2p' "${uninstall_state}/compose.log")" = "down"
+
+uninstall_failure_state="${fixture}/uninstall-failure"
+seed_upgrade_state "${uninstall_failure_state}" "${next_release_file}"
+export MOCK_DOWN_EXIT=1
+if run_controller_uninstall "${uninstall_failure_state}" \
+  >"${uninstall_failure_state}/output.log" 2>&1; then
+  unset MOCK_DOWN_EXIT
+  echo "uninstall failure was accepted" >&2
+  exit 1
+fi
+unset MOCK_DOWN_EXIT
+grep -Fq 'Controller Compose down failed; lifecycle state and persistent data were retained' \
+  "${uninstall_failure_state}/output.log"
+test -f "${uninstall_failure_state}/current-release.json"
+test -f "${uninstall_failure_state}/previous-release.json"
+
+pending_uninstall_state="${fixture}/uninstall-pending"
+seed_upgrade_state "${pending_uninstall_state}" "${next_release_file}"
+seed_pending_state "${pending_uninstall_state}" "${next_release_file}" "${release_file}"
+if run_controller_uninstall "${pending_uninstall_state}" >"${pending_uninstall_state}/output.log" 2>&1; then
+  echo "uninstall with a pending transaction was accepted" >&2
+  exit 1
+fi
+grep -Fq 'pending release transaction exists; refusing to uninstall' \
+  "${pending_uninstall_state}/output.log"
+test ! -e "${pending_uninstall_state}/compose.log"
+
+purge_state="${fixture}/uninstall-purge"
+seed_upgrade_state "${purge_state}" "${next_release_file}"
+purge_backup="${purge_state}/operator-backups"
+purge_secret="${purge_state}/operator-secrets"
+mkdir -m 700 -- "${purge_backup}" "${purge_secret}"
+printf '%s\n' backup >"${purge_backup}/sentinel"
+printf '%s\n' secret >"${purge_secret}/sentinel"
+OCSERV_BACKUP_DIR="${purge_backup}" OCSERV_SECRET_DIR="${purge_secret}" \
+  run_controller_uninstall "${purge_state}" --purge-data
+test "$(sed -n '1p' "${purge_state}/compose.log")" = "down --volumes"
+test ! -e "${purge_state}/current-release.json"
+test ! -e "${purge_state}/previous-release.json"
+test ! -e "${purge_state}/pending-release.json"
+test -f "${purge_state}/lifecycle.lock"
+test "$(cat "${purge_backup}/sentinel")" = backup
+test "$(cat "${purge_secret}/sentinel")" = secret
+
+purge_failure_state="${fixture}/uninstall-purge-failure"
+seed_upgrade_state "${purge_failure_state}" "${next_release_file}"
+export MOCK_DOWN_EXIT=1
+if run_controller_uninstall "${purge_failure_state}" --purge-data \
+  >"${purge_failure_state}/output.log" 2>&1; then
+  unset MOCK_DOWN_EXIT
+  echo "purge failure was accepted" >&2
+  exit 1
+fi
+unset MOCK_DOWN_EXIT
+grep -Fq 'local data purge is partial and lifecycle state was retained' \
+  "${purge_failure_state}/output.log"
+test "$(sed -n '1p' "${purge_failure_state}/compose.log")" = "down --volumes"
+test -f "${purge_failure_state}/current-release.json"
+test -f "${purge_failure_state}/previous-release.json"
+
+for pending_phase in preflight activation rollback-activation; do
+  phase_state="${fixture}/uninstall-${pending_phase}"
+  seed_upgrade_state "${phase_state}" "${next_release_file}"
+  seed_pending_state "${phase_state}" "${next_release_file}" "${release_file}"
+  jq --arg phase "${pending_phase}" '.phase = $phase' \
+    "${phase_state}/pending-release.json" >"${phase_state}/pending-release.tmp"
+  mv -- "${phase_state}/pending-release.tmp" "${phase_state}/pending-release.json"
+  chmod 600 "${phase_state}/pending-release.json"
+  if run_controller_uninstall "${phase_state}" >"${phase_state}/output.log" 2>&1; then
+    echo "uninstall during ${pending_phase} was accepted" >&2
+    exit 1
+  fi
+  grep -Fq 'pending release transaction exists; refusing to uninstall' \
+    "${phase_state}/output.log"
+  test ! -e "${phase_state}/compose.log"
+done
+
+unsafe_uninstall_state="${fixture}/uninstall-unsafe-state"
+mkdir -m 750 -- "${unsafe_uninstall_state}"
+if run_controller_uninstall "${unsafe_uninstall_state}" >"${fixture}/uninstall-unsafe-state.log" 2>&1; then
+  echo "unsafe uninstall state root was accepted" >&2
+  exit 1
+fi
+grep -Fq 'state root must be owned by the launcher user with mode 0700' \
+  "${fixture}/uninstall-unsafe-state.log"
+
+symlink_uninstall_state="${fixture}/uninstall-symlink-state"
+mkdir -m 700 -- "${symlink_uninstall_state}"
+ln -s "${release_file}" "${symlink_uninstall_state}/current-release.json"
+if run_controller_uninstall "${symlink_uninstall_state}" \
+  >"${fixture}/uninstall-symlink-state.log" 2>&1; then
+  echo "symlink uninstall release state was accepted" >&2
+  exit 1
+fi
+grep -Fq 'current release state is a symlink; refusing to uninstall' \
+  "${fixture}/uninstall-symlink-state.log"
+
+lock_uninstall_state="${fixture}/uninstall-lock"
+seed_upgrade_state "${lock_uninstall_state}"
+: >"${lock_uninstall_state}/lifecycle.lock"
+chmod 600 "${lock_uninstall_state}/lifecycle.lock"
+(
+  exec 9>>"${lock_uninstall_state}/lifecycle.lock"
+  flock -n 9
+  printf '%s\n' ready >"${lock_uninstall_state}/ready"
+  sleep 10
+) &
+uninstall_lock_holder=$!
+for _ in $(seq 1 100); do
+  [[ -f "${lock_uninstall_state}/ready" ]] && break
+  sleep 0.01
+done
+test -f "${lock_uninstall_state}/ready"
+if run_controller_uninstall "${lock_uninstall_state}" \
+  >"${lock_uninstall_state}/output.log" 2>&1; then
+  kill "${uninstall_lock_holder}" 2>/dev/null || true
+  wait "${uninstall_lock_holder}" 2>/dev/null || true
+  echo "concurrent Controller uninstall was accepted" >&2
+  exit 1
+fi
+grep -Fq 'another Controller lifecycle command is already running' \
+  "${lock_uninstall_state}/output.log"
+kill "${uninstall_lock_holder}" 2>/dev/null || true
+wait "${uninstall_lock_holder}" 2>/dev/null || true
+
+after_unknown_uninstall="${fixture}/uninstall-unknown-flag.log"
+if run_controller_uninstall "${fixture}/uninstall-unknown-flag" --unexpected \
+  >"${after_unknown_uninstall}" 2>&1; then
+  echo "unknown uninstall flag was accepted" >&2
+  exit 1
+fi
+grep -Fq 'usage:' "${after_unknown_uninstall}"
 
 echo "Controller lifecycle tests passed"

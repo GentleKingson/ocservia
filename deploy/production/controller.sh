@@ -14,12 +14,14 @@ PENDING_MANIFEST_TMP=""
 PENDING_PREVIOUS_TMP=""
 PENDING_ACTIVE=false
 PENDING_FAILURE_RECORDED=false
+PURGE_DATA=false
 
 umask 077
 
 usage() {
   echo "usage: $0 {install|upgrade} --release-file /path/controller-release.json" >&2
   echo "       $0 rollback" >&2
+  echo "       $0 uninstall [--purge-data]" >&2
   exit 2
 }
 
@@ -216,18 +218,20 @@ map_manifest_images() {
 }
 
 validate_prerequisites() {
-  local compose_help
+  local compose_help require_release_runtime="${1:-true}"
   command -v jq >/dev/null 2>&1 || fail "jq is required to validate release manifests"
   [[ -x "${COMPOSE_LAUNCHER}" && ! -L "${COMPOSE_LAUNCHER}" ]] ||
     fail "production Compose launcher is missing or not executable"
   require_absolute_canonical_path "production Compose launcher" "${COMPOSE_LAUNCHER}"
-  [[ -x "${SMOKE_SCRIPT}" && ! -L "${SMOKE_SCRIPT}" ]] ||
-    fail "Controller release smoke script is missing or not executable"
-  require_absolute_canonical_path "Controller release smoke script" "${SMOKE_SCRIPT}"
   command -v docker >/dev/null 2>&1 || fail "docker is required"
-  compose_help="$(docker compose up --help 2>&1)" || fail "Docker Compose v2 is required"
-  [[ "${compose_help}" == *"--wait"* ]] ||
-    fail "Docker Compose must support 'docker compose up --wait'"
+  if [[ "${require_release_runtime}" == true ]]; then
+    [[ -x "${SMOKE_SCRIPT}" && ! -L "${SMOKE_SCRIPT}" ]] ||
+      fail "Controller release smoke script is missing or not executable"
+    require_absolute_canonical_path "Controller release smoke script" "${SMOKE_SCRIPT}"
+    compose_help="$(docker compose up --help 2>&1)" || fail "Docker Compose v2 is required"
+    [[ "${compose_help}" == *"--wait"* ]] ||
+      fail "Docker Compose must support 'docker compose up --wait'"
+  fi
 }
 
 cleanup() {
@@ -738,6 +742,87 @@ rollback_controller() {
   echo "Controller rolled back to ${target_version}"
 }
 
+validate_uninstall_state() {
+  if [[ -L "${CURRENT_RELEASE}" ]]; then
+    fail "current release state is a symlink; refusing to uninstall"
+  fi
+  validate_current_release
+  validate_previous_release
+  if [[ -L "${PENDING_RELEASE}" ]]; then
+    fail "pending release state must not be a symlink; refusing to uninstall"
+  elif [[ -e "${PENDING_RELEASE}" ]]; then
+    validate_state_file_path "pending release state" "${PENDING_RELEASE}"
+    validate_pending_release
+    fail "pending release transaction exists; refusing to uninstall"
+  fi
+}
+
+purge_controller_state() {
+  local state_file failed=false
+  local state_files=(
+    "${CURRENT_RELEASE}"
+    "${PREVIOUS_RELEASE}"
+    "${PENDING_RELEASE}"
+  )
+
+  for state_file in "${state_files[@]}"; do
+    if [[ -L "${state_file}" || ( -e "${state_file}" && ! -f "${state_file}" ) ]]; then
+      echo "controller lifecycle: lifecycle state path is unsafe: ${state_file}" >&2
+      failed=true
+    fi
+  done
+  [[ "${failed}" == false ]] || return 1
+
+  for state_file in "${state_files[@]}"; do
+    [[ -e "${state_file}" ]] || continue
+    if ! rm -f -- "${state_file}"; then
+      echo "controller lifecycle: failed to remove lifecycle state: ${state_file}" >&2
+      failed=true
+    fi
+  done
+  if [[ "${failed}" == true ]]; then
+    echo "controller lifecycle: lifecycle state cleanup left residual paths:" >&2
+    for state_file in "${state_files[@]}"; do
+      if [[ -e "${state_file}" || -L "${state_file}" ]]; then
+        echo "  ${state_file}" >&2
+      fi
+    done
+    return 1
+  fi
+}
+
+uninstall_controller() {
+  local down_args=(down)
+  prepare_state_root
+  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
+  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
+  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
+  acquire_lock
+  reconcile_completed_pending
+  validate_uninstall_state
+  validate_prerequisites false
+  map_manifest_images "${CURRENT_RELEASE}"
+
+  if [[ "${PURGE_DATA}" == true ]]; then
+    down_args+=(--volumes)
+  fi
+  if ! COMPOSE_PROJECT_NAME=ocservia-production "${COMPOSE_LAUNCHER}" "${down_args[@]}"; then
+    if [[ "${PURGE_DATA}" == true ]]; then
+      fail "Controller Compose down --volumes failed; local data purge is partial and lifecycle state was retained" 1
+    fi
+    fail "Controller Compose down failed; lifecycle state and persistent data were retained" 1
+  fi
+
+  if [[ "${PURGE_DATA}" == true ]]; then
+    if ! purge_controller_state; then
+      fail "local Controller data purge completed but lifecycle state cleanup failed" 1
+    fi
+    echo "Controller uninstalled and Controller-owned local data purged"
+  else
+    echo "Controller uninstalled; persistent data and lifecycle state preserved"
+  fi
+}
+
 case "${1:-}" in
   rollback)
     (($# == 1)) || usage
@@ -755,6 +840,17 @@ case "${1:-}" in
     else
       upgrade_controller
     fi
+    ;;
+  uninstall)
+    if (($# == 1)); then
+      PURGE_DATA=false
+    elif (($# == 2)) && [[ "$2" == "--purge-data" ]]; then
+      PURGE_DATA=true
+    else
+      usage
+    fi
+    trap cleanup EXIT
+    uninstall_controller
     ;;
   *)
     usage
