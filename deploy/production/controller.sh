@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${ROOT}/deploy/production/compose.sh}"
 SMOKE_SCRIPT="${OCSERV_CONTROLLER_SMOKE_SH:-${ROOT}/deploy/production/controller-release-smoke.sh}"
+RELEASE_BUNDLE_VERIFIER="${ROOT}/scripts/verify-controller-release-bundle.sh"
 CURRENT_RELEASE=""
 PREVIOUS_RELEASE=""
 PENDING_RELEASE=""
@@ -113,6 +114,17 @@ validate_release_file_path() {
     fail "release file must be root- or launcher-owned"
   (( (8#${release_mode} & 8#022) == 0 )) ||
     fail "release file must not be group/world writable"
+}
+
+verify_release_bundle() {
+  [[ -n "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-}" ]] ||
+    fail "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY must identify an operator-provisioned trusted public key"
+  [[ -x "${RELEASE_BUNDLE_VERIFIER}" && ! -L "${RELEASE_BUNDLE_VERIFIER}" ]] ||
+    fail "Controller release bundle verifier is missing or not executable"
+  require_absolute_canonical_path "Controller release bundle verifier" "${RELEASE_BUNDLE_VERIFIER}"
+  if ! "${RELEASE_BUNDLE_VERIFIER}" "${RELEASE_FILE}" "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY}"; then
+    fail "release bundle authenticity verification failed"
+  fi
 }
 
 validate_state_file_path() {
@@ -607,6 +619,7 @@ install_controller() {
   fi
 
   validate_release_file_path "${RELEASE_FILE}"
+  verify_release_bundle
   stage_and_validate_manifest
   map_manifest_images "${STAGED_RELEASE}"
   release_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
@@ -644,6 +657,7 @@ upgrade_controller() {
   validate_current_release
   validate_previous_release
   validate_release_file_path "${RELEASE_FILE}"
+  verify_release_bundle
   stage_and_validate_manifest
   validate_source_tree
   current_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"

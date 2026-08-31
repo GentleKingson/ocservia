@@ -28,10 +28,31 @@ anonymous registry read check and fails closed if any image cannot be pulled
 without credentials. The PR1 Controller bundle currently supports
 `linux/amd64` only, and the manifest records that platform explicitly.
 
-The signed `SHA256SUMS` also includes `controller-release.json`, so verify the
-published `SHA256SUMS.sig` with the release public key before trusting the
-manifest. The separate `controller-release.json.sha256` is an additional
-byte-integrity check.
+The signed `SHA256SUMS` also includes `controller-release.json`, and the separate
+`controller-release.json.sha256` is an additional byte-integrity check. Before
+using a release bundle, provision the release-signing public key through an
+independent protected channel and point the lifecycle entrypoint at it:
+
+```bash
+export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-signing.pub.pem
+```
+
+The key path must be absolute and canonical, have no symlink ancestry, be a
+regular root- or launcher-owned file, and not be group/world writable. Do not
+select the public key copied from the same release bundle as the trust anchor:
+an attacker who replaces the manifest, checksum, signature, and key together
+would otherwise be able to validate the replacement bundle with its own key.
+The lifecycle entrypoint automatically verifies the trusted Ed25519 signature
+over `SHA256SUMS`, the single manifest entry and its bytes, and the independent
+manifest checksum before any Compose config, image pull, or activation step.
+Missing or invalid bundle evidence fails closed. Rollback and start continue
+to use only the protected local release state and do not require the original
+release bundle to remain on disk.
+
+GitHub image attestations remain an optional higher-level provenance check and
+are not a production lifecycle prerequisite. When `gh` is already available,
+operators may separately run `gh attestation verify oci://...` for each
+first-party image at the exact digest recorded in the manifest.
 
 For a fresh Controller host, install the exact release selected by the local
 manifest through the lifecycle entrypoint:
