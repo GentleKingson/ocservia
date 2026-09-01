@@ -321,6 +321,14 @@ secret_scan_jobs.each do |job_id, scan_targets|
     scan_targets.all? { |target| scan_run.include?(target) }
   abort("#{job_id} must keep exactly one gitleaks invocation per evidence layer") unless
     scan_run.scan("gitleaks dir").length == scan_targets.length
+  abort("#{job_id} must execute every scan despite an earlier finding") unless
+    scan_run.scan("if ! gitleaks dir").length == scan_targets.length &&
+    scan_run.include?("scan_status=0") && scan_run.include?("exit") &&
+    scan_run.include?("${scan_status}")
+  abort("#{job_id} must retain redacted per-target diagnostics") unless
+    scan_run.scan("--report-format json").length == scan_targets.length &&
+    scan_run.scan("--report-path").length == scan_targets.length &&
+    scan_run.include?("--redact")
   abort("#{job_id} must use the repository gitleaks configuration") unless
     scan_run.include?("scripts/g6-secret-scan.toml")
   job_run = steps.map { |step| step["run"].to_s }.join("\n")
