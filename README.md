@@ -6,7 +6,7 @@
 
 **A self-hosted management plane for fleets of [ocserv](https://ocserv.openconnect-vpn.net/) / OpenConnect VPN servers.**
 
-ocservia lets you operate several independent ocserv nodes from one Web console and API: fleet inventory and health, users and groups, sessions and IP bans, configuration workflows, and signed Agent packages — with enrollment, RBAC, approvals, and audit behind every privileged action.
+ocservia lets you operate several independent ocserv nodes from one Web console and API: fleet inventory and health, users and groups, sessions and IP bans, configuration workflows, and signed Agent packages — with enrollment, RBAC, and audit controls behind privileged actions, plus independent approvals for selected high-risk changes.
 
 ocserv itself remains the VPN server and data plane. ocservia is not a VPN server, not a replacement for ocserv, and not a general-purpose remote-administration tool: there is no SSH, remote shell, or arbitrary command path. Every remote effect is typed, narrowly scoped, authorization-checked, and audited.
 
@@ -105,7 +105,7 @@ GitHub Actions remains the authoritative merge-time environment. Changes must pr
 
 ## Status
 
-ocservia is pre-1.0: patch-level maintenance applies within a release line, minor lines may evolve, and no production SLA or capacity guarantee is provided. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets. The P1 harness exercises up to 500 side-effect-free simulated Agents on a single GitHub-hosted runner — initial engineering evidence, not a production capacity claim. Multi-host, long-duration, and deployment-specific validation remain the operator's responsibility.
+ocservia is pre-1.0: minor release lines may introduce compatibility changes, and no production SLA or capacity guarantee is provided. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets. The P1 harness exercises up to 500 side-effect-free simulated Agents on a single GitHub-hosted runner — initial engineering evidence, not a production capacity claim. Multi-host, long-duration, and deployment-specific validation remain the operator's responsibility.
 
 ## Security
 
