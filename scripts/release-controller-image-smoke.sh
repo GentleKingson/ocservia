@@ -33,7 +33,7 @@ case "$(uname -m)" in
 esac
 [[ "${host_arch}" == "${CONTROLLER_ARCH}" ]] ||
   fail "controller images must be smoked on their native runner: host ${host_arch} != ${CONTROLLER_ARCH}"
-for tool in docker jq curl; do
+for tool in docker jq curl tar; do
   command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required"
 done
 
@@ -41,18 +41,33 @@ image_ref() {
   printf '%s/%s:%s-linux-%s' "${CONTROLLER_IMAGE_PREFIX}" "$1" "${VERSION}" "${CONTROLLER_ARCH}"
 }
 
-# The build step loaded the exact images its OCI archives carry into the
-# runner's Docker daemon. Assert each one really targets the matrix
-# architecture: an amd64-only build smuggled into the arm64 leg must fail
-# here, on the native runner, instead of at publish time.
+# The build step exported the OCI archive and loaded the Docker representation
+# from the same BuildKit solve. Compare the archive's config digest with the
+# daemon image ID so a cache hit or matching tag cannot stand in for artifact
+# equivalence. The exporter-specific manifest digests may differ because OCI
+# and Docker formats use different media types; the referenced config digest
+# is the format-neutral image identity.
 for name in gateway control transport backup; do
   archive="${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ -s "${archive}" ]] || fail "Controller image archive is missing or empty: ${archive}"
-  docker image inspect "$(image_ref "${name}")" >/dev/null ||
+  image="$(image_ref "${name}")"
+  docker image inspect "${image}" >/dev/null ||
     fail "Controller image ${name} was not loaded into the daemon"
-  platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$(image_ref "${name}")")"
+  platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${image}")"
   [[ "${platform}" == "linux/${CONTROLLER_ARCH}" ]] ||
     fail "loaded ${name} image is ${platform}, expected linux/${CONTROLLER_ARCH}"
+
+  archive_manifest_digest="$(
+    tar -xOf "${archive}" index.json |
+      jq -er '.manifests | if length != 1 then error("expected one image manifest") else .[0].digest end | select(test("^sha256:[0-9a-f]{64}$"))'
+  )"
+  archive_config_digest="$(
+    tar -xOf "${archive}" "blobs/sha256/${archive_manifest_digest#sha256:}" |
+      jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))'
+  )"
+  loaded_config_digest="$(docker image inspect --format '{{.Id}}' "${image}")"
+  [[ "${archive_config_digest}" == "${loaded_config_digest}" ]] ||
+    fail "${name} artifact mismatch: OCI config ${archive_config_digest}, loaded config ${loaded_config_digest}"
 done
 
 # Gateway must actually start: its USER directive once referenced an

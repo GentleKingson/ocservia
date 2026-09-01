@@ -346,9 +346,10 @@ cannot read the repository administration API.
   two-leg matrix on native runners (`ubuntu-24.04` for `amd64`,
   `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
   builder. Each leg exports its four first-party images as OCI archives
-  (and loads the identical, cache-hit build into the runner's Docker
-  daemon, whose classic image store cannot load OCI layouts back), then
-  runs `scripts/release-controller-image-smoke.sh`, which asserts each
+  and loads the Docker representation from the same BuildKit solve into the
+  runner's Docker daemon, whose classic image store cannot load OCI layouts
+  back. The smoke script compares the archive config digest with the loaded
+  image ID before it asserts each
   image really targets the leg's architecture, boots the gateway image to
   serve a request as a non-root process, and drives the control,
   transport, and backup images to their startup boundaries on the native

@@ -247,6 +247,11 @@ jobs:
             if [[ "${name}" == control ]]; then
               build_args+=(--build-arg "VERSION=${version}" --build-arg "COMMIT=${source_commit}")
             fi
+            # The runner daemon uses the classic image store, which cannot
+            # load OCI-layout archives back. Export both formats from this
+            # one BuildKit solve so the smoke below runs the same result that
+            # is stored in the release archive.
+            build_args+=(--output "type=docker")
             docker buildx build "${build_args[@]}" "${GITHUB_WORKSPACE}"
             archive="${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
             [[ -s "${archive}" ]] || {
@@ -254,22 +259,6 @@ jobs:
               exit 1
             }
             jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "${metadata}" >/dev/null
-            # The runner daemon uses the classic image store, which cannot
-            # load OCI-layout archives back; export the identical (fully
-            # cache-hit) build into the daemon so the smoke below can boot
-            # the exact images the archives carry.
-            local -a load_args=(
-              --builder "${BUILDX_BUILDER}"
-              --platform "linux/${{ matrix.controller_arch }}"
-              --provenance=false
-              --load
-              --tag "ghcr.io/gentlekingson/ocservia/${name}:${version}-linux-${{ matrix.controller_arch }}"
-              --file "${dockerfile}"
-            )
-            if [[ "${name}" == control ]]; then
-              load_args+=(--build-arg "VERSION=${version}" --build-arg "COMMIT=${source_commit}")
-            fi
-            docker buildx build "${load_args[@]}" "${GITHUB_WORKSPACE}"
           }
           build_image gateway deploy/production/gateway.Dockerfile
           build_image control control-plane/Dockerfile
