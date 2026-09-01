@@ -1,0 +1,50 @@
+# Upgrade the Agent
+
+Install a newer published Agent package on a managed node. Native package
+installation invokes the same verified repository lifecycle as the archive
+path.
+
+## Before you begin
+
+- The target package matches the host architecture and is newer than the
+  installed release.
+- The release key fingerprint was checked through a trusted channel.
+- `/etc/ocservia-agent/agent.env` and its trust/sealing keys are valid.
+- You have a current recovery window and can verify the node after restart.
+
+## Command
+
+On Debian or Ubuntu:
+
+```bash
+sudo dpkg -i ./ocservia-agent_<version>_<arch>.deb
+```
+
+On an RPM-based system:
+
+```bash
+sudo rpm -Uvh ./ocservia-agent-<version>-1.<rpm-arch>.rpm
+```
+
+Do not use package-manager downgrade as rollback. The upgrade preflight checks
+the existing trust configuration before replacing files and creates one
+matched rollback snapshot.
+
+## Verify
+
+```bash
+systemctl status ocservia-privd.service ocservia-agent.service
+```
+
+Confirm the node is online with a fresh target-version observation in the
+Controller inventory.
+
+## If it fails
+
+The package lifecycle fails before modification when trust, architecture, or
+the upgrade snapshot is unsafe. Fix the reported prerequisite and retry the
+same package. If the new pair was installed and must be restored, use the
+[Agent rollback](agent-rollback.md) command.
+
+See [Agent lifecycle reference](../operations/agent-lifecycle.md) for verified
+staging, sealing-key migration, and Controller-driven rollout behavior.

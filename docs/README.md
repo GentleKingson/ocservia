@@ -1,60 +1,47 @@
-# Documentation index
+# ocservia documentation
 
-Reference documentation for [ocservia](../README.md), a self-hosted management plane for ocserv / OpenConnect VPN fleets. This index links to the authoritative documents; each topic is documented once in its own file.
+Choose the task you need to complete. The detailed implementation contracts
+are kept in the [technical reference](reference/README.md), rather than mixed
+into the operator path.
 
-## Getting started
+## New here?
 
-- [Control-plane development](development/control-plane.md) — run the local development stack (simulated Agents, transport stub) and the browser E2E harness.
-- [Production deployment](operations/production-deployment.md) — prerequisites and the guarded Controller install, upgrade, rollback, and uninstall lifecycle.
+- [Try ocservia locally](getting-started/local-development.md)
+- [Deploy the Controller](getting-started/production.md)
+- [Install a managed node](getting-started/managed-node.md)
 
-## Architecture and security
+## Common tasks
 
-- [Architecture and trust boundaries](architecture.md) — components, data flow, and the full trust-boundary reference.
-- [Node enrollment development](development/enrollment.md)
-- [Controller command authorization v1](development/command-authorization-v1.md)
-- [Command semantic hash v1](development/command-semantic-hash-v1.md) · [v2](development/command-semantic-hash-v2.md)
-- [Agent and privd](development/agent-privd.md)
-- [Identity, authorization, approval, and audit operations](development/identity-authorization-audit.md)
-- [Certificate and secret lifecycle](development/certificate-secret-lifecycle.md)
-- Vulnerability reporting policy: [`SECURITY.md`](../SECURITY.md)
+- [Enroll a node](how-to/enroll-node.md)
+- [Upgrade the Controller](how-to/controller-upgrade.md)
+- [Roll back the Controller](how-to/controller-rollback.md)
+- [Uninstall the Controller](how-to/controller-uninstall.md)
+- [Upgrade the Agent](how-to/agent-upgrade.md)
+- [Roll back the Agent](how-to/agent-rollback.md)
+- [Configure dedicated relays](how-to/dedicated-relays.md)
+- [Back up and restore PostgreSQL](operations/postgres-backup.md)
+- [Fail over PostgreSQL](operations/postgres-failover.md)
+- [Recover PostgreSQL to a point in time](operations/postgres-pitr-restore.md)
+- [Recover from an incident](operations/incident-recovery.md)
+- [Troubleshooting](how-to/troubleshooting.md)
 
-## Operations
+## Understand the system
 
-- [Production deployment](operations/production-deployment.md)
-- [Agent package lifecycle](operations/agent-lifecycle.md) — signed package installation, upgrades, rollback, and Controller-driven rollouts.
-- [Dedicated relays](operations/dedicated-relays.md)
-- [PostgreSQL backup and restore](operations/postgres-backup.md)
-- [PostgreSQL failover, former-primary fencing, and rejoin](operations/postgres-failover.md)
-- [PostgreSQL point-in-time recovery](operations/postgres-pitr-restore.md)
-- [Production incident recovery](operations/incident-recovery.md)
+- [Architecture and trust boundaries](architecture.md)
+- [Technical reference](reference/README.md)
+- [Security policy](../SECURITY.md)
 
-## Development
+## Contribute
 
+- [Validate a change](development/testing.md)
 - [Control-plane development](development/control-plane.md)
 - [Contracts and toolchains](development/contracts.md)
 - [GitHub Actions validation](development/github-actions.md)
-- [Iroh transport development](development/transportd.md)
-- [Telemetry and read-only fleet views](development/telemetry.md)
-- [Controlled session and service operations](development/session-operations.md)
-- [User and group state](development/user-group-state.md)
-- [Quota, expiry, and batch operations](development/quota-expiry-batch.md)
-- [Configuration planning](development/config-plan.md)
-- [Configuration apply and rollback](development/config-apply.md)
-- [Operations and transactional outbox](development/operations-outbox.md)
-- [Agent command journal](development/agent-command-journal.md)
-- [P1 resilience and initial capacity validation](development/p1-resilience-capacity.md)
-- [Cross-VM real E2E validation](development/real-e2e.md)
-- [G6 readiness harness](development/g6-readiness.md) · [G6 HA/PITR cross-VM harness](development/g6-ha-pitr-topology.md)
 
-## API and contracts
+## Evidence and provenance
 
-- HTTP API: [`openapi/openapi.yaml`](../openapi/openapi.yaml)
-- Protobuf contracts: [`proto/`](../proto/)
-- Generated Web client: [`web/src/api/generated/`](../web/src/api/generated/)
+- [Acceptance records](acceptance/README.md) are release-readiness evidence and machine-readable contracts.
+- [Upstream records](upstream/v4.9-post1.md) preserve review and backport provenance.
 
-Generated artifacts are replaced by `make generate` and must not be edited manually; see [Contracts and toolchains](development/contracts.md).
-
-## Acceptance and upstream records
-
-- [`acceptance/`](acceptance/README.md) — machine-readable G6 acceptance contracts and historical release-readiness records, kept as evidence rather than deployment instructions.
-- [`upstream/`](upstream/v4.9-post1.md) — upstream review and backport provenance records.
+Acceptance and upstream records are intentionally not rewritten by the
+information-architecture work.
