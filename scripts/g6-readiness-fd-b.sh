@@ -1033,17 +1033,28 @@ owner_leases_lapsed() {
 
 owner_replaced() {
   local values advanced expected_count
-  values="$(owner_replacement_values)" || return 1
+  values="$(owner_expiry_values)" || return 1
   expected_count="$(managed_node_count)" || return 1
   [[ "$(wc -l <"${G6RD_STATE}/owner-all-terms.tsv" | tr -d '[:space:]')" == "${expected_count}" ]] || return 1
   advanced="$(psql_primary_probe -Atc \
-    "WITH expected(node_id,old_epoch,old_connection_id) AS (VALUES ${values})
+    "WITH expected(node_id,old_epoch,old_connection_id,frozen_lease_us) AS (VALUES ${values})
      SELECT count(*)
      FROM expected
      JOIN connection_owner_fencing AS current USING (node_id)
+     JOIN LATERAL (
+       SELECT min(history.updated_at) AS acquired_at
+       FROM g6_connection_owner_history AS history
+       WHERE history.node_id=current.node_id
+         AND history.owner_instance_id=current.owner_instance_id
+         AND history.owner_incarnation=current.owner_incarnation
+         AND history.connection_id=current.connection_id
+         AND history.owner_epoch=current.owner_epoch
+     ) AS acquired ON true
      WHERE current.owner_epoch>expected.old_epoch
        AND current.connection_id<>expected.old_connection_id
-       AND current.lease_until>clock_timestamp()")" || return 1
+       AND current.lease_until>clock_timestamp()
+       AND acquired.acquired_at IS NOT NULL
+       AND floor(extract(epoch FROM acquired.acquired_at)*1000000)::bigint>=expected.frozen_lease_us")" || return 1
   [[ "${advanced}" == "${expected_count}" ]]
 }
 
@@ -1267,10 +1278,12 @@ phase_scenario_owner() {
   g6rd_compose up --detach transportd
   g6rd_wait_until_deadline 30 1 "transportd ready for owner replacement" \
     g6rd_compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
-  g6rd_wait_until_deadline 60 1 "all frozen owner leases expired" \
-    owner_leases_lapsed
+  # Agents retry while the frozen terms are still held, so current fencing rows
+  # may already show replacements before every old row can be observed expired.
+  # The append-only owner history still binds each replacement to its frozen
+  # lease expiry without adding a harness-wide delay to the measured takeover.
   if ! g6rd_wait_until_deadline 60 1 \
-    "all managed owners registered higher epochs" owner_replaced; then
+    "all managed owners registered higher epochs after frozen lease expiry" owner_replaced; then
     if ! report_owner_replacement_timeout; then
       echo "owner replacement timeout diagnostics were unavailable" >&2
     fi
