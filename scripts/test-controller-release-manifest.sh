@@ -105,8 +105,8 @@ push_trigger = triggers.fetch("push")
 abort("Release workflow must trigger only on version tag pushes") unless
   !push_trigger.key?("branches") && push_trigger.fetch("tags") == ["v*.*.*"]
 abort("Release workflow must not trigger on release publication") if triggers.key?("release")
-abort("Controller image job must run only for tag-push release runs") unless
-  controller.fetch("if") == "github.event_name == 'push'"
+abort("Controller image job must run for tag-push release runs and workflow dispatch dry runs") unless
+  controller.fetch("if") == "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"
 abort("Controller publishing must run only for tag-push release runs") unless
   publish.fetch("if") == "github.event_name == 'push'"
 # The build legs must stay source-only: no registry credential may exist
@@ -136,6 +136,8 @@ abort("Controller image legs must build one matrix platform per leg") unless
   run_steps.include?('--platform "linux/${{ matrix.controller_arch }}"')
 abort("Controller image legs must export OCI archives instead of pushing") unless
   run_steps.include?("type=oci,dest=")
+abort("Controller image legs must smoke the built images on the native runner") unless
+  run_steps.include?("scripts/release-controller-image-smoke.sh")
 %w[docker\ login push=true imagetools].each do |forbidden|
   abort("Controller image legs must not write to a registry: #{forbidden}") if
     run_steps.include?(forbidden)
@@ -220,7 +222,7 @@ login_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.inc
 abort("Production writes must be skipped by the read-only recovery path") unless
   !login_step.nil? && login_step["if"] == "steps.release_state.outputs.mode != 'verify-published'"
 abort("workflow dispatch must not publish Controller images") if
-  controller.fetch("if").include?("workflow_dispatch")
+  publish.fetch("if").include?("workflow_dispatch")
 abort("Controller release must use the GHCR anonymous token flow") unless
   publish_steps.include?("https://ghcr.io/token") &&
     publish_steps.include?("scope=repository:gentlekingson/ocservia/${name}:pull") &&
