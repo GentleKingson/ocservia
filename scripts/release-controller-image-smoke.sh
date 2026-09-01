@@ -41,13 +41,15 @@ image_ref() {
   printf '%s/%s:%s-linux-%s' "${CONTROLLER_IMAGE_PREFIX}" "$1" "${VERSION}" "${CONTROLLER_ARCH}"
 }
 
-# Load every exported archive and assert the image really targets the
-# matrix architecture: an amd64-only build smuggled into the arm64 leg
-# must fail here, on the native runner, instead of at publish time.
+# The build step loaded the exact images its OCI archives carry into the
+# runner's Docker daemon. Assert each one really targets the matrix
+# architecture: an amd64-only build smuggled into the arm64 leg must fail
+# here, on the native runner, instead of at publish time.
 for name in gateway control transport backup; do
   archive="${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ -s "${archive}" ]] || fail "Controller image archive is missing or empty: ${archive}"
-  docker load --input "${archive}" >/dev/null
+  docker image inspect "$(image_ref "${name}")" >/dev/null ||
+    fail "Controller image ${name} was not loaded into the daemon"
   platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$(image_ref "${name}")")"
   [[ "${platform}" == "linux/${CONTROLLER_ARCH}" ]] ||
     fail "loaded ${name} image is ${platform}, expected linux/${CONTROLLER_ARCH}"

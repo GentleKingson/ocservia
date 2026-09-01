@@ -345,14 +345,15 @@ cannot read the repository administration API.
   `workflow_dispatch` dry runs as a
   two-leg matrix on native runners (`ubuntu-24.04` for `amd64`,
   `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
-  builder. Each leg exports its four first-party images as OCI archives,
-  then runs `scripts/release-controller-image-smoke.sh`, which loads the
-  archives back, asserts each image really targets the leg's architecture,
-  boots the gateway image to serve a request as a non-root process, and
-  drives the control, transport, and backup images to their startup
-  boundaries on the native runner. The legs hold only source-read
-  permissions: no registry write of any kind
-  happens before approval. The single `release-publishing`-gated publish
+  builder. Each leg exports its four first-party images as OCI archives
+  (and loads the identical, cache-hit build into the runner's Docker
+  daemon, whose classic image store cannot load OCI layouts back), then
+  runs `scripts/release-controller-image-smoke.sh`, which asserts each
+  image really targets the leg's architecture, boots the gateway image to
+  serve a request as a non-root process, and drives the control,
+  transport, and backup images to their startup boundaries on the native
+  runner. The legs hold only source-read
+  permissions: no registry write of any kind happens before approval. The single `release-publishing`-gated publish
   job then loads both legs' archives, pushes the per-platform images under
   `<version>-linux-<arch>` companion tags, merges them with
   `docker buildx imagetools create` into one tagged multi-platform index
