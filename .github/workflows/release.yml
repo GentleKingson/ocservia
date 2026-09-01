@@ -220,10 +220,10 @@ jobs:
             --name "${BUILDX_BUILDER}" \
             --bootstrap \
             --use
-      # Each leg builds natively (no QEMU) and exports an OCI archive per
-      # image. Nothing is written to GHCR here: the legs hold only source
-      # read, and every production registry write happens inside the single
-      # reviewer-gated publish job.
+      # Each leg builds natively (no QEMU) and exports one Docker image
+      # archive per image. Nothing is written to GHCR here: the legs hold
+      # only source read, and every production registry write happens inside
+      # the single reviewer-gated publish job.
       - name: Build Controller images
         run: |
           set -euo pipefail
@@ -236,7 +236,7 @@ jobs:
               --platform "linux/${{ matrix.controller_arch }}"
               --provenance=false
               --pull
-              --output "type=oci,dest=${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
+              --output "type=docker,dest=${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
               --metadata-file "${RUNNER_TEMP}/controller-${name}.metadata.json"
               --label "org.opencontainers.image.version=${version}"
               --label "org.opencontainers.image.revision=${source_commit}"
@@ -247,11 +247,6 @@ jobs:
             if [[ "${name}" == control ]]; then
               build_args+=(--build-arg "VERSION=${version}" --build-arg "COMMIT=${source_commit}")
             fi
-            # The runner daemon uses the classic image store, which cannot
-            # load OCI-layout archives back. Export both formats from this
-            # one BuildKit solve so the smoke below runs the same result that
-            # is stored in the release archive.
-            build_args+=(--output "type=docker")
             docker buildx build "${build_args[@]}" "${GITHUB_WORKSPACE}"
             archive="${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
             [[ -s "${archive}" ]] || {
