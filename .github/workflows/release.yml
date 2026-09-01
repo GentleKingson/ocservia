@@ -1,9 +1,10 @@
 name: Agent Release Packages
-run-name: Agent Packages · ${{ github.event.release.tag_name || inputs.version || github.sha }}
+run-name: Agent Packages · ${{ github.event_name == 'push' && github.ref_name || inputs.version || github.sha }}
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
@@ -15,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-packages-${{ github.event.release.id || github.run_id }}
+  group: release-packages-${{ github.event_name == 'push' && github.ref_name || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -53,7 +54,7 @@ jobs:
         run: scripts/bootstrap.sh native-packages
       - name: Resolve package version & source epoch
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           version=""
@@ -156,7 +157,7 @@ jobs:
 
   build-controller-images:
     name: Build Controller Images (${{ matrix.controller_arch }})
-    if: github.event_name == 'release'
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
     strategy:
@@ -181,7 +182,7 @@ jobs:
         run: scripts/ci-preflight.sh
       - name: Resolve release identity
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -280,7 +281,7 @@ jobs:
           merge-multiple: true
       - name: Resolve package version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           version=""
@@ -302,7 +303,7 @@ jobs:
   publish-release-packages:
     name: Sign & Publish Release Assets
     needs: [validate-release-packages, build-controller-images]
-    if: github.event_name == 'release'
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release-publishing
@@ -313,6 +314,7 @@ jobs:
       attestations: write
     env:
       CONTROLLER_IMAGE_PREFIX: ghcr.io/gentlekingson/ocservia
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -320,6 +322,15 @@ jobs:
           persist-credentials: false
       - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
+      - name: Verify gh CLI release verification support
+        # The publish tail depends on `gh release verify` (gh >= 2.93.0) to
+        # check the release attestation GitHub generates for immutable
+        # releases; fail before any production write if it is unavailable.
+        run: |
+          gh release verify --help >/dev/null 2>&1 || {
+            echo "runner gh CLI does not provide 'gh release verify' (requires gh >= 2.93.0)" >&2
+            exit 1
+          }
       - name: Install rpm inspection tools
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends rpm cpio
       - name: Collect built packages
@@ -336,7 +347,7 @@ jobs:
           merge-multiple: true
       - name: Resolve package version & source epoch
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: |
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "refusing to publish release packages for non-SemVer tag ${RELEASE_TAG}" >&2
@@ -348,7 +359,176 @@ jobs:
             echo "source_commit=$(git rev-parse HEAD)"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
+      - name: Verify release tag binding
+        # Immutable protection only starts at publish: while this workflow
+        # waits for approval or builds, the tag can still be moved. Bind the
+        # release to the exact source commit before any production write and
+        # again immediately before publishing. Release tags are lightweight,
+        # so a non-commit tag object is rejected outright.
+        run: |
+          set -euo pipefail
+          cat >"${RUNNER_TEMP}/check-tag-binding.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          tag="$1"
+          expected_commit="$2"
+          tag_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          tag_type="$(jq -er '.object.type' <<<"${tag_ref}")"
+          tag_sha="$(jq -er '.object.sha' <<<"${tag_ref}")"
+          if [[ "${tag_type}" != "commit" ]]; then
+            echo "tag ${tag} must be a lightweight tag on the release commit, got a ${tag_type} object (${tag_sha})" >&2
+            exit 1
+          fi
+          if [[ "${tag_sha}" != "${expected_commit}" ]]; then
+            echo "tag ${tag} no longer points at the release commit ${expected_commit} (now ${tag_sha})" >&2
+            exit 1
+          fi
+          SCRIPT
+          chmod 0700 "${RUNNER_TEMP}/check-tag-binding.sh"
+          "${RUNNER_TEMP}/check-tag-binding.sh" "${release_tag}" "${source_commit}"
+      - name: Verify release immutability prerequisite
+        # GITHUB_TOKEN cannot read the repository administration API, so the
+        # release-publishing environment provides an Administration:read-only
+        # token used exclusively for this check. Immutable protection only
+        # starts at publish, so the same check is re-run immediately before
+        # the irreversible publish below. Fail closed before any production
+        # write when immutable releases are not enforced.
+        env:
+          ADMIN_READ_TOKEN: ${{ secrets.REPO_ADMIN_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          cat >"${RUNNER_TEMP}/check-immutable-prereq.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -z "${ADMIN_READ_TOKEN:-}" ]]; then
+            echo "REPO_ADMIN_READ_TOKEN (Administration: read) must be provisioned in the release-publishing environment" >&2
+            exit 1
+          fi
+          enabled="$(GH_TOKEN="${ADMIN_READ_TOKEN}" gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)"
+          if [[ "${enabled}" != "true" ]]; then
+            echo "repository release immutability is disabled: enable it (Settings -> Releases or gh api -X PUT /repos/{owner}/{repo}/immutable-releases) before publishing" >&2
+            exit 1
+          fi
+          SCRIPT
+          chmod 0700 "${RUNNER_TEMP}/check-immutable-prereq.sh"
+          "${RUNNER_TEMP}/check-immutable-prereq.sh"
+      - name: Inspect release state
+        # Reruns of a run that already published must never touch the
+        # published release again; they take the read-only recovery step
+        # below while every production-write step is skipped. Decide on the
+        # explicit HTTP status: only a real 404 — no release for this tag,
+        # whose existence check-tag-binding.sh has already proven — may take
+        # the publish path. A query failure (API outage, rate limit,
+        # permission error) must fail closed instead of masquerading as
+        # "no release yet".
+        id: release_state
+        run: |
+          set -euo pipefail
+          state_file="${RUNNER_TEMP}/release-state.json"
+          status="$(curl --silent --show-error --output "${state_file}" --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")"
+          case "${status}" in
+            404)
+              mode="publish"
+              ;;
+            200)
+              draft="$(jq -r '.draft' "${state_file}")"
+              if [[ "${draft}" == "false" ]]; then
+                mode="verify-published"
+              elif [[ "${draft}" == "true" ]]; then
+                mode="publish"
+              else
+                echo "releases API returned HTTP 200 with an unexpected body for ${release_tag}" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "could not determine the state of release ${release_tag}: releases API returned HTTP ${status}" >&2
+              exit 1
+              ;;
+          esac
+          echo "mode=${mode}" >>"${GITHUB_OUTPUT}"
+          echo "release ${release_tag} state: ${mode}"
+      - name: Verify published release (read-only recovery)
+        if: steps.release_state.outputs.mode == 'verify-published'
+        env:
+          AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          immutable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" --jq .immutable)"
+          if [[ "${immutable}" != "true" ]]; then
+            echo "published release ${release_tag} is not immutable: enable repository release immutability, then delete the release and tag and republish" >&2
+            exit 1
+          fi
+          attempt=1
+          until gh release verify "${release_tag}"; do
+            if (( attempt >= 5 )); then
+              echo "gh release verify failed for ${release_tag}: the release attestation is missing or invalid" >&2
+              exit 1
+            fi
+            echo "release attestation not verifiable yet (attempt ${attempt}/5); retrying shortly" >&2
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+          "${RUNNER_TEMP}/check-tag-binding.sh" "${release_tag}" "${source_commit}"
+          expected_assets="$(
+            for asset in \
+              "ocservia-agent-${version}-linux-amd64.tar.gz" \
+              "ocservia-agent-${version}-linux-amd64.tar.gz.sha256" \
+              "ocservia-agent-${version}-linux-amd64.tar.gz.sha256.sig" \
+              "ocservia-agent-${version}-linux-arm64.tar.gz" \
+              "ocservia-agent-${version}-linux-arm64.tar.gz.sha256" \
+              "ocservia-agent-${version}-linux-arm64.tar.gz.sha256.sig" \
+              "ocservia-agent_${version}_amd64.deb" \
+              "ocservia-agent_${version}_arm64.deb" \
+              "ocservia-agent-${version}-1.x86_64.rpm" \
+              "ocservia-agent-${version}-1.aarch64.rpm" \
+              "controller-release.json" \
+              "controller-release.json.sha256" \
+              "controller-release-amd64.json" \
+              "controller-release-amd64.json.sha256" \
+              "controller-release-arm64.json" \
+              "controller-release-arm64.json.sha256" \
+              "SHA256SUMS" \
+              "SHA256SUMS.sig" \
+              "release-signing.pub.pem"; do
+              printf '%s\n' "${asset}"
+            done | sort
+          )"
+          actual_assets="$(gh release view "${release_tag}" --json assets --jq '.assets[].name' | sort)"
+          if [[ "${expected_assets}" != "${actual_assets}" ]]; then
+            echo "published release ${release_tag} does not carry the complete asset set:" >&2
+            diff -u <(printf '%s\n' "${expected_assets}") <(printf '%s\n' "${actual_assets}") >&2 || true
+            exit 1
+          fi
+          # A GitHub attestation only proves GitHub published these assets; it
+          # is not our build provenance. Anyone with contents:write could
+          # publish a release that passes every check above, so chain the
+          # published bytes to the pinned release key by running the same
+          # validation as the publish path over the downloaded asset set.
+          if [[ -z "${AGENT_TRUSTED_KEY_SHA256}" ]]; then
+            echo "AGENT_TRUSTED_KEY_SHA256 secret is required to verify the published release provenance" >&2
+            exit 1
+          fi
+          recovery_assets="${RUNNER_TEMP}/recovery-assets"
+          mkdir -p "${recovery_assets}"
+          gh release download "${release_tag}" --dir "${recovery_assets}"
+          # The per-archive public key files only exist next to the build, so
+          # reconstruct them from the published key; the validation script
+          # pins its fingerprint to AGENT_TRUSTED_KEY_SHA256 before any
+          # signature is trusted.
+          for package_arch in amd64 arm64; do
+            cp -- "${recovery_assets}/release-signing.pub.pem" \
+              "${recovery_assets}/ocservia-agent-${version}-linux-${package_arch}.tar.gz.sha256.pub.pem"
+          done
+          CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 \
+            ASSET_DIR="${recovery_assets}" VERSION="${version}" \
+            scripts/validate-release-packages.sh
+          echo "published release ${release_tag} verified in place; nothing was modified"
       - name: Restore native-package tool cache
+        if: steps.release_state.outputs.mode != 'verify-published'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
@@ -356,8 +536,10 @@ jobs:
             .tools
           key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap pinned nfpm tool
+        if: steps.release_state.outputs.mode != 'verify-published'
         run: scripts/bootstrap.sh native-packages
       - name: Login to GitHub Container Registry
+        if: steps.release_state.outputs.mode != 'verify-published'
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
@@ -365,6 +547,7 @@ jobs:
       # job ran source-only, so the reviewer approves the exact images and
       # packages that are about to become public.
       - name: Push Controller images & assemble multi-platform indexes
+        if: steps.release_state.outputs.mode != 'verify-published'
         id: controller-index
         run: |
           set -euo pipefail
@@ -420,6 +603,7 @@ jobs:
             printf '%s_digest=%s\n' "${name}" "${index_digest}" >>"${GITHUB_OUTPUT}"
           done
       - name: Generate Controller release manifests
+        if: steps.release_state.outputs.mode != 'verify-published'
         run: |
           set -euo pipefail
           output_dir="${RUNNER_TEMP}/controller-release"
@@ -453,6 +637,7 @@ jobs:
             controller-release-arm64.json controller-release-arm64.json.sha256 \
             "${RUNNER_TEMP}/assets/"
       - name: Verify anonymous Controller image reads
+        if: steps.release_state.outputs.mode != 'verify-published'
         env:
           GATEWAY_DIGEST: ${{ steps.controller-index.outputs.gateway_digest }}
           CONTROL_DIGEST: ${{ steps.controller-index.outputs.control_digest }}
@@ -479,30 +664,35 @@ jobs:
               >/dev/null
           done
       - name: Attest gateway image provenance
+        if: steps.release_state.outputs.mode != 'verify-published'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/gateway
           subject-digest: ${{ steps.controller-index.outputs.gateway_digest }}
           push-to-registry: true
       - name: Attest control image provenance
+        if: steps.release_state.outputs.mode != 'verify-published'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/control
           subject-digest: ${{ steps.controller-index.outputs.control_digest }}
           push-to-registry: true
       - name: Attest transport image provenance
+        if: steps.release_state.outputs.mode != 'verify-published'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/transport
           subject-digest: ${{ steps.controller-index.outputs.transport_digest }}
           push-to-registry: true
       - name: Attest backup image provenance
+        if: steps.release_state.outputs.mode != 'verify-published'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ${{ env.CONTROLLER_IMAGE_PREFIX }}/backup
           subject-digest: ${{ steps.controller-index.outputs.backup_digest }}
           push-to-registry: true
       - name: Load release signing key
+        if: steps.release_state.outputs.mode != 'verify-published'
         env:
           AGENT_SIGNING_KEY_SECRET: ${{ secrets.AGENT_SIGNING_KEY }}
         run: |
@@ -515,6 +705,7 @@ jobs:
           chmod 0600 "${key_file}"
           echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
       - name: Re-sign archives & rebuild installers
+        if: steps.release_state.outputs.mode != 'verify-published'
         run: |
           # The build jobs only ever sign with an ephemeral key. The release
           # set that reaches hosts must chain to the release key, so re-sign
@@ -537,6 +728,7 @@ jobs:
               scripts/package-native-agent.sh >/dev/null
           done
       - name: Validate package set against the pinned release key
+        if: steps.release_state.outputs.mode != 'verify-published'
         env:
           AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
         run: |
@@ -544,6 +736,7 @@ jobs:
             ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
             scripts/validate-release-packages.sh
       - name: Sign unified checksum manifest
+        if: steps.release_state.outputs.mode != 'verify-published'
         run: |
           openssl pkeyutl -sign -rawin -inkey "${release_signing_key}" \
             -in "${RUNNER_TEMP}/assets/SHA256SUMS" \
@@ -551,16 +744,41 @@ jobs:
           openssl pkey -in "${release_signing_key}" -pubout \
             -out "${RUNNER_TEMP}/assets/release-signing.pub.pem" >/dev/null 2>&1
       - name: Verify signed release manifest
+        if: steps.release_state.outputs.mode != 'verify-published'
         run: |
           CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 ASSET_DIR="${RUNNER_TEMP}/assets" \
             VERSION="${version}" \
             scripts/validate-release-packages.sh
-      - name: Publish assets to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare draft release
+        if: steps.release_state.outputs.mode != 'verify-published'
+        # GitHub locks assets of an immutable release at publication, so the
+        # complete asset set must exist before publishing. Publish the draft
+        # below only after every asset has been uploaded. A published release
+        # for this tag is never touched; only a leftover draft from an
+        # earlier failed attempt is discarded and recreated.
         run: |
+          set -euo pipefail
+          if gh release view "${release_tag}" --json isDraft >/dev/null 2>&1; then
+            if [[ "$(gh release view "${release_tag}" --json isDraft --jq .isDraft)" != "true" ]]; then
+              echo "release ${release_tag} already exists and is published; refusing to modify a published release" >&2
+              exit 1
+            fi
+            echo "deleting the leftover draft release ${release_tag} from an earlier attempt" >&2
+            gh release delete "${release_tag}" --yes
+          fi
+          gh release create "${release_tag}" \
+            --draft \
+            --verify-tag \
+            --title "${release_tag}" \
+            --notes "Published from tag ${release_tag} by the Agent Release Packages workflow; release notes are attached after publication."
+      - name: Upload assets to the draft release
+        if: steps.release_state.outputs.mode != 'verify-published'
+        # No --clobber: uploading must fail on any asset-name collision
+        # instead of silently replacing published bytes.
+        run: |
+          set -euo pipefail
           assets="${RUNNER_TEMP}/assets"
-          gh release upload "${release_tag}" --clobber \
+          gh release upload "${release_tag}" \
             "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz" \
             "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz.sha256" \
             "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz.sha256.sig" \
@@ -581,6 +799,48 @@ jobs:
             "${assets}/SHA256SUMS.sig" \
             "${assets}/release-signing.pub.pem"
           gh release view "${release_tag}" --json assets --jq '.assets[].name'
+      - name: Publish the release
+        if: steps.release_state.outputs.mode != 'verify-published'
+        env:
+          ADMIN_READ_TOKEN: ${{ secrets.REPO_ADMIN_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$(gh release view "${release_tag}" --json isDraft --jq .isDraft)" != "true" ]]; then
+            echo "release ${release_tag} is no longer a draft; refusing to publish over it" >&2
+            exit 1
+          fi
+          # The preflight ran many minutes ago and immutable protection only
+          # starts at publish: re-check the prerequisite immediately before
+          # the irreversible publish so an admin disabling it mid-run cannot
+          # yield a mutable public release.
+          "${RUNNER_TEMP}/check-immutable-prereq.sh"
+          # Re-bind the tag immediately before the irreversible publish:
+          # moving the tag during asset upload would otherwise attach assets
+          # built from one commit to a release pointing at another.
+          "${RUNNER_TEMP}/check-tag-binding.sh" "${release_tag}" "${source_commit}"
+          gh release edit "${release_tag}" --draft=false
+      - name: Verify release attestation & immutability
+        if: steps.release_state.outputs.mode != 'verify-published'
+        # Publishing an immutable release makes GitHub generate a signed
+        # release attestation covering the tag, commit, and every asset;
+        # verify it and assert the release reports itself immutable.
+        run: |
+          set -euo pipefail
+          attempt=1
+          until gh release verify "${release_tag}"; do
+            if (( attempt >= 5 )); then
+              echo "gh release verify failed for ${release_tag}: the release attestation is missing or invalid" >&2
+              exit 1
+            fi
+            echo "release attestation not verifiable yet (attempt ${attempt}/5); retrying shortly" >&2
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+          immutable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" --jq .immutable)"
+          if [[ "${immutable}" != "true" ]]; then
+            echo "release ${release_tag} is not immutable: enable repository release immutability (Settings -> Releases) before publishing" >&2
+            exit 1
+          fi
       - name: Remove release signing key
         if: always()
         run: rm -f -- "${release_signing_key}"
