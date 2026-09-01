@@ -1161,9 +1161,12 @@ jobs:
         id: secret-scan
         run: |
           source scripts/env.sh
+          scan_status=0
+          scan_report_dir="${RUNNER_TEMP}/g6-rd-secret-scan-reports"
+          mkdir -p "${scan_report_dir}"
           release_manifest_digest="${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}"
           for domain in fd-a fd-b; do
-            jq -e \
+            if ! jq -e \
               --arg candidate_sha "${GITHUB_SHA}" \
               --arg run_id "${GITHUB_RUN_ID}" \
               --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
@@ -1173,11 +1176,27 @@ jobs:
               '.candidate_sha == $candidate_sha and .run_id == $run_id and
                .run_attempt == $run_attempt and .environment_id == $environment_id and
                .authority == $authority and .release_manifest_digest == $release_manifest_digest' \
-              "${RUNNER_TEMP}/g6-rd-raw-${domain}/runtime-result.json" >/dev/null
+              "${RUNNER_TEMP}/g6-rd-raw-${domain}/runtime-result.json" >/dev/null; then
+              echo "runtime-result binding failed for ${domain}" >&2
+              scan_status=1
+            fi
           done
-          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-evidence-bundle"
-          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-a"
-          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-b"
+          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-evidence-bundle" --report-format json --report-path "${scan_report_dir}/assembled-bundle.json"; then
+            scan_status=1
+            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
+              "${scan_report_dir}/assembled-bundle.json" || true
+          fi
+          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-a" --report-format json --report-path "${scan_report_dir}/raw-fd-a.json"; then
+            scan_status=1
+            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
+              "${scan_report_dir}/raw-fd-a.json" || true
+          fi
+          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-b" --report-format json --report-path "${scan_report_dir}/raw-fd-b.json"; then
+            scan_status=1
+            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
+              "${scan_report_dir}/raw-fd-b.json" || true
+          fi
+          exit "${scan_status}"
       - name: Finish secret scan execution timing
         if: always()
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_execution || true
@@ -1211,6 +1230,14 @@ jobs:
           name: g6-rd-secret-scan-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-rd-secret-scan
           if-no-files-found: error
+          retention-days: 14
+      - name: Publish redacted secret scan diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-secret-scan-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-secret-scan-reports
+          if-no-files-found: warn
           retention-days: 14
       - name: Record secret scan timing diagnostics
         if: always()
@@ -2183,9 +2210,25 @@ jobs:
         id: scan
         run: |
           source scripts/env.sh
-          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-fd-a"
-          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-fd-b"
-          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-bundle"
+          scan_status=0
+          scan_report_dir="${RUNNER_TEMP}/g6-smoke-secret-scan-reports"
+          mkdir -p "${scan_report_dir}"
+          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-fd-a" --report-format json --report-path "${scan_report_dir}/raw-fd-a.json"; then
+            scan_status=1
+            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
+              "${scan_report_dir}/raw-fd-a.json" || true
+          fi
+          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-fd-b" --report-format json --report-path "${scan_report_dir}/raw-fd-b.json"; then
+            scan_status=1
+            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
+              "${scan_report_dir}/raw-fd-b.json" || true
+          fi
+          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-bundle" --report-format json --report-path "${scan_report_dir}/assembled-bundle.json"; then
+            scan_status=1
+            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
+              "${scan_report_dir}/assembled-bundle.json" || true
+          fi
+          exit "${scan_status}"
       - name: Finish smoke secret scan execution timing
         if: always()
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_execution || true
@@ -2206,6 +2249,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with: {name: 'g6-harness-smoke-secret-scan-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-secret-scan', if-no-files-found: error, retention-days: 1}
+      - name: Publish redacted smoke secret scan diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: {name: 'g6-harness-smoke-secret-scan-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-smoke-secret-scan-reports', if-no-files-found: warn, retention-days: 5}
       - name: Record smoke secret scan timing diagnostics
         if: always()
         run: |

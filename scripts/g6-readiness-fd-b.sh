@@ -1252,19 +1252,23 @@ phase_scenario_owner() {
   # so the replacement proves lease-expiry takeover for every managed Agent.
   G6RD_COMPOSE_TIMEOUT_SECONDS=15 g6rd_compose kill --signal KILL worker
   g6rd_timeline_event owner_a_paused
-  g6rd_wait_until_deadline 60 1 "all frozen owner leases expired" \
-    owner_leases_lapsed
+  # Start the replacement while the old terms are still authoritative. Each
+  # Agent retries the rejected handshake, so takeover begins at the first
+  # natural lease expiry instead of after a harness-wide expiry barrier.
   g6rd_compose up --detach worker
   g6rd_wait_until_deadline 30 1 "replacement worker trust socket" \
     g6rd_compose exec -T worker test -S /run/ocserv-trust/control-plane.sock
   # A worker restart alone does not sever existing Iroh sessions. Bounce the
-  # one active controller endpoint after every frozen lease expires so every
-  # local and peer Agent must register a higher owner epoch. This bounce is
-  # separate from the later measured reconnect storm and stale-Agent probe.
+  # one active controller endpoint while the old leases are still held so the
+  # Agents enter their normal retry loop before the expiry boundary. This
+  # bounce is separate from the later measured reconnect storm and stale-Agent
+  # probe.
   g6rd_compose stop transportd
   g6rd_compose up --detach transportd
   g6rd_wait_until_deadline 30 1 "transportd ready for owner replacement" \
     g6rd_compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
+  g6rd_wait_until_deadline 60 1 "all frozen owner leases expired" \
+    owner_leases_lapsed
   if ! g6rd_wait_until_deadline 60 1 \
     "all managed owners registered higher epochs" owner_replaced; then
     if ! report_owner_replacement_timeout; then

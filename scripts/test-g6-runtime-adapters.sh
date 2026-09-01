@@ -3577,13 +3577,13 @@ owner_epoch_wait_line="$(grep -nF 'all managed owners registered higher epochs' 
   && -n "${owner_transport_stop_line}" && -n "${owner_transport_start_line}" \
   && -n "${owner_epoch_wait_line}" \
   && "${owner_worker_crash_line}" -lt "${owner_pause_line}" \
-  && "${owner_pause_line}" -lt "${owner_expiry_line}" \
-  && "${owner_expiry_line}" -lt "${owner_worker_start_line}" \
+  && "${owner_pause_line}" -lt "${owner_worker_start_line}" \
   && "${owner_worker_start_line}" -lt "${owner_worker_ready_line}" \
   && "${owner_worker_ready_line}" -lt "${owner_transport_stop_line}" \
   && "${owner_transport_stop_line}" -lt "${owner_transport_start_line}" \
-  && "${owner_transport_start_line}" -lt "${owner_epoch_wait_line}" ]] || {
-  echo "all frozen leases must expire before the replacement worker and bounded fleet reconnect" >&2
+  && "${owner_transport_start_line}" -lt "${owner_expiry_line}" \
+  && "${owner_expiry_line}" -lt "${owner_epoch_wait_line}" ]] || {
+  echo "the replacement worker and transport must be active before the frozen lease expiry barrier" >&2
   exit 1
 }
 for token in \
