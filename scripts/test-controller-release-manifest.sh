@@ -136,17 +136,18 @@ end
 run_steps = Array(controller.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
 abort("Controller image legs must build one matrix platform per leg") unless
   run_steps.include?('--platform "linux/${{ matrix.controller_arch }}"')
-abort("Controller image legs must export OCI archives instead of pushing") unless
-  run_steps.include?("type=oci,dest=")
-abort("Controller image legs must load the Docker result from the same BuildKit solve") unless
-  run_steps.scan("docker buildx build").length == 1 &&
-  run_steps.include?("type=docker")
+abort("Controller image legs must export Docker image archives") unless
+  run_steps.include?("type=docker,dest=") &&
+  !run_steps.include?("type=oci,dest=")
+abort("Controller image legs must build each image once") unless
+  run_steps.scan("docker buildx build").length == 1
 abort("Controller image legs must smoke the built images on the native runner") unless
   run_steps.include?("scripts/release-controller-image-smoke.sh")
-abort("Controller image smoke must verify OCI archive and loaded image equivalence") unless
-  smoke.include?("archive_config_digest") &&
-  smoke.include?("docker image inspect --format '{{.Id}}'") &&
-  smoke.include?("tar -xOf")
+abort("Controller image smoke must load the persisted Docker archive") unless
+  smoke.include?('docker load --input "${archive}"') &&
+  smoke.include?("docker image inspect --format '{{.Os}}/{{.Architecture}}'") &&
+  !smoke.include?("archive_config_digest") &&
+  !smoke.include?("tar -xOf")
 %w[docker\ login push=true imagetools].each do |forbidden|
   abort("Controller image legs must not write to a registry: #{forbidden}") if
     run_steps.include?(forbidden)

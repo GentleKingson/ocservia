@@ -345,17 +345,14 @@ cannot read the repository administration API.
   `workflow_dispatch` dry runs as a
   two-leg matrix on native runners (`ubuntu-24.04` for `amd64`,
   `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
-  builder. Each leg exports its four first-party images as OCI archives
-  and loads the Docker representation from the same BuildKit solve into the
-  runner's Docker daemon, whose classic image store cannot load OCI layouts
-  back. The smoke script compares the archive config digest with the loaded
-  image ID before it asserts each
-  image really targets the leg's architecture, boots the gateway image to
-  serve a request as a non-root process, and drives the control,
-  transport, and backup images to their startup boundaries on the native
-  runner. The legs hold only source-read
-  permissions: no registry write of any kind happens before approval. The single `release-publishing`-gated publish
-  job then loads both legs' archives, pushes the per-platform images under
+  builder. Each native leg exports each of its four first-party images as a
+  single-platform Docker image archive. The smoke script loads that exact
+  archive into the runner's Docker daemon before it asserts the image really
+  targets the leg's architecture, boots the gateway image to serve a request
+  as a non-root process, and drives the control, transport, and backup images
+  to their startup boundaries on the native runner. The same archive is
+  uploaded as the cross-job artifact and loaded again by the single
+  `release-publishing`-gated publish job, which pushes the per-platform images under
   `<version>-linux-<arch>` companion tags, merges them with
   `docker buildx imagetools create` into one tagged multi-platform index
   per image, fails closed when an index lacks either architecture,
@@ -367,7 +364,9 @@ cannot read the repository administration API.
 - Every build job signs with an ephemeral key generated on the runner, so a
   `workflow_dispatch` run never touches the production signing credential,
   and the validate job checks the internal consistency of the signed set
-  without the production pin.
+  without the production pin. The build legs retain `contents: read` only,
+  and manual dispatch remains a dry run with no production write; the
+  protected publish job remains the sole registry-write boundary.
 - The publish job runs only for tag-push release runs behind the protected
   `release-publishing` environment with `contents: write`: it re-signs both
   archive checksum triples with the release key, rebuilds the native
