@@ -389,13 +389,18 @@ jobs:
       - name: Verify release immutability prerequisite
         # GITHUB_TOKEN cannot read the repository administration API, so the
         # release-publishing environment provides an Administration:read-only
-        # token used exclusively for this preflight. Fail closed before any
-        # production write when immutable releases are not enforced.
+        # token used exclusively for this check. Immutable protection only
+        # starts at publish, so the same check is re-run immediately before
+        # the irreversible publish below. Fail closed before any production
+        # write when immutable releases are not enforced.
         env:
           ADMIN_READ_TOKEN: ${{ secrets.REPO_ADMIN_READ_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -z "${ADMIN_READ_TOKEN}" ]]; then
+          cat >"${RUNNER_TEMP}/check-immutable-prereq.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -z "${ADMIN_READ_TOKEN:-}" ]]; then
             echo "REPO_ADMIN_READ_TOKEN (Administration: read) must be provisioned in the release-publishing environment" >&2
             exit 1
           fi
@@ -404,6 +409,9 @@ jobs:
             echo "repository release immutability is disabled: enable it (Settings -> Releases or gh api -X PUT /repos/{owner}/{repo}/immutable-releases) before publishing" >&2
             exit 1
           fi
+          SCRIPT
+          chmod 0700 "${RUNNER_TEMP}/check-immutable-prereq.sh"
+          "${RUNNER_TEMP}/check-immutable-prereq.sh"
       - name: Inspect release state
         # Reruns of a run that already published must never touch the
         # published release again; they take the read-only recovery step
@@ -421,6 +429,8 @@ jobs:
           echo "release ${release_tag} state: ${mode}"
       - name: Verify published release (read-only recovery)
         if: steps.release_state.outputs.mode == 'verify-published'
+        env:
+          AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
         run: |
           set -euo pipefail
           immutable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" --jq .immutable)"
@@ -469,6 +479,29 @@ jobs:
             diff -u <(printf '%s\n' "${expected_assets}") <(printf '%s\n' "${actual_assets}") >&2 || true
             exit 1
           fi
+          # A GitHub attestation only proves GitHub published these assets; it
+          # is not our build provenance. Anyone with contents:write could
+          # publish a release that passes every check above, so chain the
+          # published bytes to the pinned release key by running the same
+          # validation as the publish path over the downloaded asset set.
+          if [[ -z "${AGENT_TRUSTED_KEY_SHA256}" ]]; then
+            echo "AGENT_TRUSTED_KEY_SHA256 secret is required to verify the published release provenance" >&2
+            exit 1
+          fi
+          recovery_assets="${RUNNER_TEMP}/recovery-assets"
+          mkdir -p "${recovery_assets}"
+          gh release download "${release_tag}" --dir "${recovery_assets}"
+          # The per-archive public key files only exist next to the build, so
+          # reconstruct them from the published key; the validation script
+          # pins its fingerprint to AGENT_TRUSTED_KEY_SHA256 before any
+          # signature is trusted.
+          for package_arch in amd64 arm64; do
+            cp -- "${recovery_assets}/release-signing.pub.pem" \
+              "${recovery_assets}/ocservia-agent-${version}-linux-${package_arch}.tar.gz.sha256.pub.pem"
+          done
+          CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 \
+            ASSET_DIR="${recovery_assets}" VERSION="${version}" \
+            scripts/validate-release-packages.sh
           echo "published release ${release_tag} verified in place; nothing was modified"
       - name: Restore native-package tool cache
         if: steps.release_state.outputs.mode != 'verify-published'
@@ -744,12 +777,19 @@ jobs:
           gh release view "${release_tag}" --json assets --jq '.assets[].name'
       - name: Publish the release
         if: steps.release_state.outputs.mode != 'verify-published'
+        env:
+          ADMIN_READ_TOKEN: ${{ secrets.REPO_ADMIN_READ_TOKEN }}
         run: |
           set -euo pipefail
           if [[ "$(gh release view "${release_tag}" --json isDraft --jq .isDraft)" != "true" ]]; then
             echo "release ${release_tag} is no longer a draft; refusing to publish over it" >&2
             exit 1
           fi
+          # The preflight ran many minutes ago and immutable protection only
+          # starts at publish: re-check the prerequisite immediately before
+          # the irreversible publish so an admin disabling it mid-run cannot
+          # yield a mutable public release.
+          "${RUNNER_TEMP}/check-immutable-prereq.sh"
           # Re-bind the tag immediately before the irreversible publish:
           # moving the tag during asset upload would otherwise attach assets
           # built from one commit to a release pointing at another.

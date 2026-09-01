@@ -197,8 +197,17 @@ abort("Controller publishing must re-verify the tag binding immediately before p
   publishes_draft.length == 1 &&
   publishes_draft.first["run"].include?("check-tag-binding.sh") &&
   publishes_draft.first["run"].index("check-tag-binding.sh") < publishes_draft.first["run"].index("gh release edit")
+abort("Controller publishing must re-check the immutable prerequisite immediately before publishing") unless
+  publishes_draft.first["run"].include?("check-immutable-prereq.sh") &&
+  publishes_draft.first["run"].index("check-immutable-prereq.sh") < publishes_draft.first["run"].index("gh release edit")
 abort("Publish job must keep a read-only recovery path for already-published releases") unless
   publish_steps.include?("verified in place; nothing was modified")
+recovery_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.include?("verified in place; nothing was modified") }
+abort("Read-only recovery must chain the published assets to the pinned release key") unless
+  !recovery_step.nil? &&
+  recovery_step["run"].to_s.include?("scripts/validate-release-packages.sh") &&
+  recovery_step.fetch("env", {}).fetch("AGENT_TRUSTED_KEY_SHA256", "") ==
+    "${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}"
 login_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.include?("docker login") }
 abort("Production writes must be skipped by the read-only recovery path") unless
   !login_step.nil? && login_step["if"] == "steps.release_state.outputs.mode != 'verify-published'"
