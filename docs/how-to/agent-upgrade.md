@@ -16,16 +16,20 @@ path.
 
 ## Command
 
+Use the same `RELEASE_DIR` and `AGENT_PACKAGE` values whose external release
+signature and checksum were verified above. The package-manager command must
+install that exact verified path, not a different relative-path copy.
+
 On Debian or Ubuntu:
 
 ```bash
-sudo dpkg -i ./ocservia-agent_<version>_<arch>.deb
+sudo dpkg -i "$RELEASE_DIR/$AGENT_PACKAGE"
 ```
 
 On an RPM-based system:
 
 ```bash
-sudo rpm -Uvh ./ocservia-agent-<version>-1.<rpm-arch>.rpm
+sudo rpm -Uvh "$RELEASE_DIR/$AGENT_PACKAGE"
 ```
 
 Do not use package-manager downgrade as rollback. The upgrade preflight checks

@@ -9,6 +9,9 @@ record. It does not activate the node; an operator must approve it afterward.
 - You know the Controller EndpointID and the target workspace UUIDv7.
 - Two distinct sealing private keys are provisioned on the node, and you have
   their key IDs and public-key SHA-256 descriptors.
+- For production, the dedicated relay drop-in is installed, both
+  `RELAY_URL_A` and `RELAY_URL_B` are exported, and
+  `/etc/ocservia-agent/relay-access-token` is provisioned.
 - You have an authenticated API client with permission to create an enrollment
   token and approve a node.
 
@@ -64,7 +67,11 @@ record. It does not activate the node; an operator must approve it afterward.
      --user-password-seal-key-id "$USER_PASSWORD_SEAL_KEY_ID" \
      --user-password-seal-public-key-sha256 "$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256" \
      --p12-password-seal-key-id "$P12_PASSWORD_SEAL_KEY_ID" \
-     --p12-password-seal-public-key-sha256 "$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256"
+     --p12-password-seal-public-key-sha256 "$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" \
+     --relay-mode custom \
+     --relay-url "$RELAY_URL_A" \
+     --relay-url "$RELAY_URL_B" \
+     --relay-token-file /etc/ocservia-agent/relay-access-token
    ```
 
    Enrollment signs and persists both public-key descriptors. Record the UUIDv7
@@ -72,8 +79,7 @@ record. It does not activate the node; an operator must approve it afterward.
    are enrollment inputs; the returned value that belongs in `agent.env` is
    the new `NODE_ID`.
 
-   Before approval, return to [Configure the Agent after enrollment](../getting-started/managed-node.md#4-configure-the-agent-after-enrollment)
-   and, for production, [Install the production relay path](../getting-started/managed-node.md#5-install-the-production-relay-path).
+   Before approval, return to [Configure the Agent after enrollment](../getting-started/managed-node.md#6-configure-the-agent-after-enrollment).
 
 ## Approve the node
 
