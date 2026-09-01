@@ -91,11 +91,13 @@ bad_tag_args[3]=v0.2.1
 assert_rejected release-tag "${bad_tag_args[@]}" "${image_args[@]}"
 
 ruby -r yaml - "${ROOT}/.github/workflows/release.yml" \
-  "${ROOT}/docs/operations/production-deployment.md" <<'RUBY'
+  "${ROOT}/docs/operations/production-deployment.md" \
+  "${ROOT}/scripts/release-controller-image-smoke.sh" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
 controller = jobs.fetch("build-controller-images")
 publish = jobs.fetch("publish-release-packages")
+smoke = File.read(ARGV.fetch(2))
 # Immutable-release publication model: the workflow owns the whole
 # draft -> upload -> publish lifecycle (draft releases fire no workflow
 # events), so it must be triggered by pushing the version tag itself and
@@ -105,8 +107,8 @@ push_trigger = triggers.fetch("push")
 abort("Release workflow must trigger only on version tag pushes") unless
   !push_trigger.key?("branches") && push_trigger.fetch("tags") == ["v*.*.*"]
 abort("Release workflow must not trigger on release publication") if triggers.key?("release")
-abort("Controller image job must run only for tag-push release runs") unless
-  controller.fetch("if") == "github.event_name == 'push'"
+abort("Controller image job must run for tag-push release runs and workflow dispatch dry runs") unless
+  controller.fetch("if") == "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"
 abort("Controller publishing must run only for tag-push release runs") unless
   publish.fetch("if") == "github.event_name == 'push'"
 # The build legs must stay source-only: no registry credential may exist
@@ -136,6 +138,15 @@ abort("Controller image legs must build one matrix platform per leg") unless
   run_steps.include?('--platform "linux/${{ matrix.controller_arch }}"')
 abort("Controller image legs must export OCI archives instead of pushing") unless
   run_steps.include?("type=oci,dest=")
+abort("Controller image legs must load the Docker result from the same BuildKit solve") unless
+  run_steps.scan("docker buildx build").length == 1 &&
+  run_steps.include?("type=docker")
+abort("Controller image legs must smoke the built images on the native runner") unless
+  run_steps.include?("scripts/release-controller-image-smoke.sh")
+abort("Controller image smoke must verify OCI archive and loaded image equivalence") unless
+  smoke.include?("archive_config_digest") &&
+  smoke.include?("docker image inspect --format '{{.Id}}'") &&
+  smoke.include?("tar -xOf")
 %w[docker\ login push=true imagetools].each do |forbidden|
   abort("Controller image legs must not write to a registry: #{forbidden}") if
     run_steps.include?(forbidden)
@@ -220,7 +231,7 @@ login_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.inc
 abort("Production writes must be skipped by the read-only recovery path") unless
   !login_step.nil? && login_step["if"] == "steps.release_state.outputs.mode != 'verify-published'"
 abort("workflow dispatch must not publish Controller images") if
-  controller.fetch("if").include?("workflow_dispatch")
+  publish.fetch("if").include?("workflow_dispatch")
 abort("Controller release must use the GHCR anonymous token flow") unless
   publish_steps.include?("https://ghcr.io/token") &&
     publish_steps.include?("scope=repository:gentlekingson/ocservia/${name}:pull") &&

@@ -157,7 +157,10 @@ jobs:
 
   build-controller-images:
     name: Build Controller Images (${{ matrix.controller_arch }})
-    if: github.event_name == 'push'
+    # A dispatch run builds and smokes the same images as a tag push but
+    # stops before every production write: the publish job below stays
+    # push-only.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
     strategy:
@@ -183,20 +186,28 @@ jobs:
       - name: Resolve release identity
         env:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "refusing to build Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
-            exit 1
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "refusing to build Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
+              exit 1
+            fi
+            version="${RELEASE_TAG#v}"
+          else
+            version="${INPUT_VERSION}"
+            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "dispatch version must be plain SemVer without a leading v, got ${version}" >&2
+              exit 1
+            fi
           fi
-          version="${RELEASE_TAG#v}"
           source_commit="$(git rev-parse HEAD)"
           if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" != "${GITHUB_SHA}" ]]; then
             echo "checked out source does not match the release commit ${GITHUB_SHA}" >&2
             exit 1
           fi
           {
-            echo "release_tag=${RELEASE_TAG}"
             echo "version=${version}"
             echo "source_commit=${source_commit}"
           } >>"${GITHUB_ENV}"
@@ -236,6 +247,11 @@ jobs:
             if [[ "${name}" == control ]]; then
               build_args+=(--build-arg "VERSION=${version}" --build-arg "COMMIT=${source_commit}")
             fi
+            # The runner daemon uses the classic image store, which cannot
+            # load OCI-layout archives back. Export both formats from this
+            # one BuildKit solve so the smoke below runs the same result that
+            # is stored in the release archive.
+            build_args+=(--output "type=docker")
             docker buildx build "${build_args[@]}" "${GITHUB_WORKSPACE}"
             archive="${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
             [[ -s "${archive}" ]] || {
@@ -248,6 +264,15 @@ jobs:
           build_image control control-plane/Dockerfile
           build_image transport rust/transportd.Dockerfile
           build_image backup deploy/production/backup.Dockerfile
+      - name: Smoke Controller images on the native runner
+        # Runs for both tag pushes and dispatch dry runs: a dispatch must
+        # prove the real build path produces runnable images, not just
+        # non-empty archives.
+        env:
+          IMAGES_DIR: ${{ runner.temp }}/controller-images
+          CONTROLLER_ARCH: ${{ matrix.controller_arch }}
+          VERSION: ${{ env.version }}
+        run: scripts/release-controller-image-smoke.sh
       - name: Upload Controller image archives
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

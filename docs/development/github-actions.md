@@ -301,7 +301,10 @@ explicitly recorded as pending.
 `.github/workflows/release.yml` builds the Agent distribution outside the
 primary CI graph. It triggers when a lightweight `vX.Y.Z` tag (matching
 `^v[0-9]+\.[0-9]+\.[0-9]+$`) is pushed, and on manual `workflow_dispatch`,
-which always stays a dry run and never uploads release assets. Publishing
+which always stays a dry run and never uploads release assets or writes to
+GHCR: it exercises the Agent package build plus the Controller multi-arch
+image build and its native image smoke, and every publishing step stays
+skipped. Publishing
 requires repository release immutability to be enabled first (Settings →
 Releases → Enable release immutability, or `gh api -X PUT
 /repos/{owner}/{repo}/immutable-releases`); the setting only applies to
@@ -338,12 +341,20 @@ cannot read the repository administration API.
   six packages plus the three Controller manifests
   (`controller-release.json`, `controller-release-amd64.json`,
   `controller-release-arm64.json`) on formal Controller releases.
-- The Controller image build runs only for tag-push release runs as a
+- The Controller image build runs for tag-push release runs and manual
+  `workflow_dispatch` dry runs as a
   two-leg matrix on native runners (`ubuntu-24.04` for `amd64`,
   `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
   builder. Each leg exports its four first-party images as OCI archives
-  and holds only source-read permissions: no registry write of any kind
-  happens before approval. The single `release-publishing`-gated publish
+  and loads the Docker representation from the same BuildKit solve into the
+  runner's Docker daemon, whose classic image store cannot load OCI layouts
+  back. The smoke script compares the archive config digest with the loaded
+  image ID before it asserts each
+  image really targets the leg's architecture, boots the gateway image to
+  serve a request as a non-root process, and drives the control,
+  transport, and backup images to their startup boundaries on the native
+  runner. The legs hold only source-read
+  permissions: no registry write of any kind happens before approval. The single `release-publishing`-gated publish
   job then loads both legs' archives, pushes the per-platform images under
   `<version>-linux-<arch>` companion tags, merges them with
   `docker buildx imagetools create` into one tagged multi-platform index
