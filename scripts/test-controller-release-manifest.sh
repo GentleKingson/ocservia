@@ -208,6 +208,14 @@ abort("Read-only recovery must chain the published assets to the pinned release 
   recovery_step["run"].to_s.include?("scripts/validate-release-packages.sh") &&
   recovery_step.fetch("env", {}).fetch("AGENT_TRUSTED_KEY_SHA256", "") ==
     "${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}"
+state_step = publish_defs.find { |step| step.is_a?(Hash) && step["id"] == "release_state" }
+state_run = state_step.nil? ? "" : state_step["run"].to_s
+abort("Release-state detection must fail closed on a state-query failure, not fall back to the publish path") unless
+  !state_step.nil? &&
+  state_run.include?("%{http_code}") &&
+  state_run.include?("404") &&
+  state_run.include?("exit 1") &&
+  !state_run.include?("gh release view")
 login_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.include?("docker login") }
 abort("Production writes must be skipped by the read-only recovery path") unless
   !login_step.nil? && login_step["if"] == "steps.release_state.outputs.mode != 'verify-published'"

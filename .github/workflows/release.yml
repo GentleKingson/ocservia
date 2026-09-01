@@ -415,16 +415,40 @@ jobs:
       - name: Inspect release state
         # Reruns of a run that already published must never touch the
         # published release again; they take the read-only recovery step
-        # below while every production-write step is skipped.
+        # below while every production-write step is skipped. Decide on the
+        # explicit HTTP status: only a real 404 — no release for this tag,
+        # whose existence check-tag-binding.sh has already proven — may take
+        # the publish path. A query failure (API outage, rate limit,
+        # permission error) must fail closed instead of masquerading as
+        # "no release yet".
         id: release_state
         run: |
           set -euo pipefail
-          mode="publish"
-          if gh release view "${release_tag}" --json isDraft >/dev/null 2>&1; then
-            if [[ "$(gh release view "${release_tag}" --json isDraft --jq .isDraft)" != "true" ]]; then
-              mode="verify-published"
-            fi
-          fi
+          state_file="${RUNNER_TEMP}/release-state.json"
+          status="$(curl --silent --show-error --output "${state_file}" --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")"
+          case "${status}" in
+            404)
+              mode="publish"
+              ;;
+            200)
+              draft="$(jq -r '.draft' "${state_file}")"
+              if [[ "${draft}" == "false" ]]; then
+                mode="verify-published"
+              elif [[ "${draft}" == "true" ]]; then
+                mode="publish"
+              else
+                echo "releases API returned HTTP 200 with an unexpected body for ${release_tag}" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "could not determine the state of release ${release_tag}: releases API returned HTTP ${status}" >&2
+              exit 1
+              ;;
+          esac
           echo "mode=${mode}" >>"${GITHUB_OUTPUT}"
           echo "release ${release_tag} state: ${mode}"
       - name: Verify published release (read-only recovery)
