@@ -24,8 +24,20 @@ grep -qF 'g6-(?:load|relay-pre-fault|relay-failover|path-direct-recovery|crash[0
   echo "the G6 evidence scan allowlist must name the enumerated public scenario command-key class" >&2
   exit 1
 }
-grep -qF 'g6-journal-key-[0-9a-f]+' "${CONFIG}" || {
+grep -qF 'g6-journal-key-[0-9a-f]{32}' "${CONFIG}" || {
   echo "the G6 evidence scan allowlist must name the tagged public journal effect key" >&2
+  exit 1
+}
+grep -qF 'targetRules = ["generic-api-key"]' "${CONFIG}" || {
+  echo "the G6 journal exemption must target only the generic-api-key rule" >&2
+  exit 1
+}
+grep -qF 'regexTarget = "line"' "${CONFIG}" || {
+  echo "the G6 journal exemption must match the evidence record line, not a path" >&2
+  exit 1
+}
+grep -qF 'idempotency_key":"g6-journal-key-[0-9a-f]{32}' "${CONFIG}" || {
+  echo "the G6 journal exemption must bind the exact public key shape to its evidence field" >&2
   exit 1
 }
 grep -qF '01a02cfab3f17d5888eb7c20bf609ff2' "${CONFIG}" || {

@@ -3545,12 +3545,11 @@ if grep -qF 'g6rd_agent_compose restart' <<<"${owner_phase}"; then
   exit 1
 fi
 for token in \
-  'all frozen owner leases expired' \
   'all managed owners registered higher epochs' \
   'all Agents connected through replacement owners' \
   'report_owner_replacement_timeout'; do
   grep -qF "${token}" <<<"${owner_phase}" || {
-    echo "owner replacement is missing its lease-expiry, fleet-wide barrier: ${token}" >&2
+    echo "owner replacement is missing its fleet-wide barrier: ${token}" >&2
     exit 1
   }
 done
@@ -3565,29 +3564,28 @@ if grep -qF 'g6rd_compose stop worker' <<<"${owner_phase}"; then
 fi
 owner_worker_crash_line="$(grep -nF 'g6rd_compose kill --signal KILL worker' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
 owner_pause_line="$(grep -nF 'g6rd_timeline_event owner_a_paused' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
-owner_expiry_line="$(grep -nF 'all frozen owner leases expired' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
 owner_worker_start_line="$(grep -nF 'g6rd_compose up --detach worker' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
 owner_worker_ready_line="$(grep -nF 'replacement worker trust socket' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
 owner_transport_stop_line="$(grep -nF 'g6rd_compose stop transportd' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
 owner_transport_start_line="$(grep -nF 'g6rd_compose up --detach transportd' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
 owner_epoch_wait_line="$(grep -nF 'all managed owners registered higher epochs' <<<"${owner_phase}" | head -1 | cut -d: -f1)"
 [[ -n "${owner_worker_crash_line}" && -n "${owner_pause_line}" \
-  && -n "${owner_expiry_line}" && -n "${owner_worker_start_line}" \
+  && -n "${owner_worker_start_line}" \
   && -n "${owner_worker_ready_line}" \
   && -n "${owner_transport_stop_line}" && -n "${owner_transport_start_line}" \
   && -n "${owner_epoch_wait_line}" \
   && "${owner_worker_crash_line}" -lt "${owner_pause_line}" \
-  && "${owner_pause_line}" -lt "${owner_expiry_line}" \
-  && "${owner_expiry_line}" -lt "${owner_worker_start_line}" \
+  && "${owner_pause_line}" -lt "${owner_worker_start_line}" \
   && "${owner_worker_start_line}" -lt "${owner_worker_ready_line}" \
   && "${owner_worker_ready_line}" -lt "${owner_transport_stop_line}" \
   && "${owner_transport_stop_line}" -lt "${owner_transport_start_line}" \
   && "${owner_transport_start_line}" -lt "${owner_epoch_wait_line}" ]] || {
-  echo "all frozen leases must expire before the replacement worker and bounded fleet reconnect" >&2
+  echo "the replacement worker and transport must be active before the owner replacement wait" >&2
   exit 1
 }
 for token in \
   'owner-all-terms.tsv' \
+  'owner_expiry_values' \
   'frozen_lease_us' \
   'current.owner_epoch=expected.old_epoch' \
   'current.connection_id=expected.old_connection_id' \
@@ -3630,11 +3628,16 @@ owner_expiry_fixture="$(mktemp -d)"
 rm -rf -- "${owner_expiry_fixture}"
 for token in \
   'owner-all-terms.tsv' \
+  'frozen_lease_us' \
   "current.owner_epoch>expected.old_epoch" \
   "current.connection_id<>expected.old_connection_id" \
-  "current.lease_until>clock_timestamp()"; do
+  "current.lease_until>clock_timestamp()" \
+  'g6_connection_owner_history' \
+  'min(history.updated_at)' \
+  'acquired.acquired_at IS NOT NULL' \
+  'floor(extract(epoch FROM acquired.acquired_at)*1000000)::bigint>=expected.frozen_lease_us'; do
   grep -qF "${token}" <<<"${owner_replaced}${owner_values}" || {
-    echo "owner replacement must advance every frozen node through a new live connection: ${token}" >&2
+    echo "owner replacement must bind every new live connection to natural lease expiry: ${token}" >&2
     exit 1
   }
 done

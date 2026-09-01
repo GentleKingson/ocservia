@@ -44,10 +44,19 @@ fi
 # the tagged journal effect key the evidence builder publishes. The bare
 # fixture value is generated at runtime so this script never carries the
 # flagged shape as a literal.
-tagged_journal_key="g6-journal-key-01a02cfab3f17d5888eb7c20bf609ff2"
+tagged_journal_half_a="0123456789abcdef"
+tagged_journal_half_b="fedcba9876543210"
+tagged_journal_key="g6-journal-key-${tagged_journal_half_a}${tagged_journal_half_b}"
 printf '{"record_type":"effect","command_id":"01a02cfa-b3f1-7d58-88eb-7c20bf609ff2","idempotency_key":"%s"}\n' \
   "${tagged_journal_key}" \
   >"${fixture}/outbox/relay-pre-fault/command-trace.jsonl"
+# The unconfigured detector must reproduce the live generic-api-key finding on
+# the journal record itself, without relying on another allowlisted fixture.
+if (cd "${fixture}/outbox/relay-pre-fault" \
+  && gitleaks dir --no-banner --redact --no-color command-trace.jsonl) >/dev/null 2>&1; then
+  echo "the journal fixture no longer reproduces the generic-api-key finding" >&2
+  exit 1
+fi
 gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1 || {
   echo "the pinned configuration must exempt the tagged public journal effect key" >&2
   exit 1
