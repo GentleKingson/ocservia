@@ -7,6 +7,8 @@ record. It does not activate the node; an operator must approve it afterward.
 
 - The Agent package is installed on the node.
 - You know the Controller EndpointID and the target workspace UUIDv7.
+- Two distinct sealing private keys are provisioned on the node, and you have
+  their key IDs and public-key SHA-256 descriptors.
 - You have an authenticated API client with permission to create an enrollment
   token and approve a node.
 
@@ -58,13 +60,25 @@ record. It does not activate the node; an operator must approve it afterward.
      --identity-dir /var/lib/ocservia-agent/identity \
      --controller "$CONTROLLER_ENDPOINT_ID" \
      --enrollment-token-file /etc/ocservia-agent/enrollment-token \
-     --enrollment-environment production
+     --enrollment-environment production \
+     --user-password-seal-key-id "$USER_PASSWORD_SEAL_KEY_ID" \
+     --user-password-seal-public-key-sha256 "$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256" \
+     --p12-password-seal-key-id "$P12_PASSWORD_SEAL_KEY_ID" \
+     --p12-password-seal-public-key-sha256 "$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256"
    ```
 
-   Record the UUIDv7 node ID printed by the command, then remove the token
-   file.
+   Enrollment signs and persists both public-key descriptors. Record the UUIDv7
+   node ID printed by the command, then remove the token file. The descriptors
+   are enrollment inputs; the returned value that belongs in `agent.env` is
+   the new `NODE_ID`.
 
-5. Approve the pending node with an authenticated API client:
+   Before approval, return to [Configure the Agent after enrollment](../getting-started/managed-node.md#4-configure-the-agent-after-enrollment)
+   and, for production, [Install the production relay path](../getting-started/managed-node.md#5-install-the-production-relay-path).
+
+## Approve the node
+
+5. Approve the pending node with an authenticated API client only after the
+   Agent configuration and production relay path are complete:
 
    ```http
    POST /api/v1/nodes/<node-uuidv7>/approval
