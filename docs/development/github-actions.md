@@ -306,7 +306,11 @@ requires repository release immutability to be enabled first (Settings →
 Releases → Enable release immutability, or `gh api -X PUT
 /repos/{owner}/{repo}/immutable-releases`); the setting only applies to
 releases published after it is enabled, so the mutable v0.1.x baseline used
-by the upgrade smoke is unaffected.
+by the upgrade smoke is unaffected. The publish job verifies this
+prerequisite itself before any production write through the
+`REPO_ADMIN_READ_TOKEN` secret of the `release-publishing` environment
+(a fine-grained PAT with Administration: read), because `GITHUB_TOKEN`
+cannot read the repository administration API.
 
 - The build job runs as a two-leg matrix on native runners
   (`ubuntu-24.04` for `amd64`, `ubuntu-24.04-arm` for `arm64`, no emulation).
@@ -358,14 +362,23 @@ by the upgrade smoke is unaffected.
   archive checksum triples with the release key, rebuilds the native
   packages with the release trust anchor, validates the whole set against
   the `AGENT_TRUSTED_KEY_SHA256` pin, signs the unified `SHA256SUMS`, and
-  only then publishes through the immutable-release sequence: create a
-  draft release for the tag, upload the complete asset set without
-  `--clobber` (name collisions fail instead of overwriting), publish the
-  draft, and verify the release attestation GitHub generated at
-  publication with `gh release verify` plus an `immutable: true` assertion
-  on the published release. A published release is never modified: if the
-  tag already has a published release the job refuses, and a leftover
-  draft from an earlier failed attempt is the only thing it discards and
+  only then publishes through the immutable-release sequence. Before any
+  production write it binds the tag to the run's source commit (remote
+  `refs/tags/vX.Y.Z` must resolve to exactly that commit as a lightweight
+  tag; the check is repeated immediately before publishing, since a tag
+  can still be moved until the release is published), and it preflights
+  the repository immutability setting through `REPO_ADMIN_READ_TOKEN`.
+  The sequence itself is: create a draft release for the tag, upload the
+  complete asset set without `--clobber` (name collisions fail instead of
+  overwriting), publish the draft, and verify the release attestation
+  GitHub generated at publication with `gh release verify` plus an
+  `immutable: true` assertion on the published release. A published
+  release is never modified: a rerun after a successful publication skips
+  every production-write step and instead re-verifies the published
+  release in place (immutability, attestation, tag binding, and the
+  complete asset-name set), so a transient attestation delay cannot leave
+  a correct release with a permanently red workflow; a leftover draft
+  from an earlier failed attempt is the only thing it discards and
   recreates. Because immutable releases lock assets and the tag at
   publication, release notes are attached by a maintainer afterwards —
   title and notes remain editable on an immutable release.

@@ -186,6 +186,22 @@ abort("Controller release must verify the published release attestation") unless
   publish_steps.include?("gh release verify")
 abort("Controller release must fail closed on a mutable release") unless
   publish_steps.include?("--jq .immutable")
+abort("Controller publishing must preflight the immutable-releases prerequisite") unless
+  publish_steps.include?("immutable-releases") && publish_steps.include?("REPO_ADMIN_READ_TOKEN")
+abort("Controller publishing must bind the tag to the source commit before production writes") unless
+  publish_steps.include?("check-tag-binding.sh") &&
+  publish_steps.include?("git/ref/tags/")
+publish_defs = Array(publish.fetch("steps"))
+publishes_draft = publish_defs.select { |step| step.is_a?(Hash) && step["run"].to_s.include?("--draft=false") }
+abort("Controller publishing must re-verify the tag binding immediately before publishing") unless
+  publishes_draft.length == 1 &&
+  publishes_draft.first["run"].include?("check-tag-binding.sh") &&
+  publishes_draft.first["run"].index("check-tag-binding.sh") < publishes_draft.first["run"].index("gh release edit")
+abort("Publish job must keep a read-only recovery path for already-published releases") unless
+  publish_steps.include?("verified in place; nothing was modified")
+login_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.include?("docker login") }
+abort("Production writes must be skipped by the read-only recovery path") unless
+  !login_step.nil? && login_step["if"] == "steps.release_state.outputs.mode != 'verify-published'"
 abort("workflow dispatch must not publish Controller images") if
   controller.fetch("if").include?("workflow_dispatch")
 abort("Controller release must use the GHCR anonymous token flow") unless
