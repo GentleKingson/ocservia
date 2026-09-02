@@ -20,7 +20,11 @@
 # with remediation. controller.sh keeps its own prerequisite checks as the
 # final fail-closed boundary; this script only prepares the host.
 #
-# Supported hosts: Ubuntu 24.04 on amd64 or arm64.
+# Supported hosts: Ubuntu 22.04, 24.04, and 26.04 and Debian 11, 12, and 13 on
+# amd64 or arm64. Ubuntu 20.04 is a legacy compatibility host: it can run the
+# Controller against an already-installed compatible Docker, but automatic
+# Docker bootstrap is unavailable there because Ubuntu 20.04 is outside Docker's
+# current official Ubuntu support matrix.
 #
 # Environment seams (automation and fixture tests):
 #   OCSERV_CONTROLLER_STATE_ROOT / OCSERV_CONTROLLER_STATE_DIR
@@ -35,12 +39,18 @@ OS_RELEASE_FILE="${OCSERV_BOOTSTRAP_OS_RELEASE:-/etc/os-release}"
 KEYRING_DIR="${OCSERV_BOOTSTRAP_APT_KEYRING_DIR:-/etc/apt/keyrings}"
 APT_SOURCES_DIR="${OCSERV_BOOTSTRAP_APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
+SUPPORTED_HOSTS="Ubuntu 20.04 (existing Docker only), 22.04, 24.04, 26.04, and Debian 11, 12, 13 on amd64/arm64"
 COMMAND=""
 BACKUP_DIR=""
 ARCH_WORD=""
 OS_ID=""
 OS_VERSION_ID=""
 OS_CODENAME=""
+DOCKER_REPO_CODENAME=""
+DOCKER_INSTALL_DOC=""
+# full: Docker may be installed from the official Docker apt repository.
+# existing-docker: only an already-installed compatible Docker is accepted.
+SUPPORT_MODE=""
 launcher_user=""
 launcher_uid=""
 launcher_gid=""
@@ -94,7 +104,7 @@ compose_supports_wait() {
 
 detect_platform() {
   if [[ ! -r "${OS_RELEASE_FILE}" ]]; then
-    fail "cannot read the OS release file ${OS_RELEASE_FILE}; supported hosts are Ubuntu 24.04 on amd64/arm64"
+    fail "cannot read the OS release file ${OS_RELEASE_FILE}; supported hosts are ${SUPPORTED_HOSTS}"
   fi
   # shellcheck disable=SC1090
   . "${OS_RELEASE_FILE}"
@@ -102,19 +112,41 @@ detect_platform() {
   OS_ID="${ID:-}"
   # shellcheck disable=SC2154
   OS_VERSION_ID="${VERSION_ID:-}"
-  # shellcheck disable=SC2154
-  OS_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
-  if [[ "${OS_ID}" != ubuntu || "${OS_VERSION_ID}" != 24.04 ]]; then
-    fail "unsupported OS '${OS_ID:-unknown} ${OS_VERSION_ID:-unknown}'; supported hosts are Ubuntu 24.04 on amd64/arm64"
-  fi
+  # Docker's official Ubuntu repository suite follows ${UBUNTU_CODENAME:-$VERSION_CODENAME};
+  # the Debian repository suite uses $VERSION_CODENAME only.
+  case "${OS_ID}" in
+    ubuntu) OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}" ;;
+    *) OS_CODENAME="${VERSION_CODENAME:-}" ;;
+  esac
+  case "${OS_ID} ${OS_VERSION_ID}" in
+    "ubuntu 20.04") SUPPORT_MODE="existing-docker"; DOCKER_REPO_CODENAME="focal" ;;
+    "ubuntu 22.04") SUPPORT_MODE="full"; DOCKER_REPO_CODENAME="jammy" ;;
+    "ubuntu 24.04") SUPPORT_MODE="full"; DOCKER_REPO_CODENAME="noble" ;;
+    "ubuntu 26.04") SUPPORT_MODE="full"; DOCKER_REPO_CODENAME="resolute" ;;
+    "debian 11") SUPPORT_MODE="full"; DOCKER_REPO_CODENAME="bullseye" ;;
+    "debian 12") SUPPORT_MODE="full"; DOCKER_REPO_CODENAME="bookworm" ;;
+    "debian 13") SUPPORT_MODE="full"; DOCKER_REPO_CODENAME="trixie" ;;
+    *)
+      fail "unsupported OS '${OS_ID:-unknown} ${OS_VERSION_ID:-unknown}'; supported hosts are ${SUPPORTED_HOSTS}"
+      ;;
+  esac
   [[ -n "${OS_CODENAME}" ]] ||
-    fail "the Ubuntu 24.04 OS release file is missing VERSION_CODENAME"
+    fail "the ${OS_ID} ${OS_VERSION_ID} OS release file is missing its distribution codename"
+  [[ "${OS_CODENAME}" == "${DOCKER_REPO_CODENAME}" ]] ||
+    fail "OS release codename '${OS_CODENAME}' does not match the expected '${DOCKER_REPO_CODENAME}' for ${OS_ID} ${OS_VERSION_ID}; derived or customized distributions are unsupported"
   case "$(uname -m)" in
     x86_64) ARCH_WORD=amd64 ;;
     aarch64) ARCH_WORD=arm64 ;;
-    *) fail "unsupported architecture '$(uname -m)'; supported hosts are Ubuntu 24.04 on amd64/arm64" ;;
+    *) fail "unsupported architecture '$(uname -m)'; supported hosts are ${SUPPORTED_HOSTS}" ;;
   esac
-  echo "platform: Ubuntu ${OS_VERSION_ID} (${ARCH_WORD})"
+  DOCKER_INSTALL_DOC="https://docs.docker.com/engine/install/${OS_ID}/"
+  echo "platform: ${OS_ID} ${OS_VERSION_ID} (${DOCKER_REPO_CODENAME}, ${ARCH_WORD})"
+  if [[ "${OS_ID} ${OS_VERSION_ID}" == "ubuntu 20.04" ]]; then
+    echo "warning: Ubuntu 20.04 standard security maintenance ended 2025-05-31 and requires Ubuntu Pro/ESM or an equivalent maintenance strategy; this host supports only the existing-Docker compatibility path (this bootstrap never configures Ubuntu Pro/ESM)" >&2
+  fi
+  if [[ "${OS_ID} ${OS_VERSION_ID}" == "debian 11" ]]; then
+    echo "warning: Debian 11 regular Debian LTS security maintenance ended 2026-08-31; production hosts need Debian ELTS or an equivalent sustained security-maintenance strategy (this bootstrap never configures ELTS)" >&2
+  fi
 }
 
 resolve_launcher() {
@@ -128,17 +160,20 @@ resolve_launcher() {
 }
 
 detect_conflicts() {
-  local package
-  # Official Docker Ubuntu conflicts that always break the lifecycle contract.
-  for package in docker.io docker-doc podman-docker containerd runc; do
+  local package compose_packages=(docker-compose)
+  # Ubuntu's own docker-compose-v2 package joins the distro compose set; the
+  # official Docker Debian conflict list does not carry it.
+  [[ "${OS_ID}" != ubuntu ]] || compose_packages+=(docker-compose-v2)
+  # Official Docker ${OS_ID} conflicts that always break the lifecycle contract.
+  for package in docker.io docker-doc docker-buildx podman-docker containerd runc; do
     if package_installed "${package}"; then
-      record_failure "conflicting package '${package}' is installed; remove it deliberately (this bootstrap never uninstalls an existing runtime); see https://docs.docker.com/engine/install/ubuntu/"
+      record_failure "conflicting package '${package}' is installed; remove it deliberately (this bootstrap never uninstalls an existing runtime); see ${DOCKER_INSTALL_DOC}"
     fi
   done
-  # Ubuntu's own compose packages only conflict while the Compose v2 plugin
-  # this lifecycle requires is unavailable.
+  # The distribution's own compose packages only conflict while the Compose v2
+  # plugin this lifecycle requires is unavailable.
   if ! compose_plugin_available; then
-    for package in docker-compose docker-compose-v2; do
+    for package in "${compose_packages[@]}"; do
       if package_installed "${package}"; then
         record_failure "conflicting package '${package}' is installed while the Docker Compose v2 plugin is unavailable; align the existing installation deliberately (this bootstrap never uninstalls an existing runtime)"
       fi
@@ -169,12 +204,12 @@ install_missing_base_tools() {
 
 setup_docker_apt_repository() {
   local source_file="${APT_SOURCES_DIR}/docker.list" expected
-  echo "configuring the Docker official apt repository"
+  echo "configuring the Docker official apt repository for ${OS_ID} ${OS_VERSION_ID}"
   install -m 0755 -d "${KEYRING_DIR}"
   curl -fsSL "https://download.docker.com/linux/${OS_ID}/gpg" -o "${KEYRING_DIR}/docker.asc"
   chmod a+r "${KEYRING_DIR}/docker.asc"
   expected="$(printf 'deb [arch=%s signed-by=%s/docker.asc] https://download.docker.com/linux/%s %s stable' \
-    "${ARCH_WORD}" "${KEYRING_DIR}" "${OS_ID}" "${OS_CODENAME}")"
+    "${ARCH_WORD}" "${KEYRING_DIR}" "${OS_ID}" "${DOCKER_REPO_CODENAME}")"
   if [[ -e "${source_file}" ]]; then
     [[ "$(cat -- "${source_file}")" == "${expected}" ]] ||
       fail "refusing to overwrite an existing ${source_file} that differs from the official Docker repository line"
@@ -223,7 +258,11 @@ validate_docker_readiness() {
 check_docker() {
   local info_output
   if ! docker_client_present; then
-    record_failure "Docker is required but not installed; run 'bootstrap-host.sh install' to install it from the official Docker apt repository"
+    if [[ "${SUPPORT_MODE}" == "existing-docker" ]]; then
+      record_failure "Ubuntu 20.04 can run ocservia with an existing compatible Docker installation, but automatic Docker bootstrap is unavailable on this legacy host (Ubuntu 20.04 is outside Docker's current official Ubuntu support matrix; standard security maintenance ended 2025-05-31 and requires Ubuntu Pro/ESM or an equivalent maintenance strategy, which this bootstrap never configures)"
+    else
+      record_failure "Docker is required but not installed; run 'bootstrap-host.sh install' to install it from the official Docker apt repository"
+    fi
     return
   fi
   if ! docker_daemon_active; then
@@ -522,6 +561,8 @@ run_install() {
   if docker_client_present; then
     echo "existing Docker detected; preserving it without reinstall or upgrade"
     install_missing_base_tools
+  elif [[ "${SUPPORT_MODE}" == "existing-docker" ]]; then
+    fail "Ubuntu 20.04 can run ocservia with an existing compatible Docker installation, but automatic Docker bootstrap is unavailable on this legacy host (Ubuntu 20.04 is outside Docker's current official Ubuntu support matrix; standard security maintenance ended 2025-05-31 and requires Ubuntu Pro/ESM or an equivalent maintenance strategy, which this bootstrap never configures)"
   else
     echo "Docker is absent; installing Docker Engine and the Compose plugin from the official Docker apt repository"
     install_missing_base_tools

@@ -6,7 +6,13 @@ secret, and rollback contracts are in [Production deployment reference](../opera
 
 ## Requirements
 
-- Ubuntu 24.04 on `amd64` or `arm64`.
+- Ubuntu 20.04, 22.04, 24.04, or 26.04, or Debian 11, 12, or 13, on `amd64`
+  or `arm64`. Ubuntu 20.04 requires an existing compatible Docker
+  installation (Docker Engine with Compose v2 and `docker compose up --wait`);
+  automatic Docker bootstrap is unavailable on that legacy host, which needs
+  Ubuntu Pro/ESM or an equivalent maintenance strategy. Debian 11 left regular
+  Debian LTS security maintenance on 2026-08-31 and needs Debian ELTS or an
+  equivalent for production.
 - A clean checkout of the release tag being installed.
 - A DNS name and HTTPS certificate for the Controller.
 - An OIDC issuer and client, an HTTPS certificate signer, and a TLS OTLP
@@ -23,18 +29,21 @@ The repository does not generate production secrets, trust keys, certificates,
 relay tokens, or passwords. Prepare those through the operator's protected
 provisioning process.
 
-## 1. Download the release
+## 1. Release bundle
 
+`deploy/production/install.sh` downloads the release bundle for the host
+architecture automatically, so this step only describes what is downloaded.
 From the [GitHub Releases](https://github.com/GentleKingson/ocservia/releases)
-page, select one release tag and download the Controller manifest for the host
-architecture:
+page for the selected release tag, the relevant assets are:
 
 - `controller-release-amd64.json` and its `.sha256`, or
-- `controller-release-arm64.json` and its `.sha256`.
+- `controller-release-arm64.json` and its `.sha256`,
+
+together with `SHA256SUMS` and `SHA256SUMS.sig`.
 
 Keep the selected manifest, `SHA256SUMS`, and `SHA256SUMS.sig` together in one
-protected directory. Do not use the `release-signing.pub.pem` published beside
-the bundle as the trust anchor. Set
+protected directory when provisioning them manually. Do not use the
+`release-signing.pub.pem` published beside the bundle as the trust anchor. Set
 `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` to the independently provisioned key.
 
 ## 2. Prepare the host
@@ -47,15 +56,24 @@ git clone --branch <release-tag> --depth 1 \
 cd ocservia
 
 export OCSERV_BACKUP_DIR=/protected/ocservia-backups
+```
+
+The supported hosts are Ubuntu 20.04/22.04/24.04/26.04 and Debian 11/12/13 on
+`amd64` or `arm64`. When Docker is absent, the bootstrap installs Docker
+Engine and the Compose plugin from Docker's official apt repository for the
+detected distribution — except on Ubuntu 20.04, which supports only an
+already-installed compatible Docker. The bootstrap never changes Docker
+permissions, the firewall, or production trust material.
+
+`deploy/production/install.sh` (step 5) runs the host bootstrap itself. To
+prepare or verify the host separately:
+
+```bash
 deploy/production/bootstrap-host.sh check \
   --backup-dir "$OCSERV_BACKUP_DIR"
 sudo deploy/production/bootstrap-host.sh install \
   --backup-dir "$OCSERV_BACKUP_DIR"
 ```
-
-The bootstrap supports only Ubuntu 24.04 on the two Controller architectures.
-It installs missing host prerequisites but does not change Docker permissions,
-the firewall, or production trust material.
 
 ## 3. Configure required production settings
 
@@ -119,7 +137,42 @@ the same protected access token and its own certificate and key; see
 
 ## 5. Install the Controller
 
-Use the manifest matching the Docker daemon architecture:
+How the single-command installer runs depends on the Docker state of the host:
+
+- On a host that already has Docker with daemon access granted to the
+  lifecycle launcher user, run it as that launcher user (not as a whole-script
+  `sudo` — it invokes `sudo` itself only for the host bootstrap):
+
+  ```bash
+  deploy/production/install.sh
+  ```
+
+- On a fresh host without Docker, run the deliberate root lifecycle instead:
+
+  ```bash
+  deploy/production/install.sh --root-lifecycle
+  ```
+
+  A freshly installed Docker grants no non-root daemon access and the
+  installer never modifies the Docker permission model, so a non-root
+  launcher on a Docker-less host fails closed up front rather than mutating
+  the host and failing after the Docker install. `--root-lifecycle` obtains
+  root through a controlled `sudo env`, forwards only the allowlisted
+  production `OCSERV_*` settings from this operator session, and runs the
+  whole Controller lifecycle — including the state root — as root. Do not replace
+  this with `sudo -E`; plain whole-script `sudo` without the flag stays
+  rejected. The alternative is to install Docker separately first and
+  deliberately grant the launcher Docker daemon access per Docker's official
+  post-install steps, then run the installer as the launcher.
+
+The installer verifies that the checkout is a clean exact `vX.Y.Z` release
+tag, selects the manifest matching the host architecture (`amd64` or `arm64`),
+bootstraps the host, downloads the release bundle into
+`<state-root>/release-bundles/vX.Y.Z`, and activates it through
+`controller.sh install`.
+
+The equivalent manual path is the manifest matching the Docker daemon
+architecture:
 
 ```bash
 # amd64

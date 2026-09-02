@@ -24,6 +24,7 @@ paths=(
   deploy/systemd/ocservia-agent.service .github/workflows/g6-harness-smoke.yml
   .github/workflows/release.yml scripts/ci-relevance.sh scripts/test-controller-release-smoke.sh scripts/test-controller-release-bundle.sh scripts/verify-controller-release-bundle.sh scripts/test-controller-lifecycle.sh scripts/test-controller-compose-lifecycle.sh scripts/test-controller-host-bootstrap.sh web/package.json
   deploy/production/controller.sh deploy/production/controller-release-smoke.sh deploy/production/bootstrap-host.sh
+  deploy/production/install.sh scripts/test-controller-install.sh
   scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
   control-plane/Dockerfile
 )
@@ -128,6 +129,10 @@ expect_only "${out}" run_production_relays
 out="$(case_commit controller_bootstrap_test scripts/test-controller-host-bootstrap.sh)"
 expect_only "${out}" run_production_relays
 out="$(case_commit controller_bootstrap_host deploy/production/bootstrap-host.sh)"
+expect_only "${out}" run_production_relays
+out="$(case_commit controller_installer deploy/production/install.sh)"
+expect_only "${out}" run_production_relays
+out="$(case_commit controller_install_test scripts/test-controller-install.sh)"
 expect_only "${out}" run_production_relays
 out="$(case_commit controller_release_smoke scripts/test-controller-release-smoke.sh)"
 expect_only "${out}" run_contracts_policy

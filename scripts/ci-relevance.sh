@@ -131,7 +131,7 @@ classify_path() {
 
     scripts/ci-relevance.sh)
       fail_closed ci_relevance_authority_changed ;;
-    scripts/test-controller-compose-lifecycle.sh|scripts/test-controller-host-bootstrap.sh)
+    scripts/test-controller-compose-lifecycle.sh|scripts/test-controller-host-bootstrap.sh|scripts/test-controller-install.sh)
       run_production_relays=true ;;
     scripts/test-ci-relevance.sh|scripts/test-bootstrap-profiles.sh|scripts/test-ci-runtime-artifact.sh|scripts/ci-runtime-artifact.sh|scripts/test-toolchain-consistency.sh|scripts/test-controller-release-manifest.sh|scripts/test-controller-release-bundle.sh|scripts/verify-controller-release-bundle.sh|scripts/test-controller-release-smoke.sh|scripts/test-controller-lifecycle.sh|scripts/test-release-checksum-manifest.sh|scripts/release-checksum-manifest.sh|scripts/generate-controller-release-manifest.mjs)
       run_contracts_policy=true ;;

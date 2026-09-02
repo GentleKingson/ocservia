@@ -75,7 +75,9 @@ are not a production lifecycle prerequisite. When `gh` is already available,
 operators may separately run `gh attestation verify oci://...` for each
 first-party image at the exact digest recorded in the manifest.
 
-Prepare a fresh Ubuntu 24.04 host (amd64 or arm64) with the prerequisite
+Supported Controller hosts are Ubuntu 22.04, 24.04, and 26.04 and Debian 11,
+12, and 13 on amd64 or arm64, plus Ubuntu 20.04 as an existing-Docker
+compatibility host. Prepare a fresh supported host with the prerequisite
 bootstrap before the first lifecycle command:
 
 ```bash
@@ -88,13 +90,29 @@ lifecycle prerequisites. `install` is idempotent and installs only what is
 missing: `jq`, `flock` (`util-linux`), `curl`, `openssl`, and CA certificates
 through apt, and — only when Docker is absent entirely — Docker Engine, the
 CLI, containerd, Buildx, and the Compose plugin from Docker's official apt
-repository, never the `get.docker.com` convenience script. An existing
-compatible Docker installation is preserved without reinstall or upgrade; an
-existing runtime that conflicts with the lifecycle — the official Docker
-conflict set such as `docker.io`, `docker-doc`, `podman-docker`, `containerd`,
-`runc`, and Ubuntu's `docker-compose`/`docker-compose-v2` while the Compose v2
-plugin is unavailable, or a standalone `docker-compose` in the same situation —
-fails closed with an actionable message and is never uninstalled.
+repository for the detected distribution (`download.docker.com/linux/ubuntu`
+with the Ubuntu codename on Ubuntu, `download.docker.com/linux/debian` with
+`bullseye`/`bookworm`/`trixie` on Debian), never the `get.docker.com`
+convenience script. Ubuntu 20.04 is a legacy compatibility host: it can run
+the Controller only against an already-installed compatible Docker (Docker
+Engine with Compose v2 and `docker compose up --wait`), automatic Docker
+bootstrap fails closed because Ubuntu 20.04 is outside Docker's current
+official Ubuntu support matrix, and standard security maintenance ended
+2025-05-31, so the host needs Ubuntu Pro/ESM or an equivalent maintenance
+strategy (never configured by the bootstrap). Debian 11 remains fully
+bootstrappable while Docker still lists it, but regular Debian LTS security
+maintenance ended 2026-08-31; the bootstrap prints a legacy warning and
+production hosts need Debian ELTS or an equivalent sustained security
+maintenance (also never configured automatically). An existing
+compatible Docker installation is preserved without reinstall or upgrade on
+every supported host; an existing runtime that conflicts with the lifecycle —
+the official Docker conflict set such as `docker.io`, `docker-doc`,
+`docker-buildx`, `podman-docker`, `containerd`, `runc`, and the
+distribution's `docker-compose` (plus `docker-compose-v2` on Ubuntu) while
+the Compose v2 plugin is unavailable, or a standalone `docker-compose` in the
+same situation — fails closed with an actionable message pointing at the
+Docker installation guidance for the detected distribution and is never
+uninstalled.
 
 The launcher model is explicit: the lifecycle runs as the `sudo`-invoking user
 of the bootstrap, or as root when the bootstrap itself runs as root. That
@@ -118,6 +136,36 @@ published ports bypass it), and never creates or rotates any secret, key,
 token, or password. Both commands end with a read-only summary of the operator
 prerequisites that remain, such as `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`,
 and `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY`.
+
+For a first deployment, `deploy/production/install.sh` orchestrates those
+steps from a clean checkout of an exact `vX.Y.Z` release tag: it verifies the
+release-tag identity and clean checkout, selects the release manifest matching
+the host architecture (`amd64` or `arm64`), runs the host bootstrap through
+`sudo` in launcher mode (the root lifecycle re-execs once through a controlled
+`sudo env`), downloads the four bundle files — the selected
+`controller-release-<arch>.json`, its `.sha256`, `SHA256SUMS`, and
+`SHA256SUMS.sig`, never the published `release-signing.pub.pem` — into
+`<state-root>/release-bundles/vX.Y.Z` with mode-`0700` directories and
+mode-`0600` launcher-owned files, and delegates activation to
+`controller.sh install --release-file`. It must run as the lifecycle launcher
+user (not through whole-script `sudo`, which would mismatch the bootstrap's
+SUDO_USER launcher against the activating user). A deliberate
+whole-lifecycle-as-root install is available through
+`deploy/production/install.sh --root-lifecycle`: when started by a non-root
+operator it obtains root through a controlled `sudo env` that forwards only
+the allowlisted production `OCSERV_*` settings from the operator session, then
+strips `SUDO_USER` (which `sudo -i` retains) so the bootstrap provisions the
+root for the same root user that activates the Controller, and never infers
+intent from `SUDO_COMMAND`. Do not replace this with `sudo -E`.
+Because a freshly installed Docker grants no non-root daemon access and
+neither the installer nor the bootstrap ever modifies the Docker permission
+model, the installer fails closed before any host mutation when a non-root
+launcher runs it on a host without a Docker client: the fresh-host
+one-command path requires `--root-lifecycle`, or Docker must be installed
+separately first with the launcher's daemon access deliberately granted per
+Docker's official post-install steps. `controller.sh` remains the
+verification and activation authority, and the installer creates no secrets
+and no trust material.
 
 For a fresh Controller host, install the exact release selected by the local
 manifest through the lifecycle entrypoint:
