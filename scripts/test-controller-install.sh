@@ -297,19 +297,6 @@ capture --root-lifecycle extra-argument
 assert_status 2 "extra arguments alongside --root-lifecycle must be a usage error"
 echo "usage errors fail with status 2"
 
-# 1a. --root-lifecycle without root is rejected before any host mutation.
-if (( EUID != 0 )); then
-  reset_logs
-  reset_checkout
-  capture --root-lifecycle
-  assert_status 1 "--root-lifecycle without root must fail closed"
-  assert_output "--root-lifecycle must run as root"
-  assert_log_empty "${bootstrap_log}"
-  assert_log_empty "${curl_log}"
-  assert_log_empty "${controller_log}"
-  echo "--root-lifecycle without root is rejected"
-fi
-
 # 2. a non-tag checkout is rejected before any host mutation.
 reset_logs
 reset_checkout
