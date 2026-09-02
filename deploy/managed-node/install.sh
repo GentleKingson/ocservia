@@ -44,9 +44,12 @@
 #   deploy/managed-node/install.sh   # -> PENDING_APPROVAL
 #
 # Supported hosts, mirroring what this repository's installers and CI actually
-# exercise: x86_64 and aarch64; Ubuntu 20.04/22.04/24.04/26.04 and Debian
-# 11/12/13 through dpkg; Rocky Linux 9 through rpm; systemd required. Any
-# other platform fails closed before any host mutation.
+# exercise: x86_64 and aarch64; Ubuntu 22.04/24.04/26.04 and Debian 12/13
+# through dpkg; Rocky Linux 9 through rpm; systemd required. Ubuntu 20.04 and
+# Debian 11 are deliberately excluded: they ship OpenSSL 1.1.1, whose pkeyutl
+# cannot verify the Ed25519 SHA256SUMS signature this bootstrap (and the
+# package's own verifier) depend on. Any other platform fails closed before
+# any host mutation.
 #
 # Launcher contract (mirrors deploy/production/install.sh): run as the
 # operator launcher user, not as a whole-script sudo invocation. Privileged
@@ -85,7 +88,7 @@ IDENTITY_DIR="${SYSROOT}/var/lib/ocservia-agent/identity"
 PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
 PLACEHOLDER_RELAY_URL_B="https://relay-b.example.com"
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
-SUPPORTED_HOSTS="Ubuntu 20.04/22.04/24.04/26.04 and Debian 11/12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
+SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
 RELEASE_TAG=""
 RELEASE_COMMIT=""
 RELEASE_VERSION=""
@@ -95,6 +98,7 @@ PACKAGE_FAMILY=""
 PACKAGE_MANAGER=""
 PACKAGE_FILE=""
 STAGING_DIR=""
+PACKAGE_STAGING_DIR=""
 ROOT_LIFECYCLE=false
 EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
@@ -243,7 +247,7 @@ detect_platform() {
   # shellcheck disable=SC2154
   os_version_id="${VERSION_ID:-}"
   case "${os_id} ${os_version_id}" in
-    "ubuntu 20.04" | "ubuntu 22.04" | "ubuntu 24.04" | "ubuntu 26.04" | "debian 11" | "debian 12" | "debian 13")
+    "ubuntu 22.04" | "ubuntu 24.04" | "ubuntu 26.04" | "debian 12" | "debian 13")
       PACKAGE_FAMILY=deb
       PACKAGE_FILE="ocservia-agent_${RELEASE_VERSION}_${ARCH_WORD}.deb"
       ;;
@@ -346,7 +350,7 @@ resolve_trust_anchor() {
 download_release_artifacts() {
   local name
   STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
-  trap 'rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
+  trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
   for name in SHA256SUMS SHA256SUMS.sig "${PACKAGE_FILE}"; do
     echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
     curl -fsSL --proto '=https' --tlsv1.2 \
@@ -390,28 +394,47 @@ installed_package_version() {
   esac
 }
 
+expected_installed_version() {
+  case "${PACKAGE_FAMILY}" in
+    # nfpm appends the release component to the deb Version (deploy/package/
+    # nfpm.yaml sets release: 1, and scripts/release-native-package-smoke.sh
+    # asserts the installed deb Version is X.Y.Z-1); rpm keeps the release in
+    # %{RELEASE}, so %{VERSION} stays the bare SemVer.
+    deb) echo "${RELEASE_VERSION}-1" ;;
+    rpm) echo "${RELEASE_VERSION}" ;;
+  esac
+}
+
 ensure_native_package() {
   local installed_version actual_digest
   installed_version="$(installed_package_version)"
   if [[ -n "${installed_version}" ]]; then
-    [[ "${installed_version}" == "${RELEASE_VERSION}" ]] ||
-      fail "ocservia-agent ${installed_version} is installed but this checkout is release ${RELEASE_VERSION}; the bootstrap neither upgrades nor downgrades an installed package — use the Agent release lifecycle (docs/operations/agent-lifecycle.md)"
+    [[ "${installed_version}" == "$(expected_installed_version)" ]] ||
+      fail "ocservia-agent ${installed_version} is installed but this checkout is release ${RELEASE_VERSION} (native ${PACKAGE_FAMILY} version $(expected_installed_version)); the bootstrap neither upgrades nor downgrades an installed package — use the Agent release lifecycle (docs/operations/agent-lifecycle.md)"
     [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" ]] ||
       fail "the installed ocservia-agent ${installed_version} lacks the production relay drop-in ${RELAY_DROPIN}; it was installed without the production request — reinstall it through the release lifecycle with /etc/ocservia/agent-install-production-relays present"
     echo "native package ocservia-agent ${installed_version} already installed; skipping package installation"
     return
   fi
-  # Re-verify the digest on the privileged side immediately before the
-  # package manager, so the exact bytes verified out of band are the exact
-  # bytes installed.
-  actual_digest="$(priv sha256sum -- "${STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"
+  # Freeze the verified bytes on the privileged side before the package
+  # manager. The launcher's staging directory stays writable by the launcher,
+  # so digest-checking there and then handing the same path to dpkg/rpm would
+  # leave a replacement race between the two privileged processes; root would
+  # install (and run maintainer scripts from) whatever the launcher UID put
+  # there in between. The package is copied into a root-owned mode 0700
+  # staging directory the launcher cannot reach, the digest is re-verified on
+  # that frozen copy, and dpkg/rpm install exactly that file.
+  PACKAGE_STAGING_DIR="$(priv mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node-pkg.XXXXXX")"
+  priv install -o root -g root -m 0644 -- "${STAGING_DIR}/${PACKAGE_FILE}" \
+    "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}"
+  actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"
   [[ "${actual_digest}" == "${EXPECTED_PACKAGE_DIGEST}" ]] ||
     fail "the package digest changed after verification; refusing to invoke the package manager"
   priv install -d -o root -g root -m 0755 -- "$(dirname -- "${REQUEST_MARKER}")"
   priv touch -- "${REQUEST_MARKER}"
   case "${PACKAGE_FAMILY}" in
-    deb) priv dpkg -i "${STAGING_DIR}/${PACKAGE_FILE}" ;;
-    rpm) priv rpm -ivh "${STAGING_DIR}/${PACKAGE_FILE}" ;;
+    deb) priv dpkg -i "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" ;;
+    rpm) priv rpm -ivh "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" ;;
   esac
   [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" ]] ||
     fail "the native package install did not produce the production relay drop-in ${RELAY_DROPIN}"

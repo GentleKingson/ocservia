@@ -128,7 +128,7 @@ build_serve() {
     -in "${serve}/SHA256SUMS" -out "${serve}/SHA256SUMS.sig"
 }
 
-for name in ubuntu-24.04 ubuntu-22.04 debian-12 rocky-9 fedora-41 arch; do
+for name in ubuntu-24.04 ubuntu-22.04 ubuntu-20.04 debian-12 debian-11 rocky-9 fedora-41 arch; do
   case "${name}" in
     rocky-9) printf 'ID=rocky\nVERSION_ID="9.5"\n' ;;
     fedora-41) printf 'ID=fedora\nVERSION_ID="41"\n' ;;
@@ -198,7 +198,9 @@ chmod 0640 -- "${conf}/relays.env" "${conf}/agent.env"
 rm -f -- "${marker}"
 version="$(basename -- "${package}")"
 case "${version}" in
-  *.deb) version="${version#ocservia-agent_}" ; version="${version%_*}" ;;
+  # dpkg reports the nfpm release component (X.Y.Z-1); rpm -q --qf '%{VERSION}'
+  # reports the bare version because rpm keeps the release in %{RELEASE}.
+  *.deb) version="${version#ocservia-agent_}" ; version="${version%_*}-1" ;;
   *.rpm) version="${version#ocservia-agent-}" ; version="${version%-1.*}" ;;
 esac
 printf 'installed %s\n' "${version}" >"${OCSERV_MANAGED_NODE_SYSROOT}/.package-state"
@@ -518,7 +520,10 @@ assert_log_empty "${dpkg_log}"
 echo "an unsupported architecture is rejected before any host mutation"
 
 # 4. an unsupported distribution is rejected before any host mutation.
-for distro in fedora-41 arch; do
+# Ubuntu 20.04 and Debian 11 ship OpenSSL 1.1.1, whose pkeyutl cannot verify
+# the Ed25519 SHA256SUMS signature, so they are unsupported despite being
+# declarable dpkg hosts.
+for distro in fedora-41 arch ubuntu-20.04 debian-11; do
   scenario
   EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/${distro}")
   capture
@@ -645,7 +650,8 @@ echo "an installed version mismatch fails closed"
 # 10. an installed package without the production relay contract fails
 # closed instead of silently reusing a relay-free install.
 scenario
-printf '%s\n' "${VERSION}" >"${installed_version_file}"
+# The DEB platform's native version carries the nfpm release component.
+printf '%s\n' "${VERSION}-1" >"${installed_version_file}"
 capture
 assert_status 1 "a relay-free installed package must fail closed"
 assert_output "production relay drop-in"
@@ -692,6 +698,13 @@ as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${conf}/agent.e
 [[ ! -e "${sysroot}/etc/ocservia/agent-install-production-relays" ]] ||
   die "the production request marker must be consumed by the successful install"
 assert_log_contains "${agent_log}" "--prepare-enrollment"
+# The package manager must install the frozen root-owned copy, never a path
+# inside the launcher-writable staging directory (mktemp template
+# ocservia-managed-node-pkg. vs ocservia-managed-node.).
+assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
+if grep -q -- "ocservia-managed-node\." "${dpkg_log}"; then
+  die "dpkg must install the root-owned package copy, not the launcher staging: $(cat -- "${dpkg_log}")"
+fi
 if grep -q -- "--enrollment-token-file" "${agent_log}"; then
   die "no enrollment may run without a token file"
 fi

@@ -9,8 +9,11 @@ do not build a package on the node.
 - The Controller is deployed and its EndpointID is available.
 - The node is a Linux host with systemd and root access.
 - The host is one of the supported managed-node platforms: `x86_64` or
-  `aarch64` on Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12/13 (native
-  `.deb`), or Rocky Linux 9 (native `.rpm`). Other platforms fail closed.
+  `aarch64` on Ubuntu 22.04/24.04/26.04 or Debian 12/13 (native `.deb`), or
+  Rocky Linux 9 (native `.rpm`). The one-command bootstrap and the native
+  package verification require OpenSSL 3, so Ubuntu 20.04 and Debian 11
+  (OpenSSL 1.1.1) are not supported managed-node platforms. Other platforms
+  fail closed.
 - You have an independently trusted release public key and its expected
   fingerprint.
 - You can create a one-time token and approve the node. Follow [Enroll a
