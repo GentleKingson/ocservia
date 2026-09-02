@@ -59,6 +59,20 @@ Installing or upgrading never enables or starts a service — provision
 manually. Package removal runs the verified `uninstall-agent.sh`, preserving
 identity, state, and configuration by default.
 
+A production managed node requests the relay contract before invoking the
+package manager by creating `/etc/ocservia/agent-install-production-relays`
+as a regular file. `postinst` then passes `INSTALL_PRODUCTION_RELAYS=true`
+into the verified lifecycle, on a fresh install and on an upgrade, so the
+production relay drop-in and `relays.env` always come from the verified
+embedded payload — never from a source checkout. The request is one-shot: it
+is consumed only after the verified lifecycle succeeds, so a failed install
+or upgrade stays retryable; a real package removal (not an upgrade) retires
+an unconsumed request, so it cannot surprise a later plain install. The
+installed drop-in carries the standing production intent, and later upgrades
+reinstall it whenever the drop-in is already present, with or without the
+marker. Without the marker a native install stays relay-free, exactly as
+before.
+
 Package-manager downgrade is not a supported rollback path: it would skip the
 matched snapshot contract. Roll back only with
 `sudo /usr/libexec/ocservia/ocservia-agent-rollback`, then install the fixed

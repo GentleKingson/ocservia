@@ -178,6 +178,10 @@ execution_profiles = {
   "license" => "security",
   "native-ocserv" => "native"
 }
+# native-ocserv additionally bootstraps native-packages for the native
+# package scriptlet lifecycle smoke (nfpm). The allowance is explicit so any
+# other bootstrap drift still fails the exact-call policy.
+extra_bootstrap = {"native-ocserv" => ["scripts/bootstrap.sh native-packages"]}
 uncached_profiles = {"security-scan" => "g6-secret-scan"}
 (["all"] + execution_profiles.values + uncached_profiles.values).uniq.each do |profile|
   reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(/^  #{Regexp.escape(profile)}\)$/)
@@ -211,8 +215,8 @@ jobs.each do |job_id, job|
   end
 end
 execution_profiles.each do |job_id, profile|
-  expected = "scripts/bootstrap.sh #{profile}"
-  reject("#{job_id} must run exactly #{expected}") unless bootstrap_calls.fetch(job_id) == [expected]
+  expected = ["scripts/bootstrap.sh #{profile}"] + extra_bootstrap.fetch(job_id, [])
+  reject("#{job_id} must run exactly #{expected.join(' then ')}") unless bootstrap_calls.fetch(job_id) == expected
 end
 uncached_profiles.each do |job_id, profile|
   expected = "scripts/bootstrap.sh #{profile}"

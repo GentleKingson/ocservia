@@ -145,7 +145,7 @@ classify_path() {
       run_contracts_policy=true ;;
     scripts/p1-*|scripts/test-p1-*)
       run_p1_smoke=true; run_contracts_policy=true ;;
-    scripts/i13-native-*|scripts/package-native-*|scripts/install-agent.sh|scripts/uninstall-agent.sh|scripts/upgrade-agent.sh|scripts/rollback-agent.sh)
+    scripts/i13-native-*|scripts/package-native-*|scripts/release-native-package-smoke.sh|scripts/install-agent.sh|scripts/uninstall-agent.sh|scripts/upgrade-agent.sh|scripts/rollback-agent.sh)
       run_native=true; run_contracts_policy=true ;;
     scripts/i14-*|scripts/i15-*|scripts/i16-*|scripts/i17-*|scripts/i19-*)
       run_stage_contracts=true; run_contracts_policy=true ;;

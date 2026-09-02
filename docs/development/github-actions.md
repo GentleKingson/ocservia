@@ -57,7 +57,7 @@ required by the quality aggregate.
 | Rust Quality, Tests & Boundaries | Rust format, clippy, workspace tests, audit, and agent/transport boundaries | `rust-validation` | 25 minutes | Backend Integration and Quality, Security & Native |
 | Repository Secret Scan | Full-history repository gitleaks scan | `g6-secret-scan` | 20 minutes | Quality, Security & Native |
 | Dependency License Policy | Go, Rust when not covered by Rust validation, and Web dependency license policy | `security` | 20 minutes | Quality, Security & Native |
-| Native Ocserv / Agent Integration | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture | `native` | 20 minutes | Quality, Security & Native |
+| Native Ocserv / Agent Integration | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture; native package scriptlet lifecycle smoke | `native` (+ `native-packages`) | 25 minutes | Quality, Security & Native |
 
 Rust Quality, Tests & Boundaries executes once and feeds two aggregators. Each aggregator has a
 five-minute timeout, uses `always()`, and accepts a dependency only when it
@@ -159,7 +159,7 @@ exactly one explicit profile:
 | `security` | Go, Node/npm, Rust, cargo-deny, sccache, and Web dependencies | Dependency License Policy |
 | `native` | Rust and sccache | Native Ocserv / Agent Integration |
 | `g6-secret-scan` | gitleaks and host `jq`/`openssl` | Repository Secret Scan; G6 Formal Evidence Secret Scan; G6 Smoke Evidence Secret Scan |
-| `native-packages` | Rust and nfpm (Linux `aarch64` mirrors only this profile) | Agent Release Packages build matrix |
+| `native-packages` | Rust and nfpm (Linux `aarch64` mirrors only this profile) | Agent Release Packages build matrix; Native Ocserv / Agent Integration (package scriptlets) |
 
 Staged-feature contracts, credential rotation, local integration, Web Browser E2E, and runtime resilience smoke
 use runner-provided tools or artifacts and do not call bootstrap. Outside
@@ -258,6 +258,7 @@ evidence keeps its existing unconditional publication semantics.
 | Repository Contracts & Policy | `contracts-<run>-<attempt>` |
 | Rust Quality, Tests & Boundaries | `rust-<run>-<attempt>` |
 | Native Ocserv / Agent Integration | `native-ocserv-<run>-<attempt>` |
+| Native Ocserv / Agent Integration (package scriptlets) | `native-package-<run>-<attempt>` |
 | 500-Agent Resilience & Capacity Acceptance | `p1-full-<run>-<attempt>` |
 
 Repository Secret Scan and Dependency License Policy have no separate diagnostic artifact; their
