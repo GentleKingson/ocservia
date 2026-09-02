@@ -88,7 +88,17 @@ checkout directly into `/usr/lib/systemd/system`.
 If a native package is required instead, install only the exact package whose
 external release signature and checksum were verified in step 1.
 
-On Debian or Ubuntu:
+For a production node, first create the one-shot production request. Do this
+before invoking the package manager — `postinst` reads it while configuring
+the package, and the verified embedded payload then installs the production
+relay drop-in and `relays.env`:
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/ocservia
+sudo touch /etc/ocservia/agent-install-production-relays
+```
+
+Then install the package. On Debian or Ubuntu:
 
 ```bash
 sudo dpkg -i "$RELEASE_DIR/$AGENT_PACKAGE"
@@ -101,20 +111,13 @@ sudo rpm -ivh "$RELEASE_DIR/$AGENT_PACKAGE"
 ```
 
 The package installs the Agent, `privd`, the durable upgrader, and their
-systemd units. It does not enable or start either service. For a production
-node, create the one-shot production request before invoking the package
-manager; the verified embedded payload then installs the production relay
-drop-in and `relays.env`:
-
-```bash
-sudo install -d -o root -g root -m 0755 /etc/ocservia
-sudo touch /etc/ocservia/agent-install-production-relays
-```
-
-The successful install consumes the request marker, and the installed relay
-drop-in keeps later package upgrades on the production relay contract. Do not
-copy `deploy/production/systemd` files from a source checkout into
-`/usr/lib/systemd/system` under either path.
+systemd units — with the production relay drop-in and `relays.env` when the
+request marker was present, without them on a non-production node. It does
+not enable or start either service. The successful install consumes the
+request marker, the installed relay drop-in keeps later package upgrades on
+the production relay contract, and removing the package also retires any
+unconsumed request. Do not copy `deploy/production/systemd` files from a
+source checkout into `/usr/lib/systemd/system` under either path.
 
 ## 3. Prepare sealing keys
 
