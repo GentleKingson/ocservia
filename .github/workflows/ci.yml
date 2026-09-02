@@ -347,6 +347,7 @@ jobs:
       - name: Controller host bootstrap prerequisites
         run: |
           scripts/test-controller-host-bootstrap.sh
+          scripts/test-controller-install.sh
           deploy/production/bootstrap-host.sh check
       - name: Production topology, relays, backup, and package checks
         env:
