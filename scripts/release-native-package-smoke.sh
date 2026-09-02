@@ -106,7 +106,11 @@ else
     fi
   done
 fi
-echo "native ${PACKAGE_ARCH} ${STUB_BINARIES:+stub }release build passed"
+if [[ "${STUB_BINARIES}" == true ]]; then
+  echo "native ${PACKAGE_ARCH} stub release build passed"
+else
+  echo "native ${PACKAGE_ARCH} release build passed"
+fi
 
 openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
 chmod 0600 "${work}/signing.key"
