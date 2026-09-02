@@ -47,6 +47,8 @@ Logs, teardown, simulator behavior, and configuration are described in [Control-
 
 Production deployments use the guarded Controller lifecycle in [`deploy/production/`](deploy/production/): digest-pinned images, protected file-backed secrets outside the checkout, and launcher-validated runtime paths. Direct `docker compose` invocation is not a supported production path.
 
+Supported Controller hosts: Ubuntu 20.04/22.04/24.04/26.04 and Debian 11/12/13 on `amd64` or `arm64`. Ubuntu 20.04 requires an existing compatible Docker installation.
+
 Install from a clean checkout of the release you are deploying — the lifecycle entrypoint verifies that the checkout HEAD matches the release manifest's `source_commit`:
 
 ```bash
@@ -55,25 +57,13 @@ git clone --branch <release-tag> --depth 1 \
 cd ocservia
 ```
 
-Prepare an Ubuntu 24.04 host (amd64 or arm64):
+With the production environment and secrets provisioned (see [Deploy the Controller](docs/getting-started/production.md)), one command bootstraps the host, downloads the release bundle for the host architecture, and installs the Controller:
 
 ```bash
-deploy/production/bootstrap-host.sh check
-sudo deploy/production/bootstrap-host.sh install \
-  --backup-dir "$OCSERV_BACKUP_DIR"
+deploy/production/install.sh
 ```
 
-Install the Controller release manifest matching the host architecture:
-
-```bash
-# amd64 host
-deploy/production/controller.sh install \
-  --release-file /path/to/controller-release-amd64.json
-
-# arm64 host: use controller-release-arm64.json
-```
-
-The same entrypoint manages `upgrade`, `rollback`, `start`, and `uninstall`. Start with [Deploy the Controller](docs/getting-started/production.md); the full install, upgrade, rollback, recovery, and security contracts remain in [Production deployment reference](docs/operations/production-deployment.md).
+The underlying steps also remain available individually: `bootstrap-host.sh check|install` prepares host prerequisites, and `controller.sh install --release-file <manifest>` activates the manifest matching the host architecture. The same entrypoint manages `upgrade`, `rollback`, `start`, and `uninstall`. Start with [Deploy the Controller](docs/getting-started/production.md); the full install, upgrade, rollback, recovery, and security contracts remain in [Production deployment reference](docs/operations/production-deployment.md).
 
 ## Managed nodes
 
