@@ -79,6 +79,7 @@ node_id_file="${fixture}/node.id"
 enroll_exit_file="${fixture}/enroll-exit"
 installed_version_file="${fixture}/installed-version"
 arch_file="${fixture}/arch"
+tamper_after_verify_file="${fixture}/tamper-after-verify"
 
 die() {
   echo "Managed node install tests: $1" >&2
@@ -362,9 +363,43 @@ case "$*" in
 esac
 EOF
 
+cat >"${bin}/openssl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
+if [[ "${1:-}" == "pkeyutl" && -s "${root}/tamper-after-verify" ]]; then
+  status=0
+  /usr/bin/openssl "$@" || status=$?
+  if ((status == 0)); then
+    # Regression seam for the signed-manifest TOCTOU: the moment signature
+    # verification succeeds, a racing launcher-UID process replaces the
+    # launcher-writable manifest and package with internally consistent
+    # attacker artifacts (a manifest whose digest matches an attacker
+    # package). A correct installer froze its copies before verification and
+    # never reads the launcher staging again. The download staging template
+    # is ocservia-managed-node. (the privileged staging is -pkg. and is
+    # already frozen here).
+    for staging in /tmp/ocservia-managed-node.* "${TMPDIR:-/tmp}"/ocservia-managed-node.*; do
+      [[ -d "${staging}" ]] || continue
+      pkg=""
+      for candidate in "${staging}"/*.deb "${staging}"/*.rpm; do
+        [[ -f "${candidate}" ]] && pkg="${candidate}"
+      done
+      [[ -n "${pkg}" ]] || continue
+      printf 'attacker package bytes\n' >"${pkg}"
+      evil_digest="$(sha256sum -- "${pkg}" | awk '{print $1}')"
+      printf '%s  %s\n' "${evil_digest}" "$(basename -- "${pkg}")" >"${staging}/SHA256SUMS"
+    done
+  fi
+  exit "${status}"
+fi
+exec /usr/bin/openssl "$@"
+EOF
+
 chmod 0755 -- "${bin}/agent-stub" "${bin}/native-install" "${bin}/sudo" \
   "${bin}/curl" "${bin}/dpkg" "${bin}/dpkg-query" "${bin}/rpm" \
-  "${bin}/runuser" "${bin}/systemctl" "${bin}/uname" "${bin}/id"
+  "${bin}/runuser" "${bin}/systemctl" "${bin}/uname" "${bin}/id" \
+  "${bin}/openssl"
 
 build_serve
 
@@ -414,7 +449,8 @@ reset_state() {
   done
   printf '%s\n' "${MOCK_ENDPOINT_ID}" >"${endpoint_id_file}"
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
-  rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}"
+  rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
+    "${tamper_after_verify_file}"
   EXTRA_ENV=()
 }
 
@@ -724,6 +760,22 @@ assert_log_empty "${sudo_log}"
 grep -q -- "--controller ${controller_id}" "${agent_log}" ||
   die "identity preparation must pin the Controller EndpointID"
 echo "the root bootstrap flow reaches ENROLLMENT_READY"
+
+# 11a. a launcher-UID race cannot swap the signed manifest after signature
+# verification succeeds: the manifest parse and the package digest must read
+# the frozen root-owned staging, never the launcher-writable download
+# directory. The openssl mock rewrites the launcher staging with an
+# internally consistent attacker manifest + package the instant verification
+# returns success; the installer must still install the frozen signed bytes
+# (the native-install simulator rejects any package whose digest does not
+# match the signed manifest).
+scenario
+printf '1\n' >"${tamper_after_verify_file}"
+capture_root
+assert_status 0 "a post-verification launcher staging swap must not affect the install"
+assert_output "ENROLLMENT_READY"
+assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
+echo "a post-verification manifest swap in the launcher staging is ignored"
 
 # 12. a rerun converges: the installed package is reused, not reinstalled.
 scenario

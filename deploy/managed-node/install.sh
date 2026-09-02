@@ -358,21 +358,47 @@ download_release_artifacts() {
   done
 }
 
+freeze_release_artifacts() {
+  # Freeze the downloaded artifacts on the privileged side before any trust
+  # verification. The launcher's staging directory stays writable by the
+  # launcher, so verifying bytes there and then parsing the manifest or
+  # digesting the package from there would let a second launcher-UID process
+  # swap the signed manifest (and the package) after the signature check
+  # succeeds — the digest that authorizes the install must come from exactly
+  # the manifest that passed verification. From this point on the bootstrap
+  # never reads the launcher staging again. The staging parent is a fixed
+  # system directory, never the operator's TMPDIR: pathname trust comes from
+  # the parent, and an operator-owned TMPDIR would let the launcher rename or
+  # replace even this root-owned staging entry. /var/tmp is a root-owned
+  # sticky system directory on every supported host.
+  local name
+  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
+  for name in SHA256SUMS SHA256SUMS.sig "${PACKAGE_FILE}"; do
+    priv install -o root -g root -m 0644 -- "${STAGING_DIR}/${name}" \
+      "${PACKAGE_STAGING_DIR}/${name}"
+  done
+}
+
 verify_release_trust() {
   local manifest_line expected_digest actual_digest matches
   # The release-signing public key is intentionally absent from the download:
   # trust comes only from the operator-provisioned anchor verified above.
+  # The signature, the manifest parse, and the package digest all read the
+  # frozen root-owned staging, so the launcher cannot influence any of them
+  # after the fact; the staging directory is mode 0700 root, so every read
+  # crosses the privileged boundary.
   priv openssl pkeyutl -verify -rawin -pubin -inkey "${TRUSTED_RELEASE_KEY}" \
-    -in "${STAGING_DIR}/SHA256SUMS" -sigfile "${STAGING_DIR}/SHA256SUMS.sig" >/dev/null ||
+    -in "${PACKAGE_STAGING_DIR}/SHA256SUMS" \
+    -sigfile "${PACKAGE_STAGING_DIR}/SHA256SUMS.sig" >/dev/null ||
     fail "the release checksum manifest signature verification failed"
-  manifest_line="$(grep -F -- "  ${PACKAGE_FILE}" "${STAGING_DIR}/SHA256SUMS" || true)"
-  matches="$(grep -cF -- "  ${PACKAGE_FILE}" "${STAGING_DIR}/SHA256SUMS" || true)"
+  manifest_line="$(priv grep -F -- "  ${PACKAGE_FILE}" "${PACKAGE_STAGING_DIR}/SHA256SUMS" || true)"
+  matches="$(priv grep -cF -- "  ${PACKAGE_FILE}" "${PACKAGE_STAGING_DIR}/SHA256SUMS" || true)"
   [[ "${matches}" == 1 ]] ||
     fail "the signed checksum manifest must name ${PACKAGE_FILE} exactly once (found ${matches})"
   expected_digest="${manifest_line%%"  "*}"
   [[ "${expected_digest}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the signed checksum entry for ${PACKAGE_FILE} is malformed"
-  actual_digest="$(priv sha256sum -- "${STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')" ||
+  actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')" ||
     fail "cannot digest the downloaded package"
   [[ "${actual_digest}" == "${expected_digest}" ]] ||
     fail "the ${PACKAGE_FILE} digest does not match the signed checksum manifest"
@@ -416,22 +442,10 @@ ensure_native_package() {
     echo "native package ocservia-agent ${installed_version} already installed; skipping package installation"
     return
   fi
-  # Freeze the verified bytes on the privileged side before the package
-  # manager. The launcher's staging directory stays writable by the launcher,
-  # so digest-checking there and then handing the same path to dpkg/rpm would
-  # leave a replacement race between the two privileged processes; root would
-  # install (and run maintainer scripts from) whatever the launcher UID put
-  # there in between. The package is copied into a root-owned mode 0700
-  # staging directory, the digest is re-verified on that frozen copy, and
-  # dpkg/rpm install exactly that file. The staging parent is deliberately a
-  # fixed system directory, never the operator's TMPDIR: pathname trust comes
-  # from the parent, and an operator-owned TMPDIR would let the launcher
-  # rename or replace even this root-owned staging entry between the digest
-  # check and the package manager. /var/tmp is a root-owned sticky system
-  # directory on every supported host.
-  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
-  priv install -o root -g root -m 0644 -- "${STAGING_DIR}/${PACKAGE_FILE}" \
-    "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}"
+  # Re-check the digest on the frozen root-owned copy immediately before the
+  # package manager, so the exact bytes about to be installed are still the
+  # bytes verified against the signed manifest; every read since the freeze
+  # step targets the root-owned staging the launcher cannot reach.
   actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"
   [[ "${actual_digest}" == "${EXPECTED_PACKAGE_DIGEST}" ]] ||
     fail "the package digest changed after verification; refusing to invoke the package manager"
@@ -630,6 +644,7 @@ require_commands
 validate_operator_inputs
 resolve_trust_anchor
 download_release_artifacts
+freeze_release_artifacts
 verify_release_trust
 ensure_native_package
 prepare_production_node
