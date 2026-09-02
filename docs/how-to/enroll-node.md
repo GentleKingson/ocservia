@@ -109,8 +109,9 @@ record. It does not activate the node; an operator must approve it afterward.
 
    Record the returned UUIDv7 `id` as `APPROVAL_ID` and its
    `request_hash` as `APPROVAL_REQUEST_HASH`. The approval request's labels,
-   policy, capabilities, and reason are the exact activation content that the
-   independent approver must review.
+   policy, and capabilities are the exact activation content that the
+   independent approver must review. Keep the activation reason consistent for
+   audit clarity.
 
 6. Have a different authorized principal approve that request. The approver
    must verify the request content before approving it and must bind the
@@ -141,8 +142,9 @@ record. It does not activate the node; an operator must approve it afterward.
    }
    ```
 
-   The `labels`, `policy`, `capabilities`, and `reason` in this activation
-   request must exactly match the values in the `node.approve` request above.
+   The `labels`, `policy`, and `capabilities` in this activation request must
+   exactly match the values in the `node.approve` request above. Keep the
+   activation reason consistent for audit clarity.
    Node activation always requires a valid approved UUIDv7 in
    `X-Approval-ID`; independent approval is not policy-optional. Use the
    capabilities required by the node's policy, not a broader set by default.
