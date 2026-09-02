@@ -78,6 +78,7 @@ cp -- "${INSTALL}" "${repo}/deploy/production/install.sh"
 cat >"${repo}/deploy/production/bootstrap-host.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${INSTALL_TEST_BOOTSTRAP_LOG}"
 printf '%s\n' "$*" >>"${INSTALL_TEST_BOOTSTRAP_LOG}"
 [[ "${MOCK_BOOTSTRAP_EXIT:-0}" == 0 ]] || exit "${MOCK_BOOTSTRAP_EXIT}"
 if [[ "${MOCK_BOOTSTRAP_PROVISION_STATE:-1}" == 1 ]]; then
@@ -244,7 +245,22 @@ reset_logs
 reset_checkout
 capture unexpected-argument
 assert_status 2 "an unexpected argument must be a usage error"
+capture --root-lifecycle extra-argument
+assert_status 2 "extra arguments alongside --root-lifecycle must be a usage error"
 echo "usage errors fail with status 2"
+
+# 1a. --root-lifecycle without root is rejected before any host mutation.
+if (( EUID != 0 )); then
+  reset_logs
+  reset_checkout
+  capture --root-lifecycle
+  assert_status 1 "--root-lifecycle without root must fail closed"
+  assert_output "--root-lifecycle must run as root"
+  assert_log_empty "${bootstrap_log}"
+  assert_log_empty "${curl_log}"
+  assert_log_empty "${controller_log}"
+  echo "--root-lifecycle without root is rejected"
+fi
 
 # 2. a non-tag checkout is rejected before any host mutation.
 reset_logs
@@ -398,6 +414,7 @@ if can_root; then
     "${repo}/deploy/production/install.sh" 2>&1)" || RUN_STATUS=$?
   assert_status 1 "whole-script sudo must fail closed"
   assert_output "run install.sh as the lifecycle launcher user"
+  assert_output "--root-lifecycle"
   assert_log_empty "${bootstrap_log}"
   assert_log_empty "${curl_log}"
   assert_log_empty "${controller_log}"
@@ -429,6 +446,37 @@ if can_root; then
     as_root chown -R "$(id -u):$(id -g)" "${repo}"
   fi
   echo "a root shell runs the fresh-host lifecycle with no Docker present"
+
+  # 6b. --root-lifecycle deliberately runs the whole lifecycle as root even
+  # when the sudo environment still carries the invoking user's identity
+  # (which sudo -i retains): the installer strips SUDO_USER so the bootstrap
+  # provisions for root, while SUDO_UID/SUDO_GID stay untouched — git trusts
+  # the operator-owned checkout through exactly those, as real sudo sets
+  # them to the checkout owner's ids.
+  reset_logs
+  reset_checkout
+  RUN_STATUS=0
+  RUN_OUTPUT="$(sudo -n env \
+    INSTALL_TEST_CURL_LOG="${curl_log}" \
+    INSTALL_TEST_BOOTSTRAP_LOG="${bootstrap_log}" \
+    INSTALL_TEST_CONTROLLER_LOG="${controller_log}" \
+    INSTALL_TEST_SUDO_LOG="${sudo_log}" \
+    PATH="${fresh_bin}" \
+    SUDO_USER=ocservia-operator \
+    SUDO_UID="$(id -u)" \
+    SUDO_GID="$(id -g)" \
+    OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
+    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
+    "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1)" || RUN_STATUS=$?
+  assert_status 0 "--root-lifecycle must succeed with a retained sudo identity"
+  assert_output "release identity: v0.1.2"
+  assert_log_empty "${sudo_log}"
+  assert_log_contains "${bootstrap_log}" "launcher:<unset>"
+  assert_log_contains "${controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
+  if (( EUID != 0 )); then
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
+  fi
+  echo "--root-lifecycle runs the root lifecycle despite a retained sudo identity"
 else
   echo "sudo contract cases skipped: no passwordless sudo available" >&2
 fi
@@ -442,7 +490,7 @@ if (( EUID != 0 )); then
   EXTRA_ENV=("PATH=${fresh_bin}")
   capture
   assert_status 1 "a non-root launcher on a Docker-less host must fail closed"
-  assert_output "root lifecycle shell"
+  assert_output "--root-lifecycle"
   assert_output "post-install"
   assert_output "never modifies the Docker permission model"
   assert_log_empty "${bootstrap_log}"

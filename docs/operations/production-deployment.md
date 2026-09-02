@@ -148,14 +148,19 @@ the host architecture (`amd64` or `arm64`), runs the host bootstrap through
 mode-`0600` launcher-owned files, and delegates activation to
 `controller.sh install --release-file`. It must run as the lifecycle launcher
 user (not through whole-script `sudo`, which would mismatch the bootstrap's
-SUDO_USER launcher against the activating user); a plain root shell is an
-allowed root lifecycle. Because a freshly installed Docker grants no non-root
-daemon access and neither the installer nor the bootstrap ever modifies the
-Docker permission model, the installer fails closed before any host mutation
-when a non-root launcher runs it on a host without a Docker client: the
-fresh-host one-command path requires a root lifecycle shell, or Docker must be
-installed separately first with the launcher's daemon access deliberately
-granted per Docker's official post-install steps. `controller.sh` remains the
+SUDO_USER launcher against the activating user). A deliberate
+whole-lifecycle-as-root install is available through
+`sudo deploy/production/install.sh --root-lifecycle`: it requires root and
+strips `SUDO_USER` (which `sudo -i` retains) so the bootstrap provisions the
+state root for the same root user that activates the Controller, and never
+infers intent from `SUDO_COMMAND`.
+Because a freshly installed Docker grants no non-root daemon access and
+neither the installer nor the bootstrap ever modifies the Docker permission
+model, the installer fails closed before any host mutation when a non-root
+launcher runs it on a host without a Docker client: the fresh-host
+one-command path requires `--root-lifecycle`, or Docker must be installed
+separately first with the launcher's daemon access deliberately granted per
+Docker's official post-install steps. `controller.sh` remains the
 verification and activation authority, and the installer creates no secrets
 and no trust material.
 
