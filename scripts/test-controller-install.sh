@@ -57,6 +57,10 @@ curl_log="${logs}/curl.log"
 bootstrap_log="${logs}/bootstrap.log"
 controller_log="${logs}/controller.log"
 sudo_log="${logs}/sudo.log"
+root_curl_log="${state_root}.curl.log"
+root_bootstrap_log="${state_root}.bootstrap.log"
+root_controller_log="${state_root}.controller.log"
+root_sudo_log="${state_root}.sudo.log"
 EXTRA_ENV=()
 RUN_STATUS=0
 RUN_OUTPUT=""
@@ -78,8 +82,15 @@ cp -- "${INSTALL}" "${repo}/deploy/production/install.sh"
 cat >"${repo}/deploy/production/bootstrap-host.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${INSTALL_TEST_BOOTSTRAP_LOG}"
-printf '%s\n' "$*" >>"${INSTALL_TEST_BOOTSTRAP_LOG}"
+bootstrap_log="${INSTALL_TEST_BOOTSTRAP_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.bootstrap.log}"
+printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${bootstrap_log}"
+printf '%s\n' "$*" >>"${bootstrap_log}"
+printf 'OCSERV_PUBLIC_HOST=%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${bootstrap_log}"
+printf 'OCSERV_SECRET_DIR=%s\n' "${OCSERV_SECRET_DIR:-<unset>}" >>"${bootstrap_log}"
+printf 'OCSERV_BACKUP_DIR=%s\n' "${OCSERV_BACKUP_DIR:-<unset>}" >>"${bootstrap_log}"
+printf 'OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=%s\n' "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-<unset>}" >>"${bootstrap_log}"
+printf 'UNRELATED_ENV=%s\n' "${UNRELATED_ENV:-<unset>}" >>"${bootstrap_log}"
+printf 'OCSERV_UNRELATED_CONFIG=%s\n' "${OCSERV_UNRELATED_CONFIG:-<unset>}" >>"${bootstrap_log}"
 [[ "${MOCK_BOOTSTRAP_EXIT:-0}" == 0 ]] || exit "${MOCK_BOOTSTRAP_EXIT}"
 if [[ "${MOCK_BOOTSTRAP_PROVISION_STATE:-1}" == 1 ]]; then
   mkdir -p -m 0700 -- \
@@ -91,14 +102,16 @@ EOF
 cat >"${repo}/deploy/production/controller.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >>"${INSTALL_TEST_CONTROLLER_LOG}"
+controller_log="${INSTALL_TEST_CONTROLLER_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.controller.log}"
+printf '%s\n' "$*" >>"${controller_log}"
 exit "${MOCK_CONTROLLER_EXIT:-0}"
 EOF
 
 cat >"${bin}/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >>"${INSTALL_TEST_CURL_LOG}"
+curl_log="${INSTALL_TEST_CURL_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.curl.log}"
+printf '%s\n' "$*" >>"${curl_log}"
 output=""
 url=""
 while (($# > 0)); do
@@ -144,11 +157,15 @@ chmod 0755 -- "${repo}/deploy/production/bootstrap-host.sh" \
 # docker command anywhere, even when the host running the tests has Docker.
 fresh_bin="${fixture}/fresh-bin"
 mkdir -m 700 -- "${fresh_bin}"
-link_tool() {
-  local tool="$1" path
+root_lifecycle_bin="${fixture}/root-lifecycle-bin"
+link_tool_into() {
+  local destination="$1" tool="$2" path
   path="$(command -v "${tool}" || true)"
   [[ -n "${path}" ]] || die "required test tool not found: ${tool}"
-  ln -s "${path}" "${fresh_bin}/${tool}"
+  ln -s "${path}" "${destination}/${tool}"
+}
+link_tool() {
+  link_tool_into "${fresh_bin}" "$1"
 }
 for tool in bash git env chmod mkdir dirname; do
   link_tool "${tool}"
@@ -156,6 +173,26 @@ done
 ln -s "${bin}/sudo" "${fresh_bin}/sudo"
 ln -s "${bin}/curl" "${fresh_bin}/curl"
 ln -s "${bin}/uname" "${fresh_bin}/uname"
+
+# The operator-to-root regression case uses the real sudo boundary, while
+# keeping the fixture's mocked tools visible after sudo's environment reset.
+# The wrapper logs the exact sudo env arguments before adding this test-only
+# PATH, so the production installer still has to forward only its allowlist.
+if (( EUID != 0 )) && can_root; then
+  mkdir -m 700 -- "${root_lifecycle_bin}"
+  for tool in bash git env chmod mkdir dirname; do
+    link_tool_into "${root_lifecycle_bin}" "${tool}"
+  done
+  ln -s "${bin}/curl" "${root_lifecycle_bin}/curl"
+  ln -s "${bin}/uname" "${root_lifecycle_bin}/uname"
+  real_sudo="$(command -v sudo)"
+  cat >"${root_lifecycle_bin}/sudo" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${root_sudo_log}"
+exec "${real_sudo}" env PATH="${root_lifecycle_bin}" "\$@"
+EOF
+  chmod 0755 -- "${root_lifecycle_bin}/sudo"
+fi
 
 # The installer only probes for a docker client with command -v before the
 # bootstrap; a stub on PATH is enough for the existing-Docker scenarios.
@@ -187,6 +224,17 @@ reset_logs() {
       rm -rf -- "${state_root}"
     fi
   fi
+  if can_root; then
+    as_root rm -f -- "${root_curl_log}" "${root_bootstrap_log}" \
+      "${root_controller_log}" "${root_sudo_log}"
+  else
+    rm -f -- "${root_curl_log}" "${root_bootstrap_log}" \
+      "${root_controller_log}" "${root_sudo_log}"
+  fi
+  : >"${root_curl_log}"
+  : >"${root_bootstrap_log}"
+  : >"${root_controller_log}"
+  : >"${root_sudo_log}"
   EXTRA_ENV=()
 }
 
@@ -477,6 +525,60 @@ if can_root; then
     as_root chown -R "$(id -u):$(id -g)" "${repo}"
   fi
   echo "--root-lifecycle runs the root lifecycle despite a retained sudo identity"
+
+  # 6c. The documented operator command must survive sudo's default
+  # env_reset: the operator exports production settings, invokes the script
+  # directly, and the installer performs the controlled sudo env re-exec.
+  if (( EUID != 0 )); then
+    reset_logs
+    reset_checkout
+    RUN_STATUS=0
+    RUN_OUTPUT="$(
+      export INSTALL_TEST_CURL_LOG="${curl_log}"
+      export INSTALL_TEST_BOOTSTRAP_LOG="${bootstrap_log}"
+      export INSTALL_TEST_CONTROLLER_LOG="${controller_log}"
+      export INSTALL_TEST_SUDO_LOG="${sudo_log}"
+      export PATH="${root_lifecycle_bin}"
+      export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
+      export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem"
+      export OCSERV_SECRET_DIR="${fixture}/secrets"
+      export OCSERV_BACKUP_DIR="${fixture}/backup"
+      export OCSERV_PUBLIC_HOST=controller.example.test
+      export OCSERV_OIDC_ISSUER=https://id.example.test
+      export OCSERV_OIDC_CLIENT_ID=ocservia
+      export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test/v1
+      export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
+      export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
+      export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
+      export OCSERV_RELAY_URL_A=https://relay-a.example.test
+      export OCSERV_RELAY_URL_B=https://relay-b.example.test
+      export OCSERV_HTTPS_ADDRESS=127.0.0.1
+      export OCSERV_BACKUP_INTERVAL_SECONDS=300
+      export OCSERV_BACKUP_RETENTION_COUNT=4
+      export UNRELATED_ENV=must-not-cross-sudo
+      export OCSERV_UNRELATED_CONFIG=must-not-cross-sudo
+      "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1
+    )" || RUN_STATUS=$?
+    assert_status 0 "the operator root-lifecycle command must succeed through sudo env_reset"
+    assert_output "release identity: v0.1.2"
+    assert_log_contains "${root_sudo_log}" "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem"
+    assert_log_contains "${root_sudo_log}" "OCSERV_PUBLIC_HOST=controller.example.test"
+    if grep -q "UNRELATED_ENV\|OCSERV_UNRELATED_CONFIG" "${root_sudo_log}"; then
+      die "the root-lifecycle sudo command must not forward unrelated environment variables: $(cat -- "${root_sudo_log}")"
+    fi
+    assert_log_contains "${root_bootstrap_log}" "launcher:<unset>"
+    assert_log_contains "${root_bootstrap_log}" "OCSERV_PUBLIC_HOST=controller.example.test"
+    assert_log_contains "${root_bootstrap_log}" "OCSERV_SECRET_DIR=${fixture}/secrets"
+    assert_log_contains "${root_bootstrap_log}" "OCSERV_BACKUP_DIR=${fixture}/backup"
+    assert_log_contains "${root_bootstrap_log}" "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem"
+    assert_log_contains "${root_bootstrap_log}" "UNRELATED_ENV=<unset>"
+    assert_log_contains "${root_bootstrap_log}" "OCSERV_UNRELATED_CONFIG=<unset>"
+    [[ "$(wc -l <"${root_curl_log}" | tr -d ' ')" == 4 ]] ||
+      die "expected exactly four root-lifecycle bundle downloads, got: $(cat -- "${root_curl_log}")"
+    assert_log_contains "${root_controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
+    echo "the operator root-lifecycle command forwards only production configuration across sudo env_reset"
+  fi
 else
   echo "sudo contract cases skipped: no passwordless sudo available" >&2
 fi

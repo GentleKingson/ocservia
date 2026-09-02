@@ -63,7 +63,7 @@ With the production environment and secrets provisioned (see [Deploy the Control
 deploy/production/install.sh
 ```
 
-On a host that already has Docker, run it as the lifecycle launcher user with Docker daemon access already granted. On a fresh host without Docker, run `sudo deploy/production/install.sh --root-lifecycle` instead — a deliberate whole-lifecycle-as-root install; a fresh Docker installation grants no non-root daemon access, the installer never changes Docker permissions, and plain whole-script `sudo` without the flag stays rejected.
+On a host that already has Docker, run it as the lifecycle launcher user with Docker daemon access already granted. On a fresh host without Docker, run `deploy/production/install.sh --root-lifecycle` instead — a deliberate whole-lifecycle-as-root install; the installer forwards only the allowlisted production `OCSERV_*` settings through a controlled `sudo env`, a fresh Docker installation grants no non-root daemon access, the installer never changes Docker permissions, and plain whole-script `sudo` without the flag stays rejected.
 
 The underlying steps also remain available individually: `bootstrap-host.sh check|install` prepares host prerequisites, and `controller.sh install --release-file <manifest>` activates the manifest matching the host architecture. The same entrypoint manages `upgrade`, `rollback`, `start`, and `uninstall`. Start with [Deploy the Controller](docs/getting-started/production.md); the full install, upgrade, rollback, recovery, and security contracts remain in [Production deployment reference](docs/operations/production-deployment.md).
 

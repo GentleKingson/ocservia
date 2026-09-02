@@ -150,16 +150,18 @@ How the single-command installer runs depends on the Docker state of the host:
 - On a fresh host without Docker, run the deliberate root lifecycle instead:
 
   ```bash
-  sudo deploy/production/install.sh --root-lifecycle
+  deploy/production/install.sh --root-lifecycle
   ```
 
   A freshly installed Docker grants no non-root daemon access and the
   installer never modifies the Docker permission model, so a non-root
   launcher on a Docker-less host fails closed up front rather than mutating
-  the host and failing after the Docker install. `--root-lifecycle` requires
-  root and runs the whole Controller lifecycle — including the state root —
-  as root, so plain `sudo deploy/production/install.sh` without the flag
-  stays rejected. The alternative is to install Docker separately first and
+  the host and failing after the Docker install. `--root-lifecycle` obtains
+  root through a controlled `sudo env`, forwards only the allowlisted
+  production `OCSERV_*` settings from this operator session, and runs the
+  whole Controller lifecycle — including the state root — as root. Do not replace
+  this with `sudo -E`; plain whole-script `sudo` without the flag stays
+  rejected. The alternative is to install Docker separately first and
   deliberately grant the launcher Docker daemon access per Docker's official
   post-install steps, then run the installer as the launcher.
 

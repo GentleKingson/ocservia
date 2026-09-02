@@ -24,18 +24,18 @@
 #   export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=...
 #   # export the remaining production Controller configuration...
 #   deploy/production/install.sh                          # launcher user with Docker access
-#   sudo deploy/production/install.sh --root-lifecycle    # deliberate root lifecycle (fresh host)
+#   deploy/production/install.sh --root-lifecycle         # deliberate root lifecycle (fresh host)
 #
 # Launcher contract: run this script as the lifecycle launcher user, not as a
 # whole-script sudo invocation. bootstrap-host.sh provisions the state root
 # for the SUDO_USER launcher while controller.sh validates state ownership
 # against the actual invoking user, so 'sudo install.sh' would mismatch them;
-# sudo is invoked internally only for the host bootstrap step. A deliberate
-# whole-lifecycle-as-root install is available through
-# 'sudo install.sh --root-lifecycle': it requires EUID 0 and strips SUDO_USER
-# (which sudo -i retains) so the bootstrap provisions the state root for the
-# same root user that activates the Controller, and never infers intent from
-# SUDO_COMMAND. On a host without a
+# In launcher mode sudo is invoked internally only for the host bootstrap
+# step. A deliberate whole-lifecycle-as-root install is available through
+# 'install.sh --root-lifecycle': it reaches root through a controlled sudo env,
+# then strips SUDO_USER (which sudo -i retains) so the bootstrap provisions the
+# state root for the same root user that activates the Controller, and never
+# infers intent from SUDO_COMMAND. On a host without a
 # Docker client the fresh-host path additionally requires this root lifecycle
 # mode: a fresh Docker installation grants no non-root daemon access, and
 # this installer never modifies the Docker permission model, so a non-root
@@ -54,6 +54,30 @@ ARCH_WORD=""
 BUNDLE_DIR=""
 ROOT_LIFECYCLE=false
 
+# Only operator-supplied production configuration crosses the internal sudo
+# boundary. Release image variables are generated from the verified manifest;
+# bootstrap and test seams are intentionally not forwarded.
+ROOT_LIFECYCLE_ENV_NAMES=(
+  OCSERV_AUDIT_EVENT_KEY_ID
+  OCSERV_BACKUP_DIR
+  OCSERV_BACKUP_INTERVAL_SECONDS
+  OCSERV_BACKUP_RETENTION_COUNT
+  OCSERV_CERTIFICATE_SIGNER_URL
+  OCSERV_CONTROLLER_ENDPOINT_ID
+  OCSERV_CONTROLLER_PUBLIC_URL
+  OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY
+  OCSERV_CONTROLLER_STATE_DIR
+  OCSERV_CONTROLLER_STATE_ROOT
+  OCSERV_HTTPS_ADDRESS
+  OCSERV_OIDC_CLIENT_ID
+  OCSERV_OIDC_ISSUER
+  OCSERV_OTEL_BACKEND_ENDPOINT
+  OCSERV_PUBLIC_HOST
+  OCSERV_RELAY_URL_A
+  OCSERV_RELAY_URL_B
+  OCSERV_SECRET_DIR
+)
+
 fail() {
   echo "controller install: $1" >&2
   exit 1
@@ -71,9 +95,25 @@ case "${1:-}" in
     exit 2
     ;;
 esac
+
+forward_root_lifecycle() {
+  local variable allowed
+  local -a forwarded_environment=()
+  while IFS= read -r variable; do
+    for allowed in "${ROOT_LIFECYCLE_ENV_NAMES[@]}"; do
+      [[ "${variable}" == "${allowed}" ]] || continue
+      forwarded_environment+=("${variable}=${!variable}")
+      break
+    done
+  done < <(compgen -e)
+  command -v sudo >/dev/null 2>&1 ||
+    fail "sudo is required for --root-lifecycle when the installer is not already running as root"
+  exec sudo env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
+    "${ROOT}/deploy/production/install.sh" --root-lifecycle
+}
+
 if [[ "${ROOT_LIFECYCLE}" == true ]]; then
-  (( EUID == 0 )) ||
-    fail "--root-lifecycle must run as root, typically via sudo; without the flag install.sh runs as the non-root lifecycle launcher user"
+  (( EUID == 0 )) || forward_root_lifecycle
   # bootstrap-host.sh resolves its launcher from SUDO_USER, which sudo -i
   # retains: strip it so the state root is provisioned for the same root user
   # that activates the Controller. SUDO_UID/SUDO_GID stay untouched — git
@@ -85,7 +125,7 @@ if (( EUID == 0 )) && [[ "${ROOT_LIFECYCLE}" == false ]]; then
   case "${SUDO_USER:-}" in
     ""|root) ;;
     *)
-      fail "run install.sh as the lifecycle launcher user; the installer will invoke sudo only for host bootstrap (whole-script sudo from '${SUDO_USER}' would provision the state root for a launcher that never activates it); for a deliberate whole-lifecycle-as-root install run 'sudo deploy/production/install.sh --root-lifecycle'"
+      fail "run install.sh as the lifecycle launcher user; the installer will invoke sudo only for host bootstrap (whole-script sudo from '${SUDO_USER}' would provision the state root for a launcher that never activates it); for a deliberate whole-lifecycle-as-root install run 'deploy/production/install.sh --root-lifecycle'"
       ;;
   esac
 fi
@@ -130,7 +170,7 @@ verify_fresh_host_launcher_path() {
   # launcher only after the host had already been mutated. Fail closed before
   # any host mutation instead and hand the operator the two supported paths.
   if (( EUID != 0 )) && ! command -v docker >/dev/null 2>&1; then
-    fail "no Docker client is installed, so the host bootstrap would install Docker from scratch; a fresh Docker installation grants no non-root daemon access and this installer never modifies the Docker permission model — run 'sudo deploy/production/install.sh --root-lifecycle' for a deliberate root Controller lifecycle on this fresh host, or install Docker separately and deliberately grant this launcher Docker daemon access per Docker's official post-install steps, then rerun install.sh as the launcher"
+    fail "no Docker client is installed, so the host bootstrap would install Docker from scratch; a fresh Docker installation grants no non-root daemon access and this installer never modifies the Docker permission model — run 'deploy/production/install.sh --root-lifecycle' for a deliberate root Controller lifecycle on this fresh host, or install Docker separately and deliberately grant this launcher Docker daemon access per Docker's official post-install steps, then rerun install.sh as the launcher"
   fi
 }
 

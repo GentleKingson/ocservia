@@ -141,7 +141,8 @@ For a first deployment, `deploy/production/install.sh` orchestrates those
 steps from a clean checkout of an exact `vX.Y.Z` release tag: it verifies the
 release-tag identity and clean checkout, selects the release manifest matching
 the host architecture (`amd64` or `arm64`), runs the host bootstrap through
-`sudo` (only that step), downloads the four bundle files — the selected
+`sudo` in launcher mode (the root lifecycle re-execs once through a controlled
+`sudo env`), downloads the four bundle files — the selected
 `controller-release-<arch>.json`, its `.sha256`, `SHA256SUMS`, and
 `SHA256SUMS.sig`, never the published `release-signing.pub.pem` — into
 `<state-root>/release-bundles/vX.Y.Z` with mode-`0700` directories and
@@ -150,10 +151,12 @@ mode-`0600` launcher-owned files, and delegates activation to
 user (not through whole-script `sudo`, which would mismatch the bootstrap's
 SUDO_USER launcher against the activating user). A deliberate
 whole-lifecycle-as-root install is available through
-`sudo deploy/production/install.sh --root-lifecycle`: it requires root and
+`deploy/production/install.sh --root-lifecycle`: when started by a non-root
+operator it obtains root through a controlled `sudo env` that forwards only
+the allowlisted production `OCSERV_*` settings from the operator session, then
 strips `SUDO_USER` (which `sudo -i` retains) so the bootstrap provisions the
-state root for the same root user that activates the Controller, and never
-infers intent from `SUDO_COMMAND`.
+root for the same root user that activates the Controller, and never infers
+intent from `SUDO_COMMAND`. Do not replace this with `sudo -E`.
 Because a freshly installed Docker grants no non-root daemon access and
 neither the installer nor the bootstrap ever modifies the Docker permission
 model, the installer fails closed before any host mutation when a non-root
