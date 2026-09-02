@@ -422,9 +422,14 @@ ensure_native_package() {
   # leave a replacement race between the two privileged processes; root would
   # install (and run maintainer scripts from) whatever the launcher UID put
   # there in between. The package is copied into a root-owned mode 0700
-  # staging directory the launcher cannot reach, the digest is re-verified on
-  # that frozen copy, and dpkg/rpm install exactly that file.
-  PACKAGE_STAGING_DIR="$(priv mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node-pkg.XXXXXX")"
+  # staging directory, the digest is re-verified on that frozen copy, and
+  # dpkg/rpm install exactly that file. The staging parent is deliberately a
+  # fixed system directory, never the operator's TMPDIR: pathname trust comes
+  # from the parent, and an operator-owned TMPDIR would let the launcher
+  # rename or replace even this root-owned staging entry between the digest
+  # check and the package manager. /var/tmp is a root-owned sticky system
+  # directory on every supported host.
+  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
   priv install -o root -g root -m 0644 -- "${STAGING_DIR}/${PACKAGE_FILE}" \
     "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}"
   actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"

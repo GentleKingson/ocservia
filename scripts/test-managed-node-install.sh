@@ -667,8 +667,15 @@ if ! can_root; then
 fi
 
 # 11. the full root flow reaches ENROLLMENT_READY and prepares the production
-# node without enabling any service.
+# node without enabling any service. The run uses a hostile operator-owned
+# TMPDIR: the privileged package staging must sit under a trusted system
+# parent, never under a directory the launcher controls (pathname trust comes
+# from the parent, so an operator-owned parent would allow renaming even a
+# root-owned staging entry between the digest check and the package manager).
 scenario
+hostile_tmp="${fixture}/hostile-tmp"
+mkdir -m 700 -- "${hostile_tmp}"
+EXTRA_ENV=("TMPDIR=${hostile_tmp}")
 capture_root
 assert_status 0 "the root bootstrap flow must succeed"
 assert_output "ENROLLMENT_READY"
@@ -700,10 +707,14 @@ as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${conf}/agent.e
 assert_log_contains "${agent_log}" "--prepare-enrollment"
 # The package manager must install the frozen root-owned copy, never a path
 # inside the launcher-writable staging directory (mktemp template
-# ocservia-managed-node-pkg. vs ocservia-managed-node.).
+# ocservia-managed-node-pkg. vs ocservia-managed-node.), and never under the
+# hostile operator-controlled TMPDIR.
 assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
 if grep -q -- "ocservia-managed-node\." "${dpkg_log}"; then
   die "dpkg must install the root-owned package copy, not the launcher staging: $(cat -- "${dpkg_log}")"
+fi
+if grep -q -- "${hostile_tmp}" "${dpkg_log}"; then
+  die "the privileged package staging must not live under the operator-controlled TMPDIR: $(cat -- "${dpkg_log}")"
 fi
 if grep -q -- "--enrollment-token-file" "${agent_log}"; then
   die "no enrollment may run without a token file"
