@@ -11,6 +11,19 @@ trap report_error_line ERR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
+# STUB_BINARIES=true packages fabricated --version-only stubs instead of real
+# release binaries. The scriptlets never execute the binaries, so the dpkg/rpm
+# lifecycle semantics are identical; PR CI uses this mode to exercise the
+# scriptlet matrix without a release build, while the release workflow always
+# runs the default real-binary mode.
+STUB_BINARIES="${STUB_BINARIES:-false}"
+case "${STUB_BINARIES}" in
+  true | false) ;;
+  *)
+    echo "STUB_BINARIES must be true or false" >&2
+    exit 2
+    ;;
+esac
 if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   echo "RUN_ID contains unsafe characters" >&2
   exit 2
@@ -58,6 +71,7 @@ cleanup() {
     /usr/lib/systemd/system/ocservia-agent.service /usr/lib/systemd/system/ocservia-privd.service \
     /usr/lib/systemd/system/ocservia-upgrader@.service \
     /usr/lib/systemd/system/ocservia-agent.service.d || status=1
+  sudo rm -f -- /etc/ocservia/agent-install-production-relays || status=1
   sudo userdel ocserv-agent >/dev/null 2>&1 || true
   sudo groupdel ocserv-agent >/dev/null 2>&1 || true
   sudo systemctl daemon-reload >/dev/null 2>&1 || true
@@ -68,16 +82,35 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-(cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
-for binary in ocservia-agent ocservia-privd; do
-  file_output="$(file -b "${ROOT}/rust/target/release/${binary}")"
-  if [[ "${PACKAGE_ARCH}" == amd64 && "${file_output}" != *"x86-64"* ]] ||
-    [[ "${PACKAGE_ARCH}" == arm64 && "${file_output}" != *"aarch64"* ]]; then
-    echo "built ${binary} is not a native ${PACKAGE_ARCH} ELF binary: ${file_output}" >&2
-    exit 1
-  fi
-done
-echo "native ${PACKAGE_ARCH} release build passed"
+write_stub_binaries() {
+  local version="$1" binary
+  mkdir -p "${ROOT}/rust/target/release"
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    # shellcheck disable=SC2016
+    printf '#!/usr/bin/env bash\nif [[ "${1:-}" == --version ]]; then echo "%s %s"; exit 0; fi\nexit 0\n' \
+      "${binary}" "${version}" >"${ROOT}/rust/target/release/${binary}"
+    chmod 0755 "${ROOT}/rust/target/release/${binary}"
+  done
+}
+
+if [[ "${STUB_BINARIES}" == true ]]; then
+  write_stub_binaries 1.0.0
+else
+  (cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
+  for binary in ocservia-agent ocservia-privd; do
+    file_output="$(file -b "${ROOT}/rust/target/release/${binary}")"
+    if [[ "${PACKAGE_ARCH}" == amd64 && "${file_output}" != *"x86-64"* ]] ||
+      [[ "${PACKAGE_ARCH}" == arm64 && "${file_output}" != *"aarch64"* ]]; then
+      echo "built ${binary} is not a native ${PACKAGE_ARCH} ELF binary: ${file_output}" >&2
+      exit 1
+    fi
+  done
+fi
+if [[ "${STUB_BINARIES}" == true ]]; then
+  echo "native ${PACKAGE_ARCH} stub release build passed"
+else
+  echo "native ${PACKAGE_ARCH} release build passed"
+fi
 
 openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
 chmod 0600 "${work}/signing.key"
@@ -100,8 +133,12 @@ build_packages() {
   local version="$1"
   # Each package version embeds its own release identity: the packaged
   # binaries must report exactly the package version they ship.
-  (cd "${ROOT}/rust" && OCSERV_AGENT_RELEASE_VERSION="${version}" cargo build --locked --release \
-    --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
+  if [[ "${STUB_BINARIES}" == true ]]; then
+    write_stub_binaries "${version}"
+  else
+    (cd "${ROOT}/rust" && OCSERV_AGENT_RELEASE_VERSION="${version}" cargo build --locked --release \
+      --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
+  fi
   sha256sum "${ROOT}/rust/target/release/ocservia-agent" | awk '{print $1}' \
     >"${work}/binary-sha-${version}"
   OUTPUT_DIR="${pkg_dir}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION="${version}" \
@@ -168,6 +205,10 @@ assert_installed_state() {
 
 { sudo dpkg -i "${deb_old}"; } >"${ARTIFACT_DIR}/deb-install.log" 2>&1
 assert_installed_state "deb install" 1.0.0
+sudo test ! -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
+  || { echo "deb install: production relay drop-in installed without a production request" >&2; exit 1; }
+sudo test ! -e /etc/ocservia-agent/relays.env \
+  || { echo "deb install: relays.env installed without a production request" >&2; exit 1; }
 echo "deb install lifecycle passed"
 
 provision_upgrade_fixtures() {
@@ -227,6 +268,137 @@ sudo userdel ocserv-agent
 sudo groupdel ocserv-agent 2>/dev/null || true
 sudo systemctl daemon-reload
 
+assert_production_relays() {
+  local context="$1"
+  sudo test -f /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
+    || { echo "${context}: production relay drop-in missing" >&2; exit 1; }
+  sudo test -f /etc/ocservia-agent/relays.env \
+    || { echo "${context}: relays.env missing" >&2; exit 1; }
+}
+
+# Production native-install contract: an operator request marker created
+# before the package runs makes the fresh install land the production relay
+# drop-in and relays.env from the verified embedded payload. The marker is
+# one-shot: it is consumed by the successful lifecycle, and the installed
+# drop-in carries the production intent through later upgrades.
+sudo install -d -o root -g root -m 0755 /etc/ocservia
+sudo touch /etc/ocservia/agent-install-production-relays
+{ sudo dpkg -i "${deb_old}"; } >"${ARTIFACT_DIR}/deb-production-install.log" 2>&1
+assert_installed_state "deb production install" 1.0.0
+assert_production_relays "deb production install"
+sudo grep -Fq 'RELAY_URL_A=https://relay-a.example.com' /etc/ocservia-agent/relays.env \
+  || { echo "deb production install did not install the relays.env example" >&2; exit 1; }
+sudo test ! -e /etc/ocservia/agent-install-production-relays \
+  || { echo "deb production install did not consume the request marker" >&2; exit 1; }
+sudo touch /var/lib/ocservia-agent/identity/identity-sentinel
+cat >"${work}/operator-relays.env" <<'EOF'
+RELAY_URL_A=https://relay-one.example.net
+RELAY_URL_B=https://relay-two.example.net
+EOF
+sudo install -o root -g ocserv-agent -m 0640 "${work}/operator-relays.env" \
+  /etc/ocservia-agent/relays.env
+echo "deb production install lifecycle passed"
+
+provision_upgrade_fixtures
+{ sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-production-upgrade.log" 2>&1
+assert_upgraded_state "deb production upgrade" 1.0.1
+assert_production_relays "deb production upgrade"
+sudo cmp -s "${work}/operator-relays.env" /etc/ocservia-agent/relays.env \
+  || { echo "deb production upgrade replaced the operator relays.env" >&2; exit 1; }
+sudo test -f /var/lib/ocservia-upgrade/upgrade-backup/ocservia-agent-relays.conf.previous \
+  || { echo "deb production upgrade did not snapshot the relay drop-in" >&2; exit 1; }
+echo "deb production upgrade lifecycle passed"
+
+{ sudo apt-get remove -y ocservia-agent; } >"${ARTIFACT_DIR}/deb-production-remove.log" 2>&1
+sudo test ! -e /usr/libexec/ocservia/ocservia-agent \
+  || { echo "deb production remove retained the Agent binary" >&2; exit 1; }
+sudo test ! -e /usr/lib/systemd/system/ocservia-agent.service.d \
+  || { echo "deb production remove retained the relay drop-in directory" >&2; exit 1; }
+sudo test -f /etc/ocservia-agent/relays.env \
+  || { echo "deb production remove discarded the operator relays.env" >&2; exit 1; }
+sudo test -f /etc/ocservia-agent/agent.env \
+  || { echo "deb production remove discarded the preserved Agent configuration" >&2; exit 1; }
+sudo test -f /var/lib/ocservia-agent/identity/identity-sentinel \
+  || { echo "deb production remove discarded the preserved identity state" >&2; exit 1; }
+getent passwd ocserv-agent >/dev/null \
+  || { echo "deb production remove discarded the ocserv-agent user" >&2; exit 1; }
+echo "deb production removal state preservation passed"
+
+sudo touch /etc/ocservia/agent-install-production-relays
+{ sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-production-reinstall.log" 2>&1
+assert_installed_state "deb production reinstall" 1.0.1
+assert_production_relays "deb production reinstall"
+sudo test -f /var/lib/ocservia-agent/identity/identity-sentinel \
+  || { echo "deb production reinstall discarded the preserved identity state" >&2; exit 1; }
+sudo cmp -s "${work}/operator-relays.env" /etc/ocservia-agent/relays.env \
+  || { echo "deb production reinstall replaced the preserved relays.env" >&2; exit 1; }
+sudo test ! -e /etc/ocservia/agent-install-production-relays \
+  || { echo "deb production reinstall did not consume the request marker" >&2; exit 1; }
+echo "deb production reinstall identity reuse passed"
+
+sudo apt-get remove -y ocservia-agent >/dev/null 2>&1 \
+  || sudo dpkg --remove --force-remove ocservia-agent >/dev/null 2>&1 || true
+sudo rm -rf -- /etc/ocservia-agent /etc/ocservia /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
+  /var/lib/ocservia-privd /usr/share/ocservia-agent /usr/libexec/ocservia \
+  /usr/lib/systemd/system/ocservia-agent.service /usr/lib/systemd/system/ocservia-privd.service \
+  /usr/lib/systemd/system/ocservia-upgrader@.service /usr/lib/systemd/system/ocservia-agent.service.d
+sudo userdel ocserv-agent 2>/dev/null || true
+sudo groupdel ocserv-agent 2>/dev/null || true
+sudo systemctl daemon-reload
+
+# A corrupted embedded archive must fail closed inside the package: the
+# payload unpacks, but postinst verification rejects it before
+# install-agent.sh can touch the host. The unconsumed production request
+# stays retryable through the failure, is retired by the real removal, and
+# cannot reach a later plain install.
+sudo install -d -o root -g root -m 0755 /etc/ocservia
+sudo touch /etc/ocservia/agent-install-production-relays
+corrupt_stage="${work}/corrupt-package"
+dpkg-deb -R "${deb_old}" "${corrupt_stage}"
+printf 'tampered archive' >"${corrupt_stage}/usr/share/ocservia-agent/ocservia-agent-1.0.0-linux-${PACKAGE_ARCH}.tar.gz"
+dpkg-deb --build "${corrupt_stage}" "${work}/corrupt.deb" >/dev/null
+corrupt_install_status=0
+{ sudo dpkg -i "${work}/corrupt.deb"; } >"${ARTIFACT_DIR}/deb-corrupt-install.log" 2>&1 || corrupt_install_status=$?
+if [[ "${corrupt_install_status}" -eq 0 ]]; then
+  echo "deb with a corrupted embedded archive installed successfully" >&2
+  exit 1
+fi
+sudo test ! -e /usr/libexec/ocservia/ocservia-agent \
+  || { echo "corrupted deb verification failure still installed the Agent" >&2; exit 1; }
+grep -Fq 'Agent package archive digest does not match the signed checksum' \
+  "${ARTIFACT_DIR}/deb-corrupt-install.log" \
+  || { echo "corrupted deb failed for an unexpected reason" >&2; exit 1; }
+sudo test -e /etc/ocservia/agent-install-production-relays \
+  || { echo "failed corrupted install lost the retryable production request" >&2; exit 1; }
+echo "deb corrupted payload fail-closed rejection passed"
+
+{ sudo apt-get remove -y ocservia-agent; } >"${ARTIFACT_DIR}/deb-corrupt-remove.log" 2>&1
+sudo test ! -e /etc/ocservia/agent-install-production-relays \
+  || { echo "package removal retained a stale production request" >&2; exit 1; }
+echo "deb stale production request retirement passed"
+
+sudo rm -rf -- /etc/ocservia-agent /etc/ocservia /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
+  /var/lib/ocservia-privd /usr/share/ocservia-agent
+sudo userdel ocserv-agent 2>/dev/null || true
+sudo groupdel ocserv-agent 2>/dev/null || true
+sudo systemctl daemon-reload
+
+{ sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-retirement-install.log" 2>&1
+assert_installed_state "deb post-retirement install" 1.0.1
+sudo test ! -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
+  || { echo "plain install after request retirement installed the relay drop-in" >&2; exit 1; }
+sudo test ! -e /etc/ocservia-agent/relays.env \
+  || { echo "plain install after request retirement installed relays.env" >&2; exit 1; }
+echo "deb plain install after retirement passed"
+
+sudo apt-get remove -y ocservia-agent >/dev/null 2>&1 \
+  || sudo dpkg --remove --force-remove ocservia-agent >/dev/null 2>&1 || true
+sudo rm -rf -- /etc/ocservia-agent /etc/ocservia /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
+  /var/lib/ocservia-privd /usr/share/ocservia-agent
+sudo userdel ocserv-agent 2>/dev/null || true
+sudo groupdel ocserv-agent 2>/dev/null || true
+sudo systemctl daemon-reload
+
 # The stock rockylinux:9 image ships without systemd; build a one-off image
 # that can run scriptlets exactly as a real systemd host would.
 docker build --tag "${container_image}" - >"${ARTIFACT_DIR}/rpm-image-build.log" 2>&1 <<'DOCKERFILE'
@@ -247,6 +419,8 @@ done
 rpm_arch_actual="$(docker exec "${container}" rpm -qp --qf '%{ARCH}' "/packages/$(basename "${rpm_old}")")"
 [[ "${rpm_arch_actual}" == "${rpm_arch}" ]] \
   || { echo "rpm package architecture is ${rpm_arch_actual}, expected ${rpm_arch}" >&2; exit 1; }
+docker exec "${container}" install -d -o root -g root -m 0755 /etc/ocservia
+docker exec "${container}" touch /etc/ocservia/agent-install-production-relays
 docker exec "${container}" rpm -ivh "/packages/$(basename "${rpm_old}")" \
   >"${ARTIFACT_DIR}/rpm-install.log" 2>&1
 
@@ -286,6 +460,20 @@ container_assert_installed() {
     || { echo "${context}: installed Agent binary does not match the built binary" >&2; exit 1; }
 }
 container_assert_installed "rpm install" 1.0.0
+container_assert_production_relays() {
+  local context="$1"
+  docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
+    || { echo "${context}: production relay drop-in missing" >&2; exit 1; }
+  docker exec "${container}" test -f /etc/ocservia-agent/relays.env \
+    || { echo "${context}: relays.env missing" >&2; exit 1; }
+}
+container_assert_production_relays "rpm install"
+docker exec "${container}" grep -Fq 'RELAY_URL_A=https://relay-a.example.com' /etc/ocservia-agent/relays.env \
+  || { echo "rpm install did not install the relays.env example" >&2; exit 1; }
+docker exec "${container}" test ! -e /etc/ocservia/agent-install-production-relays \
+  || { echo "rpm install did not consume the request marker" >&2; exit 1; }
+docker exec "${container}" bash -c \
+  'printf "RELAY_URL_A=https://relay-one.example.net\nRELAY_URL_B=https://relay-two.example.net\n" >/tmp/operator-relays.env && install -o root -g ocserv-agent -m 0640 /tmp/operator-relays.env /etc/ocservia-agent/relays.env && rm -f /tmp/operator-relays.env'
 echo "rpm install lifecycle passed"
 
 container_provision_upgrade_fixtures() {
@@ -319,6 +507,9 @@ container_provision_upgrade_fixtures
 docker exec "${container}" rpm -Uvh "/packages/$(basename "${rpm_new}")" \
   >"${ARTIFACT_DIR}/rpm-upgrade.log" 2>&1
 container_assert_installed "rpm upgrade" 1.0.1
+container_assert_production_relays "rpm upgrade"
+docker exec "${container}" grep -Fq 'RELAY_URL_A=https://relay-one.example.net' /etc/ocservia-agent/relays.env \
+  || { echo "rpm upgrade replaced the operator relays.env" >&2; exit 1; }
 docker exec "${container}" test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
   || { echo "rpm upgrade rollback snapshot manifest missing" >&2; exit 1; }
 docker exec "${container}" bash -c \
@@ -329,6 +520,7 @@ docker exec "${container}" grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${use
   || { echo "rpm upgrade lost the configured agent environment" >&2; exit 1; }
 echo "rpm upgrade lifecycle passed"
 
+docker exec "${container}" touch /etc/ocservia/agent-install-production-relays
 docker exec "${container}" rpm -e ocservia-agent >"${ARTIFACT_DIR}/rpm-remove.log" 2>&1
 docker exec "${container}" test ! -e /usr/libexec/ocservia/ocservia-agent \
   || { echo "rpm erase retained the Agent binary" >&2; exit 1; }
@@ -337,6 +529,12 @@ docker exec "${container}" test ! -e /usr/libexec/ocservia/ocservia-agent \
 docker exec "${container}" bash -c \
   'test ! -e /usr/share/ocservia-agent || test -z "$(ls -A /usr/share/ocservia-agent)"' \
   || { echo "rpm erase retained the package payload" >&2; exit 1; }
+docker exec "${container}" test ! -e /usr/lib/systemd/system/ocservia-agent.service.d \
+  || { echo "rpm erase retained the relay drop-in directory" >&2; exit 1; }
+docker exec "${container}" test ! -e /etc/ocservia/agent-install-production-relays \
+  || { echo "rpm erase retained a stale production request" >&2; exit 1; }
+docker exec "${container}" test -f /etc/ocservia-agent/relays.env \
+  || { echo "rpm erase discarded the operator relays.env" >&2; exit 1; }
 docker exec "${container}" test -f /etc/ocservia-agent/agent.env \
   || { echo "rpm erase discarded the preserved Agent configuration" >&2; exit 1; }
 docker exec "${container}" test -d /var/lib/ocservia-agent \
@@ -346,5 +544,5 @@ docker exec "${container}" getent passwd ocserv-agent >/dev/null \
 echo "rpm removal state preservation passed"
 
 docker rm -f -- "${container}" >/dev/null
-printf 'arch=%s\nelf_check=pass\ndeb_metadata=pass\ndeb_install=pass\ndeb_upgrade=pass\ndeb_remove_preserves_state=pass\nrpm_metadata=pass\nrpm_install=pass\nrpm_upgrade=pass\nrpm_erase_preserves_state=pass\n' \
+printf 'arch=%s\nelf_check=pass\ndeb_metadata=pass\ndeb_install=pass\ndeb_upgrade=pass\ndeb_remove_preserves_state=pass\ndeb_production_install=pass\ndeb_production_upgrade=pass\ndeb_production_remove_preserves_state=pass\ndeb_production_reinstall_identity_reuse=pass\ndeb_corrupt_payload_fail_closed=pass\ndeb_stale_request_retirement=pass\ndeb_plain_install_after_retirement=pass\nrpm_metadata=pass\nrpm_production_install=pass\nrpm_upgrade_preserves_production=pass\nrpm_erase_retires_stale_request=pass\nrpm_erase_preserves_state=pass\n' \
   "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-package-summary.txt"

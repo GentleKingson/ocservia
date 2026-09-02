@@ -14,7 +14,8 @@ do not build a package on the node.
 - You can create a one-time token and approve the node. Follow [Enroll a
   node](../how-to/enroll-node.md) after preparing the sealing keys below.
 - For a production node using dedicated relays, use the signed Agent archive
-  installation path below. Do not install production systemd files from an
+  installation path below or the native package with the production request
+  marker below. Do not install production systemd files from an
   arbitrary source checkout.
 
 ## 1. Verify and choose the release package
@@ -87,7 +88,17 @@ checkout directly into `/usr/lib/systemd/system`.
 If a native package is required instead, install only the exact package whose
 external release signature and checksum were verified in step 1.
 
-On Debian or Ubuntu:
+For a production node, first create the one-shot production request. Do this
+before invoking the package manager — `postinst` reads it while configuring
+the package, and the verified embedded payload then installs the production
+relay drop-in and `relays.env`:
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/ocservia
+sudo touch /etc/ocservia/agent-install-production-relays
+```
+
+Then install the package. On Debian or Ubuntu:
 
 ```bash
 sudo dpkg -i "$RELEASE_DIR/$AGENT_PACKAGE"
@@ -100,9 +111,13 @@ sudo rpm -ivh "$RELEASE_DIR/$AGENT_PACKAGE"
 ```
 
 The package installs the Agent, `privd`, the durable upgrader, and their
-systemd units. It does not enable or start either service. A fresh native
-package install does not install the production relay drop-in, so use the
-signed archive path above for a production node.
+systemd units — with the production relay drop-in and `relays.env` when the
+request marker was present, without them on a non-production node. It does
+not enable or start either service. The successful install consumes the
+request marker, the installed relay drop-in keeps later package upgrades on
+the production relay contract, and removing the package also retires any
+unconsumed request. Do not copy `deploy/production/systemd` files from a
+source checkout into `/usr/lib/systemd/system` under either path.
 
 ## 3. Prepare sealing keys
 
@@ -136,8 +151,9 @@ Keep these variables available for the relay and enrollment steps below.
 ## 4. Configure dedicated relays before enrollment
 
 Set both dedicated HTTPS relay URLs in `/etc/ocservia-agent/relays.env`, which
-was installed by the signed archive path, and install the protected relay
-token as `/etc/ocservia-agent/relay-access-token` with owner
+was installed by the signed archive path or the production native package
+install, and install the protected relay token as
+`/etc/ocservia-agent/relay-access-token` with owner
 `root:ocserv-agent` and mode `0640`:
 
 ```bash

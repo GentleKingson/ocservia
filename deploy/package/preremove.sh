@@ -15,6 +15,14 @@ case "${1:-}" in
   remove | 0) removal=true ;;
 esac
 
+# A real removal tears the production relay contract down, so it also retires
+# an unconsumed production request — for example one left by an install whose
+# postinst failed — instead of letting it surprise a later plain install.
+# Upgrades and failed upgrades keep the request retryable.
+if [[ "${removal}" == true ]]; then
+  rm -f -- /etc/ocservia/agent-install-production-relays
+fi
+
 if [[ "${removal}" != true || ! -x /usr/libexec/ocservia/ocservia-agent ]]; then
   exit 0
 fi
