@@ -99,6 +99,7 @@ PACKAGE_MANAGER=""
 PACKAGE_FILE=""
 STAGING_DIR=""
 PACKAGE_STAGING_DIR=""
+FROZEN_RELEASE_KEY=""
 ROOT_LIFECYCLE=false
 EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
@@ -329,7 +330,7 @@ validate_operator_inputs() {
 }
 
 resolve_trust_anchor() {
-  local expected_fingerprint actual_fingerprint
+  local expected_fingerprint
   TRUSTED_RELEASE_KEY="${TRUSTED_RELEASE_KEY:-/etc/ocservia/release-signing.pub.pem}"
   if [[ -n "${EXPECTED_RELEASE_KEY_SHA256:-}" ]]; then
     expected_fingerprint="${EXPECTED_RELEASE_KEY_SHA256}"
@@ -339,18 +340,43 @@ resolve_trust_anchor() {
   fi
   [[ "${expected_fingerprint}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the trusted release key fingerprint must be 64 lowercase hexadecimal characters"
+  EXPECTED_RELEASE_KEY_SHA256="${expected_fingerprint}"
   [[ -f "${TRUSTED_RELEASE_KEY}" && ! -L "${TRUSTED_RELEASE_KEY}" ]] ||
     fail "the trusted release public key ${TRUSTED_RELEASE_KEY} is missing; provision it through an independent protected channel (TRUSTED_RELEASE_KEY)"
-  actual_fingerprint="$(priv openssl pkey -pubin -in "${TRUSTED_RELEASE_KEY}" -outform DER | sha256sum | awk '{print $1}')" ||
+}
+
+freeze_trust_anchor() {
+  # Freeze the operator-provisioned release key before trusting anything from
+  # it, mirroring scripts/verify-agent-package.sh: TRUSTED_RELEASE_KEY may
+  # point anywhere the operator chose, including a launcher-writable path, so
+  # pathname re-reads would let a launcher-UID process swap the key between
+  # the fingerprint check and the signature verification. The fingerprint and
+  # every later use read the same root-owned frozen copy. The staging parent
+  # is a fixed system directory, never the operator's TMPDIR: pathname trust
+  # comes from the parent, and an operator-owned TMPDIR would let the
+  # launcher rename or replace even this root-owned staging entry. /var/tmp
+  # is a root-owned sticky system directory on every supported host.
+  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
+  trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
+  FROZEN_RELEASE_KEY="${PACKAGE_STAGING_DIR}/release-signing.pub.pem"
+  priv install -o root -g root -m 0644 -- "${TRUSTED_RELEASE_KEY}" "${FROZEN_RELEASE_KEY}"
+}
+
+verify_trust_anchor() {
+  local actual_fingerprint
+  # The fingerprint is computed from the frozen root-owned copy the signature
+  # verification later uses, so the key that passed the fingerprint check is
+  # byte-identical to the key that verifies the manifest. This still happens
+  # before anything is downloaded.
+  actual_fingerprint="$(priv openssl pkey -pubin -in "${FROZEN_RELEASE_KEY}" -outform DER | sha256sum | awk '{print $1}')" ||
     fail "the trusted release public key ${TRUSTED_RELEASE_KEY} is not a readable public key PEM"
-  [[ "${actual_fingerprint}" == "${expected_fingerprint}" ]] ||
-    fail "the trusted release public key fingerprint ${actual_fingerprint} does not match the expected ${expected_fingerprint}"
+  [[ "${actual_fingerprint}" == "${EXPECTED_RELEASE_KEY_SHA256}" ]] ||
+    fail "the trusted release public key fingerprint ${actual_fingerprint} does not match the expected ${EXPECTED_RELEASE_KEY_SHA256}"
 }
 
 download_release_artifacts() {
   local name
   STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
-  trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
   for name in SHA256SUMS SHA256SUMS.sig "${PACKAGE_FILE}"; do
     echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
     curl -fsSL --proto '=https' --tlsv1.2 \
@@ -359,20 +385,15 @@ download_release_artifacts() {
 }
 
 freeze_release_artifacts() {
-  # Freeze the downloaded artifacts on the privileged side before any trust
-  # verification. The launcher's staging directory stays writable by the
-  # launcher, so verifying bytes there and then parsing the manifest or
+  # Freeze the downloaded artifacts beside the frozen release key before any
+  # trust verification. The launcher's staging directory stays writable by
+  # the launcher, so verifying bytes there and then parsing the manifest or
   # digesting the package from there would let a second launcher-UID process
   # swap the signed manifest (and the package) after the signature check
   # succeeds — the digest that authorizes the install must come from exactly
   # the manifest that passed verification. From this point on the bootstrap
-  # never reads the launcher staging again. The staging parent is a fixed
-  # system directory, never the operator's TMPDIR: pathname trust comes from
-  # the parent, and an operator-owned TMPDIR would let the launcher rename or
-  # replace even this root-owned staging entry. /var/tmp is a root-owned
-  # sticky system directory on every supported host.
+  # never reads the launcher staging again.
   local name
-  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
   for name in SHA256SUMS SHA256SUMS.sig "${PACKAGE_FILE}"; do
     priv install -o root -g root -m 0644 -- "${STAGING_DIR}/${name}" \
       "${PACKAGE_STAGING_DIR}/${name}"
@@ -383,11 +404,11 @@ verify_release_trust() {
   local manifest_line expected_digest actual_digest matches
   # The release-signing public key is intentionally absent from the download:
   # trust comes only from the operator-provisioned anchor verified above.
-  # The signature, the manifest parse, and the package digest all read the
-  # frozen root-owned staging, so the launcher cannot influence any of them
-  # after the fact; the staging directory is mode 0700 root, so every read
-  # crosses the privileged boundary.
-  priv openssl pkeyutl -verify -rawin -pubin -inkey "${TRUSTED_RELEASE_KEY}" \
+  # The frozen key, the signature, the manifest parse, and the package digest
+  # all read the root-owned staging, so the launcher cannot influence any of
+  # them after the fact; the staging directory is mode 0700 root, so every
+  # read crosses the privileged boundary.
+  priv openssl pkeyutl -verify -rawin -pubin -inkey "${FROZEN_RELEASE_KEY}" \
     -in "${PACKAGE_STAGING_DIR}/SHA256SUMS" \
     -sigfile "${PACKAGE_STAGING_DIR}/SHA256SUMS.sig" >/dev/null ||
     fail "the release checksum manifest signature verification failed"
@@ -643,6 +664,8 @@ detect_platform
 require_commands
 validate_operator_inputs
 resolve_trust_anchor
+freeze_trust_anchor
+verify_trust_anchor
 download_release_artifacts
 freeze_release_artifacts
 verify_release_trust

@@ -69,6 +69,7 @@ agent_log="${logs}/agent.log"
 systemctl_log="${logs}/systemctl.log"
 runuser_log="${logs}/runuser.log"
 root_sudo_log="${logs}/root-sudo.log"
+openssl_log="${logs}/openssl.log"
 
 # Mock configuration travels through files below the fixture root (derived
 # from OCSERV_MANAGED_NODE_SYSROOT, which the installer forwards across the
@@ -80,6 +81,7 @@ enroll_exit_file="${fixture}/enroll-exit"
 installed_version_file="${fixture}/installed-version"
 arch_file="${fixture}/arch"
 tamper_after_verify_file="${fixture}/tamper-after-verify"
+key_swap_path_file="${fixture}/key-swap-path"
 
 die() {
   echo "Managed node install tests: $1" >&2
@@ -100,6 +102,10 @@ mkdir -p -- "${repo}/deploy/managed-node" "${os}"
 openssl genpkey -algorithm ed25519 -out "${trusted}/release-signing.key" 2>/dev/null
 openssl pkey -in "${trusted}/release-signing.key" -pubout -out "${trusted}/release-signing.pub.pem"
 fingerprint="$(openssl pkey -pubin -in "${trusted}/release-signing.pub.pem" -outform DER | sha256sum | awk '{print $1}')"
+# A second key the launcher race swaps in for the operator-provisioned one.
+openssl genpkey -algorithm ed25519 -out "${fixture}/attacker-signing.key" 2>/dev/null
+openssl pkey -in "${fixture}/attacker-signing.key" -pubout \
+  -out "${fixture}/attacker-release-signing.pub.pem"
 openssl genpkey -algorithm ed25519 -out "${fixture}/command-verification.key" 2>/dev/null
 openssl pkey -in "${fixture}/command-verification.key" -pubout -out "${fixture}/controller-command-verification-key.pem"
 printf 'mock relay access token bytes\n' >"${fixture}/relay-access-token"
@@ -242,6 +248,18 @@ cat >"${bin}/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
+# Regression seam: downloads run after the release key fingerprint was
+# verified against the frozen copy, so this is the moment a racing
+# launcher-UID process swaps the launcher-controlled TRUSTED_RELEASE_KEY
+# pathname (key-swap-path holds the target, one shot). A correct installer
+# verified the frozen key and never reads the original pathname again.
+if [[ -s "${root}/key-swap-path" ]]; then
+  swap_target="$(cat -- "${root}/key-swap-path")"
+  : >"${root}/key-swap-path"
+  if [[ -n "${swap_target}" && -f "${swap_target}" ]]; then
+    cp -- "${root}/attacker-release-signing.pub.pem" "${swap_target}"
+  fi
+fi
 output="" url=""
 while (($# > 0)); do
   case "$1" in
@@ -367,6 +385,7 @@ cat >"${bin}/openssl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
+printf '%s\n' "$*" >>"${root}/logs/openssl.log"
 if [[ "${1:-}" == "pkeyutl" && -s "${root}/tamper-after-verify" ]]; then
   status=0
   /usr/bin/openssl "$@" || status=$?
@@ -444,13 +463,14 @@ reset_state() {
   fi
   mkdir -m 700 -- "${sysroot}"
   for log in "${curl_log}" "${sudo_log}" "${dpkg_log}" "${rpm_log}" \
-    "${agent_log}" "${systemctl_log}" "${runuser_log}" "${root_sudo_log}"; do
+    "${agent_log}" "${systemctl_log}" "${runuser_log}" "${root_sudo_log}" \
+    "${openssl_log}"; do
     : >"${log}"
   done
   printf '%s\n' "${MOCK_ENDPOINT_ID}" >"${endpoint_id_file}"
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
   rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
-    "${tamper_after_verify_file}"
+    "${tamper_after_verify_file}" "${key_swap_path_file}"
   EXTRA_ENV=()
 }
 
@@ -776,6 +796,27 @@ assert_status 0 "a post-verification launcher staging swap must not affect the i
 assert_output "ENROLLMENT_READY"
 assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
 echo "a post-verification manifest swap in the launcher staging is ignored"
+
+# 11b. the release key is frozen before its fingerprint is verified: a
+# launcher-controlled TRUSTED_RELEASE_KEY pathname swapped after the check
+# must never become the key that verifies the manifest. TRUSTED_RELEASE_KEY
+# points at a launcher-writable copy of the real key; the curl mock swaps that
+# pathname to an attacker key at the first download (after the fingerprint
+# check), and every later openssl read must use the frozen root-owned copy —
+# otherwise the real manifest's signature would verify under the attacker key.
+scenario
+cp -- "${trusted}/release-signing.pub.pem" "${fixture}/operator-release-key.pub.pem"
+printf '%s\n' "${fixture}/operator-release-key.pub.pem" >"${key_swap_path_file}"
+EXTRA_ENV=("TRUSTED_RELEASE_KEY=${fixture}/operator-release-key.pub.pem")
+capture_root
+assert_status 0 "a post-verification key path swap must not affect the install"
+assert_output "ENROLLMENT_READY"
+assert_log_contains "${openssl_log}" "pkeyutl -verify -rawin -pubin -inkey"
+assert_log_contains "${openssl_log}" "/var/tmp/ocservia-managed-node-pkg."
+if grep -q -- "operator-release-key" "${openssl_log}"; then
+  die "openssl must use the frozen key copy, not the launcher-controlled path: $(cat -- "${openssl_log}")"
+fi
+echo "a post-verification key path swap is ignored"
 
 # 12. a rerun converges: the installed package is reused, not reinstalled.
 scenario
