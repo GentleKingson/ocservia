@@ -66,16 +66,18 @@ case_commit() {
   printf '%s\n' "${output}"
 }
 
-# 1-3. Ordinary documentation stays policy-only; machine-read G6 contracts
-# add only the G6 smoke domain.
+# Ordinary Markdown is CI-neutral; machine-readable G6 contracts add the
+# contracts/policy and G6 smoke domains.
 out="$(case_commit readme README.md)"
-expect_only "${out}" run_contracts_policy
+expect_only "${out}"
 out="$(case_commit docs docs/development/guide.md)"
-expect_only "${out}" run_contracts_policy
+expect_only "${out}"
+out="$(case_commit acceptance_markdown docs/acceptance/v0.2-release-readiness.md)"
+expect_only "${out}"
 out="$(case_commit acceptance docs/acceptance/g6-slo.yaml)"
 expect_only "${out}" run_contracts_policy run_g6_smoke
 
-# 4-6. Browser runners are reserved for runtime and E2E inputs, not unit-only
+# Browser runners are reserved for runtime and E2E inputs, not unit-only
 # Web changes.
 out="$(case_commit web_source web/src/App.vue)"
 expect_only "${out}" run_web run_browser
@@ -84,8 +86,8 @@ expect_only "${out}" run_web
 out="$(case_commit web_e2e web/e2e/app.spec.ts)"
 expect_only "${out}" run_web run_browser
 
-# 7-12. Language suites are independent; integration flags are added from
-# the package boundary actually exercised by each harness.
+# Language suites are independent; integration flags are added from the
+# package boundary actually exercised by each harness.
 out="$(case_commit go control-plane/internal/domain/helper.go)"
 expect_only "${out}" run_go_standard run_go_race
 out="$(case_commit db_go control-plane/internal/auth/store.go)"
@@ -99,8 +101,8 @@ expect_only "${out}" run_rust run_native run_g6_smoke
 out="$(case_commit transport_stub rust/crates/transportd-stub/src/lib.rs)"
 expect_only "${out}" run_runtime_artifacts run_local_slice run_p1_smoke run_rust
 
-# 13-20. Deployment, credentials, machine contracts, G6, packaging, and
-# workflow callers each contribute only their known impact domains.
+# Deployment, credentials, machine contracts, G6, packaging, and workflow
+# callers each contribute only their known impact domains.
 out="$(case_commit production deploy/production/compose.yaml)"
 expect_only "${out}" run_production_relays
 out="$(case_commit rotation deploy/production/rotate-postgres-credentials.sh)"
@@ -147,16 +149,16 @@ out="$(case_commit classifier_authority scripts/ci-relevance.sh)"
 expect_only "${out}" "${flags[@]}"
 expect_flag "${out}" reason ci_relevance_authority_changed
 
-# 21-23. Known mixed changes are the OR-union, never a category fallback.
+# Known mixed changes are the OR-union, never a category fallback.
 out="$(case_commit docs_go docs/development/guide.md control-plane/internal/domain/helper.go)"
-expect_only "${out}" run_go_standard run_go_race run_contracts_policy
+expect_only "${out}" run_go_standard run_go_race
 out="$(case_commit web_rust web/src/App.vue rust/crates/observability/src/lib.rs)"
 expect_only "${out}" run_web run_browser run_rust
 out="$(case_commit migration_web control-plane/migrations/000001.up.sql web/src/App.vue)"
 expect_only "${out}" run_runtime_artifacts run_database run_web run_browser run_g6_smoke
 
-# 24-25. Deletions retain the old path's impact. With rename detection off,
-# both sides of a cross-domain rename contribute to the union.
+# Deletions retain the old path's impact. With rename detection off, both
+# sides of a cross-domain rename contribute to the union.
 git -C "${fixture}" checkout -q --detach "${base}"
 git -C "${fixture}" rm -q web/test/unit.test.ts
 git -C "${fixture}" commit -qm delete_known
@@ -169,9 +171,9 @@ git -C "${fixture}" mv docs/development/guide.md rust/crates/observability/src/g
 git -C "${fixture}" commit -qm rename_known
 head="$(git -C "${fixture}" rev-parse HEAD)"; out="${fixture}/rename.output"
 (cd "${fixture}" && "${SCRIPT}" pull_request "${base}" "${head}" "${out}")
-expect_only "${out}" run_contracts_policy run_rust
+expect_only "${out}" run_rust
 
-# 26-29. Unknown, empty, invalid, and dispatch classifications fail closed.
+# Unknown, empty, invalid, and dispatch classifications fail closed.
 git -C "${fixture}" checkout -q --detach "${base}"
 printf 'unknown\n' >"${fixture}/build.yaml"
 git -C "${fixture}" add build.yaml; git -C "${fixture}" commit -qm unknown
@@ -190,8 +192,8 @@ expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason all_zero_before_
 out="${fixture}/dispatch.output"; (cd "${fixture}" && "${SCRIPT}" workflow_dispatch invalid invalid "${out}")
 expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason workflow_dispatch_full_validation
 
-# 30-31. Push uses before..head. PR uses base-tip...head, excluding a
-# base-only change added after the PR branch point.
+# Push uses before..head. PR uses base-tip...head, excluding a base-only change
+# added after the PR branch point.
 git -C "${fixture}" checkout -q -B pr-branch "${base}"
 printf 'pr\n' >>"${fixture}/web/test/unit.test.ts"
 git -C "${fixture}" commit -qam pr-only

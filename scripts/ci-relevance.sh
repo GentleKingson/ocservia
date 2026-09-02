@@ -35,15 +35,17 @@ classify_path() {
       run_contracts_policy=true; run_g6_smoke=true ;;
     .github/workflows/g6-readiness.yml|.github/workflows/p1-capacity.yml|.github/workflows/real-e2e.yml|.github/workflows/release.yml|.github/workflows/rust-cache-provision.yml|.github/workflows/*)
       run_contracts_policy=true ;;
-    docs/acceptance/g6-*.json|docs/acceptance/g6-*.yaml|docs/acceptance/README.md)
+    docs/acceptance/g6-*.json|docs/acceptance/g6-*.yaml)
       run_contracts_policy=true; run_g6_smoke=true ;;
-    docs/acceptance/*)
-      run_contracts_policy=true ;;
     docs/upstream/*)
       run_contracts_policy=true; run_stage_contracts=true; run_database=true; run_runtime_artifacts=true ;;
     docs/development/telemetry.md)
       run_contracts_policy=true; run_stage_contracts=true ;;
-    .github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE*|.github/CODEOWNERS|README.md|SECURITY.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|AGENTS.md|docs/*.md|docs/**/*.md)
+    README.md|SECURITY.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|AGENTS.md|docs/*.md|docs/**/*.md)
+      : ;;
+    docs/acceptance/*)
+      run_contracts_policy=true ;;
+    .github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE*|.github/CODEOWNERS)
       run_contracts_policy=true ;;
     .github/dependabot.yml)
       run_contracts_policy=true; run_license=true ;;
