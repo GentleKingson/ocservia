@@ -30,7 +30,11 @@
 # for the SUDO_USER launcher while controller.sh validates state ownership
 # against the actual invoking user, so 'sudo install.sh' would mismatch them;
 # sudo is invoked internally only for the host bootstrap step. A plain root
-# shell (SUDO_USER unset or root) is an allowed root lifecycle.
+# shell (SUDO_USER unset or root) is an allowed root lifecycle. On a host
+# without a Docker client the fresh-host path additionally requires a root
+# lifecycle shell: a fresh Docker installation grants no non-root daemon
+# access, and this installer never modifies the Docker permission model, so a
+# non-root launcher fails closed up front instead of after host mutation.
 set -euo pipefail
 umask 077
 
@@ -94,6 +98,19 @@ resolve_architecture() {
   echo "host architecture: ${ARCH_WORD} (selecting controller-release-${ARCH_WORD}.json)"
 }
 
+verify_fresh_host_launcher_path() {
+  # When the Docker client is absent entirely, the bootstrap installs Docker
+  # from scratch. A fresh Docker installation grants no non-root daemon
+  # access, and neither this installer nor bootstrap-host.sh ever modifies the
+  # Docker permission model (group membership, socket, listeners), so the
+  # bootstrap's launcher access verification would fail for a non-root
+  # launcher only after the host had already been mutated. Fail closed before
+  # any host mutation instead and hand the operator the two supported paths.
+  if (( EUID != 0 )) && ! command -v docker >/dev/null 2>&1; then
+    fail "no Docker client is installed, so the host bootstrap would install Docker from scratch; a fresh Docker installation grants no non-root daemon access and this installer never modifies the Docker permission model — run this fresh-host install from a root lifecycle shell (for example an interactive root session), or install Docker separately and deliberately grant this launcher Docker daemon access per Docker's official post-install steps, then rerun install.sh as the launcher"
+  fi
+}
+
 run_host_bootstrap() {
   local sudo_env=() args=(install)
   # sudo resets the environment, so an explicitly configured state root must
@@ -154,6 +171,7 @@ resolve_release_identity
 resolve_architecture
 [[ -n "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-}" ]] ||
   fail "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY is not set; provision the release-signing public key through an independent protected channel (controller.sh verifies it)"
+verify_fresh_host_launcher_path
 
 run_host_bootstrap
 validate_state_root

@@ -149,9 +149,15 @@ mode-`0600` launcher-owned files, and delegates activation to
 `controller.sh install --release-file`. It must run as the lifecycle launcher
 user (not through whole-script `sudo`, which would mismatch the bootstrap's
 SUDO_USER launcher against the activating user); a plain root shell is an
-allowed root lifecycle. `controller.sh` remains the verification and
-activation authority, and the installer creates no secrets and no trust
-material.
+allowed root lifecycle. Because a freshly installed Docker grants no non-root
+daemon access and neither the installer nor the bootstrap ever modifies the
+Docker permission model, the installer fails closed before any host mutation
+when a non-root launcher runs it on a host without a Docker client: the
+fresh-host one-command path requires a root lifecycle shell, or Docker must be
+installed separately first with the launcher's daemon access deliberately
+granted per Docker's official post-install steps. `controller.sh` remains the
+verification and activation authority, and the installer creates no secrets
+and no trust material.
 
 For a fresh Controller host, install the exact release selected by the local
 manifest through the lifecycle entrypoint:

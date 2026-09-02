@@ -63,6 +63,8 @@ With the production environment and secrets provisioned (see [Deploy the Control
 deploy/production/install.sh
 ```
 
+On a host that already has Docker, run it as the lifecycle launcher user with Docker daemon access already granted. On a fresh host without Docker, run it from a root lifecycle shell instead: a fresh Docker installation grants no non-root daemon access and the installer never changes Docker permissions.
+
 The underlying steps also remain available individually: `bootstrap-host.sh check|install` prepares host prerequisites, and `controller.sh install --release-file <manifest>` activates the manifest matching the host architecture. The same entrypoint manages `upgrade`, `rollback`, `start`, and `uninstall`. Start with [Deploy the Controller](docs/getting-started/production.md); the full install, upgrade, rollback, recovery, and security contracts remain in [Production deployment reference](docs/operations/production-deployment.md).
 
 ## Managed nodes

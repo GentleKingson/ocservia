@@ -139,6 +139,33 @@ chmod 0755 -- "${repo}/deploy/production/bootstrap-host.sh" \
   "${repo}/deploy/production/controller.sh" \
   "${bin}/curl" "${bin}/sudo" "${bin}/uname"
 
+# A restricted PATH for the fresh-host scenarios: the installer must see no
+# docker command anywhere, even when the host running the tests has Docker.
+fresh_bin="${fixture}/fresh-bin"
+mkdir -m 700 -- "${fresh_bin}"
+link_tool() {
+  local tool="$1" path
+  path="$(command -v "${tool}" || true)"
+  [[ -n "${path}" ]] || die "required test tool not found: ${tool}"
+  ln -s "${path}" "${fresh_bin}/${tool}"
+}
+for tool in bash git env chmod mkdir dirname; do
+  link_tool "${tool}"
+done
+ln -s "${bin}/sudo" "${fresh_bin}/sudo"
+ln -s "${bin}/curl" "${fresh_bin}/curl"
+ln -s "${bin}/uname" "${fresh_bin}/uname"
+
+# The installer only probes for a docker client with command -v before the
+# bootstrap; a stub on PATH is enough for the existing-Docker scenarios.
+install_docker_client_stub() {
+  cat >"${bin}/docker" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 -- "${bin}/docker"
+}
+
 git -C "${repo}" init -q
 git -C "${repo}" config user.name test
 git -C "${repo}" config user.email test@example.invalid
@@ -151,6 +178,7 @@ reset_logs() {
   : >"${bootstrap_log}"
   : >"${controller_log}"
   : >"${sudo_log}"
+  rm -f -- "${bin}/docker"
   if [[ -e "${state_root}" ]]; then
     if can_root; then
       as_root rm -rf -- "${state_root}"
@@ -275,9 +303,10 @@ assert_log_empty "${bootstrap_log}"
 assert_log_empty "${curl_log}"
 echo "a missing release trust key is rejected"
 
-# 4. the full happy path as the launcher user.
+# 4. the full happy path as the launcher user on a host with Docker.
 reset_logs
 reset_checkout
+install_docker_client_stub
 EXTRA_ENV=("OCSERV_BACKUP_DIR=${fixture}/backup")
 capture
 assert_status 0 "the launcher-user install flow must succeed"
@@ -319,6 +348,7 @@ echo "the launcher install flow bootstraps, downloads, and activates"
 # 4a. arm64 hosts select the arm64 manifest automatically.
 reset_logs
 reset_checkout
+install_docker_client_stub
 EXTRA_ENV=("INSTALL_TEST_ARCH=aarch64")
 capture
 assert_status 0 "the arm64 install flow must succeed"
@@ -332,6 +362,7 @@ echo "arm64 hosts select the arm64 release manifest"
 # 5. a bootstrap failure stops before download and activation.
 reset_logs
 reset_checkout
+install_docker_client_stub
 EXTRA_ENV=("MOCK_BOOTSTRAP_EXIT=1")
 capture
 assert_status 1 "a bootstrap failure must fail the installer"
@@ -342,6 +373,7 @@ echo "a bootstrap failure stops before download and activation"
 # 5a. a state root the bootstrap did not provision is rejected.
 reset_logs
 reset_checkout
+install_docker_client_stub
 EXTRA_ENV=("MOCK_BOOTSTRAP_PROVISION_STATE=0")
 capture
 assert_status 1 "a missing state root must fail closed"
@@ -371,7 +403,9 @@ if can_root; then
   assert_log_empty "${controller_log}"
   echo "whole-script sudo is rejected with the launcher mismatch"
 
-  # 6a. a plain root shell is an allowed root lifecycle.
+  # 6a. a plain root shell is an allowed root lifecycle and is the supported
+  # fresh-host path: with no Docker client anywhere on PATH, root installs
+  # Docker through the bootstrap and activates without a permission mismatch.
   reset_logs
   reset_checkout
   RUN_STATUS=0
@@ -381,7 +415,7 @@ if can_root; then
     INSTALL_TEST_BOOTSTRAP_LOG="${bootstrap_log}" \
     INSTALL_TEST_CONTROLLER_LOG="${controller_log}" \
     INSTALL_TEST_SUDO_LOG="${sudo_log}" \
-    PATH="${bin}:${PATH}" \
+    PATH="${fresh_bin}" \
     OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
     OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
     "${repo}/deploy/production/install.sh" 2>&1)" || RUN_STATUS=$?
@@ -389,9 +423,34 @@ if can_root; then
   assert_log_empty "${sudo_log}"
   assert_log_contains "${bootstrap_log}" "install"
   assert_log_contains "${controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
-  echo "a plain root shell runs the root lifecycle without nested sudo"
+  if (( EUID != 0 )); then
+    # The root lifecycle refreshes the fixture checkout's git index as root;
+    # return ownership so later launcher scenarios can mutate the checkout.
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
+  fi
+  echo "a root shell runs the fresh-host lifecycle with no Docker present"
 else
   echo "sudo contract cases skipped: no passwordless sudo available" >&2
+fi
+
+# 7. a non-root launcher on a fresh host without Docker fails closed before
+# any host mutation: a fresh Docker installation grants no non-root daemon
+# access and the installer never modifies the Docker permission model.
+if (( EUID != 0 )); then
+  reset_logs
+  reset_checkout
+  EXTRA_ENV=("PATH=${fresh_bin}")
+  capture
+  assert_status 1 "a non-root launcher on a Docker-less host must fail closed"
+  assert_output "root lifecycle shell"
+  assert_output "post-install"
+  assert_output "never modifies the Docker permission model"
+  assert_log_empty "${bootstrap_log}"
+  assert_log_empty "${curl_log}"
+  assert_log_empty "${controller_log}"
+  echo "a non-root launcher on a fresh Docker-less host fails closed before mutation"
+else
+  echo "fresh-host launcher-path case skipped: running as root"
 fi
 
 echo "Controller install tests passed"

@@ -137,17 +137,28 @@ the same protected access token and its own certificate and key; see
 
 ## 5. Install the Controller
 
-With the environment and secrets provisioned above, run the single-command
-installer from the release checkout as the lifecycle launcher user (not as a
-whole-script `sudo` — it invokes `sudo` itself only for the host bootstrap):
+How the single-command installer runs depends on the Docker state of the host:
 
-```bash
-deploy/production/install.sh
-```
+- On a host that already has Docker with daemon access granted to the
+  lifecycle launcher user, run it as that launcher user (not as a whole-script
+  `sudo` — it invokes `sudo` itself only for the host bootstrap):
 
-It verifies that the checkout is a clean exact `vX.Y.Z` release tag, selects
-the manifest matching the host architecture (`amd64` or `arm64`), bootstraps
-the host, downloads the release bundle into
+  ```bash
+  deploy/production/install.sh
+  ```
+
+- On a fresh host without Docker, run it from a root lifecycle shell instead
+  (for example an interactive root session). A freshly installed Docker grants
+  no non-root daemon access, the installer never modifies the Docker
+  permission model, so a non-root launcher on a Docker-less host fails closed
+  up front rather than mutating the host and failing after the Docker install.
+  The alternative is to install Docker separately first and deliberately grant
+  the launcher Docker daemon access per Docker's official post-install steps,
+  then run the installer as the launcher.
+
+The installer verifies that the checkout is a clean exact `vX.Y.Z` release
+tag, selects the manifest matching the host architecture (`amd64` or `arm64`),
+bootstraps the host, downloads the release bundle into
 `<state-root>/release-bundles/vX.Y.Z`, and activates it through
 `controller.sh install`.
 
