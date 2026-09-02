@@ -1,5 +1,9 @@
 # Node enrollment development
 
+> **Reference.** The operator procedure is [Enroll a node](../how-to/enroll-node.md).
+> This document describes the enrollment protocol, trust binding, and migration
+> invariants.
+
 Enrollment is explicit and does not activate a node. On a fresh node, prepare
 the long-lived endpoint identity before requesting a token:
 
