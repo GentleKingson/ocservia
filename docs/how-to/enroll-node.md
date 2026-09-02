@@ -12,8 +12,10 @@ record. It does not activate the node; an operator must approve it afterward.
 - For production, the dedicated relay drop-in is installed, both
   `RELAY_URL_A` and `RELAY_URL_B` are exported, and
   `/etc/ocservia-agent/relay-access-token` is provisioned.
-- You have an authenticated API client with permission to create an enrollment
-  token and approve a node.
+- You have an authenticated requester API client with permission to create an
+  enrollment token and request node approval.
+- A different authorized principal is available to independently approve the
+  node approval request.
 
 ## Steps
 
@@ -83,11 +85,52 @@ record. It does not activate the node; an operator must approve it afterward.
 
 ## Approve the node
 
-5. Approve the pending node with an authenticated API client only after the
-   Agent configuration and production relay path are complete:
+5. As the requester, create a content-bound `node.approve` approval request
+   only after the Agent configuration and production relay path are complete:
+
+   ```http
+   POST /api/v1/approval-requests
+   X-Workspace-ID: <workspace-uuidv7>
+   Content-Type: application/json
+
+   {
+     "action": "node.approve",
+     "resource_type": "node",
+     "resource_id": "<node-uuidv7>",
+     "reason": "Approve managed node",
+     "ttl_seconds": 600,
+     "node_approval": {
+       "labels": {"environment": "production"},
+       "policy": "<approved-node-policy>",
+       "capabilities": ["<capabilities-approved-for-this-node>"]
+     }
+   }
+   ```
+
+   Record the returned UUIDv7 `id` as `APPROVAL_ID` and its
+   `request_hash` as `APPROVAL_REQUEST_HASH`. The approval request's labels,
+   policy, capabilities, and reason are the exact activation content that the
+   independent approver must review.
+
+6. Have a different authorized principal approve that request. The approver
+   must verify the request content before approving it and must bind the
+   decision to the returned request hash:
+
+   ```http
+   POST /api/v1/approval-requests/<approval-uuidv7>:approve
+   Content-Type: application/json
+
+   {
+     "reason": "Independent node approval review",
+     "expected_request_hash": "<approval-request-hash>"
+   }
+   ```
+
+7. As the requester, activate the pending node with the approved request ID:
 
    ```http
    POST /api/v1/nodes/<node-uuidv7>/approval
+   X-Approval-ID: <approved-request-uuidv7>
    Content-Type: application/json
 
    {
@@ -98,9 +141,11 @@ record. It does not activate the node; an operator must approve it afterward.
    }
    ```
 
-   Use the capabilities required by the node's policy, not a broader set by
-   default. If the authorization policy requires independent approval, send
-   the approved request ID in the `X-Approval-ID` header.
+   The `labels`, `policy`, `capabilities`, and `reason` in this activation
+   request must exactly match the values in the `node.approve` request above.
+   Node activation always requires a valid approved UUIDv7 in
+   `X-Approval-ID`; independent approval is not policy-optional. Use the
+   capabilities required by the node's policy, not a broader set by default.
 
 ## Verify
 
