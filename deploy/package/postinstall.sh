@@ -35,16 +35,38 @@ verified_root="$(AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
   "${package_root}/release-signing.pub.pem")"
 
 # install-agent.sh remains the only install-layout authority; the native
-# package just hands the verified staging scripts control.
+# package just hands the verified staging scripts control. A production
+# managed-node install is requested before the package runs by creating
+# /etc/ocservia/agent-install-production-relays; the drop-in it installs then
+# carries the standing intent, and upgrades keep it through the presence
+# check below.
+production=false
+if [[ -f /etc/ocservia/agent-install-production-relays && ! -L /etc/ocservia/agent-install-production-relays ]]; then
+  production=true
+fi
 if [[ -x /usr/libexec/ocservia/ocservia-agent ]]; then
-  if [[ -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf ]]; then
+  if [[ "${production}" == true || -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf ]]; then
     INSTALL_PRODUCTION_RELAYS=true "${verified_root}/scripts/upgrade-agent.sh"
   else
     "${verified_root}/scripts/upgrade-agent.sh"
   fi
 else
-  "${verified_root}/scripts/install-agent.sh"
+  if [[ "${production}" == true ]]; then
+    INSTALL_PRODUCTION_RELAYS=true "${verified_root}/scripts/install-agent.sh"
+  else
+    "${verified_root}/scripts/install-agent.sh"
+  fi
+fi
+
+if [[ "${production}" == true ]]; then
+  # One-shot request: consume it only after the lifecycle succeeded, so a
+  # failed install or upgrade leaves the production request retryable.
+  rm -f -- /etc/ocservia/agent-install-production-relays
 fi
 
 rm -rf -- "${verified_root%%/extracted/*}"
-echo "ocservia-agent ${version} installed; /etc/ocservia-agent/agent.env is required before enabling ocservia-agent.service"
+if [[ -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf ]]; then
+  echo "ocservia-agent ${version} installed; /etc/ocservia-agent/agent.env, relays.env, and the relay token are required before enabling ocservia-agent.service"
+else
+  echo "ocservia-agent ${version} installed; /etc/ocservia-agent/agent.env is required before enabling ocservia-agent.service"
+fi
