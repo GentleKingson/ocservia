@@ -1,0 +1,161 @@
+# Deploy the Controller
+
+This guide covers a first production deployment with the guarded Controller
+lifecycle. It keeps the operator path short; the exact filesystem, release,
+secret, and rollback contracts are in [Production deployment reference](../operations/production-deployment.md).
+
+## Requirements
+
+- Ubuntu 24.04 on `amd64` or `arm64`.
+- A clean checkout of the release tag being installed.
+- A DNS name and HTTPS certificate for the Controller.
+- An OIDC issuer and client, an HTTPS certificate signer, and a TLS OTLP
+  backend.
+- Two independently operated dedicated relays with distinct DNS names.
+- A protected backup location and a Controller Iroh identity whose public
+  EndpointID is known.
+- A lifecycle launcher user with Docker daemon access, or the ability to run
+  the lifecycle as root.
+- The release-signing public key and its expected fingerprint provisioned
+  through a channel separate from the release bundle.
+
+The repository does not generate production secrets, trust keys, certificates,
+relay tokens, or passwords. Prepare those through the operator's protected
+provisioning process.
+
+## 1. Download the release
+
+From the [GitHub Releases](https://github.com/GentleKingson/ocservia/releases)
+page, select one release tag and download the Controller manifest for the host
+architecture:
+
+- `controller-release-amd64.json` and its `.sha256`, or
+- `controller-release-arm64.json` and its `.sha256`.
+
+Keep the selected manifest, `SHA256SUMS`, and `SHA256SUMS.sig` together in one
+protected directory. Do not use the `release-signing.pub.pem` published beside
+the bundle as the trust anchor. Set
+`OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` to the independently provisioned key.
+
+## 2. Prepare the host
+
+Clone the exact release and choose a separately protected backup directory:
+
+```bash
+git clone --branch <release-tag> --depth 1 \
+  https://github.com/GentleKingson/ocservia.git
+cd ocservia
+
+export OCSERV_BACKUP_DIR=/protected/ocservia-backups
+deploy/production/bootstrap-host.sh check \
+  --backup-dir "$OCSERV_BACKUP_DIR"
+sudo deploy/production/bootstrap-host.sh install \
+  --backup-dir "$OCSERV_BACKUP_DIR"
+```
+
+The bootstrap supports only Ubuntu 24.04 on the two Controller architectures.
+It installs missing host prerequisites but does not change Docker permissions,
+the firewall, or production trust material.
+
+## 3. Configure required production settings
+
+Export the values used by the production Compose file. Keep this environment
+in the same protected operator session used for the lifecycle command:
+
+```bash
+export OCSERV_PUBLIC_HOST=controller.example.com
+export OCSERV_SECRET_DIR=/protected/ocservia-secrets
+export OCSERV_BACKUP_DIR=/protected/ocservia-backups
+export OCSERV_OIDC_ISSUER=https://id.example.com
+export OCSERV_OIDC_CLIENT_ID=ocservia
+export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.com/v1
+export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.com:4317
+export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
+export OCSERV_CONTROLLER_ENDPOINT_ID=<64-lowercase-hex-characters>
+export OCSERV_RELAY_URL_A=https://relay-a.example.com
+export OCSERV_RELAY_URL_B=https://relay-b.example.com
+export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-signing.pub.pem
+```
+
+`OCSERV_CONTROLLER_ENDPOINT_ID` must match the public identity derived from
+the protected `controller-iroh.key`. The two relay URLs are required for the
+production transport path; public relays are not a fallback.
+
+## 4. Configure secrets and trust
+
+Place the required files in `OCSERV_SECRET_DIR`:
+
+```text
+tls.crt
+tls.key
+postgres-owner-password
+postgres-app-password
+postgres-backup-password
+postgres.pgpass
+database-owner-url
+database-app-url
+oidc-client-secret
+session-key
+audit-checkpoint-key
+audit-event-key
+controller-command-signing-key.pem
+certificate-signer-token
+relay-access-token
+controller-iroh.key
+otel-client.crt
+otel-client.key
+otel-ca.crt
+```
+
+The directory must be an absolute, canonical mode-`0700` directory outside the
+checkout. The files have different ownership and mode requirements, so do not
+apply one broad permission rule to all of them. See [Production security and
+lifecycle details](../operations/production-deployment.md) before starting.
+
+Configure the OIDC redirect URI as
+`https://<OCSERV_PUBLIC_HOST>/api/v1/auth/callback`. Configure each relay with
+the same protected access token and its own certificate and key; see
+[Dedicated relays](../operations/dedicated-relays.md).
+
+## 5. Install the Controller
+
+Use the manifest matching the Docker daemon architecture:
+
+```bash
+# amd64
+deploy/production/controller.sh install \
+  --release-file /protected/release/controller-release-amd64.json
+
+# arm64
+deploy/production/controller.sh install \
+  --release-file /protected/release/controller-release-arm64.json
+```
+
+The lifecycle verifies the signed release bundle, the clean checkout
+`source_commit`, the platform, and the digest-pinned images before activation.
+It then starts the dependency graph and runs the release smoke check. Do not
+replace this command with `docker compose up -d`.
+
+## 6. Verify the deployment
+
+The install command must finish successfully. You can validate the public
+readiness and version endpoints:
+
+```bash
+curl --fail --silent --show-error \
+  "https://${OCSERV_PUBLIC_HOST}/api/v1/readyz"
+curl --fail --silent --show-error \
+  "https://${OCSERV_PUBLIC_HOST}/api/v1/version"
+```
+
+Then verify an authenticated read, a node connection through each relay, OTLP
+delivery, and the newest backup. A release failure leaves pending evidence;
+retry only the same target after correcting its cause. See [Controller upgrade](../how-to/controller-upgrade.md),
+[Controller rollback](../how-to/controller-rollback.md), and [Troubleshooting](../how-to/troubleshooting.md).
+
+## Next steps
+
+- [Install a managed node](managed-node.md)
+- [Enroll a node](../how-to/enroll-node.md)
+- [Configure dedicated relays](../operations/dedicated-relays.md)
+- [Back up and restore PostgreSQL](../operations/postgres-backup.md)

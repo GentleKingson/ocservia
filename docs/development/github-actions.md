@@ -1,5 +1,9 @@
 # GitHub Actions validation
 
+> **CI reference.** Contributors should start with [Validate a change](testing.md).
+> This document retains the complete workflow graph, routing rules, artifacts,
+> and required-check contract.
+
 GitHub Actions is the authoritative merge-time validation environment. The
 primary workflow runs on pull requests, pushes to `main`, and manual dispatch.
 It uses GitHub-hosted `ubuntu-24.04` runners, read-only repository permissions,

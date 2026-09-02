@@ -29,6 +29,9 @@ authority, plus the frozen release manifest digest; a mismatch fails closed.
 - `ocservia.g6-gate-result.v1` aggregates all preceding layers without
   converting an engineering rehearsal into a final production-readiness pass.
 
+The historical [v0.2 release-readiness record](v0.2-release-readiness.md) is
+preserved as evidence and is not a current deployment guide.
+
 Each failure-domain runtime is driven by a frozen `ocservia-g6-harness`
 binary built once with the repository-pinned Go toolchain. Its typed phase
 graph persists `ocservia.g6-runtime-state.v1`, append-only

@@ -73,24 +73,24 @@ deploy/production/controller.sh install \
 # arm64 host: use controller-release-arm64.json
 ```
 
-The same entrypoint manages `upgrade`, `rollback`, `start`, and `uninstall`. Prerequisites — secrets, OIDC, PKI, release-signature verification, dedicated relays, and backups — plus the full install, upgrade, rollback, and recovery procedures are documented in [Production deployment](docs/operations/production-deployment.md). Read it in full before evaluating the topology.
+The same entrypoint manages `upgrade`, `rollback`, `start`, and `uninstall`. Start with [Deploy the Controller](docs/getting-started/production.md); the full install, upgrade, rollback, recovery, and security contracts remain in [Production deployment reference](docs/operations/production-deployment.md).
 
 ## Managed nodes
 
 Each managed ocserv host runs the ocservia Agent (unprivileged) and `privd` (root, no network listener) as signed native packages: `.deb` (amd64, arm64), `.rpm` (x86_64, aarch64), and a signed `.tar.gz` archive, published with checksums and an Ed25519 signature in every [release](https://github.com/GentleKingson/ocservia/releases). Verification trusts a release-signing public key whose fingerprint is pinned out of band — never a key copied from the same bundle.
 
-Installation, enrollment, upgrades, and rollback are covered in [Agent package lifecycle](docs/operations/agent-lifecycle.md); node trust and EndpointID pinning in [Node enrollment development](docs/development/enrollment.md).
+Start with [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a node](docs/how-to/enroll-node.md). Package, rollback, and trust internals remain in [Agent package lifecycle](docs/operations/agent-lifecycle.md) and [Node enrollment reference](docs/development/enrollment.md).
 
 ## Documentation
 
 The documentation index lives in [`docs/README.md`](docs/README.md). Frequently used entry points:
 
 - [Architecture and trust boundaries](docs/architecture.md)
-- [Production deployment](docs/operations/production-deployment.md)
-- [Agent package lifecycle](docs/operations/agent-lifecycle.md)
+- [Production deployment](docs/getting-started/production.md)
+- [Managed node installation](docs/getting-started/managed-node.md)
+- [Technical reference](docs/reference/README.md)
 - [Control-plane development](docs/development/control-plane.md)
-- [Contracts and toolchains](docs/development/contracts.md)
-- [GitHub Actions validation](docs/development/github-actions.md)
+- [Contributor validation](docs/development/testing.md)
 
 ## Developing
 
@@ -101,7 +101,7 @@ make bootstrap
 make verify
 ```
 
-GitHub Actions remains the authoritative merge-time environment. Changes must preserve the narrow-operation security boundary — never introduce a generic shell, arbitrary executable, caller-selected path, or caller-selected systemd unit — and keep public HTTP and Protobuf contracts additive. See [Contracts and toolchains](docs/development/contracts.md) and [GitHub Actions validation](docs/development/github-actions.md).
+GitHub Actions remains the authoritative merge-time environment. Changes must preserve the narrow-operation security boundary — never introduce a generic shell, arbitrary executable, caller-selected path, or caller-selected systemd unit — and keep public HTTP and Protobuf contracts additive. See [Contributor validation](docs/development/testing.md) and [Technical reference](docs/reference/README.md).
 
 ## Status
 
