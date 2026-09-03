@@ -8,7 +8,7 @@ path.
 
 - The target package matches the host architecture and is newer than the
   installed release.
-- Complete [Verify and choose the release package](../getting-started/managed-node.md#1-verify-and-choose-the-release-package),
+- Complete [Verify and choose the release package](../getting-started/managed-node.md#2-verify-and-choose-the-release-package),
   including the out-of-band release-key fingerprint, `SHA256SUMS.sig`, and
   the selected package checksum, before invoking the package manager as root.
 - `/etc/ocservia-agent/agent.env` and its trust/sealing keys are valid.

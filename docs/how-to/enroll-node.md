@@ -81,7 +81,7 @@ record. It does not activate the node; an operator must approve it afterward.
    are enrollment inputs; the returned value that belongs in `agent.env` is
    the new `NODE_ID`.
 
-   Before approval, return to [Configure the Agent after enrollment](../getting-started/managed-node.md#6-configure-the-agent-after-enrollment).
+   Before approval, return to [Configure the Agent after enrollment](../getting-started/managed-node.md#7-configure-the-agent-after-enrollment).
 
 ## Approve the node
 

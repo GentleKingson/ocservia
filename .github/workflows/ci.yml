@@ -827,6 +827,8 @@ jobs:
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned native tools
         run: scripts/bootstrap.sh native
+      - name: Managed node bootstrap installer fixture
+        run: scripts/test-managed-node-install.sh
       - name: Install ephemeral native fixtures
         run: |
           sudo apt-get update

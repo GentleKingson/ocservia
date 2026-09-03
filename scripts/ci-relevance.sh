@@ -126,6 +126,8 @@ classify_path() {
       run_browser=true; run_p1_smoke=true ;;
     deploy/systemd/*|deploy/package/*|deploy/prepare-transport-runtime.sh)
       run_native=true; run_contracts_policy=true ;;
+    deploy/managed-node/*|deploy/managed-node/**/*)
+      run_native=true; run_contracts_policy=true ;;
     deploy/real-e2e/*|deploy/real-e2e/**/*|deploy/g6-ha-pitr/*|deploy/g6-ha-pitr/**/*)
       run_contracts_policy=true ;;
 
@@ -146,6 +148,8 @@ classify_path() {
     scripts/p1-*|scripts/test-p1-*)
       run_p1_smoke=true; run_contracts_policy=true ;;
     scripts/i13-native-*|scripts/package-native-*|scripts/release-native-package-smoke.sh|scripts/install-agent.sh|scripts/uninstall-agent.sh|scripts/upgrade-agent.sh|scripts/rollback-agent.sh)
+      run_native=true; run_contracts_policy=true ;;
+    scripts/test-managed-node-install.sh)
       run_native=true; run_contracts_policy=true ;;
     scripts/i14-*|scripts/i15-*|scripts/i16-*|scripts/i17-*|scripts/i19-*)
       run_stage_contracts=true; run_contracts_policy=true ;;
