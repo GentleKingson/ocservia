@@ -24,6 +24,10 @@ done
   echo "Managed node install tests require an executable installer" >&2
   exit 1
 }
+# The install.env scenarios assert metadata (0644 files pass, group- and
+# world-writable files fail closed), so fixture creation must not depend on
+# the invoking login's umask (Debian-style usergroups logins default to 002).
+umask 022
 # The agent stub derives the EndpointID from the endpoint key bytes (standing
 # in for key.public()); the identity it provisions is 32 bytes of '7', so the
 # expected EndpointID is that derivation of those bytes.
@@ -98,7 +102,7 @@ EXTRA_ENV=()
 OS_RELEASE="${os}/ubuntu-24.04"
 
 mkdir -m 700 -- "${bin}" "${logs}" "${serve}" "${trusted}" "${sysroot}"
-mkdir -p -- "${repo}/deploy/managed-node" "${os}"
+mkdir -p -- "${repo}/deploy/managed-node" "${repo}/deploy/lib" "${os}"
 
 # The out-of-band trust anchor: an Ed25519 release key kept outside the
 # release download directory, exactly like an operator-provisioned key.
@@ -489,7 +493,12 @@ chmod 0755 -- "${bin}/agent-stub" "${bin}/native-install" "${bin}/sudo" \
 
 build_serve
 
+# The shared install.env loader ships beside the installer, and the
+# repository's real .gitignore is committed too: the installer must treat a
+# present /install.env as ignored, not as a dirty release checkout.
 cp -- "${INSTALL}" "${repo}/deploy/managed-node/install.sh"
+cp -- "${ROOT}/deploy/lib/install-env.sh" "${repo}/deploy/lib/install-env.sh"
+cp -- "${ROOT}/.gitignore" "${repo}/.gitignore"
 git -C "${repo}" init -q
 git -C "${repo}" config user.name test
 git -C "${repo}" config user.email test@example.invalid
@@ -506,19 +515,31 @@ if can_root; then
   as_root useradd --system --gid ocserv-agent --home-dir /var/lib/ocservia-agent --shell /usr/sbin/nologin ocserv-agent
 fi
 
+# ROOT_ENV_OMIT names node-configuration variables build_env must leave out
+# so an install.env scenario can provide them from the invocation directory
+# instead of the environment.
+ROOT_ENV_OMIT=()
 build_env() {
+  local entry name omitted
   ROOT_ENV=(
     "PATH=${TEST_PATH_PREFIX:-${bin}:${PATH}}"
     "OCSERV_MANAGED_NODE_SYSROOT=${sysroot}"
     "OCSERV_MANAGED_NODE_OS_RELEASE=${OS_RELEASE}"
-    "CONTROLLER_ENDPOINT_ID=${controller_id}"
-    "RELAY_URL_A=https://relay-a.example.test"
-    "RELAY_URL_B=https://relay-b.example.test"
-    "RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token"
-    "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem"
-    "TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem"
-    "EXPECTED_RELEASE_KEY_SHA256=${fingerprint}"
   )
+  for entry in \
+    "CONTROLLER_ENDPOINT_ID=${controller_id}" \
+    "RELAY_URL_A=https://relay-a.example.test" \
+    "RELAY_URL_B=https://relay-b.example.test" \
+    "RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token" \
+    "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem" \
+    "TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem" \
+    "EXPECTED_RELEASE_KEY_SHA256=${fingerprint}"; do
+    name="${entry%%=*}"
+    for omitted in ${ROOT_ENV_OMIT[@]+"${ROOT_ENV_OMIT[@]}"}; do
+      [[ "${name}" == "${omitted}" ]] && continue 2
+    done
+    ROOT_ENV+=("${entry}")
+  done
 }
 
 reset_state() {
@@ -536,8 +557,10 @@ reset_state() {
   done
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
   rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
-    "${tamper_after_verify_file}" "${key_swap_path_file}" "${services_state_file}"
+    "${tamper_after_verify_file}" "${key_swap_path_file}" "${services_state_file}" \
+    "${fixture}/poison-install-env"
   EXTRA_ENV=()
+  ROOT_ENV_OMIT=()
 }
 
 reset_checkout() {
@@ -550,6 +573,9 @@ reset_checkout() {
   git -C "${repo}" clean -qfd
   git -C "${repo}" reset -q --hard "v${VERSION}"
   git -C "${repo}" tag -d v0.3.0-rc1 v0.2.2 v0.2.3 >/dev/null 2>&1 || true
+  # install.env is git-ignored, so git clean never removes it; the install.env
+  # scenarios must not leak into unrelated ones.
+  rm -f -- "${repo}/install.env"
 }
 
 capture() {
@@ -557,6 +583,20 @@ capture() {
   RUN_STATUS=0
   RUN_OUTPUT="$(env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
     "${repo}/deploy/managed-node/install.sh" "$@" 2>&1)" || RUN_STATUS=$?
+}
+
+# The install.env contract is bound to the invocation directory, so its
+# scenarios run the installer with the fixture checkout as $PWD.
+capture_from() {
+  local directory="$1"
+  shift
+  build_env
+  RUN_STATUS=0
+  RUN_OUTPUT="$(
+    cd -- "${directory}"
+    env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
+      "${repo}/deploy/managed-node/install.sh" "$@" 2>&1
+  )" || RUN_STATUS=$?
 }
 
 capture_root() {
@@ -794,6 +834,158 @@ assert_output "production relay drop-in"
 assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "a relay-free installed package is rejected"
+
+# 10a. install.env supplies the node configuration from the invocation
+# directory: the fixture repo carries the repository's real .gitignore, so a
+# present install.env must also stay invisible to the clean-release-checkout
+# contract, and the file-provided configuration must carry the whole flow
+# (operator input validation, out-of-band trust, package selection).
+scenario
+ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
+  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
+  TRUSTED_RELEASE_KEY EXPECTED_RELEASE_KEY_SHA256)
+cat >"${repo}/install.env" <<EOF
+CONTROLLER_ENDPOINT_ID=${controller_id}
+RELAY_URL_A=https://relay-file-a.example.test
+RELAY_URL_B=https://relay-file-b.example.test
+RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
+CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
+TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem
+EXPECTED_RELEASE_KEY_SHA256=${fingerprint}
+EOF
+capture_from "${repo}"
+case "$(uname -m)" in
+  x86_64) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
+  aarch64 | arm64) selected="ocservia-agent_${VERSION}_arm64.deb" ;;
+  *) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
+esac
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
+assert_log_contains "${dpkg_log}" "${selected}"
+if ((EUID == 0)); then
+  assert_status 0 "the file-configured root flow must reach ENROLLMENT_READY"
+  assert_output "ENROLLMENT_READY"
+  as_root grep -qx "RELAY_URL_A=https://relay-file-a.example.test" \
+    "${sysroot}/etc/ocservia-agent/relays.env" ||
+    die "relays.env must carry the install.env relay URL A"
+  as_root grep -qx "RELAY_URL_B=https://relay-file-b.example.test" \
+    "${sysroot}/etc/ocservia-agent/relays.env" ||
+    die "relays.env must carry the install.env relay URL B"
+else
+  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
+  assert_output "unsafe metadata"
+fi
+if grep -q "dirty" <<<"${RUN_OUTPUT}"; then
+  die "an ignored install.env must not dirty the release checkout"
+fi
+echo "install.env values load without dirtying the checkout"
+
+# 10b. an explicit shell variable wins over install.env: the environment
+# carries the correct trust fingerprint while the file carries a wrong one.
+scenario
+printf 'EXPECTED_RELEASE_KEY_SHA256=%s\n' "$(printf '0%.0s' $(seq 1 64))" \
+  >"${repo}/install.env"
+capture_from "${repo}"
+if ((EUID == 0)); then
+  assert_status 0 "the shell fingerprint must win over the file value"
+  assert_output "ENROLLMENT_READY"
+else
+  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
+  assert_output "unsafe metadata"
+fi
+if grep -q "does not match the expected" <<<"${RUN_OUTPUT}"; then
+  die "the file value must not override the explicit shell variable"
+fi
+echo "an explicit shell variable overrides install.env"
+
+# 10c. an unknown key fails closed before any host mutation; the fixture
+# seams in particular gain no install.env entry.
+scenario
+printf 'OCSERV_MANAGED_NODE_SYSROOT=%s\n' "${fixture}/evil-sysroot" \
+  >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "an unknown install.env key must fail closed"
+assert_output "unknown configuration variable OCSERV_MANAGED_NODE_SYSROOT"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+assert_log_empty "${sudo_log}"
+[[ ! -e "${fixture}/evil-sysroot" ]] ||
+  die "the fixture seam must not be settable through install.env"
+echo "an unknown install.env key fails closed before any host mutation"
+
+# 10d. malformed lines fail closed.
+scenario
+printf 'CONTROLLER_ENDPOINT_ID %s\n' "${controller_id}" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a line without = must fail closed"
+assert_output "expected KEY=VALUE"
+scenario
+printf 'controller_endpoint_id=%s\n' "${controller_id}" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a lowercase key must fail closed"
+assert_output "expected KEY=VALUE"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+echo "malformed install.env lines fail closed"
+
+# 10e. nothing in install.env is ever executed: command substitution,
+# backticks, and source lines are rejected, never evaluated.
+scenario
+printf 'RELAY_URL_A=$(touch %s)\n' "${fixture}/pwned-marker" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "command substitution syntax must fail closed"
+assert_output "must be a literal value"
+[[ ! -e "${fixture}/pwned-marker" ]] ||
+  die "command substitution in install.env must never execute"
+scenario
+printf 'RELAY_URL_A=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "backtick syntax must fail closed"
+[[ ! -e "${fixture}/pwned-marker" ]] ||
+  die "backticks in install.env must never execute"
+scenario
+printf 'source %s\n' "${fixture}/evil.sh" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a source line must fail closed as malformed"
+assert_output "expected KEY=VALUE"
+[[ ! -e "${fixture}/evil.sh" ]] || die "the test must not create evil.sh"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+echo "install.env content is never executed"
+
+# 10f. an install.env symlink is rejected.
+scenario
+printf 'RELAY_URL_A=https://relay-symlink.example.test\n' \
+  >"${fixture}/install-env-real"
+ln -s "${fixture}/install-env-real" "${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "an install.env symlink must fail closed"
+assert_output "symlink"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+rm -f -- "${repo}/install.env" "${fixture}/install-env-real"
+echo "an install.env symlink is rejected"
+
+# 10g. a group-writable install.env is rejected.
+scenario
+printf 'RELAY_URL_A=https://relay-file-a.example.test\n' >"${repo}/install.env"
+chmod 0664 -- "${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a group-writable install.env must fail closed"
+assert_output "group/world-writable"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+echo "a group-writable install.env is rejected"
+
+# 10h. a world-writable install.env is rejected.
+scenario
+printf 'RELAY_URL_A=https://relay-file-a.example.test\n' >"${repo}/install.env"
+chmod 0666 -- "${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a world-writable install.env must fail closed"
+assert_output "group/world-writable"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+echo "a world-writable install.env is rejected"
 
 # The remaining scenarios perform real privileged node preparation and need
 # the root lifecycle.
@@ -1268,11 +1460,18 @@ if ((EUID != 0)) && can_root; then
     cp -- "${bin}/${mock}" "${root_lifecycle_bin}/${mock}"
   done
   real_sudo="$(command -v sudo)"
+  # The poison-install-env seam is the install.env TOCTOU regression: the
+  # wrapper (still running as the launcher user) swaps $PWD/install.env for
+  # attacker content at the exact moment the privilege transition starts, so
+  # a root re-read of the file would pick up attacker-chosen configuration.
   cat >"${root_lifecycle_bin}/sudo" <<EOF
   #!/usr/bin/env bash
   set -euo pipefail
   root="$(dirname -- "\${OCSERV_MANAGED_NODE_SYSROOT:?}")"
   printf '%s\n' "\$*" >>"${root_sudo_log}"
+  if [[ -s "${fixture}/poison-install-env" ]]; then
+    cp -- "${fixture}/poison-install-env" "${repo}/install.env"
+  fi
   exec "${real_sudo}" env PATH="${root_lifecycle_bin}" "\$@"
 EOF
   chmod 0755 -- "${root_lifecycle_bin}/sudo"
@@ -1295,6 +1494,49 @@ EOF
   fi
   assert_log_empty "${systemctl_log}"
   echo "the operator root-lifecycle command forwards only node configuration"
+
+  # 19b. --root-lifecycle resolves install.env as the launcher user and
+  # forwards only the effective allowlist across the boundary. The sudo
+  # wrapper swaps $PWD/install.env for poisoned content the instant the
+  # privilege transition starts, so a root re-read would install
+  # attacker-chosen relay configuration; the re-exec marker must prevent it.
+  scenario
+  ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B)
+  cat >"${repo}/install.env" <<EOF
+CONTROLLER_ENDPOINT_ID=${controller_id}
+RELAY_URL_A=https://relay-root-file-a.example.test
+RELAY_URL_B=https://relay-root-file-b.example.test
+EOF
+  printf 'CONTROLLER_ENDPOINT_ID=%s\nRELAY_URL_A=https://relay-poisoned-a.example.test\nRELAY_URL_B=https://relay-poisoned-b.example.test\n' \
+    "${controller_id}" >"${fixture}/poison-install-env"
+  RUN_STATUS=0
+  RUN_OUTPUT="$(
+    export PATH="${root_lifecycle_bin}"
+    TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
+    cd -- "${repo}"
+    env "${ROOT_ENV[@]}" "${repo}/deploy/managed-node/install.sh" --root-lifecycle 2>&1
+  )" || RUN_STATUS=$?
+  assert_status 0 "the root-lifecycle with install.env must succeed"
+  assert_output "ENROLLMENT_READY"
+  assert_log_contains "${root_sudo_log}" "OCSERV_INSTALL_ENV_RESOLVED=1"
+  assert_log_contains "${root_sudo_log}" "CONTROLLER_ENDPOINT_ID=${controller_id}"
+  assert_log_contains "${root_sudo_log}" "RELAY_URL_A=https://relay-root-file-a.example.test"
+  if grep -q "poisoned" "${root_sudo_log}"; then
+    die "root must never re-read the swapped install.env: $(cat -- "${root_sudo_log}")"
+  fi
+  as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
+    "${sysroot}/etc/ocservia-agent/relays.env" ||
+    die "relays.env must carry the launcher-resolved relay URL A"
+  as_root grep -qx "RELAY_URL_B=https://relay-root-file-b.example.test" \
+    "${sysroot}/etc/ocservia-agent/relays.env" ||
+    die "relays.env must carry the launcher-resolved relay URL B"
+  if as_root grep -q "poisoned" "${sysroot}/etc/ocservia-agent/relays.env"; then
+    die "root must never apply the swapped install.env values"
+  fi
+  if ((EUID != 0)); then
+    as_root chown -R "$(id -u):$(id -g)" "${repo}" 2>/dev/null || true
+  fi
+  echo "the root lifecycle forwards resolved install.env values and never re-reads the file as root"
 else
   echo "root-lifecycle forwarding case skipped: running as root" >&2
 fi

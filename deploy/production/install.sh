@@ -23,6 +23,9 @@
 #   export OCSERV_BACKUP_DIR=... OCSERV_SECRET_DIR=...
 #   export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=...
 #   # export the remaining production Controller configuration...
+#   # (or keep the allowlisted configuration in ./install.env, parsed by the
+#   # strict non-executing loader in deploy/lib/install-env.sh; explicit
+#   # shell variables always win over the file)
 #   deploy/production/install.sh                          # launcher user with Docker access
 #   deploy/production/install.sh --root-lifecycle         # deliberate root lifecycle (fresh host)
 #
@@ -46,7 +49,6 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BOOTSTRAP="${ROOT}/deploy/production/bootstrap-host.sh"
 CONTROLLER="${ROOT}/deploy/production/controller.sh"
-STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 RELEASE_TAG=""
 RELEASE_COMMIT=""
@@ -84,17 +86,54 @@ fail() {
 }
 
 if (($# > 1)); then
-  echo "usage: deploy/production/install.sh [--root-lifecycle] (the production environment comes from the operator session)" >&2
+  echo "usage: deploy/production/install.sh [--root-lifecycle] (the production environment comes from the operator session or ./install.env)" >&2
   exit 2
 fi
 case "${1:-}" in
   "") ;;
   --root-lifecycle) ROOT_LIFECYCLE=true ;;
   *)
-    echo "usage: deploy/production/install.sh [--root-lifecycle] (the production environment comes from the operator session)" >&2
+    echo "usage: deploy/production/install.sh [--root-lifecycle] (the production environment comes from the operator session or ./install.env)" >&2
     exit 2
     ;;
 esac
+
+# Operator configuration comes from the invoking shell environment and, for
+# allowlisted variables not exported there, from $PWD/install.env. The
+# strict non-executing loader fail-closes on unknown keys, expansion
+# syntax, and unsafe file metadata, so a configuration error surfaces
+# before any host mutation below; an absent file is a no-op and explicit
+# shell variables always win. OCSERV_INSTALL_ENV_RESOLVED marks the
+# deliberate --root-lifecycle re-exec: the launcher user already resolved
+# install.env under its own privileges and forwarded the effective values
+# across the sudo boundary, so root must not treat a possibly-replaced
+# $PWD/install.env as new authoritative input.
+if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
+  # shellcheck source=../lib/install-env.sh disable=SC1091
+  source "${ROOT}/deploy/lib/install-env.sh"
+  install_env_load "${PWD}/install.env" \
+    OCSERV_AUDIT_EVENT_KEY_ID \
+    OCSERV_BACKUP_DIR \
+    OCSERV_BACKUP_INTERVAL_SECONDS \
+    OCSERV_BACKUP_RETENTION_COUNT \
+    OCSERV_CERTIFICATE_SIGNER_URL \
+    OCSERV_CONTROLLER_ENDPOINT_ID \
+    OCSERV_CONTROLLER_PUBLIC_URL \
+    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY \
+    OCSERV_CONTROLLER_STATE_DIR \
+    OCSERV_CONTROLLER_STATE_ROOT \
+    OCSERV_HTTPS_ADDRESS \
+    OCSERV_OIDC_CLIENT_ID \
+    OCSERV_OIDC_ISSUER \
+    OCSERV_OTEL_BACKEND_ENDPOINT \
+    OCSERV_PUBLIC_HOST \
+    OCSERV_RELAY_URL_A \
+    OCSERV_RELAY_URL_B \
+    OCSERV_SECRET_DIR
+fi
+# Every configuration-derived variable is computed only after the
+# configuration sources above are final.
+STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 
 forward_root_lifecycle() {
   local variable allowed
@@ -108,7 +147,11 @@ forward_root_lifecycle() {
   done < <(compgen -e)
   command -v sudo >/dev/null 2>&1 ||
     fail "sudo is required for --root-lifecycle when the installer is not already running as root"
+  # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
+  # already resolved by the launcher user: root must not re-read a file that
+  # may have been replaced across the privilege transition.
   exec sudo env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
+    OCSERV_INSTALL_ENV_RESOLVED=1 \
     "${ROOT}/deploy/production/install.sh" --root-lifecycle
 }
 

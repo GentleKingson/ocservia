@@ -95,6 +95,17 @@ export OCSERV_RELAY_URL_B=https://relay-b.example.com
 export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-signing.pub.pem
 ```
 
+Instead of exporting every variable, you can keep the configuration in
+`./install.env` in the directory you run the installer from (normally the
+checkout root): copy `install.env.example` from the repository root, delete
+the managed-node section, and uncomment and edit the Controller entries.
+`install.env` is git-ignored, so it never makes the clean-release-checkout
+check fail. The file is parsed by a strict, non-executing loader
+(`deploy/lib/install-env.sh`): it only accepts the documented allowlisted
+keys as literal `KEY=VALUE` lines, and it fails closed on unknown keys,
+malformed lines, or unsafe file metadata (symlinks, group/world-writable
+permissions). Variables exported in the shell always win over the file.
+
 `OCSERV_CONTROLLER_ENDPOINT_ID` must match the public identity derived from
 the protected `controller-iroh.key`. The two relay URLs are required for the
 production transport path; public relays are not a fallback.
