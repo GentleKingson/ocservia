@@ -19,6 +19,10 @@ command -v git >/dev/null 2>&1 || {
   echo "Controller install tests require an executable installer" >&2
   exit 1
 }
+# The install.env scenarios assert metadata (0644 files pass, group- and
+# world-writable files fail closed), so fixture creation must not depend on
+# the invoking login's umask (Debian-style usergroups logins default to 002).
+umask 022
 
 # Keep the fixture under HOME: /tmp is world-writable (mode 1777), which the
 # lifecycle state root ancestry contract must reject.
@@ -72,12 +76,17 @@ die() {
 }
 
 mkdir -m 700 -- "${bin}" "${logs}"
-mkdir -p -- "${repo}/deploy/production"
+mkdir -p -- "${repo}/deploy/production" "${repo}/deploy/lib"
 
 # The installer resolves ROOT from its own location, so the fixture exercises
 # the real install.sh against a fixture release checkout with mocked sibling
-# entrypoints (bootstrap-host.sh, controller.sh) and mocked PATH tools.
+# entrypoints (bootstrap-host.sh, controller.sh) and mocked PATH tools. The
+# shared install.env loader ships beside the installer, and the repository's
+# real .gitignore is committed too: the installer must treat a present
+# /install.env as ignored, not as a dirty release checkout.
 cp -- "${INSTALL}" "${repo}/deploy/production/install.sh"
+cp -- "${ROOT}/deploy/lib/install-env.sh" "${repo}/deploy/lib/install-env.sh"
+cp -- "${ROOT}/.gitignore" "${repo}/.gitignore"
 
 cat >"${repo}/deploy/production/bootstrap-host.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -178,9 +187,14 @@ ln -s "${bin}/uname" "${fresh_bin}/uname"
 # keeping the fixture's mocked tools visible after sudo's environment reset.
 # The wrapper logs the exact sudo env arguments before adding this test-only
 # PATH, so the production installer still has to forward only its allowlist.
+# The stat link feeds the install.env loader's permission check, and the
+# poison-install-env seam is the install.env TOCTOU regression: the wrapper
+# (still running as the launcher user) swaps $PWD/install.env for attacker
+# content at the exact moment the privilege transition starts, so a root
+# re-read of the file would pick up attacker-chosen configuration.
 if (( EUID != 0 )) && can_root; then
   mkdir -m 700 -- "${root_lifecycle_bin}"
-  for tool in bash git env chmod mkdir dirname; do
+  for tool in bash git env chmod mkdir dirname stat; do
     link_tool_into "${root_lifecycle_bin}" "${tool}"
   done
   ln -s "${bin}/curl" "${root_lifecycle_bin}/curl"
@@ -189,6 +203,9 @@ if (( EUID != 0 )) && can_root; then
   cat >"${root_lifecycle_bin}/sudo" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"${root_sudo_log}"
+if [[ -s "${fixture}/poison-install-env" ]]; then
+  cp -- "${fixture}/poison-install-env" "${repo}/install.env"
+fi
 exec "${real_sudo}" env PATH="${root_lifecycle_bin}" "\$@"
 EOF
   chmod 0755 -- "${root_lifecycle_bin}/sudo"
@@ -243,6 +260,9 @@ reset_checkout() {
   git -C "${repo}" clean -qfd
   git -C "${repo}" reset -q --hard v0.1.2
   git -C "${repo}" tag -d v0.2.0-rc1 v0.1.3 v0.1.4 >/dev/null 2>&1 || true
+  # install.env is git-ignored, so git clean never removes it; the install.env
+  # scenarios must not leak into unrelated ones.
+  rm -f -- "${repo}/install.env" "${fixture}/poison-install-env"
 }
 
 run_installer() {
@@ -257,9 +277,33 @@ run_installer() {
     env "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${repo}/deploy/production/install.sh" "$@"
 }
 
+# The install.env contract is bound to the invocation directory, so its
+# scenarios run the installer with the fixture checkout as $PWD.
+run_installer_from() {
+  local directory="$1"
+  shift
+  (
+    cd -- "${directory}"
+    INSTALL_TEST_CURL_LOG="${curl_log}" \
+      INSTALL_TEST_BOOTSTRAP_LOG="${bootstrap_log}" \
+      INSTALL_TEST_CONTROLLER_LOG="${controller_log}" \
+      INSTALL_TEST_SUDO_LOG="${sudo_log}" \
+      INSTALL_TEST_ARCH="${INSTALL_TEST_ARCH:-}" \
+      PATH="${bin}:${PATH}" \
+      OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
+      OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
+      env "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${repo}/deploy/production/install.sh" "$@"
+  )
+}
+
 capture() {
   RUN_STATUS=0
   RUN_OUTPUT="$(run_installer "$@" 2>&1)" || RUN_STATUS=$?
+}
+
+capture_from() {
+  RUN_STATUS=0
+  RUN_OUTPUT="$(run_installer_from "$@" 2>&1)" || RUN_STATUS=$?
 }
 
 assert_status() {
@@ -566,6 +610,49 @@ if can_root; then
     as_root chown -R "$(id -u):$(id -g)" "${repo}"
     echo "the operator root-lifecycle command forwards only production configuration across sudo env_reset"
   fi
+
+  # 6d. --root-lifecycle resolves install.env as the launcher user and
+  # forwards only the effective allowlist across the boundary. The sudo
+  # wrapper swaps $PWD/install.env for poisoned content the instant the
+  # privilege transition starts, so a root re-read would hand root
+  # attacker-chosen configuration; the re-exec marker must prevent it.
+  if (( EUID != 0 )); then
+    reset_logs
+    reset_checkout
+    cat >"${repo}/install.env" <<EOF
+OCSERV_PUBLIC_HOST=controller-root-file.example.test
+OCSERV_SECRET_DIR=${fixture}/root-file-secrets
+OCSERV_BACKUP_DIR=${fixture}/root-file-backup
+OCSERV_CONTROLLER_STATE_ROOT=${state_root}
+OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem
+EOF
+    printf 'OCSERV_PUBLIC_HOST=controller-poisoned.example.test\nOCSERV_SECRET_DIR=%s\nOCSERV_BACKUP_DIR=%s\n' \
+      "${fixture}/poisoned-secrets" "${fixture}/poisoned-backup" >"${fixture}/poison-install-env"
+    RUN_STATUS=0
+    RUN_OUTPUT="$(
+      export INSTALL_TEST_CURL_LOG="${root_curl_log}"
+      export INSTALL_TEST_BOOTSTRAP_LOG="${root_bootstrap_log}"
+      export INSTALL_TEST_CONTROLLER_LOG="${root_controller_log}"
+      export INSTALL_TEST_SUDO_LOG="${root_sudo_log}"
+      export PATH="${root_lifecycle_bin}"
+      cd -- "${repo}"
+      "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1
+    )" || RUN_STATUS=$?
+    assert_status 0 "the root-lifecycle with install.env must succeed"
+    assert_output "release identity: v0.1.2"
+    assert_log_contains "${root_sudo_log}" "OCSERV_INSTALL_ENV_RESOLVED=1"
+    assert_log_contains "${root_sudo_log}" "OCSERV_PUBLIC_HOST=controller-root-file.example.test"
+    assert_log_contains "${root_sudo_log}" "OCSERV_CONTROLLER_STATE_ROOT=${state_root}"
+    assert_log_contains "${root_bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-root-file.example.test"
+    assert_log_contains "${root_bootstrap_log}" "OCSERV_SECRET_DIR=${fixture}/root-file-secrets"
+    assert_log_contains "${root_bootstrap_log}" "install --backup-dir ${fixture}/root-file-backup"
+    if grep -q "poisoned" "${root_sudo_log}" || grep -q "poisoned" "${root_bootstrap_log}"; then
+      die "root must never re-read the swapped install.env: $(cat -- "${root_sudo_log}")"
+    fi
+    assert_log_contains "${root_controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
+    as_root chown -R "$(id -u):$(id -g)" "${repo}"
+    echo "the root lifecycle forwards resolved install.env values and never re-reads the file as root"
+  fi
 else
   echo "sudo contract cases skipped: no passwordless sudo available" >&2
 fi
@@ -589,5 +676,179 @@ if (( EUID != 0 )); then
 else
   echo "fresh-host launcher-path case skipped: running as root"
 fi
+
+# 8. install.env supplies allowlisted configuration from the invocation
+# directory. The fixture repo carries the repository's real .gitignore, so a
+# present install.env must also stay invisible to the clean-release-checkout
+# contract, and every value below must reach the bootstrap.
+reset_logs
+reset_checkout
+install_docker_client_stub
+cat >"${repo}/install.env" <<EOF
+OCSERV_BACKUP_DIR=${fixture}/file-backup
+OCSERV_PUBLIC_HOST=controller-file.example.test
+OCSERV_HTTPS_ADDRESS=10.0.0.9
+EOF
+capture_from "${repo}"
+assert_status 0 "install.env values must load and keep the checkout clean"
+assert_output "release identity: v0.1.2"
+assert_log_contains "${bootstrap_log}" "install --backup-dir ${fixture}/file-backup"
+assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-file.example.test"
+echo "install.env values load without dirtying the release checkout"
+
+# 8a. an explicit shell variable wins over install.env.
+reset_logs
+reset_checkout
+install_docker_client_stub
+cat >"${repo}/install.env" <<EOF
+OCSERV_PUBLIC_HOST=controller-file.example.test
+OCSERV_BACKUP_DIR=${fixture}/file-backup
+EOF
+EXTRA_ENV=("OCSERV_PUBLIC_HOST=controller-env.example.test")
+capture_from "${repo}"
+assert_status 0 "an explicit shell variable must win over install.env"
+assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-env.example.test"
+if grep -q "controller-file.example.test" "${bootstrap_log}"; then
+  die "the file value must not override the explicit shell variable: $(cat -- "${bootstrap_log}")"
+fi
+echo "an explicit shell variable overrides install.env"
+
+# 8a-2. an explicitly empty shell variable also wins over install.env: the
+# file must not fill a variable the operator deliberately unset in the
+# session, so the bootstrap runs without the file's --backup-dir.
+reset_logs
+reset_checkout
+install_docker_client_stub
+cat >"${repo}/install.env" <<EOF
+OCSERV_BACKUP_DIR=${fixture}/file-backup
+EOF
+EXTRA_ENV=("OCSERV_BACKUP_DIR=")
+capture_from "${repo}"
+assert_status 0 "an explicitly empty shell variable must win over install.env"
+assert_log_contains "${bootstrap_log}" "install"
+if grep -q -- "--backup-dir" "${bootstrap_log}"; then
+  die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"
+fi
+echo "an explicitly empty shell variable overrides install.env"
+
+# 8b. an unknown key fails closed before any host mutation.
+reset_logs
+reset_checkout
+printf 'OCSERV_NOT_A_REAL_SETTING=x\n' >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "an unknown install.env key must fail closed"
+assert_output "unknown configuration variable OCSERV_NOT_A_REAL_SETTING"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+assert_log_empty "${controller_log}"
+assert_log_empty "${sudo_log}"
+echo "an unknown install.env key fails closed before any host mutation"
+
+# 8b-2. internal test seams gain no install.env entry: the compose override
+# seam is production-reachable configuration and must stay environment-only.
+reset_logs
+reset_checkout
+printf 'OCSERV_CONTROLLER_COMPOSE_SH=%s\n' "${fixture}/evil-compose.sh" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a test seam must not be settable through install.env"
+assert_output "unknown configuration variable OCSERV_CONTROLLER_COMPOSE_SH"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+echo "internal seams are not install.env keys"
+
+# 8c. malformed lines fail closed.
+reset_logs
+reset_checkout
+printf 'OCSERV_PUBLIC_HOST controller-file.example.test\n' >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a line without = must fail closed"
+assert_output "expected KEY=VALUE"
+reset_logs
+reset_checkout
+printf 'oCsErV_PUBLIC_HOST=controller-file.example.test\n' >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a lowercase key must fail closed"
+assert_output "expected KEY=VALUE"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+echo "malformed install.env lines fail closed"
+
+# 8d. nothing in install.env is ever executed: command substitution,
+# backticks, and source lines are rejected, never evaluated.
+reset_logs
+reset_checkout
+printf 'OCSERV_PUBLIC_HOST=$(touch %s)\n' "${fixture}/pwned-marker" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "command substitution syntax must fail closed"
+assert_output "must be a literal value"
+[[ ! -e "${fixture}/pwned-marker" ]] ||
+  die "command substitution in install.env must never execute"
+reset_logs
+reset_checkout
+printf 'OCSERV_PUBLIC_HOST=`touch %s`\n' "${fixture}/pwned-marker" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "backtick syntax must fail closed"
+[[ ! -e "${fixture}/pwned-marker" ]] ||
+  die "backticks in install.env must never execute"
+reset_logs
+reset_checkout
+printf 'source %s\n' "${fixture}/evil.sh" >"${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a source line must fail closed as malformed"
+assert_output "expected KEY=VALUE"
+[[ ! -e "${fixture}/evil.sh" ]] || die "the test must not create evil.sh"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+echo "install.env content is never executed"
+
+# 8e. an install.env symlink is rejected.
+reset_logs
+reset_checkout
+printf 'OCSERV_PUBLIC_HOST=controller-symlink.example.test\n' >"${fixture}/install-env-real"
+ln -s "${fixture}/install-env-real" "${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "an install.env symlink must fail closed"
+assert_output "symlink"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+rm -f -- "${repo}/install.env" "${fixture}/install-env-real"
+echo "an install.env symlink is rejected"
+
+# 8f. a group-writable install.env is rejected.
+reset_logs
+reset_checkout
+printf 'OCSERV_PUBLIC_HOST=controller-file.example.test\n' >"${repo}/install.env"
+chmod 0664 -- "${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a group-writable install.env must fail closed"
+assert_output "group/world-writable"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+echo "a group-writable install.env is rejected"
+
+# 8g. a world-writable install.env is rejected.
+reset_logs
+reset_checkout
+printf 'OCSERV_PUBLIC_HOST=controller-file.example.test\n' >"${repo}/install.env"
+chmod 0666 -- "${repo}/install.env"
+capture_from "${repo}"
+assert_status 1 "a world-writable install.env must fail closed"
+assert_output "group/world-writable"
+assert_log_empty "${bootstrap_log}"
+assert_log_empty "${curl_log}"
+echo "a world-writable install.env is rejected"
+
+# 8h. the quoted-value form strips exactly one static quote layer.
+reset_logs
+reset_checkout
+install_docker_client_stub
+cat >"${repo}/install.env" <<EOF
+OCSERV_PUBLIC_HOST='controller-quoted.example.test'
+OCSERV_HTTPS_ADDRESS="10.0.0.9"
+EOF
+capture_from "${repo}"
+assert_status 0 "statically quoted install.env values must load"
+assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-quoted.example.test"
+echo "one static quote layer is stripped without expansion"
 
 echo "Controller install tests passed"

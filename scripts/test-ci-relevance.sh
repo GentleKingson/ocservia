@@ -26,6 +26,7 @@ paths=(
   deploy/production/controller.sh deploy/production/controller-release-smoke.sh deploy/production/bootstrap-host.sh
   deploy/production/install.sh scripts/test-controller-install.sh
   deploy/managed-node/install.sh scripts/test-managed-node-install.sh
+  deploy/lib/install-env.sh install.env.example
   scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
   control-plane/Dockerfile
 )
@@ -139,6 +140,10 @@ out="$(case_commit managed_node_installer deploy/managed-node/install.sh)"
 expect_only "${out}" run_native run_contracts_policy
 out="$(case_commit managed_node_install_test scripts/test-managed-node-install.sh)"
 expect_only "${out}" run_native run_contracts_policy
+out="$(case_commit install_env_loader deploy/lib/install-env.sh)"
+expect_only "${out}" run_native run_contracts_policy run_production_relays
+out="$(case_commit install_env_example install.env.example)"
+expect_only "${out}" run_native run_contracts_policy run_production_relays
 out="$(case_commit controller_release_smoke scripts/test-controller-release-smoke.sh)"
 expect_only "${out}" run_contracts_policy
 out="$(case_commit controller_release_bundle scripts/test-controller-release-bundle.sh)"

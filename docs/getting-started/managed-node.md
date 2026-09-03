@@ -48,6 +48,17 @@ export EXPECTED_RELEASE_KEY_SHA256="replace-with-64-lowercase-hex-fingerprint"
 deploy/managed-node/install.sh
 ```
 
+Instead of exporting every variable, you can keep the node configuration in
+`./install.env` in the directory you run the installer from (normally the
+checkout root): copy `install.env.example` from the repository root, delete
+the Controller section, and uncomment and edit the managed-node entries.
+`install.env` is git-ignored, so it never makes the clean-release-checkout
+check fail. The file is parsed by a strict, non-executing loader
+(`deploy/lib/install-env.sh`): it only accepts the documented allowlisted
+keys as literal `KEY=VALUE` lines, and it fails closed on unknown keys,
+malformed lines, or unsafe file metadata (symlinks, group/world-writable
+permissions). Variables exported in the shell always win over the file.
+
 `TRUSTED_RELEASE_KEY` defaults to `/etc/ocservia/release-signing.pub.pem` and
 `EXPECTED_RELEASE_KEY_SHA256` is otherwise read from
 `/etc/ocservia/trusted-release-key.sha256`; provision both out of band, exactly
