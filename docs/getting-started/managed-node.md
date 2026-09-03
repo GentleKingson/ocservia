@@ -25,9 +25,11 @@ do not build a package on the node.
 
 ## 1. One-command bootstrap
 
-The supported path is the managed-node installer, run from a clean checkout
-of an exact `vX.Y.Z` release tag. It installs the matching native package
-(`.deb` on the Debian family, `.rpm` on Rocky Linux 9) after verifying the
+The supported path is the managed-node installer, run as a single
+self-contained file with the release pinned through `--version vX.Y.Z`. No
+Git checkout is required: the installer detects the platform, downloads that
+exact release's `SHA256SUMS`, its signature, and the matching native package
+(`.deb` on the Debian family, `.rpm` on Rocky Linux 9), and verifies the
 out-of-band release trust — trusted key fingerprint, `SHA256SUMS.sig`, and
 the selected package digest — **before** any package manager runs as root.
 It then prepares the production node state (sealing keys, relay URLs, relay
@@ -35,9 +37,15 @@ access token, command verification key, persistent identity) and stops at
 `ENROLLMENT_READY`. It never approves the node, never enables or starts a
 service, and never weakens `expected_endpoint_id` binding.
 
+Obtain `install.sh` for the exact release you are installing — a published
+release tag is immutable, so never fetch the script from a branch or `main`
+— and run it from any directory holding the node configuration:
+
 ```bash
-git clone --branch vX.Y.Z --depth 1 https://github.com/GentleKingson/ocservia
-cd ocservia
+curl -fsSL --proto '=https' --tlsv1.2 \
+  -o install.sh \
+  https://raw.githubusercontent.com/GentleKingson/ocservia/vX.Y.Z/deploy/managed-node/install.sh
+chmod 0700 install.sh
 export CONTROLLER_ENDPOINT_ID="replace-with-64-lowercase-hex-controller-endpoint-id"
 export RELAY_URL_A="https://relay-a.example.com"
 export RELAY_URL_B="https://relay-b.example.com"
@@ -45,19 +53,37 @@ export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/controller-command-verification-key.pem
 export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
 export EXPECTED_RELEASE_KEY_SHA256="replace-with-64-lowercase-hex-fingerprint"
-deploy/managed-node/install.sh
+./install.sh --version vX.Y.Z
 ```
 
+The package-first `--version` mode is available starting with the first
+release that ships this Stage-1 bootstrap. Older releases that already
+ship `deploy/managed-node/install.sh` (starting with v0.4.0) do not accept
+`--version` — it fails as a usage error there; install those through the
+checkout-based compatibility path below. Earlier releases do not ship the
+managed-node installer at all — follow that release's historical
+installation instructions.
+
 Instead of exporting every variable, you can keep the node configuration in
-`./install.env` in the directory you run the installer from (normally the
-checkout root): copy `install.env.example` from the repository root, delete
-the Controller section, and uncomment and edit the managed-node entries.
-`install.env` is git-ignored, so it never makes the clean-release-checkout
-check fail. The file is parsed by a strict, non-executing loader
-(`deploy/lib/install-env.sh`): it only accepts the documented allowlisted
+`./install.env` in the directory you run the installer from: copy
+`install.env.example` from the repository, delete the Controller section,
+and uncomment and edit the managed-node entries. The installer embeds a
+strict, non-executing loader (the same contract as
+`deploy/lib/install-env.sh`): it only accepts the documented allowlisted
 keys as literal `KEY=VALUE` lines, and it fails closed on unknown keys,
 malformed lines, or unsafe file metadata (symlinks, group/world-writable
 permissions). Variables exported in the shell always win over the file.
+
+Compatibility path: the installer also runs from a clean checkout of an
+exact release tag without `--version`, deriving the release identity from
+the Git tag; `install.env` is git-ignored there, so it never makes the
+clean-release-checkout check fail.
+
+```bash
+git clone --branch vX.Y.Z --depth 1 https://github.com/GentleKingson/ocservia
+cd ocservia
+deploy/managed-node/install.sh
+```
 
 `TRUSTED_RELEASE_KEY` defaults to `/etc/ocservia/release-signing.pub.pem` and
 `EXPECTED_RELEASE_KEY_SHA256` is otherwise read from
