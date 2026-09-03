@@ -56,6 +56,11 @@ export EXPECTED_RELEASE_KEY_SHA256="replace-with-64-lowercase-hex-fingerprint"
 ./install.sh --version vX.Y.Z
 ```
 
+The package-first `--version` mode is available starting with the first
+release that ships this Stage-1 bootstrap. Older releases do not accept
+`--version` (it fails as a usage error there); install those through the
+checkout-based compatibility path below, which every release supports.
+
 Instead of exporting every variable, you can keep the node configuration in
 `./install.env` in the directory you run the installer from: copy
 `install.env.example` from the repository, delete the Controller section,

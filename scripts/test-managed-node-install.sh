@@ -744,6 +744,7 @@ assert_log_contains "${dpkg_log}" "${selected}"
 if ((EUID == 0)); then
   assert_status 0 "the single-file root flow must reach ENROLLMENT_READY"
   assert_output "ENROLLMENT_READY"
+  assert_output "rerun this installer with the same --version v${VERSION} argument"
 else
   assert_status 1 "the unprivileged fixture must fail closed at node preparation"
   assert_output "unsafe metadata"
@@ -791,6 +792,22 @@ assert_output "does not match the expected"
 assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "a trust fingerprint mismatch fails in --version mode before any download"
+
+# 2h. the single-file mode requires the version pin: without --version the
+# installer falls back to the legacy checkout identity and fails closed in
+# a directory with no usable Git checkout. The ENROLLMENT_READY rerun
+# instruction ("the same --version argument") is load-bearing for exactly
+# this reason. The failure message depends on whether the fixture root
+# happens to sit inside an unrelated Git work tree, so either identity
+# failure satisfies the scenario.
+scenario
+SCRIPT_UNDER_TEST="${standalone}/install.sh"
+capture_from "${standalone}"
+assert_status 1 "the single file without --version must fail closed"
+assert_output "not a Git checkout\|exactly one exact vX.Y.Z release tag\|dirty"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+echo "the single file without --version fails closed on the legacy identity"
 
 # 3. an unsupported architecture is rejected before any host mutation.
 scenario
@@ -1134,6 +1151,12 @@ assert_status 0 "the root bootstrap flow must succeed"
 assert_output "ENROLLMENT_READY"
 assert_output "EndpointID: ${MOCK_ENDPOINT_ID}"
 assert_output "next: create a short-lived one-time enrollment token"
+# The checkout mode prints its stable script path as the rerun instruction;
+# the single-file --version wording must not leak into it.
+assert_output "rerun deploy/managed-node/install.sh"
+if grep -q "the same --version" <<<"${RUN_OUTPUT}"; then
+  die "the checkout-mode rerun instruction must not mention --version"
+fi
 conf="${sysroot}/etc/ocservia-agent"
 # The configuration directory is mode 0750 root:ocserv-agent, so the
 # assertions below must read it through the privileged helper.
@@ -1224,6 +1247,7 @@ SCRIPT_UNDER_TEST="${standalone}/install.sh"
 capture_root --version "v${VERSION}"
 assert_status 0 "the single-file root bootstrap flow must succeed"
 assert_output "ENROLLMENT_READY"
+assert_output "rerun this installer with the same --version v${VERSION} argument"
 dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
 curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
 signature_checks="$(grep -c -- "pkeyutl -verify" "${openssl_log}")"
@@ -1714,6 +1738,7 @@ EOF
   )" || RUN_STATUS=$?
   assert_status 0 "the single-file root-lifecycle command must succeed"
   assert_output "ENROLLMENT_READY"
+  assert_output "rerun this installer with the same --version v${VERSION} argument"
   assert_log_contains "${root_sudo_log}" "${standalone}/install.sh --root-lifecycle --version v${VERSION}"
   as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
     "${sysroot}/etc/ocservia-agent/relays.env" ||

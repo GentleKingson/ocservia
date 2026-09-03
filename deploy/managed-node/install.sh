@@ -142,6 +142,7 @@ PLACEHOLDER_RELAY_URL_B="https://relay-b.example.com"
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
 VERSION=""
+VERSION_PINNED=false
 RELEASE_TAG=""
 RELEASE_COMMIT=""
 RELEASE_VERSION=""
@@ -220,6 +221,7 @@ if [[ "${version_seen}" == true ]]; then
     fail "unsupported version '${VERSION}': an exact vX.Y.Z release tag is required (latest, branches, commits, and pre-releases are not accepted)"
   RELEASE_TAG="${VERSION}"
   RELEASE_VERSION="${VERSION#v}"
+  VERSION_PINNED=true
 fi
 
 # Operator configuration comes from the invoking shell environment and, for
@@ -1091,7 +1093,16 @@ print_services_active() {
 }
 
 converge_enrollment() {
-  local node_id staging metadata
+  local node_id staging metadata rerun_instruction
+  # The single-file mode has no stable script path to print, and a rerun
+  # without the version pin would fall back to the legacy checkout identity
+  # and fail: the operator must rerun the same installer with the same
+  # --version argument.
+  if [[ "${VERSION_PINNED}" == true ]]; then
+    rerun_instruction="rerun this installer with the same --version ${RELEASE_TAG} argument"
+  else
+    rerun_instruction="rerun deploy/managed-node/install.sh"
+  fi
   if [[ -n "${ENROLLED_NODE_ID}" ]]; then
     if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
       echo "an enrollment token file is present but this node is already enrolled; remove the stale token file" >&2
@@ -1105,7 +1116,7 @@ converge_enrollment() {
   fi
   if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then
     echo "ENROLLMENT_READY"
-    echo "next: create a short-lived one-time enrollment token with expected_endpoint_id=${ENDPOINT_ID} (docs/how-to/enroll-node.md), install it as ${ENROLLMENT_TOKEN_FILE} (root:ocserv-agent 0640), and rerun deploy/managed-node/install.sh"
+    echo "next: create a short-lived one-time enrollment token with expected_endpoint_id=${ENDPOINT_ID} (docs/how-to/enroll-node.md), install it as ${ENROLLMENT_TOKEN_FILE} (root:ocserv-agent 0640), and ${rerun_instruction}"
     return
   fi
   metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
