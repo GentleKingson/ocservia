@@ -69,6 +69,9 @@
 #   export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem        # default
 #   export EXPECTED_RELEASE_KEY_SHA256=<64-lowercase-hex>  # else read from
 #   #   /etc/ocservia/trusted-release-key.sha256 (the durable upgrader anchor)
+#   # (or keep the allowlisted node configuration in ./install.env, parsed by
+#   # the strict non-executing loader in deploy/lib/install-env.sh; explicit
+#   # shell variables always win over the file)
 #   deploy/managed-node/install.sh   # operator launcher user -> ENROLLMENT_READY
 #   # create a one-time token with expected_endpoint_id=<printed EndpointID>
 #   # and install it as /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640
@@ -139,9 +142,6 @@ EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
 ENDPOINT_ID=""
 ENROLLED_NODE_ID=""
-USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
-P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
-ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
 USER_SEAL_DESCRIPTOR=""
 P12_SEAL_DESCRIPTOR=""
 
@@ -171,17 +171,53 @@ fail() {
 }
 
 if (($# > 1)); then
-  echo "usage: deploy/managed-node/install.sh [--root-lifecycle] (the node configuration comes from the operator session)" >&2
+  echo "usage: deploy/managed-node/install.sh [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
   exit 2
 fi
 case "${1:-}" in
   "") ;;
   --root-lifecycle) ROOT_LIFECYCLE=true ;;
   *)
-    echo "usage: deploy/managed-node/install.sh [--root-lifecycle] (the node configuration comes from the operator session)" >&2
+    echo "usage: deploy/managed-node/install.sh [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
     exit 2
     ;;
 esac
+
+# Operator configuration comes from the invoking shell environment and, for
+# allowlisted variables not exported there, from $PWD/install.env. The
+# strict non-executing loader fail-closes on unknown keys, expansion
+# syntax, and unsafe file metadata, so a configuration error surfaces
+# before any host mutation below; an absent file is a no-op and explicit
+# shell variables always win. OCSERV_INSTALL_ENV_RESOLVED marks the
+# deliberate --root-lifecycle re-exec: the launcher user already resolved
+# install.env under its own privileges and forwarded the effective values
+# across the sudo boundary, so root must not treat a possibly-replaced
+# $PWD/install.env as new authoritative input. The fixture seams above stay
+# deliberately outside this allowlist: they are test seams, not operator
+# configuration, and must not gain an install.env entry.
+if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
+  # shellcheck source=../lib/install-env.sh disable=SC1091
+  source "${ROOT}/deploy/lib/install-env.sh"
+  install_env_load "${PWD}/install.env" \
+    CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
+    CONTROLLER_ENDPOINT_ID \
+    ENROLLMENT_ENVIRONMENT \
+    EXPECTED_RELEASE_KEY_SHA256 \
+    P12_PASSWORD_SEAL_KEY_ID \
+    RELAY_ACCESS_TOKEN_SOURCE \
+    RELAY_URL_A \
+    RELAY_URL_B \
+    TRUSTED_RELEASE_KEY \
+    USER_PASSWORD_SEAL_KEY_ID
+fi
+
+# Configuration-derived defaults are applied only after the configuration
+# sources above are final, and only by normalizing unset to empty — a
+# variable explicitly set (even empty) must stay exactly as the operator
+# left it.
+USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
+P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
+ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
 
 # Privileged steps run one command at a time: directly when this process is
 # already the deliberate root lifecycle, otherwise through sudo with explicit
@@ -226,7 +262,11 @@ forward_root_lifecycle() {
   done < <(compgen -e)
   command -v sudo >/dev/null 2>&1 ||
     fail "sudo is required for --root-lifecycle when the installer is not already running as root"
+  # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
+  # already resolved by the launcher user: root must not re-read a file that
+  # may have been replaced across the privilege transition.
   exec sudo env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
+    OCSERV_INSTALL_ENV_RESOLVED=1 \
     "${ROOT}/deploy/managed-node/install.sh" --root-lifecycle
 }
 

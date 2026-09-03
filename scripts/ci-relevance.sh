@@ -126,6 +126,8 @@ classify_path() {
       run_browser=true; run_p1_smoke=true ;;
     deploy/systemd/*|deploy/package/*|deploy/prepare-transport-runtime.sh)
       run_native=true; run_contracts_policy=true ;;
+    deploy/lib/install-env.sh)
+      run_native=true; run_contracts_policy=true; run_production_relays=true ;;
     deploy/managed-node/*|deploy/managed-node/**/*)
       run_native=true; run_contracts_policy=true ;;
     deploy/real-e2e/*|deploy/real-e2e/**/*|deploy/g6-ha-pitr/*|deploy/g6-ha-pitr/**/*)
@@ -171,6 +173,8 @@ classify_path() {
       run_web=true; run_browser=true; run_contracts_policy=true ;;
     Makefile|.gitignore|.gitattributes)
       run_contracts_policy=true ;;
+    install.env.example)
+      run_native=true; run_contracts_policy=true; run_production_relays=true ;;
     *)
       fail_closed "unknown_path:${path}" ;;
   esac
