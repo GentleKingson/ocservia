@@ -98,6 +98,9 @@ die() {
 
 RUN_STATUS=0
 RUN_OUTPUT=""
+# The installer under test: the fixture checkout by default, the standalone
+# single-file copy for the package-first --version scenarios.
+SCRIPT_UNDER_TEST="${repo}/deploy/managed-node/install.sh"
 EXTRA_ENV=()
 OS_RELEASE="${os}/ubuntu-24.04"
 
@@ -506,6 +509,13 @@ git -C "${repo}" add -A
 git -C "${repo}" commit -qm base
 git -C "${repo}" tag "v${VERSION}"
 
+# The Stage-1 self-containment fixture: the installer alone in a plain
+# directory, with no repository siblings and no .git anywhere it could
+# consult. The package-first --version mode must run from exactly this.
+standalone="${fixture}/standalone"
+mkdir -m 700 -- "${standalone}"
+cp -- "${INSTALL}" "${standalone}/install.sh"
+
 # Root scenarios perform real privileged file operations; they need the
 # package's system group to exist exactly like a real host.
 if can_root; then
@@ -582,7 +592,7 @@ capture() {
   build_env
   RUN_STATUS=0
   RUN_OUTPUT="$(env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-    "${repo}/deploy/managed-node/install.sh" "$@" 2>&1)" || RUN_STATUS=$?
+    "${SCRIPT_UNDER_TEST}" "$@" 2>&1)" || RUN_STATUS=$?
 }
 
 # The install.env contract is bound to the invocation directory, so its
@@ -595,7 +605,7 @@ capture_from() {
   RUN_OUTPUT="$(
     cd -- "${directory}"
     env "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${repo}/deploy/managed-node/install.sh" "$@" 2>&1
+      "${SCRIPT_UNDER_TEST}" "$@" 2>&1
   )" || RUN_STATUS=$?
 }
 
@@ -604,10 +614,10 @@ capture_root() {
   RUN_STATUS=0
   if ((EUID == 0)); then
     RUN_OUTPUT="$(env -u SUDO_USER "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${repo}/deploy/managed-node/install.sh" 2>&1)" || RUN_STATUS=$?
+      "${SCRIPT_UNDER_TEST}" "$@" 2>&1)" || RUN_STATUS=$?
   else
     RUN_OUTPUT="$(sudo -n env -u SUDO_USER "${ROOT_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
-      "${repo}/deploy/managed-node/install.sh" 2>&1)" || RUN_STATUS=$?
+      "${SCRIPT_UNDER_TEST}" "$@" 2>&1)" || RUN_STATUS=$?
   fi
 }
 
@@ -643,6 +653,8 @@ assert_systemctl_read_only() {
 scenario() {
   reset_state
   reset_checkout
+  SCRIPT_UNDER_TEST="${repo}/deploy/managed-node/install.sh"
+  rm -f -- "${standalone}/install.env"
 }
 
 # 1. usage errors.
@@ -651,6 +663,10 @@ capture unexpected-argument
 assert_status 2 "an unexpected argument must be a usage error"
 capture --root-lifecycle extra-argument
 assert_status 2 "extra arguments alongside --root-lifecycle must be a usage error"
+capture --version
+assert_status 2 "--version without a value must be a usage error"
+capture --version "v${VERSION}" --version "v${VERSION}"
+assert_status 2 "a duplicate --version must be a usage error"
 echo "usage errors fail with status 2"
 
 # 2. a non-tag checkout is rejected before any host mutation.
@@ -683,6 +699,98 @@ assert_output "dirty"
 assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "a dirty checkout is rejected before any host mutation"
+
+# 2c. --version pins the release identity on the command line: anything but
+# an exact vX.Y.Z SemVer tag is rejected before any host mutation, without
+# consulting a checkout.
+for bad_version in 0.2.1 v0.2 v0.2.1-rc1 latest; do
+  scenario
+  capture --version "${bad_version}"
+  assert_status 1 "a non-SemVer --version must fail closed (${bad_version})"
+  assert_output "an exact vX.Y.Z release tag is required"
+  assert_log_empty "${curl_log}"
+  assert_log_empty "${dpkg_log}"
+done
+echo "non-SemVer --version values are rejected before any host mutation"
+
+# 2d. a release that does not exist fails closed during the pinned download,
+# before the package manager.
+scenario
+capture --version v9.9.9
+assert_status 1 "a nonexistent release must fail closed"
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v9.9.9/SHA256SUMS"
+assert_log_empty "${dpkg_log}"
+echo "a nonexistent release is rejected before the package manager"
+
+# 2e. the package-first mode runs the single installer file from a plain
+# directory with no repository siblings and no .git: the version comes from
+# --version, the downloads stay pinned to it, and the package manager only
+# ever receives that exact version's file.
+scenario
+SCRIPT_UNDER_TEST="${standalone}/install.sh"
+capture_from "${standalone}" --version "v${VERSION}"
+assert_output "release identity: v${VERSION} (pinned by --version)"
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS"
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS.sig"
+case "$(uname -m)" in
+  x86_64) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
+  aarch64 | arm64) selected="ocservia-agent_${VERSION}_arm64.deb" ;;
+  *) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
+esac
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 3 ]] ||
+  die "expected exactly three downloads, got: $(cat -- "${curl_log}")"
+assert_log_contains "${dpkg_log}" "${selected}"
+if ((EUID == 0)); then
+  assert_status 0 "the single-file root flow must reach ENROLLMENT_READY"
+  assert_output "ENROLLMENT_READY"
+else
+  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
+  assert_output "unsafe metadata"
+fi
+echo "the single-file --version mode installs the pinned release without a checkout"
+
+# 2f. install.env supplies the node configuration to the single-file mode
+# from the invocation directory: the embedded loader replaces the
+# repository sibling deploy/lib/install-env.sh.
+scenario
+ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
+  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
+  TRUSTED_RELEASE_KEY EXPECTED_RELEASE_KEY_SHA256)
+cat >"${standalone}/install.env" <<EOF
+CONTROLLER_ENDPOINT_ID=${controller_id}
+RELAY_URL_A=https://relay-file-a.example.test
+RELAY_URL_B=https://relay-file-b.example.test
+RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
+CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
+TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem
+EXPECTED_RELEASE_KEY_SHA256=${fingerprint}
+EOF
+SCRIPT_UNDER_TEST="${standalone}/install.sh"
+capture_from "${standalone}" --version "v${VERSION}"
+if ((EUID == 0)); then
+  assert_status 0 "the file-configured single-file flow must reach ENROLLMENT_READY"
+  assert_output "ENROLLMENT_READY"
+  as_root grep -qx "RELAY_URL_A=https://relay-file-a.example.test" \
+    "${sysroot}/etc/ocservia-agent/relays.env" ||
+    die "relays.env must carry the install.env relay URL A"
+else
+  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
+  assert_output "unsafe metadata"
+fi
+echo "install.env works in the single-file --version mode"
+
+# 2g. the out-of-band trust fingerprint mismatch fails in --version mode
+# before any download and before the package manager.
+scenario
+EXTRA_ENV=("EXPECTED_RELEASE_KEY_SHA256=$(printf '0%.0s' $(seq 1 64))")
+SCRIPT_UNDER_TEST="${standalone}/install.sh"
+capture_from "${standalone}" --version "v${VERSION}"
+assert_status 1 "a mismatched trusted key fingerprint must fail closed"
+assert_output "does not match the expected"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+echo "a trust fingerprint mismatch fails in --version mode before any download"
 
 # 3. an unsupported architecture is rejected before any host mutation.
 scenario
@@ -1106,6 +1214,29 @@ if grep -q -- "operator-release-key" "${openssl_log}"; then
   die "openssl must use the frozen key copy, not the launcher-controlled path: $(cat -- "${openssl_log}")"
 fi
 echo "a post-verification key path swap is ignored"
+
+# 11c. the single-file --version mode converges on reruns exactly like the
+# checkout mode: the already-installed package is reused without a second
+# download, a second out-of-band trust verification, or a second package
+# manager mutation.
+scenario
+SCRIPT_UNDER_TEST="${standalone}/install.sh"
+capture_root --version "v${VERSION}"
+assert_status 0 "the single-file root bootstrap flow must succeed"
+assert_output "ENROLLMENT_READY"
+dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
+curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
+signature_checks="$(grep -c -- "pkeyutl -verify" "${openssl_log}")"
+capture_root --version "v${VERSION}"
+assert_status 0 "the converged single-file rerun must succeed"
+assert_output "already installed; skipping the release download"
+[[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
+  die "a single-file rerun must not reinstall the native package"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
+  die "a single-file rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
+[[ "$(grep -c -- "pkeyutl -verify" "${openssl_log}")" == "${signature_checks}" ]] ||
+  die "a single-file rerun must not re-run the release trust verification"
+echo "the single-file --version rerun converges without reinstalling or re-downloading"
 
 # 12. a rerun converges: the installed package is reused, not reinstalled,
 # and the release is not downloaded again.
@@ -1562,6 +1693,32 @@ EOF
     as_root chown -R "$(id -u):$(id -g)" "${repo}" 2>/dev/null || true
   fi
   echo "the root lifecycle forwards resolved install.env values and never re-reads the file as root"
+
+  # 19c. --root-lifecycle re-execs the installer's own path carrying the CLI
+  # version pin. Running from the standalone directory (no .git anywhere)
+  # proves the version crossed the sudo boundary: a dropped --version would
+  # fall back to the legacy checkout identity and fail closed here.
+  scenario
+  cat >"${standalone}/install.env" <<EOF
+CONTROLLER_ENDPOINT_ID=${controller_id}
+RELAY_URL_A=https://relay-root-file-a.example.test
+RELAY_URL_B=https://relay-root-file-b.example.test
+EOF
+  ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B)
+  RUN_STATUS=0
+  RUN_OUTPUT="$(
+    export PATH="${root_lifecycle_bin}"
+    TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
+    cd -- "${standalone}"
+    env "${ROOT_ENV[@]}" "${standalone}/install.sh" --version "v${VERSION}" --root-lifecycle 2>&1
+  )" || RUN_STATUS=$?
+  assert_status 0 "the single-file root-lifecycle command must succeed"
+  assert_output "ENROLLMENT_READY"
+  assert_log_contains "${root_sudo_log}" "${standalone}/install.sh --root-lifecycle --version v${VERSION}"
+  as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
+    "${sysroot}/etc/ocservia-agent/relays.env" ||
+    die "relays.env must carry the launcher-resolved relay URL A"
+  echo "the root lifecycle re-execs the single file with the pinned version"
 else
   echo "root-lifecycle forwarding case skipped: running as root" >&2
 fi
