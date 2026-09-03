@@ -23,8 +23,12 @@
 # mode for everything the running services load: the persistent identity
 # files must exist and pass the Agent's own identity validation (agent
 # ownership, owner-only permissions, the 32-byte endpoint key, and the
-# controller pin still matching the configured Controller), both sealing
-# private keys must re-derive exactly the fingerprints pinned in agent.env,
+# controller pin still matching the configured Controller), the EndpointID
+# the identity loader derives must equal the AGENT_ENDPOINT_ID enrollment
+# binding persisted in agent.env at enrollment (a substituted-but-valid
+# endpoint key cannot silently take the Controller enrollment binding), both
+# sealing private keys must re-derive exactly the fingerprints pinned in
+# agent.env,
 # and the relay configuration, relay access token, and Controller command
 # verification key must already exist and validate (the command key as an
 # Ed25519 anchor under root-controlled ancestry) — or the rerun fails closed.
@@ -668,13 +672,20 @@ validate_enrolled_identity() {
   # exact startup rules (agent-owned owner-only directory and files, the
   # 32-byte endpoint secret key, the 64-hex controller pin, and that the pin
   # still matches the configured Controller EndpointID), rejecting partial
-  # or substituted identity material.
-  local file output endpoint_id
+  # or substituted identity material. Structural validity alone cannot
+  # detect a replaced-but-valid endpoint key, so the enrollment also
+  # persists the enrolled Agent EndpointID in agent.env and the rerun fails
+  # closed unless the loaded identity derives exactly that EndpointID — the
+  # same key the Controller bound at enrollment.
+  local file output endpoint_id enrolled_endpoint_id
   for file in "${IDENTITY_DIR}/endpoint.key" "${IDENTITY_DIR}/controller.endpoint"; do
     if ! path_exists "${file}" || ! priv test -f "${file}" || priv test -L "${file}"; then
       fail "the enrolled node is missing its persistent identity file ${file}; regenerating the identity would break the Controller enrollment binding — restore ${IDENTITY_DIR} from protected backups or re-enroll as a new node deliberately (docs/how-to/enroll-node.md)"
     fi
   done
+  enrolled_endpoint_id="$(priv sed -n 's/^AGENT_ENDPOINT_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  [[ "${enrolled_endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "the enrolled ${AGENT_ENV_FILE} has no valid AGENT_ENDPOINT_ID enrollment binding; resolve it deliberately instead of trusting an unbound enrolled identity (docs/how-to/enroll-node.md)"
   output="$(as_agent "${AGENT_BINARY}" \
     --identity-dir "${IDENTITY_DIR}" \
     --controller "${CONTROLLER_ENDPOINT_ID}" \
@@ -683,6 +694,8 @@ validate_enrolled_identity() {
   endpoint_id="$(printf '%s\n' "${output}" | awk 'NF {last=$0} END {print last}')"
   [[ "${endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the Agent did not print a valid EndpointID while validating the enrolled identity"
+  [[ "${endpoint_id}" == "${enrolled_endpoint_id}" ]] ||
+    fail "the enrolled identity now presents EndpointID ${endpoint_id} but the enrolled ${AGENT_ENV_FILE} pins ${enrolled_endpoint_id}; a replaced endpoint secret key cannot silently take the Controller enrollment binding — restore the identity material or re-enroll as a new node deliberately (docs/how-to/enroll-node.md)"
   echo "enrolled persistent identity validated; EndpointID: ${endpoint_id}"
 }
 
@@ -896,8 +909,8 @@ converge_enrollment() {
   is_final_node_id "${node_id}" ||
     fail "enrollment did not return a valid UUIDv7 node ID"
   staging="$(mktemp "${STAGING_DIR}/agent-env.XXXXXX")"
-  printf 'CONTROLLER_ENDPOINT_ID=%s\nNODE_ID=%s\nCONTROLLER_COMMAND_VERIFICATION_KEY_FILE=%s\nUSER_PASSWORD_SEAL_KEY_ID=%s\nUSER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=%s\nP12_PASSWORD_SEAL_KEY_ID=%s\nP12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=%s\n' \
-    "${CONTROLLER_ENDPOINT_ID}" "${node_id}" "${COMMAND_KEY_FILE}" \
+  printf 'CONTROLLER_ENDPOINT_ID=%s\nNODE_ID=%s\nAGENT_ENDPOINT_ID=%s\nCONTROLLER_COMMAND_VERIFICATION_KEY_FILE=%s\nUSER_PASSWORD_SEAL_KEY_ID=%s\nUSER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=%s\nP12_PASSWORD_SEAL_KEY_ID=%s\nP12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=%s\n' \
+    "${CONTROLLER_ENDPOINT_ID}" "${node_id}" "${ENDPOINT_ID}" "${COMMAND_KEY_FILE}" \
     "${USER_PASSWORD_SEAL_KEY_ID}" "${USER_SEAL_DESCRIPTOR}" \
     "${P12_PASSWORD_SEAL_KEY_ID}" "${P12_SEAL_DESCRIPTOR}" >"${staging}"
   write_config_atomic "${staging}" "${AGENT_ENV_FILE}" 0640

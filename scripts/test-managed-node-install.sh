@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="${ROOT}/deploy/managed-node/install.sh"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 VERSION="0.2.1"
-MOCK_ENDPOINT_ID="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 MOCK_NODE_ID="018f1e11-2222-7333-8444-555555555555"
 
 # The installer fixture asserts file modes with GNU stat and signs release
@@ -25,6 +24,10 @@ done
   echo "Managed node install tests require an executable installer" >&2
   exit 1
 }
+# The agent stub derives the EndpointID from the endpoint key bytes (standing
+# in for key.public()); the identity it provisions is 32 bytes of '7', so the
+# expected EndpointID is that derivation of those bytes.
+MOCK_ENDPOINT_ID="$(printf '%032d' 7 | sha256sum | awk '{print $1}')"
 
 fixture="$(mktemp -d "${HOME}/.ocservia-managed-node-test.XXXXXX")"
 
@@ -75,7 +78,6 @@ openssl_log="${logs}/openssl.log"
 # from OCSERV_MANAGED_NODE_SYSROOT, which the installer forwards across the
 # --root-lifecycle boundary), never through environment variables that sudo
 # env_reset would drop.
-endpoint_id_file="${fixture}/endpoint.id"
 node_id_file="${fixture}/node.id"
 enroll_exit_file="${fixture}/enroll-exit"
 installed_version_file="${fixture}/installed-version"
@@ -194,7 +196,11 @@ case "$*" in
       echo "identity loader: controller pin does not match the configured Controller" >&2
       exit 1
     fi
-    printf '%s\n' "$(cat -- "${root}/endpoint.id")"
+    # The printed EndpointID is derived from the loaded key bytes like
+    # key.public(): a different endpoint key always presents a different
+    # EndpointID, which the installer compares against the enrollment
+    # binding pinned in agent.env.
+    printf '%s\n' "$(sha256sum -- "${key}" | awk '{print $1}')"
     exit 0
     ;;
   *--enrollment-token-file*)
@@ -528,7 +534,6 @@ reset_state() {
     "${openssl_log}"; do
     : >"${log}"
   done
-  printf '%s\n' "${MOCK_ENDPOINT_ID}" >"${endpoint_id_file}"
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
   rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
     "${tamper_after_verify_file}" "${key_swap_path_file}" "${services_state_file}"
@@ -1017,6 +1022,8 @@ as_root grep -qx "CONTROLLER_ENDPOINT_ID=${controller_id}" "${sysroot}/etc/ocser
   die "agent.env must pin the Controller EndpointID"
 as_root grep -qx "NODE_ID=${MOCK_NODE_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
   die "agent.env must carry the enrolled NODE_ID"
+as_root grep -qx "AGENT_ENDPOINT_ID=${MOCK_ENDPOINT_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
+  die "agent.env must pin the enrolled Agent EndpointID binding"
 if as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token"; then
   die "the one-time enrollment token file must be consumed after success"
 fi
@@ -1177,6 +1184,29 @@ as_root cmp -s -- "${fixture}/rsa-command-key.pub" "${command_key}" ||
 as_root install -o root -g ocserv-agent -m 0640 -- \
   "${fixture}/controller-command-verification-key.pem" "${command_key}"
 echo "a non-Ed25519 command verification key fails closed"
+
+# 17b-7. a substituted-but-valid endpoint secret key (32 bytes, owner-only,
+# same controller pin) presents a different EndpointID; the enrolled rerun
+# must fail closed on the AGENT_ENDPOINT_ID enrollment binding instead of
+# reporting SERVICES_ACTIVE, and must not rewrite the identity or agent.env.
+agent_env_digest="$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/agent.env" | awk '{print $1}')"
+as_root sh -c "printf '%032d' 9 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+capture_root
+assert_status 1 "a substituted valid endpoint key must fail the enrollment binding"
+assert_output "cannot silently take the Controller enrollment binding"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a substituted endpoint key must not report SERVICES_ACTIVE"
+fi
+as_root test "$(as_root stat -c %s -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")" -eq 32 ||
+  die "the substituted endpoint key must not be rewritten"
+[[ "$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/agent.env" | awk '{print $1}')" == "${agent_env_digest}" ]] ||
+  die "an enrollment binding failure must leave the enrolled agent.env untouched"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "an enrollment binding failure must not trigger enrollment"
+as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+echo "a substituted valid endpoint key fails closed on the enrollment binding"
 
 # 17c. an enrolled, activated node missing a sealing private key must fail
 # closed the same way: no key regeneration, no enrollment, no

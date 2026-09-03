@@ -249,18 +249,25 @@ already-completed CLI operation. Return here after enrollment prints the new
 
 ## 7. Configure the Agent after enrollment
 
-After enrollment prints the pending UUIDv7 node ID, write that value and the
-same descriptor values to `/etc/ocservia-agent/agent.env`:
+After enrollment prints the pending UUIDv7 node ID, write that value, the
+node's prepared EndpointID, and the same descriptor values to
+`/etc/ocservia-agent/agent.env`:
 
 ```text
 CONTROLLER_ENDPOINT_ID=<64-lowercase-hex-controller-endpoint-id>
 NODE_ID=<node-uuidv7-returned-by-enrollment>
+AGENT_ENDPOINT_ID=<64-lowercase-hex-endpoint-id-printed-when-the-identity-was-prepared>
 CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=/etc/ocservia-agent/controller-command-verification-key.pem
 USER_PASSWORD_SEAL_KEY_ID=<same-user-key-id-used-during-enrollment>
 USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=<same-user-key-hash-used-during-enrollment>
 P12_PASSWORD_SEAL_KEY_ID=<same-p12-key-id-used-during-enrollment>
 P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=<same-p12-key-hash-used-during-enrollment>
 ```
+
+`AGENT_ENDPOINT_ID` records the EndpointID the one-time enrollment token
+bound. Rerunning `deploy/managed-node/install.sh` compares the loaded
+identity against this binding and fails closed if the endpoint key no longer
+derives it.
 
 Provision the Controller command verification key as a root-owned key readable
 by the `ocserv-agent` group. Keep both sealing private keys root-owned mode
