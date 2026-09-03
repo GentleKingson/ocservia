@@ -348,6 +348,7 @@ jobs:
         run: |
           scripts/test-controller-host-bootstrap.sh
           scripts/test-controller-install.sh
+          scripts/test-controller-bootstrap.sh
           deploy/production/bootstrap-host.sh check
       - name: Production topology, relays, backup, and package checks
         env:

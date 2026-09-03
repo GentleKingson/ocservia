@@ -25,6 +25,7 @@ paths=(
   .github/workflows/release.yml scripts/ci-relevance.sh scripts/test-controller-release-smoke.sh scripts/test-controller-release-bundle.sh scripts/verify-controller-release-bundle.sh scripts/test-controller-lifecycle.sh scripts/test-controller-compose-lifecycle.sh scripts/test-controller-host-bootstrap.sh web/package.json
   deploy/production/controller.sh deploy/production/controller-release-smoke.sh deploy/production/bootstrap-host.sh
   deploy/production/install.sh scripts/test-controller-install.sh
+  deploy/production/controller-bootstrap.sh scripts/test-controller-bootstrap.sh
   deploy/managed-node/install.sh scripts/test-managed-node-install.sh
   deploy/lib/install-env.sh install.env.example
   scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
@@ -135,6 +136,10 @@ expect_only "${out}" run_production_relays
 out="$(case_commit controller_installer deploy/production/install.sh)"
 expect_only "${out}" run_production_relays
 out="$(case_commit controller_install_test scripts/test-controller-install.sh)"
+expect_only "${out}" run_production_relays
+out="$(case_commit controller_stage1_bootstrap deploy/production/controller-bootstrap.sh)"
+expect_only "${out}" run_production_relays
+out="$(case_commit controller_stage1_bootstrap_test scripts/test-controller-bootstrap.sh)"
 expect_only "${out}" run_production_relays
 out="$(case_commit managed_node_installer deploy/managed-node/install.sh)"
 expect_only "${out}" run_native run_contracts_policy
