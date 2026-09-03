@@ -5,14 +5,19 @@
 #
 # Scope: the operator runs this script from any directory holding the
 # production configuration (./install.env and/or exported OCSERV_*
-# variables). The script clones the requested exact release tag into a
-# launcher-owned durable source root (the later lifecycle commands —
-# upgrade, rollback, start, uninstall — keep operating on that checkout),
-# verifies the checkout satisfies the production installer's clean
-# exact-tag contract, selects the Docker lifecycle per the documented
-# rules, and execs <checkout>/deploy/production/install.sh without
-# changing the working directory, so install.env keeps resolving from the
-# invoking directory.
+# variables). The script resolves that configuration once under the
+# operator's own privileges and exports the effective allowlisted values,
+# clones the requested exact release tag into a launcher-owned durable
+# source root (the later lifecycle commands — upgrade, rollback, start,
+# uninstall — keep operating on that checkout), verifies the checkout
+# satisfies the production installer's clean exact-tag contract, selects
+# the Docker lifecycle per the documented rules, and execs
+# <checkout>/deploy/production/install.sh without changing the working
+# directory. Because the effective configuration crosses the handoff as
+# exported environment variables, releases whose installer predates the
+# install.env loader (environment-only installers, e.g. v0.4.0) receive
+# it exactly like install.env-aware installers, for which the explicit
+# shell environment keeps its priority over the file.
 #
 # Boundaries (the existing authorities are unchanged):
 # - No production secrets or trust material is created, downloaded, or
@@ -53,10 +58,10 @@ CHECK_ONLY=false
 SOURCE_ROOT=""
 TARGET=""
 
-# The install.env allowlist checked by --check mirrors the production
-# installer's own allowlist (deploy/production/install.sh); the installer
-# re-parses $PWD/install.env itself during the real run and remains the
-# authority. Keep both lists in sync.
+# The install.env allowlist resolved by this bootstrap mirrors the
+# production installer's own allowlist (deploy/production/install.sh).
+# install.sh re-parses $PWD/install.env itself during the real run and
+# remains the authority; keep both lists in sync.
 INSTALL_ENV_NAMES=(
   OCSERV_AUDIT_EVENT_KEY_ID
   OCSERV_BACKUP_DIR
@@ -137,6 +142,22 @@ validate_source_component() {
     fail "source root ancestry must be root- or launcher-owned: ${component}"
   (( (8#${mode} & 8#022) == 0 )) ||
     fail "source root ancestry must not be group/world-writable: ${component} (mode ${mode})"
+}
+
+# Resolve ./install.env from the invoking directory once, under the
+# operator's own privileges, and export the effective allowlisted values.
+# --check uses this to validate the configuration before reporting
+# success; the run path uses it so the handoff environment already carries
+# the effective configuration, which releases whose installer predates the
+# install.env loader require (they never read the file themselves).
+# Explicit shell variables keep winning over the file, so install.env-aware
+# installers observe exactly the same effective values as before.
+load_config() {
+  [[ -f "${ROOT}/deploy/lib/install-env.sh" ]] ||
+    fail "the install.env loader is missing from this checkout: ${ROOT}/deploy/lib/install-env.sh"
+  # shellcheck source=../lib/install-env.sh disable=SC1091
+  source "${ROOT}/deploy/lib/install-env.sh"
+  install_env_load "${CONFIG_ROOT}/install.env" "${INSTALL_ENV_NAMES[@]}"
 }
 
 # Walk the source root path top-down. Existing components are validated
@@ -255,18 +276,32 @@ require_run_tools() {
   fi
 }
 
+# --check-only, read-only presence probe: a reachable tag alone does not
+# make a release installable through this bootstrap — it must also ship
+# deploy/production/install.sh. A HEAD request against the tagged raw
+# content answers that without cloning (the executed installer still comes
+# from the verified clone, never from this probe).
+check_release_installer_published() {
+  local url
+  [[ "${REPOSITORY_URL}" == https://github.com/* ]] ||
+    fail "cannot probe release content for repository ${REPOSITORY_URL}"
+  url="https://raw.githubusercontent.com/${REPOSITORY_URL#https://github.com/}/${VERSION}/deploy/production/install.sh"
+  if ! curl -fsSLI -o /dev/null --proto '=https' --tlsv1.2 "${url}" 2>/dev/null; then
+    fail "release ${VERSION} does not appear to ship deploy/production/install.sh; this bootstrap hands off only to releases that do"
+  fi
+  echo "release installer: deploy/production/install.sh is published for ${VERSION}"
+}
+
 run_check() {
   local key tag_ref
   command -v git >/dev/null 2>&1 || fail "git is required to inspect the release tag"
   command -v curl >/dev/null 2>&1 ||
-    fail "curl is required by the production installer to download the release bundle"
+    fail "curl is required to check the release and download the release bundle"
   if (( EUID != 0 )); then
     command -v sudo >/dev/null 2>&1 ||
       fail "sudo is required for a non-root launcher (the production installer invokes it for the host bootstrap and the root lifecycle)"
   fi
-  # shellcheck source=../lib/install-env.sh disable=SC1091
-  source "${ROOT}/deploy/lib/install-env.sh"
-  install_env_load "${CONFIG_ROOT}/install.env" "${INSTALL_ENV_NAMES[@]}"
+  load_config
   key="${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-}"
   [[ -n "${key}" ]] ||
     fail "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY is not set; provision the release-signing public key through an independent protected channel (set it in the environment or ${CONFIG_ROOT}/install.env)"
@@ -284,6 +319,7 @@ run_check() {
   [[ -n "${tag_ref}" ]] ||
     fail "release tag ${VERSION} was not found on ${REPOSITORY_URL}; check the published releases"
   echo "release tag: ${VERSION} is reachable on ${REPOSITORY_URL}"
+  check_release_installer_published
   echo "check passed: no host state was modified; rerun without --check to bootstrap"
 }
 
@@ -313,6 +349,7 @@ if [[ "${CHECK_ONLY}" == true ]]; then
   exit 0
 fi
 
+load_config
 select_lifecycle
 walk_source_root true
 prepare_checkout

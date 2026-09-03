@@ -58,6 +58,9 @@ git -C "${origin_work}" config user.email test@example.invalid
 # that records how it was handed off to (the bootstrap must exec exactly
 # this entrypoint from the operator's configuration directory, never a
 # sibling lifecycle script); v0.1.3 is a later release on another commit.
+# The mock models the v0.4.0-style environment-only installer contract: it
+# never reads install.env itself, so a successful handoff proves the
+# bootstrap exported the effective configuration from ${CONFIG_ROOT}.
 mkdir -p -- "${origin_work}/docs"
 printf 'old release\n' >"${origin_work}/docs/readme.md"
 git -C "${origin_work}" add -A
@@ -67,11 +70,13 @@ mkdir -p -- "${origin_work}/deploy/production"
 cat >"${origin_work}/deploy/production/install.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+: "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:?env-only installer received no release trust key}"
 log="${BOOTSTRAP_TEST_INSTALL_LOG:?}"
 printf 'invoked-as:%s\n' "$0" >>"${log}"
 printf 'pwd:%s\n' "$(pwd -P)" >>"${log}"
 printf 'args:%s\n' "$*" >>"${log}"
 printf 'env-resolved-marker:%s\n' "${OCSERV_INSTALL_ENV_RESOLVED:-<unset>}" >>"${log}"
+printf 'trust-key:%s\n' "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY}" >>"${log}"
 exit "${MOCK_INSTALL_EXIT:-0}"
 EOF
 chmod 0755 -- "${origin_work}/deploy/production/install.sh"
@@ -135,9 +140,34 @@ link_tool() {
   [[ -n "${path}" ]] || die "required test tool not found: ${tool}"
   ln -s "${path}" "${bin}/${tool}"
 }
-for tool in bash env stat realpath mkdir id dirname rm curl; do
+for tool in bash env stat realpath mkdir id dirname rm; do
   link_tool "${tool}"
 done
+
+# The curl mock answers the --check installer-presence probe from the
+# fixture origin's real git state (a release ships deploy/production/
+# install.sh exactly when the tagged tree has it) and delegates everything
+# else to the real curl.
+REAL_CURL="$(command -v curl)"
+cat >"${bin}/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+for arg in "\$@"; do
+  case "\${arg}" in
+    https://raw.githubusercontent.com/GentleKingson/ocservia/*/deploy/production/install.sh)
+      probe_version="\${arg#https://raw.githubusercontent.com/GentleKingson/ocservia/}"
+      probe_version="\${probe_version%/deploy/production/install.sh}"
+      if "${REAL_GIT}" -C "${origin}" cat-file -e "\${probe_version}:deploy/production/install.sh" 2>/dev/null; then
+        exit 0
+      fi
+      echo "curl mock: 404 not found" >&2
+      exit 22
+      ;;
+  esac
+done
+exec "${REAL_CURL}" "\$@"
+EOF
+chmod 0755 -- "${bin}/curl"
 
 install_docker_client() {
   cat >"${bin}/docker" <<'EOF'
@@ -265,6 +295,17 @@ assert_log_empty "${git_log}"
   die "the check must not create the source root"
 echo "an invalid install.env fails the check"
 
+# 4a. the run path resolves install.env too, failing before any mutation.
+reset_state
+printf 'OCSERV_NOT_A_SETTING=x\n' >"${config}/install.env"
+capture_from "${config}" --version v0.1.2
+assert_status 1 "an invalid install.env must fail the run before cloning"
+assert_output "unknown configuration variable OCSERV_NOT_A_SETTING"
+assert_log_empty "${git_log}"
+[[ ! -e "${source_root}" ]] ||
+  die "an invalid install.env must not create the source root"
+echo "an invalid install.env fails the run path before cloning"
+
 # 5. --check rejects a missing release trust path.
 reset_state
 EXTRA_ENV=("OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=")
@@ -301,6 +342,18 @@ assert_output "check passed"
   die "the check must not create the source root"
 assert_log_empty "${install_log}"
 echo "check passes for the launcher lifecycle without mutation"
+
+# 6a. --check fails for a reachable tag that ships no installer.
+reset_state
+write_install_env
+capture_from "${config}" --version v0.1.0 --check
+assert_status 1 "a reachable tag without the installer must fail the check"
+assert_output "does not appear to ship deploy/production/install.sh"
+[[ "$(git_calls ls-remote)" == 1 ]] ||
+  die "the check must still probe the release tag read-only"
+[[ ! -e "${source_root}" ]] ||
+  die "the check must not create the source root"
+echo "check fails for a reachable tag that ships no installer"
 
 # 7. --check reports the fresh-host root lifecycle when no Docker exists.
 reset_state
@@ -346,15 +399,33 @@ assert_log_contains "${install_log}" "invoked-as:${target}/deploy/production/ins
 assert_log_contains "${install_log}" "pwd:${config}"
 assert_log_contains "${install_log}" "args:--root-lifecycle"
 assert_log_contains "${install_log}" "env-resolved-marker:<unset>"
+assert_log_contains "${install_log}" "trust-key:${fixture}/controller-release-signing.pub.pem"
 echo "a fresh clone hands off to the installer with the root lifecycle"
 
+# 9a. negative control for the configuration handoff: with no install.env
+# and no exported configuration the same environment-only installer
+# refuses to run, proving the handoff above really exported the install.env
+# values instead of the mock succeeding on its own.
+reset_state
+capture_from "${config}" --version v0.1.2
+assert_status 1 "an environment-only installer must fail without configuration"
+assert_output "env-only installer received no release trust key"
+[[ -d "${source_root}/v0.1.2" ]] ||
+  die "the clone itself must still succeed without configuration"
+assert_log_empty "${install_log}"
+echo "the handoff really carries install.env values to env-only installers"
+
 # 10. an existing verified checkout is reused without recloning.
+reset_state
+write_install_env
+capture_from "${config}" --version v0.1.2
+assert_status 0 "the initial clone must succeed"
 capture_from "${config}" --version v0.1.2
 assert_status 0 "the rerun must succeed"
 assert_output "reusing verified clean v0.1.2 checkout"
 [[ "$(git_calls clone)" == 1 ]] ||
   die "the rerun must not clone again"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 8 ]] ||
+[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 10 ]] ||
   die "the installer must have been handed off to exactly twice"
 echo "an existing clean checkout is reused without recloning"
 
@@ -369,7 +440,7 @@ assert_status 1 "a dirty checkout must fail closed"
 assert_output "dirty"
 [[ "$(git_calls clone)" == 1 ]] ||
   die "a dirty checkout must not trigger a reclone"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 4 ]] ||
+[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 5 ]] ||
   die "a dirty checkout must not hand off to the installer"
 [[ -d "${target}" ]] ||
   die "a dirty pre-existing checkout must never be deleted"
