@@ -139,14 +139,16 @@ jobs:
       - name: Validate upgrade from latest published baseline (${{ matrix.package_arch }})
         # v0.1.1 proves the long-haul pre-upgrader hop; this hop proves the
         # currently supported release line upgrades into the candidate with
-        # postinstall/preremove and production-install changes intact. Bump
-        # BASELINE_RELEASE (and its pinned SHA256SUMS digest in the smoke)
-        # when a new formal release becomes the latest supported line.
+        # postinstall/preremove, production relay state, and the RPM
+        # lifecycle intact. Bump BASELINE_RELEASE (and its pinned SHA256SUMS
+        # digest plus capability flags in the smoke) when a new formal
+        # release becomes the latest supported line.
         env:
           RUN_ID: release-baseline-latest-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/latest-baseline-smoke
           VERSION: ${{ env.version }}
           CANDIDATE_DEB: ${{ runner.temp }}/packages/ocservia-agent_${{ env.version }}_${{ matrix.package_arch }}.deb
+          CANDIDATE_RPM: ${{ runner.temp }}/packages/ocservia-agent-${{ env.version }}-1.${{ matrix.package_arch == 'amd64' && 'x86_64' || 'aarch64' }}.rpm
           BASELINE_RELEASE: v0.3.0
         run: scripts/release-baseline-upgrade-smoke.sh
       - name: Upload package set
