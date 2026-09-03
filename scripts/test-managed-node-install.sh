@@ -153,6 +153,10 @@ root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
 printf '%s\n' "$*" >>"${root}/logs/agent.log"
 case "$*" in
   *--prepare-enrollment*)
+    identity="${OCSERV_MANAGED_NODE_SYSROOT}/var/lib/ocservia-agent/identity"
+    install -d -m 0700 -- "${identity}"
+    printf 'mock endpoint key\n' >"${identity}/endpoint.key"
+    printf 'mock controller pin\n' >"${identity}/controller.endpoint"
     printf '%s\n' "$(cat -- "${root}/endpoint.id")"
     exit 0
     ;;
@@ -1031,6 +1035,58 @@ fi
 assert_systemctl_read_only
 rm -f -- "${services_state_file}"
 echo "the post-activation rerun reports SERVICES_ACTIVE"
+
+# 17b. an enrolled, activated node missing identity material must fail
+# closed: no identity provisioning, no regeneration, no SERVICES_ACTIVE —
+# even while both services still report enabled+active.
+prepare_calls="$(grep -c -- "--prepare-enrollment" "${agent_log}")"
+printf 'active\n' >"${services_state_file}"
+as_root rm -f -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+capture_root
+assert_status 1 "an enrolled node missing identity material must fail closed"
+assert_output "missing its persistent identity file"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "an identity failure must not report SERVICES_ACTIVE"
+fi
+as_root test ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" ||
+  die "the missing identity file must not be provisioned again"
+[[ "$(grep -c -- "--prepare-enrollment" "${agent_log}")" == "${prepare_calls}" ]] ||
+  die "an enrolled rerun must not run identity preparation"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "the identity failure must not trigger enrollment"
+as_root sh -c "printf 'mock endpoint key\n' >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+echo "an enrolled node missing identity material fails closed"
+
+# 17c. an enrolled, activated node missing a sealing private key must fail
+# closed the same way: no key regeneration, no enrollment, no
+# SERVICES_ACTIVE.
+as_root rm -f -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+capture_root
+assert_status 1 "an enrolled node missing a sealing key must fail closed"
+assert_output "missing its user-password sealing private key"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a sealing-key failure must not report SERVICES_ACTIVE"
+fi
+as_root test ! -e "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" ||
+  die "the missing sealing key must not be regenerated"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "the sealing-key failure must not trigger enrollment"
+echo "an enrolled node missing a sealing key fails closed"
+
+# 17d. a replaced sealing key (present, safe, but not the enrolled one) must
+# fail closed instead of silently taking the enrolled fingerprint binding.
+as_root openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+as_root chmod 0600 -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+capture_root
+assert_status 1 "a replaced sealing key must fail closed"
+assert_output "the enrolled agent.env pins"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a fingerprint mismatch must not report SERVICES_ACTIVE"
+fi
+as_root grep -qx "NODE_ID=${MOCK_NODE_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
+  die "a fingerprint mismatch must leave the enrolled agent.env untouched"
+echo "a replaced sealing key fails closed on the fingerprint mismatch"
 
 # 18. whole-script sudo is rejected: the operator environment must not cross
 # to root wholesale.

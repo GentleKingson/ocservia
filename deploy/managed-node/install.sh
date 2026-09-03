@@ -18,16 +18,20 @@
 # of this exact release is already installed under the production relay
 # contract, the release download and the out-of-band trust verification are
 # skipped (they protect the package manager invocation, which no longer
-# happens), the identity and trust material are never regenerated, and an
-# enrolled node is never enrolled again. After the independent approval,
-# activation stays a deliberate operator action outside this bootstrap
-# (systemctl enable --now ocservia-privd.service ocservia-agent.service);
-# a rerun then only observes the enabled+active services and reports
-# SERVICES_ACTIVE. There is no local approval signal a bootstrap could act
-# on without Controller credentials: pending nodes are absent from relay
-# admission, and the only in-protocol confirmation of approval is the
-# Agent's accepted session, which requires the service the operator has not
-# enabled yet.
+# happens), and an already-enrolled node is never enrolled again. Once
+# agent.env carries the final NODE_ID, the bootstrap enters a validation-only
+# mode for enrolled material: the persistent identity files must exist and
+# both sealing private keys must re-derive exactly the fingerprints pinned in
+# agent.env, or the rerun fails closed — it never regenerates identity or
+# sealing keys that the Controller-side enrollment binding depends on.
+# After the independent approval, activation stays a deliberate operator
+# action outside this bootstrap (systemctl enable --now
+# ocservia-privd.service ocservia-agent.service); a rerun then only observes
+# the enabled+active services and reports SERVICES_ACTIVE. There is no local
+# approval signal a bootstrap could act on without Controller credentials:
+# pending nodes are absent from relay admission, and the only in-protocol
+# confirmation of approval is the Agent's accepted session, which requires
+# the service the operator has not enabled yet.
 #
 # This script never reimplements the verified package lifecycle, the
 # enrollment protocol, or the approval boundary: the native package
@@ -122,6 +126,7 @@ ROOT_LIFECYCLE=false
 EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
 ENDPOINT_ID=""
+ENROLLED_NODE_ID=""
 USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
 P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
 ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
@@ -585,18 +590,96 @@ ensure_protected_install() {
   echo "installed ${purpose} (${target})"
 }
 
-prepare_production_node() {
-  resolve_agent_group
-  ensure_sealing_key "${USER_SEAL_KEY_FILE}" user-password
-  ensure_sealing_key "${P12_SEAL_KEY_FILE}" p12-password
-  USER_SEAL_DESCRIPTOR="$(sealing_descriptor "${USER_SEAL_KEY_FILE}")" ||
-    fail "cannot derive the user-password sealing key descriptor; the key is not a usable RSA private key"
-  P12_SEAL_DESCRIPTOR="$(sealing_descriptor "${P12_SEAL_KEY_FILE}")" ||
-    fail "cannot derive the p12-password sealing key descriptor; the key is not a usable RSA private key"
+detect_enrolled_node() {
+  # Establishes whether this node already completed enrollment, before any
+  # step that could create node state. The enrolled state is a validation
+  # boundary: from here on the bootstrap must not regenerate identity or
+  # sealing material the Controller-side enrollment binding depends on.
+  local metadata node_id
+  ENROLLED_NODE_ID=""
+  path_exists "${AGENT_ENV_FILE}" || return 0
+  metadata="$(stat_string "${AGENT_ENV_FILE}")"
+  if ! priv test -f "${AGENT_ENV_FILE}" || priv test -L "${AGENT_ENV_FILE}"; then
+    fail "the existing ${AGENT_ENV_FILE} is not a regular file"
+  fi
+  [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
+    fail "the existing ${AGENT_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
+  node_id="$(priv sed -n 's/^NODE_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  [[ -n "${node_id}" ]] ||
+    fail "the existing ${AGENT_ENV_FILE} has no NODE_ID line; resolve it deliberately instead of overwriting node configuration"
+  if is_final_node_id "${node_id}"; then
+    ENROLLED_NODE_ID="${node_id}"
+  fi
+}
+
+validate_enrolled_sealing_keys() {
+  # The enrolled agent.env pins the exact sealing public-key fingerprints the
+  # Controller bound at enrollment. On an enrolled node both private keys
+  # must exist with safe metadata and re-derive exactly those fingerprints; a
+  # regenerated key would no longer match the enrolled binding — the same
+  # mismatch the upgrade preflight fails closed on — so the bootstrap never
+  # generates replacements here.
+  local path purpose metadata expected
+  for path in "${USER_SEAL_KEY_FILE}" "${P12_SEAL_KEY_FILE}"; do
+    case "${path}" in
+      "${USER_SEAL_KEY_FILE}") purpose=user-password ;;
+      *) purpose=p12-password ;;
+    esac
+    if ! path_exists "${path}"; then
+      fail "the enrolled node is missing its ${purpose} sealing private key ${path}; regenerating it would no longer match the enrolled Controller binding — restore the key from protected backups or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
+    fi
+    if ! priv test -f "${path}" || priv test -L "${path}"; then
+      fail "the existing ${purpose} sealing key ${path} is not a regular file; refusing to reuse it"
+    fi
+    metadata="$(stat_string "${path}")"
+    [[ "${metadata}" == "0:0:600:1" ]] ||
+      fail "the enrolled ${purpose} sealing key ${path} has unsafe metadata (${metadata}); expected root:root mode 0600 with a single link — resolve it deliberately, the installer never overwrites sealing material"
+  done
+  USER_SEAL_DESCRIPTOR="$(sealing_descriptor "${USER_SEAL_KEY_FILE}")"
+  P12_SEAL_DESCRIPTOR="$(sealing_descriptor "${P12_SEAL_KEY_FILE}")"
   [[ "${USER_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ && "${P12_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "a sealing key descriptor is malformed"
-  [[ "${USER_SEAL_DESCRIPTOR}" != "${P12_SEAL_DESCRIPTOR}" ]] ||
-    fail "the two sealing private keys are not distinct; provision two different keys and rerun"
+    fail "an enrolled sealing key is not a usable RSA private key; resolve it deliberately instead of regenerating it"
+  expected="$(priv sed -n 's/^USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "the enrolled ${AGENT_ENV_FILE} has no valid USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 fingerprint; resolve it deliberately"
+  [[ "${USER_SEAL_DESCRIPTOR}" == "${expected}" ]] ||
+    fail "the user-password sealing key re-derives ${USER_SEAL_DESCRIPTOR} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
+  expected="$(priv sed -n 's/^P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "the enrolled ${AGENT_ENV_FILE} has no valid P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256 fingerprint; resolve it deliberately"
+  [[ "${P12_SEAL_DESCRIPTOR}" == "${expected}" ]] ||
+    fail "the p12-password sealing key re-derives ${P12_SEAL_DESCRIPTOR} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
+}
+
+validate_enrolled_identity() {
+  # The persistent identity is the Controller enrollment binding. On an
+  # enrolled node a missing endpoint key or controller pin is a fail-closed
+  # integrity failure, never something to provision again: a fresh identity
+  # would print a new EndpointID that no longer matches the enrolled node on
+  # the Controller, leaving a node that looks healthy but cannot reconnect.
+  local file
+  for file in "${IDENTITY_DIR}/endpoint.key" "${IDENTITY_DIR}/controller.endpoint"; do
+    if ! path_exists "${file}" || ! priv test -f "${file}" || priv test -L "${file}"; then
+      fail "the enrolled node is missing its persistent identity file ${file}; regenerating the identity would break the Controller enrollment binding — restore ${IDENTITY_DIR} from protected backups or re-enroll as a new node deliberately (docs/how-to/enroll-node.md)"
+    fi
+  done
+}
+
+prepare_production_node() {
+  if [[ -n "${ENROLLED_NODE_ID}" ]]; then
+    validate_enrolled_sealing_keys
+  else
+    ensure_sealing_key "${USER_SEAL_KEY_FILE}" user-password
+    ensure_sealing_key "${P12_SEAL_KEY_FILE}" p12-password
+    USER_SEAL_DESCRIPTOR="$(sealing_descriptor "${USER_SEAL_KEY_FILE}")" ||
+      fail "cannot derive the user-password sealing key descriptor; the key is not a usable RSA private key"
+    P12_SEAL_DESCRIPTOR="$(sealing_descriptor "${P12_SEAL_KEY_FILE}")" ||
+      fail "cannot derive the p12-password sealing key descriptor; the key is not a usable RSA private key"
+    [[ "${USER_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ && "${P12_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ ]] ||
+      fail "a sealing key descriptor is malformed"
+    [[ "${USER_SEAL_DESCRIPTOR}" != "${P12_SEAL_DESCRIPTOR}" ]] ||
+      fail "the two sealing private keys are not distinct; provision two different keys and rerun"
+  fi
   ensure_relays_env
   ensure_protected_install "${RELAY_ACCESS_TOKEN_SOURCE}" "${RELAY_TOKEN_FILE}" "relay access token"
   ensure_protected_install "${CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE}" "${COMMAND_KEY_FILE}" "Controller command verification key"
@@ -647,27 +730,16 @@ print_services_active() {
 
 converge_enrollment() {
   local node_id staging metadata
-  if path_exists "${AGENT_ENV_FILE}"; then
-    metadata="$(stat_string "${AGENT_ENV_FILE}")"
-    if ! priv test -f "${AGENT_ENV_FILE}" || priv test -L "${AGENT_ENV_FILE}"; then
-      fail "the existing ${AGENT_ENV_FILE} is not a regular file"
+  if [[ -n "${ENROLLED_NODE_ID}" ]]; then
+    if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
+      echo "an enrollment token file is present but this node is already enrolled; remove the stale token file" >&2
     fi
-    [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
-      fail "the existing ${AGENT_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
-    node_id="$(priv sed -n 's/^NODE_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
-    [[ -n "${node_id}" ]] ||
-      fail "the existing ${AGENT_ENV_FILE} has no NODE_ID line; resolve it deliberately instead of overwriting node configuration"
-    if is_final_node_id "${node_id}"; then
-      if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
-        echo "an enrollment token file is present but this node is already enrolled; remove the stale token file" >&2
-      fi
-      if services_enabled_and_active; then
-        print_services_active "${node_id}"
-      else
-        print_pending_approval "${node_id}"
-      fi
-      return
+    if services_enabled_and_active; then
+      print_services_active "${ENROLLED_NODE_ID}"
+    else
+      print_pending_approval "${ENROLLED_NODE_ID}"
     fi
+    return
   fi
   if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then
     echo "ENROLLMENT_READY"
@@ -726,6 +798,12 @@ else
   verify_release_trust
   install_native_package
 fi
+resolve_agent_group
+detect_enrolled_node
 prepare_production_node
-prepare_identity
+if [[ -n "${ENROLLED_NODE_ID}" ]]; then
+  validate_enrolled_identity
+else
+  prepare_identity
+fi
 converge_enrollment
