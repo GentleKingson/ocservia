@@ -897,6 +897,22 @@ if grep -q "does not match the expected" <<<"${RUN_OUTPUT}"; then
 fi
 echo "an explicit shell variable overrides install.env"
 
+# 10b-2. an explicitly empty shell variable also wins over install.env: the
+# file must not fill a variable the operator deliberately unset, so the
+# operator-input validation fails closed instead of silently using the file
+# value.
+scenario
+cat >"${repo}/install.env" <<EOF
+RELAY_URL_A=https://relay-file-a.example.test
+EOF
+EXTRA_ENV=("RELAY_URL_A=")
+capture_from "${repo}"
+assert_status 1 "an explicitly empty shell variable must win over install.env"
+assert_output "RELAY_URL_A is not set"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+echo "an explicitly empty shell variable overrides install.env"
+
 # 10c. an unknown key fails closed before any host mutation; the fixture
 # seams in particular gain no install.env entry.
 scenario
@@ -1506,6 +1522,9 @@ EOF
 CONTROLLER_ENDPOINT_ID=${controller_id}
 RELAY_URL_A=https://relay-root-file-a.example.test
 RELAY_URL_B=https://relay-root-file-b.example.test
+USER_PASSWORD_SEAL_KEY_ID=file-user-v1
+P12_PASSWORD_SEAL_KEY_ID=file-p12-v1
+ENROLLMENT_ENVIRONMENT=staging
 EOF
   printf 'CONTROLLER_ENDPOINT_ID=%s\nRELAY_URL_A=https://relay-poisoned-a.example.test\nRELAY_URL_B=https://relay-poisoned-b.example.test\n' \
     "${controller_id}" >"${fixture}/poison-install-env"
@@ -1521,6 +1540,12 @@ EOF
   assert_log_contains "${root_sudo_log}" "OCSERV_INSTALL_ENV_RESOLVED=1"
   assert_log_contains "${root_sudo_log}" "CONTROLLER_ENDPOINT_ID=${controller_id}"
   assert_log_contains "${root_sudo_log}" "RELAY_URL_A=https://relay-root-file-a.example.test"
+  # These three are normalized unset->empty only after the install.env load:
+  # file-provided values must survive the normalization and cross the sudo
+  # boundary like any other allowlisted configuration.
+  assert_log_contains "${root_sudo_log}" "USER_PASSWORD_SEAL_KEY_ID=file-user-v1"
+  assert_log_contains "${root_sudo_log}" "P12_PASSWORD_SEAL_KEY_ID=file-p12-v1"
+  assert_log_contains "${root_sudo_log}" "ENROLLMENT_ENVIRONMENT=staging"
   if grep -q "poisoned" "${root_sudo_log}"; then
     die "root must never re-read the swapped install.env: $(cat -- "${root_sudo_log}")"
   fi

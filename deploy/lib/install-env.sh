@@ -19,8 +19,9 @@
 #   interpretation. Empty values are valid.
 # - Priority: explicit shell environment > install.env > installer
 #   defaults. Before the file is read, every allowlisted variable already
-#   set (non-empty) in the environment is recorded, and the loader only
-#   fills and exports variables that were not explicitly set.
+#   set in the environment — including one explicitly set to an empty
+#   value — is recorded, and the loader only fills and exports variables
+#   that were not explicitly set.
 # - File safety: the file must be an existing regular file, must not be a
 #   symlink, and must not be group- or world-writable. Root ownership is
 #   deliberately not required: a launcher user must be able to maintain its
@@ -62,8 +63,12 @@ install_env_load() {
     install_env_die "refusing the group/world-writable configuration file ${file} (mode ${mode})"
   fi
 
+  # A variable explicitly set in the shell — even to an empty value —
+  # always wins over the file; only unset variables are filled from it.
+  # (${!allowed+x} is the portable set-ness probe: it expands to "x" for a
+  # set-but-empty variable and to nothing for an unset one.)
   for allowed in "${allowlist[@]}"; do
-    if [[ -n "${!allowed:-}" ]]; then
+    if [[ -n "${!allowed+x}" ]]; then
       preset+=("${allowed}")
     fi
   done

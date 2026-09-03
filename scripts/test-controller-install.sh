@@ -713,6 +713,24 @@ if grep -q "controller-file.example.test" "${bootstrap_log}"; then
 fi
 echo "an explicit shell variable overrides install.env"
 
+# 8a-2. an explicitly empty shell variable also wins over install.env: the
+# file must not fill a variable the operator deliberately unset in the
+# session, so the bootstrap runs without the file's --backup-dir.
+reset_logs
+reset_checkout
+install_docker_client_stub
+cat >"${repo}/install.env" <<EOF
+OCSERV_BACKUP_DIR=${fixture}/file-backup
+EOF
+EXTRA_ENV=("OCSERV_BACKUP_DIR=")
+capture_from "${repo}"
+assert_status 0 "an explicitly empty shell variable must win over install.env"
+assert_log_contains "${bootstrap_log}" "install"
+if grep -q -- "--backup-dir" "${bootstrap_log}"; then
+  die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"
+fi
+echo "an explicitly empty shell variable overrides install.env"
+
 # 8b. an unknown key fails closed before any host mutation.
 reset_logs
 reset_checkout

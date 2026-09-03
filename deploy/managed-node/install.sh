@@ -142,9 +142,6 @@ EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
 ENDPOINT_ID=""
 ENROLLED_NODE_ID=""
-USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
-P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
-ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
 USER_SEAL_DESCRIPTOR=""
 P12_SEAL_DESCRIPTOR=""
 
@@ -213,6 +210,14 @@ if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
     TRUSTED_RELEASE_KEY \
     USER_PASSWORD_SEAL_KEY_ID
 fi
+
+# Configuration-derived defaults are applied only after the configuration
+# sources above are final, and only by normalizing unset to empty — a
+# variable explicitly set (even empty) must stay exactly as the operator
+# left it.
+USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
+P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
+ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
 
 # Privileged steps run one command at a time: directly when this process is
 # already the deliberate root lifecycle, otherwise through sudo with explicit
