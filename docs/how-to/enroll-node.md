@@ -79,7 +79,8 @@ record. It does not activate the node; an operator must approve it afterward.
    Enrollment signs and persists both public-key descriptors. Record the UUIDv7
    node ID printed by the command, then remove the token file. The descriptors
    are enrollment inputs; the returned value that belongs in `agent.env` is
-   the new `NODE_ID`.
+   the new `NODE_ID`, alongside the `AGENT_ENDPOINT_ID` binding recorded from
+   the identity preparation.
 
    Before approval, return to [Configure the Agent after enrollment](../getting-started/managed-node.md#7-configure-the-agent-after-enrollment).
 
@@ -153,7 +154,9 @@ record. It does not activate the node; an operator must approve it afterward.
 
 The API response should report `status: active`. The node should then appear
 online with a fresh observation in the Controller inventory after its Agent
-service starts.
+service starts — enable both services as in step 8 of [Install a managed
+node](../getting-started/managed-node.md#8-approve-and-start-the-node); the
+bootstrap and this enrollment never start or enable a service themselves.
 
 ## Troubleshooting
 

@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="${ROOT}/deploy/managed-node/install.sh"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 VERSION="0.2.1"
-MOCK_ENDPOINT_ID="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 MOCK_NODE_ID="018f1e11-2222-7333-8444-555555555555"
 
 # The installer fixture asserts file modes with GNU stat and signs release
@@ -25,6 +24,10 @@ done
   echo "Managed node install tests require an executable installer" >&2
   exit 1
 }
+# The agent stub derives the EndpointID from the endpoint key bytes (standing
+# in for key.public()); the identity it provisions is 32 bytes of '7', so the
+# expected EndpointID is that derivation of those bytes.
+MOCK_ENDPOINT_ID="$(printf '%032d' 7 | sha256sum | awk '{print $1}')"
 
 fixture="$(mktemp -d "${HOME}/.ocservia-managed-node-test.XXXXXX")"
 
@@ -75,13 +78,13 @@ openssl_log="${logs}/openssl.log"
 # from OCSERV_MANAGED_NODE_SYSROOT, which the installer forwards across the
 # --root-lifecycle boundary), never through environment variables that sudo
 # env_reset would drop.
-endpoint_id_file="${fixture}/endpoint.id"
 node_id_file="${fixture}/node.id"
 enroll_exit_file="${fixture}/enroll-exit"
 installed_version_file="${fixture}/installed-version"
 arch_file="${fixture}/arch"
 tamper_after_verify_file="${fixture}/tamper-after-verify"
 key_swap_path_file="${fixture}/key-swap-path"
+services_state_file="${fixture}/services-state"
 
 die() {
   echo "Managed node install tests: $1" >&2
@@ -152,7 +155,52 @@ root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
 printf '%s\n' "$*" >>"${root}/logs/agent.log"
 case "$*" in
   *--prepare-enrollment*)
-    printf '%s\n' "$(cat -- "${root}/endpoint.id")"
+    identity="${OCSERV_MANAGED_NODE_SYSROOT}/var/lib/ocservia-agent/identity"
+    key="${identity}/endpoint.key"
+    pin="${identity}/controller.endpoint"
+    controller=""
+    args=("$@")
+    for ((i = 0; i < $#; i++)); do
+      [[ "${args[$i]}" == "--controller" ]] && controller="${args[$((i + 1))]:-}"
+    done
+    if [[ ! -f "${key}" && ! -f "${pin}" ]]; then
+      # Fresh provisioning, mirroring the real formats the loader enforces:
+      # a 32-byte endpoint secret key and the configured 64-hex controller
+      # pin, both owner-only.
+      install -d -m 0700 -- "${identity}"
+      printf '%032d' 7 >"${key}"
+      printf '%s' "${controller}" >"${pin}"
+      chmod 0600 -- "${key}" "${pin}"
+    fi
+    # With material present this stub behaves like Identity::provision: it
+    # loads and validates instead of provisioning — owner-only permissions,
+    # the exact 32-byte endpoint key, and the controller pin matching the
+    # configured Controller EndpointID.
+    for file in "${key}" "${pin}"; do
+      if [[ ! -f "${file}" || -L "${file}" ]]; then
+        echo "identity loader: partial or missing identity material (${file})" >&2
+        exit 1
+      fi
+      mode="$(stat -c %a -- "${file}")"
+      if (( (8#${mode} & 63) != 0 )); then
+        echo "identity loader: ${file} is group/world accessible (${mode})" >&2
+        exit 1
+      fi
+    done
+    if [[ "$(stat -c %s -- "${key}")" -ne 32 ]]; then
+      echo "identity loader: endpoint key must be exactly 32 bytes" >&2
+      exit 1
+    fi
+    pin_value="$(cat -- "${pin}")"
+    if [[ ! "${pin_value}" =~ ^[0-9a-f]{64}$ ]] || [[ "${pin_value}" != "${controller}" ]]; then
+      echo "identity loader: controller pin does not match the configured Controller" >&2
+      exit 1
+    fi
+    # The printed EndpointID is derived from the loaded key bytes like
+    # key.public(): a different endpoint key always presents a different
+    # EndpointID, which the installer compares against the enrollment
+    # binding pinned in agent.env.
+    printf '%s\n' "$(sha256sum -- "${key}" | awk '{print $1}')"
     exit 0
     ;;
   *--enrollment-token-file*)
@@ -351,6 +399,25 @@ cat >"${bin}/systemctl" <<'EOF'
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
 printf '%s\n' "$*" >>"${root}/logs/systemctl.log"
+case "${1:-}" in
+  # The activation-state fixture: "active" makes both managed-node units
+  # report enabled+active (the operator's post-approval enable step); any
+  # other content leaves them disabled+inactive.
+  is-enabled | is-active)
+    if [[ "$(cat -- "${root}/services-state" 2>/dev/null || true)" == active ]]; then
+      case "$1" in
+        is-enabled) echo enabled ;;
+        is-active) echo active ;;
+      esac
+      exit 0
+    fi
+    case "$1" in
+      is-enabled) echo disabled ;;
+      is-active) echo inactive ;;
+    esac
+    exit 1
+    ;;
+esac
 exit 0
 EOF
 
@@ -467,10 +534,9 @@ reset_state() {
     "${openssl_log}"; do
     : >"${log}"
   done
-  printf '%s\n' "${MOCK_ENDPOINT_ID}" >"${endpoint_id_file}"
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
   rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
-    "${tamper_after_verify_file}" "${key_swap_path_file}"
+    "${tamper_after_verify_file}" "${key_swap_path_file}" "${services_state_file}"
   EXTRA_ENV=()
 }
 
@@ -519,6 +585,19 @@ assert_log_contains() {
 
 assert_log_empty() {
   [[ ! -s "$1" ]] || die "expected $1 to stay empty, got: $(cat -- "$1")"
+}
+
+assert_systemctl_read_only() {
+  # The activation-state observation is the only permitted systemctl use:
+  # read-only is-enabled/is-active queries of the two managed-node units.
+  [[ -s "${systemctl_log}" ]] || die "expected the activation-state queries to run"
+  while IFS= read -r line; do
+    case "${line}" in
+      "is-enabled ocservia-privd.service" | "is-enabled ocservia-agent.service" | \
+      "is-active ocservia-privd.service" | "is-active ocservia-agent.service") ;;
+      *) die "the bootstrap must only query systemctl read-only, saw: ${line}" ;;
+    esac
+  done <"${systemctl_log}"
 }
 
 scenario() {
@@ -698,8 +777,9 @@ printf '9.9.9\n' >"${installed_version_file}"
 capture
 assert_status 1 "a version mismatch must fail closed"
 assert_output "neither upgrades nor downgrades"
-# Out-of-band trust verification legitimately crosses the privileged boundary
-# before the installed-version check; the package manager must not run.
+# The installed-version convergence check runs before any download; the
+# package manager must not run either.
+assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "an installed version mismatch fails closed"
 
@@ -711,6 +791,7 @@ printf '%s\n' "${VERSION}-1" >"${installed_version_file}"
 capture
 assert_status 1 "a relay-free installed package must fail closed"
 assert_output "production relay drop-in"
+assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "a relay-free installed package is rejected"
 
@@ -818,19 +899,29 @@ if grep -q -- "operator-release-key" "${openssl_log}"; then
 fi
 echo "a post-verification key path swap is ignored"
 
-# 12. a rerun converges: the installed package is reused, not reinstalled.
+# 12. a rerun converges: the installed package is reused, not reinstalled,
+# and the release is not downloaded again.
 scenario
 capture_root
 assert_status 0
 dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
+curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
+# The release trust verification is the pkeyutl signature check; deriving the
+# sealing-key descriptors with openssl rsa legitimately repeats on every run.
+signature_checks="$(grep -c -- "pkeyutl -verify" "${openssl_log}")"
 capture_root
 assert_status 0 "the converged rerun must succeed"
-assert_output "already installed; skipping package installation"
+assert_output "already installed; skipping the release download"
 [[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
   die "a rerun must not reinstall the native package"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
+  die "a rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
+[[ "$(grep -c -- "pkeyutl -verify" "${openssl_log}")" == "${signature_checks}" ]] ||
+  die "a rerun must not re-run the release trust verification"
 grep -q "preserved existing user-password sealing key" <<<"${RUN_OUTPUT}" ||
   die "a rerun must preserve the generated sealing keys"
-echo "a rerun converges without reinstalling"
+assert_log_empty "${systemctl_log}"
+echo "a rerun converges without reinstalling or re-downloading"
 
 # 13. existing valid sealing keys are preserved and bound as descriptors.
 scenario
@@ -931,21 +1022,30 @@ as_root grep -qx "CONTROLLER_ENDPOINT_ID=${controller_id}" "${sysroot}/etc/ocser
   die "agent.env must pin the Controller EndpointID"
 as_root grep -qx "NODE_ID=${MOCK_NODE_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
   die "agent.env must carry the enrolled NODE_ID"
+as_root grep -qx "AGENT_ENDPOINT_ID=${MOCK_ENDPOINT_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
+  die "agent.env must pin the enrolled Agent EndpointID binding"
 if as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token"; then
   die "the one-time enrollment token file must be consumed after success"
 fi
+# A fresh enrollment prints PENDING_APPROVAL directly; the activation-state
+# observation only belongs to later converged reruns.
 assert_log_empty "${systemctl_log}"
 echo "a valid token completes enrollment to PENDING_APPROVAL"
 
 # 17. a rerun after enrollment does not re-enroll and stays at
-# PENDING_APPROVAL; a stale token is reported, never reused.
+# PENDING_APPROVAL while the services are not enabled; a stale token is
+# reported, never reused.
 enrollment_calls="$(grep -c -- "--enrollment-token-file" "${agent_log}")"
+curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
 capture_root
 assert_status 0 "the post-enrollment rerun must succeed"
 assert_output "PENDING_APPROVAL"
 assert_output "NODE_ID: ${MOCK_NODE_ID}"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "a rerun after enrollment must not enroll again"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
+  die "a rerun after enrollment must not re-download the release"
+assert_systemctl_read_only
 printf 'mock stale enrollment token bytes\n' >"${fixture}/enrollment-token"
 as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token" \
   "${sysroot}/etc/ocservia-agent/enrollment-token"
@@ -954,8 +1054,190 @@ assert_status 0 "a rerun with a stale token must stay at PENDING_APPROVAL"
 assert_output "stale token"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "a stale token must never trigger a second enrollment"
-assert_log_empty "${systemctl_log}"
+assert_systemctl_read_only
 echo "post-enrollment reruns stay at PENDING_APPROVAL"
+
+# 17a. after the independent approval and the operator's enable step, a
+# rerun reports the enabled+active services without any further mutation:
+# no enrollment, no download, no package manager, read-only queries only.
+as_root rm -f -- "${sysroot}/etc/ocservia-agent/enrollment-token"
+dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
+printf 'active\n' >"${services_state_file}"
+capture_root
+assert_status 0 "the post-activation rerun must succeed"
+assert_output "SERVICES_ACTIVE"
+assert_output "NODE_ID: ${MOCK_NODE_ID}"
+if grep -q "PENDING_APPROVAL" <<<"${RUN_OUTPUT}"; then
+  die "an activated node must not be reported as PENDING_APPROVAL"
+fi
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "the post-activation rerun must not enroll again"
+[[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
+  die "the post-activation rerun must not touch the package manager"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
+  die "the post-activation rerun must not re-download the release"
+assert_systemctl_read_only
+rm -f -- "${services_state_file}"
+echo "the post-activation rerun reports SERVICES_ACTIVE"
+
+# 17b. an enrolled, activated node missing identity material must fail
+# closed: no identity provisioning, no regeneration, no SERVICES_ACTIVE —
+# even while both services still report enabled+active.
+prepare_calls="$(grep -c -- "--prepare-enrollment" "${agent_log}")"
+printf 'active\n' >"${services_state_file}"
+as_root rm -f -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+capture_root
+assert_status 1 "an enrolled node missing identity material must fail closed"
+assert_output "missing its persistent identity file"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "an identity failure must not report SERVICES_ACTIVE"
+fi
+as_root test ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" ||
+  die "the missing identity file must not be provisioned again"
+[[ "$(grep -c -- "--prepare-enrollment" "${agent_log}")" == "${prepare_calls}" ]] ||
+  die "an enrolled rerun must not run identity preparation"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "the identity failure must not trigger enrollment"
+as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+echo "an enrolled node missing identity material fails closed"
+
+# 17b-2. a corrupted enrolled endpoint key must fail the Agent identity
+# validation instead of reporting SERVICES_ACTIVE.
+as_root sh -c "printf 'truncated' >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+capture_root
+assert_status 1 "a corrupted enrolled endpoint key must fail closed"
+assert_output "did not pass the Agent identity validation"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a corrupted endpoint key must not report SERVICES_ACTIVE"
+fi
+as_root test "$(as_root stat -c %s -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")" -eq 9 ||
+  die "the corrupted endpoint key must not be rewritten"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "a corrupted endpoint key must not trigger enrollment"
+as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+echo "a corrupted enrolled endpoint key fails closed"
+
+# 17b-3. group/world-readable identity material must fail closed: the
+# endpoint secret key is long-lived key material.
+as_root chmod 0644 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+capture_root
+assert_status 1 "group/world-readable identity material must fail closed"
+assert_output "did not pass the Agent identity validation"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "unsafe identity permissions must not report SERVICES_ACTIVE"
+fi
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+echo "unsafe identity permissions fail closed"
+
+# 17b-4. a controller pin that no longer matches the configured Controller
+# must fail closed (identity substitution).
+as_root sh -c "printf '%s' \"\$(printf 'd%.0s' \$(seq 1 64))\" >'${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint'"
+capture_root
+assert_status 1 "a mismatching controller pin must fail closed"
+assert_output "did not pass the Agent identity validation"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a mismatching controller pin must not report SERVICES_ACTIVE"
+fi
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "a mismatching controller pin must not trigger enrollment"
+as_root sh -c "printf '%s' '${controller_id}' >'${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint'"
+echo "a mismatching controller pin fails closed"
+
+# 17b-5. a deleted Controller command verification key must fail closed on
+# the enrolled rerun: the trust anchor is never silently reinstalled from
+# the operator source, and SERVICES_ACTIVE is never reported.
+command_key="${sysroot}/etc/ocservia-agent/controller-command-verification-key.pem"
+as_root rm -f -- "${command_key}"
+capture_root
+assert_status 1 "an enrolled node missing the command verification key must fail closed"
+assert_output "missing its Controller command verification key"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a missing command verification key must not report SERVICES_ACTIVE"
+fi
+as_root test ! -e "${command_key}" ||
+  die "the missing command verification key must not be reinstalled from the operator source"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "a missing command verification key must not trigger enrollment"
+as_root install -o root -g ocserv-agent -m 0640 -- \
+  "${fixture}/controller-command-verification-key.pem" "${command_key}"
+echo "an enrolled node missing the command verification key fails closed"
+
+# 17b-6. a replaced command verification key (safe metadata, but not the
+# Ed25519 command anchor) must fail closed instead of being preserved or
+# silently swapping the command trust anchor.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out "${fixture}/rsa-command-private.pem" 2>/dev/null
+openssl pkey -in "${fixture}/rsa-command-private.pem" -pubout \
+  -out "${fixture}/rsa-command-key.pub" 2>/dev/null
+as_root install -o root -g ocserv-agent -m 0640 -- \
+  "${fixture}/rsa-command-key.pub" "${command_key}"
+capture_root
+assert_status 1 "a non-Ed25519 command verification key must fail closed"
+assert_output "must contain an Ed25519 SubjectPublicKeyInfo public key"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a replaced command verification key must not report SERVICES_ACTIVE"
+fi
+as_root cmp -s -- "${fixture}/rsa-command-key.pub" "${command_key}" ||
+  die "the replaced command verification key must not be overwritten"
+as_root install -o root -g ocserv-agent -m 0640 -- \
+  "${fixture}/controller-command-verification-key.pem" "${command_key}"
+echo "a non-Ed25519 command verification key fails closed"
+
+# 17b-7. a substituted-but-valid endpoint secret key (32 bytes, owner-only,
+# same controller pin) presents a different EndpointID; the enrolled rerun
+# must fail closed on the AGENT_ENDPOINT_ID enrollment binding instead of
+# reporting SERVICES_ACTIVE, and must not rewrite the identity or agent.env.
+agent_env_digest="$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/agent.env" | awk '{print $1}')"
+as_root sh -c "printf '%032d' 9 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+capture_root
+assert_status 1 "a substituted valid endpoint key must fail the enrollment binding"
+assert_output "cannot silently take the Controller enrollment binding"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a substituted endpoint key must not report SERVICES_ACTIVE"
+fi
+as_root test "$(as_root stat -c %s -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")" -eq 32 ||
+  die "the substituted endpoint key must not be rewritten"
+[[ "$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/agent.env" | awk '{print $1}')" == "${agent_env_digest}" ]] ||
+  die "an enrollment binding failure must leave the enrolled agent.env untouched"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "an enrollment binding failure must not trigger enrollment"
+as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+echo "a substituted valid endpoint key fails closed on the enrollment binding"
+
+# 17c. an enrolled, activated node missing a sealing private key must fail
+# closed the same way: no key regeneration, no enrollment, no
+# SERVICES_ACTIVE.
+as_root rm -f -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+capture_root
+assert_status 1 "an enrolled node missing a sealing key must fail closed"
+assert_output "missing its user-password sealing private key"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a sealing-key failure must not report SERVICES_ACTIVE"
+fi
+as_root test ! -e "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" ||
+  die "the missing sealing key must not be regenerated"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "the sealing-key failure must not trigger enrollment"
+echo "an enrolled node missing a sealing key fails closed"
+
+# 17d. a replaced sealing key (present, safe, but not the enrolled one) must
+# fail closed instead of silently taking the enrolled fingerprint binding.
+as_root openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+as_root chmod 0600 -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem"
+capture_root
+assert_status 1 "a replaced sealing key must fail closed"
+assert_output "the enrolled agent.env pins"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a fingerprint mismatch must not report SERVICES_ACTIVE"
+fi
+as_root grep -qx "NODE_ID=${MOCK_NODE_ID}" "${sysroot}/etc/ocservia-agent/agent.env" ||
+  die "a fingerprint mismatch must leave the enrolled agent.env untouched"
+echo "a replaced sealing key fails closed on the fingerprint mismatch"
 
 # 18. whole-script sudo is rejected: the operator environment must not cross
 # to root wholesale.
