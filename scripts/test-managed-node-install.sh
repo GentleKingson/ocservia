@@ -1138,6 +1138,46 @@ fi
 as_root sh -c "printf '%s' '${controller_id}' >'${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint'"
 echo "a mismatching controller pin fails closed"
 
+# 17b-5. a deleted Controller command verification key must fail closed on
+# the enrolled rerun: the trust anchor is never silently reinstalled from
+# the operator source, and SERVICES_ACTIVE is never reported.
+command_key="${sysroot}/etc/ocservia-agent/controller-command-verification-key.pem"
+as_root rm -f -- "${command_key}"
+capture_root
+assert_status 1 "an enrolled node missing the command verification key must fail closed"
+assert_output "missing its Controller command verification key"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a missing command verification key must not report SERVICES_ACTIVE"
+fi
+as_root test ! -e "${command_key}" ||
+  die "the missing command verification key must not be reinstalled from the operator source"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "a missing command verification key must not trigger enrollment"
+as_root install -o root -g ocserv-agent -m 0640 -- \
+  "${fixture}/controller-command-verification-key.pem" "${command_key}"
+echo "an enrolled node missing the command verification key fails closed"
+
+# 17b-6. a replaced command verification key (safe metadata, but not the
+# Ed25519 command anchor) must fail closed instead of being preserved or
+# silently swapping the command trust anchor.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out "${fixture}/rsa-command-private.pem" 2>/dev/null
+openssl pkey -in "${fixture}/rsa-command-private.pem" -pubout \
+  -out "${fixture}/rsa-command-key.pub" 2>/dev/null
+as_root install -o root -g ocserv-agent -m 0640 -- \
+  "${fixture}/rsa-command-key.pub" "${command_key}"
+capture_root
+assert_status 1 "a non-Ed25519 command verification key must fail closed"
+assert_output "must contain an Ed25519 SubjectPublicKeyInfo public key"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a replaced command verification key must not report SERVICES_ACTIVE"
+fi
+as_root cmp -s -- "${fixture}/rsa-command-key.pub" "${command_key}" ||
+  die "the replaced command verification key must not be overwritten"
+as_root install -o root -g ocserv-agent -m 0640 -- \
+  "${fixture}/controller-command-verification-key.pem" "${command_key}"
+echo "a non-Ed25519 command verification key fails closed"
+
 # 17c. an enrolled, activated node missing a sealing private key must fail
 # closed the same way: no key regeneration, no enrollment, no
 # SERVICES_ACTIVE.

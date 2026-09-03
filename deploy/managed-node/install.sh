@@ -20,13 +20,18 @@
 # skipped (they protect the package manager invocation, which no longer
 # happens), and an already-enrolled node is never enrolled again. Once
 # agent.env carries the final NODE_ID, the bootstrap enters a validation-only
-# mode for enrolled material: the persistent identity files must exist and
-# pass the Agent's own identity validation (agent ownership, owner-only
-# permissions, the 32-byte endpoint key, and the controller pin still
-# matching the configured Controller), and both sealing private keys must
-# re-derive exactly the fingerprints pinned in agent.env, or the rerun fails
-# closed — it never regenerates identity or sealing keys that the
-# Controller-side enrollment binding depends on.
+# mode for everything the running services load: the persistent identity
+# files must exist and pass the Agent's own identity validation (agent
+# ownership, owner-only permissions, the 32-byte endpoint key, and the
+# controller pin still matching the configured Controller), both sealing
+# private keys must re-derive exactly the fingerprints pinned in agent.env,
+# and the relay configuration, relay access token, and Controller command
+# verification key must already exist and validate (the command key as an
+# Ed25519 anchor under root-controlled ancestry) — or the rerun fails closed.
+# It never regenerates identity or sealing keys and never installs or
+# replaces relay or command trust material; the Controller-side enrollment
+# binding and the command authorization anchor only change through
+# deliberate operations.
 # After the independent approval, activation stays a deliberate operator
 # action outside this bootstrap (systemctl enable --now
 # ocservia-privd.service ocservia-agent.service); a rerun then only observes
@@ -681,21 +686,126 @@ validate_enrolled_identity() {
   echo "enrolled persistent identity validated; EndpointID: ${endpoint_id}"
 }
 
+validate_enrolled_relays() {
+  # On an enrolled node relays.env is the running relay configuration. It
+  # must already exist, be safe, and name exactly the configured dedicated
+  # relays; a validation-only rerun never writes it.
+  local metadata existing_a existing_b
+  if ! path_exists "${RELAYS_ENV_FILE}"; then
+    fail "the enrolled node is missing its relay configuration ${RELAYS_ENV_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun (docs/getting-started/managed-node.md)"
+  fi
+  if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
+    fail "the enrolled relay configuration ${RELAYS_ENV_FILE} is not a regular file"
+  fi
+  metadata="$(stat_string "${RELAYS_ENV_FILE}")"
+  [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
+    fail "the enrolled relay configuration ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
+  existing_a="$(priv sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
+  existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
+  [[ "${existing_a}" == "${RELAY_URL_A}" && "${existing_b}" == "${RELAY_URL_B}" ]] ||
+    fail "the enrolled ${RELAYS_ENV_FILE} names ${existing_a:-<none>} / ${existing_b:-<none>}, not the configured dedicated relays; a rerun never rewrites the running relay configuration — resolve the mismatch deliberately"
+}
+
+validate_enrolled_relay_token() {
+  # The relay access token authenticates the node to the production relays.
+  # On an enrolled node it must already exist as non-empty protected
+  # material; a validation-only rerun never reinstalls it from the operator
+  # source.
+  local metadata
+  if ! path_exists "${RELAY_TOKEN_FILE}"; then
+    fail "the enrolled node is missing its relay access token ${RELAY_TOKEN_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun"
+  fi
+  if ! priv test -f "${RELAY_TOKEN_FILE}" || priv test -L "${RELAY_TOKEN_FILE}"; then
+    fail "the enrolled relay access token ${RELAY_TOKEN_FILE} is not a regular file"
+  fi
+  metadata="$(stat_string "${RELAY_TOKEN_FILE}")"
+  [[ "${metadata}" == "0:${AGENT_GID}:640:1" || "${metadata}" == "0:${AGENT_GID}:440:1" ]] ||
+    fail "the enrolled relay access token ${RELAY_TOKEN_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640 or 0440"
+  priv test -s "${RELAY_TOKEN_FILE}" ||
+    fail "the enrolled relay access token ${RELAY_TOKEN_FILE} is empty"
+}
+
+validate_enrolled_key_ancestry() {
+  # Mirror of the upgrade preflight ancestry rule for the fixed anchor path:
+  # every ancestor must be a root-owned real directory that is not
+  # group/world-writable, so Agent-writable ancestry cannot silently swap
+  # the trust anchor the running services load.
+  local ancestor uid mode
+  local -a ancestors=(/etc /etc/ocservia-agent)
+  if [[ -z "${SYSROOT}" ]]; then
+    ancestors=(/ /etc /etc/ocservia-agent)
+  fi
+  for ancestor in "${ancestors[@]}"; do
+    if ! priv test -d "${SYSROOT}${ancestor}" || priv test -L "${SYSROOT}${ancestor}"; then
+      fail "the enrolled command key ancestor ${ancestor} must be a real directory"
+    fi
+    uid="$(priv stat -c '%u' -- "${SYSROOT}${ancestor}")"
+    mode="$(priv stat -c '%a' -- "${SYSROOT}${ancestor}")"
+    if [[ "${uid}" != 0 ]] || (( (8#${mode} & 8#022) != 0 )); then
+      fail "the enrolled command key ancestor ${ancestor} must stay root-owned and not group/world-writable (found uid=${uid} mode=${mode})"
+    fi
+  done
+}
+
+validate_enrolled_command_key() {
+  # The Controller command verification key is the shared Agent/privd
+  # command authorization anchor. On an enrolled node the rerun validates it
+  # exactly like the services load it and like the upgrade preflight does:
+  # agent.env must still pin exactly this installed anchor, its ancestry
+  # must stay root-controlled, and the file must be a one-link
+  # root:ocserv-agent 0440/0640 regular file containing an Ed25519
+  # SubjectPublicKeyInfo public key. A validation-only rerun never installs
+  # or replaces it — rotating the command trust anchor is a deliberate
+  # operation with old/new key overlap (docs/operations/agent-lifecycle.md).
+  local configured matches metadata uid gid mode links size description
+  matches="$(priv grep -c '^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=' "${AGENT_ENV_FILE}" || true)"
+  [[ "${matches}" == 1 ]] ||
+    fail "the enrolled ${AGENT_ENV_FILE} must contain exactly one CONTROLLER_COMMAND_VERIFICATION_KEY_FILE assignment"
+  configured="$(priv sed -n 's/^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  [[ "${configured}" == "${COMMAND_KEY_FILE}" ]] ||
+    fail "the enrolled agent.env pins the command verification key ${configured:-<none>}, not the installed ${COMMAND_KEY_FILE}; resolve the mismatch deliberately"
+  validate_enrolled_key_ancestry
+  if ! path_exists "${COMMAND_KEY_FILE}"; then
+    fail "the enrolled node is missing its Controller command verification key ${COMMAND_KEY_FILE}; restoring the command trust anchor is a deliberate recovery operation, not a bootstrap rerun (docs/operations/agent-lifecycle.md)"
+  fi
+  if ! priv test -f "${COMMAND_KEY_FILE}" || priv test -L "${COMMAND_KEY_FILE}"; then
+    fail "the enrolled Controller command verification key ${COMMAND_KEY_FILE} is not a regular file"
+  fi
+  metadata="$(stat_string "${COMMAND_KEY_FILE}")"
+  IFS=: read -r uid gid mode links <<<"${metadata}"
+  size="$(priv stat -c '%s' -- "${COMMAND_KEY_FILE}")"
+  [[ "${links}" == 1 && "${size}" -ge 1 && "${size}" -le 4096 ]] ||
+    fail "the enrolled Controller command verification key must be a one-link regular file containing 1..4096 bytes"
+  [[ "${uid}" == 0 && "${gid}" == "${AGENT_GID}" && ( "${mode}" == 440 || "${mode}" == 640 ) ]] ||
+    fail "the enrolled Controller command verification key must be root:ocserv-agent mode 0440 or 0640 so Agent and privd can both load it (found ${metadata})"
+  description="$(priv openssl pkey -pubin -in "${COMMAND_KEY_FILE}" -noout -text 2>/dev/null)" ||
+    fail "the enrolled Controller command verification key ${COMMAND_KEY_FILE} is not a readable public key PEM"
+  [[ "${description}" == "ED25519 Public-Key:"* ]] ||
+    fail "the enrolled Controller command verification key must contain an Ed25519 SubjectPublicKeyInfo public key"
+}
+
 prepare_production_node() {
   if [[ -n "${ENROLLED_NODE_ID}" ]]; then
+    # Enrolled reruns are validation-only for everything the running services
+    # load: no ensure_* function may create or replace the relay
+    # configuration, the relay access token, or the Controller command
+    # verification key.
     validate_enrolled_sealing_keys
-  else
-    ensure_sealing_key "${USER_SEAL_KEY_FILE}" user-password
-    ensure_sealing_key "${P12_SEAL_KEY_FILE}" p12-password
-    USER_SEAL_DESCRIPTOR="$(sealing_descriptor "${USER_SEAL_KEY_FILE}")" ||
-      fail "cannot derive the user-password sealing key descriptor; the key is not a usable RSA private key"
-    P12_SEAL_DESCRIPTOR="$(sealing_descriptor "${P12_SEAL_KEY_FILE}")" ||
-      fail "cannot derive the p12-password sealing key descriptor; the key is not a usable RSA private key"
-    [[ "${USER_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ && "${P12_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ ]] ||
-      fail "a sealing key descriptor is malformed"
-    [[ "${USER_SEAL_DESCRIPTOR}" != "${P12_SEAL_DESCRIPTOR}" ]] ||
-      fail "the two sealing private keys are not distinct; provision two different keys and rerun"
+    validate_enrolled_relays
+    validate_enrolled_relay_token
+    validate_enrolled_command_key
+    return
   fi
+  ensure_sealing_key "${USER_SEAL_KEY_FILE}" user-password
+  ensure_sealing_key "${P12_SEAL_KEY_FILE}" p12-password
+  USER_SEAL_DESCRIPTOR="$(sealing_descriptor "${USER_SEAL_KEY_FILE}")" ||
+    fail "cannot derive the user-password sealing key descriptor; the key is not a usable RSA private key"
+  P12_SEAL_DESCRIPTOR="$(sealing_descriptor "${P12_SEAL_KEY_FILE}")" ||
+    fail "cannot derive the p12-password sealing key descriptor; the key is not a usable RSA private key"
+  [[ "${USER_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ && "${P12_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "a sealing key descriptor is malformed"
+  [[ "${USER_SEAL_DESCRIPTOR}" != "${P12_SEAL_DESCRIPTOR}" ]] ||
+    fail "the two sealing private keys are not distinct; provision two different keys and rerun"
   ensure_relays_env
   ensure_protected_install "${RELAY_ACCESS_TOKEN_SOURCE}" "${RELAY_TOKEN_FILE}" "relay access token"
   ensure_protected_install "${CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE}" "${COMMAND_KEY_FILE}" "Controller command verification key"
