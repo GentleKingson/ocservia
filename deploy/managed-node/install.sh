@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Thin one-command orchestrator for a production managed node.
 #
-# Scope: starting from a clean checkout of an exact vX.Y.Z release tag, run
-# the platform preflight, download the release metadata plus the matching
-# native package, verify the out-of-band release trust (trusted public key
-# fingerprint -> SHA256SUMS.sig -> selected package digest) BEFORE any
-# package manager runs as root, install the native package with the
-# production relay request marker, prepare the production node state (sealing
-# keys, relay configuration, relay access token, Controller command
-# verification key, persistent identity), and stop at ENROLLMENT_READY.
+# Scope: install an exact vX.Y.Z release package-first. With --version the
+# release is pinned on the command line and this script is a self-contained
+# Stage-1: one file, no Git checkout, and no repository sibling files.
+# Without --version it must run from a clean checkout of the exact release
+# tag and derives the release identity from the Git tag (the compatibility
+# path). Either way the script runs the platform preflight, downloads the
+# release metadata plus the matching native package, verifies the
+# out-of-band release trust (trusted public key fingerprint ->
+# SHA256SUMS.sig -> selected package digest) BEFORE any package manager
+# runs as root, installs the native package with the production relay
+# request marker, prepares the production node state (sealing keys, relay
+# configuration, relay access token, Controller command verification key,
+# persistent identity), and stops at ENROLLMENT_READY.
 # When the operator later provisions the protected enrollment token file,
 # rerunning this same entrypoint completes enrollment, atomically writes the
 # final /etc/ocservia-agent/agent.env, consumes the one-time token file, and
@@ -58,9 +63,9 @@
 # stays the trusted payload inside the package and the durable upgrade and
 # manual recovery carrier; it is not the one-command install path.
 #
-# Usage model:
-#   git clone --branch vX.Y.Z --depth 1 <ocservia repository>
-#   cd ocservia
+# Usage model (package-first: the exact release is pinned on the command
+# line; obtain install.sh for that exact release tag and run the single
+# file from any directory holding the node configuration):
 #   export CONTROLLER_ENDPOINT_ID=<64-lowercase-hex>
 #   export RELAY_URL_A=https://relay-a.example.com
 #   export RELAY_URL_B=https://relay-b.example.com
@@ -70,15 +75,20 @@
 #   export EXPECTED_RELEASE_KEY_SHA256=<64-lowercase-hex>  # else read from
 #   #   /etc/ocservia/trusted-release-key.sha256 (the durable upgrader anchor)
 #   # (or keep the allowlisted node configuration in ./install.env, parsed by
-#   # the strict non-executing loader in deploy/lib/install-env.sh; explicit
-#   # shell variables always win over the file)
-#   deploy/managed-node/install.sh   # operator launcher user -> ENROLLMENT_READY
+#   # the strict non-executing loader embedded below — the same contract as
+#   # deploy/lib/install-env.sh; explicit shell variables always win over the
+#   # file)
+#   deploy/managed-node/install.sh --version vX.Y.Z   # operator launcher user -> ENROLLMENT_READY
 #   # create a one-time token with expected_endpoint_id=<printed EndpointID>
 #   # and install it as /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640
-#   deploy/managed-node/install.sh   # -> PENDING_APPROVAL
+#   deploy/managed-node/install.sh --version vX.Y.Z   # -> PENDING_APPROVAL
 #   # approve the node (docs/how-to/enroll-node.md#approve-the-node), then:
 #   sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
-#   deploy/managed-node/install.sh   # -> SERVICES_ACTIVE (read-only verification)
+#   deploy/managed-node/install.sh --version vX.Y.Z   # -> SERVICES_ACTIVE (read-only verification)
+#
+# Compatibility path: inside a clean checkout of an exact vX.Y.Z release
+# tag the same commands run without --version and the release identity
+# comes from the Git tag instead of the command line.
 #
 # Supported hosts, mirroring what this repository's installers and CI actually
 # exercise: x86_64 and aarch64; Ubuntu 22.04/24.04/26.04 and Debian 12/13
@@ -103,7 +113,12 @@
 set -euo pipefail
 umask 077
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The installer's own absolute path (the --root-lifecycle re-exec target, so
+# the deliberate root lifecycle never depends on living inside a checkout)
+# and the repository root for the legacy Git-tag identity path.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALLER_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 OS_RELEASE_FILE="${OCSERV_MANAGED_NODE_OS_RELEASE:-/etc/os-release}"
 SYSROOT="${OCSERV_MANAGED_NODE_SYSROOT:-}"
@@ -126,6 +141,8 @@ PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
 PLACEHOLDER_RELAY_URL_B="https://relay-b.example.com"
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
+VERSION=""
+VERSION_PINNED=false
 RELEASE_TAG=""
 RELEASE_COMMIT=""
 RELEASE_VERSION=""
@@ -170,18 +187,42 @@ fail() {
   exit 1
 }
 
-if (($# > 1)); then
-  echo "usage: deploy/managed-node/install.sh [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
+usage() {
+  echo "usage: deploy/managed-node/install.sh [--version vX.Y.Z] [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
   exit 2
+}
+
+# The formal mode pins the exact release on the command line: no Git
+# checkout, no repository siblings, and no trust in the invoking directory.
+# The version is public release identity, not secret material, so it may
+# appear on the command line; the authenticity of everything downloaded is
+# still established only by the out-of-band release key fingerprint, the
+# signed SHA256SUMS manifest, and the selected package digest.
+version_seen=false
+while (($# > 0)); do
+  case "$1" in
+    --version)
+      [[ "${version_seen}" == false && $# -ge 2 ]] || usage
+      VERSION="$2"
+      version_seen=true
+      shift 2
+      ;;
+    --root-lifecycle)
+      ROOT_LIFECYCLE=true
+      shift
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+if [[ "${version_seen}" == true ]]; then
+  [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    fail "unsupported version '${VERSION}': an exact vX.Y.Z release tag is required (latest, branches, commits, and pre-releases are not accepted)"
+  RELEASE_TAG="${VERSION}"
+  RELEASE_VERSION="${VERSION#v}"
+  VERSION_PINNED=true
 fi
-case "${1:-}" in
-  "") ;;
-  --root-lifecycle) ROOT_LIFECYCLE=true ;;
-  *)
-    echo "usage: deploy/managed-node/install.sh [--root-lifecycle] (the node configuration comes from the operator session or ./install.env)" >&2
-    exit 2
-    ;;
-esac
 
 # Operator configuration comes from the invoking shell environment and, for
 # allowlisted variables not exported there, from $PWD/install.env. The
@@ -195,9 +236,136 @@ esac
 # $PWD/install.env as new authoritative input. The fixture seams above stay
 # deliberately outside this allowlist: they are test seams, not operator
 # configuration, and must not gain an install.env entry.
+# Embedded install.env loader: the Stage-1 contract copy of
+# deploy/lib/install-env.sh, kept functionally identical to it. This script
+# must stay a single self-contained file (it runs without a repository
+# checkout), so it cannot source the shared loader; any contract change is
+# made in both places. Contract:
+# - The caller names its own allowlist; any other key in the file fails
+#   closed, so a typo cannot silently drop a setting and internal test seams
+#   never gain a production configuration entry.
+# - Blank lines and lines whose first character is '#' are ignored; every
+#   other line must be strict KEY=VALUE with KEY matching ^[A-Z][A-Z0-9_]*$.
+# - Nothing in the file is ever executed, sourced, or expanded. Values
+#   containing '$' or '`' are rejected outright — no supported value
+#   (hostname, URL, path, fingerprint, environment tag) needs them, and the
+#   rejection guarantees command substitution can never reach a shell even
+#   if a future edit made this loader less careful.
+# - A value wrapped in one static outer layer of matching single or double
+#   quotes has exactly that layer removed: no expansion, no escape
+#   interpretation. Empty values are valid.
+# - Priority: explicit shell environment > install.env > installer
+#   defaults. Before the file is read, every allowlisted variable already
+#   set in the environment — including one explicitly set to an empty
+#   value — is recorded, and the loader only fills and exports variables
+#   that were not explicitly set.
+# - File safety: the file must be an existing regular file, must not be a
+#   symlink, and must not be group- or world-writable. Root ownership is
+#   deliberately not required: a launcher user must be able to maintain its
+#   own configuration in a normal working directory.
+# - Errors report the path, line, and reason only; file contents are never
+#   printed.
+# - A missing file is a silent no-op: without install.env the installer
+#   behaves exactly like an environment-only configuration.
+install_env_die() {
+  echo "install.env: $1" >&2
+  exit 1
+}
+
+# install_env_load <file> <allowlisted-key>...
+install_env_load() {
+  local file="$1"
+  shift
+  local -a allowlist=("$@")
+  local -a seen=()
+  local -a preset=()
+  local allowed key line value mode first last lineno=0 known
+
+  if [[ -L "${file}" ]]; then
+    install_env_die "refusing the configuration symlink ${file}; install.env must be a regular file"
+  fi
+  if [[ ! -e "${file}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${file}" ]]; then
+    install_env_die "${file} is not a regular file"
+  fi
+  if [[ ! -r "${file}" ]]; then
+    install_env_die "${file} is not readable by the invoking user"
+  fi
+  mode="$(stat -c '%a' -- "${file}")" ||
+    install_env_die "cannot inspect the permissions of ${file}"
+  if (( (8#${mode} & 8#022) != 0 )); then
+    install_env_die "refusing the group/world-writable configuration file ${file} (mode ${mode})"
+  fi
+
+  # A variable explicitly set in the shell — even to an empty value —
+  # always wins over the file; only unset variables are filled from it.
+  # (${!allowed+x} is the portable set-ness probe: it expands to "x" for a
+  # set-but-empty variable and to nothing for an unset one.)
+  for allowed in "${allowlist[@]}"; do
+    if [[ -n "${!allowed+x}" ]]; then
+      preset+=("${allowed}")
+    fi
+  done
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    lineno=$((lineno + 1))
+    if [[ -z "${line}" || "${line}" == \#* ]]; then
+      continue
+    fi
+    if [[ ! "${line}" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+      install_env_die "${file}:${lineno}: expected KEY=VALUE, a # comment, or a blank line"
+    fi
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    case "${value}" in
+      *'$'* | *'`'*)
+        install_env_die "${file}:${lineno}: ${key} must be a literal value; shell expansion syntax is never evaluated"
+        ;;
+    esac
+    if [[ "${value}" =~ [[:cntrl:]] ]]; then
+      install_env_die "${file}:${lineno}: ${key} contains a control character"
+    fi
+    if (( ${#value} >= 2 )); then
+      first="${value:0:1}"
+      last="${value:${#value}-1:1}"
+      if [[ ( "${first}" == "'" && "${last}" == "'" ) || ( "${first}" == '"' && "${last}" == '"' ) ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+    known=false
+    for allowed in "${allowlist[@]}"; do
+      if [[ "${key}" == "${allowed}" ]]; then
+        known=true
+        break
+      fi
+    done
+    if [[ "${known}" != true ]]; then
+      install_env_die "${file}:${lineno}: unknown configuration variable ${key}"
+    fi
+    for allowed in ${seen[@]+"${seen[@]}"}; do
+      if [[ "${key}" == "${allowed}" ]]; then
+        install_env_die "${file}:${lineno}: duplicate configuration variable ${key}"
+      fi
+    done
+    seen+=("${key}")
+    for allowed in ${preset[@]+"${preset[@]}"}; do
+      if [[ "${key}" == "${allowed}" ]]; then
+        continue 2
+      fi
+    done
+    printf -v "${key}" '%s' "${value}"
+    # shellcheck disable=SC2163 # key is a validated allowlisted identifier
+    export "${key}"
+  done <"${file}"
+
+  if (( ${#seen[@]} > 0 )); then
+    echo "loaded configuration from ${file}"
+  fi
+}
+
 if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
-  # shellcheck source=../lib/install-env.sh disable=SC1091
-  source "${ROOT}/deploy/lib/install-env.sh"
   install_env_load "${PWD}/install.env" \
     CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
     CONTROLLER_ENDPOINT_ID \
@@ -253,6 +421,11 @@ stat_string() {
 forward_root_lifecycle() {
   local variable allowed
   local -a forwarded_environment=()
+  local -a reexec_arguments=(--root-lifecycle)
+  # The --version pin is operator-chosen public release identity, not node
+  # configuration: it re-crosses the privilege boundary as the same explicit
+  # command-line argument instead of an environment variable.
+  [[ -z "${RELEASE_TAG}" ]] || reexec_arguments+=(--version "${RELEASE_TAG}")
   while IFS= read -r variable; do
     for allowed in "${ROOT_LIFECYCLE_ENV_NAMES[@]}"; do
       [[ "${variable}" == "${allowed}" ]] || continue
@@ -264,10 +437,11 @@ forward_root_lifecycle() {
     fail "sudo is required for --root-lifecycle when the installer is not already running as root"
   # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
   # already resolved by the launcher user: root must not re-read a file that
-  # may have been replaced across the privilege transition.
+  # may have been replaced across the privilege transition. The re-exec
+  # targets this script's own path, never a repository sibling.
   exec sudo env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
     OCSERV_INSTALL_ENV_RESOLVED=1 \
-    "${ROOT}/deploy/managed-node/install.sh" --root-lifecycle
+    "${INSTALLER_PATH}" "${reexec_arguments[@]}"
 }
 
 if [[ "${ROOT_LIFECYCLE}" == true ]]; then
@@ -288,6 +462,15 @@ fi
 
 resolve_release_identity() {
   local tag matching=()
+  if [[ -n "${RELEASE_TAG}" ]]; then
+    # --version mode: the release identity came from the validated command
+    # line. No Git checkout is consulted and nothing about the invoking
+    # directory is trusted; the downloaded artifacts must still prove their
+    # authenticity through the out-of-band release trust verified before
+    # the package manager runs.
+    echo "release identity: ${RELEASE_TAG} (pinned by --version)"
+    return
+  fi
   command -v git >/dev/null 2>&1 ||
     fail "git is required to identify the release checkout"
   RELEASE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" ||
@@ -362,7 +545,9 @@ validate_sysroot() {
 
 require_commands() {
   local tool
-  for tool in git curl openssl sha256sum awk; do
+  # git is deliberately absent: it is needed only by the legacy
+  # checkout-identity path, which enforces its own git requirement.
+  for tool in curl openssl sha256sum awk; do
     command -v "${tool}" >/dev/null 2>&1 ||
       fail "${tool} is required by the managed-node installer"
   done
@@ -540,7 +725,7 @@ native_package_satisfied() {
   installed_version="$(installed_package_version)"
   [[ -n "${installed_version}" ]] || return 1
   [[ "${installed_version}" == "$(expected_installed_version)" ]] ||
-    fail "ocservia-agent ${installed_version} is installed but this checkout is release ${RELEASE_VERSION} (native ${PACKAGE_FAMILY} version $(expected_installed_version)); the bootstrap neither upgrades nor downgrades an installed package — use the Agent release lifecycle (docs/operations/agent-lifecycle.md)"
+    fail "ocservia-agent ${installed_version} is installed but this bootstrap targets release ${RELEASE_VERSION} (native ${PACKAGE_FAMILY} version $(expected_installed_version)); the bootstrap neither upgrades nor downgrades an installed package — use the Agent release lifecycle (docs/operations/agent-lifecycle.md)"
   [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" ]] ||
     fail "the installed ocservia-agent ${installed_version} lacks the production relay drop-in ${RELAY_DROPIN}; it was installed without the production request — reinstall it through the release lifecycle with /etc/ocservia/agent-install-production-relays present"
   return 0
@@ -908,7 +1093,16 @@ print_services_active() {
 }
 
 converge_enrollment() {
-  local node_id staging metadata
+  local node_id staging metadata rerun_instruction
+  # The single-file mode has no stable script path to print, and a rerun
+  # without the version pin would fall back to the legacy checkout identity
+  # and fail: the operator must rerun the same installer with the same
+  # --version argument.
+  if [[ "${VERSION_PINNED}" == true ]]; then
+    rerun_instruction="rerun this installer with the same --version ${RELEASE_TAG} argument"
+  else
+    rerun_instruction="rerun deploy/managed-node/install.sh"
+  fi
   if [[ -n "${ENROLLED_NODE_ID}" ]]; then
     if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
       echo "an enrollment token file is present but this node is already enrolled; remove the stale token file" >&2
@@ -922,7 +1116,7 @@ converge_enrollment() {
   fi
   if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then
     echo "ENROLLMENT_READY"
-    echo "next: create a short-lived one-time enrollment token with expected_endpoint_id=${ENDPOINT_ID} (docs/how-to/enroll-node.md), install it as ${ENROLLMENT_TOKEN_FILE} (root:ocserv-agent 0640), and rerun deploy/managed-node/install.sh"
+    echo "next: create a short-lived one-time enrollment token with expected_endpoint_id=${ENDPOINT_ID} (docs/how-to/enroll-node.md), install it as ${ENROLLMENT_TOKEN_FILE} (root:ocserv-agent 0640), and ${rerun_instruction}"
     return
   fi
   metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
