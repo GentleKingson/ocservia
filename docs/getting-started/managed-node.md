@@ -69,7 +69,14 @@ final `/etc/ocservia-agent/agent.env` atomically, consumes the one-time token
 file, and prints `PENDING_APPROVAL` with the new `NODE_ID`. Repeated runs
 converge on the same state: existing identity, sealing keys, relay token, and
 trust material are preserved, an installed package is never reinstalled or
-downgraded, and an already-enrolled node is never enrolled again.
+downgraded, and an already-enrolled node is never enrolled again. When the
+native package of this exact release is already installed under the
+production relay contract, the rerun also skips the release download and the
+out-of-band trust verification — they protect the package-manager invocation,
+which no longer happens. After the approval and the enable step below, a
+rerun observes both services enabled and active and prints `SERVICES_ACTIVE`
+without changing anything; it cannot observe Controller-side approval, so
+confirm the node reports online in the Controller inventory.
 
 Run the installer as the operator launcher user; it elevates through scoped
 per-command `sudo` only. A deliberate whole-lifecycle-as-root run is available
@@ -265,7 +272,8 @@ are in [Agent lifecycle reference](../operations/agent-lifecycle.md).
 
 Return to [Approve the node](../how-to/enroll-node.md#approve-the-node) and
 submit the approval only after `agent.env`, the sealing keys, and the
-production relay path are configured. Then enable both units:
+production relay path are configured. Then enable both units — this is the
+deliberate activation step, and it stays outside the bootstrap:
 
 ```bash
 sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
@@ -273,6 +281,9 @@ systemctl status ocservia-privd.service ocservia-agent.service
 ```
 
 Confirm both units are active and the node appears online with a fresh
-observation in the Controller inventory. If enrollment or startup fails, do
-not replace the identity directory or generate a new Controller trust key just
-to retry; see [Troubleshooting](../how-to/troubleshooting.md).
+observation in the Controller inventory. Rerunning
+`deploy/managed-node/install.sh` at this point is a read-only convergence
+check: it prints `SERVICES_ACTIVE` and changes nothing. If enrollment or
+startup fails, do not replace the identity directory or generate a new
+Controller trust key just to retry; see
+[Troubleshooting](../how-to/troubleshooting.md).

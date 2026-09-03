@@ -82,6 +82,7 @@ installed_version_file="${fixture}/installed-version"
 arch_file="${fixture}/arch"
 tamper_after_verify_file="${fixture}/tamper-after-verify"
 key_swap_path_file="${fixture}/key-swap-path"
+services_state_file="${fixture}/services-state"
 
 die() {
   echo "Managed node install tests: $1" >&2
@@ -351,6 +352,25 @@ cat >"${bin}/systemctl" <<'EOF'
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
 printf '%s\n' "$*" >>"${root}/logs/systemctl.log"
+case "${1:-}" in
+  # The activation-state fixture: "active" makes both managed-node units
+  # report enabled+active (the operator's post-approval enable step); any
+  # other content leaves them disabled+inactive.
+  is-enabled | is-active)
+    if [[ "$(cat -- "${root}/services-state" 2>/dev/null || true)" == active ]]; then
+      case "$1" in
+        is-enabled) echo enabled ;;
+        is-active) echo active ;;
+      esac
+      exit 0
+    fi
+    case "$1" in
+      is-enabled) echo disabled ;;
+      is-active) echo inactive ;;
+    esac
+    exit 1
+    ;;
+esac
 exit 0
 EOF
 
@@ -470,7 +490,7 @@ reset_state() {
   printf '%s\n' "${MOCK_ENDPOINT_ID}" >"${endpoint_id_file}"
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
   rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
-    "${tamper_after_verify_file}" "${key_swap_path_file}"
+    "${tamper_after_verify_file}" "${key_swap_path_file}" "${services_state_file}"
   EXTRA_ENV=()
 }
 
@@ -519,6 +539,19 @@ assert_log_contains() {
 
 assert_log_empty() {
   [[ ! -s "$1" ]] || die "expected $1 to stay empty, got: $(cat -- "$1")"
+}
+
+assert_systemctl_read_only() {
+  # The activation-state observation is the only permitted systemctl use:
+  # read-only is-enabled/is-active queries of the two managed-node units.
+  [[ -s "${systemctl_log}" ]] || die "expected the activation-state queries to run"
+  while IFS= read -r line; do
+    case "${line}" in
+      "is-enabled ocservia-privd.service" | "is-enabled ocservia-agent.service" | \
+      "is-active ocservia-privd.service" | "is-active ocservia-agent.service") ;;
+      *) die "the bootstrap must only query systemctl read-only, saw: ${line}" ;;
+    esac
+  done <"${systemctl_log}"
 }
 
 scenario() {
@@ -698,8 +731,9 @@ printf '9.9.9\n' >"${installed_version_file}"
 capture
 assert_status 1 "a version mismatch must fail closed"
 assert_output "neither upgrades nor downgrades"
-# Out-of-band trust verification legitimately crosses the privileged boundary
-# before the installed-version check; the package manager must not run.
+# The installed-version convergence check runs before any download; the
+# package manager must not run either.
+assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "an installed version mismatch fails closed"
 
@@ -711,6 +745,7 @@ printf '%s\n' "${VERSION}-1" >"${installed_version_file}"
 capture
 assert_status 1 "a relay-free installed package must fail closed"
 assert_output "production relay drop-in"
+assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "a relay-free installed package is rejected"
 
@@ -818,19 +853,29 @@ if grep -q -- "operator-release-key" "${openssl_log}"; then
 fi
 echo "a post-verification key path swap is ignored"
 
-# 12. a rerun converges: the installed package is reused, not reinstalled.
+# 12. a rerun converges: the installed package is reused, not reinstalled,
+# and the release is not downloaded again.
 scenario
 capture_root
 assert_status 0
 dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
+curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
+# The release trust verification is the pkeyutl signature check; deriving the
+# sealing-key descriptors with openssl rsa legitimately repeats on every run.
+signature_checks="$(grep -c -- "pkeyutl -verify" "${openssl_log}")"
 capture_root
 assert_status 0 "the converged rerun must succeed"
-assert_output "already installed; skipping package installation"
+assert_output "already installed; skipping the release download"
 [[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
   die "a rerun must not reinstall the native package"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
+  die "a rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
+[[ "$(grep -c -- "pkeyutl -verify" "${openssl_log}")" == "${signature_checks}" ]] ||
+  die "a rerun must not re-run the release trust verification"
 grep -q "preserved existing user-password sealing key" <<<"${RUN_OUTPUT}" ||
   die "a rerun must preserve the generated sealing keys"
-echo "a rerun converges without reinstalling"
+assert_log_empty "${systemctl_log}"
+echo "a rerun converges without reinstalling or re-downloading"
 
 # 13. existing valid sealing keys are preserved and bound as descriptors.
 scenario
@@ -934,18 +979,25 @@ as_root grep -qx "NODE_ID=${MOCK_NODE_ID}" "${sysroot}/etc/ocservia-agent/agent.
 if as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token"; then
   die "the one-time enrollment token file must be consumed after success"
 fi
+# A fresh enrollment prints PENDING_APPROVAL directly; the activation-state
+# observation only belongs to later converged reruns.
 assert_log_empty "${systemctl_log}"
 echo "a valid token completes enrollment to PENDING_APPROVAL"
 
 # 17. a rerun after enrollment does not re-enroll and stays at
-# PENDING_APPROVAL; a stale token is reported, never reused.
+# PENDING_APPROVAL while the services are not enabled; a stale token is
+# reported, never reused.
 enrollment_calls="$(grep -c -- "--enrollment-token-file" "${agent_log}")"
+curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
 capture_root
 assert_status 0 "the post-enrollment rerun must succeed"
 assert_output "PENDING_APPROVAL"
 assert_output "NODE_ID: ${MOCK_NODE_ID}"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "a rerun after enrollment must not enroll again"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
+  die "a rerun after enrollment must not re-download the release"
+assert_systemctl_read_only
 printf 'mock stale enrollment token bytes\n' >"${fixture}/enrollment-token"
 as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token" \
   "${sysroot}/etc/ocservia-agent/enrollment-token"
@@ -954,8 +1006,31 @@ assert_status 0 "a rerun with a stale token must stay at PENDING_APPROVAL"
 assert_output "stale token"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "a stale token must never trigger a second enrollment"
-assert_log_empty "${systemctl_log}"
+assert_systemctl_read_only
 echo "post-enrollment reruns stay at PENDING_APPROVAL"
+
+# 17a. after the independent approval and the operator's enable step, a
+# rerun reports the enabled+active services without any further mutation:
+# no enrollment, no download, no package manager, read-only queries only.
+as_root rm -f -- "${sysroot}/etc/ocservia-agent/enrollment-token"
+dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
+printf 'active\n' >"${services_state_file}"
+capture_root
+assert_status 0 "the post-activation rerun must succeed"
+assert_output "SERVICES_ACTIVE"
+assert_output "NODE_ID: ${MOCK_NODE_ID}"
+if grep -q "PENDING_APPROVAL" <<<"${RUN_OUTPUT}"; then
+  die "an activated node must not be reported as PENDING_APPROVAL"
+fi
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "the post-activation rerun must not enroll again"
+[[ "$(grep -c -- "-i" "${dpkg_log}")" == "${dpkg_calls}" ]] ||
+  die "the post-activation rerun must not touch the package manager"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
+  die "the post-activation rerun must not re-download the release"
+assert_systemctl_read_only
+rm -f -- "${services_state_file}"
+echo "the post-activation rerun reports SERVICES_ACTIVE"
 
 # 18. whole-script sudo is rejected: the operator environment must not cross
 # to root wholesale.

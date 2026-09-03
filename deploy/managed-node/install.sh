@@ -14,6 +14,21 @@
 # final /etc/ocservia-agent/agent.env, consumes the one-time token file, and
 # stops at PENDING_APPROVAL.
 #
+# Reruns converge without repeating completed work: when the native package
+# of this exact release is already installed under the production relay
+# contract, the release download and the out-of-band trust verification are
+# skipped (they protect the package manager invocation, which no longer
+# happens), the identity and trust material are never regenerated, and an
+# enrolled node is never enrolled again. After the independent approval,
+# activation stays a deliberate operator action outside this bootstrap
+# (systemctl enable --now ocservia-privd.service ocservia-agent.service);
+# a rerun then only observes the enabled+active services and reports
+# SERVICES_ACTIVE. There is no local approval signal a bootstrap could act
+# on without Controller credentials: pending nodes are absent from relay
+# admission, and the only in-protocol confirmation of approval is the
+# Agent's accepted session, which requires the service the operator has not
+# enabled yet.
+#
 # This script never reimplements the verified package lifecycle, the
 # enrollment protocol, or the approval boundary: the native package
 # scriptlets (postinst/preremove), the Agent CLI (--prepare-enrollment /
@@ -42,6 +57,9 @@
 #   # create a one-time token with expected_endpoint_id=<printed EndpointID>
 #   # and install it as /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640
 #   deploy/managed-node/install.sh   # -> PENDING_APPROVAL
+#   # approve the node (docs/how-to/enroll-node.md#approve-the-node), then:
+#   sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
+#   deploy/managed-node/install.sh   # -> SERVICES_ACTIVE (read-only verification)
 #
 # Supported hosts, mirroring what this repository's installers and CI actually
 # exercise: x86_64 and aarch64; Ubuntu 22.04/24.04/26.04 and Debian 12/13
@@ -345,6 +363,11 @@ resolve_trust_anchor() {
     fail "the trusted release public key ${TRUSTED_RELEASE_KEY} is missing; provision it through an independent protected channel (TRUSTED_RELEASE_KEY)"
 }
 
+create_launcher_staging() {
+  STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
+  trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
+}
+
 freeze_trust_anchor() {
   # Freeze the operator-provisioned release key before trusting anything from
   # it, mirroring scripts/verify-agent-package.sh: TRUSTED_RELEASE_KEY may
@@ -357,7 +380,6 @@ freeze_trust_anchor() {
   # launcher rename or replace even this root-owned staging entry. /var/tmp
   # is a root-owned sticky system directory on every supported host.
   PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
-  trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
   FROZEN_RELEASE_KEY="${PACKAGE_STAGING_DIR}/release-signing.pub.pem"
   priv install -o root -g root -m 0644 -- "${TRUSTED_RELEASE_KEY}" "${FROZEN_RELEASE_KEY}"
 }
@@ -376,7 +398,6 @@ verify_trust_anchor() {
 
 download_release_artifacts() {
   local name
-  STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
   for name in SHA256SUMS SHA256SUMS.sig "${PACKAGE_FILE}"; do
     echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
     curl -fsSL --proto '=https' --tlsv1.2 \
@@ -452,17 +473,24 @@ expected_installed_version() {
   esac
 }
 
-ensure_native_package() {
-  local installed_version actual_digest
+native_package_satisfied() {
+  # A converged rerun must not re-download or reinstall the native package.
+  # The out-of-band release trust protects the package manager invocation,
+  # which an already-installed package makes unnecessary, so a satisfied
+  # package skips the whole download-and-verify phase. The installed version
+  # and production relay contract checks stay fail-closed either way.
+  local installed_version
   installed_version="$(installed_package_version)"
-  if [[ -n "${installed_version}" ]]; then
-    [[ "${installed_version}" == "$(expected_installed_version)" ]] ||
-      fail "ocservia-agent ${installed_version} is installed but this checkout is release ${RELEASE_VERSION} (native ${PACKAGE_FAMILY} version $(expected_installed_version)); the bootstrap neither upgrades nor downgrades an installed package — use the Agent release lifecycle (docs/operations/agent-lifecycle.md)"
-    [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" ]] ||
-      fail "the installed ocservia-agent ${installed_version} lacks the production relay drop-in ${RELAY_DROPIN}; it was installed without the production request — reinstall it through the release lifecycle with /etc/ocservia/agent-install-production-relays present"
-    echo "native package ocservia-agent ${installed_version} already installed; skipping package installation"
-    return
-  fi
+  [[ -n "${installed_version}" ]] || return 1
+  [[ "${installed_version}" == "$(expected_installed_version)" ]] ||
+    fail "ocservia-agent ${installed_version} is installed but this checkout is release ${RELEASE_VERSION} (native ${PACKAGE_FAMILY} version $(expected_installed_version)); the bootstrap neither upgrades nor downgrades an installed package — use the Agent release lifecycle (docs/operations/agent-lifecycle.md)"
+  [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" ]] ||
+    fail "the installed ocservia-agent ${installed_version} lacks the production relay drop-in ${RELAY_DROPIN}; it was installed without the production request — reinstall it through the release lifecycle with /etc/ocservia/agent-install-production-relays present"
+  return 0
+}
+
+install_native_package() {
+  local actual_digest
   # Re-check the digest on the frozen root-owned copy immediately before the
   # package manager, so the exact bytes about to be installed are still the
   # bytes verified against the signed manifest; every read since the freeze
@@ -592,10 +620,29 @@ is_final_node_id() {
     [[ "$1" != "${PLACEHOLDER_NODE_ID}" ]]
 }
 
+services_enabled_and_active() {
+  # Read-only observation, the only post-activation signal available without
+  # Controller credentials: it proves the operator completed the deliberate
+  # enable step, not Controller-side approval or an accepted session. The
+  # queries never mutate anything; the bootstrap still never enables, starts,
+  # stops, or masks a service.
+  local unit
+  for unit in ocservia-privd.service ocservia-agent.service; do
+    [[ "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" == "enabled" ]] || return 1
+    [[ "$(systemctl is-active "${unit}" 2>/dev/null || true)" == "active" ]] || return 1
+  done
+}
+
 print_pending_approval() {
   echo "PENDING_APPROVAL"
   echo "NODE_ID: ${1}"
   echo "next: approve the node as described in docs/how-to/enroll-node.md#approve-the-node, then enable ocservia-privd.service and ocservia-agent.service; the bootstrap never starts or enables a service"
+}
+
+print_services_active() {
+  echo "SERVICES_ACTIVE"
+  echo "NODE_ID: ${1}"
+  echo "next: both managed-node services are enabled and active; confirm the node reports online in the Controller inventory (the bootstrap cannot observe Controller-side approval)"
 }
 
 converge_enrollment() {
@@ -614,7 +661,11 @@ converge_enrollment() {
       if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
         echo "an enrollment token file is present but this node is already enrolled; remove the stale token file" >&2
       fi
-      print_pending_approval "${node_id}"
+      if services_enabled_and_active; then
+        print_services_active "${node_id}"
+      else
+        print_pending_approval "${node_id}"
+      fi
       return
     fi
   fi
@@ -663,13 +714,18 @@ resolve_architecture
 detect_platform
 require_commands
 validate_operator_inputs
-resolve_trust_anchor
-freeze_trust_anchor
-verify_trust_anchor
-download_release_artifacts
-freeze_release_artifacts
-verify_release_trust
-ensure_native_package
+create_launcher_staging
+if native_package_satisfied; then
+  echo "native package ocservia-agent $(expected_installed_version) already installed; skipping the release download and package installation"
+else
+  resolve_trust_anchor
+  freeze_trust_anchor
+  verify_trust_anchor
+  download_release_artifacts
+  freeze_release_artifacts
+  verify_release_trust
+  install_native_package
+fi
 prepare_production_node
 prepare_identity
 converge_enrollment
