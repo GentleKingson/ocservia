@@ -154,9 +154,46 @@ printf '%s\n' "$*" >>"${root}/logs/agent.log"
 case "$*" in
   *--prepare-enrollment*)
     identity="${OCSERV_MANAGED_NODE_SYSROOT}/var/lib/ocservia-agent/identity"
-    install -d -m 0700 -- "${identity}"
-    printf 'mock endpoint key\n' >"${identity}/endpoint.key"
-    printf 'mock controller pin\n' >"${identity}/controller.endpoint"
+    key="${identity}/endpoint.key"
+    pin="${identity}/controller.endpoint"
+    controller=""
+    args=("$@")
+    for ((i = 0; i < $#; i++)); do
+      [[ "${args[$i]}" == "--controller" ]] && controller="${args[$((i + 1))]:-}"
+    done
+    if [[ ! -f "${key}" && ! -f "${pin}" ]]; then
+      # Fresh provisioning, mirroring the real formats the loader enforces:
+      # a 32-byte endpoint secret key and the configured 64-hex controller
+      # pin, both owner-only.
+      install -d -m 0700 -- "${identity}"
+      printf '%032d' 7 >"${key}"
+      printf '%s' "${controller}" >"${pin}"
+      chmod 0600 -- "${key}" "${pin}"
+    fi
+    # With material present this stub behaves like Identity::provision: it
+    # loads and validates instead of provisioning — owner-only permissions,
+    # the exact 32-byte endpoint key, and the controller pin matching the
+    # configured Controller EndpointID.
+    for file in "${key}" "${pin}"; do
+      if [[ ! -f "${file}" || -L "${file}" ]]; then
+        echo "identity loader: partial or missing identity material (${file})" >&2
+        exit 1
+      fi
+      mode="$(stat -c %a -- "${file}")"
+      if (( (8#${mode} & 63) != 0 )); then
+        echo "identity loader: ${file} is group/world accessible (${mode})" >&2
+        exit 1
+      fi
+    done
+    if [[ "$(stat -c %s -- "${key}")" -ne 32 ]]; then
+      echo "identity loader: endpoint key must be exactly 32 bytes" >&2
+      exit 1
+    fi
+    pin_value="$(cat -- "${pin}")"
+    if [[ ! "${pin_value}" =~ ^[0-9a-f]{64}$ ]] || [[ "${pin_value}" != "${controller}" ]]; then
+      echo "identity loader: controller pin does not match the configured Controller" >&2
+      exit 1
+    fi
     printf '%s\n' "$(cat -- "${root}/endpoint.id")"
     exit 0
     ;;
@@ -1054,8 +1091,52 @@ as_root test ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" ||
   die "an enrolled rerun must not run identity preparation"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "the identity failure must not trigger enrollment"
-as_root sh -c "printf 'mock endpoint key\n' >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
 echo "an enrolled node missing identity material fails closed"
+
+# 17b-2. a corrupted enrolled endpoint key must fail the Agent identity
+# validation instead of reporting SERVICES_ACTIVE.
+as_root sh -c "printf 'truncated' >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+capture_root
+assert_status 1 "a corrupted enrolled endpoint key must fail closed"
+assert_output "did not pass the Agent identity validation"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a corrupted endpoint key must not report SERVICES_ACTIVE"
+fi
+as_root test "$(as_root stat -c %s -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key")" -eq 9 ||
+  die "the corrupted endpoint key must not be rewritten"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "a corrupted endpoint key must not trigger enrollment"
+as_root sh -c "printf '%032d' 7 >'${sysroot}/var/lib/ocservia-agent/identity/endpoint.key'"
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+echo "a corrupted enrolled endpoint key fails closed"
+
+# 17b-3. group/world-readable identity material must fail closed: the
+# endpoint secret key is long-lived key material.
+as_root chmod 0644 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+capture_root
+assert_status 1 "group/world-readable identity material must fail closed"
+assert_output "did not pass the Agent identity validation"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "unsafe identity permissions must not report SERVICES_ACTIVE"
+fi
+as_root chmod 0600 -- "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key"
+echo "unsafe identity permissions fail closed"
+
+# 17b-4. a controller pin that no longer matches the configured Controller
+# must fail closed (identity substitution).
+as_root sh -c "printf '%s' \"\$(printf 'd%.0s' \$(seq 1 64))\" >'${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint'"
+capture_root
+assert_status 1 "a mismatching controller pin must fail closed"
+assert_output "did not pass the Agent identity validation"
+if grep -q "SERVICES_ACTIVE" <<<"${RUN_OUTPUT}"; then
+  die "a mismatching controller pin must not report SERVICES_ACTIVE"
+fi
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
+  die "a mismatching controller pin must not trigger enrollment"
+as_root sh -c "printf '%s' '${controller_id}' >'${sysroot}/var/lib/ocservia-agent/identity/controller.endpoint'"
+echo "a mismatching controller pin fails closed"
 
 # 17c. an enrolled, activated node missing a sealing private key must fail
 # closed the same way: no key regeneration, no enrollment, no

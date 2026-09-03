@@ -21,9 +21,12 @@
 # happens), and an already-enrolled node is never enrolled again. Once
 # agent.env carries the final NODE_ID, the bootstrap enters a validation-only
 # mode for enrolled material: the persistent identity files must exist and
-# both sealing private keys must re-derive exactly the fingerprints pinned in
-# agent.env, or the rerun fails closed — it never regenerates identity or
-# sealing keys that the Controller-side enrollment binding depends on.
+# pass the Agent's own identity validation (agent ownership, owner-only
+# permissions, the 32-byte endpoint key, and the controller pin still
+# matching the configured Controller), and both sealing private keys must
+# re-derive exactly the fingerprints pinned in agent.env, or the rerun fails
+# closed — it never regenerates identity or sealing keys that the
+# Controller-side enrollment binding depends on.
 # After the independent approval, activation stays a deliberate operator
 # action outside this bootstrap (systemctl enable --now
 # ocservia-privd.service ocservia-agent.service); a rerun then only observes
@@ -653,16 +656,29 @@ validate_enrolled_sealing_keys() {
 
 validate_enrolled_identity() {
   # The persistent identity is the Controller enrollment binding. On an
-  # enrolled node a missing endpoint key or controller pin is a fail-closed
-  # integrity failure, never something to provision again: a fresh identity
-  # would print a new EndpointID that no longer matches the enrolled node on
-  # the Controller, leaving a node that looks healthy but cannot reconnect.
-  local file
+  # enrolled node missing identity files are a fail-closed integrity failure,
+  # never something to provision again. With both files present, the Agent's
+  # own identity loader validates the material instead: Identity::provision
+  # regenerates nothing when the files exist — it loads and enforces the
+  # exact startup rules (agent-owned owner-only directory and files, the
+  # 32-byte endpoint secret key, the 64-hex controller pin, and that the pin
+  # still matches the configured Controller EndpointID), rejecting partial
+  # or substituted identity material.
+  local file output endpoint_id
   for file in "${IDENTITY_DIR}/endpoint.key" "${IDENTITY_DIR}/controller.endpoint"; do
     if ! path_exists "${file}" || ! priv test -f "${file}" || priv test -L "${file}"; then
       fail "the enrolled node is missing its persistent identity file ${file}; regenerating the identity would break the Controller enrollment binding — restore ${IDENTITY_DIR} from protected backups or re-enroll as a new node deliberately (docs/how-to/enroll-node.md)"
     fi
   done
+  output="$(as_agent "${AGENT_BINARY}" \
+    --identity-dir "${IDENTITY_DIR}" \
+    --controller "${CONTROLLER_ENDPOINT_ID}" \
+    --prepare-enrollment)" ||
+    fail "the enrolled persistent identity in ${IDENTITY_DIR} did not pass the Agent identity validation; the bootstrap never regenerates an enrolled identity — restore the identity material or re-enroll deliberately (docs/how-to/enroll-node.md)"
+  endpoint_id="$(printf '%s\n' "${output}" | awk 'NF {last=$0} END {print last}')"
+  [[ "${endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "the Agent did not print a valid EndpointID while validating the enrolled identity"
+  echo "enrolled persistent identity validated; EndpointID: ${endpoint_id}"
 }
 
 prepare_production_node() {
