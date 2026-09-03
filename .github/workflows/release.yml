@@ -136,6 +136,19 @@ jobs:
           VERSION: ${{ env.version }}
           CANDIDATE_DEB: ${{ runner.temp }}/packages/ocservia-agent_${{ env.version }}_${{ matrix.package_arch }}.deb
         run: scripts/release-baseline-upgrade-smoke.sh
+      - name: Validate upgrade from latest published baseline (${{ matrix.package_arch }})
+        # v0.1.1 proves the long-haul pre-upgrader hop; this hop proves the
+        # currently supported release line upgrades into the candidate with
+        # postinstall/preremove and production-install changes intact. Bump
+        # BASELINE_RELEASE (and its pinned SHA256SUMS digest in the smoke)
+        # when a new formal release becomes the latest supported line.
+        env:
+          RUN_ID: release-baseline-latest-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/latest-baseline-smoke
+          VERSION: ${{ env.version }}
+          CANDIDATE_DEB: ${{ runner.temp }}/packages/ocservia-agent_${{ env.version }}_${{ matrix.package_arch }}.deb
+          BASELINE_RELEASE: v0.3.0
+        run: scripts/release-baseline-upgrade-smoke.sh
       - name: Upload package set
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -148,7 +161,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-smoke-${{ matrix.package_arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/native-smoke
+          path: |
+            ${{ runner.temp }}/artifacts/native-smoke
+            ${{ runner.temp }}/artifacts/latest-baseline-smoke
           retention-days: 7
           if-no-files-found: warn
       - name: Remove release signing key

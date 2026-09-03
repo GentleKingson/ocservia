@@ -31,8 +31,20 @@ BASELINE_VERSION="${BASELINE_RELEASE#v}"
 # smoked baseline release must match, and a release without a pin here
 # refuses to run; the signature and package-digest checks below extend the
 # pinned identity to the installed deb.
+# Each pinned baseline also records whether its package layout predates the
+# upgrader binary/unit and the read-only --version query, so baseline-install
+# assertions stay matched to what that historical release actually ships.
 case "${BASELINE_RELEASE}" in
-  v0.1.1) baseline_sums_sha256=518a4e6e0393dfc5378d117069c7affdeeb26d7dea84521e128c40256d11a1d9 ;;
+  v0.1.1)
+    baseline_sums_sha256=518a4e6e0393dfc5378d117069c7affdeeb26d7dea84521e128c40256d11a1d9
+    baseline_has_upgrader=no
+    baseline_has_version_query=no
+    ;;
+  v0.3.0)
+    baseline_sums_sha256=018c7d7f1c4f6b5f5745c7d6fa076a6f51a53b1c1050eb26729dce3606394ed0
+    baseline_has_upgrader=yes
+    baseline_has_version_query=yes
+    ;;
   *) echo "no pinned SHA256SUMS identity for baseline release ${BASELINE_RELEASE}" >&2; exit 2 ;;
 esac
 if [[ ! -f "${CANDIDATE_DEB}" ]]; then
@@ -141,9 +153,8 @@ assert_state() {
       || { echo "${context}: ${unit} is ${active} without configuration" >&2; exit 1; }
   done
   # The candidate binary answers the read-only version query as the service
-  # user. The baseline release predates the --version argument entirely, so
-  # its version identity stays pinned by the embedded archive and dpkg check
-  # above.
+  # user. A baseline that predates the --version argument keeps its version
+  # identity pinned by the embedded archive check above instead.
   if [[ "${want_version_query}" == "yes" ]]; then
     version_output="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --version)"
     [[ "${version_output}" == "ocservia-agent ${expected_version}" ]] \
@@ -152,7 +163,8 @@ assert_state() {
 }
 
 { sudo dpkg -i "${download_dir}/${baseline_deb}"; } >"${ARTIFACT_DIR}/baseline-install.log" 2>&1
-assert_state "baseline install" "${BASELINE_VERSION}" no no
+assert_state "baseline install" "${BASELINE_VERSION}" \
+  "${baseline_has_upgrader}" "${baseline_has_version_query}"
 echo "published baseline ${BASELINE_RELEASE} install passed"
 
 # The candidate upgrade preflight requires the shared command verification
