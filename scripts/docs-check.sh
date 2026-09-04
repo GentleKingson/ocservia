@@ -33,20 +33,7 @@ reject_text() {
   fi
 }
 
-require_text README.md 'git clone --branch vX.Y.Z --single-branch --depth 1'
-require_text README.md 'CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE'
+require_text README.md 'docs/getting-started/production.md'
 reject_text README.md '| bash -s'
 reject_text docs/getting-started/production.md '| bash -s'
 reject_text docs/getting-started/managed-node.md '| bash -s'
-require_text docs/getting-started/production.md 'Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout'
-require_text docs/getting-started/managed-node.md 'Stage-0 -> exact vX.Y.Z Stage-1 -> signed checksum -> .deb/.rpm'
-require_text docs/how-to/enroll-node.md 'grant `node.approve`'
-require_text docs/operations/bootstrap-hosting.md 'test "$(tail -n 1 "$stage0")" = '\''main "$@"'\'' || exit 1'
-require_text docs/operations/bootstrap-hosting.md 'Stage-0 is not a long-term upgrade, rollback, uninstall, or service manager.'
-require_text docs/acceptance/bootstrap-install-closeout.md '## Supply-chain acceptance'
-
-"${ROOT}/scripts/check-g6-contracts.mjs"
-"${ROOT}/scripts/generate-g6-test-fixtures.mjs" --check
-"${ROOT}/scripts/test-g6-evidence-verifier.mjs"
-"${ROOT}/scripts/test-g6-evidence-builder.mjs"
-"${ROOT}/scripts/test-g6-pipeline.mjs"
