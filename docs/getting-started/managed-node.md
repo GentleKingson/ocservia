@@ -23,15 +23,35 @@ do not build a package on the node.
   package with the production request marker below. Do not install production
   systemd files from an arbitrary source checkout.
 
-## 1. One-command bootstrap
+## 1. Prepare configuration and bootstrap
 
-The supported path is the managed-node installer, run as a single
-self-contained file with the release pinned through `--version vX.Y.Z`. No
-Git checkout is required: the installer detects the platform, downloads that
-exact release's `SHA256SUMS`, its signature, and the matching native package
-(`.deb` on the Debian family, `.rpm` on Rocky Linux 9), and verifies the
-out-of-band release trust — trusted key fingerprint, `SHA256SUMS.sig`, and
-the selected package digest — **before** any package manager runs as root.
+Until an operator has deployed and verified the static Stage-0 endpoint, use a
+clean checkout of the exact release. Keep node configuration in a separate
+directory:
+
+```bash
+git clone --branch vX.Y.Z --single-branch --depth 1 \
+  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
+mkdir ocservia-node-install && cd ocservia-node-install
+cp ../ocservia-vX.Y.Z/install.env.example install.env
+editor install.env
+
+../ocservia-vX.Y.Z/deploy/managed-node/install.sh
+```
+
+Delete the Controller section from `install.env`. Configure at least
+`CONTROLLER_ENDPOINT_ID`, `RELAY_URL_A`, `RELAY_URL_B`,
+`RELAY_ACCESS_TOKEN_SOURCE`, and
+`CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE`, together with the independently
+provisioned release key and fingerprint. Set `BOOTSTRAP_TOKEN_SOURCE` when the
+same run should enroll through `PENDING_APPROVAL`.
+
+The checkout supplies only the bootstrap program; the installed node runs the
+native package and has no runtime dependency on Git or that checkout. The
+installer detects the platform, downloads the exact release's `SHA256SUMS`, its
+signature, and matching native package (`.deb` on the Debian family, `.rpm` on
+Rocky Linux 9), and verifies the out-of-band release trust before any package
+manager runs as root.
 It then prepares the production node state (sealing keys, relay URLs, relay
 access token, command verification key, persistent identity). With a protected
 bootstrap token source it enrolls in the same run and stops at
@@ -39,25 +59,20 @@ bootstrap token source it enrolls in the same run and stops at
 at `ENROLLMENT_READY`. It never approves the node or enables or starts a
 service.
 
-Obtain `install.sh` for the exact release you are installing — a published
-release tag is immutable, so never fetch the script from a branch or `main`
-— and run it from any directory holding the node configuration:
+The managed-node flow is:
 
-```bash
-curl -fsSL --proto '=https' --tlsv1.2 \
-  -o install.sh \
-  https://raw.githubusercontent.com/GentleKingson/ocservia/vX.Y.Z/deploy/managed-node/install.sh
-chmod 0700 install.sh
-export CONTROLLER_ENDPOINT_ID="replace-with-64-lowercase-hex-controller-endpoint-id"
-export RELAY_URL_A="https://relay-a.example.com"
-export RELAY_URL_B="https://relay-b.example.com"
-export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
-export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/controller-command-verification-key.pem
-export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
-export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
-export EXPECTED_RELEASE_KEY_SHA256="replace-with-64-lowercase-hex-fingerprint"
-./install.sh --version vX.Y.Z
+```text
+Stage-0 -> exact vX.Y.Z Stage-1 -> signed checksum -> .deb/.rpm
+        -> identity/sealing -> Bootstrap Enrollment -> PENDING_APPROVAL
+        -> independent approval -> service activation
 ```
+
+The thin Stage-0 path requires no checkout, but it becomes an alternative only
+after an operator deploys its static endpoint and verifies the served bytes.
+Do not use a bare `curl | bash` pipeline. The fail-closed form downloads
+Stage-0, checks the transfer and final completeness marker, and then executes
+it with `--version vX.Y.Z`; the hardened form also supplies the out-of-band key
+and fingerprint. See [Stage-0 bootstrap hosting](../operations/bootstrap-hosting.md).
 
 The package-first `--version` mode is available starting with the first
 release that ships this Stage-1 bootstrap. Older releases that already
@@ -77,16 +92,9 @@ keys as literal `KEY=VALUE` lines, and it fails closed on unknown keys,
 malformed lines, or unsafe file metadata (symlinks, group/world-writable
 permissions). Variables exported in the shell always win over the file.
 
-Compatibility path: the installer also runs from a clean checkout of an
-exact release tag without `--version`, deriving the release identity from
-the Git tag; `install.env` is git-ignored there, so it never makes the
-clean-release-checkout check fail.
-
-```bash
-git clone --branch vX.Y.Z --depth 1 https://github.com/GentleKingson/ocservia
-cd ocservia
-deploy/managed-node/install.sh
-```
+The installer runs from a clean checkout of an exact release tag without
+`--version`, deriving the release identity from the Git tag; the separate
+configuration directory keeps `install.env` outside that checkout.
 
 `TRUSTED_RELEASE_KEY` defaults to `/etc/ocservia/release-signing.pub.pem` and
 `EXPECTED_RELEASE_KEY_SHA256` is otherwise read from
@@ -342,3 +350,14 @@ check: it prints `SERVICES_ACTIVE` and changes nothing. If enrollment or
 startup fails, do not replace the identity directory or generate a new
 Controller trust key just to retry; see
 [Troubleshooting](../how-to/troubleshooting.md).
+
+## Lifecycle after installation
+
+Stage-0 is not a package updater or service manager. Upgrade with the next
+signed native package or the existing Controller-driven signed upgrader
+contract; do not rerun a latest convenience script. Rollback uses the matched
+package snapshot through `ocservia-agent-rollback`. Uninstall through `dpkg` or
+`rpm`, whose package scriptlets invoke the verified Agent uninstall lifecycle
+and preserve identity, state, and configuration by default. See [Agent package
+lifecycle](../operations/agent-lifecycle.md), [Upgrade the Agent](../how-to/agent-upgrade.md),
+and [Roll back the Agent](../how-to/agent-rollback.md).

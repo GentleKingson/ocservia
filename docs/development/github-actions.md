@@ -29,6 +29,23 @@ primary isolation, promotion and post-promotion probes, role recovery,
 former-primary rejoin, merged evidence, secret scanning, and independent
 verification. The historical scripts and fixtures remain for reference.
 
+### Release bootstrap assets
+
+Every formal release includes immutable `controller-bootstrap.sh` and
+`managed-node-bootstrap.sh` Stage-1 assets. They are copied from
+`deploy/production/controller-bootstrap.sh` and
+`deploy/managed-node/install.sh` before the single signed `SHA256SUMS` is
+created. The publish and read-only recovery paths require the exact release
+asset set, verify the pinned Ed25519 signing-key contract, run
+`gh release verify`, and require GitHub to report the release immutable.
+
+The stable Stage-0 files are not versioned Release assets. Future static
+hosting must deploy them byte-for-byte from
+`deploy/bootstrap/install-controller` and `deploy/bootstrap/install-node`;
+`scripts/verify-bootstrap-endpoint.sh` checks the served bytes after
+deployment. The repository does not claim that endpoint exists today. See
+[Stage-0 bootstrap hosting](../operations/bootstrap-hosting.md).
+
 ## Execution graph
 
 The primary workflow has 15 worker job definitions plus a `Change Impact Router`
@@ -70,8 +87,11 @@ skip, fails the aggregator. The workflow uses no workflow-level path filters.
 The repository-owned `scripts/ci-relevance.sh` publishes one authorization
 flag for every conditional worker. It ORs the impact domains of all recognized
 paths, so a Web plus Rust change runs the Web, Browser, and Rust workers rather
-than full CI. Ordinary documentation runs Repository Contracts & Policy plus the
-structurally always-on Repository Secret Scan. Web unit/config-only inputs run Web Quality, Unit & Build
+than full CI. Ordinary Markdown remains CI-neutral apart from the structurally
+always-on Repository Secret Scan. The bootstrap Quick Start, trust, lifecycle,
+enrollment, hosting, and closeout documents run Repository Contracts & Policy,
+without activating runtime, database, native, production-topology, or browser
+workers. Web unit/config-only inputs run Web Quality, Unit & Build
 and Unit; Web runtime, build, dependency, and Playwright inputs also run
 Web Browser E2E. Runtime Resilience Smoke is a backend/runtime responsibility and is not activated
 by Web changes.
@@ -82,6 +102,10 @@ Artifacts. Native, production relay/Controller lifecycle, credential rotation, s
 license, and G6 smoke flags each follow the inputs consumed by their own
 harness. Machine-readable G6 acceptance contracts activate Contracts and
 Policy plus G6 Smoke, while ordinary release-readiness Markdown does not.
+Controller Stage-0 and Stage-1 inputs activate Production Topology and
+Contracts. Managed-node Stage-0 and Stage-1 inputs activate Native and
+Contracts. Bootstrap-token enrollment inputs activate Go, PostgreSQL, shared
+runtime artifacts, and Contracts.
 Repository Secret Scan remains always-on and keeps the full-history `gitleaks git`
 semantics; Dependency License Policy runs only for dependency manifests, lockfiles, or
 license-policy inputs.

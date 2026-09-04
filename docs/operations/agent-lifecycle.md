@@ -6,6 +6,26 @@
 > package construction, verified staging, sealing-key migration, and durable
 > lifecycle contracts.
 
+After its external endpoint is deployed and verified, the operator-hosted thin
+first-install chain is deliberately split:
+
+```text
+Stage-0 -> exact vX.Y.Z Stage-1 -> signed checksum -> native package
+        -> identity/sealing -> Bootstrap Enrollment -> PENDING_APPROVAL
+        -> independent approval -> service activation
+```
+
+Stage-0 is only a convenience entrypoint whose first bytes rely on the static
+HTTPS endpoint. The versioned Stage-1 asset and native package are immutable
+Release assets authenticated by `SHA256SUMS.sig`, the independently
+provisioned Ed25519 public key and its pinned fingerprint, and the selected
+asset digest. A Bootstrap Token can create or recover only the same pending
+node; it cannot approve the node. The package and enrollment lifecycles retain
+their existing authority boundaries.
+Until that hosting has operational ownership and byte-verification evidence,
+the public Quick Start obtains the installer from a clean exact-release
+checkout; the installed native package has no runtime dependency on Git.
+
 Build the Agent and privd release binaries, then create a deterministic signed package:
 
 ```bash
@@ -45,7 +65,8 @@ architectures: `ocservia-agent-<version>-linux-{amd64,arm64}.tar.gz` with its
 the six packages, and, on formal Controller releases, the Controller manifests
 `controller-release.json`, `controller-release-amd64.json`, and
 `controller-release-arm64.json` with their checksums,
-the Ed25519 `SHA256SUMS.sig`, and `release-signing.pub.pem`.
+the versioned `controller-bootstrap.sh` and `managed-node-bootstrap.sh`, the
+Ed25519 `SHA256SUMS.sig`, and `release-signing.pub.pem`.
 All of them trust the same release key whose DER SHA-256 fingerprint is pinned
 out of band.
 
@@ -77,6 +98,12 @@ Package-manager downgrade is not a supported rollback path: it would skip the
 matched snapshot contract. Roll back only with
 `sudo /usr/libexec/ocservia/ocservia-agent-rollback`, then install the fixed
 release.
+
+Stage-0 is not a long-term lifecycle manager. A managed-node upgrade continues
+through a verified signed package or the durable Controller-driven upgrader.
+Native package removal continues through `dpkg` or `rpm`, invoking the verified
+uninstall scriptlet and preserving identity, state, and configuration unless
+the operator separately chooses the irreversible purge flow.
 
 `upgrade-agent.sh` first verifies that the existing `agent.env` contains exactly
 one absolute `CONTROLLER_COMMAND_VERIFICATION_KEY_FILE` and that the referenced

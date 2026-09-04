@@ -185,11 +185,19 @@ done
 
 cp -- "${CONTROLLER}" "${fixture}/release/install-controller"
 cp -- "${NODE}" "${fixture}/release/install-node"
-PATH="${fixture}/bin:${PATH}" \
-  TEST_RELEASE_DIR="${fixture}/release" \
-  TEST_DOWNLOAD_LOG="${fixture}/downloads.log" \
-  "${ROOT}/scripts/verify-bootstrap-endpoint.sh" \
-  https://get.ocservia.example/install-controller "${CONTROLLER}" >/dev/null
+cp -- "${ROOT}/install.env.example" "${fixture}/release/install.env.example"
+for endpoint in install-controller install-node install.env.example; do
+  case "${endpoint}" in
+    install-controller) expected="${CONTROLLER}" ;;
+    install-node) expected="${NODE}" ;;
+    install.env.example) expected="${ROOT}/install.env.example" ;;
+  esac
+  PATH="${fixture}/bin:${PATH}" \
+    TEST_RELEASE_DIR="${fixture}/release" \
+    TEST_DOWNLOAD_LOG="${fixture}/downloads.log" \
+    "${ROOT}/scripts/verify-bootstrap-endpoint.sh" \
+    "https://get.ocservia.example/${endpoint}" "${expected}" >/dev/null
+done
 printf 'different bytes\n' >"${fixture}/different-source"
 if PATH="${fixture}/bin:${PATH}" \
   TEST_RELEASE_DIR="${fixture}/release" \

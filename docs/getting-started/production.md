@@ -13,7 +13,8 @@ secret, and rollback contracts are in [Production deployment reference](../opera
   Ubuntu Pro/ESM or an equivalent maintenance strategy. Debian 11 left regular
   Debian LTS security maintenance on 2026-08-31 and needs Debian ELTS or an
   equivalent for production.
-- A clean checkout of the release tag being installed.
+- Git, curl, and the ability to prepare a durable clean checkout. The versioned
+  bootstrap creates and verifies that checkout for the recommended path.
 - A DNS name and HTTPS certificate for the Controller.
 - An OIDC issuer and client, an HTTPS certificate signer, and a TLS OTLP
   backend.
@@ -29,7 +30,60 @@ The repository does not generate production secrets, trust keys, certificates,
 relay tokens, or passwords. Prepare those through the operator's protected
 provisioning process.
 
-## 1. Release bundle
+## 1. Prepare configuration
+
+Keep installation configuration in its own protected directory, separate from
+the versioned source checkout:
+
+```bash
+git clone --branch vX.Y.Z --single-branch --depth 1 \
+  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
+mkdir ocservia-install && cd ocservia-install
+cp ../ocservia-vX.Y.Z/install.env.example install.env
+editor install.env
+```
+
+The configuration file is a strict, non-executing `KEY=VALUE` contract; it is
+not a secret generator. Provision every secret and trust file it references
+through the operator's protected channel before installation.
+
+## 2. Install the pinned release
+
+Run the versioned Stage-1 from the exact release checkout:
+
+```bash
+../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
+  --version vX.Y.Z
+```
+
+Stage-1 reads `install.env` from the current directory and creates a durable
+launcher-owned clean checkout at
+`${OCSERV_CONTROLLER_SOURCE_ROOT:-$HOME/.local/share/ocservia/controller/releases}/vX.Y.Z`.
+It then invokes that checkout's `deploy/production/install.sh`. The working
+configuration directory and the source checkout therefore remain separate.
+
+The Controller flow is:
+
+```text
+Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
+        -> production/install.sh -> signed manifest -> controller.sh
+        -> smoke/readiness
+```
+
+The durable checkout must be clean and match the signed manifest's
+`source_commit`; `controller.sh` remains the authority for release verification,
+digest-pinned images, activation, and lifecycle state.
+
+The thin Stage-0 entrypoint becomes an alternative only after an operator has
+deployed the static endpoint and verified its bytes. Do not use a bare
+`curl | bash` pipeline. The fail-closed form downloads to a temporary file,
+checks curl's status and the final completeness marker, and only then executes
+Stage-0. It can additionally verify the immutable Stage-1 Release asset with
+the out-of-band Ed25519 key and fingerprint. See [Stage-0 bootstrap
+hosting](../operations/bootstrap-hosting.md) for the exact command and trust
+boundary.
+
+## 3. Release bundle
 
 `deploy/production/install.sh` downloads the release bundle for the host
 architecture automatically, so this step only describes what is downloaded.
@@ -46,9 +100,12 @@ protected directory when provisioning them manually. Do not use the
 `release-signing.pub.pem` published beside the bundle as the trust anchor. Set
 `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` to the independently provisioned key.
 
-## 2. Prepare the host
+## 4. Compatibility checkout path
 
-Clone the exact release and choose a separately protected backup directory:
+Ubuntu 20.04 and Debian 11 cannot use the verified Stage-0 path because their
+distribution OpenSSL cannot verify Ed25519 in this contract. They retain the
+clean exact-release checkout path. It is also available for operators who do
+not deploy the static Stage-0 endpoint:
 
 ```bash
 git clone --branch <release-tag> --depth 1 \
@@ -73,7 +130,7 @@ use the clean exact release checkout path documented here rather than
 contract](../operations/bootstrap-hosting.md) for the entrypoint and trust
 details.
 
-`deploy/production/install.sh` (step 5) runs the host bootstrap itself. To
+`deploy/production/install.sh` (step 7) runs the host bootstrap itself. To
 prepare or verify the host separately:
 
 ```bash
@@ -83,7 +140,7 @@ sudo deploy/production/bootstrap-host.sh install \
   --backup-dir "$OCSERV_BACKUP_DIR"
 ```
 
-## 3. Configure required production settings
+## 5. Configure required production settings
 
 Export the values used by the production Compose file. Keep this environment
 in the same protected operator session used for the lifecycle command:
@@ -118,7 +175,7 @@ permissions). Variables exported in the shell always win over the file.
 the protected `controller-iroh.key`. The two relay URLs are required for the
 production transport path; public relays are not a fallback.
 
-## 4. Configure secrets and trust
+## 6. Configure secrets and trust
 
 Place the required files in `OCSERV_SECRET_DIR`:
 
@@ -154,7 +211,7 @@ Configure the OIDC redirect URI as
 the same protected access token and its own certificate and key; see
 [Dedicated relays](../operations/dedicated-relays.md).
 
-## 5. Install the Controller
+## 7. Direct checkout installation
 
 How the single-command installer runs depends on the Docker state of the host:
 
@@ -208,7 +265,7 @@ The lifecycle verifies the signed release bundle, the clean checkout
 It then starts the dependency graph and runs the release smoke check. Do not
 replace this command with `docker compose up -d`.
 
-## 6. Verify the deployment
+## 8. Verify the deployment
 
 The install command must finish successfully. You can validate the public
 readiness and version endpoints:
@@ -224,6 +281,14 @@ Then verify an authenticated read, a node connection through each relay, OTLP
 delivery, and the newest backup. A release failure leaves pending evidence;
 retry only the same target after correcting its cause. See [Controller upgrade](../how-to/controller-upgrade.md),
 [Controller rollback](../how-to/controller-rollback.md), and [Troubleshooting](../how-to/troubleshooting.md).
+
+For later upgrades, prepare a clean checkout of the next exact release under
+the durable source root, then run `controller.sh upgrade` from that checkout
+with the new signed manifest. The current versioned bootstrap is a first-install
+entrypoint, not an upgrade command. Do not rerun an unpinned or latest
+convenience script as an implicit upgrade. Rollback continues to use protected
+lifecycle state, and uninstall continues to use `controller.sh uninstall`;
+Stage-0 is not a long-term upgrade, rollback, or uninstall manager.
 
 ## Next steps
 

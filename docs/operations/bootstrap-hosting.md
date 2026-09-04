@@ -11,6 +11,11 @@ They are intended to be deployed byte-for-byte at
 the external static-hosting infrastructure, so it does not claim that those
 example endpoints are live.
 
+The Quick Start also expects the repository's `install.env.example` to be
+served byte-for-byte at
+`https://get.ocservia.example/install.env.example`. It is configuration input,
+not executable Stage-0 code.
+
 ## Hosting requirements
 
 The deployment must be static HTTPS hosting with HSTS enabled. Both responses
@@ -27,6 +32,9 @@ scripts/verify-bootstrap-endpoint.sh \
 scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install-node \
   deploy/bootstrap/install-node
+scripts/verify-bootstrap-endpoint.sh \
+  https://get.ocservia.example/install.env.example \
+  install.env.example
 ```
 
 The verifier performs a read-only HTTPS download, requires byte equality, and
@@ -109,3 +117,10 @@ the required version. All configuration and protected material stay in the
 environment or protected paths for Stage-1; Stage-0 neither parses nor prints
 their contents. Managed-node automation may reach `PENDING_APPROVAL`, never
 Approval, and service activation remains deliberate.
+
+Stage-0 is not a long-term upgrade, rollback, uninstall, or service manager.
+Controller upgrades and rollback continue through `controller.sh` and its
+protected lifecycle state. Managed-node upgrades and removal continue through
+the signed upgrader or native package-manager contract. Long-lived settings
+belong in `install.env` or the installed service configuration, not in arguments
+that must be replayed through the convenience script.
