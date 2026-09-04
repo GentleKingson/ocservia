@@ -26,6 +26,7 @@ paths=(
   deploy/production/controller.sh deploy/production/controller-release-smoke.sh deploy/production/bootstrap-host.sh
   deploy/production/install.sh scripts/test-controller-install.sh
   deploy/production/controller-bootstrap.sh scripts/test-controller-bootstrap.sh
+  deploy/bootstrap/install-controller deploy/bootstrap/install-node scripts/test-stage0-installers.sh scripts/verify-bootstrap-endpoint.sh
   deploy/managed-node/install.sh scripts/test-managed-node-install.sh
   deploy/lib/install-env.sh install.env.example
   scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
@@ -141,6 +142,14 @@ out="$(case_commit controller_stage1_bootstrap deploy/production/controller-boot
 expect_only "${out}" run_production_relays run_contracts_policy
 out="$(case_commit controller_stage1_bootstrap_test scripts/test-controller-bootstrap.sh)"
 expect_only "${out}" run_production_relays
+out="$(case_commit controller_stage0 deploy/bootstrap/install-controller)"
+expect_only "${out}" run_production_relays run_contracts_policy
+out="$(case_commit node_stage0 deploy/bootstrap/install-node)"
+expect_only "${out}" run_production_relays run_contracts_policy
+out="$(case_commit stage0_test scripts/test-stage0-installers.sh)"
+expect_only "${out}" run_production_relays
+out="$(case_commit stage0_endpoint_verifier scripts/verify-bootstrap-endpoint.sh)"
+expect_only "${out}" run_contracts_policy
 out="$(case_commit managed_node_installer deploy/managed-node/install.sh)"
 expect_only "${out}" run_native run_contracts_policy
 out="$(case_commit managed_node_install_test scripts/test-managed-node-install.sh)"
