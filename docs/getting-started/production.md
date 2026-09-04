@@ -65,6 +65,14 @@ detected distribution — except on Ubuntu 20.04, which supports only an
 already-installed compatible Docker. The bootstrap never changes Docker
 permissions, the firewall, or production trust material.
 
+The optional static Stage-0 convenience entrypoint has a narrower verified
+platform contract because its Ed25519 release-manifest verification requires
+OpenSSL 3. Ubuntu 20.04 and Debian 11 retain full Controller support but must
+use the clean exact release checkout path documented here rather than
+`install-controller`. See the [Stage-0 bootstrap hosting
+contract](../operations/bootstrap-hosting.md) for the entrypoint and trust
+details.
+
 `deploy/production/install.sh` (step 5) runs the host bootstrap itself. To
 prepare or verify the host separately:
 

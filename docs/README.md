@@ -9,6 +9,7 @@ into the operator path.
 - [Try ocservia locally](getting-started/local-development.md)
 - [Deploy the Controller](getting-started/production.md)
 - [Install a managed node](getting-started/managed-node.md)
+- [Stage-0 bootstrap hosting contract](operations/bootstrap-hosting.md)
 
 ## Common tasks
 
