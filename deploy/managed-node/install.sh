@@ -552,14 +552,14 @@ require_commands() {
   local tool
   # git is deliberately absent: it is needed only by the legacy
   # checkout-identity path, which enforces its own git requirement.
-  for tool in curl openssl sha256sum awk cmp; do
+  for tool in curl openssl sha256sum awk; do
     command -v "${tool}" >/dev/null 2>&1 ||
       fail "${tool} is required by the managed-node installer"
   done
 }
 
 validate_operator_inputs() {
-  local variable bootstrap_mode
+  local variable
   for variable in CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
     RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE; do
     [[ -n "${!variable:-}" ]] ||
@@ -590,16 +590,19 @@ validate_operator_inputs() {
     [[ -f "${!variable}" && ! -L "${!variable}" && -s "${!variable}" ]] ||
       fail "${variable} must be a non-empty regular file (not a symlink) provisioned through a protected channel"
   done
-  if [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]]; then
-    [[ -f "${BOOTSTRAP_TOKEN_SOURCE}" && ! -L "${BOOTSTRAP_TOKEN_SOURCE}" && -s "${BOOTSTRAP_TOKEN_SOURCE}" ]] ||
-      fail "BOOTSTRAP_TOKEN_SOURCE must be a non-empty regular file (not a symlink) provisioned through a protected channel"
-    bootstrap_mode="$(stat -c '%a' -- "${BOOTSTRAP_TOKEN_SOURCE}")" ||
-      fail "cannot inspect BOOTSTRAP_TOKEN_SOURCE permissions"
-    (( (8#${bootstrap_mode} & 8#077) == 0 )) ||
-      fail "BOOTSTRAP_TOKEN_SOURCE must not be accessible by group or other users (found mode ${bootstrap_mode})"
-  fi
   openssl pkey -pubin -in "${CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE}" >/dev/null 2>&1 ||
     fail "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE is not a readable public key PEM"
+}
+
+validate_bootstrap_token_source() {
+  local bootstrap_mode
+  [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]] || return 0
+  [[ -f "${BOOTSTRAP_TOKEN_SOURCE}" && ! -L "${BOOTSTRAP_TOKEN_SOURCE}" && -s "${BOOTSTRAP_TOKEN_SOURCE}" ]] ||
+    fail "BOOTSTRAP_TOKEN_SOURCE must be a non-empty regular file (not a symlink) provisioned through a protected channel"
+  bootstrap_mode="$(stat -c '%a' -- "${BOOTSTRAP_TOKEN_SOURCE}")" ||
+    fail "cannot inspect BOOTSTRAP_TOKEN_SOURCE permissions"
+  (( (8#${bootstrap_mode} & 8#077) == 0 )) ||
+    fail "BOOTSTRAP_TOKEN_SOURCE must not be accessible by group or other users (found mode ${bootstrap_mode})"
 }
 
 resolve_trust_anchor() {
@@ -841,7 +844,8 @@ ensure_protected_install() {
 }
 
 prepare_bootstrap_token() {
-  local metadata
+  local metadata source_digest target_digest
+  [[ -z "${ENROLLED_NODE_ID}" ]] || return 0
   [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]] || return 0
   if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
     metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
@@ -850,7 +854,11 @@ prepare_bootstrap_token() {
     fi
     [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
       fail "the existing bootstrap token ${ENROLLMENT_TOKEN_FILE} must be root:ocserv-agent mode 0640 (found ${metadata})"
-    priv cmp -s -- "${BOOTSTRAP_TOKEN_SOURCE}" "${ENROLLMENT_TOKEN_FILE}" ||
+    source_digest="$(priv sha256sum -- "${BOOTSTRAP_TOKEN_SOURCE}" | awk '{print $1}')" ||
+      fail "cannot hash the protected bootstrap token source"
+    target_digest="$(priv sha256sum -- "${ENROLLMENT_TOKEN_FILE}" | awk '{print $1}')" ||
+      fail "cannot hash the already staged bootstrap token"
+    [[ "${source_digest}" == "${target_digest}" ]] ||
       fail "the protected bootstrap token source does not match the already staged token; resolve the conflicting secret deliberately"
     return
   fi
@@ -1207,6 +1215,9 @@ else
 fi
 resolve_agent_group
 detect_enrolled_node
+if [[ -z "${ENROLLED_NODE_ID}" ]]; then
+  validate_bootstrap_token_source
+fi
 prepare_production_node
 if [[ -n "${ENROLLED_NODE_ID}" ]]; then
   validate_enrolled_identity

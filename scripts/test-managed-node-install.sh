@@ -1375,7 +1375,14 @@ if as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token"; then
   die "the staged bootstrap token must be removed after success"
 fi
 assert_log_empty "${systemctl_log}"
-echo "a protected bootstrap token reaches PENDING_APPROVAL in one run"
+bootstrap_enrollment_calls="$(grep -c -- "--enrollment-token-file" "${agent_log}")"
+capture_root
+assert_status 0 "an enrolled node must tolerate the unchanged bootstrap source configuration"
+assert_output "PENDING_APPROVAL"
+[[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${bootstrap_enrollment_calls}" ]] ||
+  die "an enrolled rerun with the consumed bootstrap source configured must not enroll again"
+assert_systemctl_read_only
+echo "a protected bootstrap token reaches PENDING_APPROVAL and reruns with unchanged configuration"
 
 # 15b. bootstrap enrollment failure keeps the protected source for an
 # idempotent retry and does not finalize agent.env.

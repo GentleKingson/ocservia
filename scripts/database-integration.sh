@@ -385,6 +385,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 30")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")" = "30|29"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='node_bootstrap_tokens'")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_bootstrap_tokens','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='scheduler_leadership'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='connection_owner_fencing'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('privd_attestation_enrollment_credentials','node_privd_attestation_keys')")" = "2"
@@ -429,6 +430,12 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_app -d ocservia -c "
     INSERT INTO workspaces (id, name, slug, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000001', 'One', 'one', now(), now()), ('00000000-0000-7000-8000-000000000002', 'Two', 'two', now(), now());
     INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000003', '00000000-0000-7000-8000-000000000001', 'node', 'active', now(), now());
+    INSERT INTO node_bootstrap_tokens (id, workspace_id, token_hash, expected_environment, expires_at, created_by, created_at)
+    VALUES ('00000000-0000-7000-8000-000000000030', '00000000-0000-7000-8000-000000000001', decode(repeat('30', 32), 'hex'), 'production', now() + interval '1 hour', 'runtime-privilege-test', now());
+    UPDATE node_bootstrap_tokens
+    SET bound_endpoint_id = decode(repeat('31', 32), 'hex'), consumed_node_id = '00000000-0000-7000-8000-000000000003', consumed_at = now()
+    WHERE id = '00000000-0000-7000-8000-000000000030';
+    SELECT id FROM node_bootstrap_tokens WHERE id = '00000000-0000-7000-8000-000000000030';
   " >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT authorization_revision > 0 FROM nodes WHERE id='00000000-0000-7000-8000-000000000003'")" = "t"
   # A terminal reconciliation projection must block version 27 rollback
