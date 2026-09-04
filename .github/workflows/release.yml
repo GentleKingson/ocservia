@@ -328,6 +328,8 @@ jobs:
             version="${INPUT_VERSION}"
           fi
           echo "version=${version}" >>"${GITHUB_ENV}"
+      - name: Prepare versioned bootstrap assets
+        run: scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"
       - name: Validate both architecture package sets
         run: |
           # No production pin here: a dispatch build validates the internal
@@ -528,6 +530,8 @@ jobs:
               "controller-release-amd64.json.sha256" \
               "controller-release-arm64.json" \
               "controller-release-arm64.json.sha256" \
+              "controller-bootstrap.sh" \
+              "managed-node-bootstrap.sh" \
               "SHA256SUMS" \
               "SHA256SUMS.sig" \
               "release-signing.pub.pem"; do
@@ -575,6 +579,9 @@ jobs:
       - name: Bootstrap pinned nfpm tool
         if: steps.release_state.outputs.mode != 'verify-published'
         run: scripts/bootstrap.sh native-packages
+      - name: Prepare versioned bootstrap assets
+        if: steps.release_state.outputs.mode != 'verify-published'
+        run: scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"
       - name: Login to GitHub Container Registry
         if: steps.release_state.outputs.mode != 'verify-published'
         env:
@@ -832,6 +839,8 @@ jobs:
             "${assets}/controller-release-amd64.json.sha256" \
             "${assets}/controller-release-arm64.json" \
             "${assets}/controller-release-arm64.json.sha256" \
+            "${assets}/controller-bootstrap.sh" \
+            "${assets}/managed-node-bootstrap.sh" \
             "${assets}/SHA256SUMS" \
             "${assets}/SHA256SUMS.sig" \
             "${assets}/release-signing.pub.pem"

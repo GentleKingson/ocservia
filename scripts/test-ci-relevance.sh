@@ -22,7 +22,7 @@ paths=(
   deploy/production/rotate-postgres-credentials.sh openapi/openapi.yaml
   proto/ocserv/platform/agent/v1/agent.proto tools/g6-harness/internal/smoke/pipeline.go
   deploy/systemd/ocservia-agent.service .github/workflows/g6-harness-smoke.yml
-  .github/workflows/release.yml scripts/ci-relevance.sh scripts/test-controller-release-smoke.sh scripts/test-controller-release-bundle.sh scripts/verify-controller-release-bundle.sh scripts/test-controller-lifecycle.sh scripts/test-controller-compose-lifecycle.sh scripts/test-controller-host-bootstrap.sh web/package.json
+  .github/workflows/release.yml scripts/ci-relevance.sh scripts/prepare-bootstrap-release-assets.sh scripts/test-controller-release-smoke.sh scripts/test-controller-release-bundle.sh scripts/verify-controller-release-bundle.sh scripts/test-controller-lifecycle.sh scripts/test-controller-compose-lifecycle.sh scripts/test-controller-host-bootstrap.sh web/package.json
   deploy/production/controller.sh deploy/production/controller-release-smoke.sh deploy/production/bootstrap-host.sh
   deploy/production/install.sh scripts/test-controller-install.sh
   deploy/production/controller-bootstrap.sh scripts/test-controller-bootstrap.sh
@@ -138,13 +138,15 @@ expect_only "${out}" run_production_relays
 out="$(case_commit controller_install_test scripts/test-controller-install.sh)"
 expect_only "${out}" run_production_relays
 out="$(case_commit controller_stage1_bootstrap deploy/production/controller-bootstrap.sh)"
-expect_only "${out}" run_production_relays
+expect_only "${out}" run_production_relays run_contracts_policy
 out="$(case_commit controller_stage1_bootstrap_test scripts/test-controller-bootstrap.sh)"
 expect_only "${out}" run_production_relays
 out="$(case_commit managed_node_installer deploy/managed-node/install.sh)"
 expect_only "${out}" run_native run_contracts_policy
 out="$(case_commit managed_node_install_test scripts/test-managed-node-install.sh)"
 expect_only "${out}" run_native run_contracts_policy
+out="$(case_commit bootstrap_release_assets scripts/prepare-bootstrap-release-assets.sh)"
+expect_only "${out}" run_contracts_policy
 out="$(case_commit install_env_loader deploy/lib/install-env.sh)"
 expect_only "${out}" run_native run_contracts_policy run_production_relays
 out="$(case_commit install_env_example install.env.example)"
