@@ -48,6 +48,14 @@ operator's protected provisioning channel. Stage-1 and the existing lifecycle
 remain responsible for configuration, package and release verification,
 installation, enrollment, and activation.
 
+This Ed25519 verification path requires OpenSSL 3. That matches the managed-node
+support matrix. The Controller itself also supports Ubuntu 20.04 and Debian 11,
+but their distribution OpenSSL 1.1.1 cannot perform this verification. On those
+two Controller platforms, do not use Stage-0; continue to use the clean exact
+release checkout path in [Deploy the Controller](../getting-started/production.md).
+This narrows only the optional Controller Stage-0 entrypoint, not the existing
+Controller support matrix.
+
 The first bytes in a `curl | bash` flow cannot authenticate themselves. Before
 Stage-0 has started, that flow relies only on the HTTPS endpoint and its PKI;
 verifying the downloaded Stage-1 does not provide out-of-band authenticity for
@@ -66,18 +74,34 @@ same release as the artifact it is meant to authenticate.
 ## Intended entrypoints
 
 After the static endpoints are deployed and their bytes have been verified,
-the convenience forms are:
+the convenience forms first download Stage-0, require its final completeness
+marker, and only then execute it. The surrounding subshell makes a transport,
+empty-body, or truncated-body failure visible to automation:
 
 ```bash
 export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
 export EXPECTED_RELEASE_KEY_SHA256=<64-lowercase-hex-fingerprint>
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://get.ocservia.example/install-controller | \
-  bash -s -- --version vX.Y.Z
+(
+  set -eu
+  stage0="$(mktemp)" || exit 1
+  trap 'rm -f -- "$stage0"' EXIT
+  trap 'exit 1' HUP INT TERM
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$stage0" \
+    https://get.ocservia.example/install-controller || exit 1
+  test "$(tail -n 1 "$stage0")" = 'main "$@"' || exit 1
+  bash "$stage0" --version vX.Y.Z
+)
 
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://get.ocservia.example/install-node | \
-  bash -s -- --version vX.Y.Z
+(
+  set -eu
+  stage0="$(mktemp)" || exit 1
+  trap 'rm -f -- "$stage0"' EXIT
+  trap 'exit 1' HUP INT TERM
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$stage0" \
+    https://get.ocservia.example/install-node || exit 1
+  test "$(tail -n 1 "$stage0")" = 'main "$@"' || exit 1
+  bash "$stage0" --version vX.Y.Z
+)
 ```
 
 Only `--root-lifecycle` and, for the Controller, `--check` are accepted beyond

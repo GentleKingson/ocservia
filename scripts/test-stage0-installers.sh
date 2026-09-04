@@ -21,13 +21,27 @@ output=""
 url="${!#}"
 while (($# > 0)); do
   case "$1" in
-    --output) output="$2"; shift 2 ;;
+    -o|--output) output="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 printf '%s\n' "${url}" >>"${TEST_DOWNLOAD_LOG}"
 case "${TEST_DOWNLOAD_MODE:-success}" in
   tls) exit 35 ;;
+  404-stage0)
+    case "${url}" in */install-controller|*/install-node) exit 22 ;; esac
+    ;;
+  empty-stage0)
+    case "${url}" in */install-controller|*/install-node) : >"${output}"; exit 0 ;; esac
+    ;;
+  truncated-stage0)
+    case "${url}" in
+      */install-controller|*/install-node)
+        head -n -1 "${TEST_RELEASE_DIR}/${url##*/}" >"${output}"
+        exit 0
+        ;;
+    esac
+    ;;
   404-stage1)
     case "${url}" in */controller-bootstrap.sh|*/managed-node-bootstrap.sh) exit 22 ;; esac
     ;;
@@ -84,6 +98,33 @@ run_installer() {
       "${installer}" "$@"
   )
 }
+
+run_documented_fetch() (
+  set -eu
+  local endpoint="$1" mode="${2:-success}" stage0
+  cd "${fixture}"
+  stage0="$(TMPDIR="${fixture}/tmp" mktemp)" || exit 1
+  trap 'rm -f -- "$stage0"' EXIT
+  trap 'exit 1' HUP INT TERM
+  PATH="${fixture}/bin:${PATH}" \
+    TEST_RELEASE_DIR="${fixture}/release" \
+    TEST_DOWNLOAD_LOG="${fixture}/downloads.log" \
+    TEST_DOWNLOAD_MODE="${mode}" \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "${stage0}" \
+      "https://get.ocservia.example/${endpoint}" || exit 1
+  test "$(tail -n 1 "${stage0}")" = 'main "$@"' || exit 1
+  PATH="${fixture}/bin:${PATH}" \
+    TMPDIR="${fixture}/tmp" \
+    TEST_RELEASE_DIR="${fixture}/release" \
+    TEST_DOWNLOAD_LOG="${fixture}/downloads.log" \
+    TEST_EXEC_LOG="${fixture}/exec.log" \
+    TEST_ARGS_LOG="${fixture}/args.log" \
+    TEST_TEMP_LOG="${fixture}/temp.log" \
+    TEST_DOWNLOAD_MODE="${mode}" \
+    TRUSTED_RELEASE_KEY="${fixture}/release-key.pub.pem" \
+    EXPECTED_RELEASE_KEY_SHA256="${fingerprint}" \
+    bash "${stage0}" --version v1.2.3
+)
 
 for installer in "${CONTROLLER}" "${NODE}"; do
   for args in "" "--version latest" "--version v1.2.3-rc.1" "--version main" "--version deadbeef"; do
@@ -143,6 +184,7 @@ for mode in 404-stage1 tls; do
 done
 
 cp -- "${CONTROLLER}" "${fixture}/release/install-controller"
+cp -- "${NODE}" "${fixture}/release/install-node"
 PATH="${fixture}/bin:${PATH}" \
   TEST_RELEASE_DIR="${fixture}/release" \
   TEST_DOWNLOAD_LOG="${fixture}/downloads.log" \
@@ -157,10 +199,30 @@ if PATH="${fixture}/bin:${PATH}" \
   fail "endpoint verifier accepted different deployed bytes"
 fi
 
+: >"${fixture}/exec.log"
+for endpoint in install-controller install-node; do
+  expected_stage1="${endpoint#install-}"
+  run_documented_fetch "${endpoint}" success >"${fixture}/output" 2>&1 ||
+    fail "the documented complete ${endpoint} fetch failed"
+  [[ "$(tail -n 1 "${fixture}/exec.log")" == "${expected_stage1}" ]] ||
+    fail "the documented complete ${endpoint} fetch did not reach its Stage-1"
+done
+for mode in tls 404-stage0 empty-stage0 truncated-stage0; do
+  for endpoint in install-controller install-node; do
+    : >"${fixture}/exec.log"
+    if run_documented_fetch "${endpoint}" "${mode}" >"${fixture}/output" 2>&1; then
+      fail "the documented ${endpoint} fetch accepted ${mode}"
+    fi
+    [[ ! -s "${fixture}/exec.log" ]] || fail "the documented ${mode} fetch reached Stage-1"
+  done
+done
+
 head -n -1 "${CONTROLLER}" >"${fixture}/truncated"
 chmod 0700 "${fixture}/truncated"
 : >"${fixture}/exec.log"
+set +e
 PATH="${fixture}/bin:${PATH}" TEST_EXEC_LOG="${fixture}/exec.log" "${fixture}/truncated" --version v1.2.3
+set -e
 [[ ! -s "${fixture}/exec.log" ]] || fail "a truncated Stage-0 script executed main"
 
 for installer in "${CONTROLLER}" "${NODE}"; do

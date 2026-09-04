@@ -43,7 +43,7 @@ verify_stage1() {
     fail "release public key fingerprint does not match EXPECTED_RELEASE_KEY_SHA256"
   openssl pkeyutl -verify -rawin -pubin -inkey "${key}" \
     -in "${directory}/SHA256SUMS" -sigfile "${directory}/SHA256SUMS.sig" >/dev/null 2>&1 ||
-    fail "SHA256SUMS signature verification failed"
+    fail "SHA256SUMS signature verification failed (verified Controller Stage-0 requires OpenSSL 3; Ubuntu 20.04 and Debian 11 must use the exact-release checkout path)"
 
   expected_digest=""
   matches=0
