@@ -243,7 +243,7 @@ fi
 # deploy/lib/install-env.sh, kept functionally identical to it. This script
 # must stay a single self-contained file (it runs without a repository
 # checkout), so it cannot source the shared loader; any contract change is
-# made in both places. Contract:
+# made in the shared loader and both Stage-1 copies. Contract:
 # - The caller names its own allowlist; any other key in the file fails
 #   closed, so a typo cannot silently drop a setting and internal test seams
 #   never gain a production configuration entry.

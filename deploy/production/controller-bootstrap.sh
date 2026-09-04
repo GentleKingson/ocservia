@@ -40,16 +40,15 @@
 #
 # Usage model:
 #   cd <directory holding install.env>
-#   deploy/production/controller-bootstrap.sh --version vX.Y.Z
-#   deploy/production/controller-bootstrap.sh --version vX.Y.Z --root-lifecycle
-#   deploy/production/controller-bootstrap.sh --version vX.Y.Z --check
+#   ./controller-bootstrap.sh --version vX.Y.Z
+#   ./controller-bootstrap.sh --version vX.Y.Z --root-lifecycle
+#   ./controller-bootstrap.sh --version vX.Y.Z --check
 #
 # The version must be an explicit exact vX.Y.Z release tag; latest,
 # branches, commits, and pre-releases are not accepted.
 set -euo pipefail
 umask 077
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPOSITORY_URL="https://github.com/GentleKingson/ocservia"
 CONFIG_ROOT="${PWD}"
 VERSION=""
@@ -82,6 +81,105 @@ INSTALL_ENV_NAMES=(
   OCSERV_RELAY_URL_B
   OCSERV_SECRET_DIR
 )
+
+# Embedded install.env loader: the Stage-1 contract copy of
+# deploy/lib/install-env.sh, kept functionally identical to it. This bootstrap
+# is a single self-contained Release asset, so it cannot source repository
+# siblings before it clones the requested release; any loader contract change
+# is made in all embedded and shared copies.
+install_env_die() {
+  echo "install.env: $1" >&2
+  exit 1
+}
+
+# install_env_load <file> <allowlisted-key>...
+install_env_load() {
+  local file="$1"
+  shift
+  local -a allowlist=("$@")
+  local -a seen=()
+  local -a preset=()
+  local allowed key line value mode first last lineno=0 known
+
+  if [[ -L "${file}" ]]; then
+    install_env_die "refusing the configuration symlink ${file}; install.env must be a regular file"
+  fi
+  if [[ ! -e "${file}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${file}" ]]; then
+    install_env_die "${file} is not a regular file"
+  fi
+  if [[ ! -r "${file}" ]]; then
+    install_env_die "${file} is not readable by the invoking user"
+  fi
+  mode="$(stat -c '%a' -- "${file}")" ||
+    install_env_die "cannot inspect the permissions of ${file}"
+  if (( (8#${mode} & 8#022) != 0 )); then
+    install_env_die "refusing the group/world-writable configuration file ${file} (mode ${mode})"
+  fi
+
+  for allowed in "${allowlist[@]}"; do
+    if [[ -n "${!allowed+x}" ]]; then
+      preset+=("${allowed}")
+    fi
+  done
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    lineno=$((lineno + 1))
+    if [[ -z "${line}" || "${line}" == \#* ]]; then
+      continue
+    fi
+    if [[ ! "${line}" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+      install_env_die "${file}:${lineno}: expected KEY=VALUE, a # comment, or a blank line"
+    fi
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    case "${value}" in
+      *'$'* | *'`'*)
+        install_env_die "${file}:${lineno}: ${key} must be a literal value; shell expansion syntax is never evaluated"
+        ;;
+    esac
+    if [[ "${value}" =~ [[:cntrl:]] ]]; then
+      install_env_die "${file}:${lineno}: ${key} contains a control character"
+    fi
+    if (( ${#value} >= 2 )); then
+      first="${value:0:1}"
+      last="${value:${#value}-1:1}"
+      if [[ ( "${first}" == "'" && "${last}" == "'" ) || ( "${first}" == '"' && "${last}" == '"' ) ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+    known=false
+    for allowed in "${allowlist[@]}"; do
+      if [[ "${key}" == "${allowed}" ]]; then
+        known=true
+        break
+      fi
+    done
+    if [[ "${known}" != true ]]; then
+      install_env_die "${file}:${lineno}: unknown configuration variable ${key}"
+    fi
+    for allowed in ${seen[@]+"${seen[@]}"}; do
+      if [[ "${key}" == "${allowed}" ]]; then
+        install_env_die "${file}:${lineno}: duplicate configuration variable ${key}"
+      fi
+    done
+    seen+=("${key}")
+    for allowed in ${preset[@]+"${preset[@]}"}; do
+      if [[ "${key}" == "${allowed}" ]]; then
+        continue 2
+      fi
+    done
+    printf -v "${key}" '%s' "${value}"
+    # shellcheck disable=SC2163 # key is a validated allowlisted identifier
+    export "${key}"
+  done <"${file}"
+
+  if (( ${#seen[@]} > 0 )); then
+    echo "loaded configuration from ${file}"
+  fi
+}
 
 fail() {
   echo "controller bootstrap: $1" >&2
@@ -153,10 +251,6 @@ validate_source_component() {
 # Explicit shell variables keep winning over the file, so install.env-aware
 # installers observe exactly the same effective values as before.
 load_config() {
-  [[ -f "${ROOT}/deploy/lib/install-env.sh" ]] ||
-    fail "the install.env loader is missing from this checkout: ${ROOT}/deploy/lib/install-env.sh"
-  # shellcheck source=../lib/install-env.sh disable=SC1091
-  source "${ROOT}/deploy/lib/install-env.sh"
   install_env_load "${CONFIG_ROOT}/install.env" "${INSTALL_ENV_NAMES[@]}"
 }
 

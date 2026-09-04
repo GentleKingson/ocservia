@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTSTRAP="${ROOT}/deploy/production/controller-bootstrap.sh"
+BOOTSTRAP_SOURCE="${ROOT}/deploy/production/controller-bootstrap.sh"
+PREPARE_BOOTSTRAPS="${ROOT}/scripts/prepare-bootstrap-release-assets.sh"
 REPOSITORY_URL="https://github.com/GentleKingson/ocservia"
 
 # The bootstrap fixture asserts file modes with GNU stat; skip on hosts
@@ -15,7 +16,7 @@ command -v git >/dev/null 2>&1 || {
   echo "Controller bootstrap tests skipped: git is unavailable" >&2
   exit 0
 }
-[[ -x "${BOOTSTRAP}" ]] || {
+[[ -x "${BOOTSTRAP_SOURCE}" ]] || {
   echo "Controller bootstrap tests require an executable bootstrap script" >&2
   exit 1
 }
@@ -29,6 +30,17 @@ cleanup() {
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
+
+# Exercise the exact flat Release asset with no repository siblings. This is
+# the real Stage-1 entry shape, not the source path inside this checkout.
+release_assets="${fixture}/release-assets"
+mkdir -m 700 -- "${release_assets}"
+"${PREPARE_BOOTSTRAPS}" "${release_assets}"
+BOOTSTRAP="${release_assets}/controller-bootstrap.sh"
+[[ -x "${BOOTSTRAP}" && ! -e "${release_assets}/deploy" ]] || {
+  echo "Controller bootstrap tests require an isolated executable Release asset" >&2
+  exit 1
+}
 
 origin_work="${fixture}/origin-work"
 origin="${fixture}/origin.git"
@@ -343,7 +355,23 @@ assert_output "check passed"
 assert_log_empty "${install_log}"
 echo "check passes for the launcher lifecycle without mutation"
 
-# 6a. --check fails for a reachable tag that ships no installer.
+# 6a. The isolated Release asset also loads pure exported configuration when
+# no install.env or repository sibling exists.
+reset_state
+install_docker_client
+EXTRA_ENV=(
+  "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem"
+  "OCSERV_PUBLIC_HOST=controller-bootstrap.example.test"
+)
+capture_from "${config}" --version v0.1.2 --check
+assert_status 0 "the environment-only launcher check must pass"
+assert_output "lifecycle: launcher"
+assert_output "check passed"
+[[ ! -e "${config}/install.env" ]] ||
+  die "the environment-only check must not create install.env"
+echo "the isolated Release asset accepts pure exported configuration"
+
+# 6b. --check fails for a reachable tag that ships no installer.
 reset_state
 write_install_env
 capture_from "${config}" --version v0.1.0 --check
