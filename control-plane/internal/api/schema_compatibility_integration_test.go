@@ -32,6 +32,10 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 	}
 	server := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", expected)
 	defer server.closeEventStreams()
+	var originalCurrent, originalMinimum int64
+	if err := pool.QueryRow(ctx, `SELECT "current_schema", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton`).Scan(&originalCurrent, &originalMinimum); err != nil {
+		t.Fatal(err)
+	}
 
 	reset := func() {
 		if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version > $1", expected); err != nil {
@@ -42,7 +46,14 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 		}
 	}
 	reset()
-	defer reset()
+	defer func() {
+		if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version > $1", expected); err != nil {
+			t.Error(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE controller_schema_compatibility SET "current_schema" = $1, minimum_compatible_controller_schema = $2 WHERE singleton`, originalCurrent, originalMinimum); err != nil {
+			t.Error(err)
+		}
+	}()
 
 	readyStatus := func(label string, instance *Server, want int) map[string]any {
 		t.Helper()

@@ -321,6 +321,36 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
+  /node-bootstrap-tokens:
+    post:
+      operationId: createNodeBootstrapToken
+      summary: Create a one-time node bootstrap token
+      tags: [enrollment]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeBootstrapTokenRequest"
+      responses:
+        "201":
+          description: The plaintext token is returned once and is not persisted.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeBootstrapToken"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        default:
+          $ref: "#/components/responses/Problem"
   /nodes/{node_id}/approval:
     post:
       operationId: approveNode
@@ -2566,6 +2596,44 @@ components:
           type: string
           minLength: 43
           maxLength: 43
+          readOnly: true
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    NodeBootstrapTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [workspace_id, environment, reason]
+      properties:
+        workspace_id:
+          $ref: "#/components/schemas/UuidV7"
+        environment:
+          type: string
+          minLength: 1
+          maxLength: 64
+        expected_node_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 900
+          default: 900
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    NodeBootstrapToken:
+      type: object
+      additionalProperties: false
+      required: [id, token, expires_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/UuidV7"
+        token:
+          type: string
+          pattern: "^obt1_[A-Za-z0-9_-]{43}$"
           readOnly: true
         expires_at:
           $ref: "#/components/schemas/UtcDateTime"

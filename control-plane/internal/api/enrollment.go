@@ -28,6 +28,14 @@ type tokenRequest struct {
 	Reason             string `json:"reason"`
 }
 
+type bootstrapTokenRequest struct {
+	WorkspaceID      string `json:"workspace_id"`
+	Environment      string `json:"environment"`
+	ExpectedNodeName string `json:"expected_node_name"`
+	TTLSeconds       int64  `json:"ttl_seconds"`
+	Reason           string `json:"reason"`
+}
+
 type approvalRequest struct {
 	Labels       map[string]string `json:"labels"`
 	Policy       string            `json:"policy"`
@@ -67,6 +75,37 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token, err := s.enrollment.CreateToken(r.Context(), enrollment.TokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, ExpectedEndpointID: endpoint, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r)})
+	if err != nil {
+		s.writeEnrollmentError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusCreated, map[string]any{"id": token.ID, "token": token.Value, "expires_at": token.ExpiresAt})
+}
+
+func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request) {
+	if s.enrollment == nil {
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "enrollment is not enabled")
+		return
+	}
+	var body bootstrapTokenRequest
+	if !decodeStrictJSON(w, r, &body) {
+		return
+	}
+	workspaceID, err := parseUUIDv7(body.WorkspaceID)
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "workspace_id must be UUIDv7")
+		return
+	}
+	if !s.devAuth && workspaceID != workspace(r) {
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "workspace_id is outside the authorized scope")
+		return
+	}
+	if !validEnrollmentTTLSeconds(body.TTLSeconds) {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
+		return
+	}
+	token, err := s.enrollment.CreateBootstrapToken(r.Context(), enrollment.BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
 		return

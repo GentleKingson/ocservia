@@ -549,7 +549,7 @@ grep -Fq 'database compatibility preflight failed for rollback target' "${schema
 cmp -s "${cross_schema_current}" "${schema_state}/current-release.json"
 cmp -s "${different_schema_previous}" "${schema_state}/previous-release.json"
 test "$(sed -n '1p' "${schema_state}/compose.log")" = "ps --format json postgres backup"
-test "$(sed -n '2p' "${schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=29"
+test "$(sed -n '2p' "${schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=30"
 test "$(wc -l <"${schema_state}/compose.log")" -eq 2
 
 compatible_cross_schema_state="${fixture}/rollback-compatible-cross-schema"
@@ -560,7 +560,7 @@ chmod 600 "${compatible_cross_schema_state}/current-release.json" "${compatible_
 run_controller_rollback "${compatible_cross_schema_state}" env MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1
 cmp -s "${different_schema_previous}" "${compatible_cross_schema_state}/current-release.json"
 cmp -s "${cross_schema_current}" "${compatible_cross_schema_state}/previous-release.json"
-test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=29"
+test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=30"
 test "$(sed -n '3p' "${compatible_cross_schema_state}/compose.log")" = "config --quiet"
 test "$(sed -n '4p' "${compatible_cross_schema_state}/compose.log")" = "pull"
 test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
@@ -572,7 +572,7 @@ seed_upgrade_state "${minimum_schema_state}"
 cp -- "${cross_schema_current}" "${minimum_schema_state}/current-release.json"
 cp -- "${different_schema_previous}" "${minimum_schema_state}/previous-release.json"
 chmod 600 "${minimum_schema_state}/current-release.json" "${minimum_schema_state}/previous-release.json"
-if run_controller_rollback "${minimum_schema_state}" env MOCK_SCHEMA_MINIMUM=30 >"${minimum_schema_state}/output.log" 2>&1; then
+if run_controller_rollback "${minimum_schema_state}" env MOCK_SCHEMA_MINIMUM=31 >"${minimum_schema_state}/output.log" 2>&1; then
   echo "rollback below compatibility minimum was accepted" >&2
   exit 1
 fi
@@ -586,7 +586,7 @@ seed_upgrade_state "${current_schema_state}"
 cp -- "${cross_schema_current}" "${current_schema_state}/current-release.json"
 cp -- "${different_schema_previous}" "${current_schema_state}/previous-release.json"
 chmod 600 "${current_schema_state}/current-release.json" "${current_schema_state}/previous-release.json"
-if run_controller_rollback "${current_schema_state}" env MOCK_SCHEMA_CURRENT=28 >"${current_schema_state}/output.log" 2>&1; then
+if run_controller_rollback "${current_schema_state}" env MOCK_SCHEMA_CURRENT=29 >"${current_schema_state}/output.log" 2>&1; then
   echo "rollback above the current database schema was accepted" >&2
   exit 1
 fi

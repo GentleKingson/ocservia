@@ -38,6 +38,10 @@ func TestControllerSchemaCompatibilityMissingMetadataFailsClosedIntegration(t *t
 	if baseline.Version == 0 {
 		t.Fatal("compatibility baseline migration is missing")
 	}
+	original, err := readSchemaCompatibility(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, "DELETE FROM controller_schema_compatibility"); err != nil {
 		t.Fatal(err)
 	}
@@ -45,8 +49,8 @@ func TestControllerSchemaCompatibilityMissingMetadataFailsClosedIntegration(t *t
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO controller_schema_compatibility (
 				singleton, "current_schema", minimum_compatible_controller_schema
-			) VALUES (true, $1, $1)
-		`, expected); err != nil {
+			) VALUES (true, $1, $2)
+		`, original.CurrentSchema, original.MinimumCompatibleControllerSchema); err != nil {
 			t.Fatalf("restore compatibility baseline: %v", err)
 		}
 	}()

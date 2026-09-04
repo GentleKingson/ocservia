@@ -17,6 +17,9 @@ func TestBaselineRoleMatrixKeepsAdministrativeFunctionsSeparate(t *testing.T) {
 	if !slices.Contains(roleActions["SecurityAdmin"], "approval.approve") || !slices.Contains(roleActions["PlatformAdmin"], "*") {
 		t.Fatal("administrative role policy is incomplete")
 	}
+	if !slices.Contains(roleActions["SecurityAdmin"], "node_bootstrap_token.create") || slices.Contains(roleActions["Operator"], "node_bootstrap_token.create") || slices.Contains(roleActions["Viewer"], "node_bootstrap_token.create") {
+		t.Fatal("node bootstrap token creation is not restricted to administrative roles")
+	}
 	if !slices.Contains(roleActions["ConfigManager"], "config.plan") || !slices.Contains(roleActions["SecurityAdmin"], "config.review") || slices.Contains(roleActions["Operator"], "config.plan") {
 		t.Fatal("configuration planning and independent review permissions regressed")
 	}

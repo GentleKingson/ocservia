@@ -45,6 +45,8 @@ export * from "./GroupApplyRequest";
 export * from "./Health";
 export * from "./ListNodeCertificates200Response";
 export * from "./NodeApproval";
+export * from "./NodeBootstrapToken";
+export * from "./NodeBootstrapTokenRequest";
 export * from "./NodeIpBan";
 export * from "./NodeIpBanPage";
 export * from "./NodeObservedState";

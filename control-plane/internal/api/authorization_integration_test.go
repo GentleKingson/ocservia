@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	configplanstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan"
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
@@ -28,6 +30,45 @@ import (
 )
 
 type certificateArtifactFixture struct{ data []byte }
+
+func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap API',$2,now(),now())`, workspaceID, "bootstrap-api-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM audit_events WHERE workspace_id=$1; DELETE FROM node_bootstrap_tokens WHERE workspace_id=$1; DELETE FROM workspaces WHERE id=$1`, workspaceID)
+	}()
+	signer, err := commandauth.NewRandomSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{pool: pool, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.New(pool, "", "test", signer)}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test"}`, workspaceID.String())))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()))
+	response := httptest.NewRecorder()
+	server.createNodeBootstrapToken(response, request)
+	if response.Code != http.StatusCreated || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("bootstrap token status=%d cache-control=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || !strings.HasPrefix(body.Token, enrollment.BootstrapTokenPrefix) {
+		t.Fatalf("bootstrap token response=%q err=%v", body.Token, err)
+	}
+}
 
 func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil

@@ -24,6 +24,16 @@ import {
   EnrollmentTokenRequestToJSON,
 } from "../models/EnrollmentTokenRequest";
 import {
+  type NodeBootstrapToken,
+  NodeBootstrapTokenFromJSON,
+  NodeBootstrapTokenToJSON,
+} from "../models/NodeBootstrapToken";
+import {
+  type NodeBootstrapTokenRequest,
+  NodeBootstrapTokenRequestFromJSON,
+  NodeBootstrapTokenRequestToJSON,
+} from "../models/NodeBootstrapTokenRequest";
+import {
   type Problem,
   ProblemFromJSON,
   ProblemToJSON,
@@ -31,6 +41,10 @@ import {
 
 export interface CreateEnrollmentTokenRequest {
   enrollmentTokenRequest: EnrollmentTokenRequest;
+}
+
+export interface CreateNodeBootstrapTokenRequest {
+  nodeBootstrapTokenRequest: NodeBootstrapTokenRequest;
 }
 
 /**
@@ -102,6 +116,77 @@ export class EnrollmentApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<EnrollmentToken> {
     const response = await this.createEnrollmentTokenRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for createNodeBootstrapToken without sending the request
+   */
+  async createNodeBootstrapTokenRequestOpts(
+    requestParameters: CreateNodeBootstrapTokenRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeBootstrapTokenRequest"] == null) {
+      throw new runtime.RequiredError(
+        "nodeBootstrapTokenRequest",
+        'Required parameter "nodeBootstrapTokenRequest" was null or undefined when calling createNodeBootstrapToken().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/node-bootstrap-tokens`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: NodeBootstrapTokenRequestToJSON(
+        requestParameters["nodeBootstrapTokenRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Create a one-time node bootstrap token
+   */
+  async createNodeBootstrapTokenRaw(
+    requestParameters: CreateNodeBootstrapTokenRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<NodeBootstrapToken>> {
+    const requestOptions =
+      await this.createNodeBootstrapTokenRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      NodeBootstrapTokenFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Create a one-time node bootstrap token
+   */
+  async createNodeBootstrapToken(
+    requestParameters: CreateNodeBootstrapTokenRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<NodeBootstrapToken> {
+    const response = await this.createNodeBootstrapTokenRaw(
       requestParameters,
       initOverrides,
     );

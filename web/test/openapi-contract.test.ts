@@ -37,6 +37,15 @@ interface OpenApiDocument {
           token?: { readOnly?: unknown; writeOnly?: unknown };
         };
       };
+      NodeBootstrapToken?: {
+        properties?: {
+          token?: {
+            pattern?: unknown;
+            readOnly?: unknown;
+            writeOnly?: unknown;
+          };
+        };
+      };
       GroupApplyRequest?: {
         properties?: { members?: { maxItems?: unknown } };
       };
@@ -78,6 +87,17 @@ describe("OpenAPI invariants", () => {
       document.components?.schemas?.EnrollmentToken?.properties?.token
         ?.writeOnly,
     ).toBeUndefined();
+    expect(
+      document.components?.schemas?.NodeBootstrapToken?.properties?.token,
+    ).toMatchObject({
+      pattern: "^obt1_[A-Za-z0-9_-]{43}$",
+      readOnly: true,
+    });
+    expect(
+      document.components?.schemas?.NodeBootstrapToken?.properties?.token
+        ?.writeOnly,
+    ).toBeUndefined();
+    expect(document.paths?.["/node-bootstrap-tokens"]?.post).toBeDefined();
     expect(document.components?.securitySchemes?.oidc).toMatchObject({
       type: "apiKey",
       in: "cookie",

@@ -27,13 +27,14 @@ import (
 )
 
 const (
-	DefaultTokenTTL = 15 * time.Minute
-	MaxPendingNodes = 100
-	MaxClockSkew    = 5 * time.Minute
-	SessionGrantTTL = 5 * time.Minute
-	ProtocolMajor   = 1
-	ProtocolMinor   = 1
-	MaxMessageSize  = 1 << 20
+	DefaultTokenTTL      = 15 * time.Minute
+	BootstrapTokenPrefix = "obt1_"
+	MaxPendingNodes      = 100
+	MaxClockSkew         = 5 * time.Minute
+	SessionGrantTTL      = 5 * time.Minute
+	ProtocolMajor        = 1
+	ProtocolMinor        = 1
+	MaxMessageSize       = 1 << 20
 )
 
 var (
@@ -55,6 +56,16 @@ type TokenSpec struct {
 	ActorID            string
 	Reason             string
 	RequestID          string
+}
+
+type BootstrapTokenSpec struct {
+	WorkspaceID      uuid.UUID
+	Environment      string
+	ExpectedNodeName string
+	TTL              time.Duration
+	ActorID          string
+	Reason           string
+	RequestID        string
 }
 
 type Token struct {
@@ -163,6 +174,56 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 	return token, nil
 }
 
+func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenSpec) (Token, error) {
+	if spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
+		return Token{}, ErrInvalidRequest
+	}
+	ttl := spec.TTL
+	if ttl == 0 {
+		ttl = DefaultTokenTTL
+	}
+	if ttl <= 0 || ttl > DefaultTokenTTL {
+		return Token{}, ErrInvalidRequest
+	}
+	raw := make([]byte, 32)
+	if _, err := io.ReadFull(s.random, raw); err != nil {
+		return Token{}, fmt.Errorf("generate node bootstrap token: %w", err)
+	}
+	value := BootstrapTokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	digest := sha256.Sum256([]byte(value))
+	now := s.now().UTC()
+	token := Token{ID: uuid.Must(uuid.NewV7()), Value: value, ExpiresAt: now.Add(ttl)}
+	var expectedName any
+	if spec.ExpectedNodeName != "" {
+		expectedName = spec.ExpectedNodeName
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Token{}, fmt.Errorf("begin node bootstrap token transaction: %w", err)
+	}
+	defer rollback(tx)
+	var workspaceExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=$1)`, spec.WorkspaceID).Scan(&workspaceExists); err != nil {
+		return Token{}, fmt.Errorf("check node bootstrap token workspace: %w", err)
+	}
+	if !workspaceExists {
+		return Token{}, ErrNotFound
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO node_bootstrap_tokens
+		(id,workspace_id,token_hash,expected_environment,expected_node_name,expires_at,created_by,created_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, token.ID, spec.WorkspaceID, digest[:], spec.Environment, expectedName, token.ExpiresAt, spec.ActorID, now)
+	if err != nil {
+		return Token{}, fmt.Errorf("insert node bootstrap token: %w", err)
+	}
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, Action: "node_bootstrap_token.create", ResourceType: "node_bootstrap_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
+		return Token{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Token{}, fmt.Errorf("commit node bootstrap token transaction: %w", err)
+	}
+	return token, nil
+}
+
 // ValidateEnrollment authenticates the first application message without
 // consuming its one-time authority. Enroll repeats these checks while holding
 // the token row lock and atomically consumes it with the pending-node write.
@@ -172,6 +233,26 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 	}
 	if err := verifyEnrollmentProof(request); err != nil {
 		return err
+	}
+	if strings.HasPrefix(request.GetToken(), BootstrapTokenPrefix) {
+		digest, ok := bootstrapTokenDigest(request.GetToken())
+		if !ok {
+			return ErrInvalidToken
+		}
+		var permitted bool
+		err := s.pool.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM node_bootstrap_tokens
+			WHERE token_hash=$1 AND expected_environment=$2
+			  AND ((consumed_at IS NULL AND expires_at>$3) OR
+			       (consumed_at IS NOT NULL AND bound_endpoint_id=$4)))`,
+			digest[:], request.GetEnvironment(), s.now(), request.GetEndpointId()).Scan(&permitted)
+		if err != nil {
+			return fmt.Errorf("validate node bootstrap token: %w", err)
+		}
+		if !permitted {
+			return ErrInvalidToken
+		}
+		return nil
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
 	if err != nil || len(raw) != 32 {
@@ -198,6 +279,9 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	}
 	if err := verifyEnrollmentProof(request); err != nil {
 		return nil, err
+	}
+	if strings.HasPrefix(request.GetToken(), BootstrapTokenPrefix) {
+		return s.enrollBootstrap(ctx, request)
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
 	if err != nil || len(raw) != 32 {
@@ -336,6 +420,120 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit enrollment: %w", err)
+	}
+	return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
+}
+
+func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
+	var zero [sha256.Size]byte
+	if !strings.HasPrefix(value, BootstrapTokenPrefix) {
+		return zero, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, BootstrapTokenPrefix))
+	if err != nil || len(raw) != 32 || value != BootstrapTokenPrefix+base64.RawURLEncoding.EncodeToString(raw) {
+		return zero, false
+	}
+	return sha256.Sum256([]byte(value)), true
+}
+
+func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
+	digest, ok := bootstrapTokenDigest(request.GetToken())
+	if !ok {
+		return nil, ErrInvalidToken
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin node bootstrap enrollment: %w", err)
+	}
+	defer rollback(tx)
+	var tokenID, workspaceID uuid.UUID
+	var environment string
+	var expectedName *string
+	var expiresAt time.Time
+	var boundEndpoint []byte
+	var consumedNodeID *uuid.UUID
+	var consumedAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT id,workspace_id,expected_environment,expected_node_name,expires_at,
+		bound_endpoint_id,consumed_node_id,consumed_at FROM node_bootstrap_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
+		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expiresAt, &boundEndpoint, &consumedNodeID, &consumedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInvalidToken
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock node bootstrap token: %w", err)
+	}
+	if environment != request.GetEnvironment() {
+		return nil, ErrInvalidToken
+	}
+	if consumedAt != nil {
+		if consumedNodeID == nil || len(boundEndpoint) != 32 || subtle.ConstantTimeCompare(boundEndpoint, request.GetEndpointId()) != 1 {
+			return nil, ErrEndpointMismatch
+		}
+		var status, endpointState string
+		var persistedEndpoint []byte
+		err := tx.QueryRow(ctx, `SELECT n.status,k.state,k.endpoint_id FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1`, *consumedNodeID).
+			Scan(&status, &endpointState, &persistedEndpoint)
+		if err != nil || status != "pending" || endpointState != "pending" || subtle.ConstantTimeCompare(persistedEndpoint, request.GetEndpointId()) != 1 {
+			return nil, ErrInvalidToken
+		}
+		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
+	}
+	if !expiresAt.After(s.now()) || len(boundEndpoint) != 0 || consumedNodeID != nil {
+		return nil, ErrInvalidToken
+	}
+	if err := audit.LockChain(ctx, tx, workspaceID); err != nil {
+		return nil, err
+	}
+	var endpointExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1)`, request.GetEndpointId()).Scan(&endpointExists); err != nil {
+		return nil, fmt.Errorf("check bootstrap endpoint binding: %w", err)
+	}
+	if endpointExists {
+		return nil, ErrEndpointMismatch
+	}
+	var pending int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspaceID).Scan(&pending); err != nil {
+		return nil, fmt.Errorf("count pending nodes: %w", err)
+	}
+	if pending >= MaxPendingNodes {
+		return nil, ErrPendingLimit
+	}
+	now := s.now().UTC()
+	nodeID := uuid.Must(uuid.NewV7())
+	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
+	if expectedName != nil {
+		name = *expectedName
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'pending',$4,$4)`, nodeID, workspaceID, name, now); err != nil {
+		return nil, fmt.Errorf("insert bootstrap pending node: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'pending',$3)`, nodeID, request.GetEndpointId(), now); err != nil {
+		return nil, fmt.Errorf("bind bootstrap endpoint: %w", err)
+	}
+	sealingKeys := slices.Clone(request.GetSealingKeys())
+	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
+	for _, key := range sealingKeys {
+		if _, err := tx.Exec(ctx, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6)`, nodeID, key.GetPurpose(), key.GetVersion(), key.GetKeyId(), key.GetPublicKeySha256(), now); err != nil {
+			return nil, fmt.Errorf("record bootstrap password sealing key: %w", err)
+		}
+	}
+	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
+		if _, err := tx.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,false)`, nodeID, capability); err != nil {
+			return nil, fmt.Errorf("record bootstrap requested capability: %w", err)
+		}
+	}
+	command, err := tx.Exec(ctx, `UPDATE node_bootstrap_tokens SET bound_endpoint_id=$1,consumed_node_id=$2,consumed_at=$3 WHERE id=$4 AND consumed_at IS NULL`, request.GetEndpointId(), nodeID, now, tokenID)
+	if err != nil {
+		return nil, fmt.Errorf("consume node bootstrap token: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return nil, ErrInvalidToken
+	}
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit node bootstrap enrollment: %w", err)
 	}
 	return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
 }
