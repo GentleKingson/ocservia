@@ -343,7 +343,9 @@ cannot read the repository administration API.
   packages, both signed triples verified against the pinned fingerprint,
   `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
   identical embedded payloads, and a canonical `SHA256SUMS` covering those
-  six packages plus the three Controller manifests
+  six packages, the versioned `controller-bootstrap.sh` and
+  `managed-node-bootstrap.sh` copied byte-for-byte from the release checkout,
+  plus the three Controller manifests
   (`controller-release.json`, `controller-release-amd64.json`,
   `controller-release-arm64.json`) on formal Controller releases.
 - The Controller image build runs for tag-push release runs and manual
@@ -388,7 +390,10 @@ cannot read the repository administration API.
   overwriting), publish the draft, and verify the release attestation
   GitHub generated at publication with `gh release verify` plus an
   `immutable: true` assertion on the published release. A published
-  release is never modified: a rerun after a successful publication skips
+  release is never modified: GitHub's release attestation covers the bootstrap
+  assets along with the rest of the exact asset set, while their entries in the
+  Ed25519-signed `SHA256SUMS` preserve the independently pinned project trust
+  chain. A rerun after a successful publication skips
   every production-write step and instead re-verifies the published
   release in place (immutability, attestation, tag binding, and the
   complete asset-name set), so a transient attestation delay cannot leave
