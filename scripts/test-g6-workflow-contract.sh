@@ -10,16 +10,14 @@ formal = YAML.safe_load(File.read(formal_path), aliases: true)
 smoke = YAML.safe_load(File.read(smoke_path), aliases: true)
 core = YAML.safe_load(File.read(core_path), aliases: true)
 abort("formal caller must remain workflow_dispatch-only") unless formal.fetch(true).keys == ["workflow_dispatch"]
-abort("smoke caller must remain pull_request-only") unless smoke.fetch(true).keys == ["pull_request"]
+abort("smoke caller must remain workflow_dispatch-only") unless smoke.fetch(true).keys == ["workflow_dispatch"]
 [formal, smoke, core].each do |workflow|
   abort("G6 workflow permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
 end
 abort("formal caller must stay thin") unless formal.fetch("jobs").keys == ["g6-harness-core"]
-abort("smoke caller must keep relevance and one reusable core call") unless smoke.fetch("jobs").keys.sort == %w[g6-harness-core g6-smoke-relevance]
-smoke_relevance = smoke.fetch("jobs").fetch("g6-smoke-relevance")
-abort("smoke caller must use the unified three-dot impact classifier") unless
-  Array(smoke_relevance.fetch("steps")).any? { |step| step.fetch("run", "").include?("scripts/ci-relevance.sh pull_request") } &&
-    smoke_relevance.fetch("outputs").fetch("relevant").include?("run_g6_smoke")
+abort("manual smoke must keep one reusable core call") unless smoke.fetch("jobs").keys == ["g6-harness-core"]
+abort("manual smoke must always run the requested profile") unless
+  smoke.fetch("jobs").fetch("g6-harness-core").fetch("with").fetch("smoke_relevant") == true
 abort("core must remain workflow_call-only") unless core.fetch(true).keys == ["workflow_call"]
 inputs = core.fetch(true).fetch("workflow_call").fetch("inputs")
 abort("core inputs drifted") unless inputs.keys.sort == %w[authority candidate_sha profile smoke_relevant]
@@ -187,14 +185,8 @@ done
 ruby -r yaml - "${ROOT}/.github/workflows/rust-cache-provision.yml" <<'RUBY'
 provision = YAML.safe_load(File.read(ARGV[0]), aliases: true)
 
-abort("the Rust cache provisioner must have exactly push, schedule, and dispatch triggers") unless
-  provision.fetch(true).keys.sort == %w[push schedule workflow_dispatch]
-abort("the provisioner push trigger must fire for main only") unless
-  provision.fetch(true).fetch("push").fetch("branches") == ["main"]
-provision_paths = provision.fetch(true).fetch("push").fetch("paths")
-%w[rust/** toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh .github/actions/g6-cache-credentials/**].each do |path|
-  abort("the provisioner is missing cache input #{path}") unless provision_paths.include?(path)
-end
+abort("the Rust cache provisioner must stay outside PR and main-push CI") unless
+  provision.fetch(true).keys.sort == %w[schedule workflow_dispatch]
 abort("the provisioner must keep a scheduled refresh") unless
   provision.fetch(true).fetch("schedule").is_a?(Array) &&
     provision.fetch(true).fetch("schedule").all? { |entry| entry.key?("cron") }

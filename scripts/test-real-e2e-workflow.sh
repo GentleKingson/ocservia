@@ -50,11 +50,10 @@ runtime_invocations = jobs.values.sum do |job|
   job.fetch("steps").count { |step| step.fetch("run", "").include?("scripts/test-real-e2e-workflow.sh") }
 end
 reject("Cross-VM runtime jobs must not repeat the static workflow contract") unless runtime_invocations.zero?
-contracts_steps = ci_workflow.fetch("jobs").fetch("contracts-policy").fetch("steps")
-contract_invocations = contracts_steps.count do |step|
-  step.fetch("run", "").include?("scripts/test-real-e2e-workflow.sh")
+contract_invocations = ci_workflow.fetch("jobs").values.sum do |job|
+  Array(job["steps"]).count { |step| step.fetch("run", "").include?("scripts/test-real-e2e-workflow.sh") }
 end
-reject("Repository Contracts & Policy must run the Cross-VM workflow contract exactly once") unless contract_invocations == 1
+reject("Basic CI must not run Cross-VM contracts") unless contract_invocations.zero?
 
 required_services = %w[postgres migrate control-plane transportd transport-runtime-init controller-key-init]
 reject("Real E2E Controller service set is incomplete") unless (required_services - compose.fetch("services").keys).empty?

@@ -38,13 +38,7 @@ ci_count = ci_jobs.values.sum do |job|
     step.fetch("run", "").lines.count { |line| line.strip == hang_guard_command }
   end
 end
-reject("the hang-guard regression test must run exactly once in ordinary required CI") unless ci_count == 1
-contracts_steps = Array(ci_jobs.fetch("contracts-policy").fetch("steps"))
-reject("Contracts and Policy CI must own the hang-guard regression test") unless contracts_steps.any? do |step|
-  step.fetch("run", "").lines.any? { |line| line.strip == hang_guard_command }
-end
-reject("Contracts and Policy must remain in the required quality aggregate") unless
-  Array(ci_jobs.fetch("quality-security-native").fetch("needs")).include?("contracts-policy")
+reject("Basic CI must not run G6 hang-guard contracts") unless ci_count.zero?
 %w[g6-rd-fd-a g6-rd-fd-b].each do |job_id|
   steps = jobs.fetch(job_id).fetch("steps")
   reject("#{job_id} must not repeat the ordinary-CI hang-guard regression test") if steps.any? do |step|

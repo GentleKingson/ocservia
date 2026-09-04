@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-rust-integration|native|native-packages|rust-validation|web|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-rust-integration|native|native-packages|rust-basic|rust-validation|web|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-rust-integration | native | native-packages | rust-validation | web | security) ;;
+  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-rust-integration | native | native-packages | rust-basic | rust-validation | web | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -425,6 +425,10 @@ case "${PROFILE}" in
     install_go_quality_tools
     install_sccache
     verify_host_command jq
+    ;;
+  rust-basic)
+    install_rust
+    install_rust_validation_components
     ;;
   rust-validation)
     install_rust
