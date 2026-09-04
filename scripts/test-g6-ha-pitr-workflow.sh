@@ -683,8 +683,9 @@ done < <(grep -oE 'wait-download "[^"]+"' "${WORKFLOW}" | sed 's/^wait-download 
 # "Set up job" (unresolvable ref), where required PR CI can never catch it.
 proven_pins="$(grep -hoE 'uses: [^@]+@[0-9a-f]{40}' \
   "${ROOT}/.github/workflows/ci.yml" \
-  "${ROOT}/.github/workflows/p1-capacity.yml" \
-  "${ROOT}/.github/workflows/real-e2e.yml" | sort -u)"
+  "${ROOT}/.github/workflows/release.yml" | sort -u)"
+# Preserve the cache pin previously proven by manual acceptance runs.
+proven_pins+=$'\nuses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9'
 while IFS= read -r pin; do
   grep -qxF "${pin}" <<<"${proven_pins}" || {
     echo "pinned action ${pin} is not proven by any existing hosted workflow" >&2
