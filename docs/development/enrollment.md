@@ -13,6 +13,14 @@ consumption commit in one transaction. A consumed token can only be replayed
 by that same EndpointID and returns the same pending node ID; another endpoint
 is rejected. Bootstrap tokens never approve or activate a node.
 
+This is a strict permission boundary, not two names for the same operation.
+Bootstrap possession authorizes only creation or recovery of the bound
+`PENDING_APPROVAL` record. `node.approve` requires an authenticated requester,
+a content-bound approval request, a different authorized approver, and a later
+activation request carrying that approval. Service enablement remains a
+separate host action after Controller approval; successful bootstrap enrollment
+alone grants neither active capabilities nor a mutation-capable Agent session.
+
 The advanced manual path prepares the long-lived endpoint identity before
 requesting a legacy endpoint-bound token:
 

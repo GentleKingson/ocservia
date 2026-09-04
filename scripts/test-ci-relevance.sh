@@ -13,10 +13,11 @@ git -C "${fixture}" config user.name test
 git -C "${fixture}" config user.email test@example.invalid
 printf '*.output\n' >>"${fixture}/.git/info/exclude"
 paths=(
-  README.md docs/development/guide.md docs/acceptance/g6-slo.yaml
+  README.md docs/development/guide.md docs/operations/bootstrap-hosting.md docs/acceptance/g6-slo.yaml
   docs/acceptance/v0.2-release-readiness.md web/src/App.vue web/test/unit.test.ts
   web/e2e/app.spec.ts control-plane/internal/domain/helper.go
   control-plane/internal/auth/store.go control-plane/migrations/000001.up.sql
+  control-plane/internal/enrollment/service.go
   rust/crates/observability/src/lib.rs rust/crates/agent/src/lib.rs
   rust/crates/transportd-stub/src/lib.rs deploy/production/compose.yaml
   deploy/production/rotate-postgres-credentials.sh openapi/openapi.yaml
@@ -71,10 +72,12 @@ case_commit() {
   printf '%s\n' "${output}"
 }
 
-# Ordinary Markdown is CI-neutral; machine-readable G6 contracts add the
-# contracts/policy and G6 smoke domains.
+# Bootstrap contract Markdown runs contracts/policy; unrelated Markdown stays
+# CI-neutral, and machine-readable G6 contracts additionally run G6 smoke.
 out="$(case_commit readme README.md)"
-expect_only "${out}"
+expect_only "${out}" run_contracts_policy
+out="$(case_commit bootstrap_docs docs/operations/bootstrap-hosting.md)"
+expect_only "${out}" run_contracts_policy
 out="$(case_commit docs docs/development/guide.md)"
 expect_only "${out}"
 out="$(case_commit acceptance_markdown docs/acceptance/v0.2-release-readiness.md)"
@@ -97,6 +100,8 @@ out="$(case_commit go control-plane/internal/domain/helper.go)"
 expect_only "${out}" run_go_standard run_go_race
 out="$(case_commit db_go control-plane/internal/auth/store.go)"
 expect_only "${out}" run_go_standard run_go_race run_runtime_artifacts run_database
+out="$(case_commit enrollment control-plane/internal/enrollment/service.go)"
+expect_only "${out}" run_go_standard run_go_race run_runtime_artifacts run_database run_contracts_policy
 out="$(case_commit migration control-plane/migrations/000001.up.sql)"
 expect_only "${out}" run_runtime_artifacts run_database run_g6_smoke
 out="$(case_commit rust rust/crates/observability/src/lib.rs)"
@@ -141,13 +146,13 @@ expect_only "${out}" run_production_relays
 out="$(case_commit controller_stage1_bootstrap deploy/production/controller-bootstrap.sh)"
 expect_only "${out}" run_production_relays run_contracts_policy
 out="$(case_commit controller_stage1_bootstrap_test scripts/test-controller-bootstrap.sh)"
-expect_only "${out}" run_production_relays
+expect_only "${out}" run_production_relays run_contracts_policy
 out="$(case_commit controller_stage0 deploy/bootstrap/install-controller)"
 expect_only "${out}" run_production_relays run_contracts_policy
 out="$(case_commit node_stage0 deploy/bootstrap/install-node)"
-expect_only "${out}" run_production_relays run_contracts_policy
+expect_only "${out}" run_native run_contracts_policy
 out="$(case_commit stage0_test scripts/test-stage0-installers.sh)"
-expect_only "${out}" run_production_relays
+expect_only "${out}" run_production_relays run_native run_contracts_policy
 out="$(case_commit stage0_endpoint_verifier scripts/verify-bootstrap-endpoint.sh)"
 expect_only "${out}" run_contracts_policy
 out="$(case_commit managed_node_installer deploy/managed-node/install.sh)"

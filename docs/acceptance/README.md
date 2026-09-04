@@ -1,8 +1,14 @@
-# G6 acceptance contracts
+# Acceptance contracts
 
-This directory contains the public, machine-readable contracts consumed by the
-G6 production-readiness harness. It does not contain credentials, private
-topology details, or acceptance evidence.
+This directory contains public acceptance contracts and closeout maps. It does
+not contain credentials, private topology details, or run-specific acceptance
+evidence.
+
+- [Bootstrap installation closeout](bootstrap-install-closeout.md) maps the
+  thin installer, versioned bootstrap, guarded lifecycle, native package, and
+  supply-chain acceptance requirements to their automated evidence.
+- The remaining machine-readable files are consumed by the G6
+  production-readiness harness.
 
 - `g6-slo.yaml` is the only machine-readable source for G6 thresholds,
   comparators, units, scopes, and required timeline events.

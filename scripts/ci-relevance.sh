@@ -41,7 +41,9 @@ classify_path() {
       run_contracts_policy=true; run_stage_contracts=true; run_database=true; run_runtime_artifacts=true ;;
     docs/development/telemetry.md)
       run_contracts_policy=true; run_stage_contracts=true ;;
-    README.md|SECURITY.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|AGENTS.md|docs/*.md|docs/**/*.md)
+    README.md|docs/getting-started/production.md|docs/getting-started/managed-node.md|docs/how-to/enroll-node.md|docs/operations/production-deployment.md|docs/operations/agent-lifecycle.md|docs/operations/bootstrap-hosting.md|docs/development/enrollment.md|docs/development/github-actions.md|docs/development/contracts.md|docs/acceptance/bootstrap-install-closeout.md)
+      run_contracts_policy=true ;;
+    SECURITY.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|AGENTS.md|docs/*.md|docs/**/*.md)
       : ;;
     docs/acceptance/*)
       run_contracts_policy=true ;;
@@ -79,6 +81,7 @@ classify_path() {
       enable_go; run_contracts_policy=true ;;
     control-plane/internal/operations/*|control-plane/internal/enrollment/*|control-plane/internal/localslice/*|control-plane/internal/telemetry/*|control-plane/internal/userstate/*|control-plane/internal/useroperations/*|control-plane/internal/configplan/*|control-plane/internal/certificates/*|control-plane/internal/approvals/*|control-plane/internal/audit/*|control-plane/internal/rbac/*|control-plane/internal/auth/*|control-plane/internal/privdattestation/*|control-plane/internal/api/*|control-plane/internal/coordination/*|control-plane/internal/connectionowner/*|control-plane/internal/ownersession/*|control-plane/internal/postgresinput/*)
       enable_go; run_database=true; run_runtime_artifacts=true
+      if [[ "${path}" == control-plane/internal/enrollment/* ]]; then run_contracts_policy=true; fi
       case "${path}" in
         control-plane/internal/localslice/*|control-plane/internal/operations/*|control-plane/internal/eventstream/*|control-plane/internal/transportclient/*|control-plane/internal/trustserver/*|control-plane/internal/udssecurity/*) run_local_slice=true ;;
       esac
@@ -118,8 +121,10 @@ classify_path() {
       run_g6_smoke=true ;;
     deploy/production/rotate-postgres-credentials.sh|deploy/production/postgres-init/*|deploy/production/backup-entrypoint.sh|deploy/production/backup.Dockerfile)
       run_production_relays=true; run_credential_rotation=true ;;
-    deploy/production/controller.sh|deploy/production/controller-release-smoke.sh|deploy/production/controller-bootstrap.sh|deploy/bootstrap/*)
+    deploy/production/controller.sh|deploy/production/controller-release-smoke.sh|deploy/production/controller-bootstrap.sh|deploy/bootstrap/install-controller)
       run_production_relays=true; run_contracts_policy=true ;;
+    deploy/bootstrap/install-node)
+      run_native=true; run_contracts_policy=true ;;
     deploy/production/*|deploy/production/**/*)
       run_production_relays=true ;;
     deploy/compose/*|deploy/compose/**/*)
@@ -135,8 +140,12 @@ classify_path() {
 
     scripts/ci-relevance.sh)
       fail_closed ci_relevance_authority_changed ;;
-    scripts/test-controller-compose-lifecycle.sh|scripts/test-controller-host-bootstrap.sh|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|scripts/test-stage0-installers.sh)
+    scripts/test-controller-compose-lifecycle.sh|scripts/test-controller-host-bootstrap.sh|scripts/test-controller-install.sh)
       run_production_relays=true ;;
+    scripts/test-controller-bootstrap.sh)
+      run_production_relays=true; run_contracts_policy=true ;;
+    scripts/test-stage0-installers.sh)
+      run_production_relays=true; run_native=true; run_contracts_policy=true ;;
     scripts/test-ci-relevance.sh|scripts/test-bootstrap-profiles.sh|scripts/test-ci-runtime-artifact.sh|scripts/ci-runtime-artifact.sh|scripts/test-toolchain-consistency.sh|scripts/test-controller-release-manifest.sh|scripts/test-controller-release-bundle.sh|scripts/verify-controller-release-bundle.sh|scripts/test-controller-release-smoke.sh|scripts/test-controller-lifecycle.sh|scripts/test-release-checksum-manifest.sh|scripts/release-checksum-manifest.sh|scripts/prepare-bootstrap-release-assets.sh|scripts/generate-controller-release-manifest.mjs|scripts/verify-bootstrap-endpoint.sh)
       run_contracts_policy=true ;;
     scripts/g6-*|scripts/*g6*)

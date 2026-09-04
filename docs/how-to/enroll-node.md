@@ -3,6 +3,12 @@
 Enrollment binds a managed node's persistent EndpointID to a Controller node
 record. It does not activate the node; an operator must approve it afterward.
 
+A Bootstrap Token authorizes one narrowly scoped enrollment transaction: it
+may create only a pending node bound to the presenting EndpointID. It does not
+grant `node.approve`, select approved capabilities, activate the node, or start
+services. Approval is a separate content-bound decision by a different
+authorized principal.
+
 ## Before you begin
 
 - The Agent package is installed on the node.
@@ -198,6 +204,9 @@ bootstrap and this enrollment never start or enable a service themselves.
 
 - A token is one-time and short-lived. Create a new token instead of reusing a
   failed or expired one.
+- If the Controller committed bootstrap enrollment but the response was lost,
+  retry with the same token and the same persistent EndpointID. That exact
+  replay returns the same pending node; a different EndpointID is rejected.
 - The expected EndpointID, Controller EndpointID, and identity directory must
   match. A changed controller pin or replaced identity directory is a new
   trust decision.

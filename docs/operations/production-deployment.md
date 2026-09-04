@@ -5,6 +5,26 @@
 > detailed release, filesystem, security, lifecycle, rollback, and recovery
 > contracts.
 
+After its external endpoint is deployed and verified, the operator-hosted thin
+first-install chain preserves the existing lifecycle authorities:
+
+```text
+Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
+        -> production/install.sh -> signed manifest -> controller.sh
+        -> smoke/readiness
+```
+
+Stage-0 is a convenience boundary. Its first bytes rely on the static HTTPS
+endpoint, and it only parses the version and downloads Stage-1. The immutable
+versioned Stage-1 asset prepares a durable checkout but does not verify or
+activate a Controller release. The clean checkout, the signed manifest's
+`source_commit`, the independently provisioned release-signing key, the
+digest-pinned images, and `controller.sh` remain the production trust chain.
+`install.env` stays in the operator's configuration directory, separate from
+the durable release checkout.
+Until that hosting has operational ownership and byte-verification evidence,
+the public Quick Start obtains Stage-1 from a clean exact-release checkout.
+
 The production example in `deploy/production/compose.yaml` runs the HTTPS gateway, control plane, transport service, PostgreSQL, OpenTelemetry collector, and backup worker. It publishes only TCP 443. Database, application, and observability traffic remain on internal networks.
 
 Use digest-pinned images for every `OCSERV_*_IMAGE` variable. Put referenced secret files in an absolute, canonical, launcher-owned, mode-`0700` `OCSERV_SECRET_DIR` outside the checkout; every ancestor must be root- or launcher-owned and not group/world writable. General secrets must be launcher-owned mode `0444`: the private parent directory prevents host traversal while the read-only file allows each explicitly mounted non-root service to read it. The Ed25519 Controller command private key, `controller-command-signing-key.pem`, and the 32-byte lowercase-hex audit event key, `audit-event-key`, must be owned by UID/GID `65534:65532` with mode `0400`, matching the non-root Controller process. Set a non-secret stable identifier such as `OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1`; the identifier is stored with each event. The audit event key is independent from `audit-checkpoint-key` and must never be reused for checkpoints or another purpose. File-backed Compose secrets are bind mounts on supported deployments, so the source ownership is required even though the Compose target also declares it. The Iroh Controller key and relay token must be owned by UID/GID 65532 with mode `0400`. The launcher rejects missing files, symbolic links, unsafe host ancestry, and ownership or mode mismatches; the Controller loader additionally rejects a hard-linked audit event key and unsafe in-container ancestry. Do not place credentials in Compose environment variables.
@@ -25,6 +45,8 @@ Formal GitHub Releases publish the Controller release manifests
 `controller-release-amd64.json` and `controller-release-arm64.json` with their
 `.sha256` checksums alongside the Agent assets, plus the byte-identical
 `controller-release.json` alias of the amd64 manifest for existing operators.
+They also publish `controller-bootstrap.sh` and `managed-node-bootstrap.sh` as
+the immutable Stage-1 entrypoints covered by the same signed `SHA256SUMS`.
 Each manifest is the canonical release mapping for its platform: copy all six
 image references from its `images` object without replacing any digest with a
 tag. The gateway, control, transport, and backup references are first-party
@@ -211,6 +233,12 @@ deploy/production/controller.sh upgrade \
   --release-file /path/to/controller-release-arm64.json
 ```
 
+Prepare a clean checkout of the exact target release under the durable source
+root, then run the upgrade from that checkout. The current versioned bootstrap
+is a first-install entrypoint, not an upgrade command. Do not rerun an unpinned
+or `latest` Stage-0 convenience script as an implicit upgrade; Stage-0 is not a
+long-term lifecycle manager.
+
 Upgrade validates the confirmed current state and target first, checks the
 target `source_commit` against a clean checkout before any Compose operation,
 checks the current PostgreSQL and backup health, renders the target Compose configuration,
@@ -317,6 +345,9 @@ transaction exists. A Compose shutdown failure leaves confirmed state and data
 untouched. A failed volume purge is reported as partial and retains lifecycle
 state; a failed state cleanup reports the residual state paths instead of
 claiming that purge completed.
+
+Controller rollback and uninstall remain `controller.sh` operations over the
+protected lifecycle state. Neither operation downloads or re-enters Stage-0.
 
 Database compatibility is authoritative in the singleton
 `controller_schema_compatibility` row created by migration `000029`. Its

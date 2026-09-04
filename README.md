@@ -43,37 +43,46 @@ Open the Web console at `http://127.0.0.1:4173`. The control plane serves `http:
 
 Logs, teardown, simulator behavior, and configuration are described in [Control-plane development](docs/development/control-plane.md).
 
-## Production deployment
-
-Production deployments use the guarded Controller lifecycle in [`deploy/production/`](deploy/production/): digest-pinned images, protected file-backed secrets outside the checkout, and launcher-validated runtime paths. Direct `docker compose` invocation is not a supported production path.
-
-Supported Controller hosts: Ubuntu 20.04/22.04/24.04/26.04 and Debian 11/12/13 on `amd64` or `arm64`. Ubuntu 20.04 requires an existing compatible Docker installation.
-
-Install from a clean checkout of the release you are deploying — the lifecycle entrypoint verifies that the checkout HEAD matches the release manifest's `source_commit`:
+## Install the Controller
 
 ```bash
-git clone --branch <release-tag> --depth 1 \
-  https://github.com/GentleKingson/ocservia.git
-cd ocservia
+git clone --branch vX.Y.Z --single-branch --depth 1 \
+  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
+mkdir ocservia-install && cd ocservia-install
+cp ../ocservia-vX.Y.Z/install.env.example install.env
+editor install.env
+
+../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
+  --version vX.Y.Z
 ```
 
-With the production environment and secrets provisioned (see [Deploy the Controller](docs/getting-started/production.md)), one command bootstraps the host, downloads the release bundle for the host architecture, and installs the Controller:
+The Controller is pinned to the explicit release version. `install.env` is read
+from the current directory; production secrets, signing keys, identities, and
+other trust material must still be provisioned by the operator. See [Deploy the
+Controller](docs/getting-started/production.md) for the future operator-hosted
+Stage-0 path, hardened download verification, and complete lifecycle contract.
+
+## Install a managed node
 
 ```bash
-deploy/production/install.sh
+git clone --branch vX.Y.Z --single-branch --depth 1 \
+  https://github.com/GentleKingson/ocservia.git ocservia-vX.Y.Z
+mkdir ocservia-node-install && cd ocservia-node-install
+cp ../ocservia-vX.Y.Z/install.env.example install.env
+editor install.env
+
+../ocservia-vX.Y.Z/deploy/managed-node/install.sh
 ```
 
-On a host that already has Docker, run it as the lifecycle launcher user with Docker daemon access already granted. On a fresh host without Docker, run `deploy/production/install.sh --root-lifecycle` instead — a deliberate whole-lifecycle-as-root install; the installer forwards only the allowlisted production `OCSERV_*` settings through a controlled `sudo env`, a fresh Docker installation grants no non-root daemon access, the installer never changes Docker permissions, and plain whole-script `sudo` without the flag stays rejected.
-
-The underlying steps also remain available individually: `bootstrap-host.sh check|install` prepares host prerequisites, and `controller.sh install --release-file <manifest>` activates the manifest matching the host architecture. The same entrypoint manages `upgrade`, `rollback`, `start`, and `uninstall`. Start with [Deploy the Controller](docs/getting-started/production.md); the full install, upgrade, rollback, recovery, and security contracts remain in [Production deployment reference](docs/operations/production-deployment.md).
-
-## Managed nodes
-
-Each managed ocserv host runs the ocservia Agent (unprivileged) and `privd` (root, no network listener) as signed native packages: `.deb` (amd64, arm64), `.rpm` (x86_64, aarch64), and a signed `.tar.gz` archive, published with checksums and an Ed25519 signature in every [release](https://github.com/GentleKingson/ocservia/releases). Verification trusts a release-signing public key whose fingerprint is pinned out of band — never a key copied from the same bundle.
-
-Install a production managed node with the one-command bootstrap — the self-contained `deploy/managed-node/install.sh` for the exact release, run with `--version vX.Y.Z` from any directory holding the node configuration (no Git checkout required; inside a clean release-tag checkout it also runs without the flag). The `--version` mode requires a release that ships this Stage-1 bootstrap; older releases that ship the managed-node installer (starting with v0.4.0) use the checkout-based flow, and earlier releases follow their own historical installation instructions. It verifies the release out of band, installs the matching native package, and stops at `ENROLLMENT_READY`, then at `PENDING_APPROVAL` after enrollment; the services start only after an operator independently approves the node.
-
-Start with [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a node](docs/how-to/enroll-node.md). Package, rollback, and trust internals remain in [Agent package lifecycle](docs/operations/agent-lifecycle.md) and [Node enrollment reference](docs/development/enrollment.md).
+Keep only the managed-node section in `install.env` and configure
+`CONTROLLER_ENDPOINT_ID`, `RELAY_URL_A`, `RELAY_URL_B`,
+`RELAY_ACCESS_TOKEN_SOURCE`, `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE`, the
+release trust anchor, and the optional Bootstrap Token source. The installer
+selects and verifies the fixed release's native `.deb` or `.rpm`.
+When a protected Bootstrap Token is configured, it enrolls the node through
+`PENDING_APPROVAL`; a different authorized operator must still approve the node
+before its services are activated. See [Install a managed node](docs/getting-started/managed-node.md)
+and [Enroll a node](docs/how-to/enroll-node.md).
 
 ## Documentation
 
