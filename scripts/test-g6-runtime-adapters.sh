@@ -4862,12 +4862,11 @@ if command -v setsid >/dev/null 2>&1; then
       echo "forced sampler fixture did not become ready" >&2
       exit 1
     }
-    sleep() { :; }
+    # Preserve the shutdown grace periods so killed descendants can be reaped.
     if g6rd_stop_sampler >/dev/null 2>&1; then
       echo "sampler stop accepted a forced process-group termination" >&2
       exit 1
     fi
-    unset -f sleep
     [[ -s "${G6RD_STATE}/sampler-forced-at" \
       && ! -e "${G6RD_STATE}/sampler-complete-at" \
       && ! -e "${G6RD_STATE}/sampler.pid" ]] || {
@@ -5435,6 +5434,7 @@ rm -rf "${runtime_result_test}"
 proven_pins="$(grep -hoE 'uses: [^@]+@[0-9a-f]{40}' \
   "${ROOT}/.github/workflows/ci.yml" \
   "${ROOT}/.github/workflows/p1-capacity.yml" \
+  "${ROOT}/.github/workflows/release.yml" \
   "${ROOT}/.github/workflows/real-e2e.yml" | sort -u)"
 while IFS= read -r pin; do
   grep -qxF "${pin}" <<<"${proven_pins}" || {

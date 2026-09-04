@@ -166,7 +166,7 @@ test -x "${cache_helper}" || { echo "G6 cache fallback helper must be executable
 for cache_token in \
   "docker buildx build \"\${cache_args[@]}\" \"\$@\"" \
   "docker buildx build \"\$@\"" \
-  'cache_timeout="${G6_CACHE_TIMEOUT:-60s}"' '--cache-from' '--cache-to' \
+  "cache_timeout=\"\${G6_CACHE_TIMEOUT:-60s}\"" '--cache-from' '--cache-to' \
   'mode=max,ignore-error=true' 'PIPESTATUS[0]' \
   'failure_marker=' 'retrying once without external cache' \
   'G6_CACHE_STRICT_EXPORT' \

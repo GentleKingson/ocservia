@@ -19,6 +19,8 @@ fail_closed() {
   for flag in "${flags[@]}"; do printf -v "${flag}" true; done
 }
 
+# Flags are read indirectly through ${!flag} when writing the outputs.
+# shellcheck disable=SC2034
 classify_path() {
   local path="$1"
   case "${path}" in
