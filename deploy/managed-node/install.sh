@@ -13,8 +13,9 @@
 # runs as root, installs the native package with the production relay
 # request marker, prepares the production node state (sealing keys, relay
 # configuration, relay access token, Controller command verification key,
-# persistent identity), and stops at ENROLLMENT_READY.
-# When the operator later provisions the protected enrollment token file,
+# persistent identity), and either uses a protected bootstrap token source
+# immediately or stops at ENROLLMENT_READY.
+# When the operator provisions either token source,
 # rerunning this same entrypoint completes enrollment, atomically writes the
 # final /etc/ocservia-agent/agent.env, consumes the one-time token file, and
 # stops at PENDING_APPROVAL.
@@ -53,7 +54,7 @@
 # This script never reimplements the verified package lifecycle, the
 # enrollment protocol, or the approval boundary: the native package
 # scriptlets (postinst/preremove), the Agent CLI (--prepare-enrollment /
-# --enrollment-token-file), and the Controller's expected_endpoint_id token
+# --enrollment-token-file), and the Controller's possession-proof enrollment
 # contract remain the authorities. It never approves a node, never creates or
 # auto-approves an approval request, never places Controller administrator
 # credentials on the node, and never enables or starts a service.
@@ -71,6 +72,7 @@
 #   export RELAY_URL_B=https://relay-b.example.com
 #   export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
 #   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/key.pem
+#   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
 #   export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem        # default
 #   export EXPECTED_RELEASE_KEY_SHA256=<64-lowercase-hex>  # else read from
 #   #   /etc/ocservia/trusted-release-key.sha256 (the durable upgrader anchor)
@@ -78,10 +80,10 @@
 #   # the strict non-executing loader embedded below — the same contract as
 #   # deploy/lib/install-env.sh; explicit shell variables always win over the
 #   # file)
-#   deploy/managed-node/install.sh --version vX.Y.Z   # operator launcher user -> ENROLLMENT_READY
-#   # create a one-time token with expected_endpoint_id=<printed EndpointID>
-#   # and install it as /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640
 #   deploy/managed-node/install.sh --version vX.Y.Z   # -> PENDING_APPROVAL
+#   # Without BOOTSTRAP_TOKEN_SOURCE, this stops at ENROLLMENT_READY instead;
+#   # create an endpoint-bound token for the printed EndpointID, install it as
+#   # /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640, and rerun.
 #   # approve the node (docs/how-to/enroll-node.md#approve-the-node), then:
 #   sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
 #   deploy/managed-node/install.sh --version vX.Y.Z   # -> SERVICES_ACTIVE (read-only verification)
@@ -168,6 +170,7 @@ P12_SEAL_DESCRIPTOR=""
 # for the same reason as the Controller state root: an explicitly configured
 # root must stay identical on both sides of the boundary.
 ROOT_LIFECYCLE_ENV_NAMES=(
+  BOOTSTRAP_TOKEN_SOURCE
   CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE
   CONTROLLER_ENDPOINT_ID
   ENROLLMENT_ENVIRONMENT
@@ -367,6 +370,7 @@ install_env_load() {
 
 if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
   install_env_load "${PWD}/install.env" \
+    BOOTSTRAP_TOKEN_SOURCE \
     CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
     CONTROLLER_ENDPOINT_ID \
     ENROLLMENT_ENVIRONMENT \
@@ -386,6 +390,7 @@ fi
 USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
 P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
 ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
+BOOTSTRAP_TOKEN_SOURCE="${BOOTSTRAP_TOKEN_SOURCE:-}"
 
 # Privileged steps run one command at a time: directly when this process is
 # already the deliberate root lifecycle, otherwise through sudo with explicit
@@ -587,6 +592,17 @@ validate_operator_inputs() {
   done
   openssl pkey -pubin -in "${CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE}" >/dev/null 2>&1 ||
     fail "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE is not a readable public key PEM"
+}
+
+validate_bootstrap_token_source() {
+  local bootstrap_mode
+  [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]] || return 0
+  [[ -f "${BOOTSTRAP_TOKEN_SOURCE}" && ! -L "${BOOTSTRAP_TOKEN_SOURCE}" && -s "${BOOTSTRAP_TOKEN_SOURCE}" ]] ||
+    fail "BOOTSTRAP_TOKEN_SOURCE must be a non-empty regular file (not a symlink) provisioned through a protected channel"
+  bootstrap_mode="$(stat -c '%a' -- "${BOOTSTRAP_TOKEN_SOURCE}")" ||
+    fail "cannot inspect BOOTSTRAP_TOKEN_SOURCE permissions"
+  (( (8#${bootstrap_mode} & 8#077) == 0 )) ||
+    fail "BOOTSTRAP_TOKEN_SOURCE must not be accessible by group or other users (found mode ${bootstrap_mode})"
 }
 
 resolve_trust_anchor() {
@@ -825,6 +841,29 @@ ensure_protected_install() {
   fi
   priv install -o root -g ocserv-agent -m 0640 -- "${source}" "${target}"
   echo "installed ${purpose} (${target})"
+}
+
+prepare_bootstrap_token() {
+  local metadata source_digest target_digest
+  [[ -z "${ENROLLED_NODE_ID}" ]] || return 0
+  [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]] || return 0
+  if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
+    metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
+    if ! priv test -f "${ENROLLMENT_TOKEN_FILE}" || priv test -L "${ENROLLMENT_TOKEN_FILE}"; then
+      fail "the existing bootstrap token ${ENROLLMENT_TOKEN_FILE} is not a regular file"
+    fi
+    [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
+      fail "the existing bootstrap token ${ENROLLMENT_TOKEN_FILE} must be root:ocserv-agent mode 0640 (found ${metadata})"
+    source_digest="$(priv sha256sum -- "${BOOTSTRAP_TOKEN_SOURCE}" | awk '{print $1}')" ||
+      fail "cannot hash the protected bootstrap token source"
+    target_digest="$(priv sha256sum -- "${ENROLLMENT_TOKEN_FILE}" | awk '{print $1}')" ||
+      fail "cannot hash the already staged bootstrap token"
+    [[ "${source_digest}" == "${target_digest}" ]] ||
+      fail "the protected bootstrap token source does not match the already staged token; resolve the conflicting secret deliberately"
+    return
+  fi
+  priv install -o root -g ocserv-agent -m 0640 -- "${BOOTSTRAP_TOKEN_SOURCE}" "${ENROLLMENT_TOKEN_FILE}"
+  echo "protected node bootstrap token staged for enrollment"
 }
 
 detect_enrolled_node() {
@@ -1149,6 +1188,9 @@ converge_enrollment() {
     "${P12_PASSWORD_SEAL_KEY_ID}" "${P12_SEAL_DESCRIPTOR}" >"${staging}"
   write_config_atomic "${staging}" "${AGENT_ENV_FILE}" 0640
   priv rm -f -- "${ENROLLMENT_TOKEN_FILE}"
+  if [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]]; then
+    priv rm -f -- "${BOOTSTRAP_TOKEN_SOURCE}"
+  fi
   echo "enrollment complete; final ${AGENT_ENV_FILE} written and the one-time token file consumed"
   print_pending_approval "${node_id}"
 }
@@ -1173,10 +1215,14 @@ else
 fi
 resolve_agent_group
 detect_enrolled_node
+if [[ -z "${ENROLLED_NODE_ID}" ]]; then
+  validate_bootstrap_token_source
+fi
 prepare_production_node
 if [[ -n "${ENROLLED_NODE_ID}" ]]; then
   validate_enrolled_identity
 else
   prepare_identity
 fi
+prepare_bootstrap_token
 converge_enrollment

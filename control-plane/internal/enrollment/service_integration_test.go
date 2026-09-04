@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -113,6 +115,178 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	}
 	if count != 9 {
 		t.Fatalf("audit row count=%d", count)
+	}
+}
+
+func TestNodeBootstrapEnrollmentIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap integration',$2,now(),now())`, workspaceID, "bootstrap-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+
+	service := newTestService(t, pool, string(make([]byte, 64)), "test")
+	token, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: "bootstrap-node", ActorID: "integration", Reason: "bootstrap enrollment", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(token.Value, BootstrapTokenPrefix) {
+		t.Fatalf("bootstrap token = %q", token.Value)
+	}
+	var storedHash []byte
+	if err := pool.QueryRow(ctx, `SELECT token_hash FROM node_bootstrap_tokens WHERE id=$1`, token.ID).Scan(&storedHash); err != nil {
+		t.Fatal(err)
+	}
+	expectedHash := sha256.Sum256([]byte(token.Value))
+	if !bytes.Equal(storedHash, expectedHash[:]) || bytes.Contains(storedHash, []byte(token.Value)) {
+		t.Fatal("bootstrap token plaintext was not reduced to its SHA-256 digest")
+	}
+	var auditCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND action='node_bootstrap_token.create' AND resource_id=$2`, workspaceID, token.ID).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("bootstrap token audit count=%d err=%v", auditCount, err)
+	}
+
+	endpointA, endpointB := endpointFixture(41), endpointFixture(42)
+	invalidProof := enrollmentRequest(token.Value, endpointA)
+	invalidProof.Proof.Signature[0] ^= 1
+	if err := service.ValidateEnrollment(ctx, invalidProof); !errors.Is(err, ErrEndpointProof) {
+		t.Fatalf("invalid proof validation error = %v", err)
+	}
+	var boundEndpoint []byte
+	if err := pool.QueryRow(ctx, `SELECT bound_endpoint_id FROM node_bootstrap_tokens WHERE id=$1`, token.ID).Scan(&boundEndpoint); err != nil || boundEndpoint != nil {
+		t.Fatalf("invalid proof bound endpoint=%x err=%v", boundEndpoint, err)
+	}
+
+	wrongEnvironment := enrollmentRequest(token.Value, endpointA)
+	wrongEnvironment.Environment = "other"
+	signEnrollmentRequest(wrongEnvironment)
+	if err := service.ValidateEnrollment(ctx, wrongEnvironment); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("environment mismatch validation error = %v", err)
+	}
+
+	requestA := enrollmentRequest(token.Value, endpointA)
+	if err := service.ValidateEnrollment(ctx, requestA); err != nil {
+		t.Fatalf("bootstrap validation error = %v", err)
+	}
+	first, err := service.Enroll(ctx, requestA)
+	if err != nil || first.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
+		t.Fatalf("first bootstrap enrollment response=%v err=%v", first, err)
+	}
+	replay, err := service.Enroll(ctx, requestA)
+	if err != nil || !bytes.Equal(replay.GetNodeId(), first.GetNodeId()) || replay.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
+		t.Fatalf("same-endpoint replay response=%v err=%v", replay, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE node_bootstrap_tokens SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE id=$1`, token.ID); err != nil {
+		t.Fatal(err)
+	}
+	replay, err = service.Enroll(ctx, requestA)
+	if err != nil || !bytes.Equal(replay.GetNodeId(), first.GetNodeId()) {
+		t.Fatalf("expired consumed same-endpoint replay response=%v err=%v", replay, err)
+	}
+	if err := service.ValidateEnrollment(ctx, requestA); err != nil {
+		t.Fatalf("same-endpoint replay validation error = %v", err)
+	}
+	requestB := enrollmentRequest(token.Value, endpointB)
+	if _, err := service.Enroll(ctx, requestB); !errors.Is(err, ErrEndpointMismatch) {
+		t.Fatalf("cross-endpoint replay error = %v", err)
+	}
+	var nodeCount int
+	var nodeStatus string
+	if err := pool.QueryRow(ctx, `SELECT count(*),min(status) FROM nodes WHERE workspace_id=$1`, workspaceID).Scan(&nodeCount, &nodeStatus); err != nil || nodeCount != 1 || nodeStatus != "pending" {
+		t.Fatalf("bootstrap nodes count=%d status=%q err=%v", nodeCount, nodeStatus, err)
+	}
+
+	expired, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "expired bootstrap", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE node_bootstrap_tokens SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE id=$1`, expired.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enroll(ctx, enrollmentRequest(expired.Value, endpointFixture(45))); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expired bootstrap error = %v", err)
+	}
+
+	rollbackToken, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: "bootstrap-node", ActorID: "integration", Reason: "rollback bootstrap", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enroll(ctx, enrollmentRequest(rollbackToken.Value, endpointFixture(46))); err == nil {
+		t.Fatal("duplicate node name unexpectedly enrolled")
+	}
+	var consumedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT consumed_at,bound_endpoint_id FROM node_bootstrap_tokens WHERE id=$1`, rollbackToken.ID).Scan(&consumedAt, &boundEndpoint); err != nil || consumedAt != nil || boundEndpoint != nil {
+		t.Fatalf("rolled-back bootstrap consumed_at=%v endpoint=%x err=%v", consumedAt, boundEndpoint, err)
+	}
+
+	for index := 1; index < MaxPendingNodes; index++ {
+		if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'pending',now(),now())`, uuid.Must(uuid.NewV7()), workspaceID, fmt.Sprintf("capacity-%d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capacityToken, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "capacity bootstrap", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enroll(ctx, enrollmentRequest(capacityToken.Value, endpointFixture(47))); !errors.Is(err, ErrPendingLimit) {
+		t.Fatalf("bootstrap pending limit error = %v", err)
+	}
+}
+
+func TestNodeBootstrapConcurrentBindingIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap race',$2,now(),now())`, workspaceID, "bootstrap-race-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+	service := newTestService(t, pool, "", "test")
+	token, err := service.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "bootstrap race", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := []*agentv1.EnrollRequest{enrollmentRequest(token.Value, endpointFixture(43)), enrollmentRequest(token.Value, endpointFixture(44))}
+	results := make(chan error, len(requests))
+	var wait sync.WaitGroup
+	for _, request := range requests {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, enrollErr := service.Enroll(ctx, request)
+			results <- enrollErr
+		}()
+	}
+	wait.Wait()
+	close(results)
+	var successes int
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, ErrEndpointMismatch) {
+			t.Fatalf("unexpected concurrent binding error = %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent bootstrap successes = %d", successes)
 	}
 }
 
@@ -573,7 +747,12 @@ func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {
 
 func enrollmentRequestCapabilities(token string, endpoint []byte, capabilities []string) *agentv1.EnrollRequest {
 	request := &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: capabilities, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now(), EnrollmentProtocolMajor: EnrollmentProtocolMajor, EnrollmentProtocolMinor: EnrollmentProtocolMinor, SealingKeys: enrollmentSealingKeys()}
-	privateKey, ok := endpointPrivateKeys.Load(string(endpoint))
+	signEnrollmentRequest(request)
+	return request
+}
+
+func signEnrollmentRequest(request *agentv1.EnrollRequest) {
+	privateKey, ok := endpointPrivateKeys.Load(string(request.GetEndpointId()))
 	if !ok {
 		panic("missing enrollment endpoint private key fixture")
 	}
@@ -582,7 +761,6 @@ func enrollmentRequestCapabilities(token string, endpoint []byte, capabilities [
 		panic(err)
 	}
 	request.Proof = &agentv1.EnrollmentProofV1{Version: EnrollmentProofVersionV1, Signature: ed25519.Sign(privateKey.(ed25519.PrivateKey), canonical)}
-	return request
 }
 
 func enrollmentSealingKeys() []*agentv1.SealingKeyDescriptorV1 {
@@ -635,6 +813,7 @@ func cleanupWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.
 	_, _ = pool.Exec(ctx, `DELETE FROM node_trust_convergence WHERE node_id IN (SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM audit_events WHERE workspace_id=$1`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM enrollment_tokens WHERE workspace_id=$1`, workspaceID)
+	_, _ = pool.Exec(ctx, `DELETE FROM node_bootstrap_tokens WHERE workspace_id=$1`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM node_capabilities WHERE node_id IN (SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM node_endpoint_keys WHERE node_id IN (SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM nodes WHERE workspace_id=$1`, workspaceID)

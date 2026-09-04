@@ -33,9 +33,11 @@ exact release's `SHA256SUMS`, its signature, and the matching native package
 out-of-band release trust — trusted key fingerprint, `SHA256SUMS.sig`, and
 the selected package digest — **before** any package manager runs as root.
 It then prepares the production node state (sealing keys, relay URLs, relay
-access token, command verification key, persistent identity) and stops at
-`ENROLLMENT_READY`. It never approves the node, never enables or starts a
-service, and never weakens `expected_endpoint_id` binding.
+access token, command verification key, persistent identity). With a protected
+bootstrap token source it enrolls in the same run and stops at
+`PENDING_APPROVAL`; without one it preserves the advanced manual flow and stops
+at `ENROLLMENT_READY`. It never approves the node or enables or starts a
+service.
 
 Obtain `install.sh` for the exact release you are installing — a published
 release tag is immutable, so never fetch the script from a branch or `main`
@@ -51,6 +53,7 @@ export RELAY_URL_A="https://relay-a.example.com"
 export RELAY_URL_B="https://relay-b.example.com"
 export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/controller-command-verification-key.pem
+export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
 export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
 export EXPECTED_RELEASE_KEY_SHA256="replace-with-64-lowercase-hex-fingerprint"
 ./install.sh --version vX.Y.Z
@@ -92,10 +95,18 @@ like the durable upgrader trust anchors. The two source files must be
 protected provisioned copies of the relay access token and the Controller
 command verification public key. Optional inputs:
 `USER_PASSWORD_SEAL_KEY_ID` (default `user-password-v1`),
-`P12_PASSWORD_SEAL_KEY_ID` (default `p12-password-v1`), and
-`ENROLLMENT_ENVIRONMENT` (default `production`).
+`P12_PASSWORD_SEAL_KEY_ID` (default `p12-password-v1`),
+`ENROLLMENT_ENVIRONMENT` (default `production`), and the protected optional
+`BOOTSTRAP_TOKEN_SOURCE` path.
 
-The first successful run prints `ENROLLMENT_READY` and the node's EndpointID.
+With `BOOTSTRAP_TOKEN_SOURCE`, the first successful run prints
+`PENDING_APPROVAL`, atomically writes the final Agent configuration, and
+deletes both the staged token and its protected plaintext source. A failed
+enrollment leaves the source available for a convergent rerun and does not
+write final `agent.env`.
+
+Without `BOOTSTRAP_TOKEN_SOURCE`, the first successful run prints
+`ENROLLMENT_READY` and the node's EndpointID.
 Create a short-lived one-time token with
 `expected_endpoint_id=<printed EndpointID>` as described in [Enroll a
 node](../how-to/enroll-node.md), install it as

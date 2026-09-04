@@ -42,7 +42,7 @@ var roleActions = map[string][]string{
 	"UserManager":   {"node.read", "operation.read", "user.manage", "user.batch.disable", "group.manage", "approval.request"},
 	"ConfigManager": {"node.read", "operation.read", "config.plan", "config.review", "config.apply", "certificate.read", "certificate.issue", "secret.use", "approval.request"},
 	"Auditor":       {"node.read", "operation.read", "audit.read", "audit.verify"},
-	"SecurityAdmin": {"node.read", "operation.read", "config.review", "certificate.read", "certificate.revoke", "certificate.private_key.export", "secret.read", "secret.use", "secret.manage", "enrollment_token.create", "node.approve", "node.revoke", "privd.attestation.manage", "approval.request", "approval.approve", "role_binding.manage", "security_alert.read"},
+	"SecurityAdmin": {"node.read", "operation.read", "config.review", "certificate.read", "certificate.revoke", "certificate.private_key.export", "secret.read", "secret.use", "secret.manage", "enrollment_token.create", "node_bootstrap_token.create", "node.approve", "node.revoke", "privd.attestation.manage", "approval.request", "approval.approve", "role_binding.manage", "security_alert.read"},
 	"PlatformAdmin": {"*"},
 }
 

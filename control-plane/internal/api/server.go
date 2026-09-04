@@ -112,6 +112,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/events", s.requireOperationAuth(s.listEvents))
 	mux.HandleFunc("GET /api/v1/events/stream", s.requireOperationAuth(s.streamEvents))
 	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
+	mux.HandleFunc("POST /api/v1/node-bootstrap-tokens", s.requireOperationAuth(s.createNodeBootstrapToken))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/approval", s.requireOperationAuth(s.approveNode))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/revocation", s.requireOperationAuth(s.revokeNode))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/privd-attestation-credentials", s.requireOperationAuth(s.createPrivdAttestationCredential))
@@ -345,7 +346,7 @@ func routeMethod(path string) (string, bool) {
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
 		return http.MethodPost, true
-	case "/api/v1/enrollment-tokens", "/api/v1/auth/logout", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
+	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
 		return http.MethodPost, true
 	}
 	if path == "/api/v1/secret-provider-refs" {

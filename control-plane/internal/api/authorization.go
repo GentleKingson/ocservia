@@ -327,6 +327,8 @@ func routeAction(r *http.Request) string {
 		return "role_binding.manage"
 	case path == "/api/v1/enrollment-tokens":
 		return "enrollment_token.create"
+	case path == "/api/v1/node-bootstrap-tokens":
+		return "node_bootstrap_token.create"
 	case strings.HasPrefix(path, "/api/v1/operations"):
 		return "operation.read"
 	case strings.HasPrefix(path, "/api/v1/events"):
