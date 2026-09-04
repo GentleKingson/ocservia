@@ -12,20 +12,12 @@ rendezvous through run-scoped workflow artifacts, the same two-VM pattern
 as `docs/development/g6-ha-pitr-topology.md`, and evaluates the frozen
 contract in `docs/acceptance/g6-slo.yaml` end to end.
 
-The separate `.github/workflows/g6-harness-smoke.yml` pull-request caller
-invokes only the reusable core's bounded `smoke` profile. It schedules two
-hosted runners, proves they have distinct boot identities, and makes both
-execute one candidate-bound frozen release. The bounded fixture brings up a
-Primary and Standby, two real Agents per domain, one cross-domain authenticated
-session, one promotion, a 30-second observation, raw evidence, assembly,
-gitleaks, independent verification, and cleanup. It does not use a
-production-readiness Environment or emit a G6 verdict. Its
-`ocservia.g6-harness-smoke-result.v1` output always
-sets `formal_verdict_eligible` to `false`.
-The caller preserves that same result check for every pull request. Changes
-limited to ordinary documentation emit `status=not_applicable`; acceptance
-contracts and any executable or workflow change still run the complete hosted
-smoke, and an empty diff is treated as relevant.
+G6 runs only through manual `workflow_dispatch` in `g6-readiness.yml`,
+before a release or a major architecture change. It is not part of ordinary
+PR Basic CI. The caller passes `profile=formal`, the selected `authority`,
+and `candidate_sha=${{ github.sha }}` to the reusable core. The PR smoke
+entry point and all smoke jobs have been removed, with no replacement G6
+checks. G6-specific file changes select only Basic CI's docs check.
 
 A bounded producer job builds the candidate-labeled control-plane, transportd,
 relay, probe, and Agent images once and includes the exact PostgreSQL support

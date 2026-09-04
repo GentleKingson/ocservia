@@ -19,10 +19,14 @@ fail_closed() {
   for flag in "${flags[@]}"; do printf -v "${flag}" true; done
 }
 
+# Flags are read indirectly through ${!flag} when writing the outputs.
+# shellcheck disable=SC2034
 classify_path() {
   local path="$1"
   case "${path}" in
     docs/*|*.md|LICENSE|LICENSE.*)
+      run_docs=true ;;
+    .github/workflows/g6-*.yml|.github/actions/g6-*/*|scripts/*g6*|tools/g6-harness/*|deploy/g6-*/*|rust/g6-runtime.Dockerfile|rust/crates/g6-*/*)
       run_docs=true ;;
     .github/workflows/*|scripts/*|toolchains.lock|Makefile|.node-version|.nvmrc|.tool-versions)
       fail_closed infrastructure_changed ;;
