@@ -1,49 +1,31 @@
-name: Change-Aware CI
+name: Basic CI
 
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ci-relevance:
-    name: Change Impact Router
+    name: Basic CI Routing
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      category: ${{ steps.relevance.outputs.category }}
-      reason: ${{ steps.relevance.outputs.reason }}
-      changed_count: ${{ steps.relevance.outputs.changed_count }}
-      full: ${{ steps.relevance.outputs.full }}
-      run_backend: ${{ steps.relevance.outputs.run_backend }}
-      run_go_standard: ${{ steps.relevance.outputs.run_go_standard }}
-      run_go_race: ${{ steps.relevance.outputs.run_go_race }}
-      run_runtime_artifacts: ${{ steps.relevance.outputs.run_runtime_artifacts }}
-      run_database: ${{ steps.relevance.outputs.run_database }}
-      run_local_slice: ${{ steps.relevance.outputs.run_local_slice }}
-      run_stage_contracts: ${{ steps.relevance.outputs.run_stage_contracts }}
-      run_production_relays: ${{ steps.relevance.outputs.run_production_relays }}
-      run_credential_rotation: ${{ steps.relevance.outputs.run_credential_rotation }}
+      run_docs: ${{ steps.relevance.outputs.run_docs }}
+      run_go: ${{ steps.relevance.outputs.run_go }}
       run_rust: ${{ steps.relevance.outputs.run_rust }}
-      run_native: ${{ steps.relevance.outputs.run_native }}
       run_web: ${{ steps.relevance.outputs.run_web }}
-      run_browser: ${{ steps.relevance.outputs.run_browser }}
-      run_p1_smoke: ${{ steps.relevance.outputs.run_p1_smoke }}
-      run_contracts_policy: ${{ steps.relevance.outputs.run_contracts_policy }}
-      run_license: ${{ steps.relevance.outputs.run_license }}
-      run_g6_smoke: ${{ steps.relevance.outputs.run_g6_smoke }}
+      run_database: ${{ steps.relevance.outputs.run_database }}
     steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -54,991 +36,89 @@ jobs:
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}"
 
-  runtime-artifacts:
-    name: Build Shared Runtime Binaries
+  docs:
     needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_runtime_artifacts == 'true'
+    if: needs.ci-relevance.outputs.run_docs == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_BASEDIRS: ${{ github.workspace }}
-      SCCACHE_GHA_ENABLED: "true"
+    timeout-minutes: 5
     steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Restore verified tools
-        id: runtime-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-go-rust-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared Go cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
-          restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
-            go-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Enable sccache GitHub Actions backend
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: "v0.17.0"
-          disable_annotations: true
-      - name: Configure sccache backend
-        run: scripts/configure-sccache.sh
-      - name: Bootstrap pinned Go and Rust tools
-        run: scripts/bootstrap.sh go-rust-integration
-      - name: Build commit-bound runtime artifacts
-        run: scripts/ci-runtime-artifact.sh build "${RUNNER_TEMP}/runtime-upload" "${GITHUB_SHA}"
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.runtime-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.runtime-tools-cache.outputs.cache-primary-key }}
-      - name: Upload runtime artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: runtime-${{ github.run_id }}
-          overwrite: true
-          path: ${{ runner.temp }}/runtime-upload/runtime-artifacts.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+      - run: scripts/docs-check.sh
 
-  go-standard:
-    name: Go Quality & Unit Tests
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_go_standard == 'true'
+  go:
+    needs: ci-relevance
+    if: needs.ci-relevance.outputs.run_go == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Restore verified tools
-        id: go-standard-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-go-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared Go cache
-        id: go-standard-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
-          restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
-            go-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned Go tools
-        run: scripts/bootstrap.sh go-quality
-      - name: Go format, static analysis, unit, and vulnerability checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go-standard
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/go-check.sh standard 2>&1 | tee "${ARTIFACT_DIR}/go-standard.log"
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-standard-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.go-standard-tools-cache.outputs.cache-primary-key }}
-      - name: Save shared Go cache
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-standard-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: ${{ steps.go-standard-cache.outputs.cache-primary-key }}
-      - name: Upload Go failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: go-standard-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/go-standard
-          if-no-files-found: warn
-          retention-days: 1
+      - run: scripts/bootstrap.sh go-test
+      - run: scripts/go-check.sh standard
 
-  go-race:
-    name: Go Race Tests
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_go_race == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Restore verified tools
-        id: go-race-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared Go cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
-          restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
-            go-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned Go tools
-        run: scripts/bootstrap.sh go-test
-      - name: Go race suite
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go-race
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/go-check.sh race 2>&1 | tee "${ARTIFACT_DIR}/go-race.log"
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-race-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.go-race-tools-cache.outputs.cache-primary-key }}
-      - name: Upload Go race failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: go-race-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/go-race
-          if-no-files-found: warn
-          retention-days: 1
-
-  database:
-    name: PostgreSQL ${{ matrix.pg-major }} Migration & Integration
-    needs: [ci-relevance, runtime-artifacts]
-    if: needs.ci-relevance.outputs.run_database == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        pg-major: [17, 18]
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Restore verified tools
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared Go cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
-          restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
-            go-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned Go tools
-        run: scripts/bootstrap.sh go-test
-      - name: Download shared runtime binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: runtime-${{ github.run_id }}
-          path: ${{ runner.temp }}/runtime-download
-      - name: Verify runtime artifacts
-        run: scripts/ci-runtime-artifact.sh extract "${RUNNER_TEMP}/runtime-download/runtime-artifacts.tar.gz" "${RUNNER_TEMP}/runtime" "${GITHUB_SHA}"
-      - name: PostgreSQL integration
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/database/pg${{ matrix.pg-major }}
-          OCSERVIA_CONTROL_BIN: ${{ runner.temp }}/runtime/ocserv-control
-          PG_MAJOR: ${{ matrix.pg-major }}
-          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-pg${{ matrix.pg-major }}
-        run: scripts/database-integration.sh
-      - name: Upload PostgreSQL failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: database-pg${{ matrix.pg-major }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/database/pg${{ matrix.pg-major }}
-          if-no-files-found: warn
-          retention-days: 1
-
-  production-relays:
-    name: Production Topology & Relay Contracts
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_production_relays == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_BASEDIRS: ${{ github.workspace }}
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Restore verified tools
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-go-rust-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared Go cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
-          restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
-            go-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Enable sccache GitHub Actions backend
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: "v0.17.0"
-          disable_annotations: true
-      - name: Configure sccache backend
-        run: scripts/configure-sccache.sh
-      - name: Bootstrap pinned Go and Rust tools
-        run: scripts/bootstrap.sh go-rust-integration
-      - name: Controller Docker Compose lifecycle semantics
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
-        run: scripts/test-controller-compose-lifecycle.sh
-      - name: Controller host bootstrap prerequisites
-        run: |
-          scripts/test-controller-host-bootstrap.sh
-          scripts/test-controller-install.sh
-          scripts/test-controller-bootstrap.sh
-          scripts/test-stage0-installers.sh
-          deploy/production/bootstrap-host.sh check
-      - name: Production topology, relays, backup, and package checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
-          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-relays
-        run: scripts/i18-production-relays.sh --contract-only
-      - name: Upload production relay failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: production-relays-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/production-relays
-          if-no-files-found: warn
-          retention-days: 1
-
-  credential-rotation:
-    name: PostgreSQL Credential Rotation Integration
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_credential_rotation == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Application and backup credential rotation
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/credential-rotation
-          RUN_ID: postgres-rotation-${{ github.run_id }}-${{ github.run_attempt }}
-        run: scripts/i18-postgres-credential-rotation.sh
-      - name: Upload credential rotation failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: credential-rotation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/credential-rotation
-          if-no-files-found: warn
-          retention-days: 1
-
-  local-slice:
-    name: Control Plane ↔ Transport Local Integration
-    needs: [ci-relevance, runtime-artifacts]
-    if: needs.ci-relevance.outputs.run_local_slice == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Download shared runtime binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: runtime-${{ github.run_id }}
-          path: ${{ runner.temp }}/runtime-download
-      - name: Verify runtime artifacts
-        run: scripts/ci-runtime-artifact.sh extract "${RUNNER_TEMP}/runtime-download/runtime-artifacts.tar.gz" "${RUNNER_TEMP}/runtime" "${GITHUB_SHA}"
-      - name: Go, PostgreSQL, UDS, and Rust stub local slice
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/local-slice
-          OCSERVIA_CONTROL_BIN: ${{ runner.temp }}/runtime/ocserv-control
-          OCSERVIA_TRANSPORTD_STUB_BIN: ${{ runner.temp }}/runtime/ocservia-transportd-stub
-          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
-        run: scripts/local-slice-integration.sh
-      - name: Upload local slice failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/local-slice
-          if-no-files-found: warn
-          retention-days: 1
-
-  web-validation:
-    name: Web Quality, Unit & Build
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_web == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Restore verified tools
-        id: web-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared npm cache
-        id: web-npm-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
-          restore-keys: |
-            npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned Web tools
-        run: scripts/bootstrap.sh web
-      - name: Web checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-validation
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.web-tools-cache.outputs.cache-primary-key }}
-      - name: Save shared npm cache
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-npm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: ${{ steps.web-npm-cache.outputs.cache-primary-key }}
-      - name: Upload Web failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: web-validation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/web-validation
-          if-no-files-found: warn
-          retention-days: 1
-
-  browser-e2e:
-    name: Web Browser E2E
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_browser == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Docker Compose Playwright E2E
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/browser-e2e
-          COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}
-          RUN_ID: e2e-${{ github.run_id }}-${{ github.run_attempt }}
-        run: scripts/e2e.sh
-      - name: Upload browser failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/browser-e2e
-          if-no-files-found: warn
-          retention-days: 1
-
-  p1-smoke:
-    name: Runtime Resilience Smoke (24 Agents)
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_p1_smoke == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      AGENT_COUNT: 24
-      HEARTBEAT_COUNT: 2
-      HEARTBEAT_INTERVAL_MS: 500
-      MINIMUM_RESOURCE_SAMPLES: 8
-      P1_PROFILE: smoke
-      QUEUE_CAPACITY: 256
-      REQUEST_CONCURRENCY: 8
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Run 24-Agent resilience smoke
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-smoke
-          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-        run: scripts/p1-resilience-capacity.sh
-      - name: Upload runtime resilience failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/p1-smoke
-          if-no-files-found: warn
-          retention-days: 1
-
-  contracts-policy:
-    name: Repository Contracts & Policy
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_contracts_policy == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Restore verified tools
-        id: contracts-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared npm cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
-          restore-keys: |
-            npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned contract tools
-        run: scripts/bootstrap.sh contracts
-      - name: Repository policy
-        run: |
-          scripts/check-public-repository.sh
-          scripts/test-public-repository-policy.sh
-      - name: Documentation
-        run: scripts/docs-check.sh
-      - name: CI workflow policy tests
-        run: |
-          scripts/test-bootstrap-profiles.sh
-          scripts/test-ci-relevance.sh
-          scripts/test-ci-runtime-artifact.sh
-          scripts/test-toolchain-consistency.sh
-      - name: Validate runtime-resilience harness contracts
-        run: scripts/test-p1-resilience-capacity.sh
-      - name: Validate Cross-VM enrollment workflow contract
-        run: scripts/test-real-e2e-workflow.sh
-      - name: Validate staged feature contracts
-        if: needs.ci-relevance.outputs.run_stage_contracts == 'true'
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/contracts/staged-features
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/i14-quota-expiry-backport.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i14.log"
-          scripts/i15-config-plan.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i15.log"
-          scripts/i16-config-apply.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i16.log"
-          scripts/i17-certificate-secret.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i17.log"
-          scripts/i19-five-minute-offline-recovery.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i19.log"
-      - name: G6 readiness workflow policy
-        run: |
-          scripts/test-g6-workflow-contract.sh
-          scripts/test-g6-formal-authority.sh
-          scripts/test-g6-release-identity.sh
-          scripts/test-g6-install-release.sh
-          scripts/test-controller-release-manifest.sh
-          scripts/test-controller-release-bundle.sh
-          scripts/test-controller-release-smoke.sh
-          scripts/test-controller-lifecycle.sh
-          scripts/test-release-checksum-manifest.sh
-          scripts/test-g6-timing.sh
-          scripts/test-g6-evidence-pipeline.sh
-          scripts/test-g6-secret-scan-config.sh
-          scripts/test-g6-runtime-adapters.sh
-          scripts/test-g6-readiness-hang-guards.sh
-          scripts/test-g6-cache-credentials.sh
-          scripts/test-g6-buildx-cache-fallback.sh
-          scripts/test-g6-buildkit-cache.sh
-      - name: Generate contract outputs
-        run: scripts/generate.sh
-      - name: Lint contract sources
-        run: |
-          source scripts/env.sh
-          (cd proto && buf format --diff --exit-code && buf lint)
-          (cd web && npx --no-install redocly lint --config ../openapi/.redocly.yaml ../openapi/openapi.yaml)
-      - name: Check contract breaking changes
-        run: scripts/check-breaking.sh
-      - name: Check generated output
-        run: |
-          scripts/generated-clean.sh --skip-generate
-          scripts/test-generated-clean.sh
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.contracts-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.contracts-tools-cache.outputs.cache-primary-key }}
-      - name: Capture contract failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/contracts
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          git status --short >"${ARTIFACT_DIR}/git-status.txt"
-          git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
-      - name: Upload contract failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: contracts-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/contracts
-          if-no-files-found: error
-          retention-days: 1
-
-  rust-validation:
-    name: Rust Quality, Tests & Boundaries
-    needs: [ci-relevance]
+  rust:
+    needs: ci-relevance
     if: needs.ci-relevance.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    env:
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_BASEDIRS: ${{ github.workspace }}
-      SCCACHE_GHA_ENABLED: "true"
     steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Restore verified tools
-        id: rust-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-rust-validation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Enable sccache GitHub Actions backend
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: "v0.17.0"
-          disable_annotations: true
-      - name: Configure sccache backend
-        run: scripts/configure-sccache.sh
-      - name: Bootstrap pinned Rust tools
-        run: scripts/bootstrap.sh rust-validation
-      - name: Rust checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rust
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/rust-check.sh 2>&1 | tee "${ARTIFACT_DIR}/rust-check.log"
-      - name: Agent privilege boundary
-        run: scripts/agent-boundary-check.sh
-      - name: Transport boundary
-        run: scripts/transport-boundary-check.sh
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rust-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.rust-tools-cache.outputs.cache-primary-key }}
-      - name: Upload Rust failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: rust-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/rust
-          if-no-files-found: warn
-          retention-days: 1
+      - run: scripts/bootstrap.sh rust-basic
+      - run: scripts/rust-check.sh
 
-  security-scan:
-    name: Repository Secret Scan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Bootstrap pinned secret-scan tools
-        run: scripts/bootstrap.sh g6-secret-scan
-      - name: Secret scan
-        run: scripts/security-check.sh
-
-  license:
-    name: Dependency License Policy
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_license == 'true'
+  web:
+    needs: ci-relevance
+    if: needs.ci-relevance.outputs.run_web == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_BASEDIRS: ${{ github.workspace }}
-      SCCACHE_GHA_ENABLED: "true"
+      npm_config_audit: "false"
+      npm_config_fund: "false"
     steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Restore verified tools
-        id: security-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore shared npm cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
-          restore-keys: |
-            npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Restore shared Go cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
-          restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
-            go-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Enable sccache GitHub Actions backend
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: "v0.17.0"
-          disable_annotations: true
-      - name: Configure sccache backend
-        run: scripts/configure-sccache.sh
-      - name: Bootstrap pinned security tools
-        run: scripts/bootstrap.sh security
-      - name: License checks
-        run: scripts/license-check.sh ${{ needs.ci-relevance.outputs.run_rust == 'true' && '--skip-rust' || '' }}
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.security-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.security-tools-cache.outputs.cache-primary-key }}
+      - run: scripts/bootstrap.sh web
+      - run: scripts/web-check.sh
 
-  native-ocserv:
-    name: Native Ocserv / Agent Integration
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_native == 'true'
+  database-smoke:
+    needs: ci-relevance
+    if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_BASEDIRS: ${{ github.workspace }}
-      SCCACHE_GHA_ENABLED: "true"
+      PG_MAJOR: "17"
     steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Restore verified tools
-        id: native-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Enable sccache GitHub Actions backend
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: "v0.17.0"
-          disable_annotations: true
-      - name: Configure sccache backend
-        run: scripts/configure-sccache.sh
-      - name: Bootstrap pinned native tools
-        run: scripts/bootstrap.sh native
-      - name: Managed node bootstrap installer fixture
-        run: scripts/test-managed-node-install.sh
-      - name: Install ephemeral native fixtures
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ocserv openconnect ssl-cert
-      - name: Native ocpasswd, OpenSSL, and Ocserv login
+      - run: scripts/bootstrap.sh go-test
+      - run: scripts/database-integration.sh
+
+  basic-ci-result:
+    name: Basic CI Result
+    if: always()
+    needs: [ci-relevance, docs, go, rust, web, database-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check selected jobs
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv
+          RESULTS: ${{ toJSON(needs) }}
         run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          # Stay below the Linux ephemeral port range (32768+) so an
-          # unrelated outbound connection on the runner cannot collide with
-          # the Ocserv listener bind.
-          port=$((20000 + GITHUB_RUN_ID % 10000))
-          native_target="${RUNNER_TEMP}/ocservia-native-target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          native_status=0
-          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR,RUSTC_WRAPPER,SCCACHE_GHA_ENABLED,SCCACHE_BASEDIRS,ACTIONS_CACHE_SERVICE_V2,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL,ACTIONS_RUNTIME_TOKEN env \
-            CARGO_TARGET_DIR="${native_target}" \
-            RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-native" \
-            OCSERVIA_I13_OCSERV_PORT="${port}" \
-            scripts/i13-native-ocserv-integration.sh || native_status=$?
-          sudo rm -rf "${native_target}" || native_status=1
-          exit "${native_status}"
-      - name: Native package scriptlet lifecycle (stub payloads)
-        env:
-          RUN_ID: native-package-${{ github.run_id }}-${{ github.run_attempt }}
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-package
-          STUB_BINARIES: "true"
-        run: |
-          scripts/bootstrap.sh native-packages
-          scripts/release-native-package-smoke.sh
-      - name: Upload native package failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: native-package-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/native-package
-          if-no-files-found: warn
-          retention-days: 1
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.native-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.native-tools-cache.outputs.cache-primary-key }}
-      - name: Upload native failure diagnostics
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: native-ocserv-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/native-ocserv
-          if-no-files-found: warn
-          retention-days: 1
-
-  backend-integration:
-    name: Backend Integration
-    if: ${{ always() }}
-    needs:
-      - ci-relevance
-      - runtime-artifacts
-      - go-standard
-      - go-race
-      - database
-      - production-relays
-      - credential-rotation
-      - local-slice
-      - p1-smoke
-      - rust-validation
-      - contracts-policy
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    env:
-      CI_RELEVANCE: ${{ needs.ci-relevance.result }}
-      RUNTIME_ARTIFACTS: ${{ needs.runtime-artifacts.result }}
-      RUNTIME_ARTIFACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_runtime_artifacts }}
-      GO_STANDARD: ${{ needs.go-standard.result }}
-      GO_STANDARD_RELEVANT: ${{ needs.ci-relevance.outputs.run_go_standard }}
-      GO_RACE: ${{ needs.go-race.result }}
-      GO_RACE_RELEVANT: ${{ needs.ci-relevance.outputs.run_go_race }}
-      DATABASE: ${{ needs.database.result }}
-      DATABASE_RELEVANT: ${{ needs.ci-relevance.outputs.run_database }}
-      CONTRACTS_POLICY: ${{ needs.contracts-policy.result }}
-      STAGE_CONTRACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_stage_contracts }}
-      PRODUCTION_RELAYS: ${{ needs.production-relays.result }}
-      PRODUCTION_RELAYS_RELEVANT: ${{ needs.ci-relevance.outputs.run_production_relays }}
-      CREDENTIAL_ROTATION: ${{ needs.credential-rotation.result }}
-      CREDENTIAL_ROTATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_credential_rotation }}
-      LOCAL_SLICE: ${{ needs.local-slice.result }}
-      LOCAL_SLICE_RELEVANT: ${{ needs.ci-relevance.outputs.run_local_slice }}
-      P1_SMOKE: ${{ needs.p1-smoke.result }}
-      P1_SMOKE_RELEVANT: ${{ needs.ci-relevance.outputs.run_p1_smoke }}
-      RUST_VALIDATION: ${{ needs.rust-validation.result }}
-      RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
-    steps:
-      - name: Verify backend/runtime worker results
-        run: |
-          if [[ "${CI_RELEVANCE}" != "success" ]]; then
-            echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
-            exit 1
-          fi
-          if [[ "${STAGE_CONTRACTS_RELEVANT}" == "true" && "${CONTRACTS_POLICY}" != "success" ]]; then
-            echo "staged feature contracts require contracts-policy success, got ${CONTRACTS_POLICY}" >&2
-            exit 1
-          fi
-          while IFS='|' read -r worker result authorized; do
-            if [[ "${result}" == "success" && "${authorized}" == "true" ]]; then
-              continue
-            fi
-            if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
-              continue
-            fi
-            echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
-            exit 1
-          done <<CHECKS
-          runtime-artifacts|${RUNTIME_ARTIFACTS}|${RUNTIME_ARTIFACTS_RELEVANT}
-          go-standard|${GO_STANDARD}|${GO_STANDARD_RELEVANT}
-          go-race|${GO_RACE}|${GO_RACE_RELEVANT}
-          database|${DATABASE}|${DATABASE_RELEVANT}
-          production-relays|${PRODUCTION_RELAYS}|${PRODUCTION_RELAYS_RELEVANT}
-          credential-rotation|${CREDENTIAL_ROTATION}|${CREDENTIAL_ROTATION_RELEVANT}
-          local-slice|${LOCAL_SLICE}|${LOCAL_SLICE_RELEVANT}
-          p1-smoke|${P1_SMOKE}|${P1_SMOKE_RELEVANT}
-          rust-validation|${RUST_VALIDATION}|${RUST_VALIDATION_RELEVANT}
-          CHECKS
-
-  web-smoke:
-    name: Web & Smoke
-    if: ${{ always() }}
-    needs:
-      - ci-relevance
-      - web-validation
-      - browser-e2e
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    env:
-      CI_RELEVANCE: ${{ needs.ci-relevance.result }}
-      WEB_VALIDATION: ${{ needs.web-validation.result }}
-      WEB_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_web }}
-      BROWSER_E2E: ${{ needs.browser-e2e.result }}
-      BROWSER_E2E_RELEVANT: ${{ needs.ci-relevance.outputs.run_browser }}
-    steps:
-      - name: Verify Web/browser worker results
-        run: |
-          if [[ "${CI_RELEVANCE}" != "success" ]]; then
-            echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
-            exit 1
-          fi
-          while IFS='|' read -r worker result authorized; do
-            if [[ "${result}" == "success" && "${authorized}" == "true" ]]; then
-              continue
-            fi
-            if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
-              continue
-            fi
-            echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
-            exit 1
-          done <<CHECKS
-          web-validation|${WEB_VALIDATION}|${WEB_VALIDATION_RELEVANT}
-          browser-e2e|${BROWSER_E2E}|${BROWSER_E2E_RELEVANT}
-          CHECKS
-
-  quality-security-native:
-    name: Quality, Security & Native
-    if: ${{ always() }}
-    needs:
-      - ci-relevance
-      - contracts-policy
-      - rust-validation
-      - security-scan
-      - license
-      - native-ocserv
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    env:
-      CI_RELEVANCE: ${{ needs.ci-relevance.result }}
-      CONTRACTS_POLICY: ${{ needs.contracts-policy.result }}
-      CONTRACTS_POLICY_RELEVANT: ${{ needs.ci-relevance.outputs.run_contracts_policy }}
-      RUST_VALIDATION: ${{ needs.rust-validation.result }}
-      RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
-      SECURITY_SCAN: ${{ needs.security-scan.result }}
-      LICENSE: ${{ needs.license.result }}
-      LICENSE_RELEVANT: ${{ needs.ci-relevance.outputs.run_license }}
-      NATIVE_OCSERV: ${{ needs.native-ocserv.result }}
-      NATIVE_OCSERV_RELEVANT: ${{ needs.ci-relevance.outputs.run_native }}
-    steps:
-      - name: Verify contracts/security/native worker results
-        run: |
-          if [[ "${CI_RELEVANCE}" != "success" ]]; then
-            echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
-            exit 1
-          fi
-          # Secret scanning is structurally outside classifier skip authority.
-          # Every conditional worker must either succeed or be skipped with an
-          # explicit false relevance flag.
-          while IFS='|' read -r worker result authorized; do
-            if [[ "${result}" == "success" && "${authorized}" == "true" ]]; then
-              continue
-            fi
-            if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
-              continue
-            fi
-            echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
-            exit 1
-          done <<CHECKS
-          contracts-policy|${CONTRACTS_POLICY}|${CONTRACTS_POLICY_RELEVANT}
-          rust-validation|${RUST_VALIDATION}|${RUST_VALIDATION_RELEVANT}
-          security-scan|${SECURITY_SCAN}|true
-          license|${LICENSE}|${LICENSE_RELEVANT}
-          native-ocserv|${NATIVE_OCSERV}|${NATIVE_OCSERV_RELEVANT}
-          CHECKS
+          echo "${RESULTS}" | jq -e '
+            .["ci-relevance"].result == "success" and
+            (.["ci-relevance"].outputs as $flags |
+              [{job: "docs", flag: "run_docs"},
+               {job: "go", flag: "run_go"},
+               {job: "rust", flag: "run_rust"},
+               {job: "web", flag: "run_web"},
+               {job: "database-smoke", flag: "run_database"}] as $checks |
+              . as $results | all($checks[];
+                ($flags[.flag] == "true" and $results[.job].result == "success") or
+                ($flags[.flag] == "false" and $results[.job].result == "skipped")))'

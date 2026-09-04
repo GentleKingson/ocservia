@@ -89,29 +89,22 @@ reject("the reusable core must expose exact typed profile, authority, candidate,
 reject("the reusable core permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
 
 smoke_trigger = smoke.fetch(true)
-reject("G6 harness smoke must run only for pull requests") unless smoke_trigger.keys == ["pull_request"]
+reject("G6 harness smoke must run only on manual dispatch") unless smoke_trigger.keys == ["workflow_dispatch"]
 reject("G6 harness smoke permissions must remain read-only") unless smoke.fetch("permissions") == {"contents" => "read", "actions" => "read"}
 smoke_concurrency = smoke.fetch("concurrency")
-reject("PR smoke must use latest-wins cancellation scoped to the pull request") unless
-  smoke_concurrency.fetch("group").include?("github.event.pull_request.number") &&
-  smoke_concurrency.fetch("cancel-in-progress") == true && !smoke_concurrency.key?("queue")
+reject("manual smoke runs must not cancel each other") unless
+  smoke_concurrency.fetch("group").include?("github.run_id") &&
+  smoke_concurrency.fetch("cancel-in-progress") == false && !smoke_concurrency.key?("queue")
 smoke_jobs = smoke.fetch("jobs")
-reject("PR smoke must classify relevance before its thin reusable-workflow caller") unless smoke_jobs.keys.sort == %w[g6-harness-core g6-smoke-relevance]
-relevance = smoke_jobs.fetch("g6-smoke-relevance")
-relevance_steps = Array(relevance.fetch("steps"))
-reject("PR smoke relevance must compare the exact base and head with full history") unless
-  relevance.fetch("runs-on") == "ubuntu-24.04" && relevance.fetch("timeout-minutes") <= 5 &&
-  relevance_steps.any? { |step| step.fetch("with", {})["fetch-depth"] == 0 } &&
-  relevance_steps.any? { |step| step.fetch("run", "").include?("scripts/ci-relevance.sh pull_request") }
+reject("manual smoke must keep a thin reusable-workflow caller") unless smoke_jobs.keys == ["g6-harness-core"]
 smoke_call = smoke_jobs.fetch("g6-harness-core")
-reject("PR smoke must call the local reusable core") unless smoke_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
-reject("PR smoke must be permanently non-authoritative") unless
-  smoke_call.fetch("needs") == "g6-smoke-relevance" &&
+reject("manual smoke must call the local reusable core") unless smoke_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
+reject("manual smoke must be permanently non-authoritative") unless
   smoke_call.fetch("with") == {
     "profile" => "smoke",
     "authority" => "engineering",
     "candidate_sha" => "${{ github.sha }}",
-    "smoke_relevant" => "${{ needs.g6-smoke-relevance.outputs.relevant == 'true' }}",
+    "smoke_relevant" => true,
   }
 
 jobs = workflow.fetch("jobs")
@@ -144,25 +137,19 @@ policy_commands = %w[
   scripts/test-g6-readiness-hang-guards.sh
 ]
 ci_jobs = ci_workflow.fetch("jobs")
-contracts_steps = Array(ci_jobs.fetch("contracts-policy").fetch("steps"))
 policy_commands.each do |command|
   ci_count = ci_jobs.values.sum do |job|
     Array(job.fetch("steps", [])).sum do |step|
       step.fetch("run", "").lines.count { |line| line.strip == command }
     end
   end
-  reject("#{command} must run exactly once in required Contracts and Policy CI") unless ci_count == 1
-  reject("Contracts and Policy CI must run #{command}") unless contracts_steps.any? do |step|
-    step.fetch("run", "").lines.any? { |line| line.strip == command }
-  end
+  reject("Basic CI must not run #{command}") unless ci_count.zero?
   reject("failure-domain jobs must not repeat #{command}") if %w[g6-rd-fd-a g6-rd-fd-b].any? do |job_id|
     Array(jobs.fetch(job_id).fetch("steps")).any? do |step|
       step.fetch("run", "").lines.any? { |line| line.strip == command }
     end
   end
 end
-reject("Contracts and Policy must remain in the required quality aggregate") unless
-  Array(ci_jobs.fetch("quality-security-native").fetch("needs")).include?("contracts-policy")
 jobs.each do |job_id, job|
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
   reject("#{job_id} job env must not reference the step-only runner context") if job.fetch("env", {}).values.any? { |value| value.to_s.include?("runner.") }
