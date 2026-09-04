@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Strict, non-executing install.env loader sourced by the production
 # Controller installer (deploy/production/install.sh). The managed-node
-# installer embeds its own functionally identical copy
-# (deploy/managed-node/install.sh) because it must stay a single
-# self-contained Stage-1 file; any contract change is made in both places.
+# versioned Controller and managed-node bootstraps embed functionally identical
+# copies because they must stay single self-contained Stage-1 files; any
+# contract change is made in all three places.
 # Sourced, never executed directly.
 #
 # Contract:

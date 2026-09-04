@@ -38,13 +38,24 @@ package_files=(
   "${tar_amd64}.sha256" "${tar_amd64}.sha256.sig" "${tar_amd64}.sha256.pub.pem"
   "${tar_arm64}.sha256" "${tar_arm64}.sha256.sig" "${tar_arm64}.sha256.pub.pem"
 )
+bootstrap_files=(
+  "controller-bootstrap.sh"
+  "managed-node-bootstrap.sh"
+)
 
-for file in "${package_files[@]}"; do
+for file in "${package_files[@]}" "${bootstrap_files[@]}"; do
   if [[ ! -f "${ASSET_DIR}/${file}" || -L "${ASSET_DIR}/${file}" || ! -s "${ASSET_DIR}/${file}" ]]; then
     echo "release asset is missing or empty: ${file}" >&2
     exit 1
   fi
 done
+
+cmp -s -- "${ASSET_DIR}/controller-bootstrap.sh" \
+  "${ROOT}/deploy/production/controller-bootstrap.sh" \
+  || { echo "controller-bootstrap.sh does not match the release source" >&2; exit 1; }
+cmp -s -- "${ASSET_DIR}/managed-node-bootstrap.sh" \
+  "${ROOT}/deploy/managed-node/install.sh" \
+  || { echo "managed-node-bootstrap.sh does not match the release source" >&2; exit 1; }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-asset-validation.XXXXXX")"
 cleanup() { sudo rm -rf -- "${work}"; }
@@ -145,7 +156,7 @@ verify_arch_triple arm64 "${tar_arm64}" "aarch64"
 echo "signed archive triples, package architectures, and embedded payloads validated"
 
 canonical_manifest="$(release_checksum_manifest "${ASSET_DIR}" "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" \
-  "${package_files[@]:0:6}")"
+  "${package_files[@]:0:6}" "${bootstrap_files[@]}")"
 if [[ ! -f "${ASSET_DIR}/SHA256SUMS" ]]; then
   if [[ "${WRITE_SHA256SUMS}" == "1" ]]; then
     printf '%s\n' "${canonical_manifest}" >"${ASSET_DIR}/SHA256SUMS"

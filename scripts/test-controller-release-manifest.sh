@@ -96,6 +96,7 @@ ruby -r yaml - "${ROOT}/.github/workflows/release.yml" \
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
 controller = jobs.fetch("build-controller-images")
+validate = jobs.fetch("validate-release-packages")
 publish = jobs.fetch("publish-release-packages")
 smoke = File.read(ARGV.fetch(2))
 # Immutable-release publication model: the workflow owns the whole
@@ -155,6 +156,9 @@ end
 
 abort("Controller publishing must wait for the image build legs") unless
   Array(publish.fetch("needs")).include?("build-controller-images")
+validate_steps = Array(validate.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+abort("Release dry runs must prepare both versioned bootstrap assets") unless
+  validate_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')
 abort("Controller publishing permissions are too broad") unless publish.fetch("permissions") == {
   "contents" => "write",
   "packages" => "write",
@@ -170,6 +174,12 @@ abort("Controller release must attest four first-party images") unless attest.le
 abort("Controller release must use the verified actions/attest pin") unless
   attest.all? { |use| use == "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d" }
 publish_steps = Array(publish.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+abort("Release publishing must prepare bootstrap assets from the release checkout") unless
+  publish_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')
+%w[controller-bootstrap.sh managed-node-bootstrap.sh].each do |asset|
+  abort("Release publishing and exact-set recovery must include #{asset}") unless
+    publish_steps.scan(asset).length >= 2
+end
 abort("Controller publishing must load the built image archives") unless
   publish_steps.include?("docker load --input")
 abort("Controller publishing must push the per-platform images") unless
