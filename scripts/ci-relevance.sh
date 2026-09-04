@@ -24,6 +24,8 @@ classify_path() {
   case "${path}" in
     docs/*|*.md|LICENSE|LICENSE.*)
       run_docs=true ;;
+    .github/workflows/g6-*.yml|.github/actions/g6-*/*|scripts/*g6*|tools/g6-harness/*|deploy/g6-*/*|rust/g6-runtime.Dockerfile|rust/crates/g6-*/*)
+      run_docs=true ;;
     .github/workflows/*|scripts/*|toolchains.lock|Makefile|.node-version|.nvmrc|.tool-versions)
       fail_closed infrastructure_changed ;;
     web/*)
