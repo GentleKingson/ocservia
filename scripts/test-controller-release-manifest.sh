@@ -47,7 +47,7 @@ jq -e '
   .release_tag == "v0.2.0" and
   .source_commit == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
   .platform == "linux/amd64" and
-  .database_migration == 29 and
+  .database_migration == 30 and
   (.images | keys == ["backup", "control", "gateway", "otel", "postgres", "transport"]) and
   (.images | to_entries | all(.value | test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
 ' "${fixture}/manifest-a.json" >/dev/null
