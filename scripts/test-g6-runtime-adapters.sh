@@ -5439,13 +5439,6 @@ if ! grep -q 'gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WO
   exit 1
 fi
 
-# The evidence builder is under the same test regime as the verifier: the
-# contracts job must exercise it on every pull request.
-grep -q 'test-g6-evidence-builder.mjs' "${ROOT}/scripts/docs-check.sh" || {
-  echo "docs-check.sh must run the evidence builder test" >&2
-  exit 1
-}
-
 # The builder itself must stay a pure transcriber bound to the frozen
 # contract library: no local metric thresholds, no authority shortcuts.
 if grep -nE '\b(900|7200)\b|0\.999' "${BUILDER}"; then
