@@ -12,12 +12,48 @@ record. It does not activate the node; an operator must approve it afterward.
 - For production, the dedicated relay drop-in is installed, both
   `RELAY_URL_A` and `RELAY_URL_B` are exported, and
   `/etc/ocservia-agent/relay-access-token` is provisioned.
-- You have an authenticated requester API client with permission to create an
-  enrollment token and request node approval.
+- You have an authenticated requester API client with permission to create a
+  node bootstrap token and request node approval.
 - A different authorized principal is available to independently approve the
   node approval request.
 
 ## Steps
+
+1. With an authenticated API client, create a short-lived bootstrap token.
+
+   ```http
+   POST /api/v1/node-bootstrap-tokens
+   Content-Type: application/json
+
+   {
+     "workspace_id": "<workspace-uuidv7>",
+     "environment": "production",
+     "expected_node_name": "<node-name>",
+     "reason": "Bootstrap managed node"
+   }
+   ```
+
+   The plaintext `obt1_` token is returned once and expires within 15 minutes.
+   Place it in a protected file; do not put it in a URL, command argument, log,
+   or shared shell history.
+
+2. Give Stage-1 the protected source path and run the pinned installer. It
+   prepares the identity, enrolls immediately, deletes the plaintext source
+   after success, writes `agent.env` atomically, and stops at
+   `PENDING_APPROVAL` without enabling or starting a service.
+
+   ```bash
+   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
+   ./install.sh --version vX.Y.Z
+   ```
+
+   Record the printed UUIDv7 node ID and continue at [Approve the
+   node](#approve-the-node).
+
+### Advanced endpoint-bound enrollment
+
+The existing two-run flow remains available when no bootstrap token source is
+provided.
 
 1. On the node, prepare its persistent identity. Keep the printed EndpointID.
 
@@ -31,7 +67,7 @@ record. It does not activate the node; an operator must approve it afterward.
    This is offline preparation. It does not contact the Controller or start a
    session. Reusing the same identity directory preserves the EndpointID.
 
-2. With an authenticated API client, create a short-lived token. Replace the
+2. Create a short-lived endpoint-bound token. Replace the
    placeholders with the target workspace and the exact EndpointID from step
    1.
 

@@ -32,6 +32,19 @@ func TestCreateTokenRequiresExpectedEndpoint(t *testing.T) {
 	}
 }
 
+func TestCreateBootstrapTokenValidatesAuthorityMetadata(t *testing.T) {
+	service := &Service{}
+	_, err := service.CreateBootstrapToken(context.Background(), BootstrapTokenSpec{
+		WorkspaceID: uuid.Must(uuid.NewV7()),
+		Environment: "production",
+		ActorID:     "operator",
+		RequestID:   uuid.Must(uuid.NewV7()).String(),
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("CreateBootstrapToken without reason error = %v, want ErrInvalidRequest", err)
+	}
+}
+
 func TestEnrollmentProofV1GoldenAndBindings(t *testing.T) {
 	seed := make([]byte, ed25519.SeedSize)
 	for index := range seed {

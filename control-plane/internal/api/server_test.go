@@ -129,6 +129,7 @@ func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	for _, path := range []string{
 		"/api/v1/enrollment-tokens",
+		"/api/v1/node-bootstrap-tokens",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/approval",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/revocation",
 	} {
@@ -137,6 +138,13 @@ func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("%s status = %d", path, response.Code)
 		}
+	}
+}
+
+func TestNodeBootstrapTokenRouteUsesSeparatePermission(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", nil)
+	if action := routeAction(request); action != "node_bootstrap_token.create" {
+		t.Fatalf("route action = %q", action)
 	}
 }
 

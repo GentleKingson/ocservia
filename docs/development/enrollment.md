@@ -4,8 +4,17 @@
 > This document describes the enrollment protocol, trust binding, and migration
 > invariants.
 
-Enrollment is explicit and does not activate a node. On a fresh node, prepare
-the long-lived endpoint identity before requesting a token:
+Enrollment is explicit and does not activate a node. The normal bootstrap path
+uses a node bootstrap token created with `POST /api/v1/node-bootstrap-tokens`.
+It has an `obt1_` prefix, is stored only as a SHA-256 digest, and is not bound
+to an EndpointID until a valid endpoint possession proof reaches the
+Controller. The binding, pending node, sealing keys, capabilities, and token
+consumption commit in one transaction. A consumed token can only be replayed
+by that same EndpointID and returns the same pending node ID; another endpoint
+is rejected. Bootstrap tokens never approve or activate a node.
+
+The advanced manual path prepares the long-lived endpoint identity before
+requesting a legacy endpoint-bound token:
 
 ```bash
 sudo -u ocserv-agent ocservia-agent \
@@ -36,7 +45,7 @@ SecretKey over a versioned, domain-separated canonical request. It binds the
 token hash, EndpointID, protocol version, Agent metadata, environment, nonce,
 timestamp, and sorted advertised capabilities. The Controller verifies this
 proof independently; the EndpointID reported by transportd is only an
-additional channel binding. The token is strictly one-time: a concurrent or
+additional channel binding. The legacy token is strictly one-time: a concurrent or
 later replay is rejected even if the first response was lost. Operators recover
 the pending node ID through the authenticated Controller inventory rather than
 reusing root enrollment authority. Pending nodes cannot use the agent ALPN. The
@@ -106,3 +115,5 @@ reversed; do not roll it back while a trust transition is pending. Migration
 `000004_enrollment_trust` is destructive in reverse and must not be rolled back
 unless enrollment history and bindings have been preserved or the enrolled
 nodes will be enrolled again with new endpoint keys.
+Migration `000030_node_bootstrap_tokens` removes bootstrap token history when
+reversed and must not be rolled back while bootstrap enrollment is in flight.

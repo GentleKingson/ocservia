@@ -74,6 +74,7 @@ All URIs are relative to _/api/v1_
 | _DevelopmentApi_   | [**createLocalSimulation**](docs/DevelopmentApi.md#createlocalsimulation)                 | **POST** /development/simulations                          | Start a side-effect-free local agent simulation                                  |
 | _DevelopmentApi_   | [**getDevelopmentRuntime**](docs/DevelopmentApi.md#getdevelopmentruntime)                 | **GET** /development/runtime                               | Read bounded runtime counters for local resilience tests                         |
 | _EnrollmentApi_    | [**createEnrollmentToken**](docs/EnrollmentApi.md#createenrollmenttoken)                  | **POST** /enrollment-tokens                                | Create a one-time enrollment token                                               |
+| _EnrollmentApi_    | [**createNodeBootstrapToken**](docs/EnrollmentApi.md#createnodebootstraptoken)            | **POST** /node-bootstrap-tokens                            | Create a one-time node bootstrap token                                           |
 | _EventsApi_        | [**listAuditEvents**](docs/EventsApi.md#listauditevents)                                  | **GET** /audit/events                                      | List append-only audit events                                                    |
 | _EventsApi_        | [**listEvents**](docs/EventsApi.md#listevents)                                            | **GET** /events                                            | Rebuild platform events from durable state                                       |
 | _EventsApi_        | [**verifyAuditChain**](docs/EventsApi.md#verifyauditchain)                                | **POST** /audit:verify                                     | Verify the workspace audit hash chain and latest checkpoint                      |
@@ -174,6 +175,8 @@ All URIs are relative to _/api/v1_
 - [Health](docs/Health.md)
 - [ListNodeCertificates200Response](docs/ListNodeCertificates200Response.md)
 - [NodeApproval](docs/NodeApproval.md)
+- [NodeBootstrapToken](docs/NodeBootstrapToken.md)
+- [NodeBootstrapTokenRequest](docs/NodeBootstrapTokenRequest.md)
 - [NodeIpBan](docs/NodeIpBan.md)
 - [NodeIpBanPage](docs/NodeIpBanPage.md)
 - [NodeObservedState](docs/NodeObservedState.md)
