@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Stage-0 only pins and verifies one immutable Controller Stage-1 asset.
+set -euo pipefail
+
+fail() {
+  echo "install-controller: $1" >&2
+  exit 1
+}
+
+usage() {
+  echo "usage: install-controller --version vX.Y.Z [--root-lifecycle] [--check]" >&2
+  exit 2
+}
+
+download() {
+  local url="$1" output="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      --output "${output}" "${url}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --https-only --secure-protocol=TLSv1_2 --quiet --output-document="${output}" "${url}"
+  else
+    fail "curl or wget is required"
+  fi
+}
+
+verify_stage1() {
+  local directory="$1" asset="$2" key="$3" expected_fingerprint="$4"
+  local actual_fingerprint asset_digest expected_digest matches
+
+  command -v openssl >/dev/null 2>&1 || fail "openssl is required to verify Stage-1"
+  command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required to verify Stage-1"
+  [[ "${expected_fingerprint}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "EXPECTED_RELEASE_KEY_SHA256 must be 64 lowercase hexadecimal characters"
+  [[ -f "${key}" && ! -L "${key}" ]] ||
+    fail "TRUSTED_RELEASE_KEY must name a regular, non-symlink public key"
+
+  openssl pkey -pubin -in "${key}" -outform DER -out "${directory}/release-key.der" >/dev/null 2>&1 ||
+    fail "TRUSTED_RELEASE_KEY is not a readable public key"
+  actual_fingerprint="$(sha256sum "${directory}/release-key.der")"
+  actual_fingerprint="${actual_fingerprint%% *}"
+  [[ "${actual_fingerprint}" == "${expected_fingerprint}" ]] ||
+    fail "release public key fingerprint does not match EXPECTED_RELEASE_KEY_SHA256"
+  openssl pkeyutl -verify -rawin -pubin -inkey "${key}" \
+    -in "${directory}/SHA256SUMS" -sigfile "${directory}/SHA256SUMS.sig" >/dev/null 2>&1 ||
+    fail "SHA256SUMS signature verification failed"
+
+  expected_digest=""
+  matches=0
+  while read -r asset_digest listed_asset extra; do
+    if [[ "${listed_asset}" == "${asset}" ]]; then
+      [[ -z "${extra:-}" && "${asset_digest}" =~ ^[0-9a-f]{64}$ ]] ||
+        fail "Stage-1 checksum entry is malformed"
+      expected_digest="${asset_digest}"
+      matches=$((matches + 1))
+    fi
+  done <"${directory}/SHA256SUMS"
+  [[ "${matches}" == 1 ]] || fail "SHA256SUMS must contain exactly one entry for ${asset}"
+  asset_digest="$(sha256sum "${directory}/${asset}")"
+  asset_digest="${asset_digest%% *}"
+  [[ "${asset_digest}" == "${expected_digest}" ]] || fail "Stage-1 digest verification failed"
+}
+
+main() {
+  local version="" version_seen=false root_lifecycle=false check_only=false
+  local base asset url temporary trusted_key expected_fingerprint cleanup_parent cleanup_directory command_name
+  local -a stage1_args=()
+
+  umask 077
+
+  while (($# > 0)); do
+    case "$1" in
+      --version)
+        [[ "${version_seen}" == false && $# -ge 2 ]] || usage
+        version="$2"
+        version_seen=true
+        shift 2
+        ;;
+      --root-lifecycle)
+        [[ "${root_lifecycle}" == false ]] || usage
+        root_lifecycle=true
+        stage1_args+=(--root-lifecycle)
+        shift
+        ;;
+      --check)
+        [[ "${check_only}" == false ]] || usage
+        check_only=true
+        stage1_args+=(--check)
+        shift
+        ;;
+      *) usage ;;
+    esac
+  done
+  [[ "${version_seen}" == true ]] || usage
+  [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    fail "an exact stable vX.Y.Z release is required"
+  for command_name in mktemp chmod rm sleep; do
+    command -v "${command_name}" >/dev/null 2>&1 || fail "${command_name} is required"
+  done
+
+  base="https://github.com/GentleKingson/ocservia/releases/download"
+  asset="controller-bootstrap.sh"
+  url="${base}/${version}"
+  temporary="$(mktemp -d)" || fail "cannot create a temporary directory"
+  trap 'rm -rf -- "${temporary}"' EXIT
+  trap 'exit 1' HUP INT TERM
+
+  download "${url}/${asset}" "${temporary}/${asset}" || fail "Stage-1 download failed"
+  trusted_key="${TRUSTED_RELEASE_KEY:-}"
+  expected_fingerprint="${EXPECTED_RELEASE_KEY_SHA256:-}"
+  if [[ -n "${trusted_key}" || -n "${expected_fingerprint}" ]]; then
+    [[ -n "${trusted_key}" && -n "${expected_fingerprint}" ]] ||
+      fail "TRUSTED_RELEASE_KEY and EXPECTED_RELEASE_KEY_SHA256 must be set together"
+    download "${url}/SHA256SUMS" "${temporary}/SHA256SUMS" || fail "SHA256SUMS download failed"
+    download "${url}/SHA256SUMS.sig" "${temporary}/SHA256SUMS.sig" || fail "SHA256SUMS.sig download failed"
+    verify_stage1 "${temporary}" "${asset}" "${trusted_key}" "${expected_fingerprint}"
+  else
+    echo "warning: no out-of-band release key configured; Stage-1 authenticity relies on the HTTPS endpoint" >&2
+  fi
+
+  chmod 0700 -- "${temporary}/${asset}"
+  stage1_args=(--version "${version}" "${stage1_args[@]}")
+  cleanup_parent="${BASHPID}"
+  cleanup_directory="${temporary}"
+  # exec replaces Stage-0, so a minimal watcher owns post-Stage-1 cleanup.
+  (
+    trap - EXIT
+    trap '' HUP INT TERM
+    while kill -0 "${cleanup_parent}" 2>/dev/null; do sleep 1; done
+    rm -rf -- "${cleanup_directory}"
+  ) >/dev/null 2>&1 &
+  exec "${temporary}/${asset}" "${stage1_args[@]}"
+}
+
+main "$@"
