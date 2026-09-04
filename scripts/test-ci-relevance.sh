@@ -19,7 +19,11 @@ paths=(
   control-plane/migrations/000001.up.sql control-plane/go.mod go.work
   rust/crates/agent/src/lib.rs rust/Cargo.lock rust/rust-toolchain.toml
   .github/workflows/ci.yml scripts/ci-relevance.sh toolchains.lock Makefile
-  tools/g6-harness/internal/smoke/pipeline.go
+  .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml
+  .github/workflows/g6-harness-smoke.yml .github/actions/g6-install-release/action.yml
+  scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh
+  tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml
+  rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs
 )
 for path in "${paths[@]}"; do
   mkdir -p "${fixture}/$(dirname "${path}")"
@@ -70,7 +74,7 @@ for path in web/src/App.vue web/test/unit.test.ts web/e2e/app.spec.ts web/packag
   out="$(case_commit "web_$(basename "${path}")" "${path}")"
   expect_only "${out}" run_web run_docs
 done
-for path in control-plane/internal/domain/helper.go control-plane/internal/auth/store.go control-plane/migrations/000001.up.sql control-plane/go.mod go.work tools/g6-harness/internal/smoke/pipeline.go; do
+for path in control-plane/internal/domain/helper.go control-plane/internal/auth/store.go control-plane/migrations/000001.up.sql control-plane/go.mod go.work; do
   out="$(case_commit "go_$(basename "${path}")" "${path}")"
   expect_only "${out}" run_go run_database
 done
@@ -81,6 +85,16 @@ done
 for path in .github/workflows/ci.yml scripts/ci-relevance.sh toolchains.lock Makefile; do
   out="$(case_commit "infra_$(basename "${path}")" "${path}")"
   expect_only "${out}" "${flags[@]}"
+done
+
+# G6-only changes select basic documentation checks, never acceptance.
+for path in .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml \
+  .github/workflows/g6-harness-smoke.yml .github/actions/g6-install-release/action.yml \
+  scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh \
+  tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml \
+  rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs; do
+  out="$(case_commit "g6_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_docs
 done
 
 # Mixed changes are the union of their basic domains.

@@ -47,6 +47,7 @@ Reason and changed-file count are diagnostic metadata.
 | Changed paths | Selected checks |
 | --- | --- |
 | Documentation, Markdown, license text | docs |
+| G6 workflows, actions, scripts, harness, deployment fixtures, and dedicated Rust runtime files | docs |
 | Web | web + docs |
 | Go sources, module/workspace files, control-plane code and migrations | go + database-smoke |
 | Rust workspace | rust |
@@ -56,6 +57,8 @@ Reason and changed-file count are diagnostic metadata.
 Mixed changes use the union of their checks. Documentation-only changes do
 not activate language or database checks. Infrastructure changes, unknown
 paths, and unclassifiable diffs conservatively run all five, never acceptance.
+G6-specific paths are the exception: they select only the basic docs check,
+not G6 acceptance or additional G6 contract checks.
 
 PR routing uses `base...head`, excluding base-only changes after the branch
 point. Main pushes use `before..head`. Deletions and both sides of renames
@@ -84,8 +87,12 @@ branch protection.
 
 ## Separate acceptance
 
-G6 smoke is now manual-only through `g6-harness-smoke.yml`. Formal G6,
-runtime/security/capacity acceptance, cross-VM enrollment, and release
+G6 runs only through manual `workflow_dispatch` in `g6-readiness.yml`,
+which calls `g6-harness-core.yml` with `profile=formal`, the selected
+`authority`, and the exact `candidate_sha`. Run it before releases or major
+architecture changes. The smoke caller and all seven smoke jobs are removed;
+ordinary PRs do not run G6 smoke or formal G6. No replacement G6 check is added.
+Formal G6, runtime/security/capacity acceptance, cross-VM enrollment, and release
 packaging remain separate workflows, not ordinary CI or Basic CI prerequisites.
 The G6 Rust cache producer retains scheduled/manual execution only; it no
 longer starts on main pushes. Its cache is not needed by Basic CI.

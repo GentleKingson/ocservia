@@ -6,7 +6,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FORMAL_CALLER="${ROOT}/.github/workflows/g6-readiness.yml"
-SMOKE_CALLER="${ROOT}/.github/workflows/g6-harness-smoke.yml"
 WORKFLOW="${ROOT}/.github/workflows/g6-harness-core.yml"
 CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 COMPOSE_FILE="${ROOT}/deploy/g6-readiness/compose.yaml"
@@ -35,10 +34,9 @@ CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
 INSTALL_ACTION="${ROOT}/.github/actions/g6-install-release/action.yml"
 INSTALL_HELPER="${ROOT}/scripts/g6-install-release.sh"
 
-ruby -r yaml - "${FORMAL_CALLER}" "${SMOKE_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" "${CHECKPOINT_ACTION}" "${RENDEZVOUS_CONTRACT}" <<'RUBY'
-formal_path, smoke_path, workflow_path, compose_path, ci_workflow_path = ARGV
+ruby -r yaml - "${FORMAL_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" "${CHECKPOINT_ACTION}" "${RENDEZVOUS_CONTRACT}" <<'RUBY'
+formal_path, workflow_path, compose_path, ci_workflow_path = ARGV
 formal = YAML.safe_load(File.read(formal_path), aliases: true)
-smoke = YAML.safe_load(File.read(smoke_path), aliases: true)
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
 compose = YAML.safe_load(File.read(compose_path), aliases: true)
 ci_workflow = YAML.safe_load(File.read(ci_workflow_path), aliases: true)
@@ -51,9 +49,7 @@ end
 # Only the typed checkpoint action may publish a registered rendezvous name;
 # a raw artifact upload with one of these prefixes would skip the secret
 # policy and the typed manifest entirely.
-registry_prefixes = File.read(ARGV[6]).scan(/Prefix: "([^"]+)"/).flatten
-reject("the typed checkpoint registry must declare both profiles") unless
-  registry_prefixes.length == 28 && registry_prefixes.uniq.length == 28
+registry_prefixes = File.read(ARGV[5]).scan(/Prefix: "([^"]+)"/).flatten
 
 trigger = formal.fetch(true)
 reject("G6 readiness must remain workflow_dispatch-only") unless trigger.keys == ["workflow_dispatch"]
@@ -76,36 +72,15 @@ reject("formal readiness must select only the formal profile") unless
     "profile" => "formal",
     "authority" => "${{ inputs.authority }}",
     "candidate_sha" => "${{ github.sha }}",
-    "smoke_relevant" => true,
   }
 
 core_trigger = workflow.fetch(true)
 reject("the G6 core must be reusable-only") unless core_trigger.keys == ["workflow_call"]
 core_inputs = core_trigger.fetch("workflow_call").fetch("inputs")
-reject("the reusable core must expose exact typed profile, authority, candidate, and relevance inputs") unless
-  core_inputs.keys.sort == %w[authority candidate_sha profile smoke_relevant] &&
-  core_inputs.values_at("profile", "authority", "candidate_sha").all? { |input| input.fetch("type") == "string" && input.fetch("required") == true } &&
-  core_inputs.fetch("smoke_relevant").fetch("type") == "boolean" && core_inputs.fetch("smoke_relevant").fetch("required") == true
+reject("the reusable core must expose exact typed profile, authority, and candidate inputs") unless
+  core_inputs.keys.sort == %w[authority candidate_sha profile] &&
+  core_inputs.values_at("profile", "authority", "candidate_sha").all? { |input| input.fetch("type") == "string" && input.fetch("required") == true }
 reject("the reusable core permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-
-smoke_trigger = smoke.fetch(true)
-reject("G6 harness smoke must run only on manual dispatch") unless smoke_trigger.keys == ["workflow_dispatch"]
-reject("G6 harness smoke permissions must remain read-only") unless smoke.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-smoke_concurrency = smoke.fetch("concurrency")
-reject("manual smoke runs must not cancel each other") unless
-  smoke_concurrency.fetch("group").include?("github.run_id") &&
-  smoke_concurrency.fetch("cancel-in-progress") == false && !smoke_concurrency.key?("queue")
-smoke_jobs = smoke.fetch("jobs")
-reject("manual smoke must keep a thin reusable-workflow caller") unless smoke_jobs.keys == ["g6-harness-core"]
-smoke_call = smoke_jobs.fetch("g6-harness-core")
-reject("manual smoke must call the local reusable core") unless smoke_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
-reject("manual smoke must be permanently non-authoritative") unless
-  smoke_call.fetch("with") == {
-    "profile" => "smoke",
-    "authority" => "engineering",
-    "candidate_sha" => "${{ github.sha }}",
-    "smoke_relevant" => true,
-  }
 
 jobs = workflow.fetch("jobs")
 required_jobs = %w[
@@ -117,13 +92,6 @@ required_jobs = %w[
   g6-rd-secret-scan
   g6-rd-verifier
   g6-rd-gate
-  g6-smoke-release
-  g6-smoke-fd-a
-  g6-smoke-fd-b
-  g6-smoke-assemble
-  g6-smoke-secret-scan
-  g6-smoke-verifier
-  g6-smoke-result
 ]
 reject("G6 readiness is missing a required semantic layer") unless
   (required_jobs - jobs.keys).empty?
@@ -153,7 +121,7 @@ end
 jobs.each do |job_id, job|
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
   reject("#{job_id} job env must not reference the step-only runner context") if job.fetch("env", {}).values.any? { |value| value.to_s.include?("runner.") }
-  timeout_bound = (job_id.start_with?("g6-rd-fd-") || job_id.start_with?("g6-smoke-fd-")) ? 90 : (%w[g6-rd-release-image g6-smoke-release].include?(job_id) ? 35 : 20)
+  timeout_bound = job_id.start_with?("g6-rd-fd-") ? 90 : (job_id == "g6-rd-release-image" ? 35 : 20)
   reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= timeout_bound
   reject("#{job_id} Action is not pinned to a full SHA or exact local path") if
     Array(job.fetch("steps")).any? do |step|
@@ -191,97 +159,13 @@ end
 reject("caller-specific concurrency policy must not be duplicated inside the reusable core") if
   workflow.key?("concurrency")
 %w[g6-rd-release-image g6-rd-fd-a g6-rd-fd-b].each do |job_id|
-  reject("#{job_id} must be unreachable from the smoke profile") unless
+  reject("#{job_id} must select the formal profile") unless
     jobs.fetch(job_id).fetch("if") == "inputs.profile == 'formal'"
 end
 %w[g6-rd-assemble g6-rd-secret-scan g6-rd-verifier g6-rd-gate].each do |job_id|
-  reject("#{job_id} must remain unreachable from the smoke profile even under always()") unless
+  reject("#{job_id} must select the formal profile even under always()") unless
     jobs.fetch(job_id).fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
 end
-
-smoke_release = jobs.fetch("g6-smoke-release")
-reject("smoke must build one frozen product release only on the smoke profile") unless
-  smoke_release.fetch("needs") == "g6-contract" && smoke_release.fetch("if") == "inputs.profile == 'smoke' && inputs.smoke_relevant"
-smoke_release_steps = Array(smoke_release.fetch("steps"))
-smoke_cache = smoke_release_steps.find { |step| step["name"] == "Restore the pinned smoke release toolchain" }
-smoke_build = smoke_release_steps.find { |step| step["name"] == "Build and freeze the smoke release" }
-smoke_publish = smoke_release_steps.find { |step| step["name"] == "Publish the frozen smoke harness" }
-reject("smoke must freeze the product images, tunnel, and pinned-Go harness") unless
-  smoke_build&.fetch("run", "").include?(".tools/go/bin/go") &&
-  smoke_build.fetch("run").include?("GOTOOLCHAIN=local") &&
-  smoke_build.fetch("run").include?("GOOS=linux") &&
-  smoke_build.fetch("run").include?("harness-sha256") &&
-  smoke_build.fetch("run").include?("runtime-images.tar.gz") &&
-  smoke_build.fetch("run").include?("ocservia-g6-tunnel") &&
-  smoke_release_steps.any? { |step| step.fetch("run", "").include?("scripts/bootstrap.sh go-test") }
-reject("pull-request smoke must restore but never write a tool cache") unless
-  smoke_cache&.fetch("uses", "").start_with?("actions/cache/restore@") &&
-  smoke_release_steps.none? { |step| step.fetch("uses", "").match?(%r{\Aactions/cache(?:/save)?@}) }
-reject("the frozen smoke binary must be a run-attempt-scoped artifact") unless
-  smoke_publish&.fetch("with")&.fetch("name", "").include?("github.run_id") &&
-  smoke_publish.fetch("with").fetch("name").include?("github.run_attempt")
-
-%w[g6-smoke-fd-a g6-smoke-fd-b].each do |job_id|
-  job = jobs.fetch(job_id)
-  domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
-  steps = Array(job.fetch("steps"))
-  execute = steps.find { |step| step["name"] == "Bind #{domain.upcase} raw evidence" }
-  reject("#{job_id} must independently consume the one frozen release") unless
-    job.fetch("needs") == "g6-smoke-release" && job.fetch("if") == "inputs.profile == 'smoke' && inputs.smoke_relevant" &&
-    execute&.fetch("run", "").include?("smoke-domain") && execute.fetch("run").include?("--domain #{domain}") &&
-    execute.fetch("run").include?("--evidence-root") &&
-    steps.any? { |step| step["uses"] == "./.github/actions/g6-install-release" }
-  reject("#{job_id} must be fixed to engineering authority") unless job.fetch("env").fetch("G6_AUTHORITY") == "engineering"
-  reject("#{job_id} must run two Agents per domain under the smoke profile") unless
-    job.fetch("env").values_at("G6RD_PROFILE", "G6_AGENTS_A", "G6_AGENTS_B") == ["smoke", "2", "2"]
-  diagnostics = steps.find { |step| step["name"] == "Collect #{domain.upcase} diagnostics" }
-  diagnostics_upload = steps.find { |step| step["name"] == "Upload #{domain.upcase} diagnostics" }
-  cleanup_index = steps.index { |step| step["name"] == "Clean #{domain.upcase} resources" }
-  reject("#{job_id} must preserve bounded diagnostics before cleanup") unless
-    diagnostics&.fetch("if") == "always()" &&
-    diagnostics.fetch("run").start_with?("timeout --signal=TERM --kill-after=15s 120s ") &&
-    diagnostics_upload&.fetch("if") == "always()" &&
-    diagnostics_upload.fetch("with").fetch("path") == "${{ runner.temp }}/artifacts/g6-readiness-#{domain}" &&
-    diagnostics_upload.fetch("with").fetch("if-no-files-found") == "error" &&
-    steps.index(diagnostics_upload) < cleanup_index
-end
-
-smoke_assembly = jobs.fetch("g6-smoke-assemble")
-reject("smoke must separate Evidence Builder from runtime") unless
-  smoke_assembly.fetch("needs").sort == %w[g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release] &&
-  Array(smoke_assembly.fetch("steps")).any? { |step| step.fetch("run", "").include?("smoke-assemble") }
-reject("smoke must independently scan all raw and assembled evidence") unless
-  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).sum { |step| step.fetch("run", "").scan("gitleaks dir").length } == 3 &&
-  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).any? { |step| step.fetch("run", "").include?("source scripts/env.sh") && step.fetch("run").include?("gitleaks dir") }
-smoke_verifier_steps = Array(jobs.fetch("g6-smoke-verifier").fetch("steps"))
-smoke_verifier_fallback = smoke_verifier_steps.find { |step| step["name"] == "Preserve structured smoke verification failure" }
-smoke_verifier_publish = smoke_verifier_steps.find { |step| step["name"] == "Publish independent smoke verification" }
-reject("smoke must use an independent verifier job") unless
-  smoke_verifier_steps.any? { |step| step.fetch("run", "").include?("smoke-verify") }
-reject("smoke verifier failures must remain structured and publishable") unless
-  smoke_verifier_fallback&.fetch("if") == "always()" &&
-  smoke_verifier_fallback.fetch("run").include?("ocservia.g6-harness-smoke-verification-result.v1") &&
-  smoke_verifier_publish&.fetch("if") == "always()" &&
-  smoke_verifier_publish.fetch("with").fetch("if-no-files-found") == "error"
-
-smoke_result = jobs.fetch("g6-smoke-result")
-smoke_result_steps = Array(smoke_result.fetch("steps"))
-smoke_aggregate = smoke_result_steps.find { |step| step["name"] == "Aggregate the non-authoritative smoke result" }
-smoke_enforce = smoke_result_steps.find { |step| step["name"] == "Enforce the smoke contract" }
-reject("smoke aggregation must require two separately scheduled hosted domains") unless
-  smoke_result.fetch("needs").sort == %w[g6-smoke-assemble g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release g6-smoke-secret-scan g6-smoke-verifier] &&
-  smoke_result.fetch("if") == "${{ always() && inputs.profile == 'smoke' }}" &&
-  smoke_aggregate&.fetch("run", "").include?("smoke-aggregate")
-smoke_not_applicable = smoke_result_steps.find { |step| step["name"] == "Record a structured not-applicable result" }
-reject("unrelated pull requests must retain the stable smoke result check with structured not_applicable output") unless
-  smoke_not_applicable&.fetch("if") == "${{ !inputs.smoke_relevant }}" &&
-  smoke_not_applicable.fetch("run", "").include?('status:"not_applicable"') &&
-  smoke_enforce&.fetch("run", "").include?("expected_status=not_applicable")
-reject("the smoke result must be structurally unable to claim a formal verdict") unless
-  smoke_enforce&.fetch("if") == "always()" &&
-  smoke_enforce.fetch("run").include?('.formal_verdict_eligible == false') &&
-  smoke_enforce.fetch("run").include?('ocservia.g6-harness-smoke-result.v1') &&
-  !smoke_result_steps.any? { |step| step.fetch("run", "").include?("g6-pipeline.mjs gate") }
 
 release_job = jobs.fetch("g6-rd-release-image")
 release_steps = Array(release_job.fetch("steps"))
@@ -398,30 +282,7 @@ reject("every waited checkpoint must have exactly one typed producer upload") un
   waited_names.sort == published_names.sort && waited_names.uniq.length == waited_names.length
 reject("all current rendezvous uploads must use the typed checkpoint action") unless
   checkpoint_uploads.length == 17
-smoke_fd_a_steps = Array(jobs.fetch("g6-smoke-fd-a").fetch("steps"))
-smoke_fd_b_steps = Array(jobs.fetch("g6-smoke-fd-b").fetch("steps"))
-smoke_checkpoint_uploads = (smoke_fd_a_steps + smoke_fd_b_steps).select do |step|
-  step["uses"] == "./.github/actions/g6-checkpoint-upload"
-end
-smoke_waited_names = (smoke_fd_a_steps + smoke_fd_b_steps).each_with_object([]) do |step, names|
-  name = step.fetch("run", "")[/--name\s+"([^"]+)"/, 1]
-  names << name if name
-end
-smoke_published_names = smoke_checkpoint_uploads.map do |step|
-  step.fetch("with").fetch("name")
-    .gsub("${{ github.run_id }}", "${GITHUB_RUN_ID}")
-    .gsub("${{ github.run_attempt }}", "${GITHUB_RUN_ATTEMPT}")
-end
-reject("every waited smoke checkpoint must have exactly one typed producer upload") unless
-  smoke_waited_names.sort == smoke_published_names.sort && smoke_waited_names.uniq.length == smoke_waited_names.length
-reject("all current smoke rendezvous uploads must use the typed checkpoint action") unless
-  smoke_checkpoint_uploads.length == 11
-reject("smoke must publish exactly the encrypted shared runtime and its recipient certificate") unless
-  smoke_published_names.select { |name| name.start_with?("g6-smoke-shared") }.sort == %w[
-    g6-smoke-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
-    g6-smoke-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
-  ].sort
-checkpoint_action = YAML.safe_load(File.read(ARGV[5]), aliases: true)
+checkpoint_action = YAML.safe_load(File.read(ARGV[4]), aliases: true)
 action_steps = Array(checkpoint_action.fetch("runs").fetch("steps"))
 reject("the checkpoint action must scan, manifest, then upload in that exact order") unless
   action_steps.map { |step| step.fetch("name") } == ["Reject plaintext credentials", "Generate the typed checkpoint manifest", "Upload the checkpoint"]
@@ -5001,12 +4862,11 @@ if command -v setsid >/dev/null 2>&1; then
       echo "forced sampler fixture did not become ready" >&2
       exit 1
     }
-    sleep() { :; }
+    # Preserve the shutdown grace periods so killed descendants can be reaped.
     if g6rd_stop_sampler >/dev/null 2>&1; then
       echo "sampler stop accepted a forced process-group termination" >&2
       exit 1
     fi
-    unset -f sleep
     [[ -s "${G6RD_STATE}/sampler-forced-at" \
       && ! -e "${G6RD_STATE}/sampler-complete-at" \
       && ! -e "${G6RD_STATE}/sampler.pid" ]] || {
@@ -5061,8 +4921,8 @@ if [[ "${authority_bindings}" -ne 3 ]]; then
   exit 1
 fi
 sha_bindings="$(grep -c 'G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}' "${WORKFLOW}")"
-if [[ "${sha_bindings}" -ne 5 ]]; then
-  echo "both formal domains and all smoke consumers must bind the reusable candidate input (found ${sha_bindings})" >&2
+if [[ "${sha_bindings}" -ne 2 ]]; then
+  echo "both formal domains must bind the reusable candidate input (found ${sha_bindings})" >&2
   exit 1
 fi
 if grep -q 'G6RD_FAILURE_DOMAIN_CLASS' "${WORKFLOW}"; then
@@ -5494,7 +5354,7 @@ while IFS= read -r wait_name; do
     echo "workflow artifact name is absent from the typed checkpoint registry: ${prefix}" >&2
     exit 1
   }
-done < <(grep -oE -- '--name "g6-(rd|smoke)-[^"]+"' "${WORKFLOW}" | sed 's/^--name "//; s/"$//' | sort -u)
+done < <(grep -oE -- '--name "g6-rd-[^"]+"' "${WORKFLOW}" | sed 's/^--name "//; s/"$//' | sort -u)
 
 grep -qF 'checkpoint-manifest' "${CHECKPOINT_ACTION}" || {
   echo "the checkpoint upload action must generate a typed manifest before upload" >&2
@@ -5574,6 +5434,7 @@ rm -rf "${runtime_result_test}"
 proven_pins="$(grep -hoE 'uses: [^@]+@[0-9a-f]{40}' \
   "${ROOT}/.github/workflows/ci.yml" \
   "${ROOT}/.github/workflows/p1-capacity.yml" \
+  "${ROOT}/.github/workflows/release.yml" \
   "${ROOT}/.github/workflows/real-e2e.yml" | sort -u)"
 while IFS= read -r pin; do
   grep -qxF "${pin}" <<<"${proven_pins}" || {
