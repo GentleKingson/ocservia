@@ -1,30 +1,10 @@
-# Provision the default-branch BuildKit cache for the shared Rust builder.
-# Caches written by a pull_request workflow are bound to that PR's merge ref
-# and can only be restored by re-runs of the same PR, while PR workflows can
-# restore caches created on their base branch — so without this trusted
-# main-branch producer every new PR would compile all third-party
-# dependencies cold. This workflow only ever executes trusted main code, so
-# it never violates the pull_request-only rule for PR-executing workflows,
-# and it holds no secrets beyond the runner-provided Actions cache
-# credentials. It is deliberately not a required check: the cache is a
-# performance input, but the strict exporter below fails the solve when the
-# export does not complete, so green means the cache was provisioned.
+# Provision the shared G6 builder cache outside ordinary PR and main-push CI.
+# Scheduled and manual runs only execute trusted main code. This is a
+# performance input for manual acceptance, not a required validation check.
 name: G6 Rust Build Cache Provisioning
 run-name: G6 Rust Cache · ${{ github.ref }} · ${{ github.sha }}
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'rust/**'
-      - 'toolchains.lock'
-      - 'scripts/checksums.txt'
-      - 'scripts/bootstrap.sh'
-      - 'scripts/env.sh'
-      - '.github/workflows/rust-cache-provision.yml'
-      - '.github/actions/g6-cache-credentials/**'
-      - 'scripts/g6-buildx-cache.sh'
-      - 'scripts/g6-timing.sh'
   schedule:
     # Weekly refresh guards the GitHub cache 7-day no-access eviction during
     # quiet weeks.

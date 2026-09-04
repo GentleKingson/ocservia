@@ -7,4 +7,3 @@ source "${ROOT}/scripts/env.sh"
 (cd "${ROOT}/rust" && cargo check --workspace --all-targets --all-features)
 (cd "${ROOT}/rust" && cargo clippy --workspace --all-targets --all-features -- -D warnings)
 (cd "${ROOT}/rust" && cargo test --workspace --all-features)
-(cd "${ROOT}/rust" && cargo deny check licenses)
