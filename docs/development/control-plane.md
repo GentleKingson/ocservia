@@ -112,13 +112,10 @@ Run the browser-to-simulator E2E with `make e2e`. The script scopes every
 container, network, and volume to `COMPOSE_PROJECT` and removes them on success,
 failure, or interruption.
 
-The same Compose stack is used by the `Browser E2E` GitHub Actions job. The E2E
-harness collects the Playwright HTML report, traces, screenshots, videos, test
-results, Compose logs, and container status as diagnostics. GitHub Actions
-uploads the failure diagnostics artifact only when the job fails or is
-cancelled (`if: ${{ failure() || cancelled() }}`); a successful run does not
-upload this diagnostics artifact. Scoped cleanup still runs, and `make e2e` is
-the local reproduction command rather than a separate acceptance environment.
+Browser E2E is manual validation through `make e2e`, not part of Basic CI.
+The E2E harness collects the Playwright HTML report, traces, screenshots,
+videos, test results, Compose logs, and container status as diagnostics.
+Collect these locally; there is no Browser E2E job or workflow artifact upload.
 
 For a disposable development stack with no data to preserve, recreate the
 database from the current schema with:
