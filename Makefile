@@ -47,7 +47,7 @@ p1-full:
 	P1_PROFILE=full ./scripts/p1-resilience-capacity.sh
 
 real-e2e-check:
-	./scripts/test-real-e2e-workflow.sh
+	@for script in ./scripts/real-e2e-{controller,node,artifact}.sh; do bash -n "$$script" || exit; done
 
 rust-check:
 	./scripts/rust-check.sh

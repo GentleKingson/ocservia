@@ -48,6 +48,7 @@ Reason and changed-file count are diagnostic metadata.
 | --- | --- |
 | Documentation, Markdown, license text | docs |
 | G6 workflows, actions, scripts, harness, deployment fixtures, and dedicated Rust runtime files | docs |
+| Manual P1/security acceptance scripts, real-E2E scripts and their checks, `deploy/real-e2e` | docs |
 | Web | web + docs |
 | Go sources, module/workspace files, control-plane code and migrations | go + database-smoke |
 | Rust workspace | rust |
@@ -57,8 +58,8 @@ Reason and changed-file count are diagnostic metadata.
 Mixed changes use the union of their checks. Documentation-only changes do
 not activate language or database checks. Infrastructure changes, unknown
 paths, and unclassifiable diffs conservatively run all five, never acceptance.
-G6-specific paths are the exception: they select only the basic docs check,
-not G6 acceptance or additional G6 contract checks.
+G6-specific and script-level manual acceptance paths are the exceptions: they
+select only the basic docs check, not acceptance or additional contract checks.
 
 PR routing uses `base...head`, excluding base-only changes after the branch
 point. Main pushes use `before..head`. Deletions and both sides of renames
@@ -92,8 +93,9 @@ which calls `g6-harness-core.yml` with `profile=formal`, the selected
 `authority`, and the exact `candidate_sha`. Run it before releases or major
 architecture changes. The smoke caller and all seven smoke jobs are removed;
 ordinary PRs do not run G6 smoke or formal G6. No replacement G6 check is added.
-Formal G6, runtime/security/capacity acceptance, cross-VM enrollment, and release
-packaging remain separate workflows, not ordinary CI or Basic CI prerequisites.
+Formal G6 and release packaging remain separate workflows, not ordinary CI or
+Basic CI prerequisites. Runtime/security/capacity acceptance and cross-VM
+enrollment are script-level manual acceptance, not GitHub Actions workflows.
 The G6 Rust cache producer retains scheduled/manual execution only; it no
 longer starts on main pushes. Its cache is not needed by Basic CI.
 
@@ -101,6 +103,23 @@ Basic CI does not claim production readiness, capacity, native package,
 cross-VM, browser E2E, security, or license acceptance. Those scripts and
 manual entry points remain available; `make verify` is a broader local
 command, not an alias for Basic CI.
+
+### Script-level manual acceptance
+
+These environment-dependent checks are not part of Basic CI: capacity runs
+need substantial resources, native security checks need systemd/privd/PKI
+fixtures, and cross-VM enrollment needs two distinct Linux VMs and Internet
+relay connectivity. Run them manually on suitable local or dedicated servers:
+
+- `make p1-smoke` and `make p1-full` call `scripts/p1-resilience-capacity.sh`.
+- `scripts/security-acceptance-f1.sh`, `scripts/security-acceptance-f2.sh`, and
+  `scripts/security-acceptance-f3.sh` retain the live security acceptance phases.
+- `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
+  `scripts/real-e2e-artifact.sh`, and `deploy/real-e2e` remain available; see
+  [Cross-VM real E2E validation](real-e2e.md) for manual execution.
+
+`make real-e2e-check` only checks the three real-E2E scripts' Bash syntax. It
+does not read workflow files or run live acceptance, and Basic CI does not call it.
 
 ## Reproduction
 
@@ -228,4 +247,4 @@ cannot read the repository administration API.
 
 Native systemd/privd/PKI and live relay scenarios remain outside Basic CI.
 Pure Rust adapter tests still run in the ordinary Rust workspace suite.
-Use the separate manual acceptance workflows for environment-dependent checks.
+Use the script-level manual acceptance commands for environment-dependent checks.

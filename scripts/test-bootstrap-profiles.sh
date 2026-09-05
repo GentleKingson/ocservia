@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="${ROOT}/scripts/bootstrap.sh"
 WORKFLOW="${ROOT}/.github/workflows/ci.yml"
-P1_WORKFLOW="${ROOT}/.github/workflows/p1-capacity.yml"
 RELEASE_WORKFLOW="${ROOT}/.github/workflows/release.yml"
 
 set +e
@@ -16,10 +15,9 @@ if [[ ${status} -ne 2 ]] || [[ "${output}" != *"bootstrap profile must be explic
   exit 1
 fi
 
-ruby -r yaml - "${ROOT}" "${WORKFLOW}" "${P1_WORKFLOW}" "${RELEASE_WORKFLOW}" <<'RUBY'
-root, workflow_path, p1_workflow_path, release_workflow_path = ARGV
+ruby -r yaml - "${ROOT}" "${WORKFLOW}" "${RELEASE_WORKFLOW}" <<'RUBY'
+root, workflow_path, release_workflow_path = ARGV
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
-p1_workflow = YAML.safe_load(File.read(p1_workflow_path), aliases: true)
 release_workflow = YAML.safe_load(File.read(release_workflow_path), aliases: true)
 jobs = workflow.fetch("jobs")
 bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
@@ -127,13 +125,6 @@ summary = result.fetch("steps").first.fetch("run")
   reject("summary accepted a missing routing flag") if status.success?
 end
 
-p1_trigger = p1_workflow.fetch(true)
-reject("P1 Full must remain workflow_dispatch-only") unless p1_trigger.keys == ["workflow_dispatch"]
-p1_job = p1_workflow.fetch("jobs").fetch("p1-full")
-reject("P1 Full must use ubuntu-24.04") unless p1_job.fetch("runs-on") == "ubuntu-24.04"
-reject("P1 Full profile changed") unless p1_job.fetch("env").fetch("P1_PROFILE") == "full"
-reject("P1 Full timeout changed") unless p1_job.fetch("timeout-minutes") == 45
-
 release_jobs = release_workflow.fetch("jobs")
 build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")
 restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
@@ -175,5 +166,3 @@ if "${ROOT}/scripts/go-check.sh" unsupported >/dev/null 2>&1; then
   echo "go-check.sh accepted an unsupported execution mode" >&2
   exit 1
 fi
-
-"${ROOT}/scripts/test-real-e2e-workflow.sh"
