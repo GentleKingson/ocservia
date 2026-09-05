@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Only the isolated relay recovery experiment enables this feature.
+relay-recovery-test = []
+
 [dependencies]
 hex.workspace = true
 iroh.workspace = true

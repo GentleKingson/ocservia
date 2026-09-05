@@ -1341,7 +1341,16 @@ impl TransportService for IrohTransportService {
         let fence = command.connection_fence.as_ref();
         tracing::info!(
             event_type = "command_frame_written",
+            message_id = %hex::encode(&command.message_id),
             command_id = %hex::encode(&command.command_id),
+            operation_id = %hex::encode(&command.operation_id),
+            idempotency_key = %hex::encode(&command.idempotency_key),
+            delivery_mode = command.delivery_mode,
+            sequence = command.sequence,
+            expected_revision = command.expected_revision,
+            required_capability = %command.required_capability,
+            semantic_payload_sha256 = %hex::encode(&command.semantic_payload_sha256),
+            semantic_payload_hash_version = command.semantic_payload_hash_version,
             node_id = %hex::encode(&node_id),
             owner_fence_id = %fence.map_or_else(String::new, |value| hex::encode(&value.fence_id)),
             connection_id = %fence.map_or_else(String::new, |value| hex::encode(&value.connection_id)),
@@ -2237,6 +2246,7 @@ fn monitor_paths(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn read_agent_events(
     mut recv: iroh::endpoint::RecvStream,
     shared: Shared,
@@ -2318,6 +2328,20 @@ async fn read_agent_events(
                 .await;
                 return;
             }
+            tracing::info!(
+                event_type = "command_response_received",
+                message_id = %hex::encode(&command.message_id),
+                command_id = %hex::encode(&result.command_id),
+                node_id = %hex::encode(&node_id),
+                delivery_mode = command.delivery_mode,
+                state = result.state,
+                replayed = result.replayed,
+                "Agent command result received"
+            );
+            #[cfg(feature = "relay-recovery-test")]
+            if drop_relay_test_result(&command, &result).await {
+                return;
+            }
         }
         let terminal = matches!(
             event_type,
@@ -2346,11 +2370,75 @@ async fn read_agent_events(
     .await;
 }
 
+#[cfg(feature = "relay-recovery-test")]
+async fn drop_relay_test_result(command: &CommandEnvelope, result: &CommandResult) -> bool {
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandDeliveryMode;
+    use tokio::io::AsyncWriteExt;
+
+    let Ok(path) = std::env::var("OCSERVIA_TEST_DROP_RESULT_TARGET") else {
+        return false;
+    };
+    if !std::path::Path::new(&path).is_absolute()
+        || !matches!(
+            command.payload,
+            Some(command_envelope::Payload::SyntheticNoop(_))
+        )
+        || command.delivery_mode != i32::from(CommandDeliveryMode::ExecuteOrReplay)
+        || result.state != i32::from(CommandResultState::Succeeded)
+        || result.replayed
+        || result.command_id != command.command_id
+        || result.idempotency_key != command.idempotency_key
+        || result.payload_sha256 != command.semantic_payload_sha256
+        || result.semantic_payload_hash_version != command.semantic_payload_hash_version
+    {
+        return false;
+    }
+    let Ok(target) = tokio::fs::read_to_string(&path).await else {
+        return false;
+    };
+    if target.trim_end() != hex::encode(&command.command_id) {
+        return false;
+    }
+    let marker = format!("{path}.dropped");
+    let Ok(mut file) = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+        .await
+    else {
+        return false;
+    };
+    let evidence = format!(
+        "command_id={}\nmessage_id={}\nstate=succeeded\nreplayed=false\n",
+        hex::encode(&command.command_id),
+        hex::encode(&command.message_id)
+    );
+    if file.write_all(evidence.as_bytes()).await.is_err() || file.sync_all().await.is_err() {
+        return false;
+    }
+    tracing::warn!(
+        event_type = "test_command_result_dropped",
+        command_id = %hex::encode(&command.command_id),
+        message_id = %hex::encode(&command.message_id),
+        "test-only single synthetic result dropped before event publication"
+    );
+    true
+}
+
 async fn publish_command_unknown(
     (shared, node_id, traceparent, connection): (&Shared, &[u8], &str, &Connection),
     command: &CommandEnvelope,
-    _message: &str,
+    message: &'static str,
 ) {
+    tracing::warn!(
+        event_type = "command_response_unknown",
+        response_reason = message,
+        message_id = %hex::encode(&command.message_id),
+        command_id = %hex::encode(&command.command_id),
+        node_id = %hex::encode(node_id),
+        delivery_mode = command.delivery_mode,
+        "command response requires reconciliation"
+    );
     let now = now_timestamp();
     let result = CommandResult {
         command_id: command.command_id.clone(),
