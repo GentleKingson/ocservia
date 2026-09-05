@@ -147,104 +147,54 @@ GitHub checks for the exact candidate commit remain the merge-time authority.
 ## Release packages workflow
 
 `.github/workflows/release.yml` builds the Agent distribution outside the
-primary CI graph. It triggers when a lightweight `vX.Y.Z` tag (matching
-`^v[0-9]+\.[0-9]+\.[0-9]+$`) is pushed, and on manual `workflow_dispatch`,
-which always stays a dry run and never uploads release assets or writes to
-GHCR: it exercises the Agent package build plus the Controller multi-arch
-image build and its native image smoke, and every publishing step stays
-skipped. Publishing
-requires repository release immutability to be enabled first (Settings →
-Releases → Enable release immutability, or `gh api -X PUT
-/repos/{owner}/{repo}/immutable-releases`); the setting only applies to
-releases published after it is enabled, so the mutable v0.1.x baseline used
-by the upgrade smoke is unaffected. The publish job verifies this
-prerequisite itself before any production write through the
-`REPO_ADMIN_READ_TOKEN` secret of the `release-publishing` environment
-(a fine-grained PAT with Administration: read), because `GITHUB_TOKEN`
-cannot read the repository administration API.
+primary CI graph. It triggers on `v*.*.*` tag pushes, requiring a lightweight
+`vX.Y.Z` tag with a plain SemVer version, and on manual `workflow_dispatch`.
+Dispatch always stays a dry run: it never publishes a GitHub Release, writes
+to GHCR, or loads the production signing key.
 
-- The build job runs as a two-leg matrix on native runners
-  (`ubuntu-24.04` for `amd64`, `ubuntu-24.04-arm` for `arm64`, no emulation).
-  Each leg bootstraps the `native-packages` profile, builds the release
-  binaries natively, produces the signed archive triple plus `.deb` and
-  `.rpm`, and runs `scripts/release-native-package-smoke.sh`: a full
-  deb install/upgrade/removal lifecycle on the runner plus an rpm
-  install/upgrade/erase lifecycle inside a systemd-enabled Rocky Linux 9
-  container built for the run. A failure on either architecture fails the
-  workflow before any assets can be published.
-- Each build leg also runs
-  `scripts/release-baseline-upgrade-smoke.sh`: it installs the published
-  v0.1.1 `.deb` after verifying it against the release's signed
-  `SHA256SUMS`, whose exact bytes the smoke pins in-repo (the v0.1.1
-  release is not immutable), then upgrades it in place to the candidate
-  while asserting the package state and the rollback snapshot. The
-  published-baseline leg is deb-only; rpm cross-version coverage remains
-  the fabricated-version lifecycle smoke inside the Rocky Linux 9
-  container.
-- The validate job downloads both legs' artifacts and runs
-  `scripts/validate-release-packages.sh`: presence and naming of the six
-  packages, both signed triples verified against the pinned fingerprint,
-  `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
-  identical embedded payloads, and a canonical `SHA256SUMS` covering those
-  six packages, the versioned `controller-bootstrap.sh` and
-  `managed-node-bootstrap.sh` copied byte-for-byte from the release checkout,
-  plus the three Controller manifests
-  (`controller-release.json`, `controller-release-amd64.json`,
-  `controller-release-arm64.json`) on formal Controller releases.
-- The Controller image build runs for tag-push release runs and manual
-  `workflow_dispatch` dry runs as a
-  two-leg matrix on native runners (`ubuntu-24.04` for `amd64`,
-  `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
-  builder. Each native leg exports each of its four first-party images as a
-  single-platform Docker image archive. The smoke script loads that exact
-  archive into the runner's Docker daemon before it asserts the image really
-  targets the leg's architecture, boots the gateway image to serve a request
-  as a non-root process, and drives the control, transport, and backup images
-  to their startup boundaries on the native runner. The same archive is
-  uploaded as the cross-job artifact and loaded again by the single
-  `release-publishing`-gated publish job, which pushes the per-platform images under
-  `<version>-linux-<arch>` companion tags, merges them with
-  `docker buildx imagetools create` into one tagged multi-platform index
-  per image, fails closed when an index lacks either architecture,
-  generates the platform manifests, re-checks anonymous GHCR reads of the
-  image indexes, pushes the four `actions/attest` provenance attestations
-  against the final index digests, and finally signs and uploads the whole
-  release asset set. Every production registry write therefore happens
-  behind exactly one reviewer checkpoint.
-- Every build job signs with an ephemeral key generated on the runner, so a
-  `workflow_dispatch` run never touches the production signing credential,
-  and the validate job checks the internal consistency of the signed set
-  without the production pin. The build legs retain `contents: read` only,
-  and manual dispatch remains a dry run with no production write; the
-  protected publish job remains the sole registry-write boundary.
-- The publish job runs only for tag-push release runs behind the protected
-  `release-publishing` environment with `contents: write`: it re-signs both
-  archive checksum triples with the release key, rebuilds the native
-  packages with the release trust anchor, validates the whole set against
-  the `AGENT_TRUSTED_KEY_SHA256` pin, signs the unified `SHA256SUMS`, and
-  only then publishes through the immutable-release sequence. Before any
-  production write it binds the tag to the run's source commit (remote
-  `refs/tags/vX.Y.Z` must resolve to exactly that commit as a lightweight
-  tag; the check is repeated immediately before publishing, since a tag
-  can still be moved until the release is published), and it preflights
-  the repository immutability setting through `REPO_ADMIN_READ_TOKEN`.
-  The sequence itself is: create a draft release for the tag, upload the
-  complete asset set without `--clobber` (name collisions fail instead of
-  overwriting), publish the draft, and verify the release attestation
-  GitHub generated at publication with `gh release verify` plus an
-  `immutable: true` assertion on the published release. A published
-  release is never modified: GitHub's release attestation covers the bootstrap
-  assets along with the rest of the exact asset set, while their entries in the
-  Ed25519-signed `SHA256SUMS` preserve the independently pinned project trust
-  chain. A rerun after a successful publication skips
-  every production-write step and instead re-verifies the published
-  release in place (immutability, attestation, tag binding, and the
-  complete asset-name set), so a transient attestation delay cannot leave
-  a correct release with a permanently red workflow; a leftover draft
-  from an earlier failed attempt is the only thing it discards and
-  recreates. Because immutable releases lock assets and the tag at
-  publication, release notes are attached by a maintainer afterwards —
-  title and notes remain editable on an immutable release.
+- Dispatch accepts `version` and `arch` (`amd64`, `arm64`, or `all`).
+  The default `amd64` builds and smokes only one architecture, avoiding the
+  arm64 Agent and Controller build legs for faster feedback. Tag pushes
+  always build both amd64 and arm64, regardless of dispatch defaults.
+- Agent packages build natively on `ubuntu-24.04` (amd64) and
+  `ubuntu-24.04-arm` (arm64), without emulation. Each selected leg builds
+  Agent, privd, and upgrader, produces a signed tar archive plus deb/rpm,
+  and runs `scripts/release-native-package-smoke.sh` for the candidate's
+  deb install/upgrade/removal and rpm install/upgrade/erase scripts.
+  Neither published-baseline upgrade smoke runs in the release workflow.
+- Tag pushes and `arch=all` dry runs download both package sets and run
+  `scripts/validate-release-packages.sh`. This retains package presence,
+  signatures, architecture metadata, embedded payload consistency, and
+  canonical checksum coverage of packages and versioned bootstrap assets.
+  Single-architecture dry runs skip this two-architecture aggregate job;
+  their candidate lifecycle smoke still runs.
+- Controller builds use the same selected architectures and pinned BuildKit.
+  Each leg exports the four first-party images as Docker archives and runs
+  `scripts/release-controller-image-smoke.sh` against those exact archives
+  on its native runner. Package sets and Controller image archives remain
+  uploaded as artifacts. Native smoke diagnostics upload only on failure
+  or cancellation, without duplicate baseline diagnostics.
+- Build jobs use ephemeral signing keys and source-read permissions only.
+  The tag-push-only publish job remains behind the `release-publishing`
+  environment with `contents: write` and `packages: write`. It checks
+  SemVer and binds the remote tag to the source commit once before
+  production writes. Runner environment recording runs only here and is
+  non-blocking.
+- The publish job loads the built Controller archives, pushes both platforms
+  to GHCR, assembles multi-platform indexes, checks both architectures and
+  anonymous reads, and generates the platform manifests plus the amd64
+  compatibility alias. It re-signs Agent archives with the release key,
+  rebuilds native installers with the release trust anchor, validates against
+  `AGENT_TRUSTED_KEY_SHA256`, and signs and verifies `SHA256SUMS`.
+  The complete package, Controller manifest, and bootstrap asset set is
+  uploaded to a draft GitHub Release before publication, without
+  `--clobber`. A leftover draft may be recreated; an already-published
+  release is not modified, and reruns have no read-only recovery path.
+- Release immutability prerequisites, `REPO_ADMIN_READ_TOKEN`, gh release
+  verification support checks, image provenance attestations, post-publish
+  attestation/immutability verification, and repeated tag binding are not
+  required by this workflow. Existing package signatures and installer trust
+  verification remain unchanged.
 
 ## Deferred native validation
 
