@@ -303,8 +303,8 @@ if [[ "${MODE}" == "full" ]]; then
     -run TestOIDCTLSAndIssuerOutagesFailClosed -count=1) \
     >"${ARTIFACT_DIR}/oidc-tls-outage.log" 2>&1
 else
-  printf 'covered by full Go and Rust validation jobs\n' >"${ARTIFACT_DIR}/relay-failover.log"
-  printf 'covered by full Go and Rust validation jobs\n' >"${ARTIFACT_DIR}/oidc-tls-outage.log"
+  printf 'covered by Basic CI go/rust jobs\n' >"${ARTIFACT_DIR}/relay-failover.log"
+  printf 'covered by Basic CI go/rust jobs\n' >"${ARTIFACT_DIR}/oidc-tls-outage.log"
 fi
 RUN_ID="${RUN_ID}-backup" ARTIFACT_DIR="${ARTIFACT_DIR}/backup-restore" \
   "${ROOT}/scripts/i18-backup-restore-smoke.sh"
