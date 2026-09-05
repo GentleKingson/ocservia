@@ -1,39 +1,27 @@
 # Deploy the Controller
 
-This guide covers a first production deployment with the guarded Controller
-lifecycle. It keeps the operator path short; the exact filesystem, release,
-secret, and rollback contracts are in [Production deployment reference](../operations/production-deployment.md).
+This guide is the short production path for installing the ocservia Controller. It focuses on what an operator needs to prepare and run. Exact file modes, lifecycle state, rollback behavior, and recovery details remain in the [Production deployment reference](../operations/production-deployment.md).
+
+## What the Controller does
+
+The Controller is the central Web/API service. It stores state in PostgreSQL, connects to managed nodes through dedicated relays, records audit events, and runs install, upgrade, rollback, and uninstall workflows for the Controller side.
 
 ## Requirements
 
-- Ubuntu 20.04, 22.04, 24.04, or 26.04, or Debian 11, 12, or 13, on `amd64`
-  or `arm64`. Ubuntu 20.04 requires an existing compatible Docker
-  installation (Docker Engine with Compose v2 and `docker compose up --wait`);
-  automatic Docker bootstrap is unavailable on that legacy host, which needs
-  Ubuntu Pro/ESM or an equivalent maintenance strategy. Debian 11 left regular
-  Debian LTS security maintenance on 2026-08-31 and needs Debian ELTS or an
-  equivalent for production.
-- Git, curl, and the ability to prepare a durable clean checkout. The versioned
-  bootstrap creates and verifies that checkout for the recommended path.
+- A supported `amd64` or `arm64` Linux host: Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12/13.
+- Git, curl, and Docker Engine with the Compose v2 plugin. The installer can bootstrap Docker on most supported hosts, but Ubuntu 20.04 needs a compatible Docker install prepared beforehand.
 - A DNS name and HTTPS certificate for the Controller.
-- An OIDC issuer and client, an HTTPS certificate signer, and a TLS OTLP
-  backend.
-- Two independently operated dedicated relays with distinct DNS names.
-- A protected backup location and a Controller Iroh identity whose public
-  EndpointID is known.
-- A lifecycle launcher user with Docker daemon access, or the ability to run
-  the lifecycle as root.
-- The release-signing public key and its expected fingerprint provisioned
-  through a channel separate from the release bundle.
+- An OIDC login provider and client.
+- A certificate signing endpoint and a TLS monitoring endpoint.
+- Two dedicated relay URLs for production node traffic.
+- Protected directories for secrets and backups.
+- The release-signing public key provisioned through a protected channel separate from the downloaded release bundle.
 
-The repository does not generate production secrets, trust keys, certificates,
-relay tokens, or passwords. Prepare those through the operator's protected
-provisioning process.
+The repository does not generate production passwords, private keys, certificates, relay tokens, or signing keys. Prepare them before installation.
 
-## 1. Prepare configuration
+## 1. Prepare the configuration directory
 
-Keep installation configuration in its own protected directory, separate from
-the versioned source checkout:
+Use an exact release tag and keep local configuration outside the release checkout:
 
 ```bash
 git clone --branch vX.Y.Z --single-branch --depth 1 \
@@ -43,232 +31,61 @@ cp ../ocservia-vX.Y.Z/install.env.example install.env
 editor install.env
 ```
 
-The configuration file is a strict, non-executing `KEY=VALUE` contract; it is
-not a secret generator. Provision every secret and trust file it references
-through the operator's protected channel before installation.
+Edit only the Controller section in `install.env`. Delete or leave commented the managed-node section. The file is read from the current directory when you run the installer.
 
-## 2. Install the pinned release
+## 2. Fill in the Controller settings
 
-Run the versioned Stage-1 from the exact release checkout:
+The exact variable names are in `install.env.example`. At a minimum, configure:
+
+| Setting group | Examples |
+| --- | --- |
+| Public address | `OCSERV_PUBLIC_HOST`, `OCSERV_CONTROLLER_PUBLIC_URL`, `OCSERV_HTTPS_ADDRESS` |
+| Login and external services | `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID`, `OCSERV_CERTIFICATE_SIGNER_URL`, `OCSERV_OTEL_BACKEND_ENDPOINT` |
+| Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` |
+| Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
+| Release trust | `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` |
+
+Keep `install.env` private and out of Git. Variables exported in the shell override values from the file.
+
+## 3. Prepare secrets and trust files
+
+Put production material in the protected directories referenced by `install.env`. Typical required material includes:
+
+- HTTPS certificate and key.
+- PostgreSQL passwords and database URLs.
+- OIDC client secret, session key, and audit keys.
+- Controller command signing key.
+- Certificate signer token.
+- Relay access token.
+- Controller identity key.
+- Monitoring client certificate, key, and CA certificate.
+
+Use the exact filenames and permission requirements from the [Production deployment reference](../operations/production-deployment.md) before running the installer.
+
+## 4. Install the pinned release
+
+Run the versioned bootstrap from the release checkout while your current directory is the configuration directory:
 
 ```bash
 ../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
   --version vX.Y.Z
 ```
 
-Stage-1 reads `install.env` from the current directory and creates a durable
-launcher-owned clean checkout at
-`${OCSERV_CONTROLLER_SOURCE_ROOT:-$HOME/.local/share/ocservia/controller/releases}/vX.Y.Z`.
-It then invokes that checkout's `deploy/production/install.sh`. The working
-configuration directory and the source checkout therefore remain separate.
-
-The Controller flow is:
-
-```text
-Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
-        -> production/install.sh -> signed manifest -> controller.sh
-        -> smoke/readiness
-```
-
-The durable checkout must be clean and match the signed manifest's
-`source_commit`; `controller.sh` remains the authority for release verification,
-digest-pinned images, activation, and lifecycle state.
-
-The thin Stage-0 entrypoint becomes an alternative only after an operator has
-deployed the static endpoint and verified its bytes. Do not use a bare
-`curl | bash` pipeline. The fail-closed form downloads to a temporary file,
-checks curl's status and the final completeness marker, and only then executes
-Stage-0. It can additionally verify the immutable Stage-1 Release asset with
-the out-of-band Ed25519 key and fingerprint. See [Stage-0 bootstrap
-hosting](../operations/bootstrap-hosting.md) for the exact command and trust
-boundary.
-
-## 3. Release bundle
-
-`deploy/production/install.sh` downloads the release bundle for the host
-architecture automatically, so this step only describes what is downloaded.
-From the [GitHub Releases](https://github.com/GentleKingson/ocservia/releases)
-page for the selected release tag, the relevant assets are:
-
-- `controller-release-amd64.json` and its `.sha256`, or
-- `controller-release-arm64.json` and its `.sha256`,
-
-together with `SHA256SUMS` and `SHA256SUMS.sig`.
-
-Keep the selected manifest, `SHA256SUMS`, and `SHA256SUMS.sig` together in one
-protected directory when provisioning them manually. Do not use the
-`release-signing.pub.pem` published beside the bundle as the trust anchor. Set
-`OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` to the independently provisioned key.
-
-## 4. Compatibility checkout path
-
-Ubuntu 20.04 and Debian 11 cannot use the verified Stage-0 path because their
-distribution OpenSSL cannot verify Ed25519 in this contract. They retain the
-clean exact-release checkout path. It is also available for operators who do
-not deploy the static Stage-0 endpoint:
+For a deliberate whole-lifecycle-as-root install, add `--root-lifecycle`:
 
 ```bash
-git clone --branch <release-tag> --depth 1 \
-  https://github.com/GentleKingson/ocservia.git
-cd ocservia
-
-export OCSERV_BACKUP_DIR=/protected/ocservia-backups
+../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh \
+  --version vX.Y.Z \
+  --root-lifecycle
 ```
 
-The supported hosts are Ubuntu 20.04/22.04/24.04/26.04 and Debian 11/12/13 on
-`amd64` or `arm64`. When Docker is absent, the bootstrap installs Docker
-Engine and the Compose plugin from Docker's official apt repository for the
-detected distribution — except on Ubuntu 20.04, which supports only an
-already-installed compatible Docker. The bootstrap never changes Docker
-permissions, the firewall, or production trust material.
+The bootstrap reads `./install.env`, prepares a clean release checkout under the Controller source root, and hands off to the production installer. The installer downloads the release bundle, verifies it, activates the Controller, and runs readiness checks.
 
-The optional static Stage-0 convenience entrypoint has a narrower verified
-platform contract because its Ed25519 release-manifest verification requires
-OpenSSL 3. Ubuntu 20.04 and Debian 11 retain full Controller support but must
-use the clean exact release checkout path documented here rather than
-`install-controller`. See the [Stage-0 bootstrap hosting
-contract](../operations/bootstrap-hosting.md) for the entrypoint and trust
-details.
+Do not replace this flow with a manual `docker compose up -d`; that bypasses the release and lifecycle checks.
 
-`deploy/production/install.sh` (step 7) runs the host bootstrap itself. To
-prepare or verify the host separately:
+## 5. Verify the deployment
 
-```bash
-deploy/production/bootstrap-host.sh check \
-  --backup-dir "$OCSERV_BACKUP_DIR"
-sudo deploy/production/bootstrap-host.sh install \
-  --backup-dir "$OCSERV_BACKUP_DIR"
-```
-
-## 5. Configure required production settings
-
-Export the values used by the production Compose file. Keep this environment
-in the same protected operator session used for the lifecycle command:
-
-```bash
-export OCSERV_PUBLIC_HOST=controller.example.com
-export OCSERV_SECRET_DIR=/protected/ocservia-secrets
-export OCSERV_BACKUP_DIR=/protected/ocservia-backups
-export OCSERV_OIDC_ISSUER=https://id.example.com
-export OCSERV_OIDC_CLIENT_ID=ocservia
-export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.com/v1
-export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.com:4317
-export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
-export OCSERV_CONTROLLER_ENDPOINT_ID=<64-lowercase-hex-characters>
-export OCSERV_RELAY_URL_A=https://relay-a.example.com
-export OCSERV_RELAY_URL_B=https://relay-b.example.com
-export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-signing.pub.pem
-```
-
-Instead of exporting every variable, you can keep the configuration in
-`./install.env` in the directory you run the installer from (normally the
-checkout root): copy `install.env.example` from the repository root, delete
-the managed-node section, and uncomment and edit the Controller entries.
-`install.env` is git-ignored, so it never makes the clean-release-checkout
-check fail. The file is parsed by a strict, non-executing loader
-(`deploy/lib/install-env.sh`): it only accepts the documented allowlisted
-keys as literal `KEY=VALUE` lines, and it fails closed on unknown keys,
-malformed lines, or unsafe file metadata (symlinks, group/world-writable
-permissions). Variables exported in the shell always win over the file.
-
-`OCSERV_CONTROLLER_ENDPOINT_ID` must match the public identity derived from
-the protected `controller-iroh.key`. The two relay URLs are required for the
-production transport path; public relays are not a fallback.
-
-## 6. Configure secrets and trust
-
-Place the required files in `OCSERV_SECRET_DIR`:
-
-```text
-tls.crt
-tls.key
-postgres-owner-password
-postgres-app-password
-postgres-backup-password
-postgres.pgpass
-database-owner-url
-database-app-url
-oidc-client-secret
-session-key
-audit-checkpoint-key
-audit-event-key
-controller-command-signing-key.pem
-certificate-signer-token
-relay-access-token
-controller-iroh.key
-otel-client.crt
-otel-client.key
-otel-ca.crt
-```
-
-The directory must be an absolute, canonical mode-`0700` directory outside the
-checkout. The files have different ownership and mode requirements, so do not
-apply one broad permission rule to all of them. See [Production security and
-lifecycle details](../operations/production-deployment.md) before starting.
-
-Configure the OIDC redirect URI as
-`https://<OCSERV_PUBLIC_HOST>/api/v1/auth/callback`. Configure each relay with
-the same protected access token and its own certificate and key; see
-[Dedicated relays](../operations/dedicated-relays.md).
-
-## 7. Direct checkout installation
-
-How the single-command installer runs depends on the Docker state of the host:
-
-- On a host that already has Docker with daemon access granted to the
-  lifecycle launcher user, run it as that launcher user (not as a whole-script
-  `sudo` — it invokes `sudo` itself only for the host bootstrap):
-
-  ```bash
-  deploy/production/install.sh
-  ```
-
-- On a fresh host without Docker, run the deliberate root lifecycle instead:
-
-  ```bash
-  deploy/production/install.sh --root-lifecycle
-  ```
-
-  A freshly installed Docker grants no non-root daemon access and the
-  installer never modifies the Docker permission model, so a non-root
-  launcher on a Docker-less host fails closed up front rather than mutating
-  the host and failing after the Docker install. `--root-lifecycle` obtains
-  root through a controlled `sudo env`, forwards only the allowlisted
-  production `OCSERV_*` settings from this operator session, and runs the
-  whole Controller lifecycle — including the state root — as root. Do not replace
-  this with `sudo -E`; plain whole-script `sudo` without the flag stays
-  rejected. The alternative is to install Docker separately first and
-  deliberately grant the launcher Docker daemon access per Docker's official
-  post-install steps, then run the installer as the launcher.
-
-The installer verifies that the checkout is a clean exact `vX.Y.Z` release
-tag, selects the manifest matching the host architecture (`amd64` or `arm64`),
-bootstraps the host, downloads the release bundle into
-`<state-root>/release-bundles/vX.Y.Z`, and activates it through
-`controller.sh install`.
-
-The equivalent manual path is the manifest matching the Docker daemon
-architecture:
-
-```bash
-# amd64
-deploy/production/controller.sh install \
-  --release-file /protected/release/controller-release-amd64.json
-
-# arm64
-deploy/production/controller.sh install \
-  --release-file /protected/release/controller-release-arm64.json
-```
-
-The lifecycle verifies the signed release bundle, the clean checkout
-`source_commit`, the platform, and the digest-pinned images before activation.
-It then starts the dependency graph and runs the release smoke check. Do not
-replace this command with `docker compose up -d`.
-
-## 8. Verify the deployment
-
-The install command must finish successfully. You can validate the public
-readiness and version endpoints:
+The install command must finish successfully. Then check the public readiness and version endpoints:
 
 ```bash
 curl --fail --silent --show-error \
@@ -277,22 +94,19 @@ curl --fail --silent --show-error \
   "https://${OCSERV_PUBLIC_HOST}/api/v1/version"
 ```
 
-Then verify an authenticated read, a node connection through each relay, OTLP
-delivery, and the newest backup. A release failure leaves pending evidence;
-retry only the same target after correcting its cause. See [Controller upgrade](../how-to/controller-upgrade.md),
-[Controller rollback](../how-to/controller-rollback.md), and [Troubleshooting](../how-to/troubleshooting.md).
+Also verify that login works, a managed node can connect through each relay, monitoring receives data, and the newest backup exists.
 
-For later upgrades, prepare a clean checkout of the next exact release under
-the durable source root, then run `controller.sh upgrade` from that checkout
-with the new signed manifest. The current versioned bootstrap is a first-install
-entrypoint, not an upgrade command. Do not rerun an unpinned or latest
-convenience script as an implicit upgrade. Rollback continues to use protected
-lifecycle state, and uninstall continues to use `controller.sh uninstall`;
-Stage-0 is not a long-term upgrade, rollback, or uninstall manager.
+## 6. After installation
+
+- Install and enroll the first managed node.
+- Use the Controller lifecycle commands for later upgrades, rollback, and uninstall.
+- Do not rerun an unpinned or `latest` installer as an implicit upgrade.
+- Use the optional static bootstrap endpoint only after you have deployed and verified it yourself; do not use a bare `curl | bash` pipeline.
 
 ## Next steps
 
 - [Install a managed node](managed-node.md)
 - [Enroll a node](../how-to/enroll-node.md)
-- [Configure dedicated relays](../operations/dedicated-relays.md)
+- [Configure dedicated relays](../how-to/dedicated-relays.md)
 - [Back up and restore PostgreSQL](../operations/postgres-backup.md)
+- [Production deployment reference](../operations/production-deployment.md)
