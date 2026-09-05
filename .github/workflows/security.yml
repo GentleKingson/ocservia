@@ -1,0 +1,54 @@
+name: Security Checks
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Repository secrets
+            profile: g6-secret-scan
+            command: scripts/security-check.sh
+          - name: Go vulnerabilities
+            profile: go-quality
+            command: |
+              (cd control-plane && govulncheck ./...)
+              (cd tools/g6-harness && govulncheck ./...)
+          - name: Rust advisories
+            profile: rust-validation
+            command: |
+              cd rust
+              cargo audit
+              cargo deny --locked check advisories
+          - name: npm vulnerabilities
+            profile: web
+            command: |
+              (cd web && npm audit --package-lock-only --ignore-scripts)
+              (cd scripts/g6-runtime && npm audit --package-lock-only --ignore-scripts)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bootstrap pinned tools
+        env:
+          npm_config_audit: "false"
+          npm_config_fund: "false"
+        run: scripts/bootstrap.sh "${{ matrix.profile }}"
+      - name: Scan
+        shell: bash
+        run: |
+          source scripts/env.sh
+          ${{ matrix.command }}

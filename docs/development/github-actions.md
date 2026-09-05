@@ -14,6 +14,7 @@ do not cancel earlier runs.
 | File | Workflow | Trigger |
 | --- | --- | --- |
 | `ci.yml` | Basic CI | PRs, pushes to `main`, manual dispatch |
+| `security.yml` | Security Checks | Weekly schedule, manual dispatch, reusable release prerequisite |
 | `g6-readiness.yml` | G6 Formal Readiness | Manual dispatch only |
 | `g6-harness-core.yml` | G6 Readiness Core (Reusable) | Reusable workflow called by formal G6 |
 | `release.yml` | Agent Release Packages | Version tag pushes and manual dry runs |
@@ -48,6 +49,19 @@ license scans, native ocserv integration, P1 smoke, browser E2E, or G6 smoke.
 The database job sets `PG_MAJOR=17` and lets the integration script build
 `ocserv-control` itself. PostgreSQL 18 and its legacy upgrade fixture are
 not run. It needs only the router, not a Rust build or a shared binary artifact.
+
+## Independent security checks
+
+`security.yml` runs weekly on Monday at 03:23 UTC, on manual dispatch, and
+from the release workflow against its candidate commit. It reuses pinned
+bootstrap profiles to run the full-history `scripts/security-check.sh`
+(including its Gitleaks rule regression check), `govulncheck` for both Go
+modules, `cargo audit` and `cargo deny check advisories` for the Rust workspace,
+and `npm audit` for both npm lockfiles, including development dependencies.
+The four scan jobs are read-only and need no production secrets. A failure
+blocks release publishing; it does not expand Basic CI or enable live security
+acceptance. A successful scan covers these tools and their current databases,
+not every possible vulnerability or the state of a deployed service.
 
 ## Path routing
 

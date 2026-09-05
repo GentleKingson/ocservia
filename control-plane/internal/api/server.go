@@ -155,7 +155,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/workspaces", s.requireOperationAuth(s.listWorkspaces))
 	mux.HandleFunc("POST /api/v1/role-bindings", s.requireOperationAuth(s.createRoleBinding))
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
-	s.http = &http.Server{Addr: address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	// Bound request reads without a global write deadline that would end SSE streams.
+	s.http = &http.Server{Addr: address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
 }
 

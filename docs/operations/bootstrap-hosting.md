@@ -48,8 +48,9 @@ single GitHub Release URL under that version and hands off only to the matching
 not read `install.env`, install packages, invoke the Controller lifecycle,
 enroll a node, approve a node, start services, or cross a privilege boundary.
 
-When both `TRUSTED_RELEASE_KEY` and `EXPECTED_RELEASE_KEY_SHA256` are exported,
-Stage-0 downloads `SHA256SUMS` and `SHA256SUMS.sig`, verifies the independently
+Stage-0 requires both `TRUSTED_RELEASE_KEY` and `EXPECTED_RELEASE_KEY_SHA256`
+to be exported and exits before downloading anything if either is missing.
+It downloads `SHA256SUMS` and `SHA256SUMS.sig`, verifies the independently
 provisioned public-key fingerprint and manifest signature, then verifies the
 selected Stage-1 digest before execution. Configure both values through the
 operator's protected provisioning channel. Stage-1 and the existing lifecycle
@@ -67,8 +68,7 @@ Controller support matrix.
 The first bytes in a `curl | bash` flow cannot authenticate themselves. Before
 Stage-0 has started, that flow relies only on the HTTPS endpoint and its PKI;
 verifying the downloaded Stage-1 does not provide out-of-band authenticity for
-the already executing Stage-0 bytes. With no release trust anchor configured,
-Stage-0 warns and Stage-1 authenticity also relies on HTTPS.
+the already executing Stage-0 bytes. There is no unsigned Stage-1 fallback.
 
 For a hardened first-byte path, download Stage-0 to local protected storage,
 compare its digest with the reviewed repository source through an independent
