@@ -91,8 +91,8 @@ run_installer() {
       TEST_EXEC_LOG="${fixture}/exec.log" \
       TEST_ARGS_LOG="${fixture}/args.log" \
       TEST_TEMP_LOG="${fixture}/temp.log" \
-      TRUSTED_RELEASE_KEY="${fixture}/release-key.pub.pem" \
-      EXPECTED_RELEASE_KEY_SHA256="${fingerprint}" \
+      TRUSTED_RELEASE_KEY="${TEST_TRUSTED_KEY-${fixture}/release-key.pub.pem}" \
+      EXPECTED_RELEASE_KEY_SHA256="${TEST_FINGERPRINT-${fingerprint}}" \
       BOOTSTRAP_TOKEN_SOURCE="token-must-not-leak" \
       OCSERV_PUBLIC_HOST="config-must-not-leak" \
       "${installer}" "$@"
@@ -127,6 +127,23 @@ run_documented_fetch() (
 )
 
 for installer in "${CONTROLLER}" "${NODE}"; do
+  for trust_case in missing key-only fingerprint-only; do
+    key=""
+    digest=""
+    [[ "${trust_case}" != key-only ]] || key="${fixture}/release-key.pub.pem"
+    [[ "${trust_case}" != fingerprint-only ]] || digest="${fingerprint}"
+    if TEST_TRUSTED_KEY="${key}" TEST_FINGERPRINT="${digest}" \
+      run_installer "${installer}" --version v1.2.3 >"${fixture}/output" 2>&1; then
+      fail "$(basename "${installer}") accepted ${trust_case} trust"
+    fi
+    [[ ! -s "${fixture}/exec.log" && ! -s "${fixture}/downloads.log" ]] ||
+      fail "${trust_case} trust reached download or Stage-1"
+  done
+  if TEST_FINGERPRINT="$(printf '%064d' 0)" \
+    run_installer "${installer}" --version v1.2.3 >"${fixture}/output" 2>&1; then
+    fail "$(basename "${installer}") accepted a wrong fingerprint"
+  fi
+  [[ ! -s "${fixture}/exec.log" ]] || fail "a wrong fingerprint reached Stage-1"
   for args in "" "--version latest" "--version v1.2.3-rc.1" "--version main" "--version deadbeef"; do
     # shellcheck disable=SC2086 # each fixture intentionally supplies zero or two words
     if run_installer "${installer}" ${args} >"${fixture}/output" 2>&1; then
@@ -173,6 +190,16 @@ if run_installer "${NODE}" --version v1.2.3 >"${fixture}/output" 2>&1; then
 fi
 [[ ! -s "${fixture}/exec.log" ]] || fail "a digest mismatch reached Stage-1"
 mv -- "${fixture}/managed-node-bootstrap.good" "${fixture}/release/managed-node-bootstrap.sh"
+
+cp -- "${fixture}/release/SHA256SUMS.sig" "${fixture}/signature.good"
+printf 'invalid signature\n' >"${fixture}/release/SHA256SUMS.sig"
+for installer in "${CONTROLLER}" "${NODE}"; do
+  if run_installer "${installer}" --version v1.2.3 >"${fixture}/output" 2>&1; then
+    fail "$(basename "${installer}") accepted an invalid manifest signature"
+  fi
+  [[ ! -s "${fixture}/exec.log" ]] || fail "an invalid signature reached Stage-1"
+done
+mv -- "${fixture}/signature.good" "${fixture}/release/SHA256SUMS.sig"
 
 for mode in 404-stage1 tls; do
   rm -rf -- "${fixture}/tmp"/*
