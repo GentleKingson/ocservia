@@ -13,13 +13,13 @@ steady SQL query count grows with subscriber count, and records active and
 rejected streams, healthy/unhealthy watcher and query counters, slow-consumer disconnects, file
 descriptors, goroutines, RSS, and unrelated probe completion.
 
-The authoritative profiles run on a standard GitHub-hosted `ubuntu-24.04`
-runner. `P1 Smoke` runs for pull requests and `main` with 24 Agents, two
+Both profiles are script-level manual acceptance, not part of Basic CI;
+there is no P1 GitHub Actions workflow. `make p1-smoke` uses 24 Agents, two
 500-millisecond heartbeats, eight request submitters, and a 256-item queue. It
 keeps every fault phase and resource-sample assertion while reducing load and
-duration. `P1 Full Validation` is a manual workflow using the defaults below.
+duration. `make p1-full` uses the defaults below.
 
-For optional local Linux reproduction with Docker, Compose, `curl`, and `jq`:
+Run on a suitable Linux server with Docker, Compose, `curl`, and `jq`:
 
 ```bash
 make p1-smoke
@@ -55,9 +55,11 @@ every Docker resource with its Compose project and removes only that project's
 containers, network, volumes, and locally built images on success, failure, or
 interruption.
 
-Both hosted profiles write under `RUNNER_TEMP` and upload run parameters,
+The harness records run parameters,
 request and completion metrics, the JSON summary, resource samples, slow-SSE
 output, interrupted-operation state, disk snapshots, Compose logs, container
-status, and the final exit status. A standard runner's disk, CPU, and memory
-bound the result. The full job must fail rather than silently reduce its load if
-that VM cannot complete the configured profile.
+status, and the final exit status. Set `ARTIFACT_DIR` outside the temporary
+run directory to retain these diagnostics; no workflow uploads them.
+The server's disk, CPU, and memory bound the result.
+The full run must fail rather than silently reduce its load if that server
+cannot complete the configured profile.

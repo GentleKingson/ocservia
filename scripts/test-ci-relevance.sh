@@ -20,7 +20,7 @@ paths=(
   rust/crates/agent/src/lib.rs rust/Cargo.lock rust/rust-toolchain.toml
   .github/workflows/ci.yml scripts/ci-relevance.sh toolchains.lock Makefile
   .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml
-  .github/workflows/g6-harness-smoke.yml .github/actions/g6-install-release/action.yml
+  .github/actions/g6-install-release/action.yml
   scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh
   scripts/g6-buildx-cache.sh scripts/g6-timing.sh .github/actions/g6-cache-credentials/action.yml
   tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml
@@ -95,7 +95,7 @@ done
 
 # G6-only changes select basic documentation checks, never acceptance.
 for path in .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml \
-  .github/workflows/g6-harness-smoke.yml .github/actions/g6-install-release/action.yml \
+  .github/actions/g6-install-release/action.yml \
   scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh \
   scripts/g6-buildx-cache.sh scripts/g6-timing.sh .github/actions/g6-cache-credentials/action.yml \
   tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml \

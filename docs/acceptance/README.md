@@ -58,8 +58,11 @@ and artifact or payload digest mismatch. `ocservia.g6-rendezvous-result.v1`
 records every successful wait or structured fail-closed outcome, including
 peer failure, bounded timeout, GitHub API failure, and contract rejection.
 
-The formal caller and the pull-request smoke caller share one reusable core
-workflow but invoke disjoint profiles. The smoke profile is fixed to
+Only the manual formal caller invokes the reusable core workflow. The former
+pull-request smoke caller and its jobs have been removed; Basic CI does not
+produce G6 results, including for documentation-only PRs. The following smoke
+contracts describe retained legacy tooling and historical evidence, not
+current workflow jobs. The legacy smoke profile is fixed to
 `engineering`, runs on two distinct hosted-runner boot identities, and verifies
 that both runners execute the same candidate-bound frozen harness bytes. Each
 domain result also binds a deterministic digest of its bounded, regular-file-only
@@ -75,10 +78,11 @@ non-formal.
 GitHub artifact IDs and digests while fixing `formal_verdict_eligible` to
 `false`. A smoke result is never an `ocservia.g6-verdict.v2`, never references
 the production-readiness Environment, and cannot satisfy the formal G6 gate.
-For a pull request limited to ordinary documentation, the same contract uses
+For a pull request limited to ordinary documentation, the former caller used
 `status=not_applicable`, null artifact bindings, and `not_applicable` stage
-states. This keeps the aggregate check stable without representing that a
-runtime or verifier executed. Acceptance-contract changes are always relevant.
+states. This kept the old aggregate check stable without representing that a
+runtime or verifier executed. Current G6-only changes select Basic CI's docs
+check, not acceptance.
 
 The harness records actual values and source artifact digests. It does not
 authoritatively declare limits, comparisons, per-item results, or the final

@@ -20,10 +20,11 @@ from drifting away from the guarded Controller and native package authorities.
 GitHub Actions on the pinned `ubuntu-24.04` hosted runner is the authoritative
 pull-request validation environment. The workflow bootstraps from
 `toolchains.lock`, verifies downloaded tools against `scripts/checksums.txt`,
-and runs contract compatibility and generated-clean checks from a fresh
-checkout.
+and selects the basic docs, Go, Rust, Web, and PostgreSQL 17 checks from a
+fresh checkout. Contract compatibility and generated-clean checks remain
+manual commands, not Basic CI jobs.
 
-Use `make bootstrap` followed by `make verify` to reproduce failures locally
+Use `make bootstrap` followed by `make verify` for broader manual validation
 before opening or updating a pull request. Local success is useful for
 debugging but does not replace the required Actions checks. See
-[github-actions.md](github-actions.md) for the complete job and artifact map.
+[github-actions.md](github-actions.md) for the Basic CI jobs and their commands.
