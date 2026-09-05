@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,6 +39,7 @@ type Config struct {
 	RuntimeDBRole            string
 	Environment              string
 	HTTPAddress              string
+	AuthTrustedProxyCIDRs    []netip.Prefix
 	DatabaseURL              string
 	OTLPEndpoint             string
 	DevAuth                  bool
@@ -98,6 +100,15 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
+	if raw, ok := lookup("OCSERV_AUTH_TRUSTED_PROXY_CIDRS"); ok && strings.TrimSpace(raw) != "" {
+		for _, value := range strings.Split(raw, ",") {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+			if err != nil || prefix.Bits() == 0 || prefix.Addr().Is4In6() {
+				return Config{}, errors.New("OCSERV_AUTH_TRUSTED_PROXY_CIDRS must contain explicit IPv4/IPv6 CIDRs, not /0 or mapped IPv4")
+			}
+			cfg.AuthTrustedProxyCIDRs = append(cfg.AuthTrustedProxyCIDRs, prefix.Masked())
+		}
+	}
 	if err := setStringOrFile(lookup, "OCSERV_DATABASE_URL", &cfg.DatabaseURL); err != nil {
 		return Config{}, err
 	}

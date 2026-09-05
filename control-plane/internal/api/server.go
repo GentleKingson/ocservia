@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
@@ -66,6 +67,8 @@ type Server struct {
 	telemetry        *telemetrystore.Service
 	releaseCatalog   *releasecatalog.Catalog
 	auth             *auth.Service
+	authProxies      []netip.Prefix
+	breakGlassBudget *authAdmission
 	rbac             *rbac.Service
 	approvals        *approvals.Service
 	audit            *audit.Manager
@@ -83,6 +86,7 @@ type Server struct {
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
 	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, devAuthToken: devAuthToken, expectedSchema: expectedSchema}
+	s.breakGlassBudget = newAuthAdmission(5, 0, 4)
 	if err := s.configureEventStreams(eventstream.DefaultConfig()); err != nil {
 		panic(err)
 	}
@@ -93,8 +97,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/livez", s.live)
 	mux.HandleFunc("GET /api/v1/readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/version", s.version)
-	mux.HandleFunc("GET /api/v1/auth/login", s.login)
-	mux.HandleFunc("GET /api/v1/auth/callback", s.callback)
+	mux.HandleFunc("GET /api/v1/auth/login", s.limitAuthentication(newAuthAdmission(30, 120, 8), s.login))
+	mux.HandleFunc("GET /api/v1/auth/callback", s.limitAuthentication(newAuthAdmission(30, 120, 8), s.callback))
 	mux.HandleFunc("POST /api/v1/auth/logout", s.requireOperationAuth(s.logout))
 	mux.HandleFunc("POST /api/v1/auth/break-glass", s.breakGlass)
 	mux.HandleFunc("POST /api/v1/development/simulations", s.createSimulation)

@@ -8,6 +8,25 @@ import (
 	"time"
 )
 
+func TestAuthTrustedProxyCIDRs(t *testing.T) {
+	for _, value := range []string{"", "10.0.0.2/32, 2001:db8::/64", "not-a-cidr", "0.0.0.0/0", "::/0", "::ffff:10.0.0.2/128", "10.0.0.2/32,"} {
+		_, err := Load(nil, func(key string) (string, bool) {
+			switch key {
+			case "OCSERV_DATABASE_URL":
+				return "postgres://db/test", true
+			case "OCSERV_AUTH_TRUSTED_PROXY_CIDRS":
+				return value, true
+			default:
+				return "", false
+			}
+		})
+		valid := value == "" || value == "10.0.0.2/32, 2001:db8::/64"
+		if (err == nil) != valid {
+			t.Fatalf("value=%q err=%v", value, err)
+		}
+	}
+}
+
 func TestSensitiveConfigurationFiles(t *testing.T) {
 	directory := secureKeyTestDirectory(t)
 	database := filepath.Join(directory, "database-url")
