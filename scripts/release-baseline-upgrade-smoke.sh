@@ -57,6 +57,13 @@ case "${BASELINE_RELEASE}" in
     baseline_has_production_relays=yes
     baseline_has_rpm=yes
     ;;
+  v0.4.0)
+    baseline_sums_sha256=52c6294d4e999864f087e00cd17d21df04542749f461a5ff0bce401a0d9b73cc
+    baseline_has_upgrader=yes
+    baseline_has_version_query=yes
+    baseline_has_production_relays=yes
+    baseline_has_rpm=yes
+    ;;
   *) echo "no pinned SHA256SUMS identity for baseline release ${BASELINE_RELEASE}" >&2; exit 2 ;;
 esac
 case "${BASELINE_RELEASE#v}" in

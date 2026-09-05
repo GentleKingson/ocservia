@@ -143,6 +143,29 @@ jobs:
           RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
         run: scripts/release-native-package-smoke.sh
+      - name: Validate published v0.4.0 upgrade (${{ matrix.package_arch }})
+        env:
+          RUN_ID: baseline-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/baseline-upgrade
+          BASELINE_RELEASE: v0.4.0
+          PACKAGE_ARCH: ${{ matrix.package_arch }}
+        run: |
+          case "${PACKAGE_ARCH}" in
+            amd64) rpm_arch=x86_64 ;;
+            arm64) rpm_arch=aarch64 ;;
+          esac
+          VERSION="${version}" \
+            CANDIDATE_DEB="${RUNNER_TEMP}/packages/ocservia-agent_${version}_${PACKAGE_ARCH}.deb" \
+            CANDIDATE_RPM="${RUNNER_TEMP}/packages/ocservia-agent-${version}-1.${rpm_arch}.rpm" \
+            scripts/release-baseline-upgrade-smoke.sh
+      - name: Upload published baseline upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: baseline-upgrade-${{ matrix.package_arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/baseline-upgrade
+          retention-days: 7
+          if-no-files-found: warn
       - name: Upload package set
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
