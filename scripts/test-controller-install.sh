@@ -95,6 +95,7 @@ bootstrap_log="${INSTALL_TEST_BOOTSTRAP_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/no
 printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${bootstrap_log}"
 printf '%s\n' "$*" >>"${bootstrap_log}"
 printf 'OCSERV_PUBLIC_HOST=%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${bootstrap_log}"
+printf 'proxy-network:%s,%s,%s\n' "${OCSERV_APPLICATION_SUBNET:-}" "${OCSERV_APPLICATION_IP_RANGE:-}" "${OCSERV_GATEWAY_APPLICATION_IP:-}" >>"${bootstrap_log}"
 printf 'OCSERV_SECRET_DIR=%s\n' "${OCSERV_SECRET_DIR:-<unset>}" >>"${bootstrap_log}"
 printf 'OCSERV_BACKUP_DIR=%s\n' "${OCSERV_BACKUP_DIR:-<unset>}" >>"${bootstrap_log}"
 printf 'OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=%s\n' "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-<unset>}" >>"${bootstrap_log}"
@@ -584,6 +585,9 @@ if can_root; then
       export OCSERV_RELAY_URL_A=https://relay-a.example.test
       export OCSERV_RELAY_URL_B=https://relay-b.example.test
       export OCSERV_HTTPS_ADDRESS=127.0.0.1
+      export OCSERV_APPLICATION_SUBNET=198.18.80.0/24
+      export OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
+      export OCSERV_GATEWAY_APPLICATION_IP=198.18.80.2
       export OCSERV_BACKUP_INTERVAL_SECONDS=300
       export OCSERV_BACKUP_RETENTION_COUNT=4
       export UNRELATED_ENV=must-not-cross-sudo
@@ -599,6 +603,7 @@ if can_root; then
     fi
     assert_log_contains "${root_bootstrap_log}" "launcher:<unset>"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_PUBLIC_HOST=controller.example.test"
+    assert_log_contains "${root_bootstrap_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_SECRET_DIR=${fixture}/secrets"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_BACKUP_DIR=${fixture}/backup"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem"
@@ -688,12 +693,16 @@ cat >"${repo}/install.env" <<EOF
 OCSERV_BACKUP_DIR=${fixture}/file-backup
 OCSERV_PUBLIC_HOST=controller-file.example.test
 OCSERV_HTTPS_ADDRESS=10.0.0.9
+OCSERV_APPLICATION_SUBNET=198.18.80.0/24
+OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
+OCSERV_GATEWAY_APPLICATION_IP=198.18.80.2
 EOF
 capture_from "${repo}"
 assert_status 0 "install.env values must load and keep the checkout clean"
 assert_output "release identity: v0.1.2"
 assert_log_contains "${bootstrap_log}" "install --backup-dir ${fixture}/file-backup"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-file.example.test"
+assert_log_contains "${bootstrap_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
 echo "install.env values load without dirtying the release checkout"
 
 # 8a. an explicit shell variable wins over install.env.

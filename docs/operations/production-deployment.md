@@ -406,18 +406,39 @@ than evicting them to give an attacker fresh capacity. These are fixed one-minut
 windows, not rolling quotas. Multiple API replicas multiply the limits; keep
 edge protection for distributed floods.
 
-Set `OCSERV_AUTH_TRUSTED_PROXY_CIDRS` in the Controller environment (or
-`install.env`) to a comma-separated list of the gateway's backend source IPs
-as `/32` or `/128` CIDRs, or an explicitly isolated proxy-only subnet. The
-shipped Caddy overwrites `X-Ocservia-Client-IP` with its direct peer address.
+Production Compose assigns the gateway the static application-network address
+`172.30.240.2` and defaults `OCSERV_AUTH_TRUSTED_PROXY_CIDRS` to that address's
+`/32`. Recreating the gateway therefore preserves its trusted source address.
+The application subnet is `172.30.240.0/24`; dynamic allocations use only
+`172.30.240.128/25`, so other services cannot acquire the gateway address while
+it is absent. This pairs Compose's [static service address and IPAM configuration](https://docs.docker.com/reference/compose-file/services/#ipv4_address)
+rather than relying on a previously observed dynamic IP.
+
+If that subnet overlaps host/VPN routes or another Docker network, set
+`OCSERV_APPLICATION_SUBNET`, `OCSERV_APPLICATION_IP_RANGE`, and
+`OCSERV_GATEWAY_APPLICATION_IP` together in the Controller environment or
+`install.env`. Keep the gateway IP inside the subnet, outside the dynamic range,
+and distinct from the network's bridge gateway. The default trusted `/32`
+automatically follows `OCSERV_GATEWAY_APPLICATION_IP`. An explicit
+`OCSERV_AUTH_TRUSTED_PROXY_CIDRS` overrides that default and must be updated
+when the chosen static IP changes; an explicitly empty value trusts no proxy.
+
+Changing IPAM on an existing deployment requires a maintenance window to
+recreate its application network and attached containers; merely restarting
+containers does not change network IPAM. Preserve named volumes and Controller
+lifecycle state; do not use `down --volumes` or `uninstall --purge-data`.
+Existing manually configured proxy CIDRs must match the new
+static address before restarting. Ordinary gateway-only recreation after this
+network migration does not require changing the Controller's trusted CIDR.
+
+The shipped Caddy overwrites `X-Ocservia-Client-IP` with its direct peer address.
 The API accepts this single IP only from configured trusted peers; it ignores
 client-supplied `X-Forwarded-For`. Do not trust the entire shared application
-network or publish the Controller's port. Keep gateway addresses stable or
-update this setting and restart the Controller when they change.
+network or publish the Controller's port.
 
-The default trusts no proxy. Requests then share the directly connected peer's
-budget, including all users behind an unconfigured gateway. Configure and verify
-the actual gateway addresses before public use. If another proxy is placed in
+Outside production Compose, the API still defaults to trusting no proxy.
+Requests then share the directly connected peer's budget, including all users
+behind an unconfigured gateway. If another proxy is placed in
 front of Caddy, its clients share that proxy's budget; enforce client-level
 limits there rather than trusting arbitrary forwarded addresses.
 
