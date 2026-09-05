@@ -2,6 +2,13 @@
 
 # Read-only snapshots for one synthetic relay command. Never export envelopes,
 # result bytes, credentials, or unrelated command rows.
+g6_relay_public_keys() {
+  jq -c 'walk(if type == "object" and (.idempotency_key? | type == "string") then
+    if (.idempotency_key | test("^[0-9a-fA-F]{32}$")) then
+      .idempotency_key = ("g6-journal-key-" + (.idempotency_key | ascii_downcase))
+    else . end else . end)'
+}
+
 capture_relay_agent_proof() {
   local command="${1:?}" service="${2:?}" output="${3:?}"
   [[ "$command" =~ ^[0-9a-f]{32}$ && "$service" =~ ^agent-fd-[ab]-[0-9]{2}$ ]] || return 2
@@ -10,7 +17,7 @@ capture_relay_agent_proof() {
   G6RD_COMPOSE_TIMEOUT_SECONDS=15 g6rd_agent_compose logs --no-color --no-log-prefix "$service" \
     | jq -Rsc --arg command "$command" '[split("\n")[] | fromjson? | .fields | select(.command_id == $command)]' >"${output}.events" || return 1
   jq -n --slurpfile journal "${output}.journal" --slurpfile events "${output}.events" \
-    '{journal: $journal, events: $events[0]}' >"$output" || return 1
+    '{journal: $journal, events: $events[0]}' | g6_relay_public_keys >"$output" || return 1
   rm -f -- "${output}.journal" "${output}.events"
 }
 
@@ -36,7 +43,7 @@ capture_relay_command_snapshot() {
       FROM agent_command_results r WHERE r.command_id=c.id))
     FROM commands c JOIN operations o ON o.id=c.operation_id
     WHERE c.idempotency_key='$key' AND c.node_id='$node'
-      AND c.payload_type='synthetic_noop'" >> "$output"
+      AND c.payload_type='synthetic_noop'" | g6_relay_public_keys >> "$output"
 }
 
 relay_settled_with_snapshot() {
@@ -59,6 +66,7 @@ capture_relay_exit_diagnostics() {
     # when the proof rejects their number. No other service log is copied.
     if ! G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_compose logs --no-color --no-log-prefix transportd \
       | jq -Rc --arg command "${command_id//-/}" 'fromjson? | select(.fields.command_id == $command)' \
+      | g6_relay_public_keys \
       > "$dir/transport-events.jsonl"; then
       printf 'transport log capture failed\n' >> "$dir/failures.log"
     fi

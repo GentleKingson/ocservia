@@ -17,7 +17,8 @@ export function verifyRelayProof(proof, observation, agent) {
   assert.match(first.semantic_payload_sha256, /^[0-9a-f]{64}$/);
   assert.ok(Number.isSafeInteger(first.sequence) && first.sequence > 0);
   assert.ok(Number.isSafeInteger(first.expected_revision) && first.expected_revision > 0);
-  for (const key of ["command_id", "operation_id", "node_id", "idempotency_key", "message_id"]) assert.match(first[key], /^[0-9a-f]{32}$/);
+  for (const key of ["command_id", "operation_id", "node_id", "message_id"]) assert.match(first[key], /^[0-9a-f]{32}$/);
+  assert.match(first.idempotency_key, /^g6-journal-key-[0-9a-f]{32}$/);
   for (const write of writes) {
     assert.equal(write.event_type, "command_frame_written");
     assert.equal(write.path, "relay");
@@ -88,7 +89,7 @@ export function verifyRelayProof(proof, observation, agent) {
   assert.equal(agent.journal.length, 1);
   const journal = agent.journal[0];
   assert.equal(hex(journal.command_id), first.command_id);
-  assert.equal(hex(journal.idempotency_key), first.idempotency_key);
+  assert.equal(journal.idempotency_key, first.idempotency_key);
   assert.equal(journal.state, "succeeded");
   assert.ok(journal.effect_executed_at);
   assert.equal(journal.total_executions, journal.effect_rows, "no unaccounted synthetic effects");

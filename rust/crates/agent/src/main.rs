@@ -1297,35 +1297,33 @@ async fn handle_command_stream(
     if matches!(
         envelope.payload,
         Some(command_envelope::Payload::SyntheticNoop(_))
-    ) {
-        if let Ok(key) = <&[u8; 16]>::try_from(envelope.idempotency_key.as_slice()) {
-            let journal = session.command_executor.journal();
-            match (
-                journal.synthetic_effect(key),
-                journal.synthetic_execution_count(),
-            ) {
-                (Ok(effect), Ok(executions)) => {
-                    use sha2::{Digest as _, Sha256};
-                    tracing::info!(
-                    event_type = "synthetic_effect_observed",
-                    command_id = %hex::encode(&envelope.command_id),
-                    message_id = %hex::encode(&envelope.message_id),
-                    idempotency_key = %hex::encode(key),
-                    effect_present = effect.is_some(),
-                    effect_executed_at = effect.as_ref().map(|value| value.executed_at),
-                    journal_total_executions = executions,
-                    result_sha256 = %hex::encode(Sha256::digest(&result.result)),
-                    effect_result_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(Sha256::digest(&value.result))),
-                    effect_payload_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(value.payload_sha256)),
-                    "read-only synthetic journal observation"
-                    );
-                }
-                _ => tracing::warn!(
-                    event_type = "synthetic_effect_observation_failed",
-                    command_id = %hex::encode(&envelope.command_id),
-                    "synthetic journal diagnostic unavailable"
-                ),
-            }
+    ) && let Ok(key) = <&[u8; 16]>::try_from(envelope.idempotency_key.as_slice())
+    {
+        let journal = session.command_executor.journal();
+        if let (Ok(effect), Ok(executions)) = (
+            journal.synthetic_effect(key),
+            journal.synthetic_execution_count(),
+        ) {
+            use sha2::{Digest as _, Sha256};
+            tracing::info!(
+            event_type = "synthetic_effect_observed",
+            command_id = %hex::encode(&envelope.command_id),
+            message_id = %hex::encode(&envelope.message_id),
+            idempotency_key = %hex::encode(key),
+            effect_present = effect.is_some(),
+            effect_executed_at = effect.as_ref().map(|value| value.executed_at),
+            journal_total_executions = executions,
+            result_sha256 = %hex::encode(Sha256::digest(&result.result)),
+            effect_result_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(Sha256::digest(&value.result))),
+            effect_payload_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(value.payload_sha256)),
+            "read-only synthetic journal observation"
+            );
+        } else {
+            tracing::warn!(
+                event_type = "synthetic_effect_observation_failed",
+                command_id = %hex::encode(&envelope.command_id),
+                "synthetic journal diagnostic unavailable"
+            );
         }
     }
     let event = AgentEvent {

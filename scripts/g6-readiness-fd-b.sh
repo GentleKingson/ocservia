@@ -1563,7 +1563,8 @@ capture_relay_dispatch_proof() {
   if ! jq -eRsc --arg command "${command_hex}" --arg node "${node_hex}" '
     [split("\n")[] | fromjson? |
       select(.fields.event_type == "command_frame_written"
-        and .fields.command_id == $command) | .fields] as $matches
+        and .fields.command_id == $command) | .fields |
+      .idempotency_key = ("g6-journal-key-" + .idempotency_key)] as $matches
     | if ($matches | length) == 1 then $matches[0] + {deliveries: $matches}
       elif ($matches | length) == 2 then $matches[0] + {deliveries: $matches}
       else false end

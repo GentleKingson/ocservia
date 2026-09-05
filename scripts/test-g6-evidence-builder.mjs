@@ -1061,7 +1061,7 @@ write(
     path_detail: "iroh/relay-b",
     message_id: fakeUuid(8801, 7).replaceAll("-", ""),
     operation_id: fakeUuid(8802, 7).replaceAll("-", ""),
-    idempotency_key: relayEffectKey.toLowerCase(),
+    idempotency_key: `g6-journal-key-${relayEffectKey.toLowerCase()}`,
     delivery_mode: 1,
     required_capability: "synthetic.noop",
     semantic_payload_hash_version: 2,

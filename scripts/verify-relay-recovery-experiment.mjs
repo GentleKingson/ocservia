@@ -14,7 +14,8 @@ for (const [scenario, count] of [["control", 1], ["loss", 2]]) {
   assert.equal(writes.length, count, "exact explained dispatch count");
   const first = writes[0];
   const proof = json(`${scenario}/existing-gate-proof.json`);
-  assert.deepEqual(proof.deliveries, writes, "runtime proof retains every write");
+  assert.deepEqual(proof.deliveries, writes.map((write) => ({...write,
+    idempotency_key: `g6-journal-key-${write.idempotency_key}`})), "runtime proof retains every write");
   verifyRelayProof(proof, json(`${scenario}/session-before.json`).observations[0], json(`${scenario}/agent-proof.json`));
   for (const position of ["before", "after"]) {
     const probe = json(`${scenario}/session-${position}.json`);
@@ -72,7 +73,7 @@ for (const [scenario, count] of [["control", 1], ["loss", 2]]) {
   assert.equal(result.state, "succeeded");
   assert.equal(result.replayed, scenario === "loss");
   assert.equal(result.payload_sha256, first.semantic_payload_sha256);
-  assert.equal(result.idempotency_key, first.idempotency_key);
+  assert.equal(result.idempotency_key, `g6-journal-key-${first.idempotency_key}`);
   const agentEvents = readFileSync(join(root, "agent-live.log"), "utf8").split("\n").flatMap((line) => {
     try { return [JSON.parse(line)]; } catch { return []; }
   }).filter((event) => event.fields?.command_id === first.command_id);

@@ -2246,6 +2246,7 @@ fn monitor_paths(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn read_agent_events(
     mut recv: iroh::endpoint::RecvStream,
     shared: Shared,
