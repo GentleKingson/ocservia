@@ -84,7 +84,8 @@ pub fn bind_socket(config: &ServerConfig) -> Result<UnixListener, io::Error> {
     let parent_metadata = fs::symlink_metadata(parent)?;
     if !parent_metadata.is_dir()
         || parent_metadata.file_type().is_symlink()
-        || parent_metadata.mode() & 0o002 != 0
+        || parent_metadata.uid() != rustix_uid()
+        || parent_metadata.mode() & 0o022 != 0
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -2762,6 +2763,70 @@ mod tests {
                 dispatch(unsigned_request(Some(mutation)), &node_id, &keys, &adapter).await;
             assert_permission_denied(&response);
         }
+    }
+
+    #[tokio::test]
+    async fn socket_binding_requires_trusted_parent_and_preserves_socket_access() {
+        use std::os::unix::fs::{chown, symlink};
+
+        let directory =
+            PathBuf::from("/tmp").join(format!("ocp-socket-{}", Uuid::now_v7().simple()));
+        fs::create_dir(&directory).expect("test directory");
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        let mut config = ServerConfig {
+            socket: directory.join("privd.sock"),
+            agent_uid: rustix_uid(),
+            node_id: *Uuid::now_v7().as_bytes(),
+            command_keys: keyring(&signing),
+            attestation_key: Arc::new(signing),
+            upgrades: UpgradeScheduler::disabled(),
+        };
+        for mode in [0o755, 0o750] {
+            fs::set_permissions(&directory, fs::Permissions::from_mode(mode)).unwrap();
+            let listener = bind_socket(&config).expect("trusted parent");
+            assert_eq!(fs::metadata(&config.socket).unwrap().mode() & 0o777, 0o660);
+            drop(listener);
+        }
+        remove_socket(&config.socket).unwrap();
+        for mode in [0o775, 0o757, 0o777] {
+            fs::set_permissions(&directory, fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                bind_socket(&config).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert!(!config.socket.exists());
+        }
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        // Changing ownership requires root; the BuildServer regression runs as root.
+        if rustix_uid() == 0 {
+            chown(&directory, Some(65534), None).unwrap();
+            let result = bind_socket(&config);
+            chown(&directory, Some(0), None).unwrap();
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+        let alias = directory.with_extension("link");
+        symlink(&directory, &alias).unwrap();
+        config.socket = alias.join("privd.sock");
+        assert_eq!(
+            bind_socket(&config).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        fs::remove_file(alias).unwrap();
+        config.socket = directory.join("privd.sock");
+        fs::write(&config.socket, b"do not replace").unwrap();
+        assert_eq!(
+            bind_socket(&config).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&config.socket).unwrap(), b"do not replace");
+        fs::remove_file(&config.socket).unwrap();
+        symlink(directory.join("missing"), &config.socket).unwrap();
+        assert_eq!(
+            bind_socket(&config).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        fs::remove_file(&config.socket).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[tokio::test]

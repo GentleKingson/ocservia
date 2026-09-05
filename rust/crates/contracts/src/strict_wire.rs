@@ -105,6 +105,7 @@ enum MessageKind {
     ConnectionFenceV2,
     FenceBindingV2,
     Timestamp,
+    SealedSecretV1,
     SessionDisconnect,
     SessionTerminate,
     IpBanRemove,
@@ -133,6 +134,7 @@ impl MessageKind {
             Self::ConnectionFenceV2 => "ConnectionFenceV2",
             Self::FenceBindingV2 => "FenceBindingV2",
             Self::Timestamp => "Timestamp",
+            Self::SealedSecretV1 => "SealedSecretV1",
             Self::SessionDisconnect => "SessionDisconnect",
             Self::SessionTerminate => "SessionTerminate",
             Self::IpBanRemove => "IpBanRemove",
@@ -210,9 +212,9 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
     use MessageKind::{
         AgentUpgrade, CertificateCsr, CertificateP12, CertificateRevoke, CommandAuthorizationProof,
         CommandEnvelope, ConfigApply, ConfigPlan, ConnectionFenceV2, FenceBindingV2, GroupApply,
-        IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SimulationProbe,
-        SyntheticEcho, SyntheticNoop, Timestamp, UserCreate, UserDisable, UserEnable,
-        UserPasswordRotate,
+        IpBanRemove, SealedSecretV1, ServiceReload, SessionDisconnect, SessionTerminate,
+        SimulationProbe, SyntheticEcho, SyntheticNoop, Timestamp, UserCreate, UserDisable,
+        UserEnable, UserPasswordRotate,
     };
     use WireType::{LengthDelimited, Varint};
 
@@ -248,6 +250,11 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             1 | 2 => Some(Scalar(Varint)),
             _ => None,
         },
+        SealedSecretV1 => match tag {
+            1 | 2 => Some(Scalar(Varint)),
+            3 | 4 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
         CommandAuthorizationProof => match tag {
             1 => Some(Scalar(Varint)),
             2 | 3 => Some(Scalar(LengthDelimited)),
@@ -273,7 +280,13 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             1 => Some(Scalar(LengthDelimited)),
             _ => None,
         },
-        UserCreate | UserPasswordRotate | ConfigApply | CertificateCsr => match tag {
+        UserCreate | UserPasswordRotate => match tag {
+            1..=3 => Some(Scalar(LengthDelimited)),
+            4 => Some(Scalar(Varint)),
+            5 => Some(Nested(SealedSecretV1)),
+            _ => None,
+        },
+        ConfigApply | CertificateCsr => match tag {
             1..=3 => Some(Scalar(LengthDelimited)),
             4 => Some(Scalar(Varint)),
             _ => None,
@@ -290,14 +303,19 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
         },
         ConfigPlan => match tag {
             1 | 2 => Some(Scalar(LengthDelimited)),
+            3 => Some(Scalar(Varint)),
             _ => None,
         },
         CertificateP12 => match tag {
             1..=5 => Some(Scalar(LengthDelimited)),
+            6 => Some(Nested(SealedSecretV1)),
+            7 => Some(Scalar(Varint)),
+            8 => Some(Nested(Timestamp)),
             _ => None,
         },
         CertificateRevoke => match tag {
             1 | 2 => Some(Scalar(LengthDelimited)),
+            3 => Some(Scalar(Varint)),
             _ => None,
         },
         AgentUpgrade => match tag {
@@ -356,6 +374,155 @@ mod tests {
             if value == 0 {
                 break;
             }
+        }
+    }
+
+    fn nested_field(tag: usize, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        append_varint(&mut bytes, (tag << 3) | 2);
+        append_varint(&mut bytes, payload.len());
+        bytes.extend(payload);
+        bytes
+    }
+
+    #[test]
+    fn accepts_go_encoded_command_fixtures() {
+        use command_envelope::Payload;
+        let fixtures: std::collections::BTreeMap<String, String> = serde_json::from_str(
+            include_str!("../../../../testdata/command-strict-wire.json"),
+        )
+        .expect("Go wire fixtures");
+        assert_eq!(fixtures.len(), 6);
+        for (name, hex) in fixtures {
+            let bytes: Vec<u8> = hex
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    u8::from_str_radix(std::str::from_utf8(pair).expect("hex text"), 16)
+                        .expect("hex byte")
+                })
+                .collect();
+            let command = decode_strict_command_envelope(&bytes).expect("Go command accepted");
+            assert_eq!(command.protocol_version, "1.1");
+            let secret = match (name.as_str(), command.payload.expect("payload")) {
+                ("user_create", Payload::UserCreate(value)) => {
+                    assert_eq!(value.username, "alice");
+                    assert_eq!(value.desired_revision, 42);
+                    value.sealed_password_v1
+                }
+                ("password_rotate", Payload::UserPasswordRotate(value)) => {
+                    assert_eq!(value.username, "alice");
+                    assert_eq!(value.desired_revision, 42);
+                    value.sealed_password_v1
+                }
+                ("certificate_p12", Payload::CertificateP12(value)) => {
+                    assert_eq!(value.certificate_id, b"certificate");
+                    assert_eq!(value.artifact_id, b"artifact");
+                    assert_eq!(value.certificate_version, 42);
+                    assert_eq!(
+                        value.artifact_expires_at,
+                        Some(Timestamp {
+                            seconds: 1_700_000_060,
+                            nanos: 123
+                        })
+                    );
+                    value.sealed_password_v1
+                }
+                ("certificate_revoke", Payload::CertificateRevoke(value)) => {
+                    assert_eq!(value.certificate_id, b"certificate");
+                    assert_eq!(value.certificate_version, 42);
+                    assert_eq!(value.reason, "rotation");
+                    continue;
+                }
+                ("config_plan_zero" | "config_plan_revision", Payload::ConfigPlan(value)) => {
+                    assert_eq!(value.candidate, b"config");
+                    assert_eq!(value.candidate_hash, b"hash");
+                    assert_eq!(
+                        value.expected_revision,
+                        if name == "config_plan_zero" { 0 } else { 42 }
+                    );
+                    continue;
+                }
+                _ => panic!("unexpected fixture {name}"),
+            }
+            .expect("sealed password");
+            assert_eq!(secret.version, 1);
+            assert_eq!(
+                secret.purpose,
+                if name == "certificate_p12" { 2 } else { 1 }
+            );
+            assert_eq!(secret.key_id, "test-key");
+            assert_eq!(secret.ciphertext, b"sealed-test-data");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_secret_and_p12_timestamp_fields() {
+        for (payload_tag, field_tag, message) in [
+            (101, 5, "SealedSecretV1"),
+            (114, 5, "SealedSecretV1"),
+            (118, 6, "SealedSecretV1"),
+            (118, 8, "Timestamp"),
+        ] {
+            let bytes = nested_field(payload_tag, &nested_field(field_tag, &[0x98, 0x06, 1]));
+            assert!(matches!(decode_strict_command_envelope(&bytes),
+                Err(StrictWireError::UnknownField { message: actual, tag: 99 }) if actual == message));
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_wire_types_for_new_fields() {
+        for (payload_tag, field_tag, nested) in [
+            (101, 5, true),
+            (114, 5, true),
+            (103, 3, false),
+            (118, 6, true),
+            (118, 7, false),
+            (118, 8, true),
+            (119, 3, false),
+        ] {
+            let payload = if nested {
+                vec![(field_tag << 3), 1]
+            } else {
+                nested_field(usize::from(field_tag), &[])
+            };
+            assert!(matches!(
+                decode_strict_command_envelope(&nested_field(payload_tag, &payload)),
+                Err(StrictWireError::UnexpectedWireType { .. })
+            ));
+        }
+        for secret_tag in 1..=4 {
+            let secret = if secret_tag <= 2 {
+                nested_field(secret_tag, &[])
+            } else {
+                vec![u8::try_from(secret_tag << 3).unwrap(), 1]
+            };
+            let bytes = nested_field(118, &nested_field(6, &secret));
+            assert!(matches!(
+                decode_strict_command_envelope(&bytes),
+                Err(StrictWireError::UnexpectedWireType {
+                    message: "SealedSecretV1",
+                    ..
+                })
+            ));
+        }
+        let bytes = nested_field(118, &nested_field(8, &nested_field(1, &[])));
+        assert!(matches!(
+            decode_strict_command_envelope(&bytes),
+            Err(StrictWireError::UnexpectedWireType {
+                message: "Timestamp",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_tag_five_on_unchanged_command_schemas() {
+        for (tag, message) in [(104, "ConfigApply"), (117, "CertificateCsr")] {
+            assert!(
+                matches!(decode_strict_command_envelope(&nested_field(tag, &nested_field(5, &[]))),
+                Err(StrictWireError::UnknownField { message: actual, tag: 5 }) if actual == message)
+            );
         }
     }
 

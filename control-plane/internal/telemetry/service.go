@@ -44,6 +44,11 @@ const (
 // retrying it. Database and transaction failures are deliberately not wrapped.
 var ErrInvalidTelemetry = errors.New("telemetry payload is permanently invalid")
 
+var (
+	ErrInvalidMetric     = errors.New("metric is invalid")
+	ErrInvalidResolution = errors.New("resolution is invalid")
+)
+
 var allowedMetrics = map[string]bool{
 	"cpu_usage_ratio": true, "memory_used_bytes": true,
 	"network_rx_bytes": true, "network_tx_bytes": true,
@@ -887,7 +892,7 @@ func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after stri
 
 func (s *Service) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since time.Time) ([]HistoryPoint, error) {
 	if !allowedMetrics[metric] {
-		return nil, errors.New("metric is invalid")
+		return nil, ErrInvalidMetric
 	}
 	if since.IsZero() {
 		since = s.now().Add(-24 * time.Hour)
@@ -898,7 +903,7 @@ func (s *Service) History(ctx context.Context, nodeID uuid.UUID, metric, resolut
 	} else if resolution == "1h" {
 		query = `SELECT bucket_at,metric,sample_count,min_value,max_value,avg_value FROM telemetry_rollups_1h WHERE node_id=$1 AND metric=$2 AND bucket_at >= $3 ORDER BY bucket_at LIMIT 2000`
 	} else if resolution != "raw" {
-		return nil, errors.New("resolution is invalid")
+		return nil, ErrInvalidResolution
 	}
 	rows, err := s.pool.Query(ctx, query, nodeID, metric, since)
 	if err != nil {

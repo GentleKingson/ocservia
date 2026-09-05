@@ -35,7 +35,9 @@ import {
   type AgentRolloutPage,
 } from "@ocservia/api-client";
 
-const devAuthToken = import.meta.env.VITE_DEV_AUTH_TOKEN;
+const devAuthToken = import.meta.env.DEV
+  ? import.meta.env.VITE_DEV_AUTH_TOKEN
+  : undefined;
 const loginReturnKey = "ocservia.login.return-to";
 const loginStartedKey = "ocservia.login.started-at";
 const workspaceKey = "ocservia.workspace-id";

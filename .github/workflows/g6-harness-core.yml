@@ -20,6 +20,9 @@ permissions:
   contents: read
   actions: read
 
+env:
+  G6_AUTHORITY: ${{ inputs.authority }}
+
 # The formal profile freezes every runtime image and host-side binary once,
 # then runs the two failure domains through the authority-selected Environment.
 jobs:
@@ -962,7 +965,7 @@ jobs:
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
-            --authority "${{ inputs.authority }}" \
+            --authority "${G6_AUTHORITY}" \
             --release-manifest-digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
             --fd-a-artifact-id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
             --fd-a-artifact-digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
@@ -986,7 +989,7 @@ jobs:
             --topology "${bundle}/topology.json" \
             --release-manifest "${bundle}/release-manifest.json" \
             --artifact-root "${bundle}" \
-            --expected-authority "${{ inputs.authority }}" \
+            --expected-authority "${G6_AUTHORITY}" \
             --expected-environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
             --expected-failure-domain-class multi_host \
             --result "${RUNNER_TEMP}/g6-rd-assembly-work/bundle-verification-result.json" \
@@ -1014,7 +1017,7 @@ jobs:
             --arg run_id "${GITHUB_RUN_ID}" \
             --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg environment_id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
-            --arg authority "${{ inputs.authority }}" \
+            --arg authority "${G6_AUTHORITY}" \
             --arg release_manifest_digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
             --arg fd_a_artifact_id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
             --arg fd_a_artifact_digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
@@ -1051,7 +1054,7 @@ jobs:
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --environment-id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
-            --authority "${{ inputs.authority }}" \
+            --authority "${G6_AUTHORITY}" \
             --release-manifest-digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
             --fd-a-artifact-id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
             --fd-a-artifact-digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
@@ -1153,7 +1156,7 @@ jobs:
               --arg run_id "${GITHUB_RUN_ID}" \
               --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
               --arg environment_id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
-              --arg authority "${{ inputs.authority }}" \
+              --arg authority "${G6_AUTHORITY}" \
               --arg release_manifest_digest "${release_manifest_digest}" \
               '.candidate_sha == $candidate_sha and .run_id == $run_id and
                .run_attempt == $run_attempt and .environment_id == $environment_id and
@@ -1196,7 +1199,7 @@ jobs:
             --arg run_id "${GITHUB_RUN_ID}" \
             --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg environment_id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
-            --arg authority "${{ inputs.authority }}" \
+            --arg authority "${G6_AUTHORITY}" \
             --arg release_manifest_digest "${release_manifest_digest}" \
             --arg status "${status}" \
             '{schema_version:"ocservia.g6-secret-scan-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,release_manifest_digest:(if $release_manifest_digest == "" then null else $release_manifest_digest end),$status}' \
@@ -1378,7 +1381,7 @@ jobs:
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --environment-id "${expected_environment_id}" \
-            --authority "${{ inputs.authority }}" \
+            --authority "${G6_AUTHORITY}" \
             --release-manifest-digest "${{ needs.g6-rd-assemble.outputs.release-manifest-digest }}" \
             --fd-a-artifact-id "${{ needs.g6-rd-assemble.outputs.fd-a-artifact-id }}" \
             --fd-a-artifact-digest "${{ needs.g6-rd-assemble.outputs.fd-a-artifact-digest }}" \
@@ -1461,7 +1464,7 @@ jobs:
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --environment-id "${environment_id}" \
-            --authority "${{ inputs.authority }}" \
+            --authority "${G6_AUTHORITY}" \
             --release-manifest-digest "${release_manifest_digest}" \
             --fd-a-artifact-id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
             --fd-a-artifact-digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
@@ -1481,7 +1484,7 @@ jobs:
             --arg run_id "${GITHUB_RUN_ID}" \
             --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg environment_id "${environment_id}" \
-            --arg authority "${{ inputs.authority }}" \
+            --arg authority "${G6_AUTHORITY}" \
             --arg release_manifest_digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
             --arg fd_a_artifact_id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
             --arg fd_a_artifact_digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
