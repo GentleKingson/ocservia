@@ -1049,7 +1049,7 @@ write(
 );
 write(
   join(runDir, "state", "relay-dispatch-proof.json"),
-  `${JSON.stringify({
+  `${JSON.stringify((() => { const first = {
     event_type: "command_frame_written",
     message: "command frame written to authenticated Agent session",
     command_id: relayCommandId.replaceAll("-", ""),
@@ -1059,7 +1059,16 @@ write(
     owner_epoch: relayBObservation.owner_epoch,
     path: "relay",
     path_detail: "iroh/relay-b",
-  })}\n`,
+    message_id: fakeUuid(8801, 7).replaceAll("-", ""),
+    operation_id: fakeUuid(8802, 7).replaceAll("-", ""),
+    idempotency_key: `g6-journal-key-${relayEffectKey.toLowerCase()}`,
+    delivery_mode: 1,
+    required_capability: "synthetic.noop",
+    semantic_payload_hash_version: 2,
+    semantic_payload_sha256: "ab".repeat(32),
+    sequence: 1,
+    expected_revision: 1,
+  }; return { ...first, deliveries: [first] }; })())}\n`,
 );
 const ownerBTermsPath = join(runDir, "state", "owner-b-terms.tsv");
 const ownerReplacementSessionsPath = join(

@@ -1110,6 +1110,12 @@ phase_evidence() {
   copy_control_evidence "${out}"
   mkdir -p "${out}/evidence/effects"
   cp -f "${freeze}/final-freeze-at" "${out}/"
+  require_file "${freeze}/relay-dispatch-proof.json"
+  if [[ "$(jq '.deliveries | length' "${freeze}/relay-dispatch-proof.json")" == 2 ]]; then
+    source "${ROOT}/scripts/g6-relay-diagnostics.sh"
+    capture_relay_agent_proof "$(jq -er '.command_id' "${freeze}/relay-dispatch-proof.json")" \
+      agent-fd-a-01 "${out}/evidence/relay-agent-proof.json"
+  fi
   g6rd_now >"${out}/freeze-received-at"
   local index service
   for index in $(seq 1 "$(g6rd_agent_count)"); do
@@ -1138,6 +1144,9 @@ phase_evidence() {
 phase_runtime_result() {
   local job_status="${1:?job status is required}"
   local out="${G6RD_OUTBOX}/fd-a-final"
+  source "${ROOT}/scripts/g6-relay-diagnostics.sh"
+  capture_relay_agent_exit_diagnostics "g6-relay-failover-${RUN_ID%-fd-a}-fd-b" \
+    agent-fd-a-01 "${out}/evidence/relay-exit-diagnostics" || true
   g6rd_write_runtime_result "${out}" "${job_status}" \
     "$([[ "${job_status}" == success ]] && printf runtime_complete || printf unknown)"
 }
