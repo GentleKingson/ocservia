@@ -1,6 +1,12 @@
 {
 	admin off
 	auto_https off
+	servers {
+		timeouts {
+			read_header 5s
+			read_body 30s
+		}
+	}
 }
 
 :8443 {

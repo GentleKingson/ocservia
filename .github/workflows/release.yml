@@ -32,6 +32,9 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  security:
+    uses: ./.github/workflows/security.yml
+
   build-agent-packages:
     name: Build & Smoke Agent Packages (${{ matrix.package_arch }})
     runs-on: ${{ matrix.runs_on }}
@@ -329,7 +332,7 @@ jobs:
 
   publish-release-packages:
     name: Sign & Publish Release Assets
-    needs: [validate-release-packages, build-controller-images]
+    needs: [validate-release-packages, build-controller-images, security]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45

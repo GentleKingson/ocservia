@@ -126,6 +126,21 @@ summary = result.fetch("steps").first.fetch("run")
 end
 
 release_jobs = release_workflow.fetch("jobs")
+security = YAML.safe_load(File.read(File.join(root, ".github/workflows/security.yml")), aliases: true)
+reject("security checks must support scheduled, manual, and release runs") unless
+  security.fetch(true).keys.sort == %w[schedule workflow_call workflow_dispatch]
+reject("security scans must be read-only") unless security.fetch("permissions") == {"contents" => "read"}
+scan = security.fetch("jobs").fetch("scan")
+reject("security scans must not cancel siblings on failure") unless scan.fetch("strategy").fetch("fail-fast") == false
+checks = scan.fetch("strategy").fetch("matrix").fetch("include")
+reject("security scans must cover secrets and all three dependency ecosystems") unless
+  checks.map { |check| check.fetch("profile") }.sort == %w[g6-secret-scan go-quality rust-validation web]
+reject("secret scans need complete history") unless
+  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
+reject("release must call candidate security checks") unless
+  release_jobs.fetch("security").fetch("uses") == "./.github/workflows/security.yml"
+reject("publishing must wait for security success") unless
+  release_jobs.fetch("publish-release-packages").fetch("needs").include?("security")
 build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")
 restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
 save = build_steps.find { |step| step["name"] == "Save native-package tool cache" }

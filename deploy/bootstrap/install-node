@@ -92,6 +92,11 @@ main() {
     command -v "${command_name}" >/dev/null 2>&1 || fail "${command_name} is required"
   done
 
+  trusted_key="${TRUSTED_RELEASE_KEY:-}"
+  expected_fingerprint="${EXPECTED_RELEASE_KEY_SHA256:-}"
+  [[ -n "${trusted_key}" && -n "${expected_fingerprint}" ]] ||
+    fail "TRUSTED_RELEASE_KEY and EXPECTED_RELEASE_KEY_SHA256 are required to verify Stage-1"
+
   base="https://github.com/GentleKingson/ocservia/releases/download"
   asset="managed-node-bootstrap.sh"
   url="${base}/${version}"
@@ -100,17 +105,9 @@ main() {
   trap 'exit 1' HUP INT TERM
 
   download "${url}/${asset}" "${temporary}/${asset}" || fail "Stage-1 download failed"
-  trusted_key="${TRUSTED_RELEASE_KEY:-}"
-  expected_fingerprint="${EXPECTED_RELEASE_KEY_SHA256:-}"
-  if [[ -n "${trusted_key}" || -n "${expected_fingerprint}" ]]; then
-    [[ -n "${trusted_key}" && -n "${expected_fingerprint}" ]] ||
-      fail "TRUSTED_RELEASE_KEY and EXPECTED_RELEASE_KEY_SHA256 must be set together"
-    download "${url}/SHA256SUMS" "${temporary}/SHA256SUMS" || fail "SHA256SUMS download failed"
-    download "${url}/SHA256SUMS.sig" "${temporary}/SHA256SUMS.sig" || fail "SHA256SUMS.sig download failed"
-    verify_stage1 "${temporary}" "${asset}" "${trusted_key}" "${expected_fingerprint}"
-  else
-    echo "warning: no out-of-band release key configured; Stage-1 authenticity relies on the HTTPS endpoint" >&2
-  fi
+  download "${url}/SHA256SUMS" "${temporary}/SHA256SUMS" || fail "SHA256SUMS download failed"
+  download "${url}/SHA256SUMS.sig" "${temporary}/SHA256SUMS.sig" || fail "SHA256SUMS.sig download failed"
+  verify_stage1 "${temporary}" "${asset}" "${trusted_key}" "${expected_fingerprint}"
 
   chmod 0700 -- "${temporary}/${asset}"
   stage1_args=(--version "${version}" "${stage1_args[@]}")
