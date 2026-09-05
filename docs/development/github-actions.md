@@ -1,445 +1,214 @@
-# GitHub Actions validation
+# Basic CI
 
 > **CI reference.** Contributors should start with [Validate a change](testing.md).
-> This document retains the complete workflow graph, routing rules, artifacts,
-> and required-check contract.
 
-GitHub Actions is the authoritative merge-time validation environment. The
-primary workflow runs on pull requests, pushes to `main`, and manual dispatch.
-It uses GitHub-hosted `ubuntu-24.04` runners, read-only repository permissions,
-and no production secrets. Local commands reproduce behavior but never replace
-the required checks for the exact pull-request commit.
+The primary workflow, `.github/workflows/ci.yml`, runs Basic CI on
+`pull_request`, pushes to `main`, and `workflow_dispatch`. It uses
+GitHub-hosted `ubuntu-24.04` runners, `contents: read`, SHA-pinned checkout,
+and no production secrets. A new commit cancels an older run of the same PR.
+Main pushes and manual dispatches have run-specific concurrency groups and
+do not cancel earlier runs.
 
-## Workflow inventory
+## Retained workflows
 
-The retained workflows are:
-
-- **Change-Aware CI**: change-routed pull-request and `main` validation.
-- **G6 PR Readiness Smoke**: required pull-request G6 smoke validation.
-- **G6 Formal Readiness**: manually dispatched formal readiness acceptance.
-- **G6 Readiness Core (Reusable)**: shared formal and smoke execution graph.
-- **Manual Runtime & Security Acceptance**: high-cost runtime and security phases.
-- **Cross-VM Iroh Enrollment E2E**: real two-runner enrollment acceptance.
-- **Agent Release Packages**: multi-architecture build, validation, signing, and publishing.
-- **G6 Rust Build Cache Provisioning**: trusted default-branch BuildKit cache producer.
-
-The legacy `g6-ha-pitr.yml` entry point was removed after parity review. Formal
-G6 covers its two failure domains, streaming standby, base backup and PITR,
-primary isolation, promotion and post-promotion probes, role recovery,
-former-primary rejoin, merged evidence, secret scanning, and independent
-verification. The historical scripts and fixtures remain for reference.
-
-### Release bootstrap assets
-
-Every formal release includes immutable `controller-bootstrap.sh` and
-`managed-node-bootstrap.sh` Stage-1 assets. They are copied from
-`deploy/production/controller-bootstrap.sh` and
-`deploy/managed-node/install.sh` before the single signed `SHA256SUMS` is
-created. The publish and read-only recovery paths require the exact release
-asset set, verify the pinned Ed25519 signing-key contract, run
-`gh release verify`, and require GitHub to report the release immutable.
-
-The stable Stage-0 files are not versioned Release assets. Future static
-hosting must deploy them byte-for-byte from
-`deploy/bootstrap/install-controller` and `deploy/bootstrap/install-node`;
-`scripts/verify-bootstrap-endpoint.sh` checks the served bytes after
-deployment. The repository does not claim that endpoint exists today. See
-[Stage-0 bootstrap hosting](../operations/bootstrap-hosting.md).
-
-## Execution graph
-
-The primary workflow has 15 worker job definitions plus a `Change Impact Router`
-classifier job. The PostgreSQL matrix expands one definition into separate
-PostgreSQL 17 and 18 executions, so a full run has 16 worker executions.
-Three lightweight result aggregators preserve the stable required-check
-names. Conditional workers start after the relevance classifier except that
-the two PostgreSQL workers and Control Plane ↔ Transport Local Integration
-additionally wait for the commit-bound runtime artifact. Repository Secret Scan starts independently and is always
-required by the quality aggregate.
-
-| Worker execution | Coverage | Bootstrap profile | Timeout | Required-check aggregator |
-| --- | --- | --- | --- | --- |
-| Build Shared Runtime Binaries | Builds `ocserv-control` and `ocservia-transportd-stub` once | `go-rust-integration` | 15 minutes | Backend Integration |
-| Go Quality & Unit Tests | Format, vet, staticcheck, unit tests, and govulncheck | `go-quality` | 20 minutes | Backend Integration |
-| Go Race Tests | Full Go race suite | `go-test` | 20 minutes | Backend Integration |
-| PostgreSQL 17 Migration & Integration | PostgreSQL 17 migrations, rollback, runtime, and failure behavior | `go-test` | 25 minutes | Backend Integration |
-| PostgreSQL 18 Migration & Integration | PostgreSQL 18 coverage plus the legacy full upgrade fixture | `go-test` | 25 minutes | Backend Integration |
-| Production Topology & Relay Contracts | Production topology, controlled relay failover, backup restore, Agent package lifecycle, and Docker-backed Controller lifecycle semantics | `go-rust-integration` | 25 minutes | Backend Integration |
-| PostgreSQL Credential Rotation Integration | Application and backup credential rotation | none | 15 minutes | Backend Integration |
-| Control Plane ↔ Transport Local Integration | Go, PostgreSQL, UDS, and Rust-stub integration | none | 15 minutes | Backend Integration |
-| Web Quality, Unit & Build | Web format, type, unit, build, and audit checks | `web` | 20 minutes | Web & Smoke |
-| Web Browser E2E | Isolated Compose Playwright desktop and mobile E2E | none | 25 minutes | Web & Smoke |
-| Runtime Resilience Smoke (24 Agents) | Hosted-runner runtime resilience smoke | none | 20 minutes | Backend Integration |
-| Repository Contracts & Policy | Repository, docs, workflow, generated-output, staged-feature, runtime-harness, and Cross-VM contracts | `contracts` | 20 minutes | Quality, Security & Native |
-| Rust Quality, Tests & Boundaries | Rust format, clippy, workspace tests, audit, and agent/transport boundaries | `rust-validation` | 25 minutes | Backend Integration and Quality, Security & Native |
-| Repository Secret Scan | Full-history repository gitleaks scan | `g6-secret-scan` | 20 minutes | Quality, Security & Native |
-| Dependency License Policy | Go, Rust when not covered by Rust validation, and Web dependency license policy | `security` | 20 minutes | Quality, Security & Native |
-| Native Ocserv / Agent Integration | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture; native package scriptlet lifecycle smoke | `native` (+ `native-packages`) | 25 minutes | Quality, Security & Native |
-
-Rust Quality, Tests & Boundaries executes once and feeds two aggregators. Each aggregator has a
-five-minute timeout, uses `always()`, and accepts a dependency only when it
-succeeded or when the relevance classifier explicitly marked it not
-applicable and it was skipped; every other result, including an unexpected
-skip, fails the aggregator. The workflow uses no workflow-level path filters.
-
-### Change relevance
-
-The repository-owned `scripts/ci-relevance.sh` publishes one authorization
-flag for every conditional worker. It ORs the impact domains of all recognized
-paths, so a Web plus Rust change runs the Web, Browser, and Rust workers rather
-than full CI. Ordinary Markdown remains CI-neutral apart from the structurally
-always-on Repository Secret Scan. The bootstrap Quick Start, trust, lifecycle,
-enrollment, hosting, and closeout documents run Repository Contracts & Policy,
-without activating runtime, database, native, production-topology, or browser
-workers. Web unit/config-only inputs run Web Quality, Unit & Build
-and Unit; Web runtime, build, dependency, and Playwright inputs also run
-Web Browser E2E. Runtime Resilience Smoke is a backend/runtime responsibility and is not activated
-by Web changes.
-
-Database packages and migrations alone activate PostgreSQL 17/18, and
-PostgreSQL or local-integration relevance explicitly implies Build Shared Runtime
-Artifacts. Native, production relay/Controller lifecycle, credential rotation, stage-contract,
-license, and G6 smoke flags each follow the inputs consumed by their own
-harness. Machine-readable G6 acceptance contracts activate Contracts and
-Policy plus G6 Smoke, while ordinary release-readiness Markdown does not.
-Controller Stage-0 and Stage-1 inputs activate Production Topology and
-Contracts. Managed-node Stage-0 and Stage-1 inputs activate Native and
-Contracts. Bootstrap-token enrollment inputs activate Go, PostgreSQL, shared
-runtime artifacts, and Contracts.
-Repository Secret Scan remains always-on and keeps the full-history `gitleaks git`
-semantics; Dependency License Policy runs only for dependency manifests, lockfiles, or
-license-policy inputs.
-
-Pull requests are classified with `base...head` three-dot semantics, so base
-branch changes after the PR branch point are excluded. Pushes to `main` use
-`github.event.before..github.sha` two-dot semantics and are incrementally
-routed. Manual dispatch remains full validation. Invalid or all-zero SHAs,
-unresolvable merge bases, failed or empty diffs, global toolchain changes, the
-primary CI routing authority, and unknown paths fail closed to full CI.
-Known mixed changes never become full merely because they are mixed.
-
-Staged-feature `--contract-only` modes omit only repeated Go or Rust language
-suite invocations. Their static source, API, manifest, recovery, and policy
-assertions now run conditionally inside Repository Contracts & Policy.
-
-The 500-Agent Resilience & Capacity Acceptance remains a separate manual
-`p1-capacity.yml` phase. It
-runs the default 500-Agent single-VM profile and all fault phases with a
-45-minute timeout. Capacity evidence is not part of ordinary pull-request
-feedback, and the primary workflow keeps the smoke parameters unchanged.
-
-`rust-cache-provision.yml` is a performance-input producer, not a validation:
-it runs on trusted `main` pushes that touch the Rust workspace (plus a weekly
-refresh and manual dispatch, which fail closed on any non-`main` ref before
-checkout), rebuilds the shared `g6-rust-builder` stage with the strict cache
-exporter, and publishes the `g6-rust-runtime` cache on the default branch. Pull-request workflows can restore base-branch caches, while
-caches they write themselves are bound to their own merge ref, so this
-producer is what lets a brand-new PR start from a warm dependency cache. A
-red provision run never affects correctness on `main`; it only means that run
-did not finish publishing the cache.
-
-The G6 harness has two thin callers over `.github/workflows/g6-harness-core.yml`.
-`g6-readiness.yml` is the queued manual formal caller and preserves the full
-two-failure-domain production-readiness contract. `g6-harness-smoke.yml` is a
-latest-wins pull-request check fixed to engineering authority. Its two hosted
-jobs load the same frozen product release, bring up two Agents per domain,
-exercise one authenticated cross-domain mutation and one standby promotion,
-then freeze evidence after a bounded observation. Separate Builder, gitleaks,
-and independent Verifier jobs feed `ocservia.g6-harness-smoke-result.v1`; the
-smoke never enters a formal Environment,
-produces a production-readiness verdict, or substitutes for the three required
-CI aggregators or a formal G6 run. The secret-scan jobs on both profiles scan
-every published evidence layer with the same repository gitleaks configuration
-and bootstrap only the dedicated minimal `g6-secret-scan` profile; their
-bootstrap, evidence download, scan, and result-publication spans are recorded
-as non-authoritative timing diagnostics that never influence a verdict: every
-timing call is fail-open guarded at the call site, so a telemetry failure can
-neither skip nor fail the authoritative scan work. The minimal profile is
-small enough that it bootstraps cold every run with no tooling cache.
-
-The smoke caller always creates the same aggregate result check. Executable,
-workflow, deployment, and acceptance-contract changes run the complete hosted
-profile. Documentation-only pull requests publish a structured
-`not_applicable` smoke result and succeed without reserving the two runtime
-runners. Empty or unclassifiable diffs fail closed by running the full profile.
-Workflow policy is checked by separate authority, release-identity, evidence,
-and reusable-workflow contract tests; runtime adapter fixtures remain isolated
-from those YAML-level contracts.
-
-## Bootstrap profiles
-
-`toolchains.lock` is the only version source, and `scripts/checksums.txt`
-authenticates downloaded binaries. Every worker that bootstraps tools invokes
-exactly one explicit profile:
-
-| Profile | Installed or verified tools | Workers |
+| File | Workflow | Trigger |
 | --- | --- | --- |
-| `go-test` | Go and host `jq` | Go Race Tests; PostgreSQL 17/18 Migration & Integration |
-| `go-quality` | Go, staticcheck, govulncheck, and host `jq` | Go Quality & Unit Tests |
-| `go-rust-integration` | Go, Rust, staticcheck, govulncheck, sccache, and host `jq` | Build Shared Runtime Binaries; Production Topology & Relay Contracts |
-| `web` | Node, pinned npm, and `npm ci` dependencies | Web Quality, Unit & Build |
-| `contracts` | Node/npm, Buf, OpenAPI Generator, oasdiff, host Java, and Web dependencies | Repository Contracts & Policy |
-| `rust-validation` | Rust, rustfmt, clippy, cargo-audit, cargo-deny, and sccache | Rust Quality, Tests & Boundaries |
-| `security` | Go, Node/npm, Rust, cargo-deny, sccache, and Web dependencies | Dependency License Policy |
-| `native` | Rust and sccache | Native Ocserv / Agent Integration |
-| `g6-secret-scan` | gitleaks and host `jq`/`openssl` | Repository Secret Scan; G6 Formal Evidence Secret Scan; G6 Smoke Evidence Secret Scan |
-| `native-packages` | Rust and nfpm (Linux `aarch64` mirrors only this profile) | Agent Release Packages build matrix; Native Ocserv / Agent Integration (package scriptlets) |
+| `ci.yml` | Basic CI | PRs, pushes to `main`, manual dispatch |
+| `g6-readiness.yml` | G6 Formal Readiness | Manual dispatch only |
+| `g6-harness-core.yml` | G6 Readiness Core (Reusable) | Reusable workflow called by formal G6 |
+| `release.yml` | Agent Release Packages | Version tag pushes and manual dry runs |
 
-Staged-feature contracts, credential rotation, local integration, Web Browser E2E, and runtime resilience smoke
-use runner-provided tools or artifacts and do not call bootstrap. Outside
-GitHub Actions, `make bootstrap` explicitly selects the complete `all` profile.
+## Basic checks
 
-## Caches
+One small routing job selects up to five independent checks. There is no
+runtime-artifact dependency, PostgreSQL matrix, or acceptance worker graph.
 
-Tool caches contain only `.cache/downloads` and `.tools`. Their exact keys
-include the profile, runner OS and architecture, `toolchains.lock`, checksums,
-bootstrap code, and environment setup. They have no broad restore prefix. A
-cache miss is supported because bootstrap revalidates versions and checksums.
+| Job | Command | Bootstrap profile | Coverage |
+| --- | --- | --- | --- |
+| `docs` | `scripts/docs-check.sh` | none | Line endings, nonempty Markdown, and bootstrap documentation |
+| `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
+| `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
+| `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, and generated-client authentication tests |
+| `database-smoke` | `scripts/database-integration.sh` | `go-test` | PostgreSQL 17 migrations and database integration |
 
-| Tool-cache profile | Main-branch writer | Restore consumers |
-| --- | --- | --- |
-| `go-rust-integration` | Build Shared Runtime Binaries | Build Shared Runtime Binaries; Production Topology & Relay Contracts |
-| `go-quality` | Go Quality & Unit Tests | Go Quality & Unit Tests |
-| `go-test` | Go Race Tests | Go Race Tests; PostgreSQL 17/18 Migration & Integration |
-| `web` | Web Quality, Unit & Build | Web Quality, Unit & Build |
-| `contracts` | Repository Contracts & Policy | Repository Contracts & Policy |
-| `rust-validation` | Rust Quality, Tests & Boundaries | Rust Quality, Tests & Boundaries |
-| `security` | Dependency License Policy | Dependency License Policy |
-| `native` | Native Ocserv / Agent Integration | Native Ocserv / Agent Integration |
+Go checks retain both existing Go modules, including unit tests for the G6
+harness; they do not run G6 acceptance. Rust checks do not run cargo audit,
+license policy, native integration, or separate boundary scripts. License
+validation remains available through `scripts/license-check.sh`.
 
-The release-packages workflow writes its own `native-packages` tool cache from
-its per-architecture build matrix jobs.
+Bootstrap versions come from `toolchains.lock`; downloads are verified
+against `scripts/checksums.txt`. The Go profile installs only Go and verifies
+host jq. The Rust profile installs only Rust, rustfmt, and clippy. Web
+bootstrap installs pinned Node/npm and dependencies, with
+`npm_config_audit=false` and `npm_config_fund=false` for the entire job,
+including npm installation. Ordinary CI does not run `go-race`, `npm audit`,
+`cargo audit`, `cargo deny`, or `govulncheck`, nor repository secret scans,
+license scans, native ocserv integration, P1 smoke, browser E2E, or G6 smoke.
 
-The shared Go cache contains `.cache/go-build`, `.cache/go-mod`, and
-`.cache/gopath`. Build Shared Runtime Binaries, Go Quality & Unit Tests, Go Race Tests,
-PostgreSQL 17/18, Production Topology & Relay Contracts, and Dependency License Policy restore it.
-Its primary key includes the exact commit and Go dependency inputs, with
-dependency and platform prefix fallbacks. Go Quality & Unit Tests is its only
-writer.
+The database job sets `PG_MAJOR=17` and lets the integration script build
+`ocserv-control` itself. PostgreSQL 18 and its legacy upgrade fixture are
+not run. It needs only the router, not a Rust build or a shared binary artifact.
 
-The shared npm cache contains `.cache/npm`. Web Quality, Unit & Build, Repository Contracts &
-Policy, and Dependency License Policy restore it; Web Quality, Unit & Build is its only
-writer. All explicit tool, Go, and npm cache writes require a successful push
-to `main` and a primary-key miss. Pull-request workers are restore-only. CI
-does not cache `node_modules`, credentials, environment files, logs, test
-artifacts, or `rust/target`.
+## Path routing
 
-Rust compiler outputs use sccache instead of archiving `rust/target`. Build
-Shared Runtime Binaries, Production Topology & Relay Contracts, Rust Quality,
-Tests & Boundaries, Dependency License Policy, and Native Ocserv / Agent Integration:
+`scripts/ci-relevance.sh` emits only five execution flags:
+`run_docs`, `run_go`, `run_rust`, `run_web`, and `run_database`.
+Reason and changed-file count are diagnostic metadata.
 
-- request repository-pinned sccache `0.17.0` through the SHA-pinned sccache
-  Action;
-- set `RUSTC_WRAPPER=sccache`, disable Cargo incremental compilation, and
-  normalize the workspace base path;
-- select the GitHub Actions backend only when its runtime credentials and
-  cache endpoint are present;
-- fall back to the local `.cache/sccache` directory outside that environment.
-
-The downloaded sccache binary and platform checksums are pinned in the same
-toolchain files as other bootstrap tools. Native Ocserv / Agent Integration preserves the required
-sccache environment across its root fixture while keeping its Cargo target in
-a unique directory below `RUNNER_TEMP`.
-
-## Runtime artifact
-
-Build Shared Runtime Binaries compiles `ocserv-control` and
-`ocservia-transportd-stub`, then creates
-`runtime-<run>/runtime-artifacts.tar.gz`. Its manifest records the
-full candidate commit and a SHA-256 digest for each executable. Extraction
-allows exactly the manifest and two expected binaries, rejects unsafe or
-unexpected entries, validates both digests, and verifies that the manifest
-commit equals `GITHUB_SHA`. The name omits the run attempt and the upload
-overwrites, so "Re-run failed jobs" reuses the artifact the successful build
-already produced while a full re-run replaces it; the manifest check still
-binds the artifact to the exact commit.
-
-PostgreSQL 17, PostgreSQL 18, and the local integration worker download and validate that
-artifact instead of rebuilding the same binaries. The PostgreSQL matrix uses
-`fail-fast: false`, so a failure in one major does not cancel evidence from the
-other. The PostgreSQL 18-only legacy upgrade fixture runs for `PG_MAJOR=18` or
-the local `PG_MAJOR=all` mode; it is not repeated in the PostgreSQL 17 worker.
-
-## Diagnostics
-
-Uploads use SHA-pinned Actions, one-day retention, and names bound to the run
-(except the reusable runtime artifact) or to the run and attempt. Ordinary CI
-diagnostics upload only after failure or cancellation; acceptance and release
-evidence keeps its existing unconditional publication semantics.
-
-| Worker | Artifact name |
+| Changed paths | Selected checks |
 | --- | --- |
-| Build Shared Runtime Binaries | `runtime-<run>` |
-| Go Quality & Unit Tests | `go-standard-<run>-<attempt>` |
-| Go Race Tests | `go-race-<run>-<attempt>` |
-| PostgreSQL 17/18 | `database-pg<major>-<run>-<attempt>` |
-| Production Topology & Relay Contracts | `production-relays-<run>-<attempt>` |
-| PostgreSQL Credential Rotation Integration | `credential-rotation-<run>-<attempt>` |
-| Control Plane ↔ Transport Local Integration | `local-slice-<run>-<attempt>` |
-| Web Quality, Unit & Build | `web-validation-<run>-<attempt>` |
-| Web Browser E2E | `browser-e2e-<run>-<attempt>` |
-| Runtime Resilience Smoke (24 Agents) | `p1-smoke-<run>-<attempt>` |
-| Repository Contracts & Policy | `contracts-<run>-<attempt>` |
-| Rust Quality, Tests & Boundaries | `rust-<run>-<attempt>` |
-| Native Ocserv / Agent Integration | `native-ocserv-<run>-<attempt>` |
-| Native Ocserv / Agent Integration (package scriptlets) | `native-package-<run>-<attempt>` |
-| 500-Agent Resilience & Capacity Acceptance | `p1-full-<run>-<attempt>` |
+| Documentation, Markdown, license text | docs |
+| G6 workflows, actions, scripts, harness, deployment fixtures, and dedicated Rust runtime files | docs |
+| Manual P1/security acceptance scripts, real-E2E scripts and their checks, `deploy/real-e2e` | docs |
+| Web | web + docs |
+| Go sources, module/workspace files, control-plane code and migrations | go + database-smoke |
+| Rust workspace | rust |
+| Workflows, scripts, shared toolchain files, Makefile | All five basic checks |
+| Unrecognized paths | All five basic checks |
 
-Repository Secret Scan and Dependency License Policy have no separate diagnostic artifact; their
-results remain in the job log. Web Browser E2E and Runtime Resilience Smoke use distinct
-`RUN_ID`, Compose project, and artifact paths. Docker and native scripts capture
-diagnostics before scoped cleanup, preserve the original test result, and turn
-their own leftovers into failures.
+Mixed changes use the union of their checks. Documentation-only changes do
+not activate language or database checks. Infrastructure changes, unknown
+paths, and unclassifiable diffs conservatively run all five, never acceptance.
+G6-specific and script-level manual acceptance paths are the exceptions: they
+select only the basic docs check, not acceptance or additional contract checks.
 
-Download one artifact with:
+PR routing uses `base...head`, excluding base-only changes after the branch
+point. Main pushes use `before..head`. Deletions and both sides of renames
+retain their path impact. Manual dispatch, empty diffs, invalid/all-zero or
+unresolvable SHAs, and diff failures select all basic checks.
 
-```bash
-gh run download <run-id> --name <artifact-name>
-```
+## Required check migration
 
-Reproduce from the same commit with the worker's bootstrap profile and script.
-`make verify` covers the local language, contract, security, generated-output,
-and policy baseline; `make e2e` reproduces the browser stack. Docker tests must
-use unique `RUN_ID` and `COMPOSE_PROJECT` values.
+`basic-ci-result` publishes the stable **Basic CI Result** check. It succeeds
+only when routing succeeds, every selected job succeeds, and every unselected
+job is skipped. Failed, cancelled, unexpectedly skipped, or missing results
+fail this one summary. No legacy result aggregators remain.
 
-## Required checks
-
-Branch protection requires these stable result contexts:
+The former required contexts below are historical names, not current jobs.
+The replacement summary check is `Basic CI Result`:
 
 - `Backend Integration`
 - `Web & Smoke`
 - `Quality, Security & Native`
 - `G6 Harness Smoke Core / G6 Harness Smoke Result`
 
-The worker names are visible checks but are not configured individually as
-required checks. Backend Integration waits for its ten worker job definitions,
-including both PostgreSQL matrix executions, Runtime Resilience Smoke, and the
-contract worker that conditionally owns staged-feature assertions. Web & Smoke
-waits for its two Web workers. Quality, Security & Native waits for Repository
-Contracts & Policy, the shared Rust validation execution, Repository Secret
-Scan, Dependency License Policy, and Native Ocserv / Agent Integration.
+Changing workflow YAML does not migrate GitHub rulesets; administrators must
+check the ruleset separately. Leaving those old
+contexts required will block merging. The workflow does not bypass or modify
+branch protection.
 
-Do not rename an aggregator until the branch ruleset has first been migrated to
-a successful check with the replacement name. A change is fully validated only
-when all three aggregators pass for its exact commit, diagnostic uploads and
-scoped cleanup complete, and any independent gate remains satisfied or is
-explicitly recorded as pending.
+## Separate acceptance
+
+G6 runs only through manual `workflow_dispatch` in `g6-readiness.yml`,
+which calls `g6-harness-core.yml` with `profile=formal`, the selected
+`authority`, and the exact `candidate_sha`. Run it before releases or major
+architecture changes. The smoke caller and all seven smoke jobs are removed;
+ordinary PRs do not run G6 smoke or formal G6. No replacement G6 check is added.
+Formal G6 and release packaging remain separate workflows, not ordinary CI or
+Basic CI prerequisites. Runtime/security/capacity acceptance and cross-VM
+enrollment are script-level manual acceptance, not GitHub Actions workflows.
+There is no separate G6 Rust cache warmup workflow. Formal G6 retains its
+BuildKit cache support and can build cold when no cache is available; cache
+warmup is not a prerequisite for Basic CI or formal G6. Without advance
+warmup, a cold formal build may take longer, but its acceptance checks remain
+unchanged.
+
+Basic CI does not claim production readiness, capacity, native package,
+cross-VM, browser E2E, security, or license acceptance. Those scripts and
+manual entry points remain available; `make verify` is a broader local
+command, not an alias for Basic CI.
+
+### Script-level manual acceptance
+
+These environment-dependent checks are not part of Basic CI: capacity runs
+need substantial resources, native security checks need systemd/privd/PKI
+fixtures, and cross-VM enrollment needs two distinct Linux VMs and Internet
+relay connectivity. Run them manually on suitable local or dedicated servers:
+
+- `make p1-smoke` and `make p1-full` call `scripts/p1-resilience-capacity.sh`.
+- `scripts/security-acceptance-f1.sh`, `scripts/security-acceptance-f2.sh`, and
+  `scripts/security-acceptance-f3.sh` retain the live security acceptance phases.
+- `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
+  `scripts/real-e2e-artifact.sh`, and `deploy/real-e2e` remain available; see
+  [Cross-VM real E2E validation](real-e2e.md) for manual execution.
+
+`make real-e2e-check` only checks the three real-E2E scripts' Bash syntax. It
+does not read workflow files or run live acceptance, and Basic CI does not call it.
+
+## Reproduction
+
+Use the same commit and run these commands on `LocalServer`:
+
+```bash
+scripts/test-ci-relevance.sh
+scripts/test-bootstrap-profiles.sh
+scripts/docs-check.sh
+scripts/bootstrap.sh go-test
+scripts/go-check.sh standard
+scripts/bootstrap.sh rust-basic
+scripts/rust-check.sh
+npm_config_audit=false npm_config_fund=false scripts/bootstrap.sh web
+npm_config_audit=false npm_config_fund=false scripts/web-check.sh
+PG_MAJOR=17 scripts/database-integration.sh
+```
+
+Job logs contain diagnostics; Basic CI has no artifact upload/download graph.
+GitHub checks for the exact candidate commit remain the merge-time authority.
 
 ## Release packages workflow
 
 `.github/workflows/release.yml` builds the Agent distribution outside the
-primary CI graph. It triggers when a lightweight `vX.Y.Z` tag (matching
-`^v[0-9]+\.[0-9]+\.[0-9]+$`) is pushed, and on manual `workflow_dispatch`,
-which always stays a dry run and never uploads release assets or writes to
-GHCR: it exercises the Agent package build plus the Controller multi-arch
-image build and its native image smoke, and every publishing step stays
-skipped. Publishing
-requires repository release immutability to be enabled first (Settings →
-Releases → Enable release immutability, or `gh api -X PUT
-/repos/{owner}/{repo}/immutable-releases`); the setting only applies to
-releases published after it is enabled, so the mutable v0.1.x baseline used
-by the upgrade smoke is unaffected. The publish job verifies this
-prerequisite itself before any production write through the
-`REPO_ADMIN_READ_TOKEN` secret of the `release-publishing` environment
-(a fine-grained PAT with Administration: read), because `GITHUB_TOKEN`
-cannot read the repository administration API.
+primary CI graph. It triggers on `v*.*.*` tag pushes, requiring a lightweight
+`vX.Y.Z` tag with a plain SemVer version, and on manual `workflow_dispatch`.
+Dispatch always stays a dry run: it never publishes a GitHub Release, writes
+to GHCR, or loads the production signing key.
 
-- The build job runs as a two-leg matrix on native runners
-  (`ubuntu-24.04` for `amd64`, `ubuntu-24.04-arm` for `arm64`, no emulation).
-  Each leg bootstraps the `native-packages` profile, builds the release
-  binaries natively, produces the signed archive triple plus `.deb` and
-  `.rpm`, and runs `scripts/release-native-package-smoke.sh`: a full
-  deb install/upgrade/removal lifecycle on the runner plus an rpm
-  install/upgrade/erase lifecycle inside a systemd-enabled Rocky Linux 9
-  container built for the run. A failure on either architecture fails the
-  workflow before any assets can be published.
-- Each build leg also runs
-  `scripts/release-baseline-upgrade-smoke.sh`: it installs the published
-  v0.1.1 `.deb` after verifying it against the release's signed
-  `SHA256SUMS`, whose exact bytes the smoke pins in-repo (the v0.1.1
-  release is not immutable), then upgrades it in place to the candidate
-  while asserting the package state and the rollback snapshot. The
-  published-baseline leg is deb-only; rpm cross-version coverage remains
-  the fabricated-version lifecycle smoke inside the Rocky Linux 9
-  container.
-- The validate job downloads both legs' artifacts and runs
-  `scripts/validate-release-packages.sh`: presence and naming of the six
-  packages, both signed triples verified against the pinned fingerprint,
-  `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
-  identical embedded payloads, and a canonical `SHA256SUMS` covering those
-  six packages, the versioned `controller-bootstrap.sh` and
-  `managed-node-bootstrap.sh` copied byte-for-byte from the release checkout,
-  plus the three Controller manifests
-  (`controller-release.json`, `controller-release-amd64.json`,
-  `controller-release-arm64.json`) on formal Controller releases.
-- The Controller image build runs for tag-push release runs and manual
-  `workflow_dispatch` dry runs as a
-  two-leg matrix on native runners (`ubuntu-24.04` for `amd64`,
-  `ubuntu-24.04-arm` for `arm64`, no emulation) with the pinned BuildKit
-  builder. Each native leg exports each of its four first-party images as a
-  single-platform Docker image archive. The smoke script loads that exact
-  archive into the runner's Docker daemon before it asserts the image really
-  targets the leg's architecture, boots the gateway image to serve a request
-  as a non-root process, and drives the control, transport, and backup images
-  to their startup boundaries on the native runner. The same archive is
-  uploaded as the cross-job artifact and loaded again by the single
-  `release-publishing`-gated publish job, which pushes the per-platform images under
-  `<version>-linux-<arch>` companion tags, merges them with
-  `docker buildx imagetools create` into one tagged multi-platform index
-  per image, fails closed when an index lacks either architecture,
-  generates the platform manifests, re-checks anonymous GHCR reads of the
-  image indexes, pushes the four `actions/attest` provenance attestations
-  against the final index digests, and finally signs and uploads the whole
-  release asset set. Every production registry write therefore happens
-  behind exactly one reviewer checkpoint.
-- Every build job signs with an ephemeral key generated on the runner, so a
-  `workflow_dispatch` run never touches the production signing credential,
-  and the validate job checks the internal consistency of the signed set
-  without the production pin. The build legs retain `contents: read` only,
-  and manual dispatch remains a dry run with no production write; the
-  protected publish job remains the sole registry-write boundary.
-- The publish job runs only for tag-push release runs behind the protected
-  `release-publishing` environment with `contents: write`: it re-signs both
-  archive checksum triples with the release key, rebuilds the native
-  packages with the release trust anchor, validates the whole set against
-  the `AGENT_TRUSTED_KEY_SHA256` pin, signs the unified `SHA256SUMS`, and
-  only then publishes through the immutable-release sequence. Before any
-  production write it binds the tag to the run's source commit (remote
-  `refs/tags/vX.Y.Z` must resolve to exactly that commit as a lightweight
-  tag; the check is repeated immediately before publishing, since a tag
-  can still be moved until the release is published), and it preflights
-  the repository immutability setting through `REPO_ADMIN_READ_TOKEN`.
-  The sequence itself is: create a draft release for the tag, upload the
-  complete asset set without `--clobber` (name collisions fail instead of
-  overwriting), publish the draft, and verify the release attestation
-  GitHub generated at publication with `gh release verify` plus an
-  `immutable: true` assertion on the published release. A published
-  release is never modified: GitHub's release attestation covers the bootstrap
-  assets along with the rest of the exact asset set, while their entries in the
-  Ed25519-signed `SHA256SUMS` preserve the independently pinned project trust
-  chain. A rerun after a successful publication skips
-  every production-write step and instead re-verifies the published
-  release in place (immutability, attestation, tag binding, and the
-  complete asset-name set), so a transient attestation delay cannot leave
-  a correct release with a permanently red workflow; a leftover draft
-  from an earlier failed attempt is the only thing it discards and
-  recreates. Because immutable releases lock assets and the tag at
-  publication, release notes are attached by a maintainer afterwards —
-  title and notes remain editable on an immutable release.
+- Dispatch accepts `version` and `arch` (`amd64`, `arm64`, or `all`).
+  The default `amd64` builds and smokes only one architecture, avoiding the
+  arm64 Agent and Controller build legs for faster feedback. Tag pushes
+  always build both amd64 and arm64, regardless of dispatch defaults.
+- Agent packages build natively on `ubuntu-24.04` (amd64) and
+  `ubuntu-24.04-arm` (arm64), without emulation. Each selected leg builds
+  Agent, privd, and upgrader, produces a signed tar archive plus deb/rpm,
+  and runs `scripts/release-native-package-smoke.sh` for the candidate's
+  deb install/upgrade/removal and rpm install/upgrade/erase scripts.
+  Neither published-baseline upgrade smoke runs in the release workflow.
+- Tag pushes and `arch=all` dry runs download both package sets and run
+  `scripts/validate-release-packages.sh`. This retains package presence,
+  signatures, architecture metadata, embedded payload consistency, and
+  canonical checksum coverage of packages and versioned bootstrap assets.
+  Single-architecture dry runs skip this two-architecture aggregate job;
+  their candidate lifecycle smoke still runs.
+- Controller builds use the same selected architectures and pinned BuildKit.
+  Each leg exports the four first-party images as Docker archives and runs
+  `scripts/release-controller-image-smoke.sh` against those exact archives
+  on its native runner. Package sets and Controller image archives remain
+  uploaded as artifacts. Native smoke diagnostics upload only on failure
+  or cancellation, without duplicate baseline diagnostics.
+- Build jobs use ephemeral signing keys and source-read permissions only.
+  The tag-push-only publish job remains behind the `release-publishing`
+  environment with `contents: write` and `packages: write`. It checks
+  SemVer and binds the remote tag to the source commit once before
+  production writes. Runner environment recording runs only here and is
+  non-blocking.
+- The publish job loads the built Controller archives, pushes both platforms
+  to GHCR, assembles multi-platform indexes, checks both architectures and
+  anonymous reads, and generates the platform manifests plus the amd64
+  compatibility alias. It re-signs Agent archives with the release key,
+  rebuilds native installers with the release trust anchor, validates against
+  `AGENT_TRUSTED_KEY_SHA256`, and signs and verifies `SHA256SUMS`.
+  The complete package, Controller manifest, and bootstrap asset set is
+  uploaded to a draft GitHub Release before publication, without
+  `--clobber`. A leftover draft may be recreated; an already-published
+  release is not modified, and reruns have no read-only recovery path.
+- Release immutability prerequisites, `REPO_ADMIN_READ_TOKEN`, gh release
+  verification support checks, image provenance attestations, post-publish
+  attestation/immutability verification, and repeated tag binding are not
+  required by this workflow. Existing package signatures and installer trust
+  verification remain unchanged.
 
 ## Deferred native validation
 
-The `native_user_and_group_operations` ignored test and the real I13 loopback
-login run in Native Ocserv / Agent Integration. Pure adapter logic remains in ordinary Rust tests.
-These tests are not reported as hosted validation:
-
-- `native_controlled_operations` needs prepared live sessions, an IP ban, and a
-  real `ocserv.service` lifecycle.
-- `native_reload_failure_is_bounded` depends on a deliberately stopped native
-  service and belongs with the same isolated systemd fixture.
-- `relay_only_connection_and_disabled_relay_failure` and
-  `relay_and_direct_paths_converge_to_direct` depend on a public Iroh relay.
-
-Backend Integration instead uses two controlled local relays, removes the first
-relay, and proves reconnection through the second. A hosted single-VM workflow
-does not claim multi-host, multi-region, or production failure-domain evidence.
+Native systemd/privd/PKI and live relay scenarios remain outside Basic CI.
+Pure Rust adapter tests still run in the ordinary Rust workspace suite.
+Use the script-level manual acceptance commands for environment-dependent checks.

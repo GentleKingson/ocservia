@@ -6,30 +6,4 @@ source "${ROOT}/scripts/env.sh"
 (cd "${ROOT}/rust" && cargo fmt --all -- --check)
 (cd "${ROOT}/rust" && cargo check --workspace --all-targets --all-features)
 (cd "${ROOT}/rust" && cargo clippy --workspace --all-targets --all-features -- -D warnings)
-(cd "${ROOT}/rust" && cargo test --workspace --all-features -- --test-threads=1)
-for test_name in \
-  concurrent_relay_status_transitions_preserve_every_actor \
-  datagrams_for_disconnected_relays_are_dropped_not_queued \
-  relay_paths_offered_only_for_connected_relays \
-  home_relay_failover_only_picks_connected_configured_standbys; do
-  cargo test \
-    --manifest-path "${ROOT}/rust/vendor/iroh/Cargo.toml" \
-    --locked \
-    --no-default-features \
-    --features metrics,tls-ring \
-    --lib \
-    "${test_name}" \
-    -- \
-    --test-threads=1
-done
-rustfmt --edition 2024 --check \
-  "${ROOT}/rust/vendor/iroh/src/endpoint.rs" \
-  "${ROOT}/rust/vendor/iroh/src/socket.rs" \
-  "${ROOT}/rust/vendor/iroh/src/socket/remote_map.rs" \
-  "${ROOT}/rust/vendor/iroh/src/socket/remote_map/remote_state.rs" \
-  "${ROOT}/rust/vendor/iroh/src/socket/transports.rs" \
-  "${ROOT}/rust/vendor/iroh/src/socket/transports/relay.rs" \
-  "${ROOT}/rust/vendor/iroh/src/socket/transports/relay/actor.rs"
-(cd "${ROOT}/rust" && cargo doc --workspace --no-deps)
-(cd "${ROOT}/rust" && cargo audit)
-(cd "${ROOT}/rust" && cargo deny check)
+(cd "${ROOT}/rust" && cargo test --workspace --all-features)

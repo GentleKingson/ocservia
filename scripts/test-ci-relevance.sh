@@ -6,32 +6,30 @@ SCRIPT="${ROOT}/scripts/ci-relevance.sh"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
-flags=(run_go_standard run_go_race run_runtime_artifacts run_database run_local_slice run_stage_contracts run_production_relays run_credential_rotation run_web run_browser run_p1_smoke run_contracts_policy run_rust run_native run_license run_g6_smoke full)
+flags=(run_docs run_go run_rust run_web run_database)
 
 git -C "${fixture}" init -q
 git -C "${fixture}" config user.name test
 git -C "${fixture}" config user.email test@example.invalid
 printf '*.output\n' >>"${fixture}/.git/info/exclude"
 paths=(
-  README.md docs/development/guide.md docs/operations/bootstrap-hosting.md docs/acceptance/g6-slo.yaml
-  docs/acceptance/v0.2-release-readiness.md web/src/App.vue web/test/unit.test.ts
-  web/e2e/app.spec.ts control-plane/internal/domain/helper.go
-  control-plane/internal/auth/store.go control-plane/migrations/000001.up.sql
-  control-plane/internal/enrollment/service.go
-  rust/crates/observability/src/lib.rs rust/crates/agent/src/lib.rs
-  rust/crates/transportd-stub/src/lib.rs deploy/production/compose.yaml
-  deploy/production/rotate-postgres-credentials.sh openapi/openapi.yaml
-  proto/ocserv/platform/agent/v1/agent.proto tools/g6-harness/internal/smoke/pipeline.go
-  deploy/systemd/ocservia-agent.service .github/workflows/g6-harness-smoke.yml
-  .github/workflows/release.yml scripts/ci-relevance.sh scripts/prepare-bootstrap-release-assets.sh scripts/test-controller-release-smoke.sh scripts/test-controller-release-bundle.sh scripts/verify-controller-release-bundle.sh scripts/test-controller-lifecycle.sh scripts/test-controller-compose-lifecycle.sh scripts/test-controller-host-bootstrap.sh web/package.json
-  deploy/production/controller.sh deploy/production/controller-release-smoke.sh deploy/production/bootstrap-host.sh
-  deploy/production/install.sh scripts/test-controller-install.sh
-  deploy/production/controller-bootstrap.sh scripts/test-controller-bootstrap.sh
-  deploy/bootstrap/install-controller deploy/bootstrap/install-node scripts/test-stage0-installers.sh scripts/verify-bootstrap-endpoint.sh
-  deploy/managed-node/install.sh scripts/test-managed-node-install.sh
-  deploy/lib/install-env.sh install.env.example
-  scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
-  control-plane/Dockerfile
+  README.md docs/development/guide.md docs/acceptance/g6-slo.yaml scripts/README.md web/README.md
+  web/src/App.vue web/test/unit.test.ts web/e2e/app.spec.ts web/package.json
+  control-plane/internal/domain/helper.go control-plane/internal/auth/store.go
+  control-plane/migrations/000001.up.sql control-plane/go.mod go.work
+  rust/crates/agent/src/lib.rs rust/Cargo.lock rust/rust-toolchain.toml
+  .github/workflows/ci.yml scripts/ci-relevance.sh toolchains.lock Makefile
+  .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml
+  .github/actions/g6-install-release/action.yml
+  scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh
+  scripts/g6-buildx-cache.sh scripts/g6-timing.sh .github/actions/g6-cache-credentials/action.yml
+  tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml
+  rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs
+  deploy/real-e2e/controller.compose.yaml
+  scripts/real-e2e-controller.sh scripts/real-e2e-node.sh scripts/real-e2e-artifact.sh
+  scripts/test-real-e2e-artifact.sh scripts/p1-resilience-capacity.sh
+  scripts/test-p1-resilience-capacity.sh
+  scripts/security-acceptance-f1.sh scripts/security-acceptance-f2.sh scripts/security-acceptance-f3.sh
 )
 for path in "${paths[@]}"; do
   mkdir -p "${fixture}/$(dirname "${path}")"
@@ -72,126 +70,57 @@ case_commit() {
   printf '%s\n' "${output}"
 }
 
-# Bootstrap contract Markdown runs contracts/policy; unrelated Markdown stays
-# CI-neutral, and machine-readable G6 contracts additionally run G6 smoke.
+
+# Only the five basic domains can be selected.
 out="$(case_commit readme README.md)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit bootstrap_docs docs/operations/bootstrap-hosting.md)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit docs docs/development/guide.md)"
-expect_only "${out}"
-out="$(case_commit acceptance_markdown docs/acceptance/v0.2-release-readiness.md)"
-expect_only "${out}"
-out="$(case_commit acceptance docs/acceptance/g6-slo.yaml)"
-expect_only "${out}" run_contracts_policy run_g6_smoke
+expect_only "${out}" run_docs
+out="$(case_commit docs docs/development/guide.md docs/acceptance/g6-slo.yaml scripts/README.md web/README.md)"
+expect_only "${out}" run_docs
+for path in web/src/App.vue web/test/unit.test.ts web/e2e/app.spec.ts web/package.json; do
+  out="$(case_commit "web_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_web run_docs
+done
+for path in control-plane/internal/domain/helper.go control-plane/internal/auth/store.go control-plane/migrations/000001.up.sql control-plane/go.mod go.work; do
+  out="$(case_commit "go_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_go run_database
+done
+for path in rust/crates/agent/src/lib.rs rust/Cargo.lock rust/rust-toolchain.toml; do
+  out="$(case_commit "rust_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_rust
+done
+for path in .github/workflows/ci.yml scripts/ci-relevance.sh toolchains.lock Makefile; do
+  out="$(case_commit "infra_$(basename "${path}")" "${path}")"
+  expect_only "${out}" "${flags[@]}"
+done
 
-# Browser runners are reserved for runtime and E2E inputs, not unit-only
-# Web changes.
-out="$(case_commit web_source web/src/App.vue)"
-expect_only "${out}" run_web run_browser
-out="$(case_commit web_unit web/test/unit.test.ts)"
-expect_only "${out}" run_web
-out="$(case_commit web_e2e web/e2e/app.spec.ts)"
-expect_only "${out}" run_web run_browser
+# G6-only changes select basic documentation checks, never acceptance.
+for path in .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml \
+  .github/actions/g6-install-release/action.yml \
+  scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh \
+  scripts/g6-buildx-cache.sh scripts/g6-timing.sh .github/actions/g6-cache-credentials/action.yml \
+  tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml \
+  rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs; do
+  out="$(case_commit "g6_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_docs
+done
 
-# Language suites are independent; integration flags are added from the
-# package boundary actually exercised by each harness.
-out="$(case_commit go control-plane/internal/domain/helper.go)"
-expect_only "${out}" run_go_standard run_go_race
-out="$(case_commit db_go control-plane/internal/auth/store.go)"
-expect_only "${out}" run_go_standard run_go_race run_runtime_artifacts run_database
-out="$(case_commit enrollment control-plane/internal/enrollment/service.go)"
-expect_only "${out}" run_go_standard run_go_race run_runtime_artifacts run_database run_contracts_policy
-out="$(case_commit migration control-plane/migrations/000001.up.sql)"
-expect_only "${out}" run_runtime_artifacts run_database run_g6_smoke
-out="$(case_commit rust rust/crates/observability/src/lib.rs)"
-expect_only "${out}" run_rust
-out="$(case_commit native_rust rust/crates/agent/src/lib.rs)"
-expect_only "${out}" run_rust run_native run_g6_smoke
-out="$(case_commit transport_stub rust/crates/transportd-stub/src/lib.rs)"
-expect_only "${out}" run_runtime_artifacts run_local_slice run_p1_smoke run_rust
+# Script-level manual acceptance changes select only basic documentation checks.
+for path in deploy/real-e2e/controller.compose.yaml \
+  scripts/real-e2e-controller.sh scripts/real-e2e-node.sh scripts/real-e2e-artifact.sh \
+  scripts/test-real-e2e-artifact.sh scripts/p1-resilience-capacity.sh \
+  scripts/test-p1-resilience-capacity.sh \
+  scripts/security-acceptance-f1.sh scripts/security-acceptance-f2.sh scripts/security-acceptance-f3.sh; do
+  out="$(case_commit "manual_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_docs
+done
 
-# Deployment, credentials, machine contracts, G6, packaging, and workflow
-# callers each contribute only their known impact domains.
-out="$(case_commit production deploy/production/compose.yaml)"
-expect_only "${out}" run_production_relays
-out="$(case_commit rotation deploy/production/rotate-postgres-credentials.sh)"
-expect_only "${out}" run_production_relays run_credential_rotation
-out="$(case_commit openapi openapi/openapi.yaml)"
-expect_only "${out}" run_go_standard run_go_race run_stage_contracts run_web run_browser run_contracts_policy
-out="$(case_commit proto proto/ocserv/platform/agent/v1/agent.proto)"
-expect_only "${out}" run_go_standard run_go_race run_stage_contracts run_contracts_policy run_rust run_g6_smoke
-out="$(case_commit g6_runtime tools/g6-harness/internal/smoke/pipeline.go)"
-expect_only "${out}" run_go_standard run_go_race run_g6_smoke
-out="$(case_commit g6_contract docs/acceptance/g6-slo.yaml)"
-expect_only "${out}" run_contracts_policy run_g6_smoke
-out="$(case_commit systemd deploy/systemd/ocservia-agent.service)"
-expect_only "${out}" run_contracts_policy run_native
-out="$(case_commit workflow .github/workflows/g6-harness-smoke.yml)"
-expect_only "${out}" run_contracts_policy run_g6_smoke
-out="$(case_commit release_workflow .github/workflows/release.yml)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit controller_lifecycle scripts/test-controller-lifecycle.sh)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit controller_compose_lifecycle scripts/test-controller-compose-lifecycle.sh)"
-expect_only "${out}" run_production_relays
-out="$(case_commit controller_bootstrap_test scripts/test-controller-host-bootstrap.sh)"
-expect_only "${out}" run_production_relays
-out="$(case_commit controller_bootstrap_host deploy/production/bootstrap-host.sh)"
-expect_only "${out}" run_production_relays
-out="$(case_commit controller_installer deploy/production/install.sh)"
-expect_only "${out}" run_production_relays
-out="$(case_commit controller_install_test scripts/test-controller-install.sh)"
-expect_only "${out}" run_production_relays
-out="$(case_commit controller_stage1_bootstrap deploy/production/controller-bootstrap.sh)"
-expect_only "${out}" run_production_relays run_contracts_policy
-out="$(case_commit controller_stage1_bootstrap_test scripts/test-controller-bootstrap.sh)"
-expect_only "${out}" run_production_relays run_contracts_policy
-out="$(case_commit controller_stage0 deploy/bootstrap/install-controller)"
-expect_only "${out}" run_production_relays run_contracts_policy
-out="$(case_commit node_stage0 deploy/bootstrap/install-node)"
-expect_only "${out}" run_native run_contracts_policy
-out="$(case_commit stage0_test scripts/test-stage0-installers.sh)"
-expect_only "${out}" run_production_relays run_native run_contracts_policy
-out="$(case_commit stage0_endpoint_verifier scripts/verify-bootstrap-endpoint.sh)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit managed_node_installer deploy/managed-node/install.sh)"
-expect_only "${out}" run_native run_contracts_policy
-out="$(case_commit managed_node_install_test scripts/test-managed-node-install.sh)"
-expect_only "${out}" run_native run_contracts_policy
-out="$(case_commit bootstrap_release_assets scripts/prepare-bootstrap-release-assets.sh)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit install_env_loader deploy/lib/install-env.sh)"
-expect_only "${out}" run_native run_contracts_policy run_production_relays
-out="$(case_commit install_env_example install.env.example)"
-expect_only "${out}" run_native run_contracts_policy run_production_relays
-out="$(case_commit controller_release_smoke scripts/test-controller-release-smoke.sh)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit controller_release_bundle scripts/test-controller-release-bundle.sh)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit controller_release_verifier scripts/verify-controller-release-bundle.sh)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit controller_entrypoint deploy/production/controller.sh)"
-expect_only "${out}" run_contracts_policy run_production_relays
-out="$(case_commit controller_smoke deploy/production/controller-release-smoke.sh)"
-expect_only "${out}" run_contracts_policy run_production_relays
-out="$(case_commit real_e2e_script scripts/real-e2e-node.sh)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit real_e2e_deploy deploy/real-e2e/controller.compose.yaml)"
-expect_only "${out}" run_contracts_policy
-out="$(case_commit control_dockerfile control-plane/Dockerfile)"
-expect_only "${out}" run_contracts_policy run_production_relays run_g6_smoke
-out="$(case_commit classifier_authority scripts/ci-relevance.sh)"
-expect_only "${out}" "${flags[@]}"
-expect_flag "${out}" reason ci_relevance_authority_changed
-
-# Known mixed changes are the OR-union, never a category fallback.
+# Mixed changes are the union of their basic domains.
 out="$(case_commit docs_go docs/development/guide.md control-plane/internal/domain/helper.go)"
-expect_only "${out}" run_go_standard run_go_race
-out="$(case_commit web_rust web/src/App.vue rust/crates/observability/src/lib.rs)"
-expect_only "${out}" run_web run_browser run_rust
+expect_only "${out}" run_docs run_go run_database
+out="$(case_commit web_rust web/src/App.vue rust/crates/agent/src/lib.rs)"
+expect_only "${out}" run_docs run_web run_rust
 out="$(case_commit migration_web control-plane/migrations/000001.up.sql web/src/App.vue)"
-expect_only "${out}" run_runtime_artifacts run_database run_web run_browser run_g6_smoke
+expect_only "${out}" run_docs run_go run_database run_web
 
 # Deletions retain the old path's impact. With rename detection off, both
 # sides of a cross-domain rename contribute to the union.
@@ -200,14 +129,14 @@ git -C "${fixture}" rm -q web/test/unit.test.ts
 git -C "${fixture}" commit -qm delete_known
 head="$(git -C "${fixture}" rev-parse HEAD)"; out="${fixture}/delete.output"
 (cd "${fixture}" && "${SCRIPT}" pull_request "${base}" "${head}" "${out}")
-expect_only "${out}" run_web
+expect_only "${out}" run_docs run_web
 git -C "${fixture}" checkout -q --detach "${base}"
 mkdir -p "${fixture}/rust/crates/observability/src"
 git -C "${fixture}" mv docs/development/guide.md rust/crates/observability/src/guide.rs
 git -C "${fixture}" commit -qm rename_known
 head="$(git -C "${fixture}" rev-parse HEAD)"; out="${fixture}/rename.output"
 (cd "${fixture}" && "${SCRIPT}" pull_request "${base}" "${head}" "${out}")
-expect_only "${out}" run_rust
+expect_only "${out}" run_docs run_rust
 
 # Unknown, empty, invalid, and dispatch classifications fail closed.
 git -C "${fixture}" checkout -q --detach "${base}"
@@ -226,7 +155,7 @@ expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason unresolvable_sha
 out="${fixture}/zero-before.output"; (cd "${fixture}" && "${SCRIPT}" push 0000000000000000000000000000000000000000 "${base}" "${out}")
 expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason all_zero_before_sha
 out="${fixture}/dispatch.output"; (cd "${fixture}" && "${SCRIPT}" workflow_dispatch invalid invalid "${out}")
-expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason workflow_dispatch_full_validation
+expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason workflow_dispatch_basic_checks
 
 # Push uses before..head. PR uses base-tip...head, excluding a base-only change
 # added after the PR branch point.
@@ -240,11 +169,11 @@ git -C "${fixture}" commit -qam base-only
 base_tip="$(git -C "${fixture}" rev-parse HEAD)"
 out="${fixture}/three-dot.output"
 (cd "${fixture}" && "${SCRIPT}" pull_request "${base_tip}" "${pr_head}" "${out}")
-expect_only "${out}" run_web
+expect_only "${out}" run_docs run_web
 expect_flag "${out}" changed_count 1
 out="${fixture}/push.output"
 (cd "${fixture}" && "${SCRIPT}" push "${base}" "${base_tip}" "${out}")
-expect_only "${out}" run_go_standard run_go_race run_runtime_artifacts run_database
+expect_only "${out}" run_go run_database
 expect_flag "${out}" changed_count 1
 
 echo "CI relevance classifier tests passed"

@@ -18,9 +18,4 @@ abort("formal release fell back to ambient Go") if build.match?(/(?:^|\s)go\s+bu
   abort("#{id} must use the shared frozen release verifier") unless
     load.fetch("uses") == "./.github/actions/g6-install-release"
 end
-smoke = jobs.fetch("g6-smoke-release")
-smoke_build = Array(smoke.fetch("steps")).find { |step| step["name"] == "Build and freeze the smoke release" }.fetch("run")
-%w[.tools/go/bin/go GOTOOLCHAIN=local runtime-images.tar.gz ocservia-g6-tunnel harness-sha256].each do |token|
-  abort("smoke release is missing #{token}") unless smoke_build.include?(token)
-end
 RUBY

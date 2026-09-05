@@ -124,6 +124,8 @@ GitHub Actions remains the merge-time validation environment. See [Contributor v
 
 ocservia is pre-1.0. Minor release lines may introduce compatibility changes, and production validation remains the operator's responsibility. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets.
 
+The P1 harness provides manual, single-host validation outside Basic CI, not a production capacity guarantee. See [P1 resilience and capacity](docs/development/p1-resilience-capacity.md) for details.
+
 ## Security
 
 ocservia is designed to avoid broad remote administration. It has no remote shell path, privileged operations are limited to fixed ocserv actions, and high-risk changes are recorded and reviewed.

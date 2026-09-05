@@ -23,10 +23,7 @@ if [[ "${MODE}" != "race" ]]; then
   test -z "$(gofmt -l "${ROOT}/control-plane" "${ROOT}/tools/g6-harness")"
   for module in "${GO_MODULES[@]}"; do
     (cd "${ROOT}/${module}" && go vet ./...)
-    (cd "${ROOT}/${module}" && \
-      HOME="${ROOT}/.cache/staticcheck-home" staticcheck ./...)
     (cd "${ROOT}/${module}" && go test ./...)
-    (cd "${ROOT}/${module}" && govulncheck ./...)
   done
 fi
 

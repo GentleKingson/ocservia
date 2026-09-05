@@ -3,29 +3,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ruby -r yaml - "${ROOT}/.github/workflows/g6-readiness.yml" \
-  "${ROOT}/.github/workflows/g6-harness-smoke.yml" \
   "${ROOT}/.github/workflows/g6-harness-core.yml" <<'RUBY'
-formal_path, smoke_path, core_path = ARGV
+formal_path, core_path = ARGV
 formal = YAML.safe_load(File.read(formal_path), aliases: true)
-smoke = YAML.safe_load(File.read(smoke_path), aliases: true)
 core = YAML.safe_load(File.read(core_path), aliases: true)
 abort("formal caller must remain workflow_dispatch-only") unless formal.fetch(true).keys == ["workflow_dispatch"]
-abort("smoke caller must remain pull_request-only") unless smoke.fetch(true).keys == ["pull_request"]
-[formal, smoke, core].each do |workflow|
+[formal, core].each do |workflow|
   abort("G6 workflow permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
 end
 abort("formal caller must stay thin") unless formal.fetch("jobs").keys == ["g6-harness-core"]
-abort("smoke caller must keep relevance and one reusable core call") unless smoke.fetch("jobs").keys.sort == %w[g6-harness-core g6-smoke-relevance]
-smoke_relevance = smoke.fetch("jobs").fetch("g6-smoke-relevance")
-abort("smoke caller must use the unified three-dot impact classifier") unless
-  Array(smoke_relevance.fetch("steps")).any? { |step| step.fetch("run", "").include?("scripts/ci-relevance.sh pull_request") } &&
-    smoke_relevance.fetch("outputs").fetch("relevant").include?("run_g6_smoke")
 abort("core must remain workflow_call-only") unless core.fetch(true).keys == ["workflow_call"]
 inputs = core.fetch(true).fetch("workflow_call").fetch("inputs")
-abort("core inputs drifted") unless inputs.keys.sort == %w[authority candidate_sha profile smoke_relevant]
-abort("smoke relevance must be typed") unless inputs.fetch("smoke_relevant").values_at("type", "required") == ["boolean", true]
+abort("core inputs drifted") unless inputs.keys.sort == %w[authority candidate_sha profile]
 jobs = core.fetch("jobs")
-required = %w[g6-contract g6-rd-release-image g6-rd-fd-a g6-rd-fd-b g6-rd-assemble g6-rd-secret-scan g6-rd-verifier g6-rd-gate g6-smoke-release g6-smoke-fd-a g6-smoke-fd-b g6-smoke-assemble g6-smoke-secret-scan g6-smoke-verifier g6-smoke-result]
+required = %w[g6-contract g6-rd-release-image g6-rd-fd-a g6-rd-fd-b g6-rd-assemble g6-rd-secret-scan g6-rd-verifier g6-rd-gate]
 abort("core semantic layers are incomplete") unless (required - jobs.keys).empty?
 jobs.each do |id, job|
   abort("#{id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
@@ -50,8 +41,8 @@ for stage in runner_preparation toolchain_bootstrap candidate_docker_image_build
     "${TIMING_HELPER}" "${INSTALL_HELPER}" \
     || { echo "G6 timing stage is missing: ${stage}" >&2; exit 1; }
 done
-# Per-build telemetry inside the candidate image build: every lane of both
-# release producers (formal and smoke) must carry its own duration mark so a
+# Per-build telemetry inside the candidate image build: every lane of the
+# formal release producer must carry its own duration mark so a
 # regression can be attributed to one build graph, and every frozen image
 # must record its final size and image ID.
 for stage in control_plane_build relay_build rust_workspace_build \
@@ -60,19 +51,19 @@ for stage in control_plane_build relay_build rust_workspace_build \
     || { echo "G6 per-image build timing stage is missing: ${stage}" >&2; exit 1; }
 done
 measure_count="$(grep -cF 'g6-timing.sh measure' "${ROOT}/.github/workflows/g6-harness-core.yml")"
-if [[ "${measure_count}" -ne 12 ]]; then
-  echo "both release producers must time all six build lanes individually (expected 12 measures, found ${measure_count})" >&2
+if [[ "${measure_count}" -ne 6 ]]; then
+  echo "the formal release producer must time all six build lanes individually (expected 6 measures, found ${measure_count})" >&2
   exit 1
 fi
 image_mark_count="$(grep -cF 'record_image_timing ' "${ROOT}/.github/workflows/g6-harness-core.yml")"
-if [[ "${image_mark_count}" -ne 10 ]]; then
-  echo "both release producers must record all five frozen images (expected 10 marks, found ${image_mark_count})" >&2
+if [[ "${image_mark_count}" -ne 5 ]]; then
+  echo "the formal release producer must record all five frozen images (expected 5 marks, found ${image_mark_count})" >&2
   exit 1
 fi
 grep -qF 'g6-timing.sh image' "${ROOT}/.github/workflows/g6-harness-core.yml" \
   || { echo "release producers must record per-image size and image ID" >&2; exit 1; }
 
-# Persistent BuildKit caches: both release producers must run a
+# Persistent BuildKit caches: the formal release producer must run a
 # run-scoped docker-container builder, split caches across the three
 # disjoint lane scopes, export only the heavyweight builds with mode=max,
 # tolerate cache export failures, rebuild mutable runtime package stages, load
@@ -82,7 +73,7 @@ grep -qF 'g6-timing.sh image' "${ROOT}/.github/workflows/g6-harness-core.yml" \
 ruby -r yaml - "${ROOT}/.github/workflows/g6-harness-core.yml" <<'RUBY'
 core = YAML.safe_load(File.read(ARGV[0]), aliases: true)
 jobs = core.fetch("jobs")
-%w[g6-rd-release-image g6-smoke-release].each do |job_id|
+%w[g6-rd-release-image].each do |job_id|
   steps = Array(jobs.fetch(job_id).fetch("steps"))
   prep = steps.find { |step| step["name"] == "Prepare the BuildKit cache builder" }
   relay = steps.find { |step| step["name"] == "Relay Actions cache credentials to the job environment" }
@@ -175,53 +166,15 @@ test -x "${cache_helper}" || { echo "G6 cache fallback helper must be executable
 for cache_token in \
   "docker buildx build \"\${cache_args[@]}\" \"\$@\"" \
   "docker buildx build \"\$@\"" \
-  'cache_timeout="${G6_CACHE_TIMEOUT:-60s}"' '--cache-from' '--cache-to' \
+  "cache_timeout=\"\${G6_CACHE_TIMEOUT:-60s}\"" '--cache-from' '--cache-to' \
   'mode=max,ignore-error=true' 'PIPESTATUS[0]' \
-  'failure_marker=' 'retrying once without external cache' \
-  'G6_CACHE_STRICT_EXPORT' \
-  'strict cache export requires Actions cache credentials' \
-  'a completed cache export is required'; do
+  'failure_marker=' 'retrying once without external cache'; do
   grep -qF -- "${cache_token}" "${cache_helper}" \
     || { echo "G6 cache fallback helper is missing ${cache_token}" >&2; exit 1; }
 done
-ruby -r yaml - "${ROOT}/.github/workflows/rust-cache-provision.yml" <<'RUBY'
-provision = YAML.safe_load(File.read(ARGV[0]), aliases: true)
-
-abort("the Rust cache provisioner must have exactly push, schedule, and dispatch triggers") unless
-  provision.fetch(true).keys.sort == %w[push schedule workflow_dispatch]
-abort("the provisioner push trigger must fire for main only") unless
-  provision.fetch(true).fetch("push").fetch("branches") == ["main"]
-provision_paths = provision.fetch(true).fetch("push").fetch("paths")
-%w[rust/** toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh .github/actions/g6-cache-credentials/**].each do |path|
-  abort("the provisioner is missing cache input #{path}") unless provision_paths.include?(path)
-end
-abort("the provisioner must keep a scheduled refresh") unless
-  provision.fetch(true).fetch("schedule").is_a?(Array) &&
-    provision.fetch(true).fetch("schedule").all? { |entry| entry.key?("cron") }
-abort("the provisioner permissions must stay read-only") unless
-  provision.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-concurrency = provision.fetch("concurrency")
-abort("the provisioner concurrency must be latest-wins per ref") unless
-  concurrency.fetch("group").include?("github.ref") && concurrency.fetch("cancel-in-progress") == true
-
-steps = provision.fetch("jobs").fetch("provision").fetch("steps")
-guard = steps.first
-abort("the first provisioner step must fail closed on a non-main ref before any checkout") unless
-  guard["name"] == "Guard trusted main ref" &&
-    guard.fetch("run").to_s.include?('test "${GITHUB_REF}" = "refs/heads/main"')
-checkout_index = steps.index { |step| step["uses"].to_s.start_with?("actions/checkout") }
-abort("the provisioner checkout must follow the main-ref guard") unless checkout_index == 1
-
-build_step = steps.find { |step| step["name"] == "Populate G6 Rust builder cache" }
-abort("the provisioner solve must use the strict exporter against the shared Rust builder") unless
-  build_step&.dig("env", "G6_CACHE_STRICT_EXPORT") == "true" &&
-    build_step&.dig("env", "G6_CACHE_TIMEOUT") == "300s" &&
-    build_step&.fetch("run", "").to_s.include?("scripts/g6-buildx-cache.sh g6-rust-runtime true rust-cache-provision") &&
-    build_step&.fetch("run", "").to_s.include?("--target g6-rust-builder")
-RUBY
 builder_count="$(grep -cF 'docker buildx create' "${ROOT}/.github/workflows/g6-harness-core.yml")"
-if [[ "${builder_count}" -ne 2 ]]; then
-  echo "both release producers must create exactly one run-scoped buildx builder (found ${builder_count})" >&2
+if [[ "${builder_count}" -ne 1 ]]; then
+  echo "the formal release producer must create exactly one run-scoped buildx builder (found ${builder_count})" >&2
   exit 1
 fi
 # The credential relay must stay best-effort and must never log values.
@@ -240,7 +193,7 @@ if grep -nE 'console\.(log|error|info)\(.*value' "${ROOT}/.github/actions/g6-cac
   echo "the cache credential relay must not log credential values" >&2
   exit 1
 fi
-for scope_counts in 'g6-rust-runtime:10' 'g6-control-plane:2' 'g6-relay:2'; do
+for scope_counts in 'g6-rust-runtime:5' 'g6-control-plane:1' 'g6-relay:1'; do
   scope="${scope_counts%%:*}"
   expected="${scope_counts##*:}"
   actual="$(grep -oF "scripts/g6-buildx-cache.sh ${scope}" "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')"
@@ -249,24 +202,24 @@ for scope_counts in 'g6-rust-runtime:10' 'g6-control-plane:2' 'g6-relay:2'; do
     exit 1
   fi
 done
-if [[ "$(grep -oF -- 'scripts/g6-buildx-cache.sh ' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 14 ]] \
-  || [[ "$(grep -oF 'image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 2 ]] \
-  || [[ "$(grep -oF -- '--load' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 10 ]] \
-  || [[ "$(grep -cF 'docker buildx rm' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
-  || [[ "$(grep -cF 'buildx_builder_prepare' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]] \
-  || [[ "$(grep -cF -- '--no-cache-filter runtime-base' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
-  || [[ "$(grep -cF -- '--no-cache-filter relay-runtime' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]]; then
+if [[ "$(grep -oF -- 'scripts/g6-buildx-cache.sh ' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 7 ]] \
+  || [[ "$(grep -oF 'image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 1 ]] \
+  || [[ "$(grep -oF -- '--load' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 5 ]] \
+  || [[ "$(grep -cF 'docker buildx rm' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 1 ]] \
+  || [[ "$(grep -cF 'buildx_builder_prepare' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
+  || [[ "$(grep -cF -- '--no-cache-filter runtime-base' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 1 ]] \
+  || [[ "$(grep -cF -- '--no-cache-filter relay-runtime' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 1 ]]; then
   echo "BuildKit cache flags drifted from the pinned release graph" >&2
   exit 1
 fi
 summary_count="$(grep -cF 'scripts/g6-timing.sh summary' "${ROOT}/.github/workflows/g6-harness-core.yml")"
-if [[ "${summary_count}" -ne 8 ]]; then
-  echo "every G6 release, failure domain, and secret-scan job must write a timing step summary (expected 8, found ${summary_count})" >&2
+if [[ "${summary_count}" -ne 4 ]]; then
+  echo "every G6 release, failure domain, and secret-scan job must write a timing step summary (expected 4, found ${summary_count})" >&2
   exit 1
 fi
 upload_stage_count="$(grep -cF 'release_artifact_upload' "${ROOT}/.github/workflows/g6-harness-core.yml")"
-if [[ "${upload_stage_count}" -ne 4 ]]; then
-  echo "both frozen release producers must time the full artifact upload (expected 4 stage marks, found ${upload_stage_count})" >&2
+if [[ "${upload_stage_count}" -ne 2 ]]; then
+  echo "the formal frozen release producer must time the full artifact upload (expected 2 stage marks, found ${upload_stage_count})" >&2
   exit 1
 fi
 grep -qF 'GITHUB_STEP_SUMMARY' "${TIMING_HELPER}" \
@@ -274,7 +227,7 @@ grep -qF 'GITHUB_STEP_SUMMARY' "${TIMING_HELPER}" \
 grep -qF 'rendezvous-dir' "${TIMING_HELPER}" \
   || { echo "G6 timing helper must aggregate rendezvous waits" >&2; exit 1; }
 rendezvous_marker="rendezvous-dir \"\${timing}\""
-if [[ "$(grep -cF "${rendezvous_marker}" "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]]; then
+if [[ "$(grep -cF "${rendezvous_marker}" "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]]; then
   echo "every G6 failure domain must record rendezvous timing diagnostics" >&2
   exit 1
 fi
@@ -302,9 +255,6 @@ secret_scan_jobs = {
   "g6-rd-secret-scan" => %w[
     g6-rd-raw-fd-a g6-rd-raw-fd-b g6-rd-evidence-bundle
   ],
-  "g6-smoke-secret-scan" => %w[
-    g6-harness-smoke-fd-a g6-harness-smoke-fd-b g6-harness-smoke-bundle
-  ]
 }
 secret_scan_jobs.each do |job_id, scan_targets|
   job = jobs.fetch(job_id) { abort("secret-scan job is missing: #{job_id}") }
@@ -367,7 +317,7 @@ secret_scan_jobs.each do |job_id, scan_targets|
   end
   # if-no-files-found only covers a missing local timing file: an artifact
   # service failure would otherwise fail the whole job and flip the formal
-  # gate or smoke aggregate on pure telemetry. Only the telemetry upload is
+  # gate on pure telemetry. Only the telemetry upload is
   # exempt; the structured scan result uploads stay fail-closed.
   unless timing_upload["continue-on-error"] == true
     abort("#{job_id} timing diagnostics upload must be continue-on-error")

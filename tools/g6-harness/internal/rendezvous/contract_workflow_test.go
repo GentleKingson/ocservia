@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// TestPeerJobNamesMatchWorkflowPins keeps the frozen rendezvous contract and
+// TestPeerJobNamesMatchWorkflowPins keeps the formal rendezvous contract and
 // the workflow job display names in lockstep. A renamed FD job must update
-// peerJobName in the same commit, otherwise both FD pairs fail at the first
+// peerJobName in the same commit, otherwise the formal FD pair fails at the first
 // cross-domain checkpoint wait because the typed contract rejects the
 // producer job name reported by the Actions API.
 func TestPeerJobNamesMatchWorkflowPins(t *testing.T) {
@@ -38,14 +38,17 @@ func TestPeerJobNamesMatchWorkflowPins(t *testing.T) {
 	}
 	expected := map[string]bool{}
 	for _, contract := range Contracts() {
+		if contract.Profile != "formal" {
+			continue
+		}
 		job, err := peerJobName(contract)
 		if err != nil {
 			t.Fatal(err)
 		}
 		expected[job] = true
 	}
-	if len(expected) != 4 {
-		t.Fatalf("expected four distinct peer job names, got %d: %v", len(expected), expected)
+	if len(expected) != 2 {
+		t.Fatalf("expected two distinct formal peer job names, got %d: %v", len(expected), expected)
 	}
 	for job := range expected {
 		if !pinned[job] {
