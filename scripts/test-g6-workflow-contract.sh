@@ -168,42 +168,10 @@ for cache_token in \
   "docker buildx build \"\$@\"" \
   "cache_timeout=\"\${G6_CACHE_TIMEOUT:-60s}\"" '--cache-from' '--cache-to' \
   'mode=max,ignore-error=true' 'PIPESTATUS[0]' \
-  'failure_marker=' 'retrying once without external cache' \
-  'G6_CACHE_STRICT_EXPORT' \
-  'strict cache export requires Actions cache credentials' \
-  'a completed cache export is required'; do
+  'failure_marker=' 'retrying once without external cache'; do
   grep -qF -- "${cache_token}" "${cache_helper}" \
     || { echo "G6 cache fallback helper is missing ${cache_token}" >&2; exit 1; }
 done
-ruby -r yaml - "${ROOT}/.github/workflows/rust-cache-provision.yml" <<'RUBY'
-provision = YAML.safe_load(File.read(ARGV[0]), aliases: true)
-
-abort("the Rust cache provisioner must stay outside PR and main-push CI") unless
-  provision.fetch(true).keys.sort == %w[schedule workflow_dispatch]
-abort("the provisioner must keep a scheduled refresh") unless
-  provision.fetch(true).fetch("schedule").is_a?(Array) &&
-    provision.fetch(true).fetch("schedule").all? { |entry| entry.key?("cron") }
-abort("the provisioner permissions must stay read-only") unless
-  provision.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-concurrency = provision.fetch("concurrency")
-abort("the provisioner concurrency must be latest-wins per ref") unless
-  concurrency.fetch("group").include?("github.ref") && concurrency.fetch("cancel-in-progress") == true
-
-steps = provision.fetch("jobs").fetch("provision").fetch("steps")
-guard = steps.first
-abort("the first provisioner step must fail closed on a non-main ref before any checkout") unless
-  guard["name"] == "Guard trusted main ref" &&
-    guard.fetch("run").to_s.include?('test "${GITHUB_REF}" = "refs/heads/main"')
-checkout_index = steps.index { |step| step["uses"].to_s.start_with?("actions/checkout") }
-abort("the provisioner checkout must follow the main-ref guard") unless checkout_index == 1
-
-build_step = steps.find { |step| step["name"] == "Populate G6 Rust builder cache" }
-abort("the provisioner solve must use the strict exporter against the shared Rust builder") unless
-  build_step&.dig("env", "G6_CACHE_STRICT_EXPORT") == "true" &&
-    build_step&.dig("env", "G6_CACHE_TIMEOUT") == "300s" &&
-    build_step&.fetch("run", "").to_s.include?("scripts/g6-buildx-cache.sh g6-rust-runtime true rust-cache-provision") &&
-    build_step&.fetch("run", "").to_s.include?("--target g6-rust-builder")
-RUBY
 builder_count="$(grep -cF 'docker buildx create' "${ROOT}/.github/workflows/g6-harness-core.yml")"
 if [[ "${builder_count}" -ne 1 ]]; then
   echo "the formal release producer must create exactly one run-scoped buildx builder (found ${builder_count})" >&2

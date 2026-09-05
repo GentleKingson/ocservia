@@ -96,8 +96,11 @@ ordinary PRs do not run G6 smoke or formal G6. No replacement G6 check is added.
 Formal G6 and release packaging remain separate workflows, not ordinary CI or
 Basic CI prerequisites. Runtime/security/capacity acceptance and cross-VM
 enrollment are script-level manual acceptance, not GitHub Actions workflows.
-The G6 Rust cache producer retains scheduled/manual execution only; it no
-longer starts on main pushes. Its cache is not needed by Basic CI.
+There is no separate G6 Rust cache warmup workflow. Formal G6 retains its
+BuildKit cache support and can build cold when no cache is available; cache
+warmup is not a prerequisite for Basic CI or formal G6. Without advance
+warmup, a cold formal build may take longer, but its acceptance checks remain
+unchanged.
 
 Basic CI does not claim production readiness, capacity, native package,
 cross-VM, browser E2E, security, or license acceptance. Those scripts and
