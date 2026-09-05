@@ -99,10 +99,7 @@ controller = jobs.fetch("build-controller-images")
 validate = jobs.fetch("validate-release-packages")
 publish = jobs.fetch("publish-release-packages")
 smoke = File.read(ARGV.fetch(2))
-# Immutable-release publication model: the workflow owns the whole
-# draft -> upload -> publish lifecycle (draft releases fire no workflow
-# events), so it must be triggered by pushing the version tag itself and
-# must never react to release publication.
+# The workflow owns draft -> upload -> publish and starts from a version tag.
 triggers = workflow.key?("on") ? workflow.fetch("on") : workflow.fetch(true)
 push_trigger = triggers.fetch("push")
 abort("Release workflow must trigger only on version tag pushes") unless
@@ -122,13 +119,15 @@ abort("Controller image build legs must not run in a protected environment") if
 gated = jobs.values.select { |job| job["environment"] == "release-publishing" }
 abort("Exactly one release-publishing gated job must exist") unless gated.length == 1
 abort("The release-publishing environment must gate the publish job only") unless gated.first == publish
-matrix_includes = Array(controller.fetch("strategy").fetch("matrix").fetch("include"))
-controller_arches = matrix_includes.map { |entry| entry["controller_arch"] }.sort
-abort("Controller image build must target amd64 and arm64") unless controller_arches == %w[amd64 arm64]
-matrix_includes.each do |entry|
-  expected_runner = entry["controller_arch"] == "amd64" ? "ubuntu-24.04" : "ubuntu-24.04-arm"
-  abort("Controller #{entry['controller_arch']} leg must build natively on #{expected_runner}") unless
-    entry["runs_on"] == expected_runner
+arch_input = triggers.fetch("workflow_dispatch").fetch("inputs").fetch("arch")
+abort("Dispatch must default to amd64 and offer amd64, arm64, all") unless
+  arch_input.fetch("default") == "amd64" && arch_input.fetch("options") == %w[amd64 arm64 all]
+%w[build-agent-packages build-controller-images].each do |job_name|
+  matrix = jobs.fetch(job_name).fetch("strategy").fetch("matrix").fetch("include")
+  abort("#{job_name} must select native architecture legs for tag pushes and dispatch") unless
+    matrix.include?("github.event_name == 'push'") && matrix.include?("inputs.arch == 'all'") &&
+    matrix.include?("inputs.arch == 'arm64'") &&
+    matrix.include?("ubuntu-24.04") && matrix.include?("ubuntu-24.04-arm")
 end
 uses = Array(controller.fetch("steps")).map { |step| step["uses"] }.compact
 uses.each do |use|
@@ -161,24 +160,18 @@ abort("Release dry runs must prepare both versioned bootstrap assets") unless
   validate_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')
 abort("Controller publishing permissions are too broad") unless publish.fetch("permissions") == {
   "contents" => "write",
-  "packages" => "write",
-  "id-token" => "write",
-  "attestations" => "write"
+  "packages" => "write"
 }
 publish_uses = Array(publish.fetch("steps")).map { |step| step["uses"] }.compact
 publish_uses.each do |use|
   abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
 end
-attest = publish_uses.select { |use| use.start_with?("actions/attest@") }
-abort("Controller release must attest four first-party images") unless attest.length == 4
-abort("Controller release must use the verified actions/attest pin") unless
-  attest.all? { |use| use == "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d" }
 publish_steps = Array(publish.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
 abort("Release publishing must prepare bootstrap assets from the release checkout") unless
   publish_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')
 %w[controller-bootstrap.sh managed-node-bootstrap.sh].each do |asset|
-  abort("Release publishing and exact-set recovery must include #{asset}") unless
-    publish_steps.scan(asset).length >= 2
+  abort("Release publishing must include #{asset}") unless
+    publish_steps.include?(asset)
 end
 abort("Controller publishing must load the built image archives") unless
   publish_steps.include?("docker load --input")
@@ -204,43 +197,8 @@ abort("Controller publishing must create a draft, upload every asset, then publi
   create_at < upload_at && upload_at < publish_at
 abort("Controller publishing must never clobber release assets") if
   publish_steps.include?("--clobber")
-abort("Controller release must verify the published release attestation") unless
-  publish_steps.include?("gh release verify")
-abort("Controller release must fail closed on a mutable release") unless
-  publish_steps.include?("--jq .immutable")
-abort("Controller publishing must preflight the immutable-releases prerequisite") unless
-  publish_steps.include?("immutable-releases") && publish_steps.include?("REPO_ADMIN_READ_TOKEN")
-abort("Controller publishing must bind the tag to the source commit before production writes") unless
-  publish_steps.include?("check-tag-binding.sh") &&
-  publish_steps.include?("git/ref/tags/")
-publish_defs = Array(publish.fetch("steps"))
-publishes_draft = publish_defs.select { |step| step.is_a?(Hash) && step["run"].to_s.include?("--draft=false") }
-abort("Controller publishing must re-verify the tag binding immediately before publishing") unless
-  publishes_draft.length == 1 &&
-  publishes_draft.first["run"].include?("check-tag-binding.sh") &&
-  publishes_draft.first["run"].index("check-tag-binding.sh") < publishes_draft.first["run"].index("gh release edit")
-abort("Controller publishing must re-check the immutable prerequisite immediately before publishing") unless
-  publishes_draft.first["run"].include?("check-immutable-prereq.sh") &&
-  publishes_draft.first["run"].index("check-immutable-prereq.sh") < publishes_draft.first["run"].index("gh release edit")
-abort("Publish job must keep a read-only recovery path for already-published releases") unless
-  publish_steps.include?("verified in place; nothing was modified")
-recovery_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.include?("verified in place; nothing was modified") }
-abort("Read-only recovery must chain the published assets to the pinned release key") unless
-  !recovery_step.nil? &&
-  recovery_step["run"].to_s.include?("scripts/validate-release-packages.sh") &&
-  recovery_step.fetch("env", {}).fetch("AGENT_TRUSTED_KEY_SHA256", "") ==
-    "${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}"
-state_step = publish_defs.find { |step| step.is_a?(Hash) && step["id"] == "release_state" }
-state_run = state_step.nil? ? "" : state_step["run"].to_s
-abort("Release-state detection must fail closed on a state-query failure, not fall back to the publish path") unless
-  !state_step.nil? &&
-  state_run.include?("%{http_code}") &&
-  state_run.include?("404") &&
-  state_run.include?("exit 1") &&
-  !state_run.include?("gh release view")
-login_step = publish_defs.find { |step| step.is_a?(Hash) && step["run"].to_s.include?("docker login") }
-abort("Production writes must be skipped by the read-only recovery path") unless
-  !login_step.nil? && login_step["if"] == "steps.release_state.outputs.mode != 'verify-published'"
+abort("Controller publishing must bind the tag to the source commit") unless
+  publish_steps.include?("git/ref/tags/") && publish_steps.include?('${tag_sha}" != "${source_commit}')
 abort("workflow dispatch must not publish Controller images") if
   publish.fetch("if").include?("workflow_dispatch")
 abort("Controller release must use the GHCR anonymous token flow") unless

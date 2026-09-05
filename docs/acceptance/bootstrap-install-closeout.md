@@ -33,8 +33,8 @@ node installation path. It does not grant any installer new authority.
 
 | Contract | Automated evidence |
 | --- | --- |
-| Both Stage-1 scripts are immutable Release assets in the exact asset set | `scripts/prepare-bootstrap-release-assets.sh`, `.github/workflows/release.yml`, release workflow contract tests |
-| Published release attestation and immutability verify with `gh release verify` | `.github/workflows/release.yml` |
+| Both Stage-1 scripts are versioned Release assets covered by the signed checksum manifest | `scripts/prepare-bootstrap-release-assets.sh`, `.github/workflows/release.yml`, release workflow contract tests |
+| Tag pushes build and smoke amd64 + arm64 packages/images; dispatch stays dry-run with default amd64 and optional arm64/all | `.github/workflows/release.yml`, `scripts/test-controller-release-manifest.sh` |
 | Stage-0 and Stage-1 verify the independently pinned Ed25519 key, signed checksum, and selected asset digest | `scripts/test-stage0-installers.sh`, `scripts/test-controller-release-bundle.sh`, `scripts/test-managed-node-install.sh` |
 | Tampered assets fail before handoff or package installation | the same three fixture suites |
 | The endpoint verifier rejects bytes that differ from the repository sources | `scripts/verify-bootstrap-endpoint.sh`, `scripts/test-stage0-installers.sh` |
