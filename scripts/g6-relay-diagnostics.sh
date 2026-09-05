@@ -21,6 +21,21 @@ capture_relay_agent_proof() {
   rm -f -- "${output}.journal" "${output}.events"
 }
 
+capture_relay_agent_exit_diagnostics() {
+  local key="${1:?}" service="${2:?}" dir="${3:?}" command
+  mkdir -p "$dir"
+  [[ "$key" =~ ^[a-zA-Z0-9._-]+$ ]] || return 2
+  if command="$(G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
+    "SELECT replace(id::text,'-','') FROM commands WHERE idempotency_key='$key' AND payload_type='synthetic_noop'" 2>"$dir/lookup-error.log")" \
+    && [[ "$command" =~ ^[0-9a-f]{32}$ ]]; then
+    if ! capture_relay_agent_proof "$command" "$service" "$dir/agent-proof.json" 2>"$dir/capture-error.log"; then
+      printf 'target Agent journal/log capture failed\n' >>"$dir/failures.log"
+    fi
+  else
+    printf 'target command unavailable from local database replica\n' >>"$dir/failures.log"
+  fi
+}
+
 capture_relay_command_snapshot() {
   local key="${1:?}" node="${2:?}" output="${3:?}"
   [[ "$key" =~ ^[a-zA-Z0-9._-]+$ && "$node" =~ ^[0-9a-f-]{36}$ ]] || return 2

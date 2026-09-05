@@ -1144,6 +1144,9 @@ phase_evidence() {
 phase_runtime_result() {
   local job_status="${1:?job status is required}"
   local out="${G6RD_OUTBOX}/fd-a-final"
+  source "${ROOT}/scripts/g6-relay-diagnostics.sh"
+  capture_relay_agent_exit_diagnostics "g6-relay-failover-${RUN_ID%-fd-a}-fd-b" \
+    agent-fd-a-01 "${out}/evidence/relay-exit-diagnostics" || true
   g6rd_write_runtime_result "${out}" "${job_status}" \
     "$([[ "${job_status}" == success ]] && printf runtime_complete || printf unknown)"
 }

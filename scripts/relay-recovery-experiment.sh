@@ -49,6 +49,7 @@ finish() {
   g6rd_agent_compose logs --no-color agent-fd-a-01 > "$EVIDENCE/agent.log" 2>&1
   cp "$G6RD_WORK/relay-loss/target.dropped" "$EVIDENCE/" 2>/dev/null
   if [[ -n "${node:-}" && -n "${key:-}" ]]; then
+    capture_relay_agent_exit_diagnostics "$key" agent-fd-a-01 "$EVIDENCE/agent-exit-diagnostics"
     capture_relay_command_snapshot "$key" "$node" "$EVIDENCE/final-database.jsonl" 2> "$EVIDENCE/final-database-error"
     g6rd_probe_node_connection relay "$node" > "$EVIDENCE/final-session.json" 2> "$EVIDENCE/final-session-error"
   fi
