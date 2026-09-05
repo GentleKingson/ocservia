@@ -1246,6 +1246,16 @@ async fn handle_command_stream(
                 | command_envelope::Payload::AgentUpgrade(_)
         )
     );
+    tracing::info!(
+        event_type = "command_delivery_authorized",
+        message_id = %hex::encode(&envelope.message_id),
+        command_id = %hex::encode(&envelope.command_id),
+        node_id = %hex::encode(&envelope.node_id),
+        delivery_mode = envelope.delivery_mode,
+        semantic_payload_sha256 = %hex::encode(&envelope.semantic_payload_sha256),
+        semantic_payload_hash_version = envelope.semantic_payload_hash_version,
+        "command delivery passed session authorization"
+    );
     let execution = if external {
         execute_external_command(session, &envelope, &context, now_unix_seconds).await
     } else {
@@ -1274,6 +1284,50 @@ async fn handle_command_stream(
         }
         Err(CommandError::InjectedCrash(_)) => unreachable!("crash injection is test-only"),
     };
+    tracing::info!(
+        event_type = "command_delivery_result",
+        message_id = %hex::encode(&envelope.message_id),
+        command_id = %hex::encode(&envelope.command_id),
+        delivery_mode = envelope.delivery_mode,
+        state = result.state,
+        replayed = result.replayed,
+        error_code = %result.error_code,
+        "command delivery produced a result"
+    );
+    if matches!(
+        envelope.payload,
+        Some(command_envelope::Payload::SyntheticNoop(_))
+    ) {
+        if let Ok(key) = <&[u8; 16]>::try_from(envelope.idempotency_key.as_slice()) {
+            let journal = session.command_executor.journal();
+            match (
+                journal.synthetic_effect(key),
+                journal.synthetic_execution_count(),
+            ) {
+                (Ok(effect), Ok(executions)) => {
+                    use sha2::{Digest as _, Sha256};
+                    tracing::info!(
+                    event_type = "synthetic_effect_observed",
+                    command_id = %hex::encode(&envelope.command_id),
+                    message_id = %hex::encode(&envelope.message_id),
+                    idempotency_key = %hex::encode(key),
+                    effect_present = effect.is_some(),
+                    effect_executed_at = effect.as_ref().map(|value| value.executed_at),
+                    journal_total_executions = executions,
+                    result_sha256 = %hex::encode(Sha256::digest(&result.result)),
+                    effect_result_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(Sha256::digest(&value.result))),
+                    effect_payload_sha256 = %effect.as_ref().map_or_else(String::new, |value| hex::encode(value.payload_sha256)),
+                    "read-only synthetic journal observation"
+                    );
+                }
+                _ => tracing::warn!(
+                    event_type = "synthetic_effect_observation_failed",
+                    command_id = %hex::encode(&envelope.command_id),
+                    "synthetic journal diagnostic unavailable"
+                ),
+            }
+        }
+    }
     let event = AgentEvent {
         r#type: AgentEventType::CommandResult.into(),
         payload: result.encode_to_vec(),

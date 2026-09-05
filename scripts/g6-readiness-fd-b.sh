@@ -1440,6 +1440,7 @@ phase_relay_pre_fault() {
 }
 
 phase_scenario_relay() {
+  (
   local peer_ready="${1:?failure-domain A readiness directory is required}"
   local relay_failed_at="${peer_ready}/relay-a-failed-at"
   require_file "${relay_failed_at}"
@@ -1516,6 +1517,11 @@ phase_scenario_relay() {
     g6rd_wait_until_deadline 90 5 "cross-VM session through relay-b" \
     relay_probe_relay_b "${cross_vm_node}" "${before_file}"
   key="g6-relay-failover-${RUN_ID}"
+  # Diagnostics must run before cleanup even if the existing proof rejects
+  # a second frame. The original scenario status remains authoritative.
+  source "${ROOT}/scripts/g6-relay-diagnostics.sh"
+  mkdir -p "${G6RD_STATE}/relay-diagnostics"
+  trap 'status=$?; trap - EXIT; set +e; capture_relay_exit_diagnostics "$status" "$key" "$cross_vm_node" "$before_file"; exit "$status"' EXIT
   g6rd_enqueue_command "${cross_vm_node}" "${key}" \
     "${G6RD_STATE}/relay-command-enqueue.jsonl"
   command_id="$(command_id_of_key "${key}")"
@@ -1524,7 +1530,7 @@ phase_scenario_relay() {
     return 1
   }
   g6rd_wait_until_deadline 120 2 "relay failover command result" \
-    wait_commands_settled "${key}"
+    relay_settled_with_snapshot "${key}" "${cross_vm_node}" "${G6RD_STATE}/relay-diagnostics/database.jsonl"
   dispatch_file="${G6RD_STATE}/relay-dispatch-proof.json"
   capture_relay_dispatch_proof \
     "${command_id}" "${cross_vm_node}" "${before_file}" "${dispatch_file}" relay-b
@@ -1539,6 +1545,7 @@ phase_scenario_relay() {
   capture_database_clock_bounded "${active_at_file}" \
     "database clock after relay-b activation"
   g6rd_timeline_event relay_b_active "${active_at_file}"
+  )
 }
 
 capture_relay_dispatch_proof() {
@@ -1556,16 +1563,38 @@ capture_relay_dispatch_proof() {
   if ! jq -eRsc --arg command "${command_hex}" --arg node "${node_hex}" '
     [split("\n")[] | fromjson? |
       select(.fields.event_type == "command_frame_written"
-        and .fields.command_id == $command
-        and .fields.node_id == $node) | .fields] as $matches
-    | if ($matches | length) == 1 then $matches[0] else false end
+        and .fields.command_id == $command) | .fields] as $matches
+    | if ($matches | length) == 1 then $matches[0] + {deliveries: $matches}
+      elif ($matches | length) == 2 then $matches[0] + {deliveries: $matches}
+      else false end
   ' "${logs}" >"${temporary}"; then
     rm -f -- "${logs}" "${temporary}"
     return 1
   fi
+  if [[ "${relay}" == relay-b ]]; then
+    if [[ "$(jq '.deliveries | length' "${temporary}")" == 2 ]]; then
+      source "${ROOT}/scripts/g6-relay-diagnostics.sh"
+      local key database="${output}.database.$$" reasons="${output}.reasons.$$"
+      key="$(psql_primary_probe -Atc "SELECT idempotency_key FROM commands WHERE id='${command_id}' AND node_id='${node}' AND payload_type='synthetic_noop'")" || return 1
+      capture_relay_command_snapshot "${key}" "${node}" "${database}" || return 1
+      G6RD_COMPOSE_TIMEOUT_SECONDS=15 g6rd_compose logs --no-color --no-log-prefix worker \
+        | jq -Rsc --arg command "${command_id}" '[split("\n")[] | sub("^[^{]*"; "") | fromjson? | select(.event_type == "command_reconciliation_prepared" and .command_id == $command)]' >"${reasons}" || return 1
+      jq --slurpfile database "${database}" --slurpfile reasons "${reasons}" \
+        --rawfile logs "${logs}" --arg command "${command_hex}" '
+        . + {recovery: {database: $database[-1], reasons: $reasons[0],
+          responses: [$logs | split("\n")[] | fromjson? | .fields |
+            select(.event_type == "command_response_received" and .command_id == $command)]}}' \
+        "${temporary}" >"${temporary}.recovery" || return 1
+      mv -f "${temporary}.recovery" "${temporary}"
+      rm -f -- "${database}" "${reasons}"
+    fi
+    node "${ROOT}/scripts/g6-relay-proof.mjs" "${temporary}" "${observation}" || return 1
+  else
+    jq -e '.deliveries | length == 1' "${temporary}" >/dev/null || return 1
+  fi
   rm -f -- "${logs}"
-  if ! jq -e --slurpfile observation "${observation}" --arg relay "${relay}" '
-    .path == "relay"
+  if ! jq -e --slurpfile observation "${observation}" --arg relay "${relay}" --arg node "${node_hex}" '
+    .node_id == $node and .path == "relay"
     and (.path_detail | contains($relay))
     and (.owner_fence_id | test("^[0-9a-f]{32}$"))
     and (.connection_id | test("^[0-9a-f]{32}$"))
@@ -3014,6 +3043,7 @@ phase_final_freeze() {
   require_file "${G6RD_STATE}/window-ended-at"
   require_file "${G6RD_STATE}/evidence/final-sessions.json"
   mkdir -p "${G6RD_OUTBOX}/final-freeze"
+  cp -f "${G6RD_STATE}/relay-dispatch-proof.json" "${G6RD_OUTBOX}/final-freeze/"
   g6rd_now >"${G6RD_OUTBOX}/final-freeze/final-freeze-at"
 }
 
@@ -3032,6 +3062,8 @@ phase_runtime_result() {
     state/scheduler-replacement-term
     state/scheduler-maintenance-observation.json
     state/relay-b-node-id
+    state/relay-command-enqueue.jsonl
+    state/relay-diagnostics
     state/relay-b-before-command.json
     state/relay-b-observation.json
     state/relay-b-active-at

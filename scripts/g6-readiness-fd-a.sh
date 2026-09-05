@@ -1110,6 +1110,12 @@ phase_evidence() {
   copy_control_evidence "${out}"
   mkdir -p "${out}/evidence/effects"
   cp -f "${freeze}/final-freeze-at" "${out}/"
+  require_file "${freeze}/relay-dispatch-proof.json"
+  if [[ "$(jq '.deliveries | length' "${freeze}/relay-dispatch-proof.json")" == 2 ]]; then
+    source "${ROOT}/scripts/g6-relay-diagnostics.sh"
+    capture_relay_agent_proof "$(jq -er '.command_id' "${freeze}/relay-dispatch-proof.json")" \
+      agent-fd-a-01 "${out}/evidence/relay-agent-proof.json"
+  fi
   g6rd_now >"${out}/freeze-received-at"
   local index service
   for index in $(seq 1 "$(g6rd_agent_count)"); do

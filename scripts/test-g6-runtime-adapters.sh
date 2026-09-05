@@ -1520,8 +1520,9 @@ relay_dispatch_fixture="$(mktemp -d)"
   node_id=00000000-0000-7000-8000-000000000456
   observation="${relay_dispatch_fixture}/observation.json"
   output="${relay_dispatch_fixture}/dispatch.json"
-  printf '%s\n' '{"observations":[{"owner_fence_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","connection_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","owner_epoch":2}]}' >"${observation}"
+  printf '%s\n' '{"observations":[{"node_id":"00000000000070008000000000000456","owner_fence_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","connection_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","owner_epoch":2}]}' >"${observation}"
   good_log='{"fields":{"event_type":"command_frame_written","command_id":"00000000000070008000000000000123","node_id":"00000000000070008000000000000456","owner_fence_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","connection_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","owner_epoch":2,"path":"relay","path_detail":"iroh/relay-b"}}'
+  good_log="$(jq -c '.fields += {message_id: "00000000000070008000000000000789", operation_id: "00000000000070008000000000000123", idempotency_key: "00000000000070008000000000000123", delivery_mode: 1, required_capability: "synthetic.noop", semantic_payload_hash_version: 2, semantic_payload_sha256: ("ab" * 32), sequence: 1, expected_revision: 1}' <<<"${good_log}")"
   relay_log="${good_log}"
   g6rd_compose() { printf '%s\n' "${relay_log}"; }
   capture_relay_dispatch_proof \
@@ -4916,8 +4917,8 @@ grep -qF 'shared_run="${RUN_ID%-fd-[a-b]}"' "${LIB}" || {
   exit 1
 }
 authority_bindings="$(grep -c 'G6_AUTHORITY: ${{ inputs.authority }}' "${WORKFLOW}")"
-if [[ "${authority_bindings}" -ne 3 ]]; then
-  echo "both failure-domain jobs and the verifier must bind the dispatched authority (found ${authority_bindings})" >&2
+if [[ "${authority_bindings}" -ne 4 ]]; then
+  echo "workflow defaults, both failure-domain jobs and the verifier must bind the dispatched authority (found ${authority_bindings})" >&2
   exit 1
 fi
 sha_bindings="$(grep -c 'G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}' "${WORKFLOW}")"
@@ -5509,6 +5510,7 @@ rm -rf "${cleanup_test}"
 
 "${ROOT}/scripts/test-real-e2e-artifact.sh"
 shellcheck "${LIB}" "${FD_A}" "${FD_B}" "${SUPERVISOR}" \
+  "${ROOT}/scripts/g6-relay-diagnostics.sh" \
   "${ROOT}/scripts/real-e2e-artifact.sh" \
   "${ROOT}/scripts/test-real-e2e-artifact.sh" "${POSTGRES_INIT}"
 echo "g6-readiness policy checks passed"

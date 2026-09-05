@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -1392,10 +1393,17 @@ func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) e
 			if s.signer == nil {
 				return errors.New("operations: reconciliation signer is unavailable")
 			}
+			priorMessageID := hex.EncodeToString(envelope.GetMessageId())
 			payload, expiresAt, err = PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observedAt, s.signer)
 			if err != nil {
 				return fmt.Errorf("prepare missing-result reconciliation for command %s: %w", commandID, err)
 			}
+			slog.InfoContext(ctx, "missing-result reconciliation prepared; transaction not yet committed",
+				"event_type", "command_reconciliation_prepared", "reason", "sent_result_timeout",
+				"command_id", commandID, "operation_id", operationID, "node_id", nodeID,
+				"outbox_id", outboxID, "prior_attempt", attempts,
+				"prior_message_id", priorMessageID, "message_id", hex.EncodeToString(envelope.GetMessageId()),
+				"semantic_payload_sha256", hex.EncodeToString(envelope.GetSemanticPayloadSha256()))
 		}
 		commandTag, err := tx.Exec(ctx, `UPDATE commands
 			SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4
