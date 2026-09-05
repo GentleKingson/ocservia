@@ -204,12 +204,21 @@ func (s *Service) Logout(ctx context.Context, principal Principal) error {
 	return err
 }
 
+// ValidBreakGlassToken is only an admission hint, not session authorization.
+// BreakGlass must still enforce rotation and commit the audited session.
+func (s *Service) ValidBreakGlassToken(token string) bool {
+	if !s.breakGlassEnabled || len(s.breakGlassTokenHash) != sha256.Size {
+		return false
+	}
+	digest := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(digest[:], s.breakGlassTokenHash) == 1
+}
+
 func (s *Service) BreakGlass(ctx context.Context, token string, requestID string) (*http.Cookie, Principal, error) {
 	if !s.breakGlassEnabled || len(s.breakGlassTokenHash) != sha256.Size {
 		return nil, Principal{}, ErrBreakGlassDisabled
 	}
-	digest := sha256.Sum256([]byte(token))
-	if subtle.ConstantTimeCompare(digest[:], s.breakGlassTokenHash) != 1 {
+	if !s.ValidBreakGlassToken(token) {
 		return nil, Principal{}, ErrUnauthenticated
 	}
 	fingerprint := sha256.Sum256(s.breakGlassTokenHash)

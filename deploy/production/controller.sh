@@ -534,6 +534,86 @@ check_current_database_and_backup_health() {
   fi
 }
 
+migrate_application_network() {
+  local config project network_name networks network_id network subnet ip_range endpoints container
+  if ! config="$("${COMPOSE_LAUNCHER}" config --format json)"; then
+    fail "cannot render target application network; runtime remains unchanged"
+  fi
+  if ! jq -e '
+    (.name | type == "string" and length > 0) and
+    (.networks.application | .internal == true and (.external // false) == false and
+      (.driver // "bridge") == "bridge" and (.ipam.driver // "default") == "default" and
+      (.ipam.config | length == 1) and
+      (.ipam.config[0].subnet | type == "string" and length > 0) and
+      (.ipam.config[0].ip_range | type == "string" and length > 0)) and
+    ([.services | to_entries[] | select(.value.networks | has("application")) | .key] | sort) ==
+      ["control-plane", "gateway", "transportd"]
+  ' <<<"${config}" >/dev/null; then
+    fail "unsupported target application network; runtime remains unchanged"
+  fi
+  project="$(jq -er '.name' <<<"${config}")"
+  network_name="$(jq -er '.networks.application.name' <<<"${config}")"
+  subnet="$(jq -er '.networks.application.ipam.config[0].subnet' <<<"${config}")"
+  ip_range="$(jq -er '.networks.application.ipam.config[0].ip_range' <<<"${config}")"
+  if ! networks="$(docker network ls --filter "name=${network_name}" --no-trunc --format '{{json .}}')"; then
+    fail "cannot list application networks; runtime remains unchanged"
+  fi
+  networks="$(jq -s --arg name "${network_name}" '[.[] | select(.Name == $name)]' <<<"${networks}")" ||
+    fail "invalid application network inventory"
+  # A previous attempt may have removed the legacy network before activation.
+  [[ "$(jq 'length' <<<"${networks}")" != 0 ]] || return 0
+  [[ "$(jq 'length' <<<"${networks}")" == 1 ]] || fail "ambiguous application network identity"
+  network_id="$(jq -er '.[0].ID' <<<"${networks}")"
+  if ! network="$(docker network inspect "${network_id}")"; then
+    fail "cannot inspect application network; runtime remains unchanged"
+  fi
+  if ! jq -e --arg project "${project}" --arg name "${network_name}" --arg id "${network_id}" '
+    length == 1 and (.[0] |
+      .Id == $id and .Name == $name and .Driver == "bridge" and .Internal == true and
+      .Scope == "local" and .EnableIPv6 == false and .IPAM.Driver == "default" and
+      (.IPAM.Config | length == 1) and
+      .Labels["com.docker.compose.project"] == $project and
+      .Labels["com.docker.compose.network"] == "application")
+  ' <<<"${network}" >/dev/null; then
+    fail "application network ownership or topology is unexpected; runtime remains unchanged"
+  fi
+  if jq -e --arg subnet "${subnet}" --arg range "${ip_range}" '
+    .[0].IPAM.Config[0] | .Subnet == $subnet and .IPRange == $range
+  ' <<<"${network}" >/dev/null; then
+    return 0
+  fi
+  # Only the legacy automatic pool is migrated here, not arbitrary IPAM changes.
+  if ! jq -e '.[0] | ((.IPAM.Config[0].IPRange // "") == "") and
+    ((.Options // {}) | length == 0) and ((.IPAM.Options // {}) | length == 0) and
+    ((.IPAM.Config[0].AuxiliaryAddresses // {}) | length == 0)
+  ' <<<"${network}" >/dev/null; then
+    fail "application network is neither legacy nor the target; refusing automatic migration"
+  fi
+  endpoints="$(jq -r '.[0].Containers // {} | keys[]' <<<"${network}")"
+  while IFS= read -r container; do
+    [[ -n "${container}" ]] || continue
+    if ! docker container inspect "${container}" | jq -e --arg project "${project}" '
+      length == 1 and (.[0].Config.Labels |
+        .["com.docker.compose.project"] == $project and
+        (.["com.docker.compose.service"] | IN("gateway", "control-plane", "transportd")))
+    ' >/dev/null; then
+      fail "application network has an unexpected attachment; runtime remains unchanged"
+    fi
+  done <<<"${endpoints}"
+
+  mark_pending_phase application-network-migration "${CURRENT_RELEASE}"
+  echo "migrating legacy application network; gateway, control-plane and transportd will be recreated"
+  # Include stopped containers with stale network references. Never pass -v;
+  # PostgreSQL, backup, other networks and all durable state stay in place.
+  if ! "${COMPOSE_LAUNCHER}" rm --stop --force gateway control-plane transportd; then
+    fail "application service removal failed; retain pending state and retry the identical upgrade" 1
+  fi
+  # Docker refuses removal if a new/unexpected endpoint appeared meanwhile.
+  if ! docker network rm "${network_id}"; then
+    fail "application network removal failed; retain pending state and retry the identical upgrade" 1
+  fi
+}
+
 check_rollback_database_compatibility() {
   local previous_migration="$1"
   if ! "${COMPOSE_LAUNCHER}" run --rm --no-deps migrate \
@@ -710,6 +790,7 @@ upgrade_controller() {
   if ! "${COMPOSE_LAUNCHER}" pull; then
     fail "target image pull failed; current release remains unchanged"
   fi
+  migrate_application_network
   mark_pending_phase activation "${CURRENT_RELEASE}"
   if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
     fail "upgrade activation started but was not confirmed successful; current release state remains unchanged; do not automatically rollback old images" 1

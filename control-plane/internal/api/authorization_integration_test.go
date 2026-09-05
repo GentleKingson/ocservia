@@ -561,10 +561,26 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 		t.Fatalf("sibling-origin break-glass reached the database: uses=%d want %d err=%v", blockedUses, breakGlassUsesBefore, err)
 	}
 
+	for attempt := 0; attempt < 6; attempt++ {
+		invalid := do(http.MethodPost, "/api/v1/auth/break-glass",
+			"https://admin.example.test", "", "application/json", "", "", `{"token":"invalid"}`)
+		want := http.StatusUnauthorized
+		if attempt == 5 {
+			want = http.StatusTooManyRequests
+		}
+		if invalid.Code != want {
+			t.Fatalf("invalid emergency attempt=%d status=%d body=%s", attempt, invalid.Code, invalid.Body)
+		}
+	}
 	legitimate := do(http.MethodPost, "/api/v1/auth/break-glass",
 		"https://admin.example.test", "", "application/json", "", "", `{"token":"`+breakGlassToken+`"}`)
 	if legitimate.Code != http.StatusNoContent {
 		t.Fatalf("same-origin break-glass status=%d body=%s", legitimate.Code, legitimate.Body.String())
+	}
+	reused := do(http.MethodPost, "/api/v1/auth/break-glass",
+		"https://admin.example.test", "", "application/json", "", "", `{"token":"`+breakGlassToken+`"}`)
+	if reused.Code != http.StatusLocked {
+		t.Fatalf("emergency rate exemption bypassed rotation: %d", reused.Code)
 	}
 	sessionCookie := ""
 	for _, entry := range legitimate.Result().Cookies() {

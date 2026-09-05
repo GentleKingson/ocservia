@@ -21,6 +21,15 @@ The command selects only the protected previous release. It does not accept an
 operator-selected manifest and does not run a database down migration or
 restore.
 
+Rollback also requires an unchanged production deployment contract. The release
+introducing the static gateway/application IPAM and security configuration is a
+**forward-only deployment change** from v0.4.0; this command intentionally refuses
+that rollback. For a failed upgrade, first retry the identical target through
+the guarded lifecycle. If it cannot be recovered, preserve the evidence and
+follow the [backup/PITR recovery procedure](../operations/postgres-pitr-restore.md)
+in an isolated deployment before redirecting traffic, rather than bypassing the
+deployment-contract guard.
+
 ## Verify
 
 Wait for the rollback smoke check to succeed. Confirm the expected version and

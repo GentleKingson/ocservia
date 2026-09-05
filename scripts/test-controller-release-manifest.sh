@@ -90,7 +90,7 @@ bad_tag_args=("${common_args[@]}")
 bad_tag_args[3]=v0.2.1
 assert_rejected release-tag "${bad_tag_args[@]}" "${image_args[@]}"
 
-ruby -r yaml - "${ROOT}/.github/workflows/release.yml" \
+ruby -r yaml -r tmpdir -r open3 - "${ROOT}/.github/workflows/release.yml" \
   "${ROOT}/docs/operations/production-deployment.md" \
   "${ROOT}/scripts/release-controller-image-smoke.sh" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
@@ -167,6 +167,45 @@ publish_uses.each do |use|
   abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
 end
 publish_steps = Array(publish.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+final_gate = publish.fetch("steps").find { |step| step["name"] == "Verify signed release manifest" }
+abort("Final release validation must retain the trusted key pin") unless
+  final_gate.fetch("env").fetch("AGENT_TRUSTED_KEY_SHA256") == '${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}'
+pre_sign = publish.fetch("steps").find { |step| step["name"] == "Validate package set against the pinned release key" }
+abort("Pre-sign and dry-run validation must still generate unsigned manifests") unless
+  pre_sign.fetch("run").include?("WRITE_SHA256SUMS=1") && validate_steps.include?("WRITE_SHA256SUMS=1")
+Dir.mktmpdir("ocservia-final-signature-gate") do |dir|
+  Dir.mkdir("#{dir}/assets")
+  Dir.mkdir("#{dir}/scripts")
+  # The gate must reject before invoking package extraction/verification.
+  validator = "#{dir}/scripts/validate-release-packages.sh"
+  File.write(validator, <<~SH)
+    #!/usr/bin/env bash
+    set -eu
+    test "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" = 1
+    test "${AGENT_TRUSTED_KEY_SHA256}" = "#{'a' * 64}"
+    test -s "${ASSET_DIR}/SHA256SUMS.sig"
+    touch validation-called
+  SH
+  File.chmod(0755, validator)
+  signature = "#{dir}/assets/SHA256SUMS.sig"
+  env = {"RUNNER_TEMP" => dir, "version" => "0.2.0", "AGENT_TRUSTED_KEY_SHA256" => 'a' * 64}
+  %w[missing empty symlink regular].each do |kind|
+    File.unlink(signature) if File.exist?(signature) || File.symlink?(signature)
+    File.write(signature, "") if kind == "empty"
+    if kind == "symlink"
+      File.write("#{dir}/target", "signature")
+      File.symlink("#{dir}/target", signature)
+    end
+    File.write(signature, "signature") if kind == "regular"
+    _, status = Open3.capture2e(env, "bash", "-euo", "pipefail", "-c", final_gate.fetch("run"), chdir: dir)
+    expected = kind == "regular"
+    abort("Final signature gate mishandled #{kind}") unless status.success? == expected
+    abort("Final signature gate delegated #{kind} incorrectly") unless File.exist?("#{dir}/validation-called") == expected
+  end
+  File.unlink("#{dir}/validation-called")
+  _, status = Open3.capture2e(env.merge("AGENT_TRUSTED_KEY_SHA256" => ""), "bash", "-euo", "pipefail", "-c", final_gate.fetch("run"), chdir: dir)
+  abort("Final signature gate accepted missing key pin") if status.success? || File.exist?("#{dir}/validation-called")
+end
 abort("Release publishing must prepare bootstrap assets from the release checkout") unless
   publish_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')
 %w[controller-bootstrap.sh managed-node-bootstrap.sh].each do |asset|

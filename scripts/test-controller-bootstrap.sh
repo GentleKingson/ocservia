@@ -89,6 +89,7 @@ printf 'pwd:%s\n' "$(pwd -P)" >>"${log}"
 printf 'args:%s\n' "$*" >>"${log}"
 printf 'env-resolved-marker:%s\n' "${OCSERV_INSTALL_ENV_RESOLVED:-<unset>}" >>"${log}"
 printf 'trust-key:%s\n' "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY}" >>"${log}"
+printf 'proxy-network:%s,%s,%s\n' "${OCSERV_APPLICATION_SUBNET:-}" "${OCSERV_APPLICATION_IP_RANGE:-}" "${OCSERV_GATEWAY_APPLICATION_IP:-}" >>"${log}"
 exit "${MOCK_INSTALL_EXIT:-0}"
 EOF
 chmod 0755 -- "${origin_work}/deploy/production/install.sh"
@@ -213,6 +214,9 @@ write_install_env() {
   cat >"${config}/install.env" <<EOF
 OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem
 OCSERV_PUBLIC_HOST=controller-bootstrap.example.test
+OCSERV_APPLICATION_SUBNET=198.18.80.0/24
+OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
+OCSERV_GATEWAY_APPLICATION_IP=198.18.80.2
 EOF
 }
 : >"${fixture}/controller-release-signing.pub.pem"
@@ -428,6 +432,7 @@ assert_log_contains "${install_log}" "pwd:${config}"
 assert_log_contains "${install_log}" "args:--root-lifecycle"
 assert_log_contains "${install_log}" "env-resolved-marker:<unset>"
 assert_log_contains "${install_log}" "trust-key:${fixture}/controller-release-signing.pub.pem"
+assert_log_contains "${install_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
 echo "a fresh clone hands off to the installer with the root lifecycle"
 
 # 9a. negative control for the configuration handoff: with no install.env
@@ -453,7 +458,7 @@ assert_status 0 "the rerun must succeed"
 assert_output "reusing verified clean v0.1.2 checkout"
 [[ "$(git_calls clone)" == 1 ]] ||
   die "the rerun must not clone again"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 10 ]] ||
+[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 12 ]] ||
   die "the installer must have been handed off to exactly twice"
 echo "an existing clean checkout is reused without recloning"
 
@@ -468,7 +473,7 @@ assert_status 1 "a dirty checkout must fail closed"
 assert_output "dirty"
 [[ "$(git_calls clone)" == 1 ]] ||
   die "a dirty checkout must not trigger a reclone"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 5 ]] ||
+[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 6 ]] ||
   die "a dirty checkout must not hand off to the installer"
 [[ -d "${target}" ]] ||
   die "a dirty pre-existing checkout must never be deleted"

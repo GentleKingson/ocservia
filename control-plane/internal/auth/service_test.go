@@ -82,3 +82,14 @@ func TestNewRejectsNonHTTPSRedirectAndWeakSessionKey(t *testing.T) {
 		t.Fatal("unsafe OIDC configuration accepted")
 	}
 }
+
+func TestValidBreakGlassTokenIsOnlyCredentialAdmission(t *testing.T) {
+	service := &Service{breakGlassEnabled: true, breakGlassTokenHash: TokenHash("correct")}
+	if !service.ValidBreakGlassToken("correct") || service.ValidBreakGlassToken("wrong") {
+		t.Fatal("incorrect emergency credential admission")
+	}
+	service.breakGlassEnabled = false
+	if service.ValidBreakGlassToken("correct") {
+		t.Fatal("disabled emergency credential accepted")
+	}
+}
