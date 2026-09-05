@@ -24,6 +24,26 @@ command -v openssl >/dev/null || {
 
 fixture="$(mktemp -d)"
 trap 'rm -rf "${fixture}"' EXIT
+mkdir -p "${fixture}/strict-wire"
+cp "${ROOT}/testdata/command-strict-wire.json" "${fixture}/strict-wire/command.json"
+if gitleaks dir --no-banner --redact --no-color "${fixture}/strict-wire" >/dev/null 2>&1; then
+  echo "the strict-wire fixture no longer reproduces the generic-api-key finding" >&2
+  exit 1
+fi
+gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}/strict-wire" >/dev/null 2>&1 || {
+  echo "the pinned configuration must exempt the fixed synthetic protobuf vector" >&2
+  exit 1
+}
+# A different value under the same field in the same file must remain visible.
+hex_half_a="0f1e2d3c4b5a6978"
+hex_half_b="8796a5b4c3d2e1f0"
+printf '{"password_rotate":"%s%s"}\n' "${hex_half_a}" "${hex_half_b}" \
+  >>"${fixture}/strict-wire/command.json"
+if gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}/strict-wire" >/dev/null 2>&1; then
+  echo "the pinned configuration must still detect other password_rotate values" >&2
+  exit 1
+fi
+rm -rf "${fixture}/strict-wire"
 mkdir -p "${fixture}/outbox/relay-pre-fault"
 run_id="32613255503"
 attempt="1"
