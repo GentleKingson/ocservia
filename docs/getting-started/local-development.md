@@ -1,8 +1,6 @@
 # Try ocservia locally
 
-Use the development stack to explore the Web console without a real Iroh
-transport, a real ocserv server, or privileged node operations. It uses a
-bounded Agent simulator and a Rust transport stub.
+Use the local stack to explore the Web console without connecting to a real VPN server. It starts the Controller, Web console, database, and simulated nodes on your machine.
 
 ## Requirements
 
@@ -18,8 +16,7 @@ cd ocservia
 docker compose -f deploy/compose/compose.yaml up --build -d
 ```
 
-Open `http://127.0.0.1:4173` in a browser. The control plane exposes
-`/livez`, `/readyz`, and `/version` on `http://127.0.0.1:8080`.
+Open `http://127.0.0.1:4173` in a browser. The Controller exposes `/livez`, `/readyz`, and `/version` on `http://127.0.0.1:8080`.
 
 ## Stop the stack
 
@@ -29,5 +26,4 @@ For a disposable local stack, including its database volume:
 docker compose -f deploy/compose/compose.yaml down --volumes
 ```
 
-For simulator behavior, logs, persistent data, and browser E2E, see
-[Control-plane development](../development/control-plane.md).
+For logs, simulator behavior, persistent data, and browser tests, see [Control-plane development](../development/control-plane.md).

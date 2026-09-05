@@ -1,33 +1,26 @@
 # Install a managed node
 
-A managed node runs the unprivileged ocservia Agent beside `privd`, a small
-root service for fixed typed ocserv operations. Install a published package;
-do not build a package on the node.
+A managed node is an existing ocserv server with the ocservia node services installed beside it. The node still runs ocserv for VPN traffic. ocservia adds controlled management, health reporting, enrollment, and lifecycle operations from the Controller.
 
-## Before you begin
+This guide covers the normal package-first installation path. Detailed package verification, manual archive installation, rollback, and uninstall behavior remain in the [Agent package lifecycle reference](../operations/agent-lifecycle.md).
 
-- The Controller is deployed and its EndpointID is available.
-- The node is a Linux host with systemd and root access.
-- The host is one of the supported managed-node platforms: `x86_64` or
-  `aarch64` on Ubuntu 22.04/24.04/26.04 or Debian 12/13 (native `.deb`), or
-  Rocky Linux 9 (native `.rpm`). The one-command bootstrap and the native
-  package verification require OpenSSL 3, so Ubuntu 20.04 and Debian 11
-  (OpenSSL 1.1.1) are not supported managed-node platforms. Other platforms
-  fail closed.
-- You have an independently trusted release public key and its expected
-  fingerprint.
-- You can create a one-time token and approve the node. Follow [Enroll a
-  node](../how-to/enroll-node.md) after preparing the sealing keys below.
-- For a production node using dedicated relays, use the one-command bootstrap
-  below, the signed Agent archive installation path below, or the native
-  package with the production request marker below. Do not install production
-  systemd files from an arbitrary source checkout.
+## Requirements
 
-## 1. Prepare configuration and bootstrap
+- The Controller is deployed and reachable through the production relays.
+- The Controller EndpointID is available.
+- The node is a Linux host with systemd, root access, and ocserv installed or ready to be managed.
+- Supported managed-node platforms are:
+  - Ubuntu 22.04/24.04/26.04 or Debian 12/13 on `x86_64` or `aarch64` using native `.deb` packages.
+  - Rocky Linux 9 on `x86_64` or `aarch64` using native `.rpm` packages.
+- The release-signing public key and expected SHA-256 fingerprint are provisioned through a protected channel.
+- Relay access token and Controller command verification key files are available on the node through protected paths.
+- A bootstrap token is available if you want the installer to enroll the node in the same run.
 
-Until an operator has deployed and verified the static Stage-0 endpoint, use a
-clean checkout of the exact release. Keep node configuration in a separate
-directory:
+Ubuntu 20.04 and Debian 11 are not supported for managed nodes because the native package verification path requires OpenSSL 3.
+
+## 1. Prepare the node configuration
+
+Use an exact release tag and keep node configuration outside the release checkout:
 
 ```bash
 git clone --branch vX.Y.Z --single-branch --depth 1 \
@@ -35,329 +28,85 @@ git clone --branch vX.Y.Z --single-branch --depth 1 \
 mkdir ocservia-node-install && cd ocservia-node-install
 cp ../ocservia-vX.Y.Z/install.env.example install.env
 editor install.env
+```
 
+Edit only the managed-node section in `install.env`. Delete or leave commented the Controller section.
+
+Configure at least:
+
+| Setting | Purpose |
+| --- | --- |
+| `CONTROLLER_ENDPOINT_ID` | Binds this node to the expected Controller identity. |
+| `RELAY_URL_A`, `RELAY_URL_B` | Production relay URLs. |
+| `RELAY_ACCESS_TOKEN_SOURCE` | Protected source file for the relay token. |
+| `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE` | Protected source file for the Controller command verification key. |
+| `TRUSTED_RELEASE_KEY` | Trusted release-signing public key. |
+| `EXPECTED_RELEASE_KEY_SHA256` | Expected fingerprint of the trusted release key. |
+| `BOOTSTRAP_TOKEN_SOURCE` | Optional protected source file for one-run enrollment. |
+
+The installer reads `./install.env` from the current directory. Shell variables override values from the file.
+
+## 2. Run the installer
+
+Run the managed-node installer from the exact release checkout:
+
+```bash
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh
 ```
 
-Delete the Controller section from `install.env`. Configure at least
-`CONTROLLER_ENDPOINT_ID`, `RELAY_URL_A`, `RELAY_URL_B`,
-`RELAY_ACCESS_TOKEN_SOURCE`, and
-`CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE`, together with the independently
-provisioned release key and fingerprint. Set `BOOTSTRAP_TOKEN_SOURCE` when the
-same run should enroll through `PENDING_APPROVAL`.
-
-The checkout supplies only the bootstrap program; the installed node runs the
-native package and has no runtime dependency on Git or that checkout. The
-installer detects the platform, downloads the exact release's `SHA256SUMS`, its
-signature, and matching native package (`.deb` on the Debian family, `.rpm` on
-Rocky Linux 9), and verifies the out-of-band release trust before any package
-manager runs as root.
-It then prepares the production node state (sealing keys, relay URLs, relay
-access token, command verification key, persistent identity). With a protected
-bootstrap token source it enrolls in the same run and stops at
-`PENDING_APPROVAL`; without one it preserves the advanced manual flow and stops
-at `ENROLLMENT_READY`. It never approves the node or enables or starts a
-service.
-
-The managed-node flow is:
-
-```text
-Stage-0 -> exact vX.Y.Z Stage-1 -> signed checksum -> .deb/.rpm
-        -> identity/sealing -> Bootstrap Enrollment -> PENDING_APPROVAL
-        -> independent approval -> service activation
-```
-
-The thin Stage-0 path requires no checkout, but it becomes an alternative only
-after an operator deploys its static endpoint and verifies the served bytes.
-Do not use a bare `curl | bash` pipeline. The fail-closed form downloads
-Stage-0, checks the transfer and final completeness marker, and then executes
-it with `--version vX.Y.Z`; the hardened form also supplies the out-of-band key
-and fingerprint. See [Stage-0 bootstrap hosting](../operations/bootstrap-hosting.md).
-
-The package-first `--version` mode is available starting with the first
-release that ships this Stage-1 bootstrap. Older releases that already
-ship `deploy/managed-node/install.sh` (starting with v0.4.0) do not accept
-`--version` — it fails as a usage error there; install those through the
-checkout-based compatibility path below. Earlier releases do not ship the
-managed-node installer at all — follow that release's historical
-installation instructions.
-
-Instead of exporting every variable, you can keep the node configuration in
-`./install.env` in the directory you run the installer from: copy
-`install.env.example` from the repository, delete the Controller section,
-and uncomment and edit the managed-node entries. The installer embeds a
-strict, non-executing loader (the same contract as
-`deploy/lib/install-env.sh`): it only accepts the documented allowlisted
-keys as literal `KEY=VALUE` lines, and it fails closed on unknown keys,
-malformed lines, or unsafe file metadata (symlinks, group/world-writable
-permissions). Variables exported in the shell always win over the file.
-
-The installer runs from a clean checkout of an exact release tag without
-`--version`, deriving the release identity from the Git tag; the separate
-configuration directory keeps `install.env` outside that checkout.
-
-`TRUSTED_RELEASE_KEY` defaults to `/etc/ocservia/release-signing.pub.pem` and
-`EXPECTED_RELEASE_KEY_SHA256` is otherwise read from
-`/etc/ocservia/trusted-release-key.sha256`; provision both out of band, exactly
-like the durable upgrader trust anchors. The two source files must be
-protected provisioned copies of the relay access token and the Controller
-command verification public key. Optional inputs:
-`USER_PASSWORD_SEAL_KEY_ID` (default `user-password-v1`),
-`P12_PASSWORD_SEAL_KEY_ID` (default `p12-password-v1`),
-`ENROLLMENT_ENVIRONMENT` (default `production`), and the protected optional
-`BOOTSTRAP_TOKEN_SOURCE` path.
-
-With `BOOTSTRAP_TOKEN_SOURCE`, the first successful run prints
-`PENDING_APPROVAL`, atomically writes the final Agent configuration, and
-deletes both the staged token and its protected plaintext source. A failed
-enrollment leaves the source available for a convergent rerun and does not
-write final `agent.env`.
-
-Without `BOOTSTRAP_TOKEN_SOURCE`, the first successful run prints
-`ENROLLMENT_READY` and the node's EndpointID.
-Create a short-lived one-time token with
-`expected_endpoint_id=<printed EndpointID>` as described in [Enroll a
-node](../how-to/enroll-node.md), install it as
-`/etc/ocservia-agent/enrollment-token` (`root:ocserv-agent`, mode `0640`), and
-rerun the same command. The rerun skips the completed steps, runs the
-enrollment with the prepared identity and sealing descriptors, writes the
-final `/etc/ocservia-agent/agent.env` atomically, consumes the one-time token
-file, and prints `PENDING_APPROVAL` with the new `NODE_ID`. Repeated runs
-converge on the same state: existing identity, sealing keys, relay token, and
-trust material are preserved, an installed package is never reinstalled or
-downgraded, and an already-enrolled node is never enrolled again. When the
-native package of this exact release is already installed under the
-production relay contract, the rerun also skips the release download and the
-out-of-band trust verification — they protect the package-manager invocation,
-which no longer happens. After the approval and the enable step below, a
-rerun observes both services enabled and active and prints `SERVICES_ACTIVE`
-without changing anything; it cannot observe Controller-side approval, so
-confirm the node reports online in the Controller inventory.
-
-Run the installer as the operator launcher user; it elevates through scoped
-per-command `sudo` only. A deliberate whole-lifecycle-as-root run is available
-with `deploy/managed-node/install.sh --root-lifecycle`.
-
-After `PENDING_APPROVAL`, continue with [Approve the
-node](../how-to/enroll-node.md#approve-the-node); `/etc/ocservia-agent/agent.env`,
-the sealing keys, and the relay configuration are already complete at that
-point. Enable both services only after approval, as in step 8 below.
-
-## 2. Verify and choose the release package
-
-Download the signed Agent archive, its checksum sidecars, the native package
-you may install, `SHA256SUMS`, and `SHA256SUMS.sig` for one exact release from
-[GitHub Releases](https://github.com/GentleKingson/ocservia/releases).
-Provision the trusted public key through a separate channel. Do not use only
-the `release-signing.pub.pem` downloaded beside the package.
-
-Set the package variables for the release artifacts you will use:
+For a deliberate whole-lifecycle-as-root run, add `--root-lifecycle`:
 
 ```bash
-export VERSION="replace-with-release-version"
-export RELEASE_DIR="/protected/ocservia-agent-${VERSION}"
-export AGENT_ARCHIVE="ocservia-agent-${VERSION}-linux-amd64.tar.gz"
-export AGENT_PACKAGE="ocservia-agent_${VERSION}_amd64.deb"
-export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
-export EXPECTED_RELEASE_KEY_SHA256="replace-with-64-lowercase-hex-fingerprint"
+../ocservia-vX.Y.Z/deploy/managed-node/install.sh --root-lifecycle
 ```
 
-Set `AGENT_ARCHIVE` and `AGENT_PACKAGE` to the exact artifacts for the host:
-use `linux-arm64.tar.gz` and `ocservia-agent_${VERSION}_arm64.deb` on Debian or
-Ubuntu ARM, or `linux-amd64.tar.gz` / `linux-arm64.tar.gz` and
-`ocservia-agent-${VERSION}-1.x86_64.rpm` /
-`ocservia-agent-${VERSION}-1.aarch64.rpm` on RPM-based hosts. Verify the
-trusted key, the signed release manifest, and both selected artifacts before
-invoking any package manager as root:
+The installer detects the platform, downloads the matching `.deb` or `.rpm`, verifies the release trust, installs the package, prepares node state, writes relay configuration, and prepares the persistent node identity.
 
-```bash
-test "$(openssl pkey -pubin -in "$TRUSTED_RELEASE_KEY" -outform DER \
-  | sha256sum | awk '{print $1}')" = "$EXPECTED_RELEASE_KEY_SHA256"
-(
-  cd "$RELEASE_DIR"
-  openssl pkeyutl -verify -rawin -pubin \
-    -inkey "$TRUSTED_RELEASE_KEY" \
-    -in SHA256SUMS -sigfile SHA256SUMS.sig
-  grep -F "  ${AGENT_ARCHIVE}" SHA256SUMS | sha256sum -c --strict -
-  grep -F "  ${AGENT_PACKAGE}" SHA256SUMS | sha256sum -c --strict -
-)
-```
+It does not approve the node and does not enable or start services.
 
-The package's post-install verification is defense in depth. It must not be
-the first trust decision for an unverified native package.
+## 3. Finish enrollment
 
-## 3. Install the production Agent from the signed archive
+The next step depends on whether `BOOTSTRAP_TOKEN_SOURCE` was configured.
 
-For production, use the signed archive path described in the [Agent lifecycle
-reference](../operations/agent-lifecycle.md). Run the verifier from a
-separately trusted release-tooling checkout; it is only a verifier source, not
-the source of any production systemd file. The install script must run from
-the root-owned staging directory printed by that verifier:
+| Installer result | What to do next |
+| --- | --- |
+| `PENDING_APPROVAL` | The node enrolled successfully and is waiting for Controller approval. Continue to approval. |
+| `ENROLLMENT_READY` | Create an endpoint-bound bootstrap token for the printed EndpointID, place it at `/etc/ocservia-agent/enrollment-token` as `root:ocserv-agent` with mode `0640`, and rerun the same installer. |
 
-```bash
-export RELEASE_TOOLING=/path/to/trusted/ocservia
-VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256="$EXPECTED_RELEASE_KEY_SHA256" \
-  "$RELEASE_TOOLING/scripts/verify-agent-package.sh" \
-  "$RELEASE_DIR/$AGENT_ARCHIVE" \
-  "$RELEASE_DIR/$AGENT_ARCHIVE.sha256" \
-  "$RELEASE_DIR/$AGENT_ARCHIVE.sha256.sig" \
-  "$TRUSTED_RELEASE_KEY")"
-sudo INSTALL_PRODUCTION_RELAYS=true \
-  "$VERIFIED_PACKAGE/scripts/install-agent.sh"
-```
+Use [Enroll a node](../how-to/enroll-node.md) for the Controller-side token and approval steps.
 
-This installs the production relay drop-in and `relays.env.example` from the
-verified archive. Do not copy `deploy/production/systemd` files from a source
-checkout directly into `/usr/lib/systemd/system`.
+## 4. Approve and start services
 
-If a native package is required instead, install only the exact package whose
-external release signature and checksum were verified in step 1.
-
-For a production node, first create the one-shot production request. Do this
-before invoking the package manager — `postinst` reads it while configuring
-the package, and the verified embedded payload then installs the production
-relay drop-in and `relays.env`:
-
-```bash
-sudo install -d -o root -g root -m 0755 /etc/ocservia
-sudo touch /etc/ocservia/agent-install-production-relays
-```
-
-Then install the package. On Debian or Ubuntu:
-
-```bash
-sudo dpkg -i "$RELEASE_DIR/$AGENT_PACKAGE"
-```
-
-On an RPM-based system:
-
-```bash
-sudo rpm -ivh "$RELEASE_DIR/$AGENT_PACKAGE"
-```
-
-The package installs the Agent, `privd`, the durable upgrader, and their
-systemd units — with the production relay drop-in and `relays.env` when the
-request marker was present, without them on a non-production node. It does
-not enable or start either service. The successful install consumes the
-request marker, the installed relay drop-in keeps later package upgrades on
-the production relay contract, and removing the package also retires any
-unconsumed request. Do not copy `deploy/production/systemd` files from a
-source checkout into `/usr/lib/systemd/system` under either path.
-
-## 4. Prepare sealing keys
-
-Prepare two distinct RSA private keys before enrollment. If they were already
-provisioned through a protected channel, do not regenerate them:
-
-```bash
-sudo openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out /etc/ocservia-agent/user-password-seal-private.pem
-sudo openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out /etc/ocservia-agent/p12-password-seal-private.pem
-sudo chmod 0600 \
-  /etc/ocservia-agent/user-password-seal-private.pem \
-  /etc/ocservia-agent/p12-password-seal-private.pem
-
-export CONTROLLER_ENDPOINT_ID="replace-with-64-lowercase-hex-controller-endpoint-id"
-export USER_PASSWORD_SEAL_KEY_ID=user-password-v1
-export P12_PASSWORD_SEAL_KEY_ID=p12-password-v1
-export USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256="$(sudo openssl rsa \
-  -in /etc/ocservia-agent/user-password-seal-private.pem \
-  -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
-export P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256="$(sudo openssl rsa \
-  -in /etc/ocservia-agent/p12-password-seal-private.pem \
-  -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
-```
-
-The four sealing-key descriptor values are enrollment inputs. Enrollment
-returns the new `NODE_ID`; it does not invent or return these descriptors.
-Keep these variables available for the relay and enrollment steps below.
-
-## 5. Configure dedicated relays before enrollment
-
-Set both dedicated HTTPS relay URLs in `/etc/ocservia-agent/relays.env`, which
-was installed by the signed archive path or the production native package
-install, and install the protected relay token as
-`/etc/ocservia-agent/relay-access-token` with owner
-`root:ocserv-agent` and mode `0640`:
-
-```bash
-export RELAY_URL_A="https://relay-a.example.com"
-export RELAY_URL_B="https://relay-b.example.com"
-
-sudoedit /etc/ocservia-agent/relays.env
-sudo install -o root -g ocserv-agent -m 0640 \
-  /protected/relay-access-token /etc/ocservia-agent/relay-access-token
-sudo systemctl daemon-reload
-```
-
-Use the exact ownership and certificate requirements in [Dedicated relays](../how-to/dedicated-relays.md).
-Keep `RELAY_URL_A` and `RELAY_URL_B` exported: the one-time enrollment CLI
-must receive the same custom relay configuration explicitly.
-
-## 6. Enroll the node
-
-Use [Enroll a node](../how-to/enroll-node.md), passing the same sealing
-descriptors and dedicated relay values. The one-time enrollment command must
-use custom relay mode; configuring a later systemd drop-in cannot change that
-already-completed CLI operation. Return here after enrollment prints the new
-`NODE_ID`.
-
-## 7. Configure the Agent after enrollment
-
-After enrollment prints the pending UUIDv7 node ID, write that value, the
-node's prepared EndpointID, and the same descriptor values to
-`/etc/ocservia-agent/agent.env`:
-
-```text
-CONTROLLER_ENDPOINT_ID=<64-lowercase-hex-controller-endpoint-id>
-NODE_ID=<node-uuidv7-returned-by-enrollment>
-AGENT_ENDPOINT_ID=<64-lowercase-hex-endpoint-id-printed-when-the-identity-was-prepared>
-CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=/etc/ocservia-agent/controller-command-verification-key.pem
-USER_PASSWORD_SEAL_KEY_ID=<same-user-key-id-used-during-enrollment>
-USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=<same-user-key-hash-used-during-enrollment>
-P12_PASSWORD_SEAL_KEY_ID=<same-p12-key-id-used-during-enrollment>
-P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=<same-p12-key-hash-used-during-enrollment>
-```
-
-`AGENT_ENDPOINT_ID` records the EndpointID the one-time enrollment token
-bound. Rerunning `deploy/managed-node/install.sh` compares the loaded
-identity against this binding and fails closed if the endpoint key no longer
-derives it.
-
-Provision the Controller command verification key as a root-owned key readable
-by the `ocserv-agent` group. Keep both sealing private keys root-owned mode
-`0600`; their exact paths are provided by the installed `privd.env`. The two
-sealing keys must remain distinct. Exact ownership, link, and ancestry rules
-are in [Agent lifecycle reference](../operations/agent-lifecycle.md).
-
-## 8. Approve and start the node
-
-Return to [Approve the node](../how-to/enroll-node.md#approve-the-node) and
-submit the approval only after `agent.env`, the sealing keys, and the
-production relay path are configured. Then enable both units — this is the
-deliberate activation step, and it stays outside the bootstrap:
+After the node reaches `PENDING_APPROVAL`, approve it in the Controller. Then start the node services deliberately:
 
 ```bash
 sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
 systemctl status ocservia-privd.service ocservia-agent.service
 ```
 
-Confirm both units are active and the node appears online with a fresh
-observation in the Controller inventory. Rerunning
-`deploy/managed-node/install.sh` at this point is a read-only convergence
-check: it prints `SERVICES_ACTIVE` and changes nothing. If enrollment or
-startup fails, do not replace the identity directory or generate a new
-Controller trust key just to retry; see
-[Troubleshooting](../how-to/troubleshooting.md).
+Confirm that both services are active and that the node appears online in the Controller inventory with fresh health data.
+
+## 5. Verify reruns
+
+After approval and service activation, rerun the same installer as a read-only convergence check:
+
+```bash
+../ocservia-vX.Y.Z/deploy/managed-node/install.sh
+```
+
+A healthy already-active node should report `SERVICES_ACTIVE` without reinstalling the package, replacing identity files, approving the node, or starting services again.
 
 ## Lifecycle after installation
 
-Stage-0 is not a package updater or service manager. Upgrade with the next
-signed native package or the existing Controller-driven signed upgrader
-contract; do not rerun a latest convenience script. Rollback uses the matched
-package snapshot through `ocservia-agent-rollback`. Uninstall through `dpkg` or
-`rpm`, whose package scriptlets invoke the verified Agent uninstall lifecycle
-and preserve identity, state, and configuration by default. See [Agent package
-lifecycle](../operations/agent-lifecycle.md), [Upgrade the Agent](../how-to/agent-upgrade.md),
-and [Roll back the Agent](../how-to/agent-rollback.md).
+- Upgrade with the next signed native package or the Controller-driven Agent upgrade workflow.
+- Roll back with the matched package snapshot through `ocservia-agent-rollback`.
+- Uninstall through `dpkg` or `rpm`; package scripts preserve identity, state, and configuration by default.
+- Do not rerun a `latest` convenience installer as an implicit upgrade.
+
+## Next steps
+
+- [Enroll a node](../how-to/enroll-node.md)
+- [Dedicated relays](../how-to/dedicated-relays.md)
+- [Upgrade the Agent](../how-to/agent-upgrade.md)
+- [Roll back the Agent](../how-to/agent-rollback.md)
+- [Agent package lifecycle reference](../operations/agent-lifecycle.md)
