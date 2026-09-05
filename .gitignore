@@ -11,6 +11,7 @@
 .env.*
 !.env.example
 /install.env
+/.ocservia-control/keys/
 
 # Build and test output
 coverage/
