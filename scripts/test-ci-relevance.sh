@@ -24,6 +24,11 @@ paths=(
   scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh
   tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml
   rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs
+  deploy/real-e2e/controller.compose.yaml
+  scripts/real-e2e-controller.sh scripts/real-e2e-node.sh scripts/real-e2e-artifact.sh
+  scripts/test-real-e2e-artifact.sh scripts/p1-resilience-capacity.sh
+  scripts/test-p1-resilience-capacity.sh
+  scripts/security-acceptance-f1.sh scripts/security-acceptance-f2.sh scripts/security-acceptance-f3.sh
 )
 for path in "${paths[@]}"; do
   mkdir -p "${fixture}/$(dirname "${path}")"
@@ -94,6 +99,16 @@ for path in .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core
   tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml \
   rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs; do
   out="$(case_commit "g6_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_docs
+done
+
+# Script-level manual acceptance changes select only basic documentation checks.
+for path in deploy/real-e2e/controller.compose.yaml \
+  scripts/real-e2e-controller.sh scripts/real-e2e-node.sh scripts/real-e2e-artifact.sh \
+  scripts/test-real-e2e-artifact.sh scripts/p1-resilience-capacity.sh \
+  scripts/test-p1-resilience-capacity.sh \
+  scripts/security-acceptance-f1.sh scripts/security-acceptance-f2.sh scripts/security-acceptance-f3.sh; do
+  out="$(case_commit "manual_$(basename "${path}")" "${path}")"
   expect_only "${out}" run_docs
 done
 
