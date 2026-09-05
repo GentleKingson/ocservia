@@ -395,6 +395,41 @@ export OCSERV_RELAY_URL_B=https://relay-b.example.com
 
 The control plane runs `--role=all`. Terminate public TLS at the gateway. Configure the OIDC redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback` and use an HTTPS certificate signer.
 
+### Authentication request budgets
+
+Login and callback each allow 30 requests per source per minute, 120 total
+requests per minute, and 8 in-flight requests per API process. Their budgets
+are independent, so starting logins cannot consume callback capacity. Excess
+requests receive `429` with `Retry-After`; no account is persistently locked.
+Each source table holds at most 4096 addresses and retains live windows rather
+than evicting them to give an attacker fresh capacity. These are fixed one-minute
+windows, not rolling quotas. Multiple API replicas multiply the limits; keep
+edge protection for distributed floods.
+
+Set `OCSERV_AUTH_TRUSTED_PROXY_CIDRS` in the Controller environment (or
+`install.env`) to a comma-separated list of the gateway's backend source IPs
+as `/32` or `/128` CIDRs, or an explicitly isolated proxy-only subnet. The
+shipped Caddy overwrites `X-Ocservia-Client-IP` with its direct peer address.
+The API accepts this single IP only from configured trusted peers; it ignores
+client-supplied `X-Forwarded-For`. Do not trust the entire shared application
+network or publish the Controller's port. Keep gateway addresses stable or
+update this setting and restart the Controller when they change.
+
+The default trusts no proxy. Requests then share the directly connected peer's
+budget, including all users behind an unconfigured gateway. Configure and verify
+the actual gateway addresses before public use. If another proxy is placed in
+front of Caddy, its clients share that proxy's budget; enforce client-level
+limits there rather than trusting arbitrary forwarded addresses.
+
+Break-glass has its own 4-request in-flight budget and permits 5 invalid token
+attempts per source per minute. A matching enabled emergency credential bypasses
+the failed-request rate/table limits, but never bypasses origin validation,
+rotation enforcement, auditing, or session creation checks. OIDC outages or
+exhausted OIDC budgets therefore do not consume emergency capacity. Keep the
+offline credential available and alert on authentication `429` responses through
+the existing HTTP telemetry. Rate limiting does not replace an external DDoS
+control or make a stolen emergency credential safe.
+
 The reference Controller enables bounded shared SSE fan-out with 128 global,
 8 identity, 4 session, 32 workspace, 16 resource, and 64 watcher limits. These
 defaults reserve PostgreSQL and HTTP capacity for unrelated API work in the P1
