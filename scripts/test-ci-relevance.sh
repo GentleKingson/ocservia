@@ -22,6 +22,7 @@ paths=(
   .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml
   .github/workflows/g6-harness-smoke.yml .github/actions/g6-install-release/action.yml
   scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh
+  scripts/g6-buildx-cache.sh scripts/g6-timing.sh .github/actions/g6-cache-credentials/action.yml
   tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml
   rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs
   deploy/real-e2e/controller.compose.yaml
@@ -96,6 +97,7 @@ done
 for path in .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml \
   .github/workflows/g6-harness-smoke.yml .github/actions/g6-install-release/action.yml \
   scripts/g6-readiness-fd-a.sh scripts/test-g6-workflow-contract.sh \
+  scripts/g6-buildx-cache.sh scripts/g6-timing.sh .github/actions/g6-cache-credentials/action.yml \
   tools/g6-harness/internal/runtime/orchestrator.go deploy/g6-readiness/compose.yaml \
   rust/g6-runtime.Dockerfile rust/crates/g6-probe/src/main.rs; do
   out="$(case_commit "g6_$(basename "${path}")" "${path}")"
