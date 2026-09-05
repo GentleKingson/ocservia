@@ -108,7 +108,7 @@ GitHub Actions remains the authoritative merge-time environment. Changes must pr
 
 ## Status
 
-ocservia is pre-1.0: minor release lines may introduce compatibility changes, and no production SLA or capacity guarantee is provided. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets. The P1 harness exercises up to 500 side-effect-free simulated Agents on a single GitHub-hosted runner — initial engineering evidence, not a production capacity claim. Multi-host, long-duration, and deployment-specific validation remain the operator's responsibility.
+ocservia is pre-1.0: minor release lines may introduce compatibility changes, and no production SLA or capacity guarantee is provided. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets. The P1 harness is manual, single-host validation with up to 500 side-effect-free simulated Agents, outside Basic CI — initial engineering evidence, not a production capacity claim. Multi-host, long-duration, and deployment-specific validation remain the operator's responsibility.
 
 ## Security
 

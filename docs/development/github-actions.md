@@ -9,6 +9,15 @@ and no production secrets. A new commit cancels an older run of the same PR.
 Main pushes and manual dispatches have run-specific concurrency groups and
 do not cancel earlier runs.
 
+## Retained workflows
+
+| File | Workflow | Trigger |
+| --- | --- | --- |
+| `ci.yml` | Basic CI | PRs, pushes to `main`, manual dispatch |
+| `g6-readiness.yml` | G6 Formal Readiness | Manual dispatch only |
+| `g6-harness-core.yml` | G6 Readiness Core (Reusable) | Reusable workflow called by formal G6 |
+| `release.yml` | Agent Release Packages | Version tag pushes and manual dry runs |
+
 ## Basic checks
 
 One small routing job selects up to five independent checks. There is no
@@ -32,7 +41,9 @@ against `scripts/checksums.txt`. The Go profile installs only Go and verifies
 host jq. The Rust profile installs only Rust, rustfmt, and clippy. Web
 bootstrap installs pinned Node/npm and dependencies, with
 `npm_config_audit=false` and `npm_config_fund=false` for the entire job,
-including npm installation. Ordinary CI does not run security audits.
+including npm installation. Ordinary CI does not run `go-race`, `npm audit`,
+`cargo audit`, `cargo deny`, or `govulncheck`, nor repository secret scans,
+license scans, native ocserv integration, P1 smoke, browser E2E, or G6 smoke.
 
 The database job sets `PG_MAJOR=17` and lets the integration script build
 `ocserv-control` itself. PostgreSQL 18 and its legacy upgrade fixture are
@@ -73,16 +84,16 @@ only when routing succeeds, every selected job succeeds, and every unselected
 job is skipped. Failed, cancelled, unexpectedly skipped, or missing results
 fail this one summary. No legacy result aggregators remain.
 
-Before merging this change, a repository administrator must replace the old
-required contexts in the main ruleset with `Basic CI Result` after it has
-succeeded on the candidate PR:
+The former required contexts below are historical names, not current jobs.
+The replacement summary check is `Basic CI Result`:
 
 - `Backend Integration`
 - `Web & Smoke`
 - `Quality, Security & Native`
 - `G6 Harness Smoke Core / G6 Harness Smoke Result`
 
-Changing workflow YAML does not migrate GitHub rulesets. Leaving those old
+Changing workflow YAML does not migrate GitHub rulesets; administrators must
+check the ruleset separately. Leaving those old
 contexts required will block merging. The workflow does not bypass or modify
 branch protection.
 
