@@ -1,14 +1,14 @@
 # Acceptance contracts
 
-This directory contains public acceptance contracts and closeout maps. It does
+This directory contains public acceptance contracts for the G6 harness. It does
 not contain credentials, private topology details, or run-specific acceptance
 evidence.
 
-- [Bootstrap installation closeout](bootstrap-install-closeout.md) maps the
-  thin installer, versioned bootstrap, guarded lifecycle, native package, and
-  supply-chain acceptance requirements to their automated evidence.
-- The remaining machine-readable files are consumed by the G6
-  production-readiness harness.
+The machine-readable files are consumed by the G6 production-readiness
+harness. For installation and lifecycle procedures, use the
+[deployment guide](../getting-started/production.md) and
+[managed-node guide](../getting-started/managed-node.md). For validation
+entrypoints, see [GitHub Actions](../development/github-actions.md).
 
 - `g6-slo.yaml` is the only machine-readable source for G6 thresholds,
   comparators, units, scopes, and required timeline events.
@@ -34,9 +34,6 @@ authority, plus the frozen release manifest digest; a mismatch fails closed.
 - `ocservia.g6-secret-scan-result.v1` records the independent redacted scan.
 - `ocservia.g6-gate-result.v1` aggregates all preceding layers without
   converting an engineering rehearsal into a final production-readiness pass.
-
-The historical [v0.2 release-readiness record](v0.2-release-readiness.md) is
-preserved as evidence and is not a current deployment guide.
 
 Each failure-domain runtime is driven by a frozen `ocservia-g6-harness`
 binary built once with the repository-pinned Go toolchain. Its typed phase

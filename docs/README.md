@@ -1,6 +1,6 @@
 # ocservia documentation
 
-Use these documents to install, operate, and understand ocservia without reading the internal implementation notes first. Detailed contracts remain available in the reference and development sections when needed.
+Use these documents to deploy, operate, and understand ocservia. Start with the installation guides, use the operational runbooks for maintenance, and consult the technical reference for implementation contracts.
 
 ## Start here
 
@@ -30,13 +30,28 @@ Use these documents to install, operate, and understand ocservia without reading
 - [Security policy](../SECURITY.md)
 - [Technical reference](reference/README.md)
 
-## Development and release evidence
+## Deployment reference
+
+- [Production configuration and Controller lifecycle](operations/production-deployment.md)
+- [Agent package lifecycle and fleet upgrades](operations/agent-lifecycle.md)
+- [Dedicated relay configuration](operations/dedicated-relays.md)
+- [Bootstrap endpoint hosting and trust](operations/bootstrap-hosting.md)
+
+## Development and validation
 
 - [Validate a change](development/testing.md)
 - [Control-plane development](development/control-plane.md)
 - [Contracts and toolchains](development/contracts.md)
 - [GitHub Actions validation](development/github-actions.md)
-- [Acceptance records](acceptance/README.md)
-- [Upstream records](upstream/v4.9-post1.md)
+- [Readiness harness contracts](acceptance/README.md)
 
-The acceptance and upstream records are retained as release evidence and are not intended as first-read operator documentation.
+## Documentation scope
+
+Keep deployment guides, architecture and security contracts, operational
+runbooks, and instructions needed to maintain or validate the project here.
+Historical release verdicts and one-off task closeout reports do not belong
+in the maintained documentation; use Git history for removed records.
+
+The machine-readable files in `acceptance/` are harness inputs, not disposable
+reports. The files in `upstream/` support attribution and backport validation
+and remain available through the technical reference.
