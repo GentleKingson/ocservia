@@ -21,8 +21,14 @@ runtime_control_image="ocservia-i18-control-runtime:${RUN_ID}"
 trust_volume="ocservia-i18-trust-${RUN_ID}"
 transport_volume="ocservia-i18-transport-${RUN_ID}"
 development_transport_volume="ocservia-i18-development-transport-${RUN_ID}"
+transition_project="ocservia-i18-otel-${RUN_ID}"
 cleanup() {
   local status=$?
+  if [[ -f "${work}/transition/deploy/production/compose.yaml" ]]; then
+    docker compose --env-file /dev/null -p "${transition_project}" \
+      -f "${work}/transition/deploy/production/compose.yaml" --profile observability \
+      down --volumes --remove-orphans >/dev/null 2>&1 || true
+  fi
   docker volume rm -f "${trust_volume}" "${transport_volume}" \
     "${development_transport_volume}" >/dev/null 2>&1 || true
   docker image rm -f "${runtime_transport_image}" "${runtime_control_image}" >/dev/null 2>&1 || true
@@ -103,6 +109,16 @@ COMPOSE_PROFILES=observability COMPOSE_PROJECT_NAME=unexpected \
   >"${ARTIFACT_DIR}/platform-compose.json"
 OCSERV_OTEL_BACKEND_ENDPOINT= "${ROOT}/deploy/production/compose.sh" config --format json \
   >"${ARTIFACT_DIR}/platform-compose-empty-otel.json"
+mkdir -p "${work}/env-fixture/deploy"
+cp -R "${ROOT}/deploy/production" "${work}/env-fixture/deploy/production"
+printf 'OCSERV_OTEL_BACKEND_ENDPOINT=injected.example.test:4317\nCOMPOSE_PROFILES=observability\n' \
+  >"${work}/env-fixture/deploy/production/.env"
+cp "${work}/env-fixture/deploy/production/.env" "${work}/env-fixture/.env"
+(
+  cd "${work}/env-fixture"
+  COMPOSE_DISABLE_ENV_FILE=0 COMPOSE_ENV_FILES="${PWD}/.env" COMPOSE_PROFILES=observability \
+    deploy/production/compose.sh config --format json
+) >"${ARTIFACT_DIR}/platform-compose-env-injection.json"
 export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
 if "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/otel-missing.log" 2>&1; then
   echo "production launcher accepted missing OTEL TLS files" >&2
@@ -158,6 +174,9 @@ relay = json.loads(pathlib.Path(sys.argv[2]).read_text())
 empty_otel = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-empty-otel.json").read_text())
 enabled_otel = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-otel.json").read_text())
 assert empty_otel == platform
+injected = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-env-injection.json").read_text())
+assert "otel-collector" not in injected["services"]
+assert injected["services"]["control-plane"]["environment"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
 assert set(enabled_otel["services"]) == set(platform["services"]) | {"otel-collector"}
 assert enabled_otel["services"]["otel-collector"]["profiles"] == ["observability"]
 assert enabled_otel["services"]["control-plane"]["environment"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel-collector:4317"
@@ -278,6 +297,60 @@ docker build --target runtime-base -t "${runtime_transport_image}" \
 docker build --target runtime-base -t "${runtime_control_image}" \
   -f "${ROOT}/control-plane/Dockerfile" "${ROOT}" \
   >"${ARTIFACT_DIR}/control-runtime-build.log"
+
+# Exercise the real launcher and Docker lifecycle in one isolated project.
+# Only the test service payloads and fixed project name differ from production.
+mkdir -p "${work}/transition/deploy/production"
+sed "s/-p ocservia-production /-p ${transition_project} /" \
+  "${ROOT}/deploy/production/compose.sh" >"${work}/transition/deploy/production/compose.sh"
+chmod 0755 "${work}/transition/deploy/production/compose.sh"
+cat >"${work}/transition/deploy/production/compose.yaml" <<EOF
+services:
+  transport-runtime-init:
+    image: ${runtime_control_image}
+    entrypoint: ["/bin/true"]
+  control-plane:
+    image: ${runtime_control_image}
+    entrypoint: ["/bin/sleep"]
+    command: ["300"]
+    depends_on:
+      transport-runtime-init:
+        condition: service_completed_successfully
+  transportd:
+    image: ${runtime_control_image}
+    entrypoint: ["/bin/sleep"]
+    command: ["300"]
+  otel-collector:
+    image: ${runtime_control_image}
+    profiles: [observability]
+    entrypoint: ["/bin/sleep"]
+    command: ["300"]
+EOF
+transition_launcher="${work}/transition/deploy/production/compose.sh"
+sudo chown 999:999 "${work}/backups"
+for activation in normal cross-schema; do
+  OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317 "${transition_launcher}" up -d --wait
+  collector_id="$(docker ps -q --filter "label=com.docker.compose.project=${transition_project}" \
+    --filter label=com.docker.compose.service=otel-collector)"
+  test -n "${collector_id}"
+  mkdir -p "${work}/saved-otel"
+  mv "${work}/secrets/otel-client.crt" "${work}/secrets/otel-client.key" "${work}/secrets/otel-ca.crt" "${work}/saved-otel/"
+  if [[ "${activation}" == normal ]]; then
+    OCSERV_OTEL_BACKEND_ENDPOINT= "${transition_launcher}" up -d --wait
+  else
+    OCSERV_OTEL_BACKEND_ENDPOINT= "${transition_launcher}" up -d --wait --no-deps control-plane transportd
+  fi
+  test -z "$(docker ps -aq --filter "label=com.docker.compose.project=${transition_project}" \
+    --filter label=com.docker.compose.service=otel-collector)"
+  mv "${work}/saved-otel/"* "${work}/secrets/"
+done
+OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317 "${transition_launcher}" up -d --wait
+mv "${work}/secrets/otel-client.crt" "${work}/secrets/otel-client.key" "${work}/secrets/otel-ca.crt" "${work}/saved-otel/"
+OCSERV_OTEL_BACKEND_ENDPOINT= "${transition_launcher}" down
+test -z "$(docker ps -aq --filter "label=com.docker.compose.project=${transition_project}")"
+mv "${work}/saved-otel/"* "${work}/secrets/"
+echo "OTEL same-project on/off activation and disabled down passed"
+
 docker volume create "${transport_volume}" >/dev/null
 docker run --rm --user 0:0 --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
   -v "${transport_volume}:/run/ocserv-platform" --entrypoint /bin/sh "${runtime_transport_image}" \

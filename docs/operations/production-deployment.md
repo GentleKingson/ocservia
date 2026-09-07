@@ -37,7 +37,10 @@ A nonempty endpoint automatically adds control plane -> Collector (OTLP 4317)
 Provision `otel-client.crt`, `otel-client.key`, and `otel-ca.crt` in
 `OCSERV_SECRET_DIR` with launcher ownership and mode `0444` before enabling it.
 Missing files or invalid permissions fail closed before startup. They are not
-required when OTEL is disabled. The launcher ignores inherited `COMPOSE_PROFILES`;
+required when OTEL is disabled. On activation, disabling OTEL stops and removes
+any existing Collector in the same project; `down` also includes the optional
+Collector. The launcher ignores inherited `COMPOSE_PROFILES`, `COMPOSE_ENV_FILES`,
+and automatic Compose `.env` files, using only the exported lifecycle configuration;
 use the endpoint setting, not a manually selected profile, to enable observability.
 The release manifest still pins all six images, including `otel` for later opt-in.
 
