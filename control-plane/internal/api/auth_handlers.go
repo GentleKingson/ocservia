@@ -72,6 +72,13 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrictJSON(w, r, &body) || strings.TrimSpace(body.Token) == "" {
 		return
 	}
+	// Failed requests cannot lock out the holder of the emergency credential.
+	// Valid credentials still share a separate, bounded in-flight budget.
+	release := s.admitAuthentication(w, r, s.breakGlassBudget, s.auth.ValidBreakGlassToken(body.Token))
+	if release == nil {
+		return
+	}
+	defer release()
 	cookie, _, err := s.auth.BreakGlass(r.Context(), body.Token, requestID(r))
 	if err != nil {
 		status := http.StatusUnauthorized

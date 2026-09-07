@@ -61,7 +61,7 @@ total_scans="$(grep -c 'gitleaks dir' "${WORKFLOW}" || true)"
 configured_scans="$(grep 'gitleaks dir' "${WORKFLOW}" | grep -cF -- '--config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml"' || true)"
 total_scans="${total_scans:-0}"
 configured_scans="${configured_scans:-0}"
-[[ "${total_scans}" -eq 6 && "${configured_scans}" -eq 6 ]] || {
+[[ "${total_scans}" -eq 3 && "${configured_scans}" -eq 3 ]] || {
   echo "every published-evidence G6 scan must load the pinned gitleaks configuration" >&2
   exit 1
 }

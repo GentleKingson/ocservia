@@ -167,6 +167,49 @@ identity and journal by default;
 `--purge-state` is irreversible and is appropriate only after revoking the node
 identity and preserving required audit material.
 
+## Journal storage monitoring
+
+The command journal has no automatic retention policy. Monitor it independently
+of Agent connectivity; normal authorized commands also accumulate durable state.
+From a reviewed checkout, run this read-only Linux probe as `ocserv-agent` (or
+another account allowed to stat the state directory):
+
+```bash
+sudo -u ocserv-agent bash scripts/check-agent-storage.sh /var/lib/ocservia-agent/agent.db
+```
+
+Use the actual path when `--journal` overrides the default. The probe reports
+the database, WAL and SHM logical sizes, their combined allocated bytes, and
+filesystem available bytes/inodes. It does not open SQLite, checkpoint, truncate,
+or delete anything. Missing or unreadable state is UNKNOWN, not healthy.
+
+Register this command in the node's existing monitoring scheduler at a 15-minute
+interval, with a 30-second execution timeout. Exit codes are 0 OK, 1 WARNING,
+2 CRITICAL, and 3 UNKNOWN; alert on 1/2/3, timeout, or two missed samples. Default
+warning/critical thresholds are 80%/90% for either disk or inode usage, adjustable
+with `STORAGE_WARNING_PERCENT` and `STORAGE_CRITICAL_PERCENT`. They are initial
+operational thresholds, not measured capacity guarantees. The repository does
+not install a scheduler or notification destination automatically.
+
+Retain samples in the existing monitoring backend. Track `journal_bytes` and
+`journal_allocated_bytes` growth, and forecast exhaustion from declining
+`filesystem_available_bytes`; alert when projected runway is below seven days,
+even before percentage thresholds fire. Record a baseline after deployment and
+confirm that a synthetic warning reaches the on-call destination:
+
+```bash
+sudo -u ocserv-agent env STORAGE_WARNING_PERCENT=1 STORAGE_CRITICAL_PERCENT=99 \
+  bash scripts/check-agent-storage.sh /var/lib/ocservia-agent/agent.db
+```
+
+On warning, inspect growth and unrelated files on the same filesystem and plan
+capacity. On critical, stop initiating new command dispatch/rollouts to the
+affected node and provision storage before resuming. Preserve the database and
+WAL together during controlled recovery. Never delete command identities, revision
+fences, pending/unknown records, or WAL files to reclaim space. Do not add age-based
+cleanup until the idempotency, signed replay and recovery retention boundaries
+are explicitly defined.
+
 ## Durable self-upgrade runner
 
 Controller-driven upgrades never execute inside the Agent or privd. When privd

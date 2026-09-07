@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -111,7 +112,15 @@ func (s *Server) listNodeTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.telemetry.History(r.Context(), id, metric, resolution, since)
 	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-query", "Invalid query", err.Error())
+		switch {
+		case errors.Is(err, telemetry.ErrInvalidMetric):
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-query", "Invalid query", "metric is invalid")
+		case errors.Is(err, telemetry.ErrInvalidResolution):
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-query", "Invalid query", "resolution is invalid")
+		default:
+			s.logger.ErrorContext(r.Context(), "read telemetry history failed", "error", err)
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Telemetry unavailable", "telemetry history could not be read")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "resolution": resolution})

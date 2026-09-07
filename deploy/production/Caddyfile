@@ -20,7 +20,9 @@
 		-Server
 	}
 	handle /api/* {
-		reverse_proxy control-plane:8080
+		reverse_proxy control-plane:8080 {
+			header_up X-Ocservia-Client-IP {http.request.remote.host}
+		}
 	}
 	handle /healthz {
 		reverse_proxy control-plane:8080

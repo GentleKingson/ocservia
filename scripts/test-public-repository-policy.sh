@@ -45,3 +45,19 @@ if "${temporary}/scripts/check-public-repository.sh" "${temporary}" >/dev/null 2
   echo "policy check accepted forbidden localserver-logs directory" >&2
   exit 1
 fi
+
+rm -rf "${temporary}/localserver-logs"
+printf '%s\n' '/.ocservia-control/keys/' >"${temporary}/.gitignore"
+git -C "${temporary}" add -Af
+"${temporary}/scripts/check-public-repository.sh" "${temporary}"
+git -C "${temporary}" check-ignore -q .ocservia-control/keys/test.pem
+if git -C "${temporary}" check-ignore -q .ocservia-control/prompt.md; then
+  echo "key ignore rule also ignored unrelated control files" >&2
+  exit 1
+fi
+
+printf '%s\n' '# .ocservia-control/prompts/' >>"${temporary}/.gitignore"
+if "${temporary}/scripts/check-public-repository.sh" "${temporary}" >/dev/null 2>&1; then
+  echo "policy check accepted another control path in .gitignore" >&2
+  exit 1
+fi

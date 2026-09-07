@@ -24,6 +24,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
+import { verifyRelayProof } from "./g6-relay-proof.mjs";
 import {
   computeG6Derivations,
   parseSlo,
@@ -2246,6 +2247,13 @@ if (
   relayDispatchProof?.owner_epoch !== relayObservation.owner_epoch
 ) {
   fail("relay dispatch proof is not the exact observed relay-b fenced session");
+}
+try {
+  const agent = relayDispatchProof.deliveries?.length === 2
+    ? JSON.parse(readText(peerDir, "evidence", "relay-agent-proof.json")) : undefined;
+  verifyRelayProof(relayDispatchProof, relayRawObservation, agent);
+} catch (error) {
+  fail(`relay delivery/recovery evidence rejected: ${error.message}`);
 }
 const relayPreObservation = publicTransportObservation(
   relayPreRawObservation,
