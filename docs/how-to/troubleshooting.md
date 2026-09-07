@@ -14,8 +14,25 @@ deploy/production/compose.sh config --quiet
 
 Check that all six image variables are full SHA-256 digests, the protected
 secret directory and backup directory meet their ownership/mode contracts, and
-the required OIDC, PKI, OTLP, Controller EndpointID, and relay settings are
+the required OIDC, PKI, Controller EndpointID, and relay settings are
 present. Do not bypass `controller.sh` with direct Compose.
+
+## Optional traces are missing
+
+OTEL is off when `OCSERV_OTEL_BACKEND_ENDPOINT` is unset or empty. With the same
+exported configuration used by the lifecycle command, inspect enabled services
+and running containers without dumping secrets:
+
+```bash
+deploy/production/compose.sh config --services
+deploy/production/compose.sh ps
+```
+
+`otel-collector` should appear only when an endpoint is configured. The launcher
+enables its profile automatically and ignores inherited `COMPOSE_PROFILES`.
+When enabled, check `otel-client.crt`, `otel-client.key`, and `otel-ca.crt` for
+launcher ownership and mode `0444`, then check Collector logs and backend mTLS
+connectivity. Missing or incorrectly permissioned TLS files block startup.
 
 ## Release verification fails
 

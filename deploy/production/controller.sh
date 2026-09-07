@@ -863,8 +863,12 @@ rollback_controller() {
     # The compatibility preflight already validated the database. Do not let
     # the previous Controller image run the normal migration service against
     # a newer schema during this activation.
-    if ! "${COMPOSE_LAUNCHER}" up -d --wait --no-deps \
-      postgres backup otel-collector transportd control-plane gateway; then
+    local rollback_services=(postgres backup)
+    if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
+      rollback_services+=(otel-collector)
+    fi
+    rollback_services+=(transportd control-plane gateway)
+    if ! "${COMPOSE_LAUNCHER}" up -d --wait --no-deps "${rollback_services[@]}"; then
       fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
     fi
   elif ! "${COMPOSE_LAUNCHER}" up -d --wait; then
