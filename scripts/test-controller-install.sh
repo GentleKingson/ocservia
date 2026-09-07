@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset OCSERV_OTEL_BACKEND_ENDPOINT
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="${ROOT}/deploy/production/install.sh"
@@ -96,6 +97,7 @@ printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${bootstrap_log}"
 printf '%s\n' "$*" >>"${bootstrap_log}"
 printf 'OCSERV_PUBLIC_HOST=%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${bootstrap_log}"
 printf 'proxy-network:%s,%s,%s\n' "${OCSERV_APPLICATION_SUBNET:-}" "${OCSERV_APPLICATION_IP_RANGE:-}" "${OCSERV_GATEWAY_APPLICATION_IP:-}" >>"${bootstrap_log}"
+printf 'otel:%s\n' "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" >>"${bootstrap_log}"
 printf 'OCSERV_SECRET_DIR=%s\n' "${OCSERV_SECRET_DIR:-<unset>}" >>"${bootstrap_log}"
 printf 'OCSERV_BACKUP_DIR=%s\n' "${OCSERV_BACKUP_DIR:-<unset>}" >>"${bootstrap_log}"
 printf 'OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=%s\n' "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-<unset>}" >>"${bootstrap_log}"
@@ -406,6 +408,7 @@ install_docker_client_stub
 EXTRA_ENV=("OCSERV_BACKUP_DIR=${fixture}/backup")
 capture
 assert_status 0 "the launcher-user install flow must succeed"
+grep -Fxq 'otel:' "${bootstrap_log}" || die "OTEL must be disabled for the base install"
 assert_output "release identity: v0.1.2"
 if (( EUID == 0 )); then
   # A root test shell exercises the root lifecycle: no whole-script sudo.
@@ -579,7 +582,6 @@ if can_root; then
       export OCSERV_OIDC_ISSUER=https://id.example.test
       export OCSERV_OIDC_CLIENT_ID=ocservia
       export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test/v1
-      export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
       export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
       export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
       export OCSERV_RELAY_URL_A=https://relay-a.example.test
@@ -696,6 +698,7 @@ OCSERV_HTTPS_ADDRESS=10.0.0.9
 OCSERV_APPLICATION_SUBNET=198.18.80.0/24
 OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
 OCSERV_GATEWAY_APPLICATION_IP=198.18.80.2
+OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
 EOF
 capture_from "${repo}"
 assert_status 0 "install.env values must load and keep the checkout clean"
@@ -703,6 +706,7 @@ assert_output "release identity: v0.1.2"
 assert_log_contains "${bootstrap_log}" "install --backup-dir ${fixture}/file-backup"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-file.example.test"
 assert_log_contains "${bootstrap_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
+assert_log_contains "${bootstrap_log}" "otel:otel.example.test:4317"
 echo "install.env values load without dirtying the release checkout"
 
 # 8a. an explicit shell variable wins over install.env.

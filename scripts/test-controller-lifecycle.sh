@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTROLLER="${ROOT}/deploy/production/controller.sh"
+unset OCSERV_OTEL_BACKEND_ENDPOINT
 
 if ! command -v flock >/dev/null 2>&1; then
   echo "Controller lifecycle tests skipped: flock is unavailable"
@@ -66,7 +67,7 @@ case "${1:-}" in
   pull) exit "${MOCK_PULL_EXIT:-0}" ;;
   up)
     if [[ "${MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION:-0}" == 1 ]]; then
-      [[ "$*" == "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway" ]]
+      [[ "$*" == "up -d --wait --no-deps postgres backup${OCSERV_OTEL_BACKEND_ENDPOINT:+ otel-collector} transportd control-plane gateway" ]]
     fi
     exit "${MOCK_UP_EXIT:-0}"
     ;;
@@ -569,9 +570,18 @@ cmp -s "${cross_schema_current}" "${compatible_cross_schema_state}/previous-rele
 test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=30"
 test "$(sed -n '3p' "${compatible_cross_schema_state}/compose.log")" = "config --quiet"
 test "$(sed -n '4p' "${compatible_cross_schema_state}/compose.log")" = "pull"
-test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
+test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup transportd control-plane gateway"
 test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '2p')" = "ghcr.io/gentlekingson/ocservia/control@${next_digest}"
 test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '5p')" = "ghcr.io/gentlekingson/ocservia/control@${digest}"
+
+otel_cross_schema_state="${fixture}/rollback-compatible-cross-schema-otel"
+seed_upgrade_state "${otel_cross_schema_state}"
+cp -- "${cross_schema_current}" "${otel_cross_schema_state}/current-release.json"
+cp -- "${different_schema_previous}" "${otel_cross_schema_state}/previous-release.json"
+chmod 600 "${otel_cross_schema_state}/current-release.json" "${otel_cross_schema_state}/previous-release.json"
+run_controller_rollback "${otel_cross_schema_state}" env MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 \
+  OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
+test "$(sed -n '5p' "${otel_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
 
 minimum_schema_state="${fixture}/rollback-schema-minimum"
 seed_upgrade_state "${minimum_schema_state}"

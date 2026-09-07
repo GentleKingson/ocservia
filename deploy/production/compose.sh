@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+unset COMPOSE_PROFILES COMPOSE_ENV_FILES
+export COMPOSE_DISABLE_ENV_FILE=1
+otel_enabled=false
+if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
+  otel_enabled=true
+fi
+
 for variable in OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE \
   OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE; do
   value="${!variable:-}"
@@ -35,7 +42,10 @@ while true; do
 done
 general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
   postgres.pgpass database-owner-url database-app-url oidc-client-secret session-key \
-  audit-checkpoint-key certificate-signer-token otel-client.crt otel-client.key otel-ca.crt)
+  audit-checkpoint-key certificate-signer-token)
+if [[ "${otel_enabled}" == true ]]; then
+  general_secrets+=(otel-client.crt otel-client.key otel-ca.crt)
+fi
 for secret in "${general_secrets[@]}"; do
   path="${secret_dir}/${secret}"
   if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%a' "${path}")" != "$(id -u):444" ]]; then
@@ -60,8 +70,13 @@ for secret in relay-access-token controller-iroh.key; do
 done
 
 prepare_transport_runtime=false
+teardown=false
 for argument in "$@"; do
   case "${argument}" in
+    down)
+      teardown=true
+      break
+      ;;
     up|create|run)
       backup_dir="${OCSERV_BACKUP_DIR:-}"
       if [[ -z "${backup_dir}" || ! -d "${backup_dir}" || -L "${backup_dir}" ]]; then
@@ -80,8 +95,14 @@ for argument in "$@"; do
   esac
 done
 
-compose=(docker compose -p ocservia-production -f "${ROOT}/deploy/production/compose.yaml")
+compose=(docker compose --env-file /dev/null -p ocservia-production -f "${ROOT}/deploy/production/compose.yaml")
+if [[ "${otel_enabled}" == true || "${teardown}" == true ]]; then
+  compose+=(--profile observability)
+fi
 if [[ "${prepare_transport_runtime}" == true ]]; then
+  if [[ "${otel_enabled}" == false ]]; then
+    "${compose[@]}" --profile observability rm --stop --force otel-collector
+  fi
   "${compose[@]}" stop control-plane transportd
   "${compose[@]}" run --rm --no-deps transport-runtime-init
 fi

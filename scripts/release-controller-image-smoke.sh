@@ -71,6 +71,7 @@ cat >"${fixture}/Caddyfile" <<'EOF'
 }
 EOF
 docker run --detach --name "${gateway_container}" \
+  --cap-drop ALL --security-opt no-new-privileges:true \
   --publish "127.0.0.1:${gateway_port}:8443" \
   --volume "${fixture}/Caddyfile:/etc/caddy/Caddyfile:ro" \
   "$(image_ref gateway)" >/dev/null

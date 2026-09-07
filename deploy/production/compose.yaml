@@ -65,6 +65,7 @@ services:
 
   postgres:
     <<: *service-defaults
+    user: "999:999"
     image: ${OCSERV_POSTGRES_IMAGE:?set OCSERV_POSTGRES_IMAGE to a digest-pinned PostgreSQL 17 image}
     environment:
       POSTGRES_DB: ocservia
@@ -174,7 +175,7 @@ services:
       OCSERV_SSE_MAX_LIFETIME: 30m
       OCSERV_SSE_REVALIDATE_INTERVAL: 30s
       OCSERV_SSE_RETRY_AFTER: 5s
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OCSERV_OTEL_BACKEND_ENDPOINT:+http://otel-collector:4317}
     secrets:
       - database_app_url
       - oidc_client_secret
@@ -204,8 +205,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      otel-collector:
-        condition: service_started
       transport-runtime-init:
         condition: service_completed_successfully
     healthcheck:
@@ -299,11 +298,12 @@ services:
           pids: 256
 
   otel-collector:
+    profiles: [observability]
     <<: *service-defaults
     image: ${OCSERV_OTEL_IMAGE:?set OCSERV_OTEL_IMAGE to a digest-pinned OpenTelemetry Collector image}
     command: ["--config=/etc/otelcol/config.yaml"]
     environment:
-      OCSERV_OTEL_BACKEND_ENDPOINT: ${OCSERV_OTEL_BACKEND_ENDPOINT:?set the TLS OTLP backend endpoint}
+      OCSERV_OTEL_BACKEND_ENDPOINT: ${OCSERV_OTEL_BACKEND_ENDPOINT:-}
     secrets:
       - otel_client_certificate
       - otel_client_key

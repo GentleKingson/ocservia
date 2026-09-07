@@ -12,7 +12,7 @@ The Controller is the central Web/API service. It stores state in PostgreSQL, co
 - Git, curl, and Docker Engine with the Compose v2 plugin. The installer can bootstrap Docker on most supported hosts, but Ubuntu 20.04 needs a compatible Docker install prepared beforehand.
 - A DNS name and HTTPS certificate for the Controller.
 - An OIDC login provider and client.
-- A certificate signing endpoint and a TLS monitoring endpoint.
+- A certificate signing endpoint.
 - Two dedicated relay URLs for production node traffic.
 - Protected directories for secrets and backups.
 - The release-signing public key provisioned through a protected channel separate from the downloaded release bundle.
@@ -40,7 +40,7 @@ The exact variable names are in `install.env.example`. At a minimum, configure:
 | Setting group | Examples |
 | --- | --- |
 | Public address | `OCSERV_PUBLIC_HOST`, `OCSERV_CONTROLLER_PUBLIC_URL`, `OCSERV_HTTPS_ADDRESS` |
-| Login and external services | `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID`, `OCSERV_CERTIFICATE_SIGNER_URL`, `OCSERV_OTEL_BACKEND_ENDPOINT` |
+| Login and external services | `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID`, `OCSERV_CERTIFICATE_SIGNER_URL` |
 | Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
 | Release trust | `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` |
@@ -58,9 +58,17 @@ Put production material in the protected directories referenced by `install.env`
 - Certificate signer token.
 - Relay access token.
 - Controller identity key.
-- Monitoring client certificate, key, and CA certificate.
 
 Use the exact filenames and permission requirements from the [Production deployment reference](../operations/production-deployment.md) before running the installer.
+
+### Optional observability
+
+OTEL is disabled when `OCSERV_OTEL_BACKEND_ENDPOINT` is unset or empty. No
+Collector or monitoring TLS files are required in that case. To enable it, set
+the endpoint in `install.env` and provision `otel-client.crt`, `otel-client.key`,
+and `otel-ca.crt` in `OCSERV_SECRET_DIR`, owned by the launcher with mode `0444`.
+The launcher automatically enables the Collector; missing or incorrectly
+permissioned TLS files prevent startup. No separate enable flag is needed.
 
 ## 4. Install the pinned release
 
@@ -94,7 +102,7 @@ curl --fail --silent --show-error \
   "https://${OCSERV_PUBLIC_HOST}/api/v1/version"
 ```
 
-Also verify that login works, a managed node can connect through each relay, monitoring receives data, and the newest backup exists.
+Also verify that login works, a managed node can connect through each relay, and the newest backup exists. When observability is enabled, verify that the backend receives traces.
 
 ## 6. After installation
 
