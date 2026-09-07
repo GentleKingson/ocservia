@@ -1,7 +1,7 @@
 # Technical reference
 
 These documents describe how ocservia works, its exact contracts, and its
-validation evidence. They are not the first reading path for installing or
+validation tooling. They are not the first reading path for installing or
 operating the system.
 
 ## System and security
@@ -9,6 +9,7 @@ operating the system.
 - [Architecture and trust boundaries](../architecture.md)
 - [Production deployment and Controller lifecycle](../operations/production-deployment.md)
 - [Agent package lifecycle](../operations/agent-lifecycle.md)
+- [Bootstrap endpoint hosting and trust](../operations/bootstrap-hosting.md)
 - [Agent and privd boundary](../development/agent-privd.md)
 - [Node enrollment and trust](../development/enrollment.md)
 - [Iroh transport](../development/transportd.md)
@@ -42,9 +43,9 @@ operating the system.
 - HTTP API: [`openapi/openapi.yaml`](../../openapi/openapi.yaml)
 - Protobuf contracts: [`proto/`](../../proto/)
 - Generated Web client: [`web/src/api/generated/`](../../web/src/api/generated/)
-- [Acceptance records](../acceptance/README.md)
+- [Readiness harness contracts](../acceptance/README.md)
 - [Upstream provenance records](../upstream/v4.9-post1.md)
 
 Generated artifacts are replaced by `make generate` and must not be edited
-manually. Historical acceptance and upstream records are preserved as
-evidence; this index only changes their navigation context.
+manually. Acceptance schemas are consumed by the readiness harness; upstream
+records support attribution and backport validation.
