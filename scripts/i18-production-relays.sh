@@ -47,7 +47,7 @@ mkdir -p "${work}/secrets" "${work}/relay-secrets" "${work}/backups" "${ARTIFACT
 chmod 0700 "${work}" "${work}/secrets" "${work}/relay-secrets" "${work}/backups"
 for secret in tls.crt tls.key postgres-owner-password postgres-app-password postgres.pgpass \
   postgres-backup-password database-owner-url database-app-url oidc-client-secret session-key audit-checkpoint-key \
-  certificate-signer-token relay-access-token controller-iroh.key otel-client.crt otel-client.key otel-ca.crt; do
+  certificate-signer-token relay-access-token controller-iroh.key; do
   printf 'test-only\n' >"${work}/secrets/${secret}"
 done
 openssl genpkey -algorithm ED25519 -out "${work}/secrets/controller-command-signing-key.pem" >/dev/null 2>&1
@@ -57,7 +57,7 @@ for secret in relay-access-token tls.crt tls.key; do
 done
 general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
   postgres.pgpass database-owner-url database-app-url oidc-client-secret session-key \
-  audit-checkpoint-key certificate-signer-token otel-client.crt otel-client.key otel-ca.crt)
+  audit-checkpoint-key certificate-signer-token)
 chmod 0444 "${general_secrets[@]/#/${work}\/secrets/}"
 chmod 0400 "${work}/secrets/controller-command-signing-key.pem" "${work}/secrets/audit-event-key"
 chmod 0444 "${work}/relay-secrets/tls.crt" "${work}/relay-secrets/tls.key"
@@ -77,7 +77,7 @@ export OCSERV_OIDC_ISSUER=https://id.example.test OCSERV_OIDC_CLIENT_ID=ocservia
 export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
 export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
 export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test/v1
-export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
+unset OCSERV_OTEL_BACKEND_ENDPOINT
 export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=https://relay-b.example.test
 export OCSERV_RELAY_SECRET_DIR="${work}/relay-secrets"
 
@@ -98,9 +98,35 @@ fi
 grep -Fq 'host replication ocservia_backup all scram-sha-256' \
   "${ROOT}/deploy/production/postgres-init/001-runtime-role.sh"
 
-COMPOSE_PROJECT_NAME=unexpected \
+COMPOSE_PROFILES=observability COMPOSE_PROJECT_NAME=unexpected \
   "${ROOT}/deploy/production/compose.sh" config --format json \
   >"${ARTIFACT_DIR}/platform-compose.json"
+OCSERV_OTEL_BACKEND_ENDPOINT= "${ROOT}/deploy/production/compose.sh" config --format json \
+  >"${ARTIFACT_DIR}/platform-compose-empty-otel.json"
+export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
+if "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/otel-missing.log" 2>&1; then
+  echo "production launcher accepted missing OTEL TLS files" >&2
+  exit 1
+fi
+for secret in otel-client.crt otel-ca.crt; do
+  printf 'test-only\n' >"${work}/secrets/${secret}"
+  chmod 0444 "${work}/secrets/${secret}"
+done
+if "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/otel-missing.log" 2>&1; then
+  echo "production launcher accepted a missing OTEL client key" >&2
+  exit 1
+fi
+grep -Fq 'otel-client.key' "${work}/otel-missing.log"
+printf 'test-only\n' >"${work}/secrets/otel-client.key"
+chmod 0600 "${work}/secrets/otel-client.key"
+if "${ROOT}/deploy/production/compose.sh" config --quiet >/dev/null 2>&1; then
+  echo "production launcher accepted incorrect OTEL client key permissions" >&2
+  exit 1
+fi
+chmod 0444 "${work}/secrets/otel-client.key"
+"${ROOT}/deploy/production/compose.sh" config --format json \
+  >"${ARTIFACT_DIR}/platform-compose-otel.json"
+unset OCSERV_OTEL_BACKEND_ENDPOINT
 "${ROOT}/deploy/production/relay/compose.sh" config --format json \
   >"${ARTIFACT_DIR}/relay-compose.json"
 if OCSERV_CONTROL_IMAGE=example.invalid/ocservia/control:latest \
@@ -129,6 +155,14 @@ import sys
 
 platform = json.loads(pathlib.Path(sys.argv[1]).read_text())
 relay = json.loads(pathlib.Path(sys.argv[2]).read_text())
+empty_otel = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-empty-otel.json").read_text())
+enabled_otel = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-otel.json").read_text())
+assert empty_otel == platform
+assert set(enabled_otel["services"]) == set(platform["services"]) | {"otel-collector"}
+assert enabled_otel["services"]["otel-collector"]["profiles"] == ["observability"]
+assert enabled_otel["services"]["control-plane"]["environment"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel-collector:4317"
+assert platform["services"]["control-plane"]["environment"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == ""
+assert "otel-collector" not in platform["services"]["control-plane"]["depends_on"]
 
 assert platform["name"] == "ocservia-production"
 
@@ -146,8 +180,9 @@ def hardened(service):
         assert forbidden not in serialized
 
 services = platform["services"]
-assert set(services) == {"transport-runtime-init", "gateway", "postgres", "migrate", "control-plane", "transportd", "otel-collector", "backup"}
-for name, service in services.items():
+assert services["postgres"]["user"] == "999:999"
+assert set(services) == {"transport-runtime-init", "gateway", "postgres", "migrate", "control-plane", "transportd", "backup"}
+for name, service in enabled_otel["services"].items():
     if name == "transport-runtime-init":
         continue
     hardened(service)

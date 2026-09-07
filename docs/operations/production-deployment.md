@@ -25,7 +25,28 @@ the durable release checkout.
 Until that hosting has operational ownership and byte-verification evidence,
 the public Quick Start obtains Stage-1 from a clean exact-release checkout.
 
-The production example in `deploy/production/compose.yaml` runs the HTTPS gateway, control plane, transport service, PostgreSQL, OpenTelemetry collector, and backup worker. It publishes only TCP 443. Database, application, and observability traffic remain on internal networks.
+The production example in `deploy/production/compose.yaml` runs the HTTPS gateway, control plane, transport service, PostgreSQL, and backup worker by default. It publishes only TCP 443. Database, application, and observability traffic remain on internal networks.
+
+## Optional observability
+
+Unset or empty `OCSERV_OTEL_BACKEND_ENDPOINT` disables OTLP export and the
+OpenTelemetry Collector. The default topology is gateway -> control plane ->
+PostgreSQL and transportd -> managed nodes, with a separate backup worker.
+A nonempty endpoint automatically adds control plane -> Collector (OTLP 4317)
+-> operator backend (mTLS) through the `observability` Compose profile.
+Provision `otel-client.crt`, `otel-client.key`, and `otel-ca.crt` in
+`OCSERV_SECRET_DIR` with launcher ownership and mode `0444` before enabling it.
+Missing files or invalid permissions fail closed before startup. They are not
+required when OTEL is disabled. The launcher ignores inherited `COMPOSE_PROFILES`;
+use the endpoint setting, not a manually selected profile, to enable observability.
+The release manifest still pins all six images, including `otel` for later opt-in.
+
+The first release with optional OTEL changes the production deployment contract.
+Standard rollback to a release before this change is refused by the existing
+descriptor guard. Record this rollback boundary in release notes; do not bypass
+the guard or treat database compatibility as deployment compatibility.
+
+## Secrets and release trust
 
 Use digest-pinned images for every `OCSERV_*_IMAGE` variable. Put referenced secret files in an absolute, canonical, launcher-owned, mode-`0700` `OCSERV_SECRET_DIR` outside the checkout; every ancestor must be root- or launcher-owned and not group/world writable. General secrets must be launcher-owned mode `0444`: the private parent directory prevents host traversal while the read-only file allows each explicitly mounted non-root service to read it. The Ed25519 Controller command private key, `controller-command-signing-key.pem`, and the 32-byte lowercase-hex audit event key, `audit-event-key`, must be owned by UID/GID `65534:65532` with mode `0400`, matching the non-root Controller process. Set a non-secret stable identifier such as `OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1`; the identifier is stored with each event. The audit event key is independent from `audit-checkpoint-key` and must never be reused for checkpoints or another purpose. File-backed Compose secrets are bind mounts on supported deployments, so the source ownership is required even though the Compose target also declares it. The Iroh Controller key and relay token must be owned by UID/GID 65532 with mode `0400`. The launcher rejects missing files, symbolic links, unsafe host ancestry, and ownership or mode mismatches; the Controller loader additionally rejects a hard-linked audit event key and unsafe in-container ancestry. Do not place credentials in Compose environment variables.
 
@@ -518,4 +539,4 @@ deploy/production/compose.sh up -d
 
 Migration `000021` introduces authenticated audit events. Before upgrading a database that already contains audit history, stop API writes and let the previous scheduler create a checkpoint covering each workspace's exact audit tail. Keep that checkpoint key available to the migration container. While holding the audit tables against concurrent writes, the migration preflight verifies every legacy chain and its exact tail checkpoint before applying any `000021` schema change. A failed preflight leaves the database at schema `20`, so the previous release remains usable. Do not bypass this check or rewrite old rows. After the one-shot migration succeeds, each new event carries a domain-separated HMAC, version, and key ID, and checkpoint creation first verifies the entire event chain.
 
-Verify `/readyz`, an authenticated read, a node connection through each relay, OTLP delivery, and a restore from the newest backup. Never expose PostgreSQL, Unix sockets, Docker sockets, or host `/proc` and `/sys` mounts.
+Verify `/readyz`, an authenticated read, a node connection through each relay, OTLP delivery when enabled, and a restore from the newest backup. Never expose PostgreSQL, Unix sockets, Docker sockets, or host `/proc` and `/sys` mounts.

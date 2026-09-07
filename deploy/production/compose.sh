@@ -3,6 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+unset COMPOSE_PROFILES
+otel_enabled=false
+if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
+  otel_enabled=true
+fi
+
 for variable in OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE \
   OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE; do
   value="${!variable:-}"
@@ -35,7 +41,10 @@ while true; do
 done
 general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
   postgres.pgpass database-owner-url database-app-url oidc-client-secret session-key \
-  audit-checkpoint-key certificate-signer-token otel-client.crt otel-client.key otel-ca.crt)
+  audit-checkpoint-key certificate-signer-token)
+if [[ "${otel_enabled}" == true ]]; then
+  general_secrets+=(otel-client.crt otel-client.key otel-ca.crt)
+fi
 for secret in "${general_secrets[@]}"; do
   path="${secret_dir}/${secret}"
   if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%a' "${path}")" != "$(id -u):444" ]]; then
@@ -81,6 +90,9 @@ for argument in "$@"; do
 done
 
 compose=(docker compose -p ocservia-production -f "${ROOT}/deploy/production/compose.yaml")
+if [[ "${otel_enabled}" == true ]]; then
+  compose+=(--profile observability)
+fi
 if [[ "${prepare_transport_runtime}" == true ]]; then
   "${compose[@]}" stop control-plane transportd
   "${compose[@]}" run --rm --no-deps transport-runtime-init
