@@ -76,6 +76,8 @@ LATEST_BIN="${BIN}"
 # Socket tests require trusted ancestry and short Unix-domain socket paths.
 PRE34_ROOT="$(mktemp -d "${ROOT}/.p34-XXXXXX")"
 cp -R "${ROOT}/control-plane" "${PRE34_ROOT}/control-plane"
+# Do not inherit the repository workspace, which excludes this fixture module.
+(cd "${PRE34_ROOT}" && GOWORK=off go work init ./control-plane)
 rm "${PRE34_ROOT}/control-plane/migrations/000034_local_initialization.up.sql"
 sed '/"GRANT UPDATE (completion_pending,completed_at,approver_identity_id) ON local_auth_bootstrap TO " + identifier,/d' \
   "${ROOT}/control-plane/migrations/runner.go" >"${PRE34_ROOT}/control-plane/migrations/runner.go"
