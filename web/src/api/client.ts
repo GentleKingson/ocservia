@@ -34,12 +34,14 @@ import {
   type AgentRollout,
   type AgentRolloutPage,
 } from "@ocservia/api-client";
+import { safeLoginReturnPath } from "../shared/login";
 
 const devAuthToken = import.meta.env.DEV
   ? import.meta.env.VITE_DEV_AUTH_TOKEN
   : undefined;
 const loginReturnKey = "ocservia.login.return-to";
 const loginStartedKey = "ocservia.login.started-at";
+let loginRedirecting = false;
 const workspaceKey = "ocservia.workspace-id";
 export const workspaceChangedEvent = "ocservia:workspace-changed";
 export const platformEventsEvent = "ocservia:platform-events";
@@ -60,14 +62,15 @@ async function authenticatedFetch(
 ): Promise<Response> {
   const response = await fetch(input, init);
   if (response.status === 401 && typeof window !== "undefined") {
-    const started = Number(sessionStorage.getItem(loginStartedKey) ?? "0");
-    if (!started || Date.now() - started > 60_000) {
-      const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-      if (returnTo.startsWith("/") && !returnTo.startsWith("//")) {
+    if (!loginRedirecting && window.location.pathname !== "/login") {
+      loginRedirecting = true;
+      const returnTo = safeLoginReturnPath(
+        `${window.location.pathname}${window.location.search}${window.location.hash}`,
+      );
+      if (returnTo) {
         sessionStorage.setItem(loginReturnKey, returnTo);
       }
-      sessionStorage.setItem(loginStartedKey, String(Date.now()));
-      window.location.assign("/api/v1/auth/login");
+      window.location.assign("/login");
     }
   }
   return response;
@@ -285,7 +288,7 @@ export function consumeLoginReturnPath(): string | undefined {
   const value = sessionStorage.getItem(loginReturnKey) ?? undefined;
   sessionStorage.removeItem(loginReturnKey);
   sessionStorage.removeItem(loginStartedKey);
-  return value?.startsWith("/") && !value.startsWith("//") ? value : undefined;
+  return safeLoginReturnPath(value);
 }
 
 export async function probeAuthentication(): Promise<void> {

@@ -9,7 +9,7 @@ import {
   Settings,
 } from "@lucide/vue";
 import type { Workspace } from "@ocservia/api-client";
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
 import {
@@ -23,25 +23,39 @@ import { developmentRuntime } from "./shared/routes";
 
 const readiness = useReadinessStore();
 const router = useRouter();
+const isLogin = computed(() => router.currentRoute.value.name === "login");
 const workspaces = ref<Workspace[]>([]);
 const selectedWorkspaceId = ref("");
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let stopLoginWatch: (() => void) | undefined;
 
 onMounted(async () => {
-  void readiness.refresh();
-  refreshTimer = setInterval(() => void readiness.refresh(), 15_000);
-  try {
-    workspaces.value = await listAuthorizedWorkspaces();
-    selectedWorkspaceId.value = (await getWorkspace()).id;
-    const returnTo = consumeLoginReturnPath();
-    if (returnTo && returnTo !== router.currentRoute.value.fullPath) {
-      await router.replace(returnTo);
-    }
-  } catch {
-    // The centralized API handler starts OIDC login for unauthenticated users.
-  }
+  await router.isReady();
+  stopLoginWatch = watch(
+    isLogin,
+    async (login) => {
+      clearInterval(refreshTimer);
+      if (login) return;
+      void readiness.refresh();
+      refreshTimer = setInterval(() => void readiness.refresh(), 15_000);
+      try {
+        workspaces.value = await listAuthorizedWorkspaces();
+        selectedWorkspaceId.value = (await getWorkspace()).id;
+        const returnTo = consumeLoginReturnPath();
+        if (returnTo && returnTo !== router.currentRoute.value.fullPath) {
+          await router.replace(returnTo);
+        }
+      } catch {
+        // The centralized API handler opens the unified login page.
+      }
+    },
+    { immediate: true },
+  );
 });
-onBeforeUnmount(() => clearInterval(refreshTimer));
+onBeforeUnmount(() => {
+  stopLoginWatch?.();
+  clearInterval(refreshTimer);
+});
 
 async function changeWorkspace(event: Event): Promise<void> {
   const workspaceId = (event.target as HTMLSelectElement).value;
@@ -60,7 +74,8 @@ const links = [
 </script>
 
 <template>
-  <div class="app-shell">
+  <RouterView v-if="isLogin" />
+  <div v-else class="app-shell">
     <aside class="sidebar">
       <div class="brand">
         <Activity :size="22" stroke-width="2.4" /><span>{{ $t("brand") }}</span>
