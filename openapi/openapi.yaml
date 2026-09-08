@@ -1786,7 +1786,6 @@ components:
           format: password
           writeOnly: true
           minLength: 1
-          maxLength: 1024
           description: At most 1024 UTF-8 bytes. Never returned or logged.
     AuthMethods:
       type: object

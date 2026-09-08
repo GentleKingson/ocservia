@@ -6,14 +6,45 @@ import { parse } from "yaml";
 
 interface OpenApiDocument {
   openapi?: unknown;
-  paths?: Record<string, Record<string, unknown>>;
+  security?: unknown;
+  paths?: Record<
+    string,
+    Record<
+      string,
+      {
+        operationId?: unknown;
+        security?: unknown;
+        responses?: Record<string, unknown>;
+      }
+    >
+  >;
   components?: {
     responses?: Record<string, { content?: Record<string, unknown> }>;
     securitySchemes?: {
+      oidc?: unknown;
       sessionCookie?: { type?: unknown; in?: unknown; name?: unknown };
       bearerAuth?: { type?: unknown; scheme?: unknown };
     };
     schemas?: {
+      LocalLoginRequest?: {
+        additionalProperties?: unknown;
+        required?: unknown;
+        properties?: {
+          username?: { maxLength?: unknown };
+          password?: {
+            minLength?: unknown;
+            maxLength?: unknown;
+            writeOnly?: unknown;
+            description?: unknown;
+          };
+        };
+      };
+      AuthMethods?: {
+        type?: unknown;
+        additionalProperties?: unknown;
+        required?: unknown;
+        properties?: Record<string, { type?: unknown }>;
+      };
       UuidV7?: { pattern?: unknown };
       Problem?: { required?: unknown };
       AgentUpgradeRequest?: {
@@ -71,34 +102,39 @@ describe("OpenAPI invariants", () => {
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
       "utf8",
     );
-    const document = parse(source);
+    const document = parse(source) as OpenApiDocument;
     expect(document.security).toContainEqual({ sessionCookie: [] });
-    expect(document.components.securitySchemes.oidc).toBeUndefined();
-    expect(document.paths["/auth/local/login"]).toBeUndefined();
-    expect(document.paths["/auth/login"].get.operationId).toBe(
+    expect(document.components?.securitySchemes?.oidc).toBeUndefined();
+    expect(document.paths?.["/auth/local/login"]).toBeUndefined();
+    expect(document.paths?.["/auth/login"]?.get?.operationId).toBe(
       "beginOIDCLogin",
     );
-    expect(document.paths["/auth/login"].post).toMatchObject({
+    expect(document.paths?.["/auth/login"]?.post).toMatchObject({
       operationId: "loginLocal",
       security: [],
       responses: {
-        "204": expect.anything(),
-        "401": expect.anything(),
         "403": { $ref: "#/components/responses/CrossOriginRequest" },
-        "404": expect.anything(),
-        "429": expect.anything(),
       },
     });
-    expect(document.paths["/auth/methods"].get.security).toEqual([]);
-    expect(document.components.schemas.LocalLoginRequest).toMatchObject({
+    for (const status of ["204", "401", "404", "429"]) {
+      expect(
+        document.paths?.["/auth/login"]?.post?.responses?.[status],
+      ).toBeDefined();
+    }
+    expect(document.paths?.["/auth/methods"]?.get?.security).toEqual([]);
+    expect(document.components?.schemas?.LocalLoginRequest).toMatchObject({
       additionalProperties: false,
       required: ["username", "password"],
       properties: {
         username: { maxLength: 128 },
-        password: { maxLength: 1024, writeOnly: true },
+        password: { minLength: 1, writeOnly: true },
       },
     });
-    expect(document.components.schemas.AuthMethods).toEqual({
+    const password =
+      document.components?.schemas?.LocalLoginRequest?.properties?.password;
+    expect(password?.maxLength).toBeUndefined();
+    expect(password?.description).toContain("1024 UTF-8 bytes");
+    expect(document.components?.schemas?.AuthMethods).toEqual({
       type: "object",
       additionalProperties: false,
       required: ["local", "oidc"],
