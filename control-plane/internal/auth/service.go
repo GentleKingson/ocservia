@@ -321,6 +321,9 @@ func (s *Service) createSession(ctx context.Context, issuer, subject, email, nam
 		if err != nil {
 			return nil, Principal{}, err
 		}
+		if err := clearLocalAttempt(ctx, tx, subject, local.attemptLease); err != nil {
+			return nil, Principal{}, err
+		}
 	} else if err := tx.QueryRow(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$6) ON CONFLICT(issuer,subject) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,updated_at=EXCLUDED.updated_at RETURNING id`, identityID, issuer, subject, email, name, now).Scan(&identityID); err != nil {
 		return nil, Principal{}, err
 	}

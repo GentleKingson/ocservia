@@ -158,6 +158,10 @@ func (s *Service) MutateLocalUser(ctx context.Context, request LocalUserMutation
 		if _, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=$2 WHERE identity_id=$1 AND revoked_at IS NULL`, id, now); err != nil {
 			return uuid.Nil, err
 		}
+		// Fence old verification completions and start a fresh credential epoch.
+		if _, err := tx.Exec(ctx, `DELETE FROM local_auth_attempts WHERE username=(SELECT username FROM local_credentials WHERE identity_id=$1)`, id); err != nil {
+			return uuid.Nil, err
+		}
 	}
 	var approvalID *uuid.UUID
 	if request.ApprovalID != uuid.Nil {

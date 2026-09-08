@@ -85,6 +85,17 @@ logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
 Rolling back 000031 deletes local password hashes, not identities or sessions.
 Stop local provisioning/login and preserve credentials before applying down.
 
+Local login also requires migration 000033 for shared account failure backoff.
+`AuthenticateLocal` reserves a PostgreSQL single-flight lease before reading a
+credential or executing KDF, then completes only an observed incorrect password
+as a failure. Admission serializes capacity allocation in a short transaction;
+verification runs after commit, without a held connection or database lock.
+Success clears the matching lease in the credential-revalidation/session
+transaction. Reset and disable invalidate the state in their existing transaction,
+so a stale completion cannot overwrite the next credential epoch's failures.
+See [Local account failure backoff](../operations/authentication.md#local-account-failure-backoff-r2)
+for parameters, expiry, capacity, response behavior and upgrade constraints.
+
 ## Initial Local administrator and lifecycle (P4)
 
 Apply migrations first using the existing `--migrate-only` procedure. Select an
