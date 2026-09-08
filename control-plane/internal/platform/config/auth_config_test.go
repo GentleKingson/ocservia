@@ -43,15 +43,22 @@ func TestProductionAuthenticationConfiguration(t *testing.T) {
 				}
 				lookup := func(key string) (string, bool) { v, ok := values[key]; return v, ok }
 				cfg, err := Load(nil, lookup)
-				valid := mask == 15 || (local && mask == 0)
+				valid := mask == 15
 				if (err == nil) != valid {
 					t.Fatalf("Load() error=%v, want success=%t", err, valid)
 				}
 				if !valid {
+					if mask == 0 && !strings.Contains(err.Error(), "until Local HTTP login is available") {
+						t.Fatalf("expected production login availability guard, got %v", err)
+					}
 					return
 				}
 				if cfg.LocalAuthEnabled() != local || cfg.OIDCEnabled() != (mask == 15) {
 					t.Fatal("authentication enablement does not match configuration")
+				}
+				values["OCSERV_RUNTIME_DATABASE_ROLE"] = "ocservia_app"
+				if _, err := Load([]string{"--migrate-only"}, lookup); err != nil {
+					t.Fatalf("production migration configuration rejected: %v", err)
 				}
 				for key, invalidValues := range map[string][]string{
 					"OCSERV_SESSION_KEY":   {"", "aa", strings.Repeat("AA", 32), strings.Repeat("z", 64)},
