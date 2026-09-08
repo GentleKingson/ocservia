@@ -10,7 +10,7 @@ interface OpenApiDocument {
   components?: {
     responses?: Record<string, { content?: Record<string, unknown> }>;
     securitySchemes?: {
-      oidc?: { type?: unknown; in?: unknown; name?: unknown };
+      sessionCookie?: { type?: unknown; in?: unknown; name?: unknown };
       bearerAuth?: { type?: unknown; scheme?: unknown };
     };
     schemas?: {
@@ -66,6 +66,46 @@ interface OpenApiDocument {
 }
 
 describe("OpenAPI invariants", () => {
+  it("publishes the shared Local and OIDC authentication contract", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const document = parse(source);
+    expect(document.security).toContainEqual({ sessionCookie: [] });
+    expect(document.components.securitySchemes.oidc).toBeUndefined();
+    expect(document.paths["/auth/local/login"]).toBeUndefined();
+    expect(document.paths["/auth/login"].get.operationId).toBe(
+      "beginOIDCLogin",
+    );
+    expect(document.paths["/auth/login"].post).toMatchObject({
+      operationId: "loginLocal",
+      security: [],
+      responses: {
+        "204": expect.anything(),
+        "401": expect.anything(),
+        "403": { $ref: "#/components/responses/CrossOriginRequest" },
+        "404": expect.anything(),
+        "429": expect.anything(),
+      },
+    });
+    expect(document.paths["/auth/methods"].get.security).toEqual([]);
+    expect(document.components.schemas.LocalLoginRequest).toMatchObject({
+      additionalProperties: false,
+      required: ["username", "password"],
+      properties: {
+        username: { maxLength: 128 },
+        password: { maxLength: 1024, writeOnly: true },
+      },
+    });
+    expect(document.components.schemas.AuthMethods).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["local", "oidc"],
+      properties: { local: { type: "boolean" }, oidc: { type: "boolean" } },
+    });
+  });
+
   it("pins OpenAPI and the cross-language scalar conventions", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
@@ -98,7 +138,7 @@ describe("OpenAPI invariants", () => {
         ?.writeOnly,
     ).toBeUndefined();
     expect(document.paths?.["/node-bootstrap-tokens"]?.post).toBeDefined();
-    expect(document.components?.securitySchemes?.oidc).toMatchObject({
+    expect(document.components?.securitySchemes?.sessionCookie).toMatchObject({
       type: "apiKey",
       in: "cookie",
       name: "__Host-ocservia_session",

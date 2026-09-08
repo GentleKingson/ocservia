@@ -14,6 +14,11 @@
 
 import * as runtime from "../runtime";
 import {
+  type AuthMethods,
+  AuthMethodsFromJSON,
+  AuthMethodsToJSON,
+} from "../models/AuthMethods";
+import {
   type BreakGlassRequest,
   BreakGlassRequestFromJSON,
   BreakGlassRequestToJSON,
@@ -24,6 +29,11 @@ import {
   BuildInfoToJSON,
 } from "../models/BuildInfo";
 import { type Health, HealthFromJSON, HealthToJSON } from "../models/Health";
+import {
+  type LocalLoginRequest,
+  LocalLoginRequestFromJSON,
+  LocalLoginRequestToJSON,
+} from "../models/LocalLoginRequest";
 import {
   type Problem,
   ProblemFromJSON,
@@ -58,6 +68,10 @@ export interface CompleteOIDCLoginRequest {
 export interface CreateRoleBindingRequest {
   roleBindingRequest: RoleBindingRequest;
   xWorkspaceID?: string;
+}
+
+export interface LoginLocalRequest {
+  localLoginRequest: LocalLoginRequest;
 }
 
 export interface UseBreakGlassRequest {
@@ -258,6 +272,48 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for getAuthMethods without sending the request
+   */
+  async getAuthMethodsRequestOpts(): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    let urlPath = `/auth/methods`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Read enabled authentication methods
+   */
+  async getAuthMethodsRaw(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<AuthMethods>> {
+    const requestOptions = await this.getAuthMethodsRequestOpts();
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      AuthMethodsFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Read enabled authentication methods
+   */
+  async getAuthMethods(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<AuthMethods> {
+    const response = await this.getAuthMethodsRaw(initOverrides);
+    return await response.value();
+  }
+
+  /**
    * Creates request options for getLiveness without sending the request
    */
   async getLivenessRequestOpts(): Promise<runtime.RequestOpts> {
@@ -432,6 +488,61 @@ export class PlatformApi extends runtime.BaseAPI {
   ): Promise<WorkspacePage> {
     const response = await this.listAuthorizedWorkspacesRaw(initOverrides);
     return await response.value();
+  }
+
+  /**
+   * Creates request options for loginLocal without sending the request
+   */
+  async loginLocalRequestOpts(
+    requestParameters: LoginLocalRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["localLoginRequest"] == null) {
+      throw new runtime.RequiredError(
+        "localLoginRequest",
+        'Required parameter "localLoginRequest" was null or undefined when calling loginLocal().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/auth/login`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: LocalLoginRequestToJSON(requestParameters["localLoginRequest"]),
+    };
+  }
+
+  /**
+   * Requires Local authentication and the exact PUBLIC_ORIGIN. Body is limited to 8192 bytes (or the configured request limit if smaller). Invalid credentials return the same 401 response. Limited to 5 attempts per source and 120 globally per minute, with at most 4 concurrent requests.
+   * Authenticate with a local username and password
+   */
+  async loginLocalRaw(
+    requestParameters: LoginLocalRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<void>> {
+    const requestOptions = await this.loginLocalRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.VoidApiResponse(response);
+  }
+
+  /**
+   * Requires Local authentication and the exact PUBLIC_ORIGIN. Body is limited to 8192 bytes (or the configured request limit if smaller). Invalid credentials return the same 401 response. Limited to 5 attempts per source and 120 globally per minute, with at most 4 concurrent requests.
+   * Authenticate with a local username and password
+   */
+  async loginLocal(
+    requestParameters: LoginLocalRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<void> {
+    await this.loginLocalRaw(requestParameters, initOverrides);
   }
 
   /**

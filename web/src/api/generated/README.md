@@ -22,7 +22,7 @@ import type { CreateCertificateRequest } from '@ocservia/api-client';
 async function example() {
   console.log("🚀 Testing @ocservia/api-client SDK...");
   const config = new Configuration({
-    // To configure API key authorization: oidc
+    // To configure API key authorization: sessionCookie
     apiKey: "YOUR API KEY",
     // Configure HTTP bearer authorization: bearerAuth
     accessToken: "YOUR BEARER TOKEN",
@@ -121,10 +121,12 @@ All URIs are relative to _/api/v1_
 | _PlatformApi_      | [**beginOIDCLogin**](docs/PlatformApi.md#beginoidclogin)                                  | **GET** /auth/login                                        | Begin OIDC Authorization Code login with PKCE S256                               |
 | _PlatformApi_      | [**completeOIDCLogin**](docs/PlatformApi.md#completeoidclogin)                            | **GET** /auth/callback                                     | Validate OIDC state, nonce, code, and ID token                                   |
 | _PlatformApi_      | [**createRoleBinding**](docs/PlatformApi.md#createrolebinding)                            | **POST** /role-bindings                                    | Bind one baseline role to a workspace or resource scope                          |
+| _PlatformApi_      | [**getAuthMethods**](docs/PlatformApi.md#getauthmethods)                                  | **GET** /auth/methods                                      | Read enabled authentication methods                                              |
 | _PlatformApi_      | [**getLiveness**](docs/PlatformApi.md#getliveness)                                        | **GET** /livez                                             | Get process liveness                                                             |
 | _PlatformApi_      | [**getReadiness**](docs/PlatformApi.md#getreadiness)                                      | **GET** /readyz                                            | Get dependency readiness                                                         |
 | _PlatformApi_      | [**getVersion**](docs/PlatformApi.md#getversion)                                          | **GET** /version                                           | Get build metadata                                                               |
 | _PlatformApi_      | [**listAuthorizedWorkspaces**](docs/PlatformApi.md#listauthorizedworkspaces)              | **GET** /workspaces                                        | List only workspaces visible to the current principal                            |
+| _PlatformApi_      | [**loginLocal**](docs/PlatformApi.md#loginlocal)                                          | **POST** /auth/login                                       | Authenticate with a local username and password                                  |
 | _PlatformApi_      | [**logout**](docs/PlatformApi.md#logout)                                                  | **POST** /auth/logout                                      | Revoke the current server-side session                                           |
 | _PlatformApi_      | [**useBreakGlass**](docs/PlatformApi.md#usebreakglass)                                    | **POST** /auth/break-glass                                 | Use explicitly enabled offline emergency access                                  |
 
@@ -147,6 +149,7 @@ All URIs are relative to _/api/v1_
 - [ArtifactGrant](docs/ArtifactGrant.md)
 - [AuditEventPage](docs/AuditEventPage.md)
 - [AuditVerification](docs/AuditVerification.md)
+- [AuthMethods](docs/AuthMethods.md)
 - [BreakGlassRequest](docs/BreakGlassRequest.md)
 - [BuildInfo](docs/BuildInfo.md)
 - [Certificate](docs/Certificate.md)
@@ -174,6 +177,7 @@ All URIs are relative to _/api/v1_
 - [GroupApplyRequest](docs/GroupApplyRequest.md)
 - [Health](docs/Health.md)
 - [ListNodeCertificates200Response](docs/ListNodeCertificates200Response.md)
+- [LocalLoginRequest](docs/LocalLoginRequest.md)
 - [NodeApproval](docs/NodeApproval.md)
 - [NodeBootstrapToken](docs/NodeBootstrapToken.md)
 - [NodeBootstrapTokenRequest](docs/NodeBootstrapTokenRequest.md)
@@ -231,9 +235,9 @@ All URIs are relative to _/api/v1_
 ### Authorization
 
 Authentication schemes defined for the API:
-<a id="oidc"></a>
+<a id="sessionCookie"></a>
 
-#### oidc
+#### sessionCookie
 
 - **Type**: API key
 - **API key parameter name**: `__Host-ocservia_session`

@@ -177,6 +177,10 @@ func (s *Service) CompleteLogin(ctx context.Context, state, code string, cookie 
 	return s.createSession(ctx, s.issuer, identity.Subject, identity.Email, identity.Name, false, nil)
 }
 
+func (s *Service) LocalEnabled() bool { return s.localEnabled }
+
+func (s *Service) OIDCEnabled() bool { return s.oidcEnabled }
+
 func (s *Service) provider(ctx context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
 	if !s.oidcEnabled {
 		return oauth2.Config{}, nil, ErrOIDCDisabled

@@ -1,0 +1,309 @@
+package api
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/oauth2"
+)
+
+const authTestOrigin = "https://admin.example.test"
+
+func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, issuer string) *Server {
+	t.Helper()
+	cfg := auth.Config{LocalEnabled: local, SessionKey: make([]byte, 32), SessionTTL: time.Hour}
+	if issuer != "" {
+		cfg.Issuer, cfg.ClientID, cfg.ClientSecret = issuer, "client", "secret"
+		cfg.RedirectURL = authTestOrigin + "/api/v1/auth/callback"
+	}
+	if pool == nil {
+		pool = &pgxpool.Pool{}
+	}
+	service, err := auth.New(context.Background(), pool, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 1)
+	s.auth = service
+	s.EnableBrowserOrigin(authTestOrigin)
+	return s
+}
+
+func authHTTPRequest(s *Server, method, path, body, origin string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, "/api/v1/auth/"+path, strings.NewReader(body))
+	r.Header.Set("Origin", origin)
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, r)
+	return w
+}
+
+func TestAuthHTTPMethodsAndDisabledRoutes(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		for _, oidc := range []bool{false, true} {
+			t.Run(fmt.Sprintf("local=%t/oidc=%t", local, oidc), func(t *testing.T) {
+				issuer := ""
+				if oidc {
+					issuer = "https://idp.example.test"
+				}
+				s := newAuthHTTPServer(t, nil, local, issuer)
+				w := authHTTPRequest(s, "GET", "methods", "", "")
+				if w.Code != 200 || strings.TrimSpace(w.Body.String()) != fmt.Sprintf(`{"local":%t,"oidc":%t}`, local, oidc) {
+					t.Fatalf("methods: %d %s", w.Code, w.Body)
+				}
+				if !local {
+					for i := 0; i < 7; i++ {
+						if w := authHTTPRequest(s, "POST", "login", `{}`, ""); w.Code != 404 {
+							t.Fatalf("disabled local: %d", w.Code)
+						}
+					}
+				}
+				if !oidc {
+					for _, path := range []string{"login", "callback"} {
+						for i := 0; i < 32; i++ {
+							if w := authHTTPRequest(s, "GET", path, "", ""); w.Code != 404 {
+								t.Fatalf("disabled OIDC %s: %d", path, w.Code)
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+	s := newAuthHTTPServer(t, nil, false, "")
+	s.auth = nil
+	if w := authHTTPRequest(s, "GET", "methods", "", ""); strings.TrimSpace(w.Body.String()) != `{"local":false,"oidc":false}` {
+		t.Fatal(w.Body)
+	}
+}
+
+func TestLocalLoginHTTPBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name, body, origin, mediaType, fetchSite string
+		want                                     int
+	}{
+		{"missing origin", `{}`, "", "application/json", "", 403},
+		{"sibling origin", `{}`, "https://sibling.example.test", "application/json", "same-site", 403},
+		{"different port", `{}`, authTestOrigin + ":444", "application/json", "", 403},
+		{"cross-site metadata", `{}`, authTestOrigin, "application/json", "cross-site", 403},
+		{"wrong media", `{}`, authTestOrigin, "text/plain", "", 415},
+		{"unknown field", `{"username":"a","password":"b","extra":true}`, authTestOrigin, "application/json", "", 400},
+		{"trailing JSON", `{} {}`, authTestOrigin, "application/json", "", 400},
+		{"malformed", `{`, authTestOrigin, "application/json", "", 400},
+		{"null", `null`, authTestOrigin, "application/json", "", 400},
+		{"missing password", `{"username":"a"}`, authTestOrigin, "application/json", "", 400},
+		{"wrong type", `{"username":1,"password":"b"}`, authTestOrigin, "application/json", "", 400},
+		{"body limit", `{"username":"a","password":"` + strings.Repeat("p", 8192) + `"}`, authTestOrigin, "application/json", "", 400},
+		{"username limit", `{"username":"` + strings.Repeat("a", 129) + `","password":"b"}`, authTestOrigin, "application/json", "", 401},
+		{"password byte limit", `{"username":"a","password":"` + strings.Repeat("\u00e9", 513) + `"}`, authTestOrigin, "application/json", "", 401},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := newAuthHTTPServer(t, nil, true, "")
+			r := httptest.NewRequest("POST", "/api/v1/auth/login", strings.NewReader(test.body))
+			r.Header.Set("Origin", test.origin)
+			r.Header.Set("Content-Type", test.mediaType)
+			r.Header.Set("Sec-Fetch-Site", test.fetchSite)
+			w := httptest.NewRecorder()
+			s.http.Handler.ServeHTTP(w, r)
+			if w.Code != test.want || len(w.Result().Cookies()) != 0 {
+				t.Fatalf("status=%d body=%s cookies=%v", w.Code, w.Body, w.Result().Cookies())
+			}
+		})
+	}
+}
+
+func TestLocalLoginHTTPAdmission(t *testing.T) {
+	for _, kind := range []string{"source", "global", "concurrent"} {
+		t.Run(kind, func(t *testing.T) {
+			s := newAuthHTTPServer(t, nil, true, "")
+			attempts := 6
+			if kind == "global" {
+				attempts = 121
+			}
+			if kind == "concurrent" {
+				for i := 0; i < 4; i++ {
+					s.localLoginBudget.active <- struct{}{}
+				}
+				attempts = 1
+			}
+			for i := 0; i < attempts; i++ {
+				r := httptest.NewRequest("POST", "/api/v1/auth/login", strings.NewReader(`{"username":"","password":""}`))
+				r.Header.Set("Origin", authTestOrigin)
+				r.Header.Set("Content-Type", "application/json")
+				if kind == "global" {
+					r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1234", i+1)
+				}
+				w := httptest.NewRecorder()
+				s.http.Handler.ServeHTTP(w, r)
+				want := 401
+				if i == attempts-1 {
+					want = 429
+				}
+				if w.Code != want || (want == 429 && w.Header().Get("Retry-After") == "") {
+					t.Fatalf("attempt=%d status=%d body=%s", i, w.Code, w.Body)
+				}
+			}
+		})
+	}
+}
+
+func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	pool, err := pgxpool.New(context.Background(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issuer, nonce, challenge string
+	idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/keys", "id_token_signing_alg_values_supported": []string{"RS256"}})
+		case "/keys":
+			_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, Algorithm: "RS256", Use: "sig"}}})
+		case "/token":
+			_ = r.ParseForm()
+			digest := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+			if base64.RawURLEncoding.EncodeToString(digest[:]) != challenge || r.Form.Get("redirect_uri") != authTestOrigin+"/api/v1/auth/callback" {
+				t.Error("OIDC PKCE or redirect changed")
+				http.Error(w, "invalid grant", 400)
+				return
+			}
+			claims, _ := json.Marshal(map[string]any{"iss": issuer, "aud": "client", "sub": "http-operator", "nonce": nonce, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix()})
+			signed, err := signer.Sign(claims)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			token, err := signed.CompactSerialize()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer", "id_token": token})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer idp.Close()
+	issuer = idp.URL
+	for _, mode := range []string{"local", "oidc", "both"} {
+		t.Run(mode, func(t *testing.T) {
+			provider := issuer
+			if mode == "local" {
+				provider = ""
+			}
+			s := newAuthHTTPServer(t, pool, mode != "oidc", provider)
+			logout := func(cookie *http.Cookie) {
+				t.Helper()
+				if cookie.Name != auth.SessionCookieName || !cookie.Secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
+					t.Fatal("nonstandard session cookie")
+				}
+				if _, err := s.auth.Authenticate(context.Background(), cookie); err != nil {
+					t.Fatal(err)
+				}
+				r := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
+				r.Header.Set("Origin", authTestOrigin)
+				r.AddCookie(cookie)
+				w := httptest.NewRecorder()
+				s.http.Handler.ServeHTTP(w, r)
+				if w.Code != 204 || len(w.Result().Cookies()) != 1 || w.Result().Cookies()[0].MaxAge != -1 {
+					t.Fatalf("logout: %d %s", w.Code, w.Body)
+				}
+				if _, err := s.auth.Authenticate(context.Background(), cookie); err == nil {
+					t.Fatal("revoked session accepted")
+				}
+			}
+			if mode != "oidc" {
+				username := "http-" + uuid.NewString()
+				if _, err := s.auth.CreateLocalCredential(context.Background(), username, "test-password"); err != nil {
+					t.Fatal(err)
+				}
+				wrong := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"wrong"}`, username), authTestOrigin)
+				missing := authHTTPRequest(s, "POST", "login", `{"username":"missing-http-user","password":"wrong"}`, authTestOrigin)
+				if wrong.Code != 401 || missing.Code != 401 || wrong.Body.String() != missing.Body.String() || len(wrong.Result().Cookies()) != 0 || len(missing.Result().Cookies()) != 0 {
+					t.Fatal("credential failures differ")
+				}
+				w := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"test-password"}`, username), authTestOrigin)
+				if w.Code != 204 || len(w.Result().Cookies()) != 1 {
+					t.Fatalf("local login: %d %s", w.Code, w.Body)
+				}
+				logout(w.Result().Cookies()[0])
+			}
+			if mode != "local" {
+				do := func(path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+					r := httptest.NewRequest("GET", "/api/v1/auth/"+path, nil)
+					r = r.WithContext(context.WithValue(r.Context(), oauth2.HTTPClient, idp.Client()))
+					if cookie != nil {
+						r.AddCookie(cookie)
+					}
+					w := httptest.NewRecorder()
+					s.http.Handler.ServeHTTP(w, r)
+					return w
+				}
+				w := do("login", nil)
+				if w.Code != 302 || len(w.Result().Cookies()) != 1 {
+					t.Fatalf("OIDC start: %d %s", w.Code, w.Body)
+				}
+				location, err := url.Parse(w.Header().Get("Location"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				query := location.Query()
+				nonce, challenge = query.Get("nonce"), query.Get("code_challenge")
+				if query.Get("code_challenge_method") != "S256" || nonce == "" || query.Get("state") == "" {
+					t.Fatal("OIDC protections missing")
+				}
+				cookie := w.Result().Cookies()[0]
+				if rejected := do("callback?state=wrong&code=test", cookie); rejected.Code != 401 {
+					t.Fatal("invalid state accepted")
+				}
+				w = do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
+				if w.Code != 302 {
+					t.Fatalf("OIDC callback: %d %s", w.Code, w.Body)
+				}
+				var session *http.Cookie
+				for _, c := range w.Result().Cookies() {
+					if c.Name == auth.SessionCookieName {
+						session = c
+					}
+				}
+				if session == nil {
+					t.Fatal("missing OIDC session")
+				}
+				logout(session)
+			}
+		})
+	}
+}
