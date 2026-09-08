@@ -51,7 +51,6 @@ paths:
                   format: password
                   writeOnly: true
                   minLength: 1
-                  maxLength: 1024
                   description: 1 to 1024 UTF-8 bytes, not normalized.
       responses:
         "201":
@@ -81,7 +80,7 @@ paths:
         - name: identity_id
           in: path
           required: true
-          schema: {type: string, format: uuid}
+          schema: { $ref: "#/components/schemas/UuidV7" }
       requestBody:
         required: true
         content:
@@ -108,7 +107,7 @@ paths:
         - name: identity_id
           in: path
           required: true
-          schema: {type: string, format: uuid}
+          schema: { $ref: "#/components/schemas/UuidV7" }
         - name: X-Approval-ID
           in: header
           required: true
@@ -127,7 +126,6 @@ paths:
                   format: password
                   writeOnly: true
                   minLength: 1
-                  maxLength: 1024
                   description: 1 to 1024 UTF-8 bytes, not normalized.
       responses:
         "204":

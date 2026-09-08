@@ -6,3 +6,9 @@ CREATE TABLE local_auth_bootstrap (
 );
 
 COMMENT ON TABLE local_auth_bootstrap IS 'One-shot Local initialization marker and fixed RBAC management workspace. Never cleared by password changes or disable.';
+
+-- Older Controllers do not read this additive marker. Existing identity,
+-- credential, session and role-binding schemas remain unchanged.
+UPDATE controller_schema_compatibility
+SET minimum_compatible_controller_schema = 29
+WHERE singleton AND "current_schema" = 32;
