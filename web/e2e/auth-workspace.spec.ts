@@ -3,6 +3,12 @@ import { expect, test, type Page } from "@playwright/test";
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const betaId = "019fc0a4-6d92-765c-a8a1-4af556614cc2";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/v1/auth/methods", (route) =>
+    route.fulfill({ json: { local: false, oidc: true } }),
+  );
+});
+
 async function installEventSourceProbe(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const sources: Array<{
