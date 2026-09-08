@@ -51,6 +51,7 @@ cleanup() {
     fi
   done
   rm -rf "${TMP_ROOT}"
+  if [[ -n "${PRE34_ROOT:-}" ]]; then rm -rf "${PRE34_ROOT}"; fi
   if ((exit_code != 0)); then
     exit "${exit_code}"
   fi
@@ -68,6 +69,21 @@ else
   (cd "${ROOT}/control-plane" && go build -trimpath -o "${BIN}" ./cmd/ocserv-control)
 fi
 
+# Historical rollback tests need a genuine pre-34 database, not a bypass of
+# the forward-only migration. Build a test-only controller/source fixture with
+# the unchanged migrations 1..33 and their original runtime grant contract.
+LATEST_BIN="${BIN}"
+# Socket tests require trusted ancestry and short Unix-domain socket paths.
+PRE34_ROOT="$(mktemp -d "${ROOT}/.p34-XXXXXX")"
+cp -R "${ROOT}/control-plane" "${PRE34_ROOT}/control-plane"
+rm "${PRE34_ROOT}/control-plane/migrations/000034_local_initialization.up.sql"
+sed '/"GRANT UPDATE (completion_pending,completed_at,approver_identity_id) ON local_auth_bootstrap TO " + identifier,/d' \
+  "${ROOT}/control-plane/migrations/runner.go" >"${PRE34_ROOT}/control-plane/migrations/runner.go"
+PRE34_BIN="${TMP_ROOT}/pre34-control"
+(cd "${PRE34_ROOT}/control-plane" && go build -trimpath -o "${PRE34_BIN}" ./cmd/ocserv-control)
+TEST_CONTROL_PLANE="${ROOT}/control-plane"
+SCHEMA_VERSION=34
+
 case "${PG_MAJOR}" in
   all) POSTGRES_MAJORS=(17 18) ;;
   17 | 18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
@@ -78,12 +94,29 @@ case "${PG_MAJOR}" in
 esac
 
 assert_local_bootstrap_schema() {
-  local container=$1 database=$2
+  local container=$1 database=$2 schema=${3:-${SCHEMA_VERSION}}
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM schema_migrations WHERE version = 32")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")" = "33|33"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")" = "${schema}|${schema}"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','local_auth_attempts','SELECT,INSERT,UPDATE,DELETE') AND NOT has_table_privilege('ocservia_app','local_auth_attempts','TRUNCATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='local_auth_bootstrap'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','local_auth_bootstrap','SELECT') AND has_table_privilege('ocservia_app','local_auth_bootstrap','INSERT') AND NOT has_table_privilege('ocservia_app','local_auth_bootstrap','UPDATE,DELETE,TRUNCATE')")" = "t"
+  if [[ "${schema}" = 33 ]]; then
+    test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM schema_migrations WHERE version>=34")" = "0"
+    test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='local_auth_bootstrap' AND column_name='completion_pending'")" = "0"
+    return
+  fi
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM schema_migrations WHERE version=34")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='local_auth_bootstrap' AND ((column_name='completion_pending' AND data_type='boolean' AND is_nullable='NO' AND column_default='false') OR (column_name='completed_at' AND data_type='timestamp with time zone' AND is_nullable='YES') OR (column_name='approver_identity_id' AND data_type='uuid' AND is_nullable='YES'))")" = "3"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid='local_auth_bootstrap'::regclass AND convalidated AND ((conname='local_initialization_state' AND contype='c') OR (conname='local_auth_bootstrap_approver_identity_id_fkey' AND contype='f' AND confrelid='identities'::regclass AND confdeltype='r'))")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT bool_and(has_column_privilege('ocservia_app','local_auth_bootstrap',column_name,'UPDATE') = (column_name IN ('completion_pending','completed_at','approver_identity_id'))) FROM information_schema.columns WHERE table_schema='public' AND table_name='local_auth_bootstrap'")" = "t"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolbypassrls AND NOT pg_has_role('ocservia_app','ocservia_owner','MEMBER') FROM pg_roles WHERE rolname='ocservia_app'")" = "t"
+  if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" \
+    <"${ROOT}/control-plane/migrations/000034_local_initialization.down.sql" >"${TMP_ROOT}/${database}-initialization-down.log" 2>&1; then
+    echo "forward-only Local initialization migration unexpectedly rolled back" >&2
+    exit 1
+  fi
+  grep -Fq 'Local initialization migration is forward-only' "${TMP_ROOT}/${database}-initialization-down.log"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")" = "34|34"
 }
 
 wait_for_postgres() {
@@ -189,22 +222,36 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-migrate.log" 2>&1
   assert_local_bootstrap_schema "${container}" ocservia
+  latest_owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia_latest?sslmode=disable"
+  latest_runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia_latest?sslmode=disable"
   compatibility_before="$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc \
     "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")"
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
-    "${BIN}" --schema-compatibility-check=33 \
+    "${BIN}" --schema-compatibility-check=34 \
     >"${TMP_ROOT}/pg${major}-schema-compatibility-check.log" 2>&1
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc \
     "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")" = "${compatibility_before}"
   if OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
-    "${BIN}" --schema-compatibility-check=32 \
+    "${BIN}" --schema-compatibility-check=33 \
     >"${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log" 2>&1; then
     echo "schema compatibility check accepted a Controller below the declared minimum" >&2
     exit 1
   fi
-  grep -Fq 'schema compatibility does not allow Controller schema 32' \
+  grep -Fq 'schema compatibility does not allow Controller schema 33' \
     "${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log"
 
+  # Preserve the latest database. Historical down chains use a separately
+  # initialized schema-33 fixture, never a bypass of migration 34.
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+    "ALTER DATABASE ocservia RENAME TO ocservia_latest" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+    "CREATE DATABASE ocservia" >/dev/null
+  BIN="${PRE34_BIN}"
+  TEST_CONTROL_PLANE="${PRE34_ROOT}/control-plane"
+  SCHEMA_VERSION=33
+  OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
+    "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-pre34.log" 2>&1
+  assert_local_bootstrap_schema "${container}" ocservia
   clean_database="ocservia_clean23_${major}"
   clone_database "${container}" ocservia "${clean_database}"
   # Simulate leaders that already took over: the fencing epoch must survive
@@ -281,7 +328,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # The next takeover runs through the real connectionowner.Acquire path on
   # the re-upgraded schema, not a hand-written SQL update, so the evidence
   # matches the production code path.
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${clean_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${clean_url}" \
     OCSERV_TEST_RETAINED_NODE_HEX="25252525252525252525252525252525" \
     go test -p 1 -race ./internal/connectionowner -run TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration -count=1)
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
@@ -377,11 +424,11 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # -race is required here: these are the only tests that exercise the
   # coordination package against a database, so this is where the race
   # detector actually observes renewal, loss, and session snapshotting.
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 -race ./internal/coordination ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
     go test -p 1 ./migrations -run '^TestControllerSchemaCompatibility.*Integration$' -count=1)
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/api -run '^TestReadinessHonorsSchemaCompatibilityContractIntegration$' -count=1)
 
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
@@ -528,10 +575,16 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_class WHERE relname = 'telemetry_samples_' || to_char(date_trunc('month', now()) - interval '2 months', 'YYYYMM')")" = "0"
   stop_process "${pid}"
   rollback_database="ocservia_rollback_${major}"
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/rbac ./internal/auth ./internal/privdattestation -run Integration -count=1)
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
-    go test -p 1 ./internal/api -run '^TestLocalAccountHTTPSharedLimitsIntegration$|^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$|^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$|^TestAgentUpgradeRouteResolvesTrustedReleasesIntegration$|^TestAgentRolloutFleetLifecycleIntegration$' -count=1)
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
+    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/privdattestation -run Integration -count=1)
+  # R4 Local/RBAC tests exercise the real latest schema, not the historical
+  # rollback fixture. Their runtime role retains the production privileges.
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
+    go test -p 1 ./internal/rbac ./internal/auth -run Integration -count=1)
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" \
+    go test -p 1 ./internal/api -run '^TestLocalAccountHTTPSharedLimitsIntegration$' -count=1)
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
+    go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$|^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$|^TestAgentUpgradeRouteResolvesTrustedReleasesIntegration$|^TestAgentRolloutFleetLifecycleIntegration$' -count=1)
   OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=scheduler \
     >"${TMP_ROOT}/pg${major}-audit-checkpoint.log" 2>&1 &
   checkpoint_pid=$!
@@ -817,6 +870,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "DELETE FROM schema_migrations WHERE version = 7" >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='agent_command_results'")" = "0"
+  BIN="${LATEST_BIN}"
+  TEST_CONTROL_PLANE="${ROOT}/control-plane"
+  SCHEMA_VERSION=34
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-up-after-down.log" 2>&1
@@ -849,7 +905,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # The next takeover runs through the real connectionowner.Acquire path on
   # the re-upgraded schema, not a hand-written SQL update, so the evidence
   # matches the production code path.
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
     OCSERV_TEST_RETAINED_NODE_HEX="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" \
     go test -p 1 -race ./internal/connectionowner -run TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration -count=1)
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
@@ -866,7 +922,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   pid=$!
   PIDS+=("${pid}")
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "33"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "34"
   assert_local_bootstrap_schema "${container}" ocservia
   # The re-upgraded leader acquires leadership on its first maintenance tick:
   # the retained epoch must advance strictly beyond the pre-rollback value,
@@ -885,10 +941,10 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     exit 1
   fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (34, '000034_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (35, '000035_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "503"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 34" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 35" >/dev/null
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
 
   docker stop "${container}" >/dev/null
@@ -902,14 +958,14 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   wait_for_tcp 127.0.0.1 "${port}"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (34, '000034_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (35, '000035_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-unknown-version.log" 2>&1; then
     echo "binary accepted an unknown schema version" >&2
     exit 1
   fi
-  if ! grep -Fq 'schema compatibility current schema 33 does not match applied schema version 34' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
+  if ! grep -Fq 'schema compatibility current schema 34 does not match applied schema version 35' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
     cat "${TMP_ROOT}/pg${major}-unknown-version.log" >&2
     echo "binary failed for an unexpected reason with an unknown schema version" >&2
     exit 1
@@ -951,6 +1007,10 @@ docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia
 " >/dev/null
 owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
+OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
+  "${PRE34_BIN}" --migrate-only >"${TMP_ROOT}/upgrade-pre34.log" 2>&1
+assert_local_bootstrap_schema "${container}" ocservia 33
+clone_database "${container}" ocservia ocservia_pre34
 OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
   OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
   >"${TMP_ROOT}/upgrade.log" 2>&1
@@ -1003,6 +1063,13 @@ for role in scheduler api; do
   kill -0 "${pid}"
   stop_process "${pid}"
 done
+
+# Resume the historical teardown from the pre-34 upgrade snapshot.
+docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+  "ALTER DATABASE ocservia RENAME TO ocservia_latest" >/dev/null
+docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+  "ALTER DATABASE ocservia_pre34 RENAME TO ocservia" >/dev/null
+assert_local_bootstrap_schema "${container}" ocservia 33
 
 # The fencing table outlives even a full downgrade by contract: bump the
 # epoch first so retention is observable through the teardown below.

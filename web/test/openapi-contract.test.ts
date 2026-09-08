@@ -14,7 +14,7 @@ interface OpenApiDocument {
       {
         operationId?: unknown;
         security?: unknown;
-        responses?: Record<string, unknown>;
+        responses?: Record<string, { description?: unknown }>;
       }
     >
   >;
@@ -167,9 +167,13 @@ describe("OpenAPI invariants", () => {
         },
       },
       responses: {
-        "204": { description: expect.stringContaining("Log in again") },
+        "204": {},
       },
     });
+    expect(
+      document.paths?.["/auth/change-password"]?.post?.responses?.["204"]
+        ?.description,
+    ).toContain("Log in again");
   });
 
   it("keeps Local lifecycle password limits byte-based and identity paths UUIDv7", async () => {
