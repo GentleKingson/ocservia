@@ -110,7 +110,11 @@ func TestAuthSourceTrustAndNormalization(t *testing.T) {
 
 func TestAuthRouteAdmissionAndIsolation(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
-	server.auth = &auth.Service{}
+	var err error
+	server.auth, err = auth.New(context.Background(), &pgxpool.Pool{}, auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
 	budget := newAuthAdmission(1, 1, 1)
 	calls := 0
 	handler := server.limitAuthentication(budget, func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusNoContent) })

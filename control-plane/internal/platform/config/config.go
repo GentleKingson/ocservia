@@ -376,9 +376,8 @@ func (c Config) Validate() error {
 			return errors.New("browser sessions require a 32-byte session key and a session TTL from 1m to 24h")
 		}
 	}
-	// Keep a usable browser login path until the Local HTTP login API ships.
-	if c.Environment == "production" && !c.OIDCEnabled() {
-		return errors.New("OIDC is required in production until Local HTTP login is available")
+	if c.Environment == "production" && !c.LocalAuthEnabled() && !c.OIDCEnabled() {
+		return errors.New("Local or OIDC authentication is required in production")
 	}
 	if len(c.AuditCheckpointKey) != 0 && len(c.AuditCheckpointKey) != 32 {
 		return errors.New("audit checkpoint key must be 32 bytes")

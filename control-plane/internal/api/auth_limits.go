@@ -111,7 +111,7 @@ func (s *Server) admitAuthentication(w http.ResponseWriter, r *http.Request, bud
 func (s *Server) limitAuthentication(budget *authAdmission, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Preserve the disabled-auth response without spending a budget.
-		if s.auth == nil {
+		if s.auth == nil || !s.auth.OIDCEnabled() {
 			next(w, r)
 			return
 		}
