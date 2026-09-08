@@ -47,8 +47,8 @@ func normalizeLocalUsername(username string) (string, error) {
 }
 
 func hashPassword(password string) (string, error) {
-	if len(password) == 0 || len(password) > maxPasswordBytes {
-		return "", errors.New("local password must contain 1 to 1024 bytes")
+	if err := ValidateNewPassword(password); err != nil {
+		return "", err
 	}
 	salt := make([]byte, passwordSaltBytes)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {

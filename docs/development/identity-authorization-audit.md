@@ -66,8 +66,11 @@ Migration 000031 stores passwords only in `local_credentials`, keyed by
 as subject. Usernames are trimmed and lowercased, with a 128-byte input limit;
 the accepted alphabet is ASCII letters/digits plus `.`, `_`, and `-`, starting
 with a letter or digit. No email/name matching or OIDC account linking occurs.
-Passwords are not normalized and accept 1 to 1024 bytes; future provisioning
-entry points must apply their password-strength and login rate-limit policy.
+New passwords are not normalized and require at least 15 Unicode code points,
+at most 1024 UTF-8 bytes, and the embedded offline blocklist check. Every new
+hash passes `ValidateNewPassword` through `hashPassword`; future provisioning
+and self-service changes must reuse it. Historical 1..1024-byte credentials
+still verify unchanged. See the [Local password policy](../operations/authentication.md#local-new-password-policy).
 
 Hashes use `golang.org/x/crypto/argon2` Argon2id v19, independent 16-byte random
 salts, 32-byte outputs, and self-contained PHC parameters. The write cost is
@@ -103,8 +106,8 @@ ocserv-control --bootstrap-local-admin
 Provision the password file using the deployment secret manager, with restricted
 read permissions. The existing secret-file reader requires an absolute regular
 file, rejects symlinks and file replacement, limits reads, and removes a trailing
-CR/LF. The Local password limit remains 1..1024 bytes; use a strong generated
-password. No default, plaintext environment password, or password CLI option
+CR/LF. The password must meet the shared Local new-password policy above; use a
+strong generated password. No default, plaintext environment password, or password CLI option
 exists. Remove the bootstrap environment and secret mount after success.
 
 The one-shot exits without starting listeners/workers or contacting OIDC. One

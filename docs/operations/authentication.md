@@ -141,8 +141,10 @@ operator-invoked **one-shot**, not part of normal install or restart.
      control-plane --bootstrap-local-admin
    ```
 
-   The password accepts 1..1024 bytes (a trailing CR/LF is removed); use a strong
-   password from your secret manager, not the minimum length. The command uses
+   The password must satisfy the Local new-password policy below. The existing
+   secret-file format removes one trailing LF and then CR; other spaces and the
+   password's case are preserved. Use a password from your secret manager.
+   The command uses
    the application's database role, grants existing workspace-scoped
    `PlatformAdmin`, records the initialization and audit event atomically, and
    exits without starting listeners/workers or contacting the IdP.
@@ -159,6 +161,33 @@ not read the bootstrap file or reset/synchronize passwords. Disabling the first
 admin or resetting its password does not re-enable bootstrap. Preserve the
 initialization marker in backups; do not delete it or roll back its migration
 to recover an account.
+
+## Local new-password policy
+
+All Local password writes (trusted `CreateLocalCredential`, bootstrap, managed
+user creation and administrator reset) use `ValidateNewPassword` through the
+shared hashing function. Future self-service changes must use the same path.
+
+- At least 15 Unicode code points, at most 1024 UTF-8 bytes; invalid UTF-8 is rejected.
+- Long passwords, spaces and valid Unicode are supported. No uppercase, digit
+  or symbol composition rules, and no periodic forced changes are added.
+- Complete candidates are checked offline against an embedded common/breached
+  list and service-related supplement. No substring dictionary rejection or
+  online password checks are used. See the
+  [list provenance, license and maintenance procedure](../../control-plane/internal/auth/password_blocklist/README.md).
+- Password bytes are not trimmed, truncated, case-changed or Unicode-normalized
+  by the policy or hashing functions. Only blocklist lookup is case-insensitive.
+- Policy failures return a safe explanation (HTTP 400 for management endpoints),
+  before database writes: no identity, credential, role, audit mutation, session
+  revocation or reset-approval consumption occurs. Passwords/hashes are not logged.
+
+Existing hashes still verify the original password bytes, including historical
+short or now-blocklisted passwords. Login does not apply this new-setting policy
+and continues returning uniform credential errors. A later reset must meet the
+new policy. Argon2id, random salts, PHC parameters/limits and dummy verification
+remain unchanged. The length and blocklist rules follow
+[NIST SP 800-63B-4, section 3.1.1.2](https://pages.nist.gov/800-63-4/sp800-63b.html#passwordver).
+Unicode normalization is deliberately deferred to preserve historical hashes.
 
 ## Local identity and sessions
 

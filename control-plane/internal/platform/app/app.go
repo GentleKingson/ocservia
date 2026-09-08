@@ -41,6 +41,12 @@ import (
 type BuildInfo struct{ Version, Commit string }
 
 func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.Logger) error {
+	// Reject new bootstrap passwords before startup can transition audit state.
+	if cfg.BootstrapLocalAdmin {
+		if err := auth.ValidateNewPassword(cfg.LocalBootstrapPassword); err != nil {
+			return err
+		}
+	}
 	shutdownTelemetry, err := telemetry.Configure(ctx, cfg.OTLPEndpoint, build.Version, cfg.Environment)
 	if err != nil {
 		return err
