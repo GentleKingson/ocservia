@@ -15,6 +15,7 @@ type localCredential struct {
 	identityID   uuid.UUID
 	passwordHash string
 	disabled     bool
+	attemptLease uuid.UUID
 }
 
 // CreateLocalCredential is a provisioning primitive for trusted callers, not
@@ -65,7 +66,7 @@ func (s *Service) localCredential(ctx context.Context, username string) (localCr
 }
 
 // AuthenticateLocal returns the same session cookie and principal as OIDC.
-func (s *Service) AuthenticateLocal(ctx context.Context, username, password string) (*http.Cookie, Principal, error) {
+func (s *Service) AuthenticateLocal(ctx context.Context, username, password string) (cookie *http.Cookie, principal Principal, resultErr error) {
 	if !s.localEnabled {
 		return nil, Principal{}, ErrLocalDisabled
 	}
@@ -73,6 +74,21 @@ func (s *Service) AuthenticateLocal(ctx context.Context, username, password stri
 	if err != nil || len(password) == 0 || len(password) > maxPasswordBytes {
 		return nil, Principal{}, ErrUnauthenticated
 	}
+	lease, err := s.reserveLocalAttempt(ctx, username)
+	if err != nil {
+		return nil, Principal{}, err
+	}
+	failed := false
+	defer func() {
+		if cookie != nil {
+			return // Session commit already cleared the lease and failures.
+		}
+		if err := s.finishLocalAttempt(username, lease, failed); err != nil {
+			cookie, principal, resultErr = nil, Principal{}, err
+		}
+	}()
+	ctx, cancel := context.WithTimeout(ctx, localAttemptLease)
+	defer cancel()
 	credential, err := s.localCredential(ctx, username)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, Principal{}, err
@@ -85,9 +101,15 @@ func (s *Service) AuthenticateLocal(ctx context.Context, username, password stri
 	valid, err := verifyPassword(hash, password)
 	if err != nil {
 		_, _ = verifyPassword(dummyPasswordHash, password)
+		return nil, Principal{}, err
 	}
-	if !found || err != nil || !valid || credential.disabled {
+	if !found || !valid {
+		failed = true
 		return nil, Principal{}, ErrUnauthenticated
 	}
+	if credential.disabled {
+		return nil, Principal{}, ErrUnauthenticated
+	}
+	credential.attemptLease = lease
 	return s.createSession(ctx, LocalIssuer, username, "", "", false, &credential)
 }

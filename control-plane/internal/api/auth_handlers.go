@@ -53,6 +53,8 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 	// AuthenticateLocal enforces field byte limits and hides credential existence.
 	cookie, _, err := s.auth.AuthenticateLocal(r.Context(), *body.Username, *body.Password)
 	if err != nil {
+		// Account cooldown/single-flight rejection deliberately shares the bad
+		// credential response, without an account-specific Retry-After header.
 		if errors.Is(err, auth.ErrUnauthenticated) {
 			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Invalid username or password", "Invalid username or password")
 		} else {
