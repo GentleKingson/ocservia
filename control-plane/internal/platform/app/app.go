@@ -32,6 +32,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -96,6 +97,23 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
 		return fmt.Errorf("verify audit event authentication: %w", err)
+	}
+
+	if cfg.BootstrapLocalAdmin {
+		service, err := auth.New(ctx, pool, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+		if err != nil {
+			return errors.New("configure bootstrap authentication failed")
+		}
+		workspaceID, err := uuid.Parse(cfg.LocalBootstrapWorkspace)
+		if err != nil || workspaceID.Version() != 7 {
+			return errors.New("bootstrap workspace ID must be UUIDv7")
+		}
+		id, err := service.BootstrapLocalAdmin(ctx, cfg.LocalBootstrapUsername, cfg.LocalBootstrapPassword, workspaceID)
+		if err != nil {
+			return errors.New("Local administrator bootstrap rejected; check initialization state, workspace and credentials")
+		}
+		logger.Info("Local administrator bootstrap complete", "identity_id", id, "workspace_id", workspaceID)
+		return nil
 	}
 
 	logger.Info("control plane starting", "role", cfg.Role)

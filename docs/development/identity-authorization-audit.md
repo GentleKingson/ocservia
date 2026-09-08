@@ -78,6 +78,83 @@ logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
 Rolling back 000031 deletes local password hashes, not identities or sessions.
 Stop local provisioning/login and preserve credentials before applying down.
 
+## Initial Local administrator and lifecycle (P4)
+
+Apply migrations first using the existing `--migrate-only` procedure. Select an
+existing workspace to own platform Local identity administration. Its UUIDv7 is
+required explicitly: the repository has workspace-scoped RBAC, not global role
+bindings. Bootstrap records this choice permanently; API headers cannot select
+another workspace to obtain access to shared login identities.
+
+With the normal database, Local auth, session and audit configuration loaded:
+
+```sh
+export OCSERV_LOCAL_AUTH_ENABLED=true
+export OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin
+export OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID='<existing-workspace-uuidv7>'
+export OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password
+ocserv-control --bootstrap-local-admin
+```
+
+Provision the password file using the deployment secret manager, with restricted
+read permissions. The existing secret-file reader requires an absolute regular
+file, rejects symlinks and file replacement, limits reads, and removes a trailing
+CR/LF. The Local password limit remains 1..1024 bytes; use a strong generated
+password. No default, plaintext environment password, or password CLI option
+exists. Remove the bootstrap environment and secret mount after success.
+
+The one-shot exits without starting listeners/workers or contacting OIDC. One
+transaction creates the `local` identity, Argon2id credential, existing
+workspace-scoped `PlatformAdmin` binding, singleton initialization marker and
+audit event. A missing workspace or any insert/audit failure rolls everything
+back. Concurrent or later bootstrap attempts fail closed; an existing Local
+SecurityAdmin/PlatformAdmin also prevents bootstrap. Disabling the bootstrap
+identity or changing its password does not clear the marker. Normal startup does
+not read the bootstrap password file or synchronize credentials. Preserve the
+marker in backups; do not drop migration 000032 to reset credentials.
+
+Lifecycle endpoints (under `/api/v1`, `Content-Type: application/json`):
+
+| Endpoint | Body | Success |
+| --- | --- | --- |
+| `POST /local-users` | `{"username":"operator1","password":"..."}` | 201, `identity_id` |
+| `POST /local-users/{identity_id}:disable` | `{}` | 204 |
+| `POST /local-users/{identity_id}:reset-password` | `{"password":"..."}` | 204 |
+
+Every mutation requires an authenticated session, exact trusted `Origin`, and
+existing RBAC action `local_user.manage` in the fixed management workspace.
+Only existing `PlatformAdmin` has this action via its wildcard; SecurityAdmin,
+UserManager, and PlatformAdmin in other workspaces do not. The existing explicit
+break-glass policy remains available; development pseudo-principals are rejected.
+Creating an account grants no roles. Use `/role-bindings` for subsequent grants,
+including the unchanged independent approval requirement for elevated grants.
+
+Reset additionally requires `X-Approval-ID`. Request approval through
+`POST /approval-requests` in the management workspace using
+`action: local_user.reset-password`, `resource_type: local_user`, the target
+`resource_id`, `reason`, and `ttl_seconds`. A different existing authorized
+SecurityAdmin/PlatformAdmin approves the returned request hash through the normal
+approval endpoint. Approval authorizes replacing that identity's password, not a
+specific password value; no password or password hash enters approval content.
+Consumption, reset, session revocation and audit commit together. Replay fails.
+Establish separately owned approval authority using the existing provisioning
+procedure before relying on password reset; bootstrap deliberately does not
+create a second approver or bypass elevated role-grant approval.
+
+Disable and reset revoke **all** `auth_sessions` for the target identity in the
+same transaction as the change and audit. `Authenticate` also checks
+`identities.disabled_at` on every request. A login verified before the change
+rechecks the locked credential and disabled state before creating a session, so
+it cannot issue a usable stale session after commit. Already-authorized in-flight
+requests are not retroactively cancelled. Reset does not re-enable a disabled
+identity. Each successful mutation records actor, session, target identity,
+action, request ID and (for reset) approval ID in the existing audit chain.
+
+These resources are platform login identities, not `/nodes/{node_id}/users` VPN
+accounts. Duplicate normalized usernames return 409. Invalid input returns 400;
+OIDC/non-Local identity targets return 404 and are never modified, even with the
+same username/email. There is no linking, self-registration, recovery or MFA.
+
 ## Break-glass
 
 Break-glass is disabled unless `OCSERV_BREAK_GLASS_ENABLED=true` and

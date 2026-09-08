@@ -36,15 +36,23 @@ func (s *Service) CreateLocalCredential(ctx context.Context, username, password 
 		return uuid.Nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	id, err := s.insertLocalCredential(ctx, tx, username, hash)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
+}
+
+func (s *Service) insertLocalCredential(ctx context.Context, tx pgx.Tx, username, hash string) (uuid.UUID, error) {
 	id := uuid.Must(uuid.NewV7())
 	now := s.now()
 	if _, err := tx.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,$2,$3,$4,$4)`, id, LocalIssuer, username, now); err != nil {
 		return uuid.Nil, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO local_credentials(identity_id,username,password_hash,created_at,updated_at,password_changed_at) VALUES($1,$2,$3,$4,$4,$4)`, id, username, hash, now); err != nil {
-		return uuid.Nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, err
 	}
 	return id, nil

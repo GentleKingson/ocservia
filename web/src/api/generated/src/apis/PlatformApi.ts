@@ -28,6 +28,16 @@ import {
   BuildInfoFromJSON,
   BuildInfoToJSON,
 } from "../models/BuildInfo";
+import {
+  type CreateLocalUser201Response,
+  CreateLocalUser201ResponseFromJSON,
+  CreateLocalUser201ResponseToJSON,
+} from "../models/CreateLocalUser201Response";
+import {
+  type CreateLocalUserRequest,
+  CreateLocalUserRequestFromJSON,
+  CreateLocalUserRequestToJSON,
+} from "../models/CreateLocalUserRequest";
 import { type Health, HealthFromJSON, HealthToJSON } from "../models/Health";
 import {
   type LocalLoginRequest,
@@ -44,6 +54,11 @@ import {
   ReadinessFromJSON,
   ReadinessToJSON,
 } from "../models/Readiness";
+import {
+  type ResetLocalUserPasswordRequest,
+  ResetLocalUserPasswordRequestFromJSON,
+  ResetLocalUserPasswordRequestToJSON,
+} from "../models/ResetLocalUserPasswordRequest";
 import {
   type RoleBinding,
   RoleBindingFromJSON,
@@ -65,13 +80,28 @@ export interface CompleteOIDCLoginRequest {
   code: string;
 }
 
+export interface CreateLocalUserOperationRequest {
+  createLocalUserRequest: CreateLocalUserRequest;
+}
+
 export interface CreateRoleBindingRequest {
   roleBindingRequest: RoleBindingRequest;
   xWorkspaceID?: string;
 }
 
+export interface DisableLocalUserRequest {
+  identityId: string;
+  requestBody: { [key: string]: any | null };
+}
+
 export interface LoginLocalRequest {
   localLoginRequest: LocalLoginRequest;
+}
+
+export interface ResetLocalUserPasswordOperationRequest {
+  identityId: string;
+  xApprovalID: string;
+  resetLocalUserPasswordRequest: ResetLocalUserPasswordRequest;
 }
 
 export interface UseBreakGlassRequest {
@@ -197,6 +227,79 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for createLocalUser without sending the request
+   */
+  async createLocalUserRequestOpts(
+    requestParameters: CreateLocalUserOperationRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["createLocalUserRequest"] == null) {
+      throw new runtime.RequiredError(
+        "createLocalUserRequest",
+        'Required parameter "createLocalUserRequest" was null or undefined when calling createLocalUser().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/local-users`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: CreateLocalUserRequestToJSON(
+        requestParameters["createLocalUserRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Requires exact Origin and local_user.manage in the fixed bootstrap management workspace (existing PlatformAdmin). Never links OIDC identities or managed-node VPN users.
+   * Create a platform Local login identity without role bindings
+   */
+  async createLocalUserRaw(
+    requestParameters: CreateLocalUserOperationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<CreateLocalUser201Response>> {
+    const requestOptions =
+      await this.createLocalUserRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      CreateLocalUser201ResponseFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Requires exact Origin and local_user.manage in the fixed bootstrap management workspace (existing PlatformAdmin). Never links OIDC identities or managed-node VPN users.
+   * Create a platform Local login identity without role bindings
+   */
+  async createLocalUser(
+    requestParameters: CreateLocalUserOperationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<CreateLocalUser201Response> {
+    const response = await this.createLocalUserRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for createRoleBinding without sending the request
    */
   async createRoleBindingRequestOpts(
@@ -269,6 +372,82 @@ export class PlatformApi extends runtime.BaseAPI {
       initOverrides,
     );
     return await response.value();
+  }
+
+  /**
+   * Creates request options for disableLocalUser without sending the request
+   */
+  async disableLocalUserRequestOpts(
+    requestParameters: DisableLocalUserRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["identityId"] == null) {
+      throw new runtime.RequiredError(
+        "identityId",
+        'Required parameter "identityId" was null or undefined when calling disableLocalUser().',
+      );
+    }
+
+    if (requestParameters["requestBody"] == null) {
+      throw new runtime.RequiredError(
+        "requestBody",
+        'Required parameter "requestBody" was null or undefined when calling disableLocalUser().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/local-users/{identity_id}:disable`;
+    urlPath = urlPath.replace(
+      "{identity_id}",
+      encodeURIComponent(String(requestParameters["identityId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: requestParameters["requestBody"],
+    };
+  }
+
+  /**
+   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes.
+   * Disable a platform Local login identity and revoke all its sessions
+   */
+  async disableLocalUserRaw(
+    requestParameters: DisableLocalUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<void>> {
+    const requestOptions =
+      await this.disableLocalUserRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.VoidApiResponse(response);
+  }
+
+  /**
+   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes.
+   * Disable a platform Local login identity and revoke all its sessions
+   */
+  async disableLocalUser(
+    requestParameters: DisableLocalUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<void> {
+    await this.disableLocalUserRaw(requestParameters, initOverrides);
   }
 
   /**
@@ -591,6 +770,97 @@ export class PlatformApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<void> {
     await this.logoutRaw(initOverrides);
+  }
+
+  /**
+   * Creates request options for resetLocalUserPassword without sending the request
+   */
+  async resetLocalUserPasswordRequestOpts(
+    requestParameters: ResetLocalUserPasswordOperationRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["identityId"] == null) {
+      throw new runtime.RequiredError(
+        "identityId",
+        'Required parameter "identityId" was null or undefined when calling resetLocalUserPassword().',
+      );
+    }
+
+    if (requestParameters["xApprovalID"] == null) {
+      throw new runtime.RequiredError(
+        "xApprovalID",
+        'Required parameter "xApprovalID" was null or undefined when calling resetLocalUserPassword().',
+      );
+    }
+
+    if (requestParameters["resetLocalUserPasswordRequest"] == null) {
+      throw new runtime.RequiredError(
+        "resetLocalUserPasswordRequest",
+        'Required parameter "resetLocalUserPasswordRequest" was null or undefined when calling resetLocalUserPassword().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["xApprovalID"] != null) {
+      headerParameters["X-Approval-ID"] = String(
+        requestParameters["xApprovalID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/local-users/{identity_id}:reset-password`;
+    urlPath = urlPath.replace(
+      "{identity_id}",
+      encodeURIComponent(String(requestParameters["identityId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ResetLocalUserPasswordRequestToJSON(
+        requestParameters["resetLocalUserPasswordRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Requires exact Origin, local_user.manage in the fixed management workspace, and an independent one-use approval for action local_user.reset-password, resource_type local_user and this identity ID. Approval authorizes credential replacement without storing password content. Does not re-enable a disabled identity. OIDC identities return 404.
+   * Reset a platform Local password and revoke all its sessions
+   */
+  async resetLocalUserPasswordRaw(
+    requestParameters: ResetLocalUserPasswordOperationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<void>> {
+    const requestOptions =
+      await this.resetLocalUserPasswordRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.VoidApiResponse(response);
+  }
+
+  /**
+   * Requires exact Origin, local_user.manage in the fixed management workspace, and an independent one-use approval for action local_user.reset-password, resource_type local_user and this identity ID. Approval authorizes credential replacement without storing password content. Does not re-enable a disabled identity. OIDC identities return 404.
+   * Reset a platform Local password and revoke all its sessions
+   */
+  async resetLocalUserPassword(
+    requestParameters: ResetLocalUserPasswordOperationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<void> {
+    await this.resetLocalUserPasswordRaw(requestParameters, initOverrides);
   }
 
   /**

@@ -104,6 +104,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/auth/methods", s.authMethods)
 	mux.HandleFunc("GET /api/v1/auth/callback", s.limitAuthentication(newAuthAdmission(30, 120, 8), s.callback))
 	mux.HandleFunc("POST /api/v1/auth/logout", s.requireOperationAuth(s.logout))
+	mux.HandleFunc("POST /api/v1/local-users", s.requireOperationAuth(s.createLocalUser))
+	mux.HandleFunc("POST /api/v1/local-users/{local_user_action}", s.requireOperationAuth(s.localUserAction))
 	mux.HandleFunc("POST /api/v1/auth/break-glass", s.breakGlass)
 	mux.HandleFunc("POST /api/v1/development/simulations", s.createSimulation)
 	mux.HandleFunc("GET /api/v1/development/runtime", s.developmentRuntime)
@@ -348,6 +350,16 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 }
 
 func routeMethod(path string) (string, bool) {
+	if path == "/api/v1/local-users" {
+		return http.MethodPost, true
+	}
+	if strings.HasPrefix(path, "/api/v1/local-users/") {
+		id, action, ok := strings.Cut(strings.TrimPrefix(path, "/api/v1/local-users/"), ":")
+		if ok && id != "" && !strings.Contains(id, "/") && (action == "disable" || action == "reset-password") {
+			return http.MethodPost, true
+		}
+		return "", false
+	}
 	switch path {
 	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/operations/summary", "/api/v1/user-operations/metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/methods", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
 		return http.MethodGet, true

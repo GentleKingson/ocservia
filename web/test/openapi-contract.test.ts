@@ -142,6 +142,71 @@ describe("OpenAPI invariants", () => {
     });
   });
 
+  it("keeps Local lifecycle password limits byte-based and identity paths UUIDv7", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    for (const path of [
+      "/local-users",
+      "/local-users/{identity_id}:reset-password",
+    ]) {
+      expect(document.paths?.[path]?.post).toMatchObject({
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                properties: {
+                  password: {
+                    minLength: 1,
+                    writeOnly: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      expect(document.paths?.[path]?.post).not.toHaveProperty([
+        "requestBody",
+        "content",
+        "application/json",
+        "schema",
+        "properties",
+        "password",
+        "maxLength",
+      ]);
+      expect(document.paths?.[path]?.post).toHaveProperty(
+        [
+          "requestBody",
+          "content",
+          "application/json",
+          "schema",
+          "properties",
+          "password",
+          "description",
+        ],
+        expect.stringContaining("1024 UTF-8 bytes"),
+      );
+    }
+    for (const action of ["disable", "reset-password"]) {
+      expect(
+        document.paths?.[`/local-users/{identity_id}:${action}`]?.post,
+      ).toHaveProperty(
+        "parameters",
+        expect.arrayContaining([
+          {
+            name: "identity_id",
+            in: "path",
+            required: true,
+            schema: { $ref: "#/components/schemas/UuidV7" },
+          },
+        ]),
+      );
+    }
+  });
+
   it("pins OpenAPI and the cross-language scalar conventions", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
