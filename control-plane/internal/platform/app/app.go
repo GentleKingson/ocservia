@@ -350,10 +350,15 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		return fmt.Errorf("configure SSE admission: %w", err)
 	}
 	var authService *auth.Service
-	if cfg.OIDCEnabled() {
-		authService, err = auth.New(ctx, pool, auth.Config{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, RedirectURL: cfg.OIDCRedirectURL, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash})
+	if cfg.LocalAuthEnabled() || cfg.OIDCEnabled() {
+		authConfig := auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash}
+		if cfg.OIDCEnabled() {
+			authConfig.Issuer, authConfig.ClientID = cfg.OIDCIssuer, cfg.OIDCClientID
+			authConfig.ClientSecret, authConfig.RedirectURL = cfg.OIDCClientSecret, cfg.OIDCRedirectURL
+		}
+		authService, err = auth.New(ctx, pool, authConfig)
 		if err != nil {
-			return fmt.Errorf("configure OIDC: %w", err)
+			return fmt.Errorf("configure authentication: %w", err)
 		}
 	}
 	server.EnableAuthorization(authService, rbac.New(pool), approvals.New(pool), auditManager)

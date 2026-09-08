@@ -429,6 +429,7 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 	cfg.OIDCClientID = "ocservia"
 	cfg.OIDCClientSecret = strings.Repeat("s", 11)
 	cfg.OIDCRedirectURL = "https://ocservia.example.test/api/v1/auth/callback"
+	cfg.PublicOrigin = "https://ocservia.example.test"
 	cfg.SessionKey = make([]byte, 32)
 	cfg.AuditCheckpointKey = make([]byte, 32)
 	cfg.AuditEventKeyID = "audit-event-v1"
@@ -559,34 +560,31 @@ func TestCertificateSignerRequiresHTTPSAndCompleteCredentials(t *testing.T) {
 	}
 }
 
-func TestBrowserOriginDerivesFromOIDCRedirectURL(t *testing.T) {
+func TestBrowserOriginUsesPublicOrigin(t *testing.T) {
 	tests := []struct {
-		name        string
-		redirectURL string
-		want        string
+		name         string
+		publicOrigin string
+		want         string
 	}{
-		{name: "host only", redirectURL: "https://admin.example.com/api/v1/auth/callback", want: "https://admin.example.com"},
-		{name: "default HTTPS port is normalized away", redirectURL: "https://admin.example.com:443/api/v1/auth/callback", want: "https://admin.example.com"},
-		{name: "non-default port is kept", redirectURL: "https://admin.example.com:8443/api/v1/auth/callback", want: "https://admin.example.com:8443"},
-		{name: "uppercase host is normalized", redirectURL: "https://Admin.Example.COM/api/v1/auth/callback", want: "https://admin.example.com"},
-		{name: "no OIDC configuration yields no origin", redirectURL: "", want: ""},
+		{name: "host only", publicOrigin: "https://admin.example.com", want: "https://admin.example.com"},
+		{name: "default HTTPS port is normalized away", publicOrigin: "https://admin.example.com:443/", want: "https://admin.example.com"},
+		{name: "non-default port is kept", publicOrigin: "https://admin.example.com:8443", want: "https://admin.example.com:8443"},
+		{name: "uppercase host is normalized", publicOrigin: "https://Admin.Example.COM", want: "https://admin.example.com"},
+		{name: "no public origin yields no origin", want: ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
-			if test.redirectURL != "" {
-				values["OCSERV_OIDC_REDIRECT_URL"] = test.redirectURL
-				values["OCSERV_OIDC_ISSUER"] = "https://id.example.test"
-				values["OCSERV_OIDC_CLIENT_ID"] = "client"
-				values["OCSERV_OIDC_CLIENT_SECRET"] = "secret"
-				values["OCSERV_SESSION_KEY"] = strings.Repeat("11", 32)
-			}
+			values["OCSERV_PUBLIC_ORIGIN"] = test.publicOrigin
 			cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
 			if err != nil {
 				t.Fatalf("Load() error = %v", err)
 			}
 			if origin := cfg.BrowserOrigin(); origin != test.want {
 				t.Fatalf("BrowserOrigin() = %q, want %q", origin, test.want)
+			}
+			if cfg.PublicOrigin != test.want {
+				t.Fatalf("stored PublicOrigin = %q, want %q", cfg.PublicOrigin, test.want)
 			}
 		})
 	}

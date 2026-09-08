@@ -44,6 +44,8 @@ type Config struct {
 	OTLPEndpoint             string
 	DevAuth                  bool
 	DevAuthToken             string
+	LocalAuth                bool
+	PublicOrigin             string
 	OIDCIssuer               string
 	OIDCClientID             string
 	OIDCClientSecret         string
@@ -135,6 +137,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		cfg.TransportUID, cfg.TransportGID, cfg.TransportIdentitySet = uint32(uid), uint32(gid), true
 	}
 	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
+	setString(lookup, "OCSERV_PUBLIC_ORIGIN", &cfg.PublicOrigin)
 	setString(lookup, "OCSERV_OIDC_ISSUER", &cfg.OIDCIssuer)
 	setString(lookup, "OCSERV_OIDC_CLIENT_ID", &cfg.OIDCClientID)
 	if err := setStringOrFile(lookup, "OCSERV_OIDC_CLIENT_SECRET", &cfg.OIDCClientSecret); err != nil {
@@ -253,6 +256,13 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 			return Config{}, err
 		}
 	}
+	if value, ok := lookup("OCSERV_LOCAL_AUTH_ENABLED"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_LOCAL_AUTH_ENABLED: %w", err)
+		}
+		cfg.LocalAuth = parsed
+	}
 	if value, ok := lookup("OCSERV_DEV_AUTH"); ok {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -298,6 +308,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
+	cfg.PublicOrigin = cfg.BrowserOrigin()
 	return cfg, nil
 }
 
@@ -339,18 +350,35 @@ func (c Config) Validate() error {
 	if c.DevAuthToken != "" && (c.Environment != "development" || len(c.DevAuthToken) < 32) {
 		return errors.New("development auth token requires environment=development and at least 32 characters")
 	}
-	oidcConfigured := c.OIDCIssuer != "" || c.OIDCClientID != "" || c.OIDCClientSecret != "" || c.OIDCRedirectURL != "" || len(c.SessionKey) != 0
+	publicOrigin := c.BrowserOrigin()
+	if c.PublicOrigin != "" && publicOrigin == "" {
+		return errors.New("OCSERV_PUBLIC_ORIGIN must be a valid HTTP(S) origin without userinfo, query, or fragment")
+	}
+	if c.Environment == "production" && !strings.HasPrefix(publicOrigin, "https://") {
+		return errors.New("OCSERV_PUBLIC_ORIGIN must be an HTTPS origin in production")
+	}
+	oidcConfigured := c.OIDCIssuer != "" || c.OIDCClientID != "" || c.OIDCClientSecret != "" || c.OIDCRedirectURL != ""
 	if oidcConfigured {
 		issuer, issuerErr := url.Parse(c.OIDCIssuer)
 		redirect, redirectErr := url.Parse(c.OIDCRedirectURL)
 		if issuerErr != nil || issuer.Scheme != "https" || issuer.Host == "" || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" ||
 			redirectErr != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" ||
-			c.OIDCClientID == "" || c.OIDCClientSecret == "" || len(c.SessionKey) != 32 || c.SessionTTL < time.Minute || c.SessionTTL > 24*time.Hour {
-			return errors.New("OIDC requires HTTPS issuer/redirect, client credentials, a 32-byte session key, and a session TTL from 1m to 24h")
+			c.OIDCClientID == "" || c.OIDCClientSecret == "" {
+			return errors.New("OIDC requires HTTPS issuer/redirect and complete client credentials")
+		}
+		redirectOrigin, ok := browserorigin.Normalize(redirect.Scheme + "://" + redirect.Host)
+		if !ok || (c.Environment == "production" && redirectOrigin != publicOrigin) {
+			return errors.New("OIDC redirect origin must match OCSERV_PUBLIC_ORIGIN in production")
 		}
 	}
-	if c.Environment == "production" && !oidcConfigured {
-		return errors.New("OIDC is required in production")
+	if c.LocalAuthEnabled() || c.OIDCEnabled() || len(c.SessionKey) != 0 {
+		if len(c.SessionKey) != 32 || c.SessionTTL < time.Minute || c.SessionTTL > 24*time.Hour {
+			return errors.New("browser sessions require a 32-byte session key and a session TTL from 1m to 24h")
+		}
+	}
+	// Keep a usable browser login path until the Local HTTP login API ships.
+	if c.Environment == "production" && !c.OIDCEnabled() {
+		return errors.New("OIDC is required in production until Local HTTP login is available")
 	}
 	if len(c.AuditCheckpointKey) != 0 && len(c.AuditCheckpointKey) != 32 {
 		return errors.New("audit checkpoint key must be 32 bytes")
@@ -710,22 +738,19 @@ func setHexOrFile(lookup LookupEnv, name string, target *[]byte) error {
 	return nil
 }
 
-func (c Config) OIDCEnabled() bool { return c.OIDCIssuer != "" }
+func (c Config) LocalAuthEnabled() bool { return c.LocalAuth }
 
-// BrowserOrigin derives the exact public browser origin that may drive
-// cookie-authenticated mutations from the validated OIDC redirect URL, so the
-// CSRF boundary introduces no second origin configuration to drift. The
-// redirect URL carries no user info, query, or fragment. Empty when OIDC is
-// not configured or an origin cannot be canonicalized.
+func (c Config) OIDCEnabled() bool {
+	return c.OIDCIssuer != "" && c.OIDCClientID != "" && c.OIDCClientSecret != "" && c.OIDCRedirectURL != ""
+}
+
+// BrowserOrigin is the explicit exact-origin boundary for cookie mutations,
+// independent of whether Local or OIDC authentication is enabled.
 func (c Config) BrowserOrigin() string {
-	if c.OIDCRedirectURL == "" {
+	if strings.ContainsAny(c.PublicOrigin, "?#") {
 		return ""
 	}
-	origin, err := url.Parse(c.OIDCRedirectURL)
-	if err != nil || origin.Scheme == "" || origin.Host == "" {
-		return ""
-	}
-	canonical, ok := browserorigin.Normalize(origin.Scheme + "://" + origin.Host)
+	canonical, ok := browserorigin.Normalize(c.PublicOrigin)
 	if !ok {
 		return ""
 	}
