@@ -7,6 +7,20 @@ export const i18n = createI18n({
   messages: {
     en: {
       brand: "ocservia",
+      loginTitle: "Sign in",
+      loginUsername: "Username",
+      loginPassword: "Password",
+      loginSubmit: "Sign in",
+      loginSubmitting: "Signing in...",
+      loginSSO: "Sign in with SSO",
+      loginOr: "or",
+      loginRedirecting: "Redirecting to SSO...",
+      loginInvalid: "Invalid username or password",
+      loginUnavailable: "Sign in is unavailable. Please try again later.",
+      loginRateLimited: "Too many attempts. Please try again later.",
+      loginRetryAfter:
+        "Too many attempts. Please try again in {seconds} seconds.",
+      loginRetry: "Try again",
       overview: "Overview",
       nodes: "Nodes",
       fleet: "Fleet",

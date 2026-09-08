@@ -40,6 +40,7 @@ describe("web information architecture routes", () => {
 
     expect(pageNames).toEqual(
       new Set([
+        "login",
         "overview",
         "nodes",
         "node-detail",

@@ -19,6 +19,11 @@ export const developmentRuntime =
   import.meta.env.DEV || Boolean(import.meta.env.VITE_DEV_AUTH_TOKEN);
 
 export const routeRecords: RouteRecordRaw[] = [
+  {
+    path: "/login",
+    name: "login",
+    component: () => import("../views/LoginView.vue"),
+  },
   { path: "/", name: "overview", component: OverviewView },
   { path: "/nodes", name: "nodes", component: NodesView },
   {
