@@ -58,6 +58,8 @@ func (s *Server) mutateLocalUser(w http.ResponseWriter, r *http.Request, mutatio
 	if err != nil {
 		status, detail := http.StatusInternalServerError, "Local user mutation failed"
 		switch {
+		case errors.Is(err, auth.ErrPasswordPolicy):
+			status, detail = http.StatusBadRequest, err.Error()
 		case errors.Is(err, approvals.ErrNotReady):
 			status, detail = http.StatusConflict, "a matching independent approval is required"
 		case errors.Is(err, auth.ErrLocalInvalid):

@@ -27,7 +27,7 @@ func (s *Service) BootstrapLocalAdmin(ctx context.Context, username, password st
 	}
 	hash, err := hashPassword(password)
 	if err != nil {
-		return uuid.Nil, ErrLocalInvalid
+		return uuid.Nil, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -109,7 +109,7 @@ func (s *Service) MutateLocalUser(ctx context.Context, request LocalUserMutation
 	if request.Action != "disable" {
 		hash, err = hashPassword(request.Password)
 		if err != nil {
-			return uuid.Nil, ErrLocalInvalid
+			return uuid.Nil, err
 		}
 	}
 	tx, err := s.pool.Begin(ctx)

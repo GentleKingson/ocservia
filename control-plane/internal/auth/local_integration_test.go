@@ -29,6 +29,13 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	username := "alice-" + uuid.NewString()
+	if _, err := s.CreateLocalCredential(ctx, username, "x"); !errors.Is(err, ErrPasswordPolicy) {
+		t.Fatalf("weak provisioning: %v", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM identities WHERE subject=$1)+(SELECT count(*) FROM local_credentials WHERE username=$1)`, username).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("weak provisioning wrote rows: %d %v", count, err)
+	}
 	password := "a local test password"
 	id, err := s.CreateLocalCredential(ctx, " "+strings.ToUpper(username)+" ", password)
 	if err != nil {
@@ -137,5 +144,17 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 	var sessions, bindings int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM auth_sessions WHERE identity_id=$1),(SELECT count(*) FROM role_bindings WHERE identity_id=$1)`, id).Scan(&sessions, &bindings); err != nil || sessions != 2 || bindings != 0 {
 		t.Fatalf("failed logins created sessions or provisioning granted roles: %d/%d, %v", sessions, bindings, err)
+	}
+	for _, legacy := range []string{"x", "password", "12345678901234567890"} {
+		if _, err := pool.Exec(ctx, `UPDATE local_credentials SET password_hash=$2 WHERE identity_id=$1`, id, legacyPasswordHash(legacy)); err != nil {
+			t.Fatal(err)
+		}
+		cookie, principal, err := s.AuthenticateLocal(ctx, username, legacy)
+		if err != nil || cookie == nil || principal.IdentityID != id {
+			t.Fatalf("historical login rejected: %v", err)
+		}
+		if _, err := s.Authenticate(ctx, cookie); err != nil {
+			t.Fatalf("historical login session rejected: %v", err)
+		}
 	}
 }
