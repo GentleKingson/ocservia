@@ -251,7 +251,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 			}
 			if mode != "oidc" {
 				username := "http-" + uuid.NewString()
-				if _, err := s.auth.CreateLocalCredential(context.Background(), username, "test-password"); err != nil {
+				if _, err := s.auth.CreateLocalCredential(context.Background(), username, "http-test-password"); err != nil {
 					t.Fatal(err)
 				}
 				wrong := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"wrong"}`, username), authTestOrigin)
@@ -259,7 +259,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 				if wrong.Code != 401 || missing.Code != 401 || wrong.Body.String() != missing.Body.String() || len(wrong.Result().Cookies()) != 0 || len(missing.Result().Cookies()) != 0 {
 					t.Fatal("credential failures differ")
 				}
-				w := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"test-password"}`, username), authTestOrigin)
+				w := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":"http-test-password"}`, username), authTestOrigin)
 				if w.Code != 204 || len(w.Result().Cookies()) != 1 {
 					t.Fatalf("local login: %d %s", w.Code, w.Body)
 				}
