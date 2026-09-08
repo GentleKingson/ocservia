@@ -79,6 +79,10 @@ editor install.env
 
 Edit only the Controller section in `install.env`. The template references operator-provided secrets, keys, certificates, relay details, and backup paths; it does not generate them for you.
 
+Choose **Local only**, **OIDC only**, or **Local + OIDC**. Local deployments have
+no default admin password: use the protected-file, one-shot bootstrap described
+in [Production authentication](docs/operations/authentication.md).
+
 See [Deploy the Controller](docs/getting-started/production.md) for the full deployment path.
 
 ## Install a managed node

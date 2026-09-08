@@ -5,6 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 unset COMPOSE_PROFILES COMPOSE_ENV_FILES
 export COMPOSE_DISABLE_ENV_FILE=1
+oidc_enabled=false
+if [[ -n "${OCSERV_OIDC_ISSUER:-}${OCSERV_OIDC_CLIENT_ID:-}${OCSERV_OIDC_REDIRECT_URL:-}" ]]; then
+  oidc_enabled=true
+fi
+if [[ "${oidc_enabled}" == false && "${OCSERV_LOCAL_AUTH_ENABLED:-false}" != true ]]; then
+  echo "enable Local authentication or configure OIDC for production" >&2
+  exit 2
+fi
 otel_enabled=false
 if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
   otel_enabled=true
@@ -41,8 +49,11 @@ while true; do
   ancestor="$(dirname -- "${ancestor}")"
 done
 general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
-  postgres.pgpass database-owner-url database-app-url oidc-client-secret session-key \
+  postgres.pgpass database-owner-url database-app-url session-key \
   audit-checkpoint-key certificate-signer-token)
+if [[ "${oidc_enabled}" == true ]]; then
+  general_secrets+=(oidc-client-secret)
+fi
 if [[ "${otel_enabled}" == true ]]; then
   general_secrets+=(otel-client.crt otel-client.key otel-ca.crt)
 fi
@@ -96,6 +107,9 @@ for argument in "$@"; do
 done
 
 compose=(docker compose --env-file /dev/null -p ocservia-production -f "${ROOT}/deploy/production/compose.yaml")
+if [[ "${oidc_enabled}" == true ]]; then
+  compose+=(-f "${ROOT}/deploy/production/compose.oidc.yaml")
+fi
 if [[ "${otel_enabled}" == true || "${teardown}" == true ]]; then
   compose+=(--profile observability)
 fi

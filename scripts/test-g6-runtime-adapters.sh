@@ -486,11 +486,27 @@ reject("the G6 callback must match the explicit browser origin") unless redirect
   reject("#{role} must share the explicit browser origin") unless services.fetch(role).fetch("environment").fetch("OCSERV_PUBLIC_ORIGIN") == browser_origin
 end
 production = YAML.safe_load(File.read(File.join(File.dirname(compose_path), "../production/compose.yaml")), aliases: true)
+production_oidc = YAML.safe_load(File.read(File.join(File.dirname(compose_path), "../production/compose.oidc.yaml")), aliases: true)
+default_production_origin = 'https://${OCSERV_PUBLIC_HOST}'
+oidc_environment = {
+  "OCSERV_OIDC_ISSUER" => '${OCSERV_OIDC_ISSUER:?set OCSERV_OIDC_ISSUER}',
+  "OCSERV_OIDC_CLIENT_ID" => '${OCSERV_OIDC_CLIENT_ID:?set OCSERV_OIDC_CLIENT_ID}',
+  "OCSERV_OIDC_CLIENT_SECRET_FILE" => "/run/secrets/oidc_client_secret",
+  "OCSERV_OIDC_REDIRECT_URL" => '${OCSERV_OIDC_REDIRECT_URL:-' + default_production_origin + '/api/v1/auth/callback}',
+}
 %w[migrate control-plane].each do |role|
   environment = production.fetch("services").fetch(role).fetch("environment")
-  reject("production #{role} must explicitly configure its browser origin") unless environment.fetch("OCSERV_PUBLIC_ORIGIN") == 'https://${OCSERV_PUBLIC_HOST}'
-  reject("production #{role} callback must match its browser origin") unless environment.fetch("OCSERV_OIDC_REDIRECT_URL") == "#{environment.fetch('OCSERV_PUBLIC_ORIGIN')}/api/v1/auth/callback"
+  reject("production #{role} must support an explicit browser origin with the public-host default") unless
+    environment.fetch("OCSERV_PUBLIC_ORIGIN") == '${OCSERV_PUBLIC_ORIGIN:-' + default_production_origin + '}'
+  reject("production #{role} base must remain usable without OIDC") if environment.keys.any? { |key| key.start_with?("OCSERV_OIDC_") }
+  overlay = production_oidc.fetch("services").fetch(role)
+  reject("production #{role} OIDC overlay must preserve complete file-backed configuration and an explicit redirect with a same-origin default") unless
+    overlay.fetch("environment") == oidc_environment && overlay.fetch("secrets") == ["oidc_client_secret"]
+  reject("production #{role} base must not mount the optional OIDC secret") if
+    production.fetch("services").fetch(role).fetch("secrets").include?("oidc_client_secret")
 end
+reject("production OIDC secret must use the protected host file") unless
+  production_oidc.fetch("secrets").fetch("oidc_client_secret").fetch("file") == '${OCSERV_SECRET_DIR}/oidc-client-secret'
 reject("postgres must publish only loopback") unless services.fetch("postgres").fetch("ports") == ["127.0.0.1:5432:5432"]
 reject("the API host port must stay on loopback for the tunnel to serve") unless services.fetch("api").fetch("ports").fetch(0).start_with?("127.0.0.1:")
 reject("postgres must run data checksums") unless services.fetch("postgres").fetch("environment").fetch("POSTGRES_INITDB_ARGS").include?("data-checksums")
