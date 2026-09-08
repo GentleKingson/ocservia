@@ -300,6 +300,9 @@ docker build --target runtime-base -t "${runtime_control_image}" \
 
 # Exercise the real launcher and Docker lifecycle in one isolated project.
 # Only the test service payloads and fixed project name differ from production.
+# This synthetic lifecycle topology has no OIDC service configuration.
+export OCSERV_LOCAL_AUTH_ENABLED=true
+unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL
 mkdir -p "${work}/transition/deploy/production"
 sed "s/-p ocservia-production /-p ${transition_project} /" \
   "${ROOT}/deploy/production/compose.sh" >"${work}/transition/deploy/production/compose.sh"

@@ -27,6 +27,11 @@ the public Quick Start obtains Stage-1 from a clean exact-release checkout.
 
 The production example in `deploy/production/compose.yaml` runs the HTTPS gateway, control plane, transport service, PostgreSQL, and backup worker by default. It publishes only TCP 443. Database, application, and observability traffic remain on internal networks.
 
+For Local only, OIDC only, or Local + OIDC configuration, login behavior and
+one-shot first-admin creation, follow [Production authentication](authentication.md).
+OIDC is optional when Local is enabled; `compose.sh` selects the OIDC overlay
+only when configured. All modes retain protected session-key file input.
+
 ## Optional observability
 
 Unset or empty `OCSERV_OTEL_BACKEND_ENDPOINT` disables OTLP export and the
@@ -418,7 +423,7 @@ export OCSERV_RELAY_URL_A=https://relay-a.example.com
 export OCSERV_RELAY_URL_B=https://relay-b.example.com
 ```
 
-The control plane runs `--role=all`. Terminate public TLS at the gateway. Configure the OIDC redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback` and use an HTTPS certificate signer.
+The control plane runs `--role=all`. Terminate public TLS at the gateway and use an HTTPS certificate signer. Set `OCSERV_PUBLIC_ORIGIN` to the public HTTPS origin. When OIDC is enabled, configure its redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback`; its origin must match `OCSERV_PUBLIC_ORIGIN`.
 
 ### Authentication request budgets
 

@@ -11,7 +11,7 @@ The Controller is the central Web/API service. It stores state in PostgreSQL, co
 - A supported `amd64` or `arm64` Linux host: Ubuntu 20.04/22.04/24.04/26.04 or Debian 11/12/13.
 - Git, curl, and Docker Engine with the Compose v2 plugin. The installer can bootstrap Docker on most supported hosts, but Ubuntu 20.04 needs a compatible Docker install prepared beforehand.
 - A DNS name and HTTPS certificate for the Controller.
-- An OIDC login provider and client.
+- A selected login mode: Local only, OIDC only, or Local + OIDC. An OIDC provider and client are required only for SSO.
 - A certificate signing endpoint.
 - Two dedicated relay URLs for production node traffic.
 - Protected directories for secrets and backups.
@@ -40,12 +40,15 @@ The exact variable names are in `install.env.example`. At a minimum, configure:
 | Setting group | Examples |
 | --- | --- |
 | Public address | `OCSERV_PUBLIC_HOST`, `OCSERV_CONTROLLER_PUBLIC_URL`, `OCSERV_HTTPS_ADDRESS` |
-| Login and external services | `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID`, `OCSERV_CERTIFICATE_SIGNER_URL` |
+| Login | `OCSERV_LOCAL_AUTH_ENABLED`, `OCSERV_PUBLIC_ORIGIN`, `OCSERV_SESSION_TTL`; OIDC settings only for SSO |
+| External services | `OCSERV_CERTIFICATE_SIGNER_URL` |
 | Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
 | Release trust | `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` |
 
 Keep `install.env` private and out of Git. Variables exported in the shell override values from the file.
+
+Choose one of the complete [authentication mode examples](../operations/authentication.md#choose-a-mode).
 
 ## 3. Prepare secrets and trust files
 
@@ -53,7 +56,7 @@ Put production material in the protected directories referenced by `install.env`
 
 - HTTPS certificate and key.
 - PostgreSQL passwords and database URLs.
-- OIDC client secret, session key, and audit keys.
+- Session key and audit keys; OIDC client secret only when SSO is enabled.
 - Controller command signing key.
 - Certificate signer token.
 - Relay access token.
@@ -101,6 +104,11 @@ curl --fail --silent --show-error \
 curl --fail --silent --show-error \
   "https://${OCSERV_PUBLIC_HOST}/api/v1/version"
 ```
+
+For Local-only or dual-auth first deployments, follow the
+[one-shot Local admin bootstrap](../operations/authentication.md#bootstrap-the-first-local-admin)
+before verifying login. There is no default admin password, and normal restart
+does not reset credentials. For OIDC-only, use existing identity/RBAC provisioning.
 
 Also verify that login works, a managed node can connect through each relay, and the newest backup exists. When observability is enabled, verify that the backend receives traces.
 

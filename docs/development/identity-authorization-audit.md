@@ -1,23 +1,26 @@
 # Identity, authorization, approval, and audit operations
 
-Production API access uses an OIDC Authorization Code flow with PKCE S256.
-Configure an HTTPS issuer, exact HTTPS callback URL, client credentials, a
+Production API access supports Local only, OIDC only, and Local + OIDC.
+When OIDC is enabled, it uses Authorization Code flow with PKCE S256.
+Configure an HTTPS issuer, exact HTTPS callback URL and client credentials for
+OIDC; its redirect origin must match `OCSERV_PUBLIC_ORIGIN`. All modes require a
 32-byte session encryption key, a 32-byte audit checkpoint key, and an
 independent 32-byte audit event authentication key with a stable key ID. The browser
 receives only Secure, HttpOnly, SameSite session cookies; OIDC tokens are not
 stored in browser storage. Existing sessions remain usable during a temporary
-identity-provider outage, while new logins fail closed.
+identity-provider outage, while new SSO logins fail closed. Local login remains
+available when enabled.
 
-The required environment variables are:
+See [production authentication](../operations/authentication.md) for deployment
+examples, secret mounts, first-admin bootstrap and login behavior. Common
+authentication and audit settings are:
 
 ```text
-OCSERV_OIDC_ISSUER
-OCSERV_OIDC_CLIENT_ID
-OCSERV_OIDC_CLIENT_SECRET
-OCSERV_OIDC_REDIRECT_URL
-OCSERV_SESSION_KEY
+OCSERV_LOCAL_AUTH_ENABLED
+OCSERV_PUBLIC_ORIGIN
+OCSERV_SESSION_KEY_FILE
 OCSERV_SESSION_TTL
-OCSERV_AUDIT_CHECKPOINT_KEY
+OCSERV_AUDIT_CHECKPOINT_KEY_FILE
 OCSERV_AUDIT_EVENT_KEY_ID
 OCSERV_AUDIT_EVENT_KEY_FILE
 ```
@@ -25,7 +28,8 @@ OCSERV_AUDIT_EVENT_KEY_FILE
 The symmetric key values contain 64 lowercase hexadecimal characters. The
 event key file must be a process-owned, single-link regular file with mode
 `0400` or `0600` below root- or process-owned non-writable ancestry. Production startup
-fails when OIDC, the checkpoint key, or the event key is absent. Development bearer
+fails when both Local and OIDC are disabled, OIDC is incomplete, or a required
+session/audit key is absent. Development bearer
 authentication remains limited to a non-production deployment.
 
 Authorization combines a subject, workspace, resource type, resource ID, and
@@ -53,9 +57,9 @@ the business transaction.
 The internal `auth.Service` can be constructed without an OIDC provider.
 Trusted Go callers may opt in with `auth.Config.LocalEnabled`, provision an
 identity using `CreateLocalCredential`, and log in using `AuthenticateLocal`.
-Provisioning grants no roles. HTTP routes, runtime configuration wiring,
-production local-only startup, and user management are not part of P1; the
-production OIDC requirement above remains in place.
+Provisioning grants no roles. Runtime configuration, HTTP login, Local-only
+production startup and user management use this core through the shared session
+and authorization stack.
 
 Migration 000031 stores passwords only in `local_credentials`, keyed by
 `identity_id`. Local identities use issuer `local` and the normalized username
@@ -156,6 +160,9 @@ OIDC/non-Local identity targets return 404 and are never modified, even with the
 same username/email. There is no linking, self-registration, recovery or MFA.
 
 ## Break-glass
+
+Local auth is not a replacement for this independent emergency offline access
+mechanism. Its rotation, alert, audit and short-session requirements are unchanged.
 
 Break-glass is disabled unless `OCSERV_BREAK_GLASS_ENABLED=true` and
 `OCSERV_BREAK_GLASS_TOKEN_SHA256` contains the SHA-256 digest of a high-entropy
