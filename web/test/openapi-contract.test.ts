@@ -161,7 +161,6 @@ describe("OpenAPI invariants", () => {
                   password: {
                     minLength: 1,
                     writeOnly: true,
-                    description: expect.stringContaining("1024 UTF-8 bytes"),
                   },
                 },
               },
@@ -178,12 +177,25 @@ describe("OpenAPI invariants", () => {
         "password",
         "maxLength",
       ]);
+      expect(document.paths?.[path]?.post).toHaveProperty(
+        [
+          "requestBody",
+          "content",
+          "application/json",
+          "schema",
+          "properties",
+          "password",
+          "description",
+        ],
+        expect.stringContaining("1024 UTF-8 bytes"),
+      );
     }
     for (const action of ["disable", "reset-password"]) {
       expect(
         document.paths?.[`/local-users/{identity_id}:${action}`]?.post,
-      ).toMatchObject({
-        parameters: expect.arrayContaining([
+      ).toHaveProperty(
+        "parameters",
+        expect.arrayContaining([
           {
             name: "identity_id",
             in: "path",
@@ -191,7 +203,7 @@ describe("OpenAPI invariants", () => {
             schema: { $ref: "#/components/schemas/UuidV7" },
           },
         ]),
-      });
+      );
     }
   });
 
