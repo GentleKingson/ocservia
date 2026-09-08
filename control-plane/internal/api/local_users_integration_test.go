@@ -204,10 +204,28 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	state := func() string {
 		t.Helper()
 		var value string
-		if err := pool.QueryRow(ctx, `SELECT json_build_array((SELECT row_to_json(c) FROM local_credentials c WHERE identity_id=$1),(SELECT json_agg(s ORDER BY id) FROM auth_sessions s WHERE identity_id=$1),(SELECT row_to_json(a) FROM approval_requests a WHERE id=$2),(SELECT count(*) FROM audit_events WHERE workspace_id=$3))::text`, id, approval.ID, workspaceID).Scan(&value); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT json_build_array((SELECT row_to_json(c) FROM local_credentials c WHERE identity_id=$1),(SELECT json_agg(s ORDER BY id) FROM auth_sessions s WHERE identity_id=$1),(SELECT row_to_json(a) FROM approval_requests a WHERE id=$2),(SELECT count(*) FROM audit_events WHERE workspace_id=$3),(SELECT row_to_json(i) FROM identities i WHERE id=$1),(SELECT count(*) FROM identities),(SELECT count(*) FROM local_credentials),(SELECT count(*) FROM role_bindings),(SELECT count(*) FROM auth_sessions))::text`, id, approval.ID, workspaceID).Scan(&value); err != nil {
 			t.Fatal(err)
 		}
 		return value
+	}
+	for _, invalidBytes := range []string{"\xff", "\xfe", "\xc0\xaf", "\xed\xa0\x80"} {
+		// Do not JSON-marshal: that would replace the invalid bytes in the fixture.
+		invalidPassword := "otherwise-valid-password" + invalidBytes
+		for _, request := range []struct{ path, body string }{
+			{"local-users", fmt.Sprintf(`{"username":%q,"password":"`, "invalid-"+username) + invalidPassword + `"}`},
+			{resetPath, `{"password":"` + invalidPassword + `"}`},
+		} {
+			before = state()
+			response := call(request.path, request.body, adminCookie, "https://console.example", approval.ID.String())
+			expect(response, 400)
+			if strings.Contains(response.Body.String(), "otherwise-valid-password") {
+				t.Fatal("invalid UTF-8 response disclosed password")
+			}
+			if after = state(); before != after {
+				t.Fatal("invalid UTF-8 changed identity, credential, role, approval, session or audit state")
+			}
+		}
 	}
 	before = state()
 	expect(call(resetPath, fmt.Sprintf(`{"password":%q}`, weakPassword), adminCookie, "https://console.example", approval.ID.String()), 400)

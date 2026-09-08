@@ -18,5 +18,7 @@ USER nobody:ocservia
 
 FROM runtime-base
 COPY --from=build /out/ocserv-control /usr/local/bin/ocserv-control
+COPY control-plane/internal/auth/password_blocklist/LICENSE.django /usr/share/doc/ocservia/LICENSE.django
+COPY THIRD_PARTY_NOTICES.md /usr/share/doc/ocservia/THIRD_PARTY_NOTICES.md
 ENTRYPOINT ["/usr/local/bin/ocserv-control"]
 CMD ["--role=all"]
