@@ -15,6 +15,7 @@ export const i18n = createI18n({
       loginSSO: "Sign in with SSO",
       loginOr: "or",
       loginRedirecting: "Redirecting to SSO...",
+      loginSSOFailed: "SSO did not complete. Sign in with SSO to try again.",
       loginInvalid: "Invalid username or password",
       loginUnavailable: "Sign in is unavailable. Please try again later.",
       loginRateLimited: "Too many attempts. Please try again later.",
