@@ -18,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -101,6 +103,7 @@ func TestLocalLoginHTTPBoundary(t *testing.T) {
 		want                                     int
 	}{
 		{"missing origin", `{}`, "", "application/json", "", 403},
+		{"normalized origin", `{}`, "https://ADMIN.example.test:443", "application/json", "", 400},
 		{"sibling origin", `{}`, "https://sibling.example.test", "application/json", "same-site", 403},
 		{"different port", `{}`, authTestOrigin + ":444", "application/json", "", 403},
 		{"cross-site metadata", `{}`, authTestOrigin, "application/json", "cross-site", 403},
@@ -227,6 +230,7 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 			s := newAuthHTTPServer(t, pool, mode != "oidc", provider)
 			logout := func(cookie *http.Cookie) {
 				t.Helper()
+				assertAuthenticationAuthorizationParity(t, s, pool, cookie)
 				if cookie.Name != auth.SessionCookieName || !cookie.Secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
 					t.Fatal("nonstandard session cookie")
 				}
@@ -305,5 +309,75 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 				logout(session)
 			}
 		})
+	}
+}
+
+// Exercise the same HTTP authorization path with cookies from actual Local and
+// OIDC logins, rather than injecting a principal past the session middleware.
+func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxpool.Pool, cookie *http.Cookie) {
+	t.Helper()
+	ctx := context.Background()
+	actor, err := s.auth.Authenticate(ctx, cookie)
+	if err != nil || actor.BreakGlass {
+		t.Fatalf("ordinary principal: %+v %v", actor, err)
+	}
+	s.EnableAuthorization(s.auth, rbac.New(pool), approvals.New(pool), nil)
+	workspaceID, targetID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'P6 parity',$2,now(),now())`, workspaceID, "parity-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = pool.Exec(ctx, `DELETE FROM role_bindings WHERE workspace_id=$1`, workspaceID) }()
+	for _, id := range []uuid.UUID{targetID, approverID} {
+		if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'https://parity.example',$2,now(),now())`, id, id.String()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call := func(method, path, body string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, "/api/v1/"+path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", authTestOrigin)
+		r.Header.Set("X-Workspace-ID", workspaceID.String())
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		s.http.Handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d want %d: %s", actor.Issuer, path, w.Code, want, w.Body)
+		}
+		return w
+	}
+	binding := fmt.Sprintf(`{"identity_id":%q,"workspace_id":%q,"role":"SecurityAdmin","resource_type":"workspace","reason":"P6 parity"}`, targetID, workspaceID)
+	call("GET", "nodes", "", 403)
+	call("POST", "role-bindings", binding, 403)
+	for id, role := range map[uuid.UUID]string{actor.IdentityID: "PlatformAdmin", approverID: "SecurityAdmin"} {
+		if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,$4,'workspace',now())`, uuid.Must(uuid.NewV7()), id, workspaceID, role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w := call("GET", "workspaces", "", 200); !strings.Contains(w.Body.String(), workspaceID.String()) {
+		t.Fatalf("authorized workspace missing: %s", w.Body)
+	}
+	call("POST", "role-bindings", binding, 400)
+	w := call("POST", "approval-requests", fmt.Sprintf(`{"action":"role_binding.elevate","resource_type":"role_binding","resource_id":%q,"reason":"P6 parity","ttl_seconds":600,"role_binding":{"identity_id":%q,"role":"SecurityAdmin","resource_type":"workspace"}}`, targetID, targetID), 201)
+	var approval approvals.Approval
+	if err := json.Unmarshal(w.Body.Bytes(), &approval); err != nil {
+		t.Fatal(err)
+	}
+	call("POST", "approval-requests/"+approval.ID.String()+":approve", fmt.Sprintf(`{"reason":"self","expected_request_hash":%q}`, approval.RequestHash), 403)
+	// The independent approver is a database fixture; the requester uses the
+	// real login cookie for every read, approval request and protected mutation.
+	approverSession := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, approverSession, approverID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.approvals.Approve(ctx, approvals.Decision{ApprovalID: approval.ID, ApproverID: approverID, SessionID: approverSession, RequestID: uuid.NewString(), Reason: "independent review", ExpectedRequestHash: approval.RequestHash}); err != nil {
+		t.Fatal(err)
+	}
+	approvedBinding := strings.TrimSuffix(binding, "}") + fmt.Sprintf(`,"approval_id":%q}`, approval.ID)
+	call("POST", "role-bindings", approvedBinding, 201)
+	call("POST", "role-bindings", approvedBinding, 400)
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND actor_id=$2 AND source_session_id=$3 AND action='role_binding.create' AND result='succeeded'`, workspaceID, actor.IdentityID.String(), actor.SessionID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("principal/session audit parity: %d %v", count, err)
 	}
 }
