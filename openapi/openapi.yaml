@@ -75,7 +75,7 @@ paths:
       operationId: disableLocalUser
       summary: Disable a platform Local login identity and revoke all its sessions
       tags: [platform]
-      description: Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes.
+      description: Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin or fewer than two distinct active Local workspace approvers. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
       parameters:
         - name: identity_id
           in: path
@@ -1617,6 +1617,42 @@ paths:
         "302": { description: Secure session established. }
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /auth/change-password:
+    post:
+      operationId: changeLocalPassword
+      summary: Change the current Local session owner's password
+      tags: [platform]
+      security:
+        - sessionCookie: []
+      description: Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password remains independently approved.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current_password, new_password]
+              properties:
+                current_password:
+                  type: string
+                  format: password
+                  writeOnly: true
+                  minLength: 1
+                  description: Current password, at most 1024 UTF-8 bytes; never normalized.
+                new_password:
+                  type: string
+                  format: password
+                  writeOnly: true
+                  minLength: 15
+                  description: 15 or more Unicode code points, at most 1024 UTF-8 bytes; must pass the common, compromised and service-related password blocklist. Never normalized.
+      responses:
+        "204": { description: "Password changed, all old sessions revoked and cookie cleared. Log in again." }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /auth/logout:
     post:

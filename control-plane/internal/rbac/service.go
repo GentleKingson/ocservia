@@ -153,6 +153,10 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 		return uuid.Nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	// Serialize with one-shot completion and management account protection.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(734821032)`); err != nil {
+		return uuid.Nil, err
+	}
 	allowed, err := canGrantRole(ctx, tx, request.ActorID, request.WorkspaceID, request.Role)
 	if err != nil {
 		return uuid.Nil, err
@@ -173,6 +177,11 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 	}
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID.String(), SessionID: &request.SessionID, Action: "role_binding.create", ResourceType: "role_binding", ResourceID: id, RequestID: request.RequestID, Result: "succeeded", Reason: request.Reason, At: now}); err != nil {
 		return uuid.Nil, err
+	}
+	if slices.Contains([]string{"SecurityAdmin", "PlatformAdmin"}, request.Role) {
+		if _, err := tx.Exec(ctx, `UPDATE local_auth_bootstrap SET completion_pending=false,completed_at=$1 WHERE completion_pending AND workspace_id=$2 AND identity_id<>$3`, now, request.WorkspaceID, request.IdentityID); err != nil {
+			return uuid.Nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, err

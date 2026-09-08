@@ -21,6 +21,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestChangeLocalPasswordAuthorization(t *testing.T) {
+	// The issuer guard must run before any service/database call.
+	server := &Server{auth: &auth.Service{}}
+	for _, actor := range []auth.Principal{
+		{Issuer: "https://idp.example", IdentityID: uuid.New(), SessionID: uuid.New()},
+		{Issuer: auth.LocalIssuer, BreakGlass: true, IdentityID: uuid.New(), SessionID: uuid.New()},
+		{Issuer: "break-glass", BreakGlass: true, IdentityID: uuid.New(), SessionID: uuid.New()},
+		{Issuer: auth.LocalIssuer, IdentityID: uuid.New(), SessionID: uuid.New()},
+	} {
+		_, err := server.authorizeRoute(httptest.NewRequest(http.MethodPost, "/api/v1/auth/change-password", nil), actor)
+		allowed := actor.Issuer == auth.LocalIssuer && !actor.BreakGlass
+		if (err == nil) != allowed {
+			t.Fatalf("issuer=%s breakGlass=%v: %v", actor.Issuer, actor.BreakGlass, err)
+		}
+	}
+}
+
 // Run against a freshly migrated disposable database, like the other DB suites.
 func TestLocalUserLifecycleIntegration(t *testing.T) {
 	url := os.Getenv("OCSERV_TEST_DATABASE_URL")
@@ -57,7 +74,12 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	}()
 	username := "bootstrap-" + uuid.NewString()
 	const password = "p4-secret-not-for-logs"
-	if _, err := svc.BootstrapLocalAdmin(ctx, username, password, workspaceID); err == nil {
+	const approverPassword = "independent-p4-approver-secret"
+	approverName := "approver-" + username
+	bootstrap := func(name, secret string) (uuid.UUID, error) {
+		return svc.BootstrapLocalAdmin(ctx, name, secret, workspaceID, approverName, approverPassword)
+	}
+	if _, err := bootstrap(username, password); err == nil {
 		t.Fatal("bootstrap with missing workspace succeeded")
 	}
 	var count int
@@ -67,7 +89,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Local lifecycle',$2,now(),now())`, workspaceID, username); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.BootstrapLocalAdmin(ctx, username, "ocserviapassword", workspaceID); !errors.Is(err, auth.ErrPasswordPolicy) {
+	if _, err := bootstrap(username, "ocserviapassword"); !errors.Is(err, auth.ErrPasswordPolicy) {
 		t.Fatalf("weak bootstrap: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM identities WHERE subject=$1)+(SELECT count(*) FROM local_credentials WHERE username=$1)+(SELECT count(*) FROM local_auth_bootstrap)+(SELECT count(*) FROM role_bindings WHERE workspace_id=$2)`, username, workspaceID).Scan(&count); err != nil || count != 0 {
@@ -76,7 +98,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if _, err := owner.Exec(ctx, `ALTER TABLE audit_events ADD CONSTRAINT p4_reject_bootstrap CHECK (action <> 'local_user.bootstrap') NOT VALID`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.BootstrapLocalAdmin(ctx, username, password, workspaceID); err == nil {
+	if _, err := bootstrap(username, password); err == nil {
 		t.Fatal("bootstrap committed despite audit failure")
 	}
 	if _, err := owner.Exec(ctx, `ALTER TABLE audit_events DROP CONSTRAINT p4_reject_bootstrap`); err != nil {
@@ -85,11 +107,11 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM identities WHERE subject=$1)+(SELECT count(*) FROM local_credentials WHERE username=$1)+(SELECT count(*) FROM local_auth_bootstrap)+(SELECT count(*) FROM role_bindings WHERE workspace_id=$2)`, username, workspaceID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("bootstrap audit rollback: %d %v", count, err)
 	}
-	adminID, err := svc.BootstrapLocalAdmin(ctx, username, password, workspaceID)
+	adminID, err := bootstrap(username, password)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.BootstrapLocalAdmin(ctx, username, "must not replace password", workspaceID); !errors.Is(err, auth.ErrLocalInitialized) {
+	if _, err := bootstrap(username, "must not replace password"); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("repeat bootstrap: %v", err)
 	}
 	adminCookie, _, err := svc.AuthenticateLocal(ctx, username, password)
@@ -162,6 +184,19 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	selfPath := "auth/change-password"
+	expect(call(selfPath, `{"current_password":"wrong-current-password","new_password":"new-self-service-secret"}`, memberCookie, "https://console.example", ""), 401)
+	expect(call(selfPath, fmt.Sprintf(`{"current_password":%q,"new_password":"new-self-service-secret","identity_id":%q}`, password, adminID), memberCookie, "https://console.example", ""), 400)
+	expect(call(selfPath, fmt.Sprintf(`{"current_password":%q,"new_password":"ocserviapassword"}`, password), memberCookie, "https://console.example", ""), 400)
+	expect(call(selfPath, fmt.Sprintf(`{"current_password":%q,"new_password":"new-self-service-secret"}`, password), memberCookie, "https://sibling.example", ""), 403)
+	expect(call(selfPath, fmt.Sprintf(`{"current_password":%q,"new_password":"new-self-service-secret"}`, password), memberCookie, "https://console.example", ""), 204)
+	if _, err := svc.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
+		t.Fatalf("self change retained session: %v", err)
+	}
+	memberCookie, _, err = svc.AuthenticateLocal(ctx, "member-"+username, "new-self-service-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	expect(call("local-users", body, memberCookie, "https://console.example", ""), 403)
 	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'UserManager','workspace',now())`, uuid.Must(uuid.NewV7()), id, workspaceID); err != nil {
 		t.Fatal(err)
@@ -177,16 +212,8 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	expect(call("local-users/"+id.String()+":disable", `{}`, memberCookie, "https://console.example", ""), 403)
 	resetPath := "local-users/" + id.String() + ":reset-password"
 	expect(call(resetPath, `{"password":"new-p4-password"}`, adminCookie, "https://console.example", ""), 409)
-	// Seed a separately owned existing approver, not a new Local RBAC path.
-	approverName := "approver-" + username
-	approverID, err := svc.CreateLocalCredential(ctx, approverName, password)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'SecurityAdmin','workspace',now())`, uuid.Must(uuid.NewV7()), approverID, workspaceID); err != nil {
-		t.Fatal(err)
-	}
-	approverCookie, _, err := svc.AuthenticateLocal(ctx, approverName, password)
+	// The independent approver comes only from the production one-shot path.
+	approverCookie, _, err := svc.AuthenticateLocal(ctx, approverName, approverPassword)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,6 +330,11 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND resource_id=$2 AND action IN ('local_user.create','local_user.disable','local_user.reset-password') AND actor_id=$3 AND source_session_id IS NOT NULL AND result='succeeded'`, workspaceID, id, adminID.String()).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("mutation audits: %d %v", count, err)
 	}
+	var approverID uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT approver_identity_id FROM local_auth_bootstrap WHERE singleton`).Scan(&approverID); err != nil {
+		t.Fatal(err)
+	}
+	expect(call("local-users/"+approverID.String()+":disable", `{}`, adminCookie, "https://console.example", ""), 409)
 	var auditJSON string
 	if err := pool.QueryRow(ctx, `SELECT json_agg(a)::text FROM audit_events a WHERE workspace_id=$1`, workspaceID).Scan(&auditJSON); err != nil {
 		t.Fatal(err)
@@ -310,8 +342,8 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if strings.Contains(logs.String()+auditJSON, password) || strings.Contains(logs.String()+auditJSON, "new-p4-password") || strings.Contains(logs.String()+auditJSON, weakPassword) || strings.Contains(logs.String()+auditJSON, "$argon2id$") {
 		t.Fatal("password leaked into logs/audit")
 	}
-	expect(call("local-users/"+adminID.String()+":disable", `{}`, adminCookie, "https://console.example", ""), 204)
-	if _, err := svc.BootstrapLocalAdmin(ctx, "replacement-"+username, password, workspaceID); !errors.Is(err, auth.ErrLocalInitialized) {
-		t.Fatalf("disabled admin reopened bootstrap: %v", err)
+	expect(call("local-users/"+adminID.String()+":disable", `{}`, adminCookie, "https://console.example", ""), 409)
+	if _, err := bootstrap("replacement-"+username, password); !errors.Is(err, auth.ErrLocalInitialized) {
+		t.Fatalf("protected admin reopened bootstrap: %v", err)
 	}
 }

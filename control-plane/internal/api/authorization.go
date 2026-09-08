@@ -41,6 +41,12 @@ func (s *Server) authenticate(r *http.Request) (auth.Principal, error) {
 }
 
 func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (context.Context, error) {
+	if r.URL.Path == "/api/v1/auth/change-password" {
+		if s.auth == nil || principal.Issuer != auth.LocalIssuer || principal.BreakGlass || principal.IdentityID == uuid.Nil || principal.SessionID == uuid.Nil {
+			return nil, rbac.ErrForbidden
+		}
+		return context.WithValue(r.Context(), principalKey{}, principal), nil
+	}
 	if r.URL.Path == "/api/v1/local-users" || strings.HasPrefix(r.URL.Path, "/api/v1/local-users/") {
 		if s.auth == nil || s.rbac == nil || principal.IdentityID == uuid.Nil {
 			return nil, rbac.ErrForbidden

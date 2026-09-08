@@ -28,6 +28,7 @@ export * from "./CertificateIssueRequest";
 export * from "./CertificateP12Request";
 export * from "./CertificateRequest";
 export * from "./CertificateRevokeRequest";
+export * from "./ChangeLocalPasswordRequest";
 export * from "./ConfigApplyRequest";
 export * from "./ConfigDirective";
 export * from "./ConfigPlan";

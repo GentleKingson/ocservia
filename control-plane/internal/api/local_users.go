@@ -58,6 +58,10 @@ func (s *Server) mutateLocalUser(w http.ResponseWriter, r *http.Request, mutatio
 	if err != nil {
 		status, detail := http.StatusInternalServerError, "Local user mutation failed"
 		switch {
+		case errors.Is(err, auth.ErrLocalProtected):
+			status, detail = http.StatusConflict, err.Error()
+		case errors.Is(err, auth.ErrUnauthenticated):
+			status, detail = http.StatusUnauthorized, "the acting session is no longer valid"
 		case errors.Is(err, auth.ErrPasswordPolicy):
 			status, detail = http.StatusBadRequest, err.Error()
 		case errors.Is(err, approvals.ErrNotReady):
@@ -81,5 +85,32 @@ func (s *Server) mutateLocalUser(w http.ResponseWriter, r *http.Request, mutatio
 		}{id})
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) changeLocalPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !decodeStrictJSON(w, r, &body) {
+		return
+	}
+	err := s.auth.ChangeLocalPassword(r.Context(), principal(r), body.CurrentPassword, body.NewPassword, requestID(r))
+	if err != nil {
+		status, detail := http.StatusInternalServerError, "password change failed"
+		if errors.Is(err, auth.ErrPasswordPolicy) {
+			status, detail = http.StatusBadRequest, err.Error()
+		}
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			status, detail = http.StatusUnauthorized, "current password or Local session is invalid, or attempts are temporarily blocked"
+		}
+		if errors.Is(err, auth.ErrLocalDisabled) {
+			status, detail = http.StatusForbidden, "Local authentication is disabled"
+		}
+		writeProblem(w, r, status, "https://ocservia.dev/problems/password-change", "Password change failed", detail)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: auth.SessionCookieName, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusNoContent)
 }

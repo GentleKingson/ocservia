@@ -104,6 +104,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/auth/methods", s.authMethods)
 	mux.HandleFunc("GET /api/v1/auth/callback", s.limitAuthentication(newAuthAdmission(30, 120, 8), s.callback))
 	mux.HandleFunc("POST /api/v1/auth/logout", s.requireOperationAuth(s.logout))
+	mux.HandleFunc("POST /api/v1/auth/change-password", s.requireOperationAuth(s.changeLocalPassword))
 	mux.HandleFunc("POST /api/v1/local-users", s.requireOperationAuth(s.createLocalUser))
 	mux.HandleFunc("POST /api/v1/local-users/{local_user_action}", s.requireOperationAuth(s.localUserAction))
 	mux.HandleFunc("POST /api/v1/auth/break-glass", s.breakGlass)
@@ -369,7 +370,7 @@ func routeMethod(path string) (string, bool) {
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
 		return http.MethodPost, true
-	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
+	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/change-password", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
 		return http.MethodPost, true
 	}
 	if path == "/api/v1/secret-provider-refs" {

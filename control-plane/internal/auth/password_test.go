@@ -72,7 +72,9 @@ func TestPasswordWriteEntrypointsRejectBeforeDatabase(t *testing.T) {
 	for _, password := range []string{"x", "12345678901234567890", "ocserviapassword"} {
 		calls := []func() (uuid.UUID, error){
 			func() (uuid.UUID, error) { return s.CreateLocalCredential(ctx, "alice", password) },
-			func() (uuid.UUID, error) { return s.BootstrapLocalAdmin(ctx, "alice", password, id) },
+			func() (uuid.UUID, error) {
+				return s.BootstrapLocalAdmin(ctx, "alice", password, id, "approver", "distinct-approver-secret")
+			},
 		}
 		for _, action := range []string{"create", "reset-password"} {
 			calls = append(calls, func() (uuid.UUID, error) {

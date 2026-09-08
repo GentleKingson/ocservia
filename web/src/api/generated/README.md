@@ -119,6 +119,7 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_    | [**upgradeNodeAgent**](docs/OperationsApi.md#upgradenodeagent)                            | **POST** /nodes/{node_id}/agent-upgrade                    | Start one reconciled single-node agent upgrade                                   |
 | _OperationsApi_    | [**watchOperationEvents**](docs/OperationsApi.md#watchoperationevents)                    | **GET** /operations/{operation_id}/events                  | Watch durable operation state changes                                            |
 | _PlatformApi_      | [**beginOIDCLogin**](docs/PlatformApi.md#beginoidclogin)                                  | **GET** /auth/login                                        | Begin OIDC Authorization Code login with PKCE S256                               |
+| _PlatformApi_      | [**changeLocalPassword**](docs/PlatformApi.md#changelocalpasswordoperation)               | **POST** /auth/change-password                             | Change the current Local session owner\&#39;s password                           |
 | _PlatformApi_      | [**completeOIDCLogin**](docs/PlatformApi.md#completeoidclogin)                            | **GET** /auth/callback                                     | Validate OIDC state, nonce, code, and ID token                                   |
 | _PlatformApi_      | [**createLocalUser**](docs/PlatformApi.md#createlocaluseroperation)                       | **POST** /local-users                                      | Create a platform Local login identity without role bindings                     |
 | _PlatformApi_      | [**createRoleBinding**](docs/PlatformApi.md#createrolebinding)                            | **POST** /role-bindings                                    | Bind one baseline role to a workspace or resource scope                          |
@@ -163,6 +164,7 @@ All URIs are relative to _/api/v1_
 - [CertificateP12Request](docs/CertificateP12Request.md)
 - [CertificateRequest](docs/CertificateRequest.md)
 - [CertificateRevokeRequest](docs/CertificateRevokeRequest.md)
+- [ChangeLocalPasswordRequest](docs/ChangeLocalPasswordRequest.md)
 - [ConfigApplyRequest](docs/ConfigApplyRequest.md)
 - [ConfigDirective](docs/ConfigDirective.md)
 - [ConfigPlan](docs/ConfigPlan.md)
