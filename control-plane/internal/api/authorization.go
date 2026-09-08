@@ -41,6 +41,20 @@ func (s *Server) authenticate(r *http.Request) (auth.Principal, error) {
 }
 
 func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (context.Context, error) {
+	if r.URL.Path == "/api/v1/local-users" || strings.HasPrefix(r.URL.Path, "/api/v1/local-users/") {
+		if s.auth == nil || s.rbac == nil || principal.IdentityID == uuid.Nil {
+			return nil, rbac.ErrForbidden
+		}
+		workspaceID, err := s.auth.LocalManagementWorkspace(r.Context())
+		if err != nil {
+			return nil, rbac.ErrForbidden
+		}
+		if err := s.rbac.Authorize(r.Context(), principal.IdentityID, "local_user.manage", rbac.Resource{WorkspaceID: workspaceID, Type: "workspace"}, principal.BreakGlass); err != nil {
+			return nil, err
+		}
+		ctx := context.WithValue(r.Context(), principalKey{}, principal)
+		return context.WithValue(ctx, workspaceKey{}, workspaceID), nil
+	}
 	if r.URL.Path == "/api/v1/auth/logout" {
 		return context.WithValue(r.Context(), principalKey{}, principal), nil
 	}
@@ -245,6 +259,8 @@ func (s *Server) selectWorkspace(r *http.Request, principal auth.Principal, acti
 func routeAction(r *http.Request) string {
 	path := r.URL.Path
 	switch {
+	case path == "/api/v1/local-users" || strings.HasPrefix(path, "/api/v1/local-users/"):
+		return "local_user.manage"
 	case strings.HasSuffix(path, ":disconnect"):
 		return "session.disconnect"
 	case strings.HasSuffix(path, ":terminate"):

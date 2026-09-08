@@ -318,6 +318,23 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
 			return
 		}
+	} else if action == "local_user.reset-password" {
+		if s.auth == nil || resource.Type != "local_user" {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+		managementWorkspace, scopeErr := s.auth.LocalManagementWorkspace(r.Context())
+		var local bool
+		if scopeErr != nil || managementWorkspace != resource.WorkspaceID {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+		if err := s.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=$1 AND i.issuer='local' AND i.subject=c.username)`, resource.ID).Scan(&local); err != nil || !local {
+			s.writeAuthorizationError(w, r, pgx.ErrNoRows)
+			return
+		}
+		requestHash, requestSummary = approvals.GenericBinding(action, resource.Type, resource.ID)
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: managementWorkspace, Type: "workspace", ID: uuid.Nil})
 	} else {
 		requestHash, requestSummary = approvals.GenericBinding(action, resource.Type, resource.ID)
 		authorityID := resource.ID
