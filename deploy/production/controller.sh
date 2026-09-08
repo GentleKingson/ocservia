@@ -626,6 +626,7 @@ production_descriptor_paths() {
   local compose_file="${ROOT}/deploy/production/compose.yaml"
   printf '%s\n' \
     "deploy/production/compose.sh" \
+    "deploy/production/compose.oidc.yaml" \
     "deploy/production/compose.yaml"
   grep -Eo '\./[^[:space:]:]+' "${compose_file}" | sort -u | while IFS= read -r source; do
     printf 'deploy/production/%s\n' "${source#./}"
