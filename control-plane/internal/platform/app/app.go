@@ -47,6 +47,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 			return err
 		}
 	}
+	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
+		if err := auth.ValidateNewPassword(cfg.LocalBootstrapApproverPassword); err != nil {
+			return err
+		}
+	}
 	shutdownTelemetry, err := telemetry.Configure(ctx, cfg.OTLPEndpoint, build.Version, cfg.Environment)
 	if err != nil {
 		return err
@@ -105,7 +110,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		return fmt.Errorf("verify audit event authentication: %w", err)
 	}
 
-	if cfg.BootstrapLocalAdmin {
+	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
 		service, err := auth.New(ctx, pool, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 		if err != nil {
 			return errors.New("configure bootstrap authentication failed")
@@ -114,11 +119,18 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		if err != nil || workspaceID.Version() != 7 {
 			return errors.New("bootstrap workspace ID must be UUIDv7")
 		}
-		id, err := service.BootstrapLocalAdmin(ctx, cfg.LocalBootstrapUsername, cfg.LocalBootstrapPassword, workspaceID)
+		initialize := service.BootstrapLocalAdmin
+		if cfg.CompleteLocalBootstrap {
+			initialize = service.CompleteLocalBootstrap
+		}
+		id, err := initialize(ctx, cfg.LocalBootstrapUsername, cfg.LocalBootstrapPassword, workspaceID, cfg.LocalBootstrapApproverUsername, cfg.LocalBootstrapApproverPassword)
 		if err != nil {
+			if errors.Is(err, auth.ErrLocalWorkspaceMissing) {
+				return err
+			}
 			return errors.New("Local administrator bootstrap rejected; check initialization state, workspace and credentials")
 		}
-		logger.Info("Local administrator bootstrap complete", "identity_id", id, "workspace_id", workspaceID)
+		logger.Info("Local initialization complete", "administrator_identity_id", id, "workspace_id", workspaceID, "upgrade_completion", cfg.CompleteLocalBootstrap)
 		return nil
 	}
 

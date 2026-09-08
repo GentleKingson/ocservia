@@ -142,6 +142,36 @@ describe("OpenAPI invariants", () => {
     });
   });
 
+  it("keeps self-service Local password changes separate from target-based reset", async () => {
+    const document = parse(
+      await readFile(
+        resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+        "utf8",
+      ),
+    ) as OpenApiDocument;
+    expect(document.paths?.["/auth/change-password"]?.post).toMatchObject({
+      operationId: "changeLocalPassword",
+      security: [{ sessionCookie: [] }],
+      requestBody: {
+        content: {
+          "application/json": {
+            schema: {
+              additionalProperties: false,
+              required: ["current_password", "new_password"],
+              properties: {
+                current_password: { writeOnly: true },
+                new_password: { writeOnly: true, minLength: 15 },
+              },
+            },
+          },
+        },
+      },
+      responses: {
+        "204": { description: expect.stringContaining("Log in again") },
+      },
+    });
+  });
+
   it("keeps Local lifecycle password limits byte-based and identity paths UUIDv7", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),

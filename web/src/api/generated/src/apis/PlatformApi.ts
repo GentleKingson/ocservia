@@ -29,6 +29,11 @@ import {
   BuildInfoToJSON,
 } from "../models/BuildInfo";
 import {
+  type ChangeLocalPasswordRequest,
+  ChangeLocalPasswordRequestFromJSON,
+  ChangeLocalPasswordRequestToJSON,
+} from "../models/ChangeLocalPasswordRequest";
+import {
   type CreateLocalUser201Response,
   CreateLocalUser201ResponseFromJSON,
   CreateLocalUser201ResponseToJSON,
@@ -74,6 +79,10 @@ import {
   WorkspacePageFromJSON,
   WorkspacePageToJSON,
 } from "../models/WorkspacePage";
+
+export interface ChangeLocalPasswordOperationRequest {
+  changeLocalPasswordRequest: ChangeLocalPasswordRequest;
+}
 
 export interface CompleteOIDCLoginRequest {
   state: string;
@@ -152,6 +161,64 @@ export class PlatformApi extends runtime.BaseAPI {
   ): Promise<Problem> {
     const response = await this.beginOIDCLoginRaw(initOverrides);
     return await response.value();
+  }
+
+  /**
+   * Creates request options for changeLocalPassword without sending the request
+   */
+  async changeLocalPasswordRequestOpts(
+    requestParameters: ChangeLocalPasswordOperationRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["changeLocalPasswordRequest"] == null) {
+      throw new runtime.RequiredError(
+        "changeLocalPasswordRequest",
+        'Required parameter "changeLocalPasswordRequest" was null or undefined when calling changeLocalPassword().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/auth/change-password`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ChangeLocalPasswordRequestToJSON(
+        requestParameters["changeLocalPasswordRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password remains independently approved.
+   * Change the current Local session owner\'s password
+   */
+  async changeLocalPasswordRaw(
+    requestParameters: ChangeLocalPasswordOperationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<void>> {
+    const requestOptions =
+      await this.changeLocalPasswordRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.VoidApiResponse(response);
+  }
+
+  /**
+   * Requires exact Origin and a valid non-break-glass Local session. No target identity or workspace may be submitted. Verifies the current password under the shared Local account attempt protection and applies the new-password policy. Credential version, disabled state and session validity are rechecked in the transaction. Success atomically changes the password, revokes all sessions and appends audit; the caller must log in again. OIDC and Break-glass sessions cannot use this endpoint. Administrator reset-password remains independently approved.
+   * Change the current Local session owner\'s password
+   */
+  async changeLocalPassword(
+    requestParameters: ChangeLocalPasswordOperationRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<void> {
+    await this.changeLocalPasswordRaw(requestParameters, initOverrides);
   }
 
   /**
@@ -425,7 +492,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes.
+   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin or fewer than two distinct active Local workspace approvers. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
    * Disable a platform Local login identity and revoke all its sessions
    */
   async disableLocalUserRaw(
@@ -440,7 +507,7 @@ export class PlatformApi extends runtime.BaseAPI {
   }
 
   /**
-   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes.
+   * Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes. Returns 409 when disabling an effective elevated Local identity would leave no active Local workspace PlatformAdmin or fewer than two distinct active Local workspace approvers. Disabled identities and bindings in other workspaces or narrower resource scopes do not count. Protection and disable are serialized in one transaction.
    * Disable a platform Local login identity and revoke all its sessions
    */
   async disableLocalUser(
