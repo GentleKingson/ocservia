@@ -12,8 +12,60 @@ type breakGlassRequest struct {
 	Token string `json:"token"`
 }
 
+type localLoginRequest struct {
+	Username *string `json:"username"`
+	Password *string `json:"password"`
+}
+
+func (s *Server) authMethods(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, struct {
+		Local bool `json:"local"`
+		OIDC  bool `json:"oidc"`
+	}{s.auth != nil && s.auth.LocalEnabled(), s.auth != nil && s.auth.OIDCEnabled()})
+}
+
+func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.auth == nil || !s.auth.LocalEnabled() {
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "Local authentication is not configured")
+		return
+	}
+	if err := s.validateBrowserMutation(r, auth.Principal{Issuer: auth.LocalIssuer}); err != nil {
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
+		return
+	}
+	release := s.admitAuthentication(w, r, s.localLoginBudget, false)
+	if release == nil {
+		return
+	}
+	defer release()
+	// Allow JSON escaping of the core's 128-byte username and 1024-byte password.
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var body localLoginRequest
+	if !decodeStrictJSON(w, r, &body) {
+		return
+	}
+	if body.Username == nil || body.Password == nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "username and password are required")
+		return
+	}
+	// AuthenticateLocal enforces field byte limits and hides credential existence.
+	cookie, _, err := s.auth.AuthenticateLocal(r.Context(), *body.Username, *body.Password)
+	if err != nil {
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Invalid username or password", "Invalid username or password")
+		} else {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/authentication-unavailable", "Login unavailable", "Local login could not be completed")
+		}
+		return
+	}
+	http.SetCookie(w, cookie)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil {
+	if s.auth == nil || !s.auth.OIDCEnabled() {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "OIDC authentication is not configured")
 		return
 	}
@@ -28,7 +80,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil {
+	if s.auth == nil || !s.auth.OIDCEnabled() {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "OIDC authentication is not configured")
 		return
 	}

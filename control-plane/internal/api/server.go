@@ -69,6 +69,7 @@ type Server struct {
 	auth             *auth.Service
 	authProxies      []netip.Prefix
 	breakGlassBudget *authAdmission
+	localLoginBudget *authAdmission
 	rbac             *rbac.Service
 	approvals        *approvals.Service
 	audit            *audit.Manager
@@ -87,6 +88,7 @@ type Server struct {
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
 	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, devAuthToken: devAuthToken, expectedSchema: expectedSchema}
 	s.breakGlassBudget = newAuthAdmission(5, 0, 4)
+	s.localLoginBudget = newAuthAdmission(5, 120, 4)
 	if err := s.configureEventStreams(eventstream.DefaultConfig()); err != nil {
 		panic(err)
 	}
@@ -98,6 +100,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/version", s.version)
 	mux.HandleFunc("GET /api/v1/auth/login", s.limitAuthentication(newAuthAdmission(30, 120, 8), s.login))
+	mux.HandleFunc("POST /api/v1/auth/login", s.localLogin)
+	mux.HandleFunc("GET /api/v1/auth/methods", s.authMethods)
 	mux.HandleFunc("GET /api/v1/auth/callback", s.limitAuthentication(newAuthAdmission(30, 120, 8), s.callback))
 	mux.HandleFunc("POST /api/v1/auth/logout", s.requireOperationAuth(s.logout))
 	mux.HandleFunc("POST /api/v1/auth/break-glass", s.breakGlass)
@@ -345,8 +349,10 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 
 func routeMethod(path string) (string, bool) {
 	switch path {
-	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/operations/summary", "/api/v1/user-operations/metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/login", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/operations/summary", "/api/v1/user-operations/metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/methods", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
 		return http.MethodGet, true
+	case "/api/v1/auth/login":
+		return "GET_OR_POST", true
 	case "/api/v1/nodes":
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
@@ -508,7 +514,7 @@ func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
 var errCrossOrigin = errors.New("the request Origin does not match the trusted browser origin")
 
 // validateBrowserMutation enforces the browser trust boundary for state
-// changing requests: a session cookie established through OIDC or break-glass
+// changing requests: a session cookie established through Local, OIDC or break-glass
 // may only be spent by the exact public browser origin, so a sibling origin
 // on the same site, an unknown site, or a missing Origin cannot drive a
 // mutation. Development bearer principals are non-browser credentials and

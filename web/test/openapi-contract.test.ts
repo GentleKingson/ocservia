@@ -6,14 +6,45 @@ import { parse } from "yaml";
 
 interface OpenApiDocument {
   openapi?: unknown;
-  paths?: Record<string, Record<string, unknown>>;
+  security?: unknown;
+  paths?: Record<
+    string,
+    Record<
+      string,
+      {
+        operationId?: unknown;
+        security?: unknown;
+        responses?: Record<string, unknown>;
+      }
+    >
+  >;
   components?: {
     responses?: Record<string, { content?: Record<string, unknown> }>;
     securitySchemes?: {
-      oidc?: { type?: unknown; in?: unknown; name?: unknown };
+      oidc?: unknown;
+      sessionCookie?: { type?: unknown; in?: unknown; name?: unknown };
       bearerAuth?: { type?: unknown; scheme?: unknown };
     };
     schemas?: {
+      LocalLoginRequest?: {
+        additionalProperties?: unknown;
+        required?: unknown;
+        properties?: {
+          username?: { maxLength?: unknown };
+          password?: {
+            minLength?: unknown;
+            maxLength?: unknown;
+            writeOnly?: unknown;
+            description?: unknown;
+          };
+        };
+      };
+      AuthMethods?: {
+        type?: unknown;
+        additionalProperties?: unknown;
+        required?: unknown;
+        properties?: Record<string, { type?: unknown }>;
+      };
       UuidV7?: { pattern?: unknown };
       Problem?: { required?: unknown };
       AgentUpgradeRequest?: {
@@ -66,6 +97,51 @@ interface OpenApiDocument {
 }
 
 describe("OpenAPI invariants", () => {
+  it("publishes the shared Local and OIDC authentication contract", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    expect(document.security).toContainEqual({ sessionCookie: [] });
+    expect(document.components?.securitySchemes?.oidc).toBeUndefined();
+    expect(document.paths?.["/auth/local/login"]).toBeUndefined();
+    expect(document.paths?.["/auth/login"]?.get?.operationId).toBe(
+      "beginOIDCLogin",
+    );
+    expect(document.paths?.["/auth/login"]?.post).toMatchObject({
+      operationId: "loginLocal",
+      security: [],
+      responses: {
+        "403": { $ref: "#/components/responses/CrossOriginRequest" },
+      },
+    });
+    for (const status of ["204", "401", "404", "429"]) {
+      expect(
+        document.paths?.["/auth/login"]?.post?.responses?.[status],
+      ).toBeDefined();
+    }
+    expect(document.paths?.["/auth/methods"]?.get?.security).toEqual([]);
+    expect(document.components?.schemas?.LocalLoginRequest).toMatchObject({
+      additionalProperties: false,
+      required: ["username", "password"],
+      properties: {
+        username: { maxLength: 128 },
+        password: { minLength: 1, writeOnly: true },
+      },
+    });
+    const password =
+      document.components?.schemas?.LocalLoginRequest?.properties?.password;
+    expect(password?.maxLength).toBeUndefined();
+    expect(password?.description).toContain("1024 UTF-8 bytes");
+    expect(document.components?.schemas?.AuthMethods).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["local", "oidc"],
+      properties: { local: { type: "boolean" }, oidc: { type: "boolean" } },
+    });
+  });
+
   it("pins OpenAPI and the cross-language scalar conventions", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
@@ -98,7 +174,7 @@ describe("OpenAPI invariants", () => {
         ?.writeOnly,
     ).toBeUndefined();
     expect(document.paths?.["/node-bootstrap-tokens"]?.post).toBeDefined();
-    expect(document.components?.securitySchemes?.oidc).toMatchObject({
+    expect(document.components?.securitySchemes?.sessionCookie).toMatchObject({
       type: "apiKey",
       in: "cookie",
       name: "__Host-ocservia_session",

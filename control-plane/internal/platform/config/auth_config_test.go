@@ -43,13 +43,16 @@ func TestProductionAuthenticationConfiguration(t *testing.T) {
 				}
 				lookup := func(key string) (string, bool) { v, ok := values[key]; return v, ok }
 				cfg, err := Load(nil, lookup)
-				valid := mask == 15
+				valid := mask == 15 || local && mask == 0
 				if (err == nil) != valid {
 					t.Fatalf("Load() error=%v, want success=%t", err, valid)
 				}
 				if !valid {
-					if mask == 0 && !strings.Contains(err.Error(), "until Local HTTP login is available") {
+					if mask == 0 && !strings.Contains(err.Error(), "Local or OIDC authentication is required") {
 						t.Fatalf("expected production login availability guard, got %v", err)
+					}
+					if mask != 0 && !strings.Contains(err.Error(), "complete client credentials") {
+						t.Fatalf("expected partial OIDC rejection, got %v", err)
 					}
 					return
 				}
