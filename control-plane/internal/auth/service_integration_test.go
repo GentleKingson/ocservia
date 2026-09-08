@@ -136,6 +136,24 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 	if _, _, err := service.CompleteLogin(ctx, expected.State, "bad-signature", loginCookie); err == nil {
 		t.Fatal("invalid ID token signature was accepted")
 	}
+	second, existing, err := service.CompleteLogin(ctx, expected.State, "valid-code", loginCookie)
+	if err != nil || existing.IdentityID != principal.IdentityID || second == nil {
+		t.Fatalf("existing identity login: %+v, %v", existing, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE identities SET disabled_at=now() WHERE id=$1`, principal.IdentityID); err != nil {
+		t.Fatal(err)
+	}
+	denied, _, loginErr := service.CompleteLogin(ctx, expected.State, "valid-code", loginCookie)
+	var sessions, identities int
+	var disabled bool
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM auth_sessions WHERE identity_id=$1), (SELECT count(*) FROM identities WHERE issuer=$2 AND subject=$3), disabled_at IS NOT NULL FROM identities WHERE id=$1`, principal.IdentityID, issuer, principal.Subject).Scan(&sessions, &identities, &disabled); err != nil {
+		t.Fatal(err)
+	}
+	_, authErr := service.Authenticate(ctx, sessionCookie)
+	t.Logf("disabled OIDC: cookie issued=%t, sessions=%d, identities=%d, disabled=%t, existing session rejected=%t", denied != nil, sessions, identities, disabled, errors.Is(authErr, ErrUnauthenticated))
+	if !errors.Is(loginErr, ErrUnauthenticated) || denied != nil || sessions != 2 || identities != 1 || !disabled || !errors.Is(authErr, ErrUnauthenticated) {
+		t.Fatalf("disabled identity login: %v", loginErr)
+	}
 }
 
 func writeJWKS(t *testing.T, w http.ResponseWriter, publicKey *rsa.PublicKey) {

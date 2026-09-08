@@ -1,3 +1,30 @@
+const oidcAttemptKey = "ocservia.login.oidc-attempt";
+
+// UX state only. Authorization always comes from the server.
+export function hasOIDCLoginAttempt(): boolean {
+  try {
+    return sessionStorage.getItem(oidcAttemptKey) !== null;
+  } catch {
+    return true; // Without persistent state, require an explicit SSO click.
+  }
+}
+
+export function startOIDCLoginAttempt(): void {
+  try {
+    sessionStorage.setItem(oidcAttemptKey, "started");
+  } catch {
+    // Manual login remains available when browser storage is disabled.
+  }
+}
+
+export function clearOIDCLoginAttempt(): void {
+  try {
+    sessionStorage.removeItem(oidcAttemptKey);
+  } catch {
+    // Storage availability is not an authorization decision.
+  }
+}
+
 export function safeLoginReturnPath(
   value: string | undefined,
 ): string | undefined {

@@ -113,6 +113,16 @@ test("fresh OIDC login returns to the requested console route", async ({
   await expect(page).toHaveURL(/\/nodes$/);
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
   expect(workspaceRequests).toBeGreaterThanOrEqual(2);
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("ocservia.login.oidc-attempt"),
+    ),
+  ).toBeNull();
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("ocservia.login.return-to"),
+    ),
+  ).toBeNull();
 });
 
 test("switching workspace clears fleet state and reconnects its stream", async ({
@@ -194,9 +204,11 @@ test("an expired SSE session starts OIDC login and restores the console", async 
   await installEventSourceProbe(page);
   await mockReadiness(page);
   let workspaceRequests = 0;
+  let authenticated = false;
+  let logins = 0;
   await page.route("**/api/v1/workspaces", (route) => {
     workspaceRequests += 1;
-    if (workspaceRequests === 2) {
+    if (!authenticated) {
       return route.fulfill({
         status: 401,
         contentType: "application/problem+json",
@@ -211,9 +223,11 @@ test("an expired SSE session starts OIDC login and restores the console", async 
       }),
     });
   });
-  await page.route("**/api/v1/auth/login", (route) =>
-    route.fulfill({ status: 302, headers: { location: "/fake-idp" } }),
-  );
+  await page.route("**/api/v1/auth/login", (route) => {
+    authenticated = true;
+    logins += 1;
+    return route.fulfill({ status: 302, headers: { location: "/fake-idp" } });
+  });
   await page.route("**/fake-idp", (route) =>
     route.fulfill({
       status: 302,
@@ -233,6 +247,15 @@ test("an expired SSE session starts OIDC login and restores the console", async 
 
   await page.goto("/nodes");
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        sessionStorage.getItem("ocservia.login.oidc-attempt"),
+      ),
+    )
+    .toBeNull();
+  expect(logins).toBe(1);
+  authenticated = false;
   await page.evaluate(() => {
     const sources = (
       window as unknown as {
@@ -244,7 +267,8 @@ test("an expired SSE session starts OIDC login and restores the console", async 
 
   await expect(page).toHaveURL(/\/nodes$/);
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  expect(workspaceRequests).toBeGreaterThanOrEqual(3);
+  await expect.poll(() => logins).toBe(2);
+  await expect.poll(() => workspaceRequests).toBeGreaterThanOrEqual(4);
 });
 
 test("a late response from the previous workspace cannot overwrite the current view", async ({
