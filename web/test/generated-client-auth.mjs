@@ -70,6 +70,23 @@ assert.equal(
   null,
 );
 
+await platform.changeLocalPassword({
+  changeLocalPasswordRequest: {
+    currentPassword: "test-current-password",
+    newPassword: "test-new-password",
+  },
+});
+const change = requests.find(({ path }) =>
+  path.endsWith("/auth/change-password"),
+);
+assert.equal(change.method, "POST");
+assert.equal(change.authorization, null);
+assert.equal(change.credentials, "include");
+assert.deepEqual(JSON.parse(change.body), {
+  current_password: "test-current-password",
+  new_password: "test-new-password",
+});
+
 await operations.listOperations({
   xWorkspaceID: "0198f20e-0882-7000-8000-000000000001",
 });

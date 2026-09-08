@@ -89,6 +89,10 @@ type Config struct {
 	AgentReleaseManifest     string
 	AgentUpgradeReconcile    time.Duration
 	EventStreams             eventstream.Config
+
+	CompleteLocalBootstrap         bool
+	LocalBootstrapApproverUsername string
+	LocalBootstrapApproverPassword string
 }
 
 type LookupEnv func(string) (string, bool)
@@ -299,6 +303,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
+	completeBootstrap := fs.Bool("complete-local-bootstrap", false, "complete an eligible pre-R4 Local initialization with an independent approver, then exit")
 	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	schemaCompatibilityCheck := fs.Int64("schema-compatibility-check", 0, "validate the stored Controller schema compatibility contract for a schema version, then exit")
@@ -309,18 +314,34 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, errors.New("unexpected command-line arguments")
 	}
 	cfg.BootstrapLocalAdmin = *bootstrap
+	cfg.CompleteLocalBootstrap = *completeBootstrap
+	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD"); ok {
+		return Config{}, errors.New("plaintext approver password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE")
+	}
 	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD"); ok {
 		return Config{}, errors.New("plaintext bootstrap password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
 	}
-	if cfg.BootstrapLocalAdmin {
+	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
 		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_USERNAME", &cfg.LocalBootstrapUsername)
 		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID", &cfg.LocalBootstrapWorkspace)
 		path, _ := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
-		password, err := readSecretFile(path)
+		password, err := readBootstrapSecret(path)
 		if err != nil {
 			return Config{}, errors.New("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE must be a valid secret file")
 		}
 		cfg.LocalBootstrapPassword = password
+		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME", &cfg.LocalBootstrapApproverUsername)
+		approverPath, _ := lookup("OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE")
+		if approverPath == path {
+			return Config{}, errors.New("administrator and approver require separate secret files")
+		}
+		cfg.LocalBootstrapApproverPassword, err = readBootstrapSecret(approverPath)
+		if err != nil {
+			return Config{}, errors.New("OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE must be a valid secret file")
+		}
+		if cfg.LocalBootstrapApproverPassword == password {
+			return Config{}, errors.New("administrator and approver credentials must differ")
+		}
 	}
 	cfg.Role = Role(*role)
 	cfg.MigrateOnly = *migrateOnly
@@ -333,7 +354,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if c.BootstrapLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
+	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "" || c.LocalBootstrapApproverUsername == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
 	}
 	switch c.Role {
@@ -421,7 +442,7 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	oneShotDatabaseCommand := c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || c.BootstrapLocalAdmin
+	oneShotDatabaseCommand := c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}
@@ -577,6 +598,30 @@ func readSecretFile(path string) (string, error) {
 	if !os.SameFile(before, after) {
 		return "", errors.New("secret file changed while opening")
 	}
+	return readSecretValue(file)
+}
+
+func readBootstrapSecret(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("secret file path must be absolute")
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return "", err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return "", err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0077 != 0 || stat.Nlink != 1 {
+		return "", errors.New("bootstrap secret must be launcher-owned, private, regular and not hard-linked")
+	}
+	return readSecretValue(file)
+}
+
+func readSecretValue(file *os.File) (string, error) {
 	raw, err := io.ReadAll(io.LimitReader(file, 4097))
 	if err != nil {
 		return "", err

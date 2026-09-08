@@ -111,7 +111,8 @@ There is **no default administrator password**. Bootstrap is a separate,
 operator-invoked **one-shot**, not part of normal install or restart.
 
 1. Complete the pinned Controller installation with Local enabled. Migrations
-   must be applied, including `000031` and `000032`, and PostgreSQL must be ready.
+   must be applied through `000034`, and PostgreSQL must be ready. Stop older
+   Controllers before migration; schema 34 intentionally rejects older binaries.
    Use the installed release checkout and its effective exported production
    settings and verified image digests for the commands below.
 2. Select an existing management workspace UUIDv7. Bootstrap does not create a
@@ -126,18 +127,32 @@ operator-invoked **one-shot**, not part of normal install or restart.
 
    Record that UUID: the Local identity management workspace is fixed at
    bootstrap, not selected later by an API header.
-3. Through your protected secret channel, provision a strong password in
-   `OCSERV_SECRET_DIR/local-bootstrap-password`, as a launcher-owned regular
-   file with mode `0444` inside the private `0700` secret directory. Reject
-   symlinks; never put its contents in an environment variable or command line.
-   The file is mounted read-only only for this command:
+3. Assign the administrator and approver to **different responsible people**.
+   Two identity IDs alone do not establish personnel independence. Deliver two
+   different passwords separately through the secret manager, in
+   `OCSERV_SECRET_DIR/local-bootstrap-password` and
+   `OCSERV_SECRET_DIR/local-bootstrap-approver-password`. Both files must be
+   owned by the one-shot process UID, mode `0400` or `0600`, within a private
+   `0700` directory. Final-path symlinks, hard links and group/world-readable files are
+   rejected. Never put password contents in environment variables, command
+   arguments, shell tracing or logs. Mount both read-only only for this command:
 
    ```bash
+   # The repository's production control image runs as 65534:65532.
+   sudo chown 65534:65532 \
+     "${OCSERV_SECRET_DIR}/local-bootstrap-password" \
+     "${OCSERV_SECRET_DIR}/local-bootstrap-approver-password"
+   sudo chmod 0400 \
+     "${OCSERV_SECRET_DIR}/local-bootstrap-password" \
+     "${OCSERV_SECRET_DIR}/local-bootstrap-approver-password"
    deploy/production/compose.sh run --rm --no-deps \
      -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin \
      -e OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID='<management-workspace-uuidv7>' \
      -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password \
+     -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=initial-approver \
+     -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/secrets/local-bootstrap-approver-password \
      -v "${OCSERV_SECRET_DIR}/local-bootstrap-password:/run/secrets/local-bootstrap-password:ro" \
+     -v "${OCSERV_SECRET_DIR}/local-bootstrap-approver-password:/run/secrets/local-bootstrap-approver-password:ro" \
      control-plane --bootstrap-local-admin
    ```
 
@@ -146,14 +161,17 @@ operator-invoked **one-shot**, not part of normal install or restart.
    password's case are preserved. Use a password from your secret manager.
    The command uses
    the application's database role, grants existing workspace-scoped
-   `PlatformAdmin`, records the initialization and audit event atomically, and
+   `PlatformAdmin` to the administrator and only existing `SecurityAdmin` to the
+   approver in that same workspace. Both identities, credentials, role bindings,
+   completion marker and audit events commit atomically. The command
    exits without starting listeners/workers or contacting the IdP.
 4. After success, `--rm` removes the one-shot container and its secret mount.
-   Delete the host bootstrap password file through your secret-management
+   Delete both temporary host bootstrap files through your secret-management
    procedure and remove any temporary bootstrap settings or mounts. Verify
-   Local login and the management workspace role. Establish separately owned
-   approval authority using existing RBAC procedures before password resets
-   are needed; bootstrap does not create a second approver.
+   both Local logins and their management workspace roles. Keep their durable
+   credentials separately controlled. The approver cannot create/reset Local
+   users or grant PlatformAdmin alone; it can independently approve the
+   administrator's content-bound role grants and password resets.
 
 Concurrent or subsequent bootstrap attempts are rejected. An existing Local
 SecurityAdmin/PlatformAdmin also blocks initialization. Controller restart does
@@ -162,11 +180,114 @@ admin or resetting its password does not re-enable bootstrap. Preserve the
 initialization marker in backups; do not delete it or roll back its migration
 to recover an account.
 
+### Upgrading a single-administrator installation
+
+Migration 34 records `completion_pending=true` only for the original active
+Local bootstrap PlatformAdmin, with a matching bootstrap audit event and no
+other historical SecurityAdmin/PlatformAdmin binding in the fixed workspace.
+Disabled bindings also close eligibility. All other existing deployments are
+marked closed without changing identities, credentials or roles. No marker or
+no verifiable original admin means no automatic recovery exception.
+
+Inspect the marker using the protected administrative database connection:
+
+```sql
+SELECT identity_id, workspace_id, completion_pending, completed_at,
+       approver_identity_id FROM local_auth_bootstrap;
+```
+
+For an eligible deployment, run the **same one-shot command and two mounts
+above**, replacing `--bootstrap-local-admin` with `--complete-local-bootstrap`.
+Set the original administrator username and fixed workspace. The administrator
+Secret file must contain its **current** password, not a replacement; the other
+file contains the new, separately delivered approver password. The command
+verifies the original credential under Local attempt protection and rechecks
+the frozen state while holding the initialization lock. It creates only a new
+SecurityAdmin identity, never modifies an existing password, and consumes the
+completion opportunity atomically with role and audit. Repeated/concurrent
+completion fails closed. Later elevated grants close pending completion too.
+
+An installation with existing independent authority needs **no** completion
+command. Losing that authority later does not reopen initialization. Normal
+Controller startup and login never create a workspace, an account or a grant.
+
+### Approval and password operations
+
+Use the authenticated API client over HTTPS with the exact trusted `Origin`.
+`POST /api/v1/local-users` creates a Local identity with no roles. To elevate it,
+the administrator submits `POST /api/v1/approval-requests` with
+`action=role_binding.elevate`, `resource_type=role_binding`, the new identity as
+`resource_id`, and `role_binding={identity_id,role,resource_type:"workspace"}`.
+Use the fixed `X-Workspace-ID`, a reason and `ttl_seconds` (60..86400). The
+separate approver reviews the returned content and submits
+`POST /api/v1/approval-requests/{id}:approve` with `reason` and
+`expected_request_hash`. The administrator then submits `POST /api/v1/role-bindings`
+with the same identity/role/scope, `workspace_id`, `reason` and `approval_id`.
+Requester self-approval remains forbidden, including after bootstrap.
+
+For self-service, provision a private JSON request file through your secret
+manager containing only `current_password` and `new_password`. With a private
+cookie jar from Local login, execute:
+
+```sh
+curl --fail-with-body --silent --show-error \
+  --cookie /run/secrets/local-session.cookies \
+  --cookie-jar /run/secrets/local-session.cookies \
+  -H "Origin: ${OCSERV_PUBLIC_ORIGIN}" -H 'Content-Type: application/json' \
+  --data-binary @/run/secrets/change-password.json \
+  "${OCSERV_PUBLIC_ORIGIN}/api/v1/auth/change-password"
+```
+
+Success is **204 and mandatory re-login**: every old session is revoked, not
+just the current cookie. Do not submit an identity ID or workspace. Incorrect
+current passwords share the login account's backoff; OIDC and Break-glass
+sessions cannot use this endpoint. Policy rejection is 400; invalid/stale Local
+credentials or a blocked attempt is 401. Remove the temporary request file.
+Administrator `:reset-password` still requires the independent, one-use
+`local_user.reset-password` approval and `X-Approval-ID`; reset does not enable
+a disabled account.
+
+### Management protection and recovery
+
+Disable returns 409 rather than removing the last active Local workspace
+PlatformAdmin or reducing Local workspace approval authority below two distinct
+active identities. Only matching Local credentials, non-disabled identities and
+workspace-wide bindings in the fixed management workspace count. Other
+workspaces, narrower/historical bindings, OIDC and Break-glass do not substitute
+for these durable Local recovery anchors. Checks and disable serialize in one
+transaction; two administrators cannot bypass this by disabling each other.
+The current application has no role-binding deletion or identity deletion API.
+Direct database administration remains a trusted, externally controlled boundary.
+
+Before disabling a protected account, create a replacement through the normal
+Local API, obtain an independent elevated-role approval, verify its login under
+the new responsible person's control, then retry disable. If one password is
+lost, use the surviving administrator and an independent approver to perform
+the approved reset. A separately governed, already enabled Break-glass session
+can request/execute a reset with a surviving SecurityAdmin's approval; it cannot
+self-approve and must follow the existing rotation/incident policy.
+
+If no usable administrator/independent approver pair remains, stop writes,
+preserve incident evidence and follow the authorized
+[backup/PITR recovery procedure](postgres-pitr-restore.md) to a verified state
+with independently controlled credentials. Keep all initialization markers and
+audit history. Before reopening access, revoke restored sessions using the
+protected administrative connection:
+
+```sql
+UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
+```
+
+Record this offline recovery in the incident/change record, verify both logins
+and approval separation, and rotate any exposed credentials through the normal
+flows. No generic account-unlock CLI or anonymous HTTP recovery endpoint is
+introduced. **Never delete/edit the Bootstrap marker to reinitialize.**
+
 ## Local new-password policy
 
 All Local password writes (trusted `CreateLocalCredential`, bootstrap, managed
-user creation and administrator reset) use `ValidateNewPassword` through the
-shared hashing function. Future self-service changes must use the same path.
+user creation, self-service change and administrator reset) use
+`ValidateNewPassword` through the shared hashing function.
 
 - At least 15 Unicode code points, at most 1024 UTF-8 bytes; invalid UTF-8 is rejected.
 - Long passwords, spaces and valid Unicode are supported. No uppercase, digit
