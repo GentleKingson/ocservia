@@ -63,6 +63,12 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 				nonce += "-replayed"
 			}
 			token := signIDToken(t, key, issuer, nonce)
+			if r.Form.Get("code") == "bad-signature" {
+				parts := strings.Split(token, ".")
+				signature, _ := base64.RawURLEncoding.DecodeString(parts[2])
+				signature[0] ^= 1
+				token = parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(signature)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer", "expires_in": 60, "id_token": token})
 		default:
@@ -127,6 +133,9 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 	if _, _, err := service.CompleteLogin(ctx, expected.State, "bad-nonce", loginCookie); err == nil {
 		t.Fatal("OIDC nonce replay was accepted")
 	}
+	if _, _, err := service.CompleteLogin(ctx, expected.State, "bad-signature", loginCookie); err == nil {
+		t.Fatal("invalid ID token signature was accepted")
+	}
 }
 
 func writeJWKS(t *testing.T, w http.ResponseWriter, publicKey *rsa.PublicKey) {
@@ -169,7 +178,7 @@ func TestBreakGlassAlertsAuditsAndRequiresRotationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := "offline-emergency-credential-with-high-entropy"
-	service, err := New(ctx, pool, Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: TokenHash(token)})
+	service, err := New(ctx, pool, Config{LocalEnabled: true, Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: TokenHash(token)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +189,12 @@ func TestBreakGlassAlertsAuditsAndRequiresRotationIntegration(t *testing.T) {
 	if !principal.BreakGlass || !cookie.Secure || !cookie.HttpOnly {
 		t.Fatal("break-glass session is not hardened")
 	}
+	var bounded bool
+	if err := pool.QueryRow(ctx, `SELECT expires_at-created_at=interval '15 minutes' FROM auth_sessions WHERE id=$1`, principal.SessionID).Scan(&bounded); err != nil || !bounded {
+		t.Fatalf("break-glass TTL changed: %t %v", bounded, err)
+	}
 	var alerts, audits int
-	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM security_alerts WHERE source_session_id=$1),(SELECT count(*) FROM audit_events WHERE workspace_id=$2 AND source_session_id=$1 AND action='break_glass.use')`, principal.SessionID, workspaceID).Scan(&alerts, &audits); err != nil || alerts != 1 || audits != 1 {
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM security_alerts WHERE source_session_id=$1 AND severity='critical'),(SELECT count(*) FROM audit_events WHERE workspace_id=$2 AND source_session_id=$1 AND action='break_glass.use')`, principal.SessionID, workspaceID).Scan(&alerts, &audits); err != nil || alerts != 1 || audits != 1 {
 		t.Fatalf("break-glass alert/audit = %d/%d, %v", alerts, audits, err)
 	}
 	if _, _, err := service.BreakGlass(ctx, token, "replay"); !errors.Is(err, ErrBreakGlassRotationDue) {
