@@ -126,3 +126,91 @@ test("unavailable methods fail closed and can be retried", async ({ page }) => {
   await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
 });
+
+test("OIDC return followed by 401 stops automatic login and permits manual retry", async ({
+  page,
+}) => {
+  await methods(page, false, true);
+  let starts = 0;
+  await page.route("**/api/v1/workspaces", (route) =>
+    route.fulfill({ status: 401, json: {} }),
+  );
+  await page.route("**/api/v1/auth/login", (route) => {
+    starts += 1;
+    return starts < 3
+      ? route.fulfill({ status: 302, headers: { Location: "/" } })
+      : route.fulfill({ contentType: "text/html", body: "Loop safety stop" });
+  });
+  await page.goto("/nodes?filter=login#latest");
+  await expect(
+    page.getByRole("button", { name: "Sign in with SSO" }),
+  ).toBeVisible();
+  expect(starts).toBe(1);
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Sign in with SSO" }),
+  ).toBeVisible();
+  expect(starts).toBe(1);
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("ocservia.login.return-to"),
+    ),
+  ).toBe("/nodes?filter=login#latest");
+  await page.getByRole("button", { name: "Sign in with SSO" }).click();
+  await expect.poll(() => starts).toBe(2);
+  await expect(
+    page.getByRole("button", { name: "Sign in with SSO" }),
+  ).toBeVisible();
+});
+
+test("fixed failure marker prevents auto SSO without accepting external returnTo", async ({
+  page,
+}) => {
+  await methods(page, false, true);
+  let starts = 0;
+  await page.route("**/api/v1/auth/login", (route) => {
+    starts += 1;
+    return route.fulfill({ contentType: "text/html", body: "Manual SSO" });
+  });
+  await page.goto(
+    "/login?auth=failed&returnTo=https://evil.example&error=provider-secret",
+  );
+  await expect(page.getByRole("alert")).toHaveText(
+    "SSO did not complete. Sign in with SSO to try again.",
+  );
+  expect(starts).toBe(0);
+  await page.getByRole("button", { name: "Sign in with SSO" }).click();
+  await expect(page).toHaveURL(/\/api\/v1\/auth\/login$/);
+  expect(starts).toBe(1);
+});
+
+test("callback rejection is terminal and revisiting login offers manual retry", async ({
+  page,
+}) => {
+  await methods(page, false, true);
+  let starts = 0;
+  await page.route("**/api/v1/auth/login", (route) => {
+    starts += 1;
+    return route.fulfill({
+      status: 302,
+      headers: { Location: "/api/v1/auth/callback?state=test&code=test" },
+    });
+  });
+  await page.route("**/api/v1/auth/callback?**", (route) =>
+    route.fulfill({
+      status: 401,
+      json: {
+        type: "https://ocservia.dev/problems/oidc-callback-rejected",
+        title: "Login rejected",
+      },
+    }),
+  );
+  await page.goto("/login");
+  await expect(page).toHaveURL(/\/api\/v1\/auth\/callback\?/);
+  expect(starts).toBe(1);
+  await page.goto("/login");
+  await expect(
+    page.getByRole("button", { name: "Sign in with SSO" }),
+  ).toBeVisible();
+  expect(starts).toBe(1);
+});

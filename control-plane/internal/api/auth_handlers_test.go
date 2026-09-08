@@ -307,6 +307,47 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 					t.Fatal("missing OIDC session")
 				}
 				logout(session)
+				fresh := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
+				if fresh.Code != 302 {
+					t.Fatalf("existing identity callback: %d", fresh.Code)
+				}
+				for _, c := range fresh.Result().Cookies() {
+					if c.Name == auth.SessionCookieName {
+						session = c
+					}
+				}
+				ctx := context.Background()
+				if _, err := s.auth.Authenticate(ctx, session); err != nil {
+					t.Fatalf("fresh session before disable: %v", err)
+				}
+				var identityID uuid.UUID
+				if err := pool.QueryRow(ctx, `UPDATE identities SET disabled_at=now() WHERE issuer=$1 AND subject='http-operator' RETURNING id`, issuer).Scan(&identityID); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _, _ = pool.Exec(ctx, `UPDATE identities SET disabled_at=NULL WHERE id=$1`, identityID) })
+				request := httptest.NewRequest("GET", "/api/v1/workspaces", nil)
+				request.AddCookie(session)
+				response := httptest.NewRecorder()
+				s.http.Handler.ServeHTTP(response, request)
+				if response.Code != 401 {
+					t.Fatalf("disabled session business API: %d", response.Code)
+				}
+				var before, after int
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE identity_id=$1`, identityID).Scan(&before); err != nil {
+					t.Fatal(err)
+				}
+				rejected := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
+				if rejected.Code != 401 || rejected.Header().Get("Location") != "" || !strings.Contains(rejected.Body.String(), "oidc-callback-rejected") {
+					t.Fatalf("disabled callback protocol: %d %s", rejected.Code, rejected.Body)
+				}
+				for _, c := range rejected.Result().Cookies() {
+					if c.Name == auth.SessionCookieName || c.Name != auth.LoginCookieName || c.MaxAge != -1 {
+						t.Fatalf("unexpected rejected callback cookie: %s", c.Name)
+					}
+				}
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE identity_id=$1`, identityID).Scan(&after); err != nil || after != before {
+					t.Fatalf("disabled callback sessions: %d -> %d, %v", before, after, err)
+				}
 			}
 		})
 	}

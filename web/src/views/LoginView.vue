@@ -4,7 +4,11 @@ import type { AuthMethods } from "@ocservia/api-client";
 import { onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
-import { retryAfterSeconds } from "../shared/login";
+import {
+  hasOIDCLoginAttempt,
+  startOIDCLoginAttempt,
+  retryAfterSeconds,
+} from "../shared/login";
 
 const { t } = useI18n();
 const methods = ref<AuthMethods>();
@@ -13,9 +17,15 @@ const password = ref("");
 const pending = ref(false);
 const loading = ref(true);
 const error = ref("");
+const ssoStopped = ref(
+  hasOIDCLoginAttempt() ||
+    new URLSearchParams(window.location.search).get("auth") === "failed",
+);
 
 function signInSSO(): void {
   password.value = "";
+  startOIDCLoginAttempt();
+  ssoStopped.value = false;
   window.location.assign("/api/v1/auth/login");
 }
 
@@ -36,7 +46,8 @@ async function loadMethods(): Promise<void> {
     )
       throw new Error("Authentication unavailable");
     methods.value = data;
-    if (!data.local && data.oidc) signInSSO();
+    if (data.oidc && ssoStopped.value) error.value = t("loginSSOFailed");
+    if (!data.local && data.oidc && !ssoStopped.value) signInSSO();
   } catch {
     error.value = t("loginUnavailable");
   } finally {
@@ -127,14 +138,14 @@ onMounted(loadMethods);
         {{ t("loginOr") }}
       </div>
       <button
-        v-if="methods?.local && methods.oidc"
+        v-if="methods?.oidc && (methods.local || ssoStopped)"
         type="button"
         :disabled="pending"
         @click="signInSSO"
       >
         <LogIn :size="18" />{{ t("loginSSO") }}
       </button>
-      <p v-if="methods?.oidc && !methods.local" role="status">
+      <p v-if="methods?.oidc && !methods.local && !ssoStopped" role="status">
         {{ t("loginRedirecting") }}
       </p>
       <button v-if="!loading && !methods" type="button" @click="loadMethods">

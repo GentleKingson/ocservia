@@ -34,13 +34,16 @@ import {
   type AgentRollout,
   type AgentRolloutPage,
 } from "@ocservia/api-client";
-import { safeLoginReturnPath } from "../shared/login";
+import {
+  clearOIDCLoginAttempt,
+  hasOIDCLoginAttempt,
+  safeLoginReturnPath,
+} from "../shared/login";
 
 const devAuthToken = import.meta.env.DEV
   ? import.meta.env.VITE_DEV_AUTH_TOKEN
   : undefined;
 const loginReturnKey = "ocservia.login.return-to";
-const loginStartedKey = "ocservia.login.started-at";
 let loginRedirecting = false;
 const workspaceKey = "ocservia.workspace-id";
 export const workspaceChangedEvent = "ocservia:workspace-changed";
@@ -67,10 +70,17 @@ async function authenticatedFetch(
       const returnTo = safeLoginReturnPath(
         `${window.location.pathname}${window.location.search}${window.location.hash}`,
       );
-      if (returnTo) {
+      if (
+        returnTo &&
+        !safeLoginReturnPath(
+          sessionStorage.getItem(loginReturnKey) ?? undefined,
+        )
+      ) {
         sessionStorage.setItem(loginReturnKey, returnTo);
       }
-      window.location.assign("/login");
+      window.location.assign(
+        hasOIDCLoginAttempt() ? "/login?auth=failed" : "/login",
+      );
     }
   }
   return response;
@@ -287,7 +297,7 @@ export async function selectWorkspace(workspaceId: string): Promise<Workspace> {
 export function consumeLoginReturnPath(): string | undefined {
   const value = sessionStorage.getItem(loginReturnKey) ?? undefined;
   sessionStorage.removeItem(loginReturnKey);
-  sessionStorage.removeItem(loginStartedKey);
+  clearOIDCLoginAttempt();
   return safeLoginReturnPath(value);
 }
 

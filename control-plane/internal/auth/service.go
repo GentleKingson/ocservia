@@ -324,8 +324,15 @@ func (s *Service) createSession(ctx context.Context, issuer, subject, email, nam
 		if err := clearLocalAttempt(ctx, tx, subject, local.attemptLease); err != nil {
 			return nil, Principal{}, err
 		}
-	} else if err := tx.QueryRow(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$6) ON CONFLICT(issuer,subject) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,updated_at=EXCLUDED.updated_at RETURNING id`, identityID, issuer, subject, email, name, now).Scan(&identityID); err != nil {
-		return nil, Principal{}, err
+	} else {
+		// The conflict row stays locked through session insertion and commit.
+		err := tx.QueryRow(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$6) ON CONFLICT(issuer,subject) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,updated_at=EXCLUDED.updated_at WHERE identities.disabled_at IS NULL RETURNING id`, identityID, issuer, subject, email, name, now).Scan(&identityID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, Principal{}, ErrUnauthenticated
+		}
+		if err != nil {
+			return nil, Principal{}, err
+		}
 	}
 	sessionID := uuid.Must(uuid.NewV7())
 	expires := now.Add(s.sessionTTL)
