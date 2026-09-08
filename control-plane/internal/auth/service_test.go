@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,32 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
+
+func TestOptionalAuthenticationProviders(t *testing.T) {
+	ctx := context.Background()
+	for _, local := range []bool{false, true} {
+		s, err := New(ctx, &pgxpool.Pool{}, Config{LocalEnabled: local, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.BeginLogin(ctx); !errors.Is(err, ErrOIDCDisabled) {
+			t.Fatalf("disabled OIDC login: %v", err)
+		}
+		if !local {
+			if _, _, err := s.AuthenticateLocal(ctx, "alice", "password"); !errors.Is(err, ErrLocalDisabled) {
+				t.Fatalf("disabled local login: %v", err)
+			}
+			if _, err := s.CreateLocalCredential(ctx, "alice", "password"); !errors.Is(err, ErrLocalDisabled) {
+				t.Fatalf("disabled local provisioning: %v", err)
+			}
+		}
+	}
+	for _, issuer := range []string{"local", "break-glass"} {
+		if _, err := New(ctx, &pgxpool.Pool{}, Config{Issuer: issuer, ClientID: "client", RedirectURL: "https://console.example/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour}); err == nil {
+			t.Fatalf("reserved identity source accepted as OIDC: %s", issuer)
+		}
+	}
+}
 
 func TestOIDCTLSAndIssuerOutagesFailClosed(t *testing.T) {
 	tlsIssuer := httptest.NewTLSServer(http.NotFoundHandler())

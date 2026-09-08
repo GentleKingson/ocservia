@@ -48,6 +48,36 @@ Audit rows and checkpoints are append-only, and the verification endpoint checks
 the hash chain, every event MAC, and the latest checkpoint. A failed audit insert rolls back
 the business transaction.
 
+## Local authentication core (P1)
+
+The internal `auth.Service` can be constructed without an OIDC provider.
+Trusted Go callers may opt in with `auth.Config.LocalEnabled`, provision an
+identity using `CreateLocalCredential`, and log in using `AuthenticateLocal`.
+Provisioning grants no roles. HTTP routes, runtime configuration wiring,
+production local-only startup, and user management are not part of P1; the
+production OIDC requirement above remains in place.
+
+Migration 000031 stores passwords only in `local_credentials`, keyed by
+`identity_id`. Local identities use issuer `local` and the normalized username
+as subject. Usernames are trimmed and lowercased, with a 128-byte input limit;
+the accepted alphabet is ASCII letters/digits plus `.`, `_`, and `-`, starting
+with a letter or digit. No email/name matching or OIDC account linking occurs.
+Passwords are not normalized and accept 1 to 1024 bytes; future provisioning
+entry points must apply their password-strength and login rate-limit policy.
+
+Hashes use `golang.org/x/crypto/argon2` Argon2id v19, independent 16-byte random
+salts, 32-byte outputs, and self-contained PHC parameters. The write cost is
+19 MiB, two passes, one lane, following the
+[OWASP recommendation](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#argon2id).
+Verification reads stored parameters with resource bounds (up to 64 MiB, five
+passes, four lanes). Unknown users perform a dummy verification at the current
+write cost. Local login rechecks the credential and disabled state under lock
+before the shared session insert; session cookies, AEAD, authentication,
+logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
+
+Rolling back 000031 deletes local password hashes, not identities or sessions.
+Stop local provisioning/login and preserve credentials before applying down.
+
 ## Break-glass
 
 Break-glass is disabled unless `OCSERV_BREAK_GLASS_ENABLED=true` and

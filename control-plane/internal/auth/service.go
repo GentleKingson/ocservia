@@ -20,6 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
@@ -32,11 +33,14 @@ const (
 var (
 	ErrUnauthenticated       = errors.New("principal is not authenticated")
 	ErrOIDCState             = errors.New("OIDC state is invalid")
+	ErrOIDCDisabled          = errors.New("OIDC is disabled")
+	ErrLocalDisabled         = errors.New("local authentication is disabled")
 	ErrBreakGlassDisabled    = errors.New("break-glass is disabled")
 	ErrBreakGlassRotationDue = errors.New("break-glass credential rotation is required")
 )
 
 type Config struct {
+	LocalEnabled                                bool
 	Issuer, ClientID, ClientSecret, RedirectURL string
 	SessionKey                                  []byte
 	SessionTTL                                  time.Duration
@@ -46,6 +50,8 @@ type Config struct {
 
 type Service struct {
 	pool                *pgxpool.Pool
+	localEnabled        bool
+	oidcEnabled         bool
 	issuer              string
 	clientID            string
 	clientSecret        string
@@ -89,9 +95,16 @@ func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
 	if pool == nil || len(cfg.SessionKey) != 32 || cfg.SessionTTL < time.Minute || cfg.SessionTTL > 24*time.Hour {
 		return nil, errors.New("invalid authentication configuration")
 	}
-	redirect, err := url.Parse(cfg.RedirectURL)
-	if err != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.Fragment != "" {
-		return nil, errors.New("OIDC redirect URL must be an absolute HTTPS URL")
+	oidcEnabled := cfg.Issuer != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.RedirectURL != ""
+	if oidcEnabled {
+		issuer, err := url.Parse(cfg.Issuer)
+		if err != nil || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.Host == "" || cfg.ClientID == "" {
+			return nil, errors.New("OIDC requires an HTTP(S) issuer and client ID")
+		}
+		redirect, err := url.Parse(cfg.RedirectURL)
+		if err != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.Fragment != "" {
+			return nil, errors.New("OIDC redirect URL must be an absolute HTTPS URL")
+		}
 	}
 	block, err := aes.NewCipher(cfg.SessionKey)
 	if err != nil {
@@ -102,6 +115,7 @@ func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("configure session encryption: %w", err)
 	}
 	return &Service{
+		localEnabled: cfg.LocalEnabled, oidcEnabled: oidcEnabled,
 		pool: pool, issuer: strings.TrimSuffix(cfg.Issuer, "/"), clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
 		breakGlassEnabled: cfg.BreakGlassEnabled, breakGlassTokenHash: cfg.BreakGlassTokenHash,
 		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader,
@@ -160,10 +174,13 @@ func (s *Service) CompleteLogin(ctx context.Context, state, code string, cookie 
 	if identity.Subject == "" || subtle.ConstantTimeCompare([]byte(identity.Nonce), []byte(attempt.Nonce)) != 1 {
 		return nil, Principal{}, errors.New("OIDC nonce or subject is invalid")
 	}
-	return s.createSession(ctx, s.issuer, identity.Subject, identity.Email, identity.Name, false)
+	return s.createSession(ctx, s.issuer, identity.Subject, identity.Email, identity.Name, false, nil)
 }
 
 func (s *Service) provider(ctx context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
+	if !s.oidcEnabled {
+		return oauth2.Config{}, nil, ErrOIDCDisabled
+	}
 	if s.discover != nil {
 		return s.discover(ctx)
 	}
@@ -283,7 +300,7 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: "offline", Issuer: "break-glass", BreakGlass: true, ExpiresAt: expires}, nil
 }
 
-func (s *Service) createSession(ctx context.Context, issuer, subject, email, name string, breakGlass bool) (*http.Cookie, Principal, error) {
+func (s *Service) createSession(ctx context.Context, issuer, subject, email, name string, breakGlass bool, local *localCredential) (*http.Cookie, Principal, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, Principal{}, err
@@ -291,7 +308,16 @@ func (s *Service) createSession(ctx context.Context, issuer, subject, email, nam
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	now := s.now()
 	identityID := uuid.Must(uuid.NewV7())
-	if err := tx.QueryRow(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$6) ON CONFLICT(issuer,subject) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,updated_at=EXCLUDED.updated_at RETURNING id`, identityID, issuer, subject, email, name, now).Scan(&identityID); err != nil {
+	if local != nil {
+		// Recheck the verified credential under lock; never upsert a local identity.
+		err = tx.QueryRow(ctx, `SELECT i.id FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=$1 AND i.issuer=$2 AND i.subject=$3 AND c.username=i.subject AND c.password_hash=$4 AND i.disabled_at IS NULL FOR UPDATE OF i,c`, local.identityID, issuer, subject, local.passwordHash).Scan(&identityID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, Principal{}, ErrUnauthenticated
+		}
+		if err != nil {
+			return nil, Principal{}, err
+		}
+	} else if err := tx.QueryRow(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$6) ON CONFLICT(issuer,subject) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,updated_at=EXCLUDED.updated_at RETURNING id`, identityID, issuer, subject, email, name, now).Scan(&identityID); err != nil {
 		return nil, Principal{}, err
 	}
 	sessionID := uuid.Must(uuid.NewV7())

@@ -194,7 +194,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT ON node_sealing_keys TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_trust_convergence TO " + identifier,
 		"GRANT SELECT, INSERT ON audit_events TO " + identifier,
-		"GRANT SELECT, INSERT, UPDATE ON identities, auth_sessions TO " + identifier,
+		"GRANT SELECT, INSERT, UPDATE ON identities, auth_sessions, local_credentials TO " + identifier,
 		"GRANT SELECT ON roles TO " + identifier,
 		"GRANT SELECT, INSERT, DELETE ON role_bindings TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON approval_requests TO " + identifier,
