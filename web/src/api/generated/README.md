@@ -120,7 +120,9 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_    | [**watchOperationEvents**](docs/OperationsApi.md#watchoperationevents)                    | **GET** /operations/{operation_id}/events                  | Watch durable operation state changes                                            |
 | _PlatformApi_      | [**beginOIDCLogin**](docs/PlatformApi.md#beginoidclogin)                                  | **GET** /auth/login                                        | Begin OIDC Authorization Code login with PKCE S256                               |
 | _PlatformApi_      | [**completeOIDCLogin**](docs/PlatformApi.md#completeoidclogin)                            | **GET** /auth/callback                                     | Validate OIDC state, nonce, code, and ID token                                   |
+| _PlatformApi_      | [**createLocalUser**](docs/PlatformApi.md#createlocaluseroperation)                       | **POST** /local-users                                      | Create a platform Local login identity without role bindings                     |
 | _PlatformApi_      | [**createRoleBinding**](docs/PlatformApi.md#createrolebinding)                            | **POST** /role-bindings                                    | Bind one baseline role to a workspace or resource scope                          |
+| _PlatformApi_      | [**disableLocalUser**](docs/PlatformApi.md#disablelocaluser)                              | **POST** /local-users/{identity_id}:disable                | Disable a platform Local login identity and revoke all its sessions              |
 | _PlatformApi_      | [**getAuthMethods**](docs/PlatformApi.md#getauthmethods)                                  | **GET** /auth/methods                                      | Read enabled authentication methods                                              |
 | _PlatformApi_      | [**getLiveness**](docs/PlatformApi.md#getliveness)                                        | **GET** /livez                                             | Get process liveness                                                             |
 | _PlatformApi_      | [**getReadiness**](docs/PlatformApi.md#getreadiness)                                      | **GET** /readyz                                            | Get dependency readiness                                                         |
@@ -128,6 +130,7 @@ All URIs are relative to _/api/v1_
 | _PlatformApi_      | [**listAuthorizedWorkspaces**](docs/PlatformApi.md#listauthorizedworkspaces)              | **GET** /workspaces                                        | List only workspaces visible to the current principal                            |
 | _PlatformApi_      | [**loginLocal**](docs/PlatformApi.md#loginlocal)                                          | **POST** /auth/login                                       | Authenticate with a local username and password                                  |
 | _PlatformApi_      | [**logout**](docs/PlatformApi.md#logout)                                                  | **POST** /auth/logout                                      | Revoke the current server-side session                                           |
+| _PlatformApi_      | [**resetLocalUserPassword**](docs/PlatformApi.md#resetlocaluserpasswordoperation)         | **POST** /local-users/{identity_id}:reset-password         | Reset a platform Local password and revoke all its sessions                      |
 | _PlatformApi_      | [**useBreakGlass**](docs/PlatformApi.md#usebreakglass)                                    | **POST** /auth/break-glass                                 | Use explicitly enabled offline emergency access                                  |
 
 ### Models
@@ -169,6 +172,8 @@ All URIs are relative to _/api/v1_
 - [ConfigTemplate](docs/ConfigTemplate.md)
 - [ConnectionPathState](docs/ConnectionPathState.md)
 - [ControlledOperationRequest](docs/ControlledOperationRequest.md)
+- [CreateLocalUser201Response](docs/CreateLocalUser201Response.md)
+- [CreateLocalUserRequest](docs/CreateLocalUserRequest.md)
 - [DesiredMutationRequest](docs/DesiredMutationRequest.md)
 - [DevelopmentRuntime](docs/DevelopmentRuntime.md)
 - [DropCounters](docs/DropCounters.md)
@@ -208,6 +213,7 @@ All URIs are relative to _/api/v1_
 - [Problem](docs/Problem.md)
 - [QueueMetrics](docs/QueueMetrics.md)
 - [Readiness](docs/Readiness.md)
+- [ResetLocalUserPasswordRequest](docs/ResetLocalUserPasswordRequest.md)
 - [RoleBinding](docs/RoleBinding.md)
 - [RoleBindingRequest](docs/RoleBindingRequest.md)
 - [SecretProviderRef](docs/SecretProviderRef.md)

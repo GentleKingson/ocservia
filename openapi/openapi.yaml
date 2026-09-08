@@ -27,6 +27,117 @@ tags:
   - name: configuration
     description: Side-effect-free configuration rendering and remote validation.
 paths:
+  /local-users:
+    post:
+      operationId: createLocalUser
+      summary: Create a platform Local login identity without role bindings
+      tags: [platform]
+      description: Requires exact Origin and local_user.manage in the fixed bootstrap management workspace (existing PlatformAdmin). Never links OIDC identities or managed-node VPN users.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  maxLength: 128
+                  description: ASCII username, trimmed and lowercased; letters/digits followed by letters/digits/dots/underscores/hyphens.
+                password:
+                  type: string
+                  format: password
+                  writeOnly: true
+                  minLength: 1
+                  maxLength: 1024
+                  description: 1 to 1024 UTF-8 bytes, not normalized.
+      responses:
+        "201":
+          description: Created without permissions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [identity_id]
+                properties:
+                  identity_id:
+                    type: string
+                    format: uuid
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "4XX":
+          $ref: "#/components/responses/Problem"
+        "5XX":
+          $ref: "#/components/responses/Problem"
+  /local-users/{identity_id}:disable:
+    post:
+      operationId: disableLocalUser
+      summary: Disable a platform Local login identity and revoke all its sessions
+      tags: [platform]
+      description: Requires exact Origin and local_user.manage in the fixed management workspace. OIDC identities return 404. No role binding changes.
+      parameters:
+        - name: identity_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "204":
+          description: Disabled and all sessions revoked atomically with audit.
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "4XX":
+          $ref: "#/components/responses/Problem"
+        "5XX":
+          $ref: "#/components/responses/Problem"
+  /local-users/{identity_id}:reset-password:
+    post:
+      operationId: resetLocalUserPassword
+      summary: Reset a platform Local password and revoke all its sessions
+      tags: [platform]
+      description: Requires exact Origin, local_user.manage in the fixed management workspace, and an independent one-use approval for action local_user.reset-password, resource_type local_user and this identity ID. Approval authorizes credential replacement without storing password content. Does not re-enable a disabled identity. OIDC identities return 404.
+      parameters:
+        - name: identity_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - name: X-Approval-ID
+          in: header
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  format: password
+                  writeOnly: true
+                  minLength: 1
+                  maxLength: 1024
+                  description: 1 to 1024 UTF-8 bytes, not normalized.
+      responses:
+        "204":
+          description: Password reset, approval consumed and all sessions revoked atomically with audit.
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "4XX":
+          $ref: "#/components/responses/Problem"
+        "5XX":
+          $ref: "#/components/responses/Problem"
   /livez:
     get:
       operationId: getLiveness

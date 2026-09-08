@@ -35,6 +35,10 @@ const (
 type Config struct {
 	Role                     Role
 	MigrateOnly              bool
+	BootstrapLocalAdmin      bool
+	LocalBootstrapUsername   string
+	LocalBootstrapPassword   string
+	LocalBootstrapWorkspace  string
 	SchemaCompatibilityCheck int64
 	RuntimeDBRole            string
 	Environment              string
@@ -293,14 +297,30 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
 	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	schemaCompatibilityCheck := fs.Int64("schema-compatibility-check", 0, "validate the stored Controller schema compatibility contract for a schema version, then exit")
 	if err := fs.Parse(args); err != nil {
-		return Config{}, err
+		return Config{}, errors.New("invalid command-line flags")
 	}
 	if fs.NArg() != 0 {
-		return Config{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+		return Config{}, errors.New("unexpected command-line arguments")
+	}
+	cfg.BootstrapLocalAdmin = *bootstrap
+	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD"); ok {
+		return Config{}, errors.New("plaintext bootstrap password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
+	}
+	if cfg.BootstrapLocalAdmin {
+		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_USERNAME", &cfg.LocalBootstrapUsername)
+		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID", &cfg.LocalBootstrapWorkspace)
+		path, _ := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
+		password, err := readSecretFile(path)
+		if err != nil {
+			return Config{}, errors.New("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE must be a valid secret file")
+		}
+		cfg.LocalBootstrapPassword = password
 	}
 	cfg.Role = Role(*role)
 	cfg.MigrateOnly = *migrateOnly
@@ -313,6 +333,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.BootstrapLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
+		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
+	}
 	switch c.Role {
 	case RoleAPI, RoleWorker, RoleScheduler, RoleAll:
 	default:
@@ -398,7 +421,7 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	oneShotDatabaseCommand := c.MigrateOnly || c.SchemaCompatibilityCheck > 0
+	oneShotDatabaseCommand := c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || c.BootstrapLocalAdmin
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}
