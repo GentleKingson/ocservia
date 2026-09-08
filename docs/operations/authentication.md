@@ -189,6 +189,74 @@ remain unchanged. The length and blocklist rules follow
 [NIST SP 800-63B-4, section 3.1.1.2](https://pages.nist.gov/800-63-4/sp800-63b.html#passwordver).
 Unicode normalization is deliberately deferred to preserve historical hashes.
 
+## Local account failure backoff (R2)
+
+Local login retains the existing per-IP request limit, per-process global
+request budget, Argon2id concurrency ceiling and trusted-proxy source validation.
+These are resource budgets, not password failure counters. OIDC and Break-glass
+keep their own entry points and budgets, including the independent emergency
+budget for a valid Break-glass credential.
+
+Account admission uses PostgreSQL `local_auth_attempts`, keyed by the exact
+Local username normalization (trim, lowercase, existing ASCII/input rules).
+Known and unknown usernames follow the same policy:
+
+| Parameter | Policy |
+| --- | --- |
+| Observation window | Fixed 15 minutes, starting with the first admitted attempt |
+| Failure threshold | 5 observed incorrect passwords in that window |
+| Cooldown after failure N | `min(300, 2^(N-5))` seconds for N >= 5 |
+| Maximum cooldown | 5 minutes; no permanent automatic lockout |
+| Concurrent account verification | One live 30-second lease across all Controllers |
+| Successful login | Clear state atomically with session creation |
+| Capacity | At most 16,384 live username rows per database |
+| Database admission/completion timeout | 2 seconds each |
+
+Cooldown and occupied-lease refusals do not change the deadline or count. They
+return the same 401 problem as invalid credentials, without `Retry-After` or
+account-existence details. Ordinary unknown-user verification still executes
+dummy Argon2id; account-refused requests do not execute KDF. Existing IP/global
+resource refusals continue to use 429 and `Retry-After`. A valid concurrent login
+can therefore receive 401 while another request holds that account's lease.
+
+Database and corrupt-hash errors are not password failures. A correct password
+for a disabled identity cannot create a session and is not counted as incorrect.
+Once an incorrect password is observed, completion uses a separate bounded
+context so client cancellation cannot erase it. Cancellation before verification
+releases the reservation without adding a failure. Process exit, ambiguous commit
+or unavailable completion leaves at most the lease duration before admission can
+recover; abandoned reservations are not silently classified as bad passwords.
+Expired lease holders cannot clear replacement state or create a session.
+
+Expiry is driven by the PostgreSQL clock. Admission deletes expired rows through
+the expiry index before allocating capacity. Rows expire when the observation
+window, cooldown and active lease no longer require them. Without login traffic,
+expired rows may remain physically present until the next admission, but the
+table remains bounded. Random usernames cannot evict live state: at capacity,
+new keys receive generic 503 while tracked keys retain their protection.
+Cleanup/admission/completion errors also fail closed with generic 503, never
+unlimited verification. PostgreSQL autovacuum remains responsible for dead tuples.
+
+Password reset and disable delete the account state in the existing credential,
+revocation and audit transaction. Rollback preserves it. Credential revalidation
+and lease-token matching prevent an older verified request from clearing failures
+or leases created after that transaction commits.
+
+Migration 000033 creates the table and expiry index. The normal migration runner
+grants only SELECT/INSERT/UPDATE/DELETE on this table to the runtime role; Owner
+or TRUNCATE permissions are not needed. The minimum compatible Controller schema
+is 33 because older binaries do not enforce this policy. Drain/stop older Local
+login instances before migration and replacement; do not mix old and new login
+handlers. Reverting this migration removes backoff state and requires stopping
+schema-33 Controllers and the normal coordinated schema/metadata rollback.
+
+This is bounded account protection, not a solution to targeted denial of login:
+an attacker can still cause temporary account cooldown, and a saturated table
+temporarily denies new keys. It intentionally retains IP protection alongside
+account protection, as discussed in the OWASP
+[Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html#login-throttling)
+and [Credential Stuffing Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html).
+
 ## Local identity and sessions
 
 Local passwords are stored as **Argon2id** hashes. Local identities use

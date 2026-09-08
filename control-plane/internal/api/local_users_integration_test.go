@@ -239,7 +239,22 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if _, err := owner.Exec(ctx, `ALTER TABLE audit_events ADD CONSTRAINT p4_reject_reset CHECK (action <> 'local_user.reset-password') NOT VALID`); err != nil {
 		t.Fatal(err)
 	}
+	seedAttempt := func() {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO local_auth_attempts(username,failures,window_until,blocked_until,lease_id,lease_until,expires_at) VALUES($1,5,now()+interval '15 minutes',now()+interval '1 minute',$2,now()+interval '30 seconds',now()+interval '15 minutes')`, "member-"+username, uuid.New()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attemptCount := func(want int) {
+		t.Helper()
+		var got int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM local_auth_attempts WHERE username=$1`, "member-"+username).Scan(&got); err != nil || got != want {
+			t.Fatalf("lifecycle attempt state: %d want %d err=%v", got, want, err)
+		}
+	}
+	seedAttempt()
 	expect(call(resetPath, `{"password":"new-p4-password"}`, adminCookie, "https://console.example", approval.ID.String()), 500)
+	attemptCount(1)
 	if _, err := svc.Authenticate(ctx, memberCookie); err != nil {
 		t.Fatalf("failed reset revoked session: %v", err)
 	}
@@ -247,6 +262,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect(call(resetPath, `{"password":"new-p4-password"}`, adminCookie, "https://console.example", approval.ID.String()), 204)
+	attemptCount(0)
 	expect(call(resetPath, `{"password":"replay-password"}`, adminCookie, "https://console.example", approval.ID.String()), 409)
 	if _, err := svc.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("reset session not revoked: %v", err)
@@ -258,7 +274,9 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedAttempt()
 	expect(call("local-users/"+id.String()+":disable", `{}`, adminCookie, "https://console.example", ""), 204)
+	attemptCount(0)
 	if _, err := svc.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("disabled session accepted: %v", err)
 	}
