@@ -75,6 +75,21 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 	if got, err := s.Authenticate(ctx, cookie); err != nil || got.IdentityID != id {
 		t.Fatalf("authenticate local session: %+v, %v", got, err)
 	}
+	realNow := s.now
+	s.now = func() time.Time { return principal.ExpiresAt.Add(time.Second) }
+	if _, err := s.Authenticate(ctx, cookie); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expired local cookie accepted: %v", err)
+	}
+	s.now = realNow
+	if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET created_at=now()-interval '1 hour',expires_at=now()-interval '1 second' WHERE id=$1`, principal.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Authenticate(ctx, cookie); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expired database session accepted: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET expires_at=$2 WHERE id=$1`, principal.SessionID, principal.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
 	var profiles int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM identities WHERE subject=$1 AND email='same@example.test' AND display_name='Same Name'`, username).Scan(&profiles); err != nil || profiles != 2 {
 		t.Fatalf("profiles changed/merged: %d, %v", profiles, err)
