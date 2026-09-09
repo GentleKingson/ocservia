@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/google/uuid"
 )
 
 type breakGlassRequest struct {
@@ -28,10 +29,12 @@ func (s *Server) authMethods(w http.ResponseWriter, r *http.Request) {
 func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.auth == nil || !s.auth.LocalEnabled() {
+		s.logAuth(r, localDisabled, uuid.Nil, "")
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "Local authentication is not configured")
 		return
 	}
 	if err := s.validateBrowserMutation(r, auth.Principal{Issuer: auth.LocalIssuer}); err != nil {
+		s.logAuth(r, localOriginRejected, uuid.Nil, "")
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
 		return
 	}
@@ -44,15 +47,28 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 	var body localLoginRequest
 	if !decodeStrictJSON(w, r, &body) {
+		s.logAuth(r, localInvalidRequest, uuid.Nil, "")
 		return
 	}
 	if body.Username == nil || body.Password == nil {
+		s.logAuth(r, localInvalidRequest, uuid.Nil, "")
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "username and password are required")
 		return
 	}
 	// AuthenticateLocal enforces field byte limits and hides credential existence.
-	cookie, _, err := s.auth.AuthenticateLocal(r.Context(), *body.Username, *body.Password)
+	account := s.auth.LocalAccountRef(*body.Username)
+	cookie, actor, err := s.auth.AuthenticateLocal(r.Context(), *body.Username, *body.Password)
 	if err != nil {
+		kind := localUnavailable
+		switch {
+		case errors.Is(err, auth.ErrLocalAccountLimited):
+			kind = localAccountLimited
+		case errors.Is(err, auth.ErrLocalAttemptCapacity):
+			kind = localCapacityLimited
+		case errors.Is(err, auth.ErrUnauthenticated):
+			kind = localCredentialsRejected
+		}
+		s.logAuth(r, kind, uuid.Nil, account)
 		// Account cooldown/single-flight rejection deliberately shares the bad
 		// credential response, without an account-specific Retry-After header.
 		if errors.Is(err, auth.ErrUnauthenticated) {
@@ -63,38 +79,49 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, cookie)
+	s.logAuth(r, localSucceeded, actor.IdentityID, account)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if s.auth == nil || !s.auth.OIDCEnabled() {
+		s.logAuth(r, oidcDisabled, uuid.Nil, "")
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "OIDC authentication is not configured")
 		return
 	}
 	location, cookie, err := s.auth.BeginLogin(r.Context())
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "begin OIDC login", "error", err)
+		s.logAuth(r, oidcStartFailed, uuid.Nil, "")
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/identity-provider-unavailable", "Login unavailable", "OIDC login could not be started")
 		return
 	}
 	http.SetCookie(w, cookie)
+	s.logAuth(r, oidcStarted, uuid.Nil, "")
 	http.Redirect(w, r, location, http.StatusFound)
 }
 
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	if s.auth == nil || !s.auth.OIDCEnabled() {
+		s.logAuth(r, oidcDisabled, uuid.Nil, "")
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "OIDC authentication is not configured")
 		return
 	}
 	loginCookie, _ := r.Cookie(auth.LoginCookieName)
 	http.SetCookie(w, auth.ClearCookie(auth.LoginCookieName))
-	sessionCookie, _, err := s.auth.CompleteLogin(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), loginCookie)
+	sessionCookie, actor, err := s.auth.CompleteLogin(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code"), loginCookie)
 	if err != nil {
-		s.logger.WarnContext(r.Context(), "OIDC callback rejected", "error", err)
+		kind := oidcCallbackRejected
+		if errors.Is(err, auth.ErrOIDCState) {
+			kind = oidcStateRejected
+		} else if errors.Is(err, auth.ErrOIDCSessionUnavailable) {
+			kind = oidcSessionUnavailable
+		}
+		s.logAuth(r, kind, uuid.Nil, "")
 		writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/oidc-callback-rejected", "Login rejected", "the OIDC response could not be validated")
 		return
 	}
 	http.SetCookie(w, sessionCookie)
+	s.logAuth(r, oidcSucceeded, actor.IdentityID, "")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
