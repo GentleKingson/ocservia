@@ -116,7 +116,7 @@ func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
 	}
 	return &Service{
 		localEnabled: cfg.LocalEnabled, oidcEnabled: oidcEnabled,
-		pool: pool, issuer: strings.TrimSuffix(cfg.Issuer, "/"), clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
+		pool: pool, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
 		breakGlassEnabled: cfg.BreakGlassEnabled, breakGlassTokenHash: cfg.BreakGlassTokenHash,
 		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader,
 	}, nil

@@ -98,6 +98,65 @@ the HTTPS issuer and client ID, and deliver the client secret through its file.
 If redirect is omitted, the production overlay defaults it to that callback on
 `OCSERV_PUBLIC_HOST`.
 
+Set `OCSERV_OIDC_ISSUER` to the provider's exact issuer, including any trailing
+slash, port and path. It is an identity identifier, not a URL to normalize.
+Discovery metadata and ID Token `iss` must match it; the OIDC library constructs
+the Discovery request URL without changing the identity identifier. Do not use
+email or username to link accounts or disable issuer verification to fix a mismatch.
+
+### Correcting a historical issuer configuration
+
+An already working no-trailing-slash issuer needs no configuration or data
+change: its `(issuer, subject)` key, identity ID, role bindings and sessions remain
+unchanged. The former application code removed one final slash before Discovery.
+If the provider actually advertised the slash, strict Discovery validation failed
+before login or identity insertion. Such a deployment does not need an identity
+migration merely because it encountered this bug. An ID Token issuer mismatch
+also failed before insertion.
+
+If Discovery and tokens instead both used the no-slash value, earlier logins
+could have succeeded under that value, even when the configured value ended in
+a slash. Confirm the provider's authoritative issuer before changing configuration;
+if it is still no-slash, configure that exact value. Import/manual provisioning or
+an actual provider issuer change can also leave historical rows. Never infer
+their presence or ownership from the configuration alone.
+
+Changing an existing row's issuer changes the unique `(issuer, subject)` key.
+The slash and no-slash values are distinct accounts; the application neither
+merges nor migrates them. If a separately approved migration is genuinely needed:
+
+1. In a maintenance window, stop login/session writes for the affected deployment.
+   Record a change ticket, operator, approver, exact old/new issuers and an explicit
+   list of identity IDs and subjects. Obtain independent IdP evidence that each
+   subject still identifies the same person; matching email/name is insufficient.
+2. Take a restorable database backup and export the selected identity rows,
+   role bindings (including workspace/resource scope), active sessions and other
+   identity-ID references. Keep the original configuration and a before/after
+   manifest in the restricted change record, not tokens or client secrets.
+3. Read both issuer populations and check target-key conflicts, including disabled
+   identities. For each approved subject, query `identities` for both exact issuer
+   values. Review `role_bindings` by identity ID with the security owner. Any
+   existing target `(issuer, subject)` is a stop condition, not permission to merge,
+   delete the target, or transfer roles.
+4. Rehearse on a restored isolated database. In an explicit transaction, lock
+   `identities` against concurrent writes, repeat the conflict/ownership checks,
+   and update only approved IDs whose old issuer and subject still match the
+   manifest. Require exactly the approved row count. Preserve IDs, subjects,
+   disabled state and roles; revoke affected active sessions and require fresh
+   login. Roll back on any discrepancy. Record the committed before/after mapping
+   through the approved operational audit process; do not rewrite historical audit
+   events. Apply the exact new issuer configuration through normal change control.
+5. Verify fresh Discovery/token validation, unchanged role ownership, and no
+   duplicate identities before reopening login. For rollback, stop writes again,
+   verify the manifest and absence of old-key conflicts, then transactionally
+   restore only the mapped issuers and original configuration. Revoke sessions
+   issued during the migration window; never reactivate revoked sessions. Stop for
+   manual review if identities/roles have since changed, rather than overwriting
+   newer data. Retain rollback evidence with the same change ticket.
+
+These are controlled operator steps, not a login-time fallback. R5 does not run
+them against production or assume that any deployment requires them.
+
 The origin (scheme, host and effective port) of `OCSERV_OIDC_REDIRECT_URL` must
 equal `OCSERV_PUBLIC_ORIGIN`. A mismatch fails production startup. In dual-auth,
 Local does not make an invalid OIDC configuration acceptable. During an IdP
