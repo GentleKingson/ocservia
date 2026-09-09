@@ -1,50 +1,50 @@
 table	column	postgres_type	draft_type	status
-agent_command_results	privd_attestation_key_id	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-agent_rollouts	idempotency_key	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-approval_authority_resources	resource_type	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-approval_requests	action	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-approval_requests	resource_type	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-approval_requests	status	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-batch_operations	idempotency_key	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-certificates	csr_privd_attestation_key_id	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-commands	state	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-commands	idempotency_key	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-commands	resource_type	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-commands	resource_key	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-desired_groups	group_name	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-desired_user_policies	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-desired_users	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-identities	issuer	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-identities	subject	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-local_auth_attempts	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-local_credentials	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-node_capabilities	capability	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-node_privd_attestation_keys	key_id	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-node_privd_attestation_keys	state	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-node_sealing_keys	key_id	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-node_sessions	session_id	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-nodes	name	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-observed_groups	group_name	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-observed_user_usage	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-observed_user_usage	period	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-observed_users	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-operations	state	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-operations	idempotency_key	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-role_bindings	role_name	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-role_bindings	resource_type	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-roles	name	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-scheduler_leases	lease_name	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-secret_provider_refs	provider	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-secret_provider_refs	key_path	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-telemetry_rollups_1h	metric	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-telemetry_rollups_5m	metric	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-telemetry_samples	metric	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-upstream_sync_records	repository	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-upstream_sync_records	old_commit	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-upstream_sync_records	new_commit	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-user_policy_enforcements	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-user_policy_enforcements	cause	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-user_policy_mutations	username	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-user_policy_mutations	idempotency_key	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-user_usage_cursors	session_id	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
-workspaces	slug	text	VARCHAR(191)	UNAPPROVED: review existing bounds and exact uniqueness
+agent_command_results	privd_attestation_key_id	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+agent_rollouts	idempotency_key	text	VARCHAR(191)	EXISTING: 128-character CHECK
+approval_authority_resources	resource_type	text	VARCHAR(191)	EXISTING: resource-type enum CHECK
+approval_requests	action	text	VARCHAR(191)	EXISTING: 128-character CHECK
+approval_requests	resource_type	text	VARCHAR(191)	EXISTING: 64-character CHECK
+approval_requests	status	text	VARCHAR(191)	EXISTING: status enum CHECK
+batch_operations	idempotency_key	text	VARCHAR(191)	EXISTING: 128-character CHECK
+certificates	csr_privd_attestation_key_id	text	VARCHAR(191)	EXISTING: FK to node_privd_attestation_keys.key_id (79 ASCII characters)
+commands	state	text	VARCHAR(191)	EXISTING: state enum CHECK
+commands	idempotency_key	text	VARCHAR(191)	EXISTING: 128-character CHECK
+commands	resource_type	text	VARCHAR(191)	EXISTING: NULL or user/group CHECK
+commands	resource_key	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+desired_groups	group_name	text	VARCHAR(191)	EXISTING: 64-character ASCII name CHECK
+desired_user_policies	username	text	VARCHAR(191)	EXISTING: 64-character ASCII name CHECK
+desired_users	username	text	VARCHAR(191)	EXISTING: 64-character ASCII name CHECK
+identities	issuer	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+identities	subject	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+local_auth_attempts	username	text	VARCHAR(191)	EXISTING: 128-byte ASCII username CHECK
+local_credentials	username	text	VARCHAR(191)	EXISTING: 128-byte ASCII username CHECK
+node_capabilities	capability	text	VARCHAR(191)	EXISTING: 128-character CHECK
+node_privd_attestation_keys	key_id	text	VARCHAR(191)	EXISTING: 79-character ASCII key CHECK
+node_privd_attestation_keys	state	text	VARCHAR(191)	EXISTING: state enum CHECK
+node_sealing_keys	key_id	text	VARCHAR(191)	EXISTING: 128-character ASCII key CHECK
+node_sessions	session_id	text	VARCHAR(257)	FIXED: existing 256-character CHECK; extra slot prevents trailing-space truncation bypass
+nodes	name	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+observed_groups	group_name	text	VARCHAR(191)	EXISTING: 64-character ASCII name CHECK
+observed_user_usage	username	text	VARCHAR(191)	EXISTING: 64-character ASCII name CHECK
+observed_user_usage	period	text	VARCHAR(191)	EXISTING: monthly/lifetime CHECK
+observed_users	username	text	VARCHAR(191)	EXISTING: 64-character ASCII name CHECK
+operations	state	text	VARCHAR(191)	EXISTING: state enum CHECK
+operations	idempotency_key	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+role_bindings	role_name	text	VARCHAR(191)	EXISTING: FK to roles.name finite enum
+role_bindings	resource_type	text	VARCHAR(191)	EXISTING: resource-type enum CHECK
+roles	name	text	VARCHAR(191)	EXISTING: role enum CHECK
+scheduler_leases	lease_name	text	VARCHAR(191)	EXISTING: 128-character CHECK
+secret_provider_refs	provider	text	VARCHAR(191)	EXISTING: 64-character ASCII provider CHECK
+secret_provider_refs	key_path	text	VARCHAR(513)	FIXED: existing 512-character CHECK; extra slot prevents trailing-space truncation bypass
+telemetry_rollups_1h	metric	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+telemetry_rollups_5m	metric	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+telemetry_samples	metric	text	VARCHAR(191)	EXISTING: metric enum CHECK
+upstream_sync_records	repository	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+upstream_sync_records	old_commit	text	VARCHAR(191)	EXISTING: 40-character ASCII hex CHECK
+upstream_sync_records	new_commit	text	VARCHAR(191)	EXISTING: 40-character ASCII hex CHECK
+user_policy_enforcements	username	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound
+user_policy_enforcements	cause	text	VARCHAR(191)	EXISTING: cause enum CHECK
+user_policy_mutations	username	text	VARCHAR(191)	EXISTING: FK to desired_user_policies.username (64 ASCII characters)
+user_policy_mutations	idempotency_key	text	VARCHAR(191)	EXISTING: 128-character CHECK
+user_usage_cursors	session_id	text	VARCHAR(257)	FIXED: existing 256-character CHECK; extra slot prevents trailing-space truncation bypass
+workspaces	slug	text	VARCHAR(191)	BLOCKER: no PostgreSQL length bound

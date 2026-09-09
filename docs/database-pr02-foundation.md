@@ -15,10 +15,13 @@ plus `business_locks`; their SQL and postcondition fingerprints were exercised
 independently on the pinned servers. **That does not establish semantic
 equivalence of the entire schema.** Outstanding acceptance blockers are:
 
-1. The draft uses `VARCHAR(191)` for indexed PostgreSQL `text`, including
-   unbounded issuer/subject keys and some fields whose existing checks permit
-   more than 191 characters. This is a proposed, unapproved restriction, not
-   an equivalent mapping. See `database-pr02-bounded-keys.tsv`. No prefix-only
+1. Eleven indexed PostgreSQL `text` columns still have an unapproved
+   `VARCHAR(191)` restriction, including issuer/subject. The 49-column
+   inventory now distinguishes 35 columns already bounded by PostgreSQL
+   CHECKs/FKs, three corrected mappings, and these eleven open cases. The
+   two session ID columns now permit the existing 256-character range and
+   secret key paths the existing 512-character range. See
+   `database-pr02-bounded-keys.tsv`. No prefix-only
    unique indexes or collision-prone hash substitutions are presented as
    exact uniqueness. These keys need a reviewed contract or an exact alternate
    design before the baseline can be accepted.
@@ -26,9 +29,12 @@ equivalence of the entire schema.** Outstanding acceptance blockers are:
    jsonb equality/canonicalization. The member-list codec preserves SQL NULL,
    empty arrays and NULL elements, but accepts only one-dimensional arrays.
    SQL currently checks array shape/cardinality, not every element's type.
-   Multidimensional arrays/lower bounds and SQL-side NUL rejection in text/JSON
-   are not implemented; regexp-engine edge equivalence remains unproven. These must not be silently
-   accepted as full PostgreSQL type semantics.
+   Multidimensional arrays/lower bounds and SQL-side NUL rejection inside JSON
+   are not implemented. Ordinary text columns now reject NUL in SQL. The ten
+   distinct regex predicates in schema 34 have shared real-server regression
+   coverage for case, anchors, ASCII/control characters and Unicode edge cases;
+   this is not a general POSIX/ICU/PCRE compatibility claim. These limitations
+   must not be silently accepted as full PostgreSQL type semantics.
 3. `DATETIME(6)` represents finite UTC instants, not PostgreSQL's entire
    timestamp range. `1000-01-01` is the proposed expired-lease sentinel for
    historical `-infinity`; the reserved-range contract has not been approved.
@@ -111,6 +117,7 @@ commit outcome**, not a rollback guarantee, and must not be blindly retried.
 | partial unique indexes | Generated nullable predicate flag appended to the full key; outside the predicate the NULL flag disables uniqueness |
 | non-unique partial indexes | Full indexes retaining key order, not a filtered storage promise; query-plan/performance equivalence is unproven |
 | case/trailing spaces | MySQL `utf8mb4_0900_bin`, MariaDB `utf8mb4_nopad_bin`; exact case and trailing spaces distinguish keys |
+| ordinary text NUL | Each table's text columns have a binary `LOCATE(0x00, ...)` CHECK; SQL NULL is allowed where nullable; JSON is a separate open issue |
 | CHECK/FK | Enforced CHECKs and InnoDB foreign keys with existing delete actions, including composite workspace/node ownership |
 | identity sequences | AUTO_INCREMENT for transport ingest and operation event sequence; not PostgreSQL sequence API compatibility |
 | audit append-only | Runtime INSERT/SELECT only; row UPDATE/DELETE triggers also reject owner mutations; runtime TRUNCATE/DDL denied |
@@ -121,6 +128,28 @@ inventory final tables/constraints, **not** inserted as an applied PostgreSQL
 history on either new backend. Non-business physical partition children are
 not counted as logical tables. Historical SQL bytes and the PostgreSQL runner
 remain unchanged.
+
+The corrected length mappings use `VARCHAR(257)` / `VARCHAR(513)` together
+with the original 256 / 512 character CHECKs. The extra storage slot is
+intentional: truncation of excess trailing spaces at the VARCHAR boundary
+must not turn a rejected input into a valid value, even in strict SQL mode.
+Full-column indexes remain full-column indexes. Four-byte UTF-8 values at the
+existing limits, distinct trailing spaces, duplicates, and over-limit inputs
+are tested against all three database families.
+
+Schema regex literals explicitly disable case folding with `(?-i)` and use
+`\\A` / `\\z` rather than newline-sensitive end anchors. This also applies to
+the path traversal predicate, where `a/..` must be rejected but `a/..` followed
+by a newline is not the same path segment under the existing PostgreSQL CHECK.
+See the [MySQL regex reference](https://dev.mysql.com/doc/refman/8.4/en/regexp.html)
+and [MariaDB PCRE reference](https://mariadb.com/docs/server/reference/sql-functions/string-functions/regular-expressions-functions/pcre).
+
+These are revisions of the **unaccepted Draft** manifests. SQL checksums and
+postcondition hashes were independently re-authored on the pinned engines.
+An already-initialized database from an earlier Draft must fail checksum
+validation, including explicit repair. Do not rewrite its metadata to adopt
+this revision. Use a fresh, disposable development/test database; there is no
+upgrade path or permission to reset an existing database automatically.
 
 ## Migration and repair
 

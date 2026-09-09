@@ -85,7 +85,7 @@ also observed the server already closing the killed client's connection; only
 the precise unknown-thread result is accepted for that cleanup race.
 
 Final result is **foundation-test success, not complete PR-02 acceptance**.
-The unapproved indexed-text limits and remaining JSON/array/NUL/regexp/time/
+The unapproved indexed-text limits and remaining JSON/array/JSON-NUL/time/
 partition semantics are explicit blockers in `database-pr02-foundation.md`.
 No MySQL/MariaDB Controller business workflow or production startup is enabled
 or claimed as tested. The PR must remain Draft.
@@ -125,3 +125,54 @@ Final reruns (same private TMPDIR, all exit 0):
 
 These corrections do not resolve the schema/semantic acceptance blockers
 listed above and do not make this Draft ready for another acceptance review.
+
+## Text semantics follow-up
+
+The next Draft revision fixes three concrete accepted-input differences:
+`node_sessions.session_id` and `user_usage_cursors.session_id` now admit 256
+characters; `secret_provider_refs.key_path` admits 512. Their original CHECK
+limits and full unique indexes remain. The backing VARCHAR has one extra
+slot so truncating excess trailing spaces cannot bypass those CHECKs.
+
+Every ordinary text column in the two manifests now has SQL-side binary NUL
+rejection, including nullable columns. Literal backslash-u0000 text, U+FFFD,
+SQL NULL and empty strings are not confused with a NUL byte. This does **not**
+validate strings nested inside JSON or complete the array mapping.
+
+All ten distinct schema-34 regex predicates have a shared test corpus. The
+PostgreSQL test obtains predicates from the live `pg_constraint` catalog;
+the MySQL/MariaDB tests obtain the actual pinned manifest patterns. Both
+execute server-side matching, with case/control/Unicode/length/anchor cases.
+The corpus also exercises path traversal boundaries. Native table INSERTs
+check username case/newline rejection and valid/invalid secret key paths.
+Only the current schema's ASCII predicate subset is covered, not arbitrary
+regex-engine equivalence.
+
+An initial MariaDB run exposed case-folding differences in parameterized
+REGEXP, including `A` matching `[a-z]` and U+017F matching `[A-Za-z]`.
+Consequently the schema regex literals explicitly disable case folding on
+both engines, in addition to using absolute start/end anchors. Evidence of
+that failed run is `artifacts/text-mariadb.log`. Fresh independent authoring
+runs on the pinned engines produced SQL checksums and postcondition hashes;
+the temporary authoring test was removed before the final regression runs.
+The migration runner has no hash-learning or checksum-rewrite mode.
+
+Final verification on BuildServer, 2026-09-09, same isolated checkout and
+private TMPDIR as above (all exit 0):
+
+| Command | Result | Evidence under checkout |
+| --- | --- | --- |
+| `PG_MAJOR=all ARTIFACT_DIR=.../artifacts/text-postgres-final bash scripts/database-integration.sh` | PostgreSQL 17/18 integration, including the live-catalog regex and actual-column length tests, passed | `artifacts/text-postgres-final.log`, `artifacts/text-postgres-final/` |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | MySQL 8.4.10, `-race` passed in 63.829s; config and CLI compilation passed | `artifacts/text-mysql-final.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | MariaDB 12.3.2, `-race` passed in 23.911s; config and CLI compilation passed | `artifacts/text-mariadb-final.log` |
+| `bash scripts/docs-check.sh` | Passed | `artifacts/text-docs.log` |
+
+PostgreSQL historical migration diffs remain empty and historical SHA-256
+checks passed in both PostgreSQL runs. Worktree `git diff --check` passed.
+
+The indexed-text audit now distinguishes 35 fields already bounded by existing
+PostgreSQL CHECKs/FKs, these three fixes, and **eleven still-unapproved limits**.
+No length restriction for those eleven fields has been approved or hidden by
+a prefix/hash unique index. JSON/arrays, full timestamp/sentinel semantics,
+telemetry maintenance parity and business lock call sites remain open. This
+is incremental progress, not full PR-02 acceptance; production remains denied.
