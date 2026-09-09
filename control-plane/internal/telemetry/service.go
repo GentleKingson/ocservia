@@ -19,6 +19,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
@@ -432,7 +433,7 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 		for _, session := range batch.Sessions {
 			usage = append(usage, userusage.Sample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
 		}
-		if err := userusage.RecordTx(ctx, tx, batch.NodeID, usage); err != nil {
+		if err := userusage.RecordTx(ctx, postgres.NewUsageStore(postgres.WrapTx(tx)), batch.NodeID, usage); err != nil {
 			if errors.Is(err, userusage.ErrInvalidSample) {
 				return false, fmt.Errorf("%w: session usage identity conflict", ErrInvalidTelemetry)
 			}

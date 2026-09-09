@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 bash "${ROOT}/scripts/test-required-go-tests.sh"
+(cd "${ROOT}" && sha256sum -c docs/database-migrations.sha256)
 
 UPSTREAM_MANIFEST="${ROOT}/docs/upstream/v4.9-post1.manifest.json"
 EXPECTED_UPSTREAM_RECORD="$(jq -r '[(.repository | sub("^https://github.com/"; "")), .old.ref, .old.commit, .new.ref, .new.commit, .imported_at] | join("|")' "${UPSTREAM_MANIFEST}")"
@@ -443,6 +444,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-audit-preflight-retry.log" 2>&1
+
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
+    go test -p 1 ./internal/database/... -count=1)
 
   # Scheduler leadership tests need an idle lease, so they run before any
   # long-lived control-plane process acquires leadership on this database.
