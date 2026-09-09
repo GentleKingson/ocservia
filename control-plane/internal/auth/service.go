@@ -57,6 +57,7 @@ type Service struct {
 	clientSecret        string
 	redirectURL         string
 	aead                cipher.AEAD
+	accountLogKey       []byte
 	sessionTTL          time.Duration
 	breakGlassEnabled   bool
 	breakGlassTokenHash []byte
@@ -116,6 +117,7 @@ func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
 	}
 	return &Service{
 		localEnabled: cfg.LocalEnabled, oidcEnabled: oidcEnabled,
+		accountLogKey: deriveAccountLogKey(cfg.SessionKey),
 		pool: pool, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
 		breakGlassEnabled: cfg.BreakGlassEnabled, breakGlassTokenHash: cfg.BreakGlassTokenHash,
 		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader,

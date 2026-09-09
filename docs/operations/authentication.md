@@ -437,6 +437,72 @@ account protection, as discussed in the OWASP
 [Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html#login-throttling)
 and [Credential Stuffing Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html).
 
+## Authentication security logs (R6)
+
+Local login and OIDC start/callback reuse the Controller's structured `slog`
+output. These routes replace the duplicate `http request` entry with one
+`auth.result` per outcome (subject to sampling below). `started` means an OIDC
+redirect was prepared, not that a session exists. `succeeded` is emitted only
+after successful session creation. No production logging configuration changes
+or external logging service are required.
+
+| Field | Contract |
+| --- | --- |
+| `event` | `auth.result` or `auth.summary` |
+| `auth_method` | `local` or `oidc` |
+| `outcome` | `succeeded`, `rejected`, `unavailable`, or `started` |
+| `reason_code` | Fixed internal classification from the table below; never returned to clients |
+| `request_id` | Result only; existing request correlation, at most 128 printable ASCII bytes; invalid incoming IDs are replaced |
+| `source_ip` | Result only; `authSource` peer/trusted `X-Ocservia-Client-IP` policy, never arbitrary `X-Forwarded-For`; at most 64 bytes |
+| `identity_id` | UUID only on successful Local/OIDC session creation |
+| `account_ref` | Local only after complete input decoding; normalized username HMAC, 67 bytes; invalid usernames share `invalid` |
+| `suppressed_count`, `window_seconds` | Summary only; number of omitted results for that method/outcome/reason in the preceding 60-second window |
+
+| Paths | Reason codes |
+| --- | --- |
+| Local success / credential denial | `session_created`, `credentials_rejected` |
+| Local account admission | `account_limited` (cooldown or occupied lease), `account_capacity` |
+| Local infrastructure | `infrastructure_failure` (DB, hash verification, attempt completion, or session creation failure) |
+| Local input boundary | `disabled`, `origin_rejected`, `invalid_request` |
+| OIDC start | `disabled`, `start_failed`, `redirect_created` |
+| OIDC callback | `disabled`, `state_rejected`, `callback_rejected`, `session_created` |
+| Both methods' resource admission | `source_limited`, `global_limited`, `concurrency_limited`, `source_capacity` |
+
+Unknown users, wrong passwords and disabled accounts retain the same credential
+response; account cooldown still returns that same 401 without Retry-After.
+OIDC callback errors remain generic. Raw upstream errors are never logged: they
+can contain response bodies, tokens or URLs. No request bodies, passwords/hashes,
+session values/Cookies, OIDC codes/tokens, client secrets, connection strings or
+callback URLs enter these events. Request-derived output is length-bounded,
+control/non-ASCII bytes are replaced, and the existing JSON handler encodes it.
+
+`account_ref` is a pseudonym, **not anonymous data** or a bare username hash.
+HMAC-SHA-256 derives a log-only key from the session key with domain
+`ocservia/auth-log/account-key/v1\0`; account HMAC uses the separate domain
+`ocservia/auth-log/local-account/v1\0` and the credential normalizer. References
+correlate across Controllers sharing that key and change on key rotation. Treat
+references and source addresses as restricted security data; knowing the key
+allows username enumeration. Do not expose logs or keys to login clients.
+
+Each Controller samples the first **10 results per fixed category per 60-second
+window**, including successes, with a saturating suppressed counter. There are
+22 fixed categories: at most 220 result entries plus 22 summaries per window,
+constant memory, no per-account/IP log map, queue or timer. The next authentication
+event after expiry flushes summaries; idle periods delay them, and process exit
+loses pending counts. Summaries carry no individual request/account attribution.
+Success/start uses Info; refusals, failures and summaries use Warn, not Debug.
+This bounds application authentication output, not gateway or unrelated access
+logs. Keep existing host/container rotation, retention and access protections;
+this change does not alter them. Logging errors/panics are best effort and do not
+change authentication or authorization; a blocked output sink can still delay
+requests. Sampling does not bypass the independent authentication/KDF budgets.
+
+These events are separate from `audit_events` and `security_alerts`. Wrong
+passwords do not enter workspace audit transactions. Password changes, account
+administration, approvals and Break-glass retain their existing transactional
+audit/alert requirements. The exclusions and bounded logging follow the
+[OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html).
+
 ## Local identity and sessions
 
 Local passwords are stored as **Argon2id** hashes. Local identities use
