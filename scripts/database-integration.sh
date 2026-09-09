@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
+bash "${ROOT}/scripts/test-required-go-tests.sh"
 
 UPSTREAM_MANIFEST="${ROOT}/docs/upstream/v4.9-post1.manifest.json"
 EXPECTED_UPSTREAM_RECORD="$(jq -r '[(.repository | sub("^https://github.com/"; "")), .old.ref, .old.commit, .new.ref, .new.commit, .imported_at] | join("|")' "${UPSTREAM_MANIFEST}")"
@@ -44,7 +45,7 @@ cleanup() {
   done
   for container in "${CONTAINERS[@]:-}"; do
     [[ -n "${container}" ]] || continue
-    docker rm -f "${container}" >/dev/null 2>&1 || cleanup_exit=1
+    docker rm -fv "${container}" >/dev/null 2>&1 || cleanup_exit=1
     if docker inspect "${container}" >/dev/null 2>&1; then
       echo "database integration left container ${container}" >&2
       cleanup_exit=1
@@ -57,7 +58,9 @@ cleanup() {
   fi
   exit "${cleanup_exit}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p "${TMP_ROOT}"
 if [[ -n "${OCSERVIA_CONTROL_BIN:-}" ]]; then
@@ -192,6 +195,25 @@ clone_database() {
     "CREATE DATABASE ${destination} TEMPLATE ${source}" >/dev/null
 }
 
+checked_go_tests() {
+  local group=$1
+  shift
+  (cd "${ROOT}/control-plane" && exec bash "${ROOT}/scripts/required-go-tests.sh" "${group}" -timeout=3m "$@") &
+  local test_pid=$! index=${#PIDS[@]}
+  PIDS+=("${test_pid}")
+  wait "${test_pid}"
+  PIDS[index]=""
+}
+
+assert_auth_fixture_cleanup() {
+  local container=$1 database=$2
+  test "$(docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -Atc "
+    SELECT (SELECT count(*) FROM local_auth_bootstrap)
+      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('r4_fail_approver','r4_fail_password','p4_reject_bootstrap','p4_reject_create','p4_reject_reset') OR conname LIKE 'r6_%')
+      + (SELECT count(*) FROM role_bindings b JOIN workspaces w ON w.id=b.workspace_id WHERE w.slug LIKE 'r4-%' OR w.slug LIKE 'bootstrap-%')
+  ")" = 0
+}
+
 seed_verified_receipt() {
   local container=$1 database=$2
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -c "
@@ -315,6 +337,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='connection_owner_fencing'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=decode(repeat('25',16),'hex')")" = "4"
   clean_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/${clean_database}?sslmode=disable"
+  clean_runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/${clean_database}?sslmode=disable"
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${clean_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-privd-clean-forward.log" 2>&1
@@ -330,7 +353,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # The next takeover runs through the real connectionowner.Acquire path on
   # the re-upgraded schema, not a hand-written SQL update, so the evidence
   # matches the production code path.
-  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${clean_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${clean_runtime_url}" \
     OCSERV_TEST_RETAINED_NODE_HEX="25252525252525252525252525252525" \
     go test -p 1 -race ./internal/connectionowner -run TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration -count=1)
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
@@ -430,7 +453,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     go test -p 1 -race ./internal/coordination ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
     go test -p 1 ./migrations -run '^TestControllerSchemaCompatibility.*Integration$' -count=1)
-  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/api -run '^TestReadinessHonorsSchemaCompatibilityContractIntegration$' -count=1)
 
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
@@ -581,10 +604,21 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/privdattestation -run Integration -count=1)
   # R4 Local/RBAC tests exercise the real latest schema, not the historical
   # rollback fixture. Their runtime role retains the production privileges.
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
-    go test -p 1 ./internal/rbac ./internal/auth -run Integration -count=1)
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" \
-    go test -p 1 ./internal/api -run '^TestLocalAccountHTTPSharedLimitsIntegration$' -count=1)
+  # Clone before any auth fixture writes. Lifecycle bootstrap requires no prior
+  # singleton/admin grants; its audit constraints must never affect other suites.
+  clone_database "${container}" ocservia_latest ocservia_lifecycle
+  OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
+    checked_go_tests database-auth -p 1 -parallel 1 ./internal/rbac ./internal/auth -run Integration
+  assert_auth_fixture_cleanup "${container}" ocservia_latest
+  OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
+    checked_go_tests database-api -p 1 -parallel 1 ./internal/api \
+      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration)$'
+  assert_auth_fixture_cleanup "${container}" ocservia_latest
+  OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_lifecycle}" \
+    OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_lifecycle}" \
+    checked_go_tests database-lifecycle -p 1 -parallel 1 ./internal/api -run '^TestLocalUserLifecycleIntegration$'
+  assert_auth_fixture_cleanup "${container}" ocservia_lifecycle
+  docker exec "${container}" dropdb -U ocservia_owner ocservia_lifecycle
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$|^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$|^TestAgentUpgradeRouteResolvesTrustedReleasesIntegration$|^TestAgentRolloutFleetLifecycleIntegration$' -count=1)
   OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=scheduler \
@@ -907,7 +941,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # The next takeover runs through the real connectionowner.Acquire path on
   # the re-upgraded schema, not a hand-written SQL update, so the evidence
   # matches the production code path.
-  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     OCSERV_TEST_RETAINED_NODE_HEX="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" \
     go test -p 1 -race ./internal/connectionowner -run TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration -count=1)
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"

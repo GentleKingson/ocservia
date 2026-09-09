@@ -52,7 +52,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	defer pool.Close()
 	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
 	if ownerURL == "" {
-		ownerURL = url
+		t.Skip("isolated owner database URL required")
 	}
 	owner, err := pgxpool.New(ctx, ownerURL)
 	if err != nil {

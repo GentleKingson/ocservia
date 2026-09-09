@@ -84,6 +84,11 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/bootstrap.sh web
+      - name: Install Chromium for authentication regressions
+        run: |
+          source scripts/env.sh
+          cd web
+          npx playwright install --with-deps chromium
       - run: scripts/web-check.sh
 
   database-smoke:
