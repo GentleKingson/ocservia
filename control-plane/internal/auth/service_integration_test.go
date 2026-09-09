@@ -18,13 +18,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/oauth2"
 )
 
 func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
+	for _, suffix := range []string{"", "/", "/tenant/"} {
+		t.Run("issuer="+suffix, func(t *testing.T) { testOIDCAuthorizationCodePKCE(t, suffix) })
+	}
+}
+
+func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
@@ -41,10 +45,28 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var issuer string
+	var discoveryMismatch, unavailable bool
+	discoveryRequests := 0
 	var expected loginState
 	redirectURL := "https://console.example/api/v1/auth/callback"
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case strings.TrimSuffix(suffix, "/") + "/.well-known/openid-configuration":
+			discoveryRequests++
+			if unavailable {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			advertised := issuer
+			if discoveryMismatch {
+				advertised = strings.TrimSuffix(issuer, "/")
+				if advertised == issuer {
+					advertised += "/"
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			base := strings.TrimSuffix(issuer, suffix)
+			_ = json.NewEncoder(w).Encode(map[string]any{"issuer": advertised, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token", "jwks_uri": base + "/keys", "id_token_signing_alg_values_supported": []string{"RS256"}})
 		case "/keys":
 			writeJWKS(t, w, &key.PublicKey)
 		case "/token":
@@ -62,7 +84,20 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 			if r.Form.Get("code") == "bad-nonce" {
 				nonce += "-replayed"
 			}
-			token := signIDToken(t, key, issuer, nonce)
+			overrides := map[string]any{}
+			switch r.Form.Get("code") {
+			case "bad-issuer":
+				other := strings.TrimSuffix(issuer, "/")
+				if other == issuer {
+					other += "/"
+				}
+				overrides["iss"] = other
+			case "bad-audience":
+				overrides["aud"] = "other-client"
+			case "expired":
+				overrides["exp"] = time.Now().Add(-time.Hour).Unix()
+			}
+			token := signIDToken(t, key, issuer, nonce, overrides)
 			if r.Form.Get("code") == "bad-signature" {
 				parts := strings.Split(token, ".")
 				signature, _ := base64.RawURLEncoding.DecodeString(parts[2])
@@ -76,22 +111,33 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 		}
 	}))
 	defer idp.Close()
-	issuer = idp.URL
+	issuer = idp.URL + suffix
+	// A preexisting no-slash identity must retain its ID and role. For slash
+	// issuers, the same sub/profile under the other issuer must stay separate.
+	legacyID, workspaceID, bindingID := uuid.New(), uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,'operator-1','operator@example.test','Operator',now(),now())`, legacyID, strings.TrimSuffix(issuer, "/")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'R5',$2,now(),now())`, workspaceID, workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,created_at) VALUES($1,$2,$3,'Viewer',now())`, bindingID, legacyID, workspaceID); err != nil {
+		t.Fatal(err)
+	}
 
 	service, err := New(ctx, pool, Config{Issuer: issuer, ClientID: "client", ClientSecret: "secret", RedirectURL: redirectURL, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.discover = func(context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
-		oauth := oauth2.Config{ClientID: "client", ClientSecret: "secret", RedirectURL: redirectURL, Endpoint: oauth2.Endpoint{AuthURL: issuer + "/authorize", TokenURL: issuer + "/token"}, Scopes: []string{oidc.ScopeOpenID}}
-		verifier := oidc.NewVerifier(issuer, oidc.NewRemoteKeySet(ctx, issuer+"/keys"), &oidc.Config{ClientID: "client"})
-		return oauth, verifier, nil
-	}
-
 	location, loginCookie, err := service.BeginLogin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	discoveryMismatch = true
+	if _, cookie, err := service.BeginLogin(ctx); err == nil || cookie != nil || !strings.Contains(err.Error(), "did not match the issuer") {
+		t.Fatalf("Discovery mismatch accepted or wrong failure: %v", err)
+	}
+	discoveryMismatch = false
 	if err := service.open(loginCookie.Value, &expected); err != nil {
 		t.Fatal(err)
 	}
@@ -105,23 +151,24 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 	if principal.Subject != "operator-1" || principal.Issuer != issuer {
 		t.Fatalf("unexpected principal: %#v", principal)
 	}
+	if (principal.IdentityID == legacyID) != (suffix == "") {
+		t.Fatalf("issuer identity boundary changed: legacy=%s principal=%s", legacyID, principal.IdentityID)
+	}
+	var roleOwner uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT identity_id FROM role_bindings WHERE id=$1 AND role_name='Viewer'`, bindingID).Scan(&roleOwner); err != nil || roleOwner != legacyID {
+		t.Fatalf("legacy role changed: %s %v", roleOwner, err)
+	}
 	if authenticated, err := service.Authenticate(ctx, sessionCookie); err != nil || authenticated.IdentityID != principal.IdentityID {
 		t.Fatalf("authenticate established session: %#v, %v", authenticated, err)
 	}
-	service.discover = func(context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
-		return oauth2.Config{}, nil, errors.New("issuer unavailable")
-	}
+	unavailable = true
 	if _, _, err := service.BeginLogin(ctx); err == nil {
 		t.Fatal("new login succeeded while the OIDC issuer was unavailable")
 	}
 	if authenticated, err := service.Authenticate(ctx, sessionCookie); err != nil || authenticated.IdentityID != principal.IdentityID {
 		t.Fatalf("bounded existing session failed during issuer outage: %#v, %v", authenticated, err)
 	}
-	service.discover = func(context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
-		oauth := oauth2.Config{ClientID: "client", ClientSecret: "secret", RedirectURL: redirectURL, Endpoint: oauth2.Endpoint{AuthURL: issuer + "/authorize", TokenURL: issuer + "/token"}, Scopes: []string{oidc.ScopeOpenID}}
-		verifier := oidc.NewVerifier(issuer, oidc.NewRemoteKeySet(ctx, issuer+"/keys"), &oidc.Config{ClientID: "client"})
-		return oauth, verifier, nil
-	}
+	unavailable = false
 
 	_, loginCookie, err = service.BeginLogin(ctx)
 	if err != nil {
@@ -130,11 +177,13 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 	if err := service.open(loginCookie.Value, &expected); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := service.CompleteLogin(ctx, expected.State, "bad-nonce", loginCookie); err == nil {
-		t.Fatal("OIDC nonce replay was accepted")
+	if cookie, _, err := service.CompleteLogin(ctx, expected.State+"wrong", "valid-code", loginCookie); !errors.Is(err, ErrOIDCState) || cookie != nil {
+		t.Fatalf("invalid state accepted: %v", err)
 	}
-	if _, _, err := service.CompleteLogin(ctx, expected.State, "bad-signature", loginCookie); err == nil {
-		t.Fatal("invalid ID token signature was accepted")
+	for _, code := range []string{"bad-nonce", "bad-signature", "bad-issuer", "bad-audience", "expired"} {
+		if cookie, _, err := service.CompleteLogin(ctx, expected.State, code, loginCookie); err == nil || cookie != nil {
+			t.Fatalf("invalid token %s accepted: %v", code, err)
+		}
 	}
 	second, existing, err := service.CompleteLogin(ctx, expected.State, "valid-code", loginCookie)
 	if err != nil || existing.IdentityID != principal.IdentityID || second == nil {
@@ -154,6 +203,9 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 	if !errors.Is(loginErr, ErrUnauthenticated) || denied != nil || sessions != 2 || identities != 1 || !disabled || !errors.Is(authErr, ErrUnauthenticated) {
 		t.Fatalf("disabled identity login: %v", loginErr)
 	}
+	if discoveryRequests != 12 {
+		t.Fatalf("real Discovery requests = %d, want 12", discoveryRequests)
+	}
 }
 
 func writeJWKS(t *testing.T, w http.ResponseWriter, publicKey *rsa.PublicKey) {
@@ -167,10 +219,14 @@ func writeJWKS(t *testing.T, w http.ResponseWriter, publicKey *rsa.PublicKey) {
 	}
 }
 
-func signIDToken(t *testing.T, key *rsa.PrivateKey, issuer, nonce string) string {
+func signIDToken(t *testing.T, key *rsa.PrivateKey, issuer, nonce string, overrides map[string]any) string {
 	t.Helper()
 	header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "test", "typ": "JWT"})
-	claims, _ := json.Marshal(map[string]any{"iss": issuer, "aud": "client", "sub": "operator-1", "email": "operator@example.test", "name": "Operator", "nonce": nonce, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix()})
+	values := map[string]any{"iss": issuer, "aud": "client", "sub": "operator-1", "email": "operator@example.test", "name": "Operator", "nonce": nonce, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix()}
+	for key, value := range overrides {
+		values[key] = value
+	}
+	claims, _ := json.Marshal(values)
 	unsigned := fmt.Sprintf("%s.%s", base64.RawURLEncoding.EncodeToString(header), base64.RawURLEncoding.EncodeToString(claims))
 	digest := sha256.Sum256([]byte(unsigned))
 	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
