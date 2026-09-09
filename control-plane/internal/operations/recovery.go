@@ -12,6 +12,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
@@ -72,7 +73,7 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 	// Match dispatch completion and lease reaping before taking authority or
 	// row locks. Result ingestion does not take this advisory lock, but it uses
 	// the same outbox-before-command row-lock order below.
-	if err := commandlimit.Lock(ctx, tx); err != nil {
+	if err := commandlimit.Lock(ctx, postgres.WrapTx(tx)); err != nil {
 		return 0, fmt.Errorf("serialize reconnect recovery: %w", err)
 	}
 

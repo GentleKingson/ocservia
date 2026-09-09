@@ -12,6 +12,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -307,7 +308,7 @@ func (w *Worker) extendPreSendClaim(ctx context.Context, dispatch Dispatch) erro
 		return fmt.Errorf("begin pre-send claim extension: %w", err)
 	}
 	defer rollback(tx)
-	if err := commandlimit.Lock(ctx, tx); err != nil {
+	if err := commandlimit.Lock(ctx, postgres.WrapTx(tx)); err != nil {
 		return fmt.Errorf("serialize pre-send claim extension: %w", err)
 	}
 	var workerID uuid.UUID

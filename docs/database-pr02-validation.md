@@ -273,3 +273,53 @@ This is a usage-storage prerequisite only. It does not complete telemetry
 ingestion/maintenance, the eleven length restrictions, JSON/arrays, full time
 semantics or the advisory-lock transaction ports. MySQL/MariaDB Controller
 startup is still refused and expanded PR-02 acceptance remains incomplete.
+
+## Version 3 storage and transaction milestone
+
+The appended version-3 plans remove the eleven remaining text length limits
+using exact full-value uniqueness tables. They introduce actual identity,
+observed-state, command-admission and telemetry-history Store adapters, typed
+JSONB/array/timestamp representations, and FK-preserving monthly telemetry
+tables. See [storage adapters](database-pr02-storage-adapters.md) for the exact
+ported fields, production call sites and remaining acceptance boundaries.
+
+Published PostgreSQL migrations and MySQL/MariaDB version-1/version-2 artifacts
+are unchanged. Version-3 candidates were independently authored against both
+pinned engines and both genuine baseline lineages. Integration review found a
+source-copy race before publication: temporary migration-owned writer guards
+and immediate pre-switch value checks were added to the unpublished candidate.
+Earlier candidate artifacts remain on BuildServer; runtime never learns hashes.
+
+Final verification on BuildServer, 2026-09-09, in
+`/root/ocservia-pr02.YX4Vwr`, with a private TMPDIR; all commands exited 0:
+
+| Command | Result | Evidence under checkout |
+| --- | --- | --- |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | MySQL 8.4.10 full script, `-race` package passed in 624.490s; config/CLI checks passed | `artifacts/pr02-expanded-mysql-final.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | MariaDB 12.3.2 full script, `-race` package passed in 457.992s; config/CLI checks passed | `artifacts/pr02-expanded-mariadb-final.log` |
+| `PG_MAJOR=all ARTIFACT_DIR=.../artifacts/pr02-expanded-postgres-final bash scripts/database-integration.sh` | Full PostgreSQL 17/18 integration, historical migration and driver-boundary checks passed | `artifacts/pr02-expanded-postgres-final.log`, `artifacts/pr02-expanded-postgres-final/` |
+| `bash scripts/test-bootstrap-profiles.sh` | CI profile contract passed, with Ruby and jq supplied by the server container | `artifacts/pr02-expanded-profiles-verified.log` |
+| `bash scripts/docs-check.sh` | Passed with source paths indexed in the isolated server checkout | `artifacts/pr02-expanded-docs.log` |
+
+After the full matrix compiled, repair was additionally tightened to reject
+a missing previously recorded writer guard. The focused real-server
+`TestRealMigrationProtectsVerifiedSourceCopy` rerun passed on MySQL (30.96s)
+and MariaDB (22.56s), including guard restoration, stale-copy refusal and
+explicit correction. Evidence: `artifacts/pr02-writer-guard-mysql.log` and
+`artifacts/pr02-writer-guard-mariadb.log`. This follow-up did not change SQL or
+manifest bytes. The full database scripts were not filtered.
+
+Earlier unsuccessful attempts are retained. An older drift fixture incorrectly
+marked all revisions running and was corrected to mark only the latest one.
+The first PostgreSQL attempt exposed the need for an owner connection for
+fixture deletion, without widening runtime privileges. A subsequent server
+checkout copied with workstation UID ownership failed secure Unix-socket
+ancestry validation; restoring server checkout ownership fixed that environment
+failure. The isolated checkout has no Git HEAD, so server Go invocations disable
+VCS stamping only. Initial profile runs lacked Ruby, then jq; both dependencies
+were supplied before the successful unmodified contract test.
+
+This is not full PR-02 acceptance. The remaining JSON/array/time columns,
+sentinel semantics, outer Controller transactions and advisory-lock workflows,
+automatic legacy telemetry migration, and authenticated cross-engine Controller
+workflows remain outstanding. Draft and production refusal stay in force.

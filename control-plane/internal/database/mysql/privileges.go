@@ -19,6 +19,7 @@ var runtimePrivileges = []struct{ privileges, tables string }{
 	{"UPDATE(completion_pending,completed_at,approver_identity_id)", "local_auth_bootstrap"},
 	{"UPDATE(transport_cursor_valid)", "transport_events"},
 	{"UPDATE(lock_key)", "business_locks"},
+	{"SELECT,UPDATE(key_name)", "exact_key_guards"},
 }
 
 // GrantTestPrivileges is restricted to the fixed development accounts. The
@@ -39,12 +40,12 @@ func (b *Backend) GrantTestPrivileges(ctx context.Context) error {
 			}
 		}
 	}
-	// Until a partition-maintenance adapter exists, maintenance can only expire
-	// telemetry rows. It cannot touch audit, authorization, or migration state.
+	// Retention is restricted to telemetry; no audit, authorization, or
+	// migration writes and no arbitrary DDL are granted to maintenance.
 	for _, table := range []string{"telemetry_samples", "telemetry_rollups_5m", "telemetry_rollups_1h"} {
 		if _, err := b.Exec(ctx, "GRANT SELECT,DELETE ON `"+name+"`.`"+table+"` TO 'ocservia_maintenance'@'%'"); err != nil {
 			return err
 		}
 	}
-	return nil
+	return b.GrantTelemetryTestPrivileges(ctx)
 }

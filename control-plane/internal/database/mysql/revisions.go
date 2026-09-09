@@ -5,24 +5,29 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 )
 
 // A revision appends to either published version-1 lineage. Baseline receipts
 // remain byte-for-byte intact; they never become receipts for a different SQL
 // artifact. The version-2 receipt names its actual parent checksum explicitly.
 type revisionStep struct {
-	Name     string `json:"name"`
-	SQL      string `json:"sql"`
-	Checksum string `json:"checksum"`
-	Before   string `json:"before"`
-	After    string `json:"after"`
+	Name           string `json:"name"`
+	Object         string `json:"object,omitempty"`
+	Kind           string `json:"kind,omitempty"`
+	SQL            string `json:"sql"`
+	Checksum       string `json:"checksum"`
+	Before         string `json:"before"`
+	After          string `json:"after"`
+	VerifySQL      string `json:"verify_sql,omitempty"`
+	CheckBeforeSQL string `json:"check_before_sql,omitempty"`
+	Repairable     bool   `json:"repairable,omitempty"`
 }
 type revisionPlan struct {
 	Steps []revisionStep `json:"steps"`
 }
 type revision struct {
 	Version                 int                     `json:"version"`
+	PreviousChecksum        string                  `json:"previous_checksum,omitempty"`
 	Engine                  Engine                  `json:"engine"`
 	ControllerSchema        int                     `json:"controller_schema"`
 	MinimumControllerSchema int                     `json:"minimum_controller_schema"`
@@ -140,247 +145,4 @@ func revisionTables(ctx context.Context, conn *sql.Conn, r revision) (int, error
 		n++
 	}
 	return n, nil
-}
-
-func revisionState(ctx context.Context, conn *sql.Conn, r revision, parent, sum string) (string, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT version,parent_checksum,manifest_checksum,state FROM backend_schema_revisions ORDER BY version`)
-	if err != nil {
-		return "", safeError(err)
-	}
-	defer rows.Close()
-	state := ""
-	for rows.Next() {
-		var v int
-		var p, s, st string
-		if err = rows.Scan(&v, &p, &s, &st); err != nil {
-			return "", safeError(err)
-		}
-		if state != "" || v != r.Version || p != parent || s != sum || (st != "running" && st != "verified") {
-			return "", ErrChecksum
-		}
-		state = st
-	}
-	return state, safeError(rows.Err())
-}
-
-func revisionStates(ctx context.Context, conn *sql.Conn, r revision, p revisionPlan) ([]string, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT version,ordinal,name,checksum,state FROM backend_schema_revision_steps ORDER BY version,ordinal`)
-	if err != nil {
-		return nil, safeError(err)
-	}
-	defer rows.Close()
-	states := []string{}
-	for rows.Next() {
-		var v, ordinal int
-		var name, sum, state string
-		if err = rows.Scan(&v, &ordinal, &name, &sum, &state); err != nil {
-			return nil, safeError(err)
-		}
-		i := len(states)
-		if v != r.Version || ordinal != i+1 || i >= len(p.Steps) || name != p.Steps[i].Name || sum != p.Steps[i].Checksum || (state != "running" && state != "verified") || (i > 0 && states[i-1] != "verified") {
-			return nil, ErrChecksum
-		}
-		states = append(states, state)
-	}
-	return states, safeError(rows.Err())
-}
-
-func revisedSnapshot(root manifest, p revisionPlan) manifest {
-	result := root
-	result.Steps = append([]step(nil), root.Steps...)
-	for _, change := range p.Steps {
-		for i := range result.Steps {
-			if result.Steps[i].Kind == "table" && result.Steps[i].Name == change.Name {
-				result.Steps[i].SchemaHash = change.After
-			}
-		}
-	}
-	return result
-}
-
-func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result error) {
-	r, sum, err := loadRevision(b.engine)
-	if err != nil {
-		return err
-	}
-	if repairChecksum != "" && repairChecksum != sum {
-		return ErrChecksum
-	}
-	conn, name, err := migrationConnection(ctx, b)
-	if err != nil {
-		return err
-	}
-	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
-	root, parent, err := b.rootOn(ctx, conn)
-	if err != nil {
-		return err
-	}
-	plan, ok := r.Parents[parent]
-	if !ok {
-		return ErrChecksum
-	}
-	tables, err := revisionTables(ctx, conn, r)
-	if err != nil {
-		return err
-	}
-	state := ""
-	if tables == 2 {
-		state, err = revisionState(ctx, conn, r, parent, sum)
-		if err != nil {
-			return err
-		}
-	}
-	if state == "" {
-		if tables == 0 {
-			token := ""
-			if repairChecksum != "" {
-				token = parent
-			}
-			if err = b.migrateBaseline(ctx, conn, root, parent, token); err != nil {
-				return err
-			}
-		}
-		if err = b.validateOn(ctx, conn, root, parent, tables); err != nil {
-			return err
-		}
-		if err = validateSnapshot(ctx, conn, root); err != nil {
-			return err
-		}
-		for _, ddl := range []string{revisionsDDL, revisionStepsDDL} {
-			if _, err = conn.ExecContext(ctx, ddl); err != nil {
-				return safeError(err)
-			}
-		}
-		if n, err := revisionTables(ctx, conn, r); err != nil || n != 2 {
-			if err != nil {
-				return err
-			}
-			return ErrSchema
-		}
-		states, err := revisionStates(ctx, conn, r, plan)
-		if err != nil {
-			return err
-		}
-		if len(states) != 0 {
-			return ErrChecksum
-		}
-		if _, err = conn.ExecContext(ctx, `INSERT INTO backend_schema_revisions(version,parent_checksum,manifest_checksum,state) VALUES(?,?,?,'running')`, r.Version, parent, sum); err != nil {
-			return safeError(err)
-		}
-	} else {
-		if state == "running" && repairChecksum == "" {
-			return ErrDirty
-		}
-		if err = b.validateOn(ctx, conn, root, parent, 2); err != nil {
-			return err
-		}
-	}
-	states, err := revisionStates(ctx, conn, r, plan)
-	if err != nil {
-		return err
-	}
-	if state == "verified" {
-		if len(states) != len(plan.Steps) || (len(states) > 0 && states[len(states)-1] != "verified") {
-			return ErrChecksum
-		}
-		return validateSnapshot(ctx, conn, revisedSnapshot(root, plan))
-	}
-	if repairChecksum != "" {
-		if _, err = conn.ExecContext(ctx, `UPDATE backend_schema_revisions SET repair_count=repair_count+1 WHERE version=?`, r.Version); err != nil {
-			return safeError(err)
-		}
-	}
-	for i, s := range plan.Steps {
-		object := step{Name: s.Name, Kind: "table"}
-		actual, err := schemaHash(ctx, conn, object)
-		if err != nil {
-			return err
-		}
-		if i < len(states) && states[i] == "verified" {
-			if actual != s.After {
-				return fmt.Errorf("%w: %s", ErrSchema, s.Name)
-			}
-			continue
-		}
-		if i >= len(states) {
-			if actual != s.Before {
-				return fmt.Errorf("%w: unjournaled revision object %s", ErrSchema, s.Name)
-			}
-			if _, err = conn.ExecContext(ctx, `INSERT INTO backend_schema_revision_steps(version,ordinal,name,checksum,state) VALUES(?,?,?,?,'running')`, r.Version, i+1, s.Name, s.Checksum); err != nil {
-				return safeError(err)
-			}
-		}
-		if actual == s.Before {
-			if _, err = conn.ExecContext(ctx, s.SQL); err != nil {
-				return fmt.Errorf("revision %d step %s: %w", r.Version, s.Name, safeError(err))
-			}
-			actual, err = schemaHash(ctx, conn, object)
-			if err != nil {
-				return err
-			}
-		}
-		if actual != s.After {
-			return fmt.Errorf("%w: %s", ErrSchema, s.Name)
-		}
-		if _, err = conn.ExecContext(ctx, `UPDATE backend_schema_revision_steps SET state='verified',verified_at=CURRENT_TIMESTAMP(6) WHERE version=? AND ordinal=?`, r.Version, i+1); err != nil {
-			return safeError(err)
-		}
-	}
-	// DDL is not transactional. The clean version receipt is published only
-	// after every statement receipt and the complete resulting schema agree.
-	if err = validateSnapshot(ctx, conn, revisedSnapshot(root, plan)); err != nil {
-		return err
-	}
-	_, err = conn.ExecContext(ctx, `UPDATE backend_schema_revisions SET state='verified',verified_at=CURRENT_TIMESTAMP(6) WHERE version=?`, r.Version)
-	return safeError(err)
-}
-
-func (b *Backend) ValidateSchema(ctx context.Context, expectedController int) (result error) {
-	r, sum, err := loadRevision(b.engine)
-	if err != nil {
-		return err
-	}
-	if expectedController < r.MinimumControllerSchema || expectedController > r.ControllerSchema {
-		return ErrSchema
-	}
-	conn, name, err := migrationConnection(ctx, b)
-	if err != nil {
-		return err
-	}
-	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
-	root, parent, err := b.rootOn(ctx, conn)
-	if err != nil {
-		return err
-	}
-	plan, ok := r.Parents[parent]
-	if !ok {
-		return ErrChecksum
-	}
-	if n, err := revisionTables(ctx, conn, r); err != nil || n != 2 {
-		if err != nil {
-			return err
-		}
-		return ErrSchema
-	}
-	state, err := revisionState(ctx, conn, r, parent, sum)
-	if err != nil {
-		return err
-	}
-	if state == "running" {
-		return ErrDirty
-	}
-	if state != "verified" {
-		return ErrSchema
-	}
-	if err = b.validateOn(ctx, conn, root, parent, 2); err != nil {
-		return err
-	}
-	states, err := revisionStates(ctx, conn, r, plan)
-	if err != nil {
-		return err
-	}
-	if len(states) != len(plan.Steps) || (len(states) > 0 && states[len(states)-1] != "verified") {
-		return ErrChecksum
-	}
-	return validateSnapshot(ctx, conn, revisedSnapshot(root, plan))
 }

@@ -5,8 +5,8 @@
 This is a **Draft, not complete database support and not ready for phase
 acceptance**. Controller startup still rejects both new selectors, including
 development startup. The separate `ocserv-db-foundation` command permits only
-explicit `test` or `development` environments. No business store was switched
-from PostgreSQL. No production migration, release, deployment, or merge is
+explicit `test` or `development` environments. Controller construction remains
+PostgreSQL-only; selected domain stores now have both adapters. No production migration, release, deployment, or merge is
 part of this PR.
 
 The connection, migration/recovery, and fresh-account permission foundation is
@@ -15,40 +15,33 @@ plus `business_locks`; their SQL and postcondition fingerprints were exercised
 independently on the pinned servers. **That does not establish semantic
 equivalence of the entire schema.** Outstanding acceptance blockers are:
 
-1. Eleven indexed PostgreSQL `text` columns still have an unapproved
-   `VARCHAR(191)` restriction, including issuer/subject. The 49-column
-   inventory now distinguishes 35 columns already bounded by PostgreSQL
-   CHECKs/FKs, three corrected mappings, and these eleven open cases. The
-   two session ID columns now permit the existing 256-character range and
-   secret key paths the existing 512-character range. See
-   `database-pr02-bounded-keys.tsv`. No prefix-only
-   unique indexes or collision-prone hash substitutions are presented as
-   exact uniqueness. The expanded PR-02 scope requires exact alternate storage
-   and actual business read/write adapters, not approval of narrower limits.
-2. JSON is native MySQL JSON and MariaDB's validated JSON alias, not PostgreSQL
-   jsonb equality/canonicalization. The member-list codec preserves SQL NULL,
-   empty arrays and NULL elements, but accepts only one-dimensional arrays.
-   SQL currently checks array shape/cardinality, not every element's type.
-   Multidimensional arrays/lower bounds and SQL-side NUL rejection inside JSON
-   are not implemented. Ordinary text columns now reject NUL in SQL. The ten
-   distinct regex predicates in schema 34 have shared real-server regression
-   coverage for case, anchors, ASCII/control characters and Unicode edge cases;
-   this is not a general POSIX/ICU/PCRE compatibility claim. These limitations
-   must not be silently accepted as full PostgreSQL type semantics.
-3. `DATETIME(6)` represents finite UTC instants, not PostgreSQL's entire
-   timestamp range. `1000-01-01` is the existing Draft's expired-lease sentinel
-   for historical `-infinity`; this narrower representation is not accepted
-   and must be replaced together with actual business read/write adapters.
-   PostgreSQL transaction-start `now()` and wall-clock functions cannot be
-   indiscriminately substituted by MySQL statement time in future stores.
-4. Telemetry has an unpartitioned InnoDB logical table and equivalent query
-   index in this draft. PostgreSQL partition functions/retention safeguards
-   have **not** been ported. Maintenance receives only scoped telemetry
-   SELECT/DELETE, not a DDL or SECURITY DEFINER substitute. This is not a claim
-   of equivalent partition maintenance.
-5. The transaction lock primitive is tested, but actual business call sites
-   remain PostgreSQL-owned. The lock-scope/order inventory below is a porting
-   obligation, not evidence that MySQL business transactions have been tested.
+1. Version 3 removes all eleven unapproved `VARCHAR(191)` restrictions using
+   LONGTEXT and exact, cascading natural-key side tables. OIDC profile upserts
+   and telemetry rollups use actual domain adapters. The other affected
+   Controller workflows still require ports, especially native ON CONFLICT
+   upserts which cannot be replaced by ON DUPLICATE KEY UPDATE over a trigger.
+   See `database-pr02-bounded-keys.tsv` and `database-pr02-long-key-storage.md`.
+2. Observed groups now preserve full text-array dimensions, lower bounds and
+   NULL elements. Telemetry security details use lossless JSONB text with
+   database-side Unicode/NUL/numeric validation. These two fields have actual
+   read/write adapters; other JSON/array fields still use the narrower native
+   representation. Existing regex regression cases are not a general
+   POSIX/ICU/PCRE equivalence guarantee.
+3. Five telemetry/observed-state time columns use checked PostgreSQL-epoch
+   BIGINT values with full range and infinity support. Other DATETIME columns
+   and expired-lease sentinels still require business adapters and migration.
+   Version 3 preserves old year-1000 values as finite instants, never guessing
+   infinity. The common transaction clock is stable, but remaining business
+   uses of now()/wall-clock time have not all been migrated.
+4. Monthly InnoDB telemetry tables retain real foreign keys. Domain ingestion,
+   history, rollups and bounded retirement have adapters; owner provisioning
+   atomically drains the corresponding legacy month and owner GC drops retired
+   tables. Full-database automatic legacy migration and complete Controller
+   ingestion/read-model/fencing integration remain open.
+5. Command admission/backlog uses common Tx and domain Stores with the original
+   PostgreSQL advisory keys and MySQL transaction lock rows. Seven production
+   call sites borrow their original PG transaction. Other advisory-lock sites
+   and these outer business transactions still need complete Store/Tx ports.
 
 Do not remove the production gate or mark this PR ready based on green
 foundation tests. The complete acceptance request is not yet satisfied.
@@ -118,11 +111,11 @@ commit outcome**, not a rollback guarantee, and must not be blindly retried.
 | --- | --- |
 | UUID | `VARBINARY(16)` plus exact byte-length CHECK; RFC byte order, no time-byte swapping or short-input padding |
 | bytea | `LONGBLOB`; indexed binary fields use `VARBINARY(512)` and retain existing length checks |
-| jsonb | Backend JSON type, existing object/array CHECKs mapped; semantic limitations above |
+| jsonb | Lossless binary JSONB text for telemetry security detail; other columns remain native JSON |
 | inet | Family byte + prefix-length byte + 4/16 address bytes; host bits and IPv4-mapped IPv6 identity preserved; NULL is separate |
-| text[] | JSON member list and explicit `TextArray` codec; limitations above |
+| text[] | Observed groups use dimensional binary envelopes; other array columns remain native lists |
 | nullable values | SQL NULL, not zero UUID, empty string, empty blob or empty JSON array |
-| ordinary uniqueness | Full-column unique keys, normal distinct NULLs; indexed-text limit remains a blocker |
+| ordinary uniqueness | Native bounded keys or exact complete-value side tables, with distinct NULLs |
 | NULLS NOT DISTINCT | Role binding's nullable resource key gets a tagged generated value, separating NULL from every UUID including zero UUID |
 | partial unique indexes | Generated nullable predicate flag appended to the full key; outside the predicate the NULL flag disables uniqueness |
 | non-unique partial indexes | Full indexes retaining key order, not a filtered storage promise; query-plan/performance equivalence is unproven |
@@ -260,10 +253,10 @@ tests run the production usage function with each backend and actual migrated
 tables/runtime grants, not temporary simplified schemas. They are a prerequisite
 for the telemetry port, not full Controller workflow acceptance.
 
-This adapter still uses the Draft's finite DATETIME representation. It does
-not resolve the eleven remaining length restrictions, JSON/array mappings,
-full timestamp/infinity semantics, telemetry physical storage/retention or the
-advisory-lock business call-site migration. No migration artifact changed.
+This usage adapter still uses the Draft's finite DATETIME representation.
+Its initial change did not alter migration artifacts. Version 3's additional
+storage and domain adapters are documented in `database-pr02-storage-adapters.md`;
+neither milestone establishes complete Controller workflow acceptance.
 
 ## Accounts and lock scopes
 
@@ -279,8 +272,10 @@ not database-wide runtime grants. Provisioning an existing account with extra
 privileges/role inheritance is outside this helper's contract and must be
 audited separately; the helper does not silently revoke existing authority.
 Runtime cannot alter migration metadata, execute DDL, rewrite audit rows or
-change protected bootstrap/event columns. Maintenance can SELECT/DELETE only
-the three telemetry data/rollup tables. It cannot repair migrations.
+change protected bootstrap/event columns. Maintenance can SELECT/DELETE the
+three legacy telemetry/rollup tables and SELECT monthly tables, plus EXECUTE
+the restricted retirement procedure. It cannot change the shard catalog,
+execute arbitrary DDL or repair migrations.
 
 Business locking uses InnoDB `business_locks` rows on the **caller-owned
 transaction**. INSERT/duplicate no-op UPDATE and SELECT FOR UPDATE serialize
@@ -292,13 +287,13 @@ or retry is used. The new adapter does not advertise native advisory locks.
 | RBAC and Local lifecycle, 734821032 | `global:734821032`, shared by both modules |
 | Local attempt capacity, 734821033 | `global:734821033`, before attempt row cleanup/admission |
 | Certificate operation serialization, 6820260817 | `global:6820260817` |
-| Command active admission, 0x4f435356434d444c | `global:0x4f435356434d444c`, environment-wide, not per node |
-| Backlog admission, 0x4f4353564241434b | `global:0x4f4353564241434b`, before node/workspace counts |
+| Command active admission, 0x4f435356434d444c | Implemented as `pg-advisory:<decimal ID>`, environment-wide, not per node |
+| Backlog admission, 0x4f4353564241434b | Implemented as `pg-advisory:<decimal ID>`, before node/workspace counts |
 | Audit workspace chain | `audit:<canonical workspace UUID>`, at the current chain-lock point |
 
-These keys must be wired in the domain-store port while retaining existing
-surrounding row-lock and audit order. Current PostgreSQL call sites are not
-changed by this foundation PR.
+The remaining keys must be wired in domain stores while retaining surrounding
+row-lock and audit order. Command-limit call sites now use the shared domain;
+the other PostgreSQL-only call sites remain acceptance blockers.
 
 ## Validation
 

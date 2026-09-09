@@ -113,10 +113,10 @@ func TestRealAppendOnlyDraftUpgrade(t *testing.T) {
 				t.Fatal("existing data changed", err)
 			}
 			var version, count int
-			if err := b.QueryRow(ctx, `SELECT version FROM backend_schema_revisions WHERE state='verified'`).Scan(&version); err != nil || version != 2 {
+			if err := b.QueryRow(ctx, `SELECT MAX(version) FROM backend_schema_revisions WHERE state='verified'`).Scan(&version); err != nil || version != latestRevisionVersion {
 				t.Fatal("missing appended version", err)
 			}
-			if err := b.QueryRow(ctx, `SELECT count(*) FROM backend_schema_revision_steps`).Scan(&count); err != nil || old && count == 0 || !old && count != 0 {
+			if err := b.QueryRow(ctx, `SELECT count(*) FROM backend_schema_revision_steps WHERE version=2`).Scan(&count); err != nil || old && count == 0 || !old && count != 0 {
 				t.Fatal("invented or missing ALTER receipts", count, err)
 			}
 			if _, err := b.Exec(ctx, `UPDATE identities SET email=? WHERE id=?`, "bad\x00value", id); !errors.Is(err, database.ErrConstraint) {
@@ -225,7 +225,7 @@ func TestRealRevisionCrashAfterDDL(t *testing.T) {
 		t.Fatal("DDL did not commit before process death", err)
 	}
 	var state string
-	if err = b.QueryRow(ctx, `SELECT state FROM backend_schema_revision_steps WHERE ordinal=1`).Scan(&state); err != nil || state != "running" {
+	if err = b.QueryRow(ctx, `SELECT state FROM backend_schema_revision_steps WHERE version=2 AND ordinal=1`).Scan(&state); err != nil || state != "running" {
 		t.Fatal("step incorrectly marked complete", err)
 	}
 	if err = b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
@@ -241,7 +241,7 @@ func TestRealRevisionCrashAfterDDL(t *testing.T) {
 	if !reflect.DeepEqual(before, baselineReceipts(t, b)) {
 		t.Fatal("crash recovery rewrote baseline")
 	}
-	if _, err = b.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=? WHERE ordinal=1`, strings.Repeat("0", 64)); err != nil {
+	if _, err = b.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=? WHERE version=2 AND ordinal=1`, strings.Repeat("0", 64)); err != nil {
 		t.Fatal(err)
 	}
 	if err = b.Migrate(ctx, sum); !errors.Is(err, ErrChecksum) {

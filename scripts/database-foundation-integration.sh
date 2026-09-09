@@ -49,6 +49,6 @@ PORT="$(docker port "${NAME}" 3306/tcp | sed 's/127.0.0.1://')"
 export PR02_ENGINE="${ENGINE}"
 export PR02_TLS_CA_FILE="${TLS_DIR}/server-cert.pem"
 export PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tls=false"
-(cd "${ROOT}/control-plane" && go test -count=1 -race -v ./internal/database/mysql)
+(cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=20m -v ./internal/database/mysql)
 # A schema-only tool must never unlock Controller production or business startup.
 (cd "${ROOT}/control-plane" && go test -count=1 ./internal/platform/config ./cmd/ocserv-db-foundation)

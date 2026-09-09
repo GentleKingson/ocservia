@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -18,7 +19,7 @@ import (
 
 // These are new backend histories, not records of PostgreSQL migrations.
 //
-//go:embed mysql/manifest.json mariadb/manifest.json history/f6cd0e0/*.json mysql/000002.json mariadb/000002.json
+//go:embed mysql/manifest.json mariadb/manifest.json history/f6cd0e0/*.json mysql/000002.json mariadb/000002.json mysql/000003.json mariadb/000003.json
 var manifests embed.FS
 
 type step struct {
@@ -71,8 +72,11 @@ func decodeManifest(engine Engine, data []byte) (manifest, string, error) {
 	return m, digest(data), nil
 }
 func ManifestChecksum(engine Engine) (string, error) {
-	_, sum, err := loadRevision(engine)
-	return sum, err
+	chain, err := loadRevisionChain(engine)
+	if err != nil {
+		return "", err
+	}
+	return chain[len(chain)-1].sum, nil
 }
 
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -98,6 +102,29 @@ func schemaHash(ctx context.Context, conn *sql.Conn, s step) (string, error) {
 			return "", nil
 		}
 		if err != nil {
+			return "", safeError(err)
+		}
+	case "procedure", "function":
+		err := conn.QueryRowContext(ctx, `SELECT CONCAT_WS('|',ROUTINE_TYPE,SQL_DATA_ACCESS,IS_DETERMINISTIC,SECURITY_TYPE,SQL_MODE,CHARACTER_SET_CLIENT,COLLATION_CONNECTION,DATABASE_COLLATION,ROUTINE_DEFINITION) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE() AND ROUTINE_NAME=? AND ROUTINE_TYPE=?`, s.Name, strings.ToUpper(s.Kind)).Scan(&definition)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		if err != nil {
+			return "", safeError(err)
+		}
+		rows, err := conn.QueryContext(ctx, `SELECT CONCAT_WS('|',ORDINAL_POSITION,PARAMETER_MODE,PARAMETER_NAME,DTD_IDENTIFIER,COALESCE(CHARACTER_SET_NAME,''),COALESCE(COLLATION_NAME,'')) FROM information_schema.PARAMETERS WHERE SPECIFIC_SCHEMA=DATABASE() AND SPECIFIC_NAME=? ORDER BY ORDINAL_POSITION`, s.Name)
+		if err != nil {
+			return "", safeError(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var parameter string
+			if err = rows.Scan(&parameter); err != nil {
+				return "", safeError(err)
+			}
+			definition += "\n" + parameter
+		}
+		if err = rows.Err(); err != nil {
 			return "", safeError(err)
 		}
 	case "seed":
@@ -141,7 +168,16 @@ func migrationConnection(ctx context.Context, b *Backend) (*sql.Conn, string, er
 	}
 	name := "ocservia:" + digest([]byte(databaseName))[:48]
 	var result sql.NullInt64
-	err = conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 10)", name).Scan(&result)
+	// Appended upgrades can exceed one server wait interval. Keep each query
+	// below the socket read timeout and the whole acquisition bounded.
+	lockCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	for {
+		err = conn.QueryRowContext(lockCtx, "SELECT GET_LOCK(?, 10)", name).Scan(&result)
+		if err != nil || !result.Valid || result.Int64 != 0 {
+			break
+		}
+	}
 	if err != nil || !result.Valid || result.Int64 != 1 {
 		discard(conn)
 		conn.Close()
@@ -324,14 +360,24 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 }
 
 func (b *Backend) validateOn(ctx context.Context, conn *sql.Conn, m manifest, sum string, extraTables int) error {
-	var tableCount, triggerCount int
+	if err := validateObjectCounts(ctx, conn, m, extraTables); err != nil {
+		return err
+	}
+	return b.validateBaselineReceipts(ctx, conn, m, sum)
+}
+
+func validateObjectCounts(ctx context.Context, conn *sql.Conn, m manifest, extraTables int) error {
+	var tableCount, triggerCount, routineCount int
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()").Scan(&tableCount); err != nil {
 		return safeError(err)
 	}
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE()").Scan(&triggerCount); err != nil {
 		return safeError(err)
 	}
-	expectedTables, expectedTriggers := 2+extraTables, 0
+	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE()").Scan(&routineCount); err != nil {
+		return safeError(err)
+	}
+	expectedTables, expectedTriggers, expectedRoutines := 2+extraTables, 0, 0
 	for _, s := range m.Steps {
 		if s.Kind == "table" {
 			expectedTables++
@@ -339,10 +385,17 @@ func (b *Backend) validateOn(ctx context.Context, conn *sql.Conn, m manifest, su
 		if s.Kind == "trigger" {
 			expectedTriggers++
 		}
+		if s.Kind == "procedure" || s.Kind == "function" {
+			expectedRoutines++
+		}
 	}
-	if tableCount != expectedTables || triggerCount != expectedTriggers {
+	if tableCount != expectedTables || triggerCount != expectedTriggers || routineCount != expectedRoutines {
 		return ErrSchema
 	}
+	return nil
+}
+
+func (b *Backend) validateBaselineReceipts(ctx context.Context, conn *sql.Conn, m manifest, sum string) error {
 	for _, name := range []string{"backend_migrations", "backend_migration_steps"} {
 		actual, err := schemaHash(ctx, conn, step{Name: name, Kind: "table"})
 		if err != nil {
@@ -403,6 +456,11 @@ func (b *Backend) validateOn(ctx context.Context, conn *sql.Conn, m manifest, su
 
 func validateSnapshot(ctx context.Context, conn *sql.Conn, m manifest) error {
 	for _, s := range m.Steps {
+		// This seed initializes a mutable business table. Its receipt is
+		// immutable, but subsequent synchronization records are not drift.
+		if s.Kind == "seed" && s.Name == "seed_upstream" {
+			continue
+		}
 		actual, err := schemaHash(ctx, conn, s)
 		if err != nil {
 			return err

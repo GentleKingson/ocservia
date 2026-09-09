@@ -19,11 +19,13 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -389,6 +391,7 @@ func (s *Service) validateForIngest(batch Batch) (int, error) {
 }
 
 func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadBytes int) (bool, error) {
+	businessTx := telemetryTransaction(tx)
 	var nodeID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, batch.NodeID).Scan(&nodeID); errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("%w: telemetry node is unavailable", ErrInvalidTelemetry)
@@ -433,7 +436,7 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 		for _, session := range batch.Sessions {
 			usage = append(usage, userusage.Sample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
 		}
-		if err := userusage.RecordTransaction(ctx, postgres.WrapTx(tx), batch.NodeID, usage); err != nil {
+		if err := userusage.RecordTransaction(ctx, businessTx, batch.NodeID, usage); err != nil {
 			if errors.Is(err, userusage.ErrInvalidSample) {
 				return false, fmt.Errorf("%w: session usage identity conflict", ErrInvalidTelemetry)
 			}
@@ -463,13 +466,8 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 				return false, fmt.Errorf("insert observed user: %w", err)
 			}
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM observed_groups WHERE node_id=$1`, batch.NodeID); err != nil {
-			return false, err
-		}
-		for _, group := range batch.Groups {
-			if _, err := tx.Exec(ctx, `INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at) VALUES($1,$2,$3,$4,$5,$6)`, batch.NodeID, group.Name, group.Members, group.Revision, group.Fingerprint, batch.Snapshot.ObservedAt); err != nil {
-				return false, fmt.Errorf("insert observed group: %w", err)
-			}
+		if err := replaceObservedGroups(ctx, businessTx, batch); err != nil {
+			return false, fmt.Errorf("replace observed groups: %w", err)
 		}
 		if batch.Snapshot.ObservedAt.After(s.now().Add(-OfflineAfter)) {
 			if _, err := tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,$2),version=version+1 WHERE id=$1 AND status='offline'`, batch.NodeID, batch.Snapshot.ObservedAt); err != nil {
@@ -496,18 +494,19 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 			return false, fmt.Errorf("insert reported agent upgrade result: %w", err)
 		}
 	}
-	for _, event := range batch.Security {
-		if _, err := tx.Exec(ctx, `INSERT INTO telemetry_security_events (event_id,node_id,observed_at,severity,event_type,detail) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, event.ID, batch.NodeID, event.ObservedAt, event.Severity, event.Type, event.Detail); err != nil {
-			return false, fmt.Errorf("insert security event: %w", err)
-		}
+	if err := insertObservedSecurity(ctx, businessTx, batch); err != nil {
+		return false, fmt.Errorf("insert security event: %w", err)
 	}
+	history, err := telemetryhistory.FromTransaction(businessTx)
+	if err != nil {
+		return false, err
+	}
+	samples := make([]telemetryhistory.Sample, 0, len(batch.Samples))
 	for _, sample := range batch.Samples {
-		if _, err := tx.Exec(ctx, `SELECT telemetry_ensure_month_partition($1)`, sample.SampledAt); err != nil {
-			return false, fmt.Errorf("ensure telemetry partition: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO telemetry_samples (node_id,batch_id,sampled_at,metric,value) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, batch.NodeID, batch.ID, sample.SampledAt, sample.Metric, sample.Value); err != nil {
-			return false, fmt.Errorf("insert telemetry sample: %w", err)
-		}
+		samples = append(samples, telemetryhistory.Sample{SampledAt: sample.SampledAt, Metric: sample.Metric, Value: sample.Value})
+	}
+	if err := history.Insert(ctx, batch.NodeID, batch.ID, samples); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -898,28 +897,27 @@ func (s *Service) History(ctx context.Context, nodeID uuid.UUID, metric, resolut
 	if since.IsZero() {
 		since = s.now().Add(-24 * time.Hour)
 	}
-	query := `SELECT sampled_at,metric,1,value,value,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at >= $3 ORDER BY sampled_at LIMIT 2000`
-	if resolution == "5m" {
-		query = `SELECT bucket_at,metric,sample_count,min_value,max_value,avg_value FROM telemetry_rollups_5m WHERE node_id=$1 AND metric=$2 AND bucket_at >= $3 ORDER BY bucket_at LIMIT 2000`
-	} else if resolution == "1h" {
-		query = `SELECT bucket_at,metric,sample_count,min_value,max_value,avg_value FROM telemetry_rollups_1h WHERE node_id=$1 AND metric=$2 AND bucket_at >= $3 ORDER BY bucket_at LIMIT 2000`
-	} else if resolution != "raw" {
+	if resolution != "raw" && resolution != "5m" && resolution != "1h" {
 		return nil, ErrInvalidResolution
 	}
-	rows, err := s.pool.Query(ctx, query, nodeID, metric, since)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	points := []HistoryPoint{}
-	for rows.Next() {
-		var p HistoryPoint
-		if err := rows.Scan(&p.At, &p.Metric, &p.Count, &p.Minimum, &p.Maximum, &p.Average); err != nil {
-			return nil, err
-		}
-		points = append(points, p)
+	defer rollback(tx)
+	history, err := telemetryhistory.FromTransaction(telemetryTransaction(tx))
+	if err != nil {
+		return nil, err
 	}
-	return points, rows.Err()
+	stored, err := history.History(ctx, nodeID, metric, resolution, since)
+	if err != nil {
+		return nil, err
+	}
+	points := make([]HistoryPoint, 0, len(stored))
+	for _, p := range stored {
+		points = append(points, HistoryPoint(p))
+	}
+	return points, nil
 }
 
 func (s *Service) Maintain(ctx context.Context) error {
@@ -956,28 +954,17 @@ func (s *Service) Maintain(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, table := range []struct{ name, interval string }{{"telemetry_rollups_5m", "5 minutes"}, {"telemetry_rollups_1h", "1 hour"}} {
-		_, err := tx.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin($1::interval,sampled_at,'2000-01-01'::timestamptz),count(*),min(value),max(value),avg(value) FROM telemetry_samples WHERE sampled_at >= $2 GROUP BY 1,2,3 ON CONFLICT (node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value`, table.name), table.interval, now.Add(-48*time.Hour))
-		if err != nil {
-			return err
-		}
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM telemetry_rollups_5m WHERE bucket_at < ($1::timestamptz - interval '90 days')`, now); err != nil {
+	history, err := telemetryhistory.FromTransaction(telemetryTransaction(tx))
+	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM telemetry_rollups_1h WHERE bucket_at < ($1::timestamptz - interval '13 months')`, now); err != nil {
-		return err
-	}
-	if err := s.dropExpiredRawPartitionsTx(ctx, tx, now.Add(-14*24*time.Hour)); err != nil {
+	if err := history.Maintain(ctx, now); err != nil {
 		return err
 	}
 	return coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx))
 }
 
-func (s *Service) dropExpiredRawPartitionsTx(ctx context.Context, tx pgx.Tx, cutoff time.Time) error {
-	_, err := tx.Exec(ctx, `SELECT telemetry_drop_expired_partitions($1)`, cutoff)
-	return err
-}
+func telemetryTransaction(tx pgx.Tx) database.Tx { return postgres.WrapTx(tx) }
 
 func newTraceparent() string {
 	trace := uuid.Must(uuid.NewV7())

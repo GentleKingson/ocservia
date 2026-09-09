@@ -129,15 +129,15 @@ func TestRealSchemaDriftRepairRefused(t *testing.T) {
 	if _, err := b.Exec(ctx, "ALTER TABLE workspaces ADD COLUMN unexpected INT"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Exec(ctx, "UPDATE backend_schema_revisions SET state='running'"); err != nil {
+	if _, err := b.Exec(ctx, "UPDATE backend_schema_revisions SET state='running' WHERE version=?", latestRevisionVersion); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
-		t.Fatal("dirty history accepted")
+		t.Fatal("dirty history accepted", err)
 	}
 	sum, _ := ManifestChecksum(b.engine)
 	if err := b.Migrate(ctx, sum); !errors.Is(err, ErrSchema) {
-		t.Fatal("repair adopted foreign schema")
+		t.Fatal("repair adopted foreign schema", err)
 	}
 }
 

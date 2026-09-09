@@ -16,8 +16,9 @@ import (
 )
 
 func run() error {
-	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, or manifest-checksum")
+	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, telemetry-provision, or telemetry-collect")
 	checksum := flag.String("repair-checksum", "", "reviewed manifest checksum for forward repair")
+	month := flag.String("month", "", "UTC month YYYY-MM for owner-only telemetry provisioning")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
@@ -35,11 +36,21 @@ func run() error {
 		fmt.Println(sum)
 		return nil
 	}
-	if *mode != "check" && *mode != "migrate" && *mode != "repair" && *mode != "grant-test-privileges" {
+	if *mode != "check" && *mode != "migrate" && *mode != "repair" && *mode != "grant-test-privileges" && *mode != "telemetry-provision" && *mode != "telemetry-collect" {
 		return fmt.Errorf("invalid foundation mode")
 	}
 	if (*mode == "repair") != (*checksum != "") {
 		return fmt.Errorf("repair requires --repair-checksum; other modes cannot supply it")
+	}
+	if (*mode == "telemetry-provision") != (*month != "") {
+		return fmt.Errorf("telemetry-provision requires --month; other modes cannot supply it")
+	}
+	var telemetryMonth time.Time
+	if *month != "" {
+		telemetryMonth, err = time.Parse("2006-01", *month)
+		if err != nil {
+			return fmt.Errorf("invalid UTC telemetry month")
+		}
 	}
 	dsn, err := config.FoundationDatabaseURL(os.LookupEnv)
 	if err != nil {
@@ -56,6 +67,18 @@ func run() error {
 	defer b.Close()
 	if *mode == "check" {
 		return b.ValidateSchema(ctx, 34)
+	}
+	if *mode == "telemetry-provision" {
+		if err := b.ProvisionTelemetryMonth(ctx, telemetryMonth); err != nil {
+			return err
+		}
+		return b.ValidateSchema(ctx, 34)
+	}
+	if *mode == "telemetry-collect" {
+		if err := b.ValidateSchema(ctx, 34); err != nil {
+			return err
+		}
+		return b.CollectRetiredTelemetryShards(ctx)
 	}
 	if *mode == "grant-test-privileges" {
 		if err := b.ValidateSchema(ctx, 34); err != nil {

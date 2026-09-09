@@ -445,7 +445,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-audit-preflight-retry.log" 2>&1
 
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/database/... -count=1)
 
   # Scheduler leadership tests need an idle lease, so they run before any

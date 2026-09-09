@@ -19,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -498,7 +499,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, err
 		}
 	}
-	if err := commandlimit.ReserveBacklog(ctx, tx, workspaceID, request.NodeID); err != nil {
+	if err := commandlimit.ReserveBacklog(ctx, postgres.WrapTx(tx), workspaceID, request.NodeID); err != nil {
 		return Operation{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -658,7 +659,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		return nil, fmt.Errorf("begin outbox claim: %w", err)
 	}
 	defer rollback(tx)
-	available, err := commandlimit.Available(ctx, tx, s.commandLimit)
+	available, err := commandlimit.Available(ctx, postgres.WrapTx(tx), s.commandLimit)
 	if err != nil {
 		return nil, fmt.Errorf("reserve global dispatch capacity: %w", err)
 	}
@@ -782,7 +783,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		return err
 	}
 	defer rollback(tx)
-	if err := commandlimit.Lock(ctx, tx); err != nil {
+	if err := commandlimit.Lock(ctx, postgres.WrapTx(tx)); err != nil {
 		return fmt.Errorf("serialize dispatch completion: %w", err)
 	}
 	if sent {
@@ -993,7 +994,7 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 		return err
 	}
 	defer rollback(tx)
-	if err := commandlimit.Lock(ctx, tx); err != nil {
+	if err := commandlimit.Lock(ctx, postgres.WrapTx(tx)); err != nil {
 		return fmt.Errorf("serialize dispatch lease reaping: %w", err)
 	}
 	if err := s.reconcileExpiredSendingAttemptsTx(ctx, tx, maxAttempts); err != nil {

@@ -3,10 +3,12 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 )
 
 type executor interface {
@@ -22,11 +24,13 @@ type Backend struct {
 }
 type transaction struct {
 	store
-	conn   *sql.Conn
-	tx     *sql.Tx
-	abort  func()
-	cancel context.CancelFunc
-	done   atomic.Bool
+	conn     *sql.Conn
+	tx       *sql.Tx
+	abort    func()
+	cancel   context.CancelFunc
+	done     atomic.Bool
+	poisoned atomic.Bool
+	started  value.Timestamp
 }
 
 func (b *Backend) Close() error { return safeError(b.pool.Close()) }
@@ -81,10 +85,32 @@ func (b *Backend) Begin(ctx context.Context, isolation database.Isolation) (data
 		}
 		return nil, safeError(err)
 	}
-	return &transaction{store: store{tx}, conn: conn, tx: tx, abort: abort, cancel: cancel}, nil
+	var started int64
+	if err := tx.QueryRowContext(ctx, "SELECT TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',UTC_TIMESTAMP(6))").Scan(&started); err != nil {
+		abort()
+		cancel()
+		_ = tx.Rollback()
+		discard(conn)
+		_ = conn.Close()
+		return nil, safeError(err)
+	}
+	return &transaction{store: store{tx}, conn: conn, tx: tx, abort: abort, cancel: cancel, started: value.Timestamp{Micros: started, Valid: true}}, nil
+}
+
+func (t *transaction) TransactionTime(ctx context.Context) (value.Timestamp, error) {
+	if err := ctx.Err(); err != nil {
+		return value.Timestamp{}, err
+	}
+	if t.done.Load() {
+		return value.Timestamp{}, database.ErrTxClosed
+	}
+	if t.poisoned.Load() {
+		return value.Timestamp{}, database.ErrTxAborted
+	}
+	return t.started, nil
 }
 func (s store) Exec(ctx context.Context, query string, args ...any) (int64, error) {
-	r, err := s.executor.ExecContext(ctx, query, args...)
+	r, err := s.executor.ExecContext(ctx, query, logicalArguments(args)...)
 	if err != nil {
 		return 0, safeError(err)
 	}
@@ -94,24 +120,27 @@ func (s store) Exec(ctx context.Context, query string, args ...any) (int64, erro
 
 type row struct{ *sql.Row }
 
-func (r row) Scan(dest ...any) error { return safeError(r.Row.Scan(dest...)) }
+func (r row) Scan(dest ...any) error { return safeError(r.Row.Scan(logicalDestinations(dest)...)) }
 
 type rows struct{ *sql.Rows }
 
-func (r rows) Scan(dest ...any) error { return safeError(r.Rows.Scan(dest...)) }
+func (r rows) Scan(dest ...any) error { return safeError(r.Rows.Scan(logicalDestinations(dest)...)) }
 func (r rows) Err() error             { return safeError(r.Rows.Err()) }
 func (r rows) Close()                 { _ = r.Rows.Close() }
 func (s store) QueryRow(ctx context.Context, query string, args ...any) database.Row {
-	return row{s.executor.QueryRowContext(ctx, query, args...)}
+	return row{s.executor.QueryRowContext(ctx, query, logicalArguments(args)...)}
 }
 func (s store) Query(ctx context.Context, query string, args ...any) (database.Rows, error) {
-	r, err := s.executor.QueryContext(ctx, query, args...)
+	r, err := s.executor.QueryContext(ctx, query, logicalArguments(args)...)
 	if err != nil {
 		return nil, safeError(err)
 	}
 	return rows{r}, nil
 }
 func (t *transaction) Commit(ctx context.Context) error {
+	if t.poisoned.Load() {
+		return errors.Join(database.ErrTxAborted, t.finish(ctx, t.tx.Rollback))
+	}
 	return t.finish(ctx, t.tx.Commit)
 }
 func (t *transaction) Rollback(ctx context.Context) error { return t.finish(ctx, t.tx.Rollback) }
@@ -161,6 +190,8 @@ func classifyNumber(code uint16) error {
 		return database.ErrConstraint
 	case 1213:
 		return database.ErrDeadlock
+	case 1020:
+		return database.ErrSerialization
 	case 1044, 1045, 1142, 1143, 1227, 1370:
 		return database.ErrPermission
 	default:

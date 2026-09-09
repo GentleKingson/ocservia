@@ -49,15 +49,15 @@
    2 control-plane/internal/auth/local_password.go:pgx.ErrNoRows
    1 control-plane/internal/auth/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/auth/service.go:"github.com/jackc/pgx/v5/pgxpool"
-   2 control-plane/internal/auth/service.go:pgx.ErrNoRows
+   1 control-plane/internal/auth/service.go:pgx.ErrNoRows
+   1 control-plane/internal/auth/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/auth/service.go:postgres.WrapTx
    2 control-plane/internal/auth/service.go:pgxpool.Pool
    1 control-plane/internal/certificates/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/certificates/service.go:"github.com/jackc/pgx/v5/pgxpool"
    5 control-plane/internal/certificates/service.go:pgx.ErrNoRows
    1 control-plane/internal/certificates/service.go:pgx.Row
    4 control-plane/internal/certificates/service.go:pgxpool.Pool
-   1 control-plane/internal/commandlimit/limit.go:"github.com/jackc/pgx/v5"
-   3 control-plane/internal/commandlimit/limit.go:pgx.Tx
    1 control-plane/internal/configplan/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/configplan/service.go:"github.com/jackc/pgx/v5/pgxpool"
    2 control-plane/internal/configplan/service.go:pgx.ErrNoRows
@@ -109,14 +109,20 @@
    1 control-plane/internal/operations/agentupgrade.go:pgx.Rows
    1 control-plane/internal/operations/agentupgrade.go:pgxpool.Pool
    1 control-plane/internal/operations/recovery.go:"github.com/jackc/pgx/v5"
+   1 control-plane/internal/operations/recovery.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/operations/recovery.go:postgres.WrapTx
    3 control-plane/internal/operations/recovery.go:pgx.ErrNoRows
    4 control-plane/internal/operations/recovery.go:pgx.Tx
    1 control-plane/internal/operations/service.go:"github.com/jackc/pgx/v5"
+   1 control-plane/internal/operations/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   4 control-plane/internal/operations/service.go:postgres.WrapTx
    1 control-plane/internal/operations/service.go:"github.com/jackc/pgx/v5/pgxpool"
   12 control-plane/internal/operations/service.go:pgx.ErrNoRows
    1 control-plane/internal/operations/service.go:pgx.Row
    7 control-plane/internal/operations/service.go:pgx.Tx
    4 control-plane/internal/operations/service.go:pgxpool.Pool
+   1 control-plane/internal/operations/worker.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/operations/worker.go:postgres.WrapTx
    1 control-plane/internal/ownersession/owner.go:"github.com/jackc/pgx/v5/pgxpool"
    4 control-plane/internal/ownersession/owner.go:pgxpool.Pool
    1 control-plane/internal/platform/app/app.go:"github.com/jackc/pgx/v5/pgxpool"
@@ -148,6 +154,8 @@
    1 control-plane/internal/useroperations/service.go:pgx.Tx
    3 control-plane/internal/useroperations/service.go:pgxpool.Pool
    1 control-plane/internal/userstate/service.go:"github.com/jackc/pgx/v5"
+   1 control-plane/internal/userstate/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/userstate/service.go:postgres.WrapTx
    1 control-plane/internal/userstate/service.go:"github.com/jackc/pgx/v5/pgxpool"
    4 control-plane/internal/userstate/service.go:pgx.ErrNoRows
    7 control-plane/internal/userstate/service.go:pgx.Tx

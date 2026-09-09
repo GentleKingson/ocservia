@@ -17,6 +17,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -183,7 +184,7 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
-	if err := commandlimit.ReserveBacklog(ctx, tx, workspaceID, request.NodeID); err != nil {
+	if err := commandlimit.ReserveBacklog(ctx, postgres.WrapTx(tx), workspaceID, request.NodeID); err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1

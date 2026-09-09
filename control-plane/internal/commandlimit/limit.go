@@ -6,35 +6,60 @@ import (
 	"context"
 	"errors"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 var ErrBacklogExceeded = errors.New("remote command backlog limit reached")
 
 const (
-	advisoryLockID        int64 = 0x4f435356434d444c // "OCSVCMDL"
-	backlogAdvisoryLockID int64 = 0x4f4353564241434b // "OCSVBACK"
-	MaxNodeBacklog              = 500
-	MaxWorkspaceBacklog         = 5000
+	AdmissionLockID     int64 = 0x4f435356434d444c // "OCSVCMDL"
+	BacklogLockID       int64 = 0x4f4353564241434b // "OCSVBACK"
+	MaxNodeBacklog            = 500
+	MaxWorkspaceBacklog       = 5000
 )
 
-func Lock(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, advisoryLockID)
-	return err
+type Store interface {
+	LockAdmission(context.Context) error
+	LockBacklog(context.Context) error
+	Active(context.Context, int) (int, error)
+	NodeBacklog(context.Context, uuid.UUID, int) (int, error)
+	WorkspaceBacklog(context.Context, uuid.UUID, int) (int, error)
+}
+
+type Provider interface{ CommandLimitStore() Store }
+
+func storeFor(tx database.Tx) (Store, error) {
+	provider, ok := tx.(Provider)
+	if !ok {
+		return nil, database.ErrUnsupported
+	}
+	return provider.CommandLimitStore(), nil
+}
+
+func Lock(ctx context.Context, tx database.Tx) error {
+	store, err := storeFor(tx)
+	if err != nil {
+		return err
+	}
+	return store.LockAdmission(ctx)
 }
 
 // Available serializes dispatch reservations and returns the number of slots
 // that may be leased without exceeding the environment-wide limit.
-func Available(ctx context.Context, tx pgx.Tx, limit int) (int, error) {
+func Available(ctx context.Context, tx database.Tx, limit int) (int, error) {
 	if limit < 1 {
 		return 0, nil
 	}
-	if err := Lock(ctx, tx); err != nil {
+	store, err := storeFor(tx)
+	if err != nil {
 		return 0, err
 	}
-	var active int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id LIMIT $1) active`, limit).Scan(&active); err != nil {
+	if err = store.LockAdmission(ctx); err != nil {
+		return 0, err
+	}
+	active, err := store.Active(ctx, limit)
+	if err != nil {
 		return 0, err
 	}
 	if active >= limit {
@@ -45,18 +70,23 @@ func Available(ctx context.Context, tx pgx.Tx, limit int) (int, error) {
 
 // ReserveBacklog bounds durable queued work independently from execution
 // concurrency so offline nodes cannot consume dispatch slots or unbounded DB.
-func ReserveBacklog(ctx context.Context, tx pgx.Tx, workspaceID, nodeID uuid.UUID) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, backlogAdvisoryLockID); err != nil {
+func ReserveBacklog(ctx context.Context, tx database.Tx, workspaceID, nodeID uuid.UUID) error {
+	store, err := storeFor(tx)
+	if err != nil {
 		return err
 	}
-	var nodeCount, workspaceCount int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT 1 FROM operations WHERE node_id=$1 AND state IN('queued','offline_pending') LIMIT $2) backlog`, nodeID, MaxNodeBacklog).Scan(&nodeCount); err != nil {
+	if err = store.LockBacklog(ctx); err != nil {
+		return err
+	}
+	nodeCount, err := store.NodeBacklog(ctx, nodeID, MaxNodeBacklog)
+	if err != nil {
 		return err
 	}
 	if nodeCount >= MaxNodeBacklog {
 		return ErrBacklogExceeded
 	}
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT 1 FROM operations WHERE workspace_id=$1 AND state IN('queued','offline_pending') LIMIT $2) backlog`, workspaceID, MaxWorkspaceBacklog).Scan(&workspaceCount); err != nil {
+	workspaceCount, err := store.WorkspaceBacklog(ctx, workspaceID, MaxWorkspaceBacklog)
+	if err != nil {
 		return err
 	}
 	if workspaceCount >= MaxWorkspaceBacklog {
