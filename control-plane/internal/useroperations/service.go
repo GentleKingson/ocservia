@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
@@ -702,7 +703,7 @@ func (s *Service) refreshBatches(ctx context.Context) error {
 // RecordUsageTx converts monotonically increasing per-session counters into
 // durable monthly and lifetime UTC usage without double-counting replays.
 func RecordUsageTx(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, samples []UsageSample) error {
-	err := userusage.RecordTx(ctx, tx, nodeID, samples)
+	err := userusage.RecordTx(ctx, postgres.NewUsageStore(postgres.WrapTx(tx)), nodeID, samples)
 	if errors.Is(err, userusage.ErrInvalidSample) {
 		return ErrInvalidRequest
 	}
