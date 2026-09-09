@@ -154,8 +154,24 @@ func (s telemetryWriteStore) Activate(ctx context.Context, node uuid.UUID, obser
 }
 func (s telemetryWriteStore) AttestationKey(ctx context.Context, node uuid.UUID, id string) (telemetrywrite.Key, error) {
 	var k telemetrywrite.Key
-	err := s.tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=? AND CAST(key_id AS BINARY)=CAST(? AS BINARY)`, UUIDBytes(node), id).Scan(&k.PublicKey, &k.State, &k.ActivatedAt, &k.ValidUntil)
-	return k, err
+	var activated, validUntil value.Timestamp
+	err := s.tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=? AND CAST(key_id AS BINARY)=CAST(? AS BINARY)`, UUIDBytes(node), id).Scan(&k.PublicKey, &k.State, &activated, &validUntil)
+	if err != nil {
+		return k, err
+	}
+	// The domain stores business-finite activation and validity instants; an
+	// infinity sentinel or NULL activation is refused instead of being mapped.
+	if k.ActivatedAt, err = activated.Time(); err != nil {
+		return k, err
+	}
+	if validUntil.Valid {
+		until, err := validUntil.Time()
+		if err != nil {
+			return k, err
+		}
+		k.ValidUntil = &until
+	}
+	return k, nil
 }
 func (s telemetryWriteStore) InsertUpgrade(ctx context.Context, node uuid.UUID, r telemetrywrite.Upgrade) error {
 	at, err := value.FromTime(r.CompletedAt)

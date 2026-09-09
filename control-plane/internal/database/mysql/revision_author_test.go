@@ -41,6 +41,10 @@ func TestAuthorRevisionFive(t *testing.T) {
 	authorRevision(t, 5, inputs)
 }
 
+func TestAuthorRevisionSix(t *testing.T) {
+	authorRevision(t, 6, AttestationTimeSteps(testOptions(t).Engine))
+}
+
 func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	output := os.Getenv("PR02_AUTHOR_DIRECTORY")
 	if output == "" {

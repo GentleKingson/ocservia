@@ -63,6 +63,21 @@ and are removed only after the switch. Published version-1 through version-3
 artifacts are unchanged; these helpers are inputs to a new version, not a
 permission to rerun candidate DDL outside the recorded migration chain.
 
+## Privd Attestation Times
+
+Version 6 converts the eight privd attestation times: credential expiry,
+consumption and creation, plus key creation, approval, activation, validity
+bounds and revocation. Every value on this domain is a business-finite instant
+written by Controller code; unlimited key validity is represented by NULL,
+never by a PostgreSQL infinity. The migration therefore needs no per-row
+infinity decisions: historical finite extremes such as a year-1000 DATETIME
+convert as finite values, matching the populated-upgrade guarantee rather
+than guessing a sentinel. The two CHECK constraints that order these columns
+(expiry after creation, consumption not before creation, validity not before
+activation, revocation paired with state) and the two secondary indexes that
+contain them are dropped and re-added around the verified switch because
+MySQL removes a dropped column from its indexes.
+
 ## Certificate Download Boundary
 
 The existing Service download methods now use the generic artifact Store:

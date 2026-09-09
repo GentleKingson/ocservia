@@ -463,3 +463,76 @@ equivalence for caller-owned old RepeatableRead snapshots. Audit v1 retains its
 existing ordinary-number float64 canonicalization; the narrow large-number
 fallback preserves old signatures, not a claim to solve that older ambiguity.
 Draft and the production rejection gate remain mandatory.
+
+## Appended Version 6 Milestone
+
+Version 6 extends both historical roots through the exact published v5 parents.
+The MySQL manifest SHA256 is
+`8519e36210c309f4e070199db7cee6d7c4e6838cacd6e58a9239b46bcc2ba365`;
+the MariaDB manifest SHA256 is
+`63d54a9b8ef56ce50d7a7581f00f0a05e4acf6d341f5e5ba5aa06d5593bcd540`.
+Both were authored against real pinned servers (authoring passed in
+`artifacts/v6-author/author-mysql.log` in 57.731s and
+`artifacts/v6-author/author-mariadb.log` in 32.618s on the same BuildServer
+checkout). Versions 1 through 5 and PostgreSQL migrations remain unchanged.
+
+This milestone converts the eight privd attestation time fields and ports the
+remaining privd attestation Controller transactions. Credential issuance,
+signed registration (one-time consumption, capability grant and authorization
+revision advance in one transaction) and key revocation now run through
+`database.Within` on a domain Store; the legacy pgxpool constructor is a
+compatibility adapter, and telemetry ingestion reads the key with the same
+typed timestamp contract. Because the enrollment-credential table name
+exceeds the generic guard-trigger identifier budget, this version's
+exclusive-writer guards use explicit shorter names. A populated v5 upgrade
+proves migration receipts and every finite historical value, including NULL
+validity and consumption, survive the switch unchanged. All of these times are
+business-finite; unlimited validity stays NULL and no infinity decision is
+needed.
+
+Development failures are retained, not counted as acceptance passes:
+
+- The first focused workflow iterations failed for test-reason errors, not
+  adapter errors: rotation was attempted with the already-consumed credential,
+  the overlap assertion used the first activation instead of the successor
+  registration instant, `consumed_at IS NULL` was scanned into the typed
+  timestamp, `authorization_revision` ignored the nodes default, and
+  `ValidateSchema` was first run under the runtime user, who cannot see
+  triggers in `information_schema.TRIGGERS`; it now validates on the owner
+  backend. The corrected focused runs are retained under
+  `artifacts/v6-focused/mysql.log` (80.069s) and
+  `artifacts/v6-focused/mariadb.log` (44.275s).
+- The first revision-six populated-upgrade fixture failed on placeholder-count
+  mismatches in the seed inserts, key IDs containing NUL bytes (hex pairs are
+  used instead), a unique `registration_credential_id` collision (the revoked
+  key now references the pending credential) and a wrong expected creation
+  instant. These were corrected before authoring; the published manifests were
+  never regenerated for them.
+- Moving the service to the backend constructor tripped the driver-boundary
+  ratchet as designed; the baseline records the reduced pgxpool references and
+  the new compatibility adapter, and the ratchet test passes inside the full
+  suite.
+- The first full-matrix run failed in the config tests because the macOS rsync
+  had left uid-501 file ownership, tripping the key-ancestry check. This was a
+  checkout-environment failure; after `chown -R root:root` the complete matrix
+  rerun below passed. Bootstrap-profile checks were not rerun for this
+  increment because the bootstrap/profile/backend contract is unchanged.
+
+All full scripts below ran without filtering database test names, using the
+root-owned TMPDIR and the exported-checkout `-buildvcs=false` wrapper. All
+commands exited 0. MySQL/MariaDB use distinct digest-pinned real containers.
+
+| Command | Result | Evidence under BuildServer checkout |
+| --- | --- | --- |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | MySQL 8.4.10 database suite with `-race` passed in 1322.489s; privd attestation workflow in 27.00s and populated v5 upgrade in 23.60s; API, telemetry and config/CLI checks passed | `artifacts/v6-full/mysql.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | MariaDB 12.3.2 database suite with `-race` passed in 799.310s; privd attestation workflow in 15.22s and populated v5 upgrade in 14.76s; API, telemetry and config/CLI checks passed | `artifacts/v6-full/mariadb.log` |
+| `PG_MAJOR=all ARTIFACT_DIR=.../artifacts/v6-full/postgres bash scripts/database-integration.sh` | Full PostgreSQL 17/18 integration passed, including historical migration, authentication, telemetry and driver-boundary checks | `artifacts/v6-full/postgres.log`, `artifacts/v6-full/postgres/` |
+| `go test -buildvcs=false -run '^$' ./...` | All Controller packages compile | `artifacts/v6-full/compile.log` |
+| `bash scripts/docs-check.sh` | Passed | `artifacts/v6-full/docs.log` |
+
+This is still **not complete PR-02 acceptance**. Of the historical pre-v4
+inventory, 89 time fields, five JSONB fields and one array remain on earlier
+representations. Certificate issuance/maintenance, the remaining Controller
+outer transactions, telemetry transport/read models/maintenance and
+extended-time API representations still need their real adapters and
+workflows. Draft and the production rejection gate remain mandatory.

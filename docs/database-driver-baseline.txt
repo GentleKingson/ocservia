@@ -121,8 +121,10 @@
    1 control-plane/internal/privdattestation/receipt.go:"github.com/jackc/pgx/v5"
    2 control-plane/internal/privdattestation/receipt.go:pgx.ErrNoRows
    2 control-plane/internal/privdattestation/receipt.go:pgx.Tx
+   1 control-plane/internal/privdattestation/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
    1 control-plane/internal/privdattestation/service.go:"github.com/jackc/pgx/v5/pgxpool"
-   3 control-plane/internal/privdattestation/service.go:pgxpool.Pool
+   2 control-plane/internal/privdattestation/service.go:pgxpool.Pool
+   1 control-plane/internal/privdattestation/service.go:postgres.WrapPool
    1 control-plane/internal/rbac/service.go:"github.com/jackc/pgx/v5/pgxpool"
    1 control-plane/internal/rbac/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
    1 control-plane/internal/rbac/service.go:postgres.WrapPool

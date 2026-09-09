@@ -32,6 +32,15 @@ lossless storage and server validation. Populated v4 upgrade coverage checks
 that the prior migration receipts remain unchanged and that finite historical
 year-1000 values remain finite, rather than being guessed to be infinity.
 
+Version 6 appends to the exact published version-5 checksum on both roots and
+converts the eight privd attestation times on
+`privd_attestation_enrollment_credentials` and `node_privd_attestation_keys`.
+The enrollment-credential table name exceeds the identifier budget of the
+generic migration-writer guard trigger names, so this version's guards use an
+explicit shorter prefix while keeping the exclusive-writer contract. A
+populated v5 upgrade proves receipts and every finite historical value,
+including NULL validity and consumption, survive the switch unchanged.
+
 ## Actual Business Boundaries
 
 - Authentication owns its entire transaction through `database.Within`:
@@ -52,6 +61,12 @@ year-1000 values remain finite, rather than being guessed to be infinity.
   Certificate download open/abort/consume/finalize uses a common artifact Store,
   preserving durable root-RPC evidence and audit/fence atomicity. Certificate
   issuance and maintenance are not part of this portable download constructor.
+- Privd attestation owns credential issuance, signed registration with
+  rotation overlap, and key revocation through `database.Within` and its own
+  domain Store. Registration consumes the one-time credential, grants the
+  capability and advances the node authorization revision inside the same
+  transaction. The original PostgreSQL constructor remains a compatibility
+  adapter; the telemetry ingestion key read uses the same typed contract.
 
 No business advisory-lock call remains outside the PostgreSQL adapter package.
 MySQL/MariaDB use transaction-owned lock records, not GET_LOCK. This is not the
@@ -110,7 +125,7 @@ not a portable implementation of all telemetry service methods.
 
 ## Remaining Acceptance
 
-Of the pre-v4 inventory, 97 DATETIME fields, five JSONB fields and one text-array
+Of the pre-v4 inventory, 89 DATETIME fields, five JSONB fields and one text-array
 field remain on their earlier representations. Each needs its writers/readers
 ported together with an appended migration. Converted physical columns alone
 do not prove every writer and API representation supports the full domain.
