@@ -88,6 +88,14 @@ func TestProductionAuthenticationConfiguration(t *testing.T) {
 					}
 				}
 				if mask == 15 {
+					for _, issuer := range []string{"https://id.example.test", "https://id.example.test/", "https://id.example.test:8443/tenant/"} {
+						values["OCSERV_OIDC_ISSUER"] = issuer
+						loaded, err := Load(nil, lookup)
+						if err != nil || loaded.OIDCIssuer != issuer {
+							t.Fatalf("issuer %q changed or rejected: %q %v", issuer, loaded.OIDCIssuer, err)
+						}
+					}
+					values["OCSERV_OIDC_ISSUER"] = oidc["OCSERV_OIDC_ISSUER"]
 					for key, invalidValues := range map[string][]string{
 						"OCSERV_OIDC_ISSUER":       {"http://id.example.test", "https://user@id.example.test", "https://id.example.test?x=1", "https://id.example.test#x"},
 						"OCSERV_OIDC_REDIRECT_URL": {"http://app.example.test/callback", "https://other.example.test/callback", "https://app.example.test:8443/callback", "https://user@app.example.test/callback", "https://app.example.test/callback?x=1", "https://app.example.test/callback#x"},
