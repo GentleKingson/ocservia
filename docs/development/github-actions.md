@@ -29,7 +29,7 @@ runtime-artifact dependency, PostgreSQL matrix, or acceptance worker graph.
 | `docs` | `scripts/docs-check.sh` | none | Line endings, nonempty Markdown, and bootstrap documentation |
 | `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
 | `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
-| `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, and generated-client authentication tests |
+| `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
 | `database-smoke` | `scripts/database-integration.sh` | `go-test` | PostgreSQL 17 migrations and database integration |
 
 Go checks retain both existing Go modules, including unit tests for the G6
@@ -44,7 +44,11 @@ bootstrap installs pinned Node/npm and dependencies, with
 `npm_config_audit=false` and `npm_config_fund=false` for the entire job,
 including npm installation. Ordinary CI does not run `go-race`, `npm audit`,
 `cargo audit`, `cargo deny`, or `govulncheck`, nor repository secret scans,
-license scans, native ocserv integration, P1 smoke, browser E2E, or G6 smoke.
+license scans, native ocserv integration, P1 smoke, the full browser E2E matrix,
+or G6 smoke. The Web job does run the required authentication browser subset:
+12 desktop Chromium regressions from `web/e2e/login.spec.ts` and
+`web/e2e/auth-workspace.spec.ts`. It installs Playwright Chromium and its system
+dependencies after Web bootstrap and before `scripts/web-check.sh`.
 
 The database job sets `PG_MAJOR=17` and lets the integration script build
 `ocserv-control` itself. PostgreSQL 18 and its legacy upgrade fixture are
@@ -128,8 +132,9 @@ warmup, a cold formal build may take longer, but its acceptance checks remain
 unchanged.
 
 Basic CI does not claim production readiness, capacity, native package,
-cross-VM, browser E2E, security, or license acceptance. Those scripts and
-manual entry points remain available; `make verify` is a broader local
+cross-VM, full browser E2E matrix, security, or license acceptance. Its required
+authentication browser subset is not full browser E2E acceptance. Those scripts
+and manual entry points remain available; `make verify` is a broader local
 command, not an alias for Basic CI.
 
 ### Script-level manual acceptance
@@ -162,6 +167,11 @@ scripts/go-check.sh standard
 scripts/bootstrap.sh rust-basic
 scripts/rust-check.sh
 npm_config_audit=false npm_config_fund=false scripts/bootstrap.sh web
+(
+  source scripts/env.sh
+  cd web
+  npx playwright install --with-deps chromium
+)
 npm_config_audit=false npm_config_fund=false scripts/web-check.sh
 PG_MAJOR=17 scripts/database-integration.sh
 ```
