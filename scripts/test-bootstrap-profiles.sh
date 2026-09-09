@@ -81,8 +81,9 @@ reject("Web npm installs must disable audit and funding") unless jobs.fetch("web
 rust_check = File.read(File.join(root, "scripts/rust-check.sh"))
 reject("basic Rust checks must not run audit or license checks") if rust_check.match?(/cargo (audit|deny)/)
 database = jobs.fetch("database-smoke")
-reject("database smoke must use PostgreSQL 17 without a matrix") unless
-  database.fetch("env") == {"PG_MAJOR" => "17"} && !database.key?("strategy")
+reject("database smoke must cover PostgreSQL 17 and 18 independently") unless
+  database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}"} &&
+  database.fetch("strategy") == {"fail-fast" => false, "matrix" => {"postgres" => ["17", "18"]}}
 reject("database smoke must let the script build its own control binary") unless
   database_script.include?('go build -trimpath -o "${BIN}" ./cmd/ocserv-control')
 reject("PostgreSQL 17 must skip the legacy upgrade fixture") unless

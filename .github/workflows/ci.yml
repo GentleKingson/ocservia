@@ -96,8 +96,12 @@ jobs:
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["17", "18"]
     env:
-      PG_MAJOR: "17"
+      PG_MAJOR: ${{ matrix.postgres }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

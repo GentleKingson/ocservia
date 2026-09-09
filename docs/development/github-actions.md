@@ -30,7 +30,7 @@ runtime-artifact dependency, PostgreSQL matrix, or acceptance worker graph.
 | `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
 | `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
 | `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
-| `database-smoke` | `scripts/database-integration.sh` | `go-test` | PostgreSQL 17 migrations and database integration |
+| `database-smoke` | `scripts/database-integration.sh` | `go-test` | PostgreSQL 17/18 migrations and database integration |
 
 Go checks retain both existing Go modules, including unit tests for the G6
 harness; they do not run G6 acceptance. Rust checks do not run cargo audit,
@@ -50,9 +50,9 @@ or G6 smoke. The Web job does run the required authentication browser subset:
 `web/e2e/auth-workspace.spec.ts`. It installs Playwright Chromium and its system
 dependencies after Web bootstrap and before `scripts/web-check.sh`.
 
-The database job sets `PG_MAJOR=17` and lets the integration script build
-`ocserv-control` itself. PostgreSQL 18 and its legacy upgrade fixture are
-not run. It needs only the router, not a Rust build or a shared binary artifact.
+The database job uses a PostgreSQL 17/18 matrix and lets the integration script
+build `ocserv-control` itself. The PostgreSQL 18 job also runs the legacy upgrade
+fixture. It needs only the router, not a Rust build or a shared binary artifact.
 
 ## Independent security checks
 
@@ -173,7 +173,7 @@ npm_config_audit=false npm_config_fund=false scripts/bootstrap.sh web
   npx playwright install --with-deps chromium
 )
 npm_config_audit=false npm_config_fund=false scripts/web-check.sh
-PG_MAJOR=17 scripts/database-integration.sh
+PG_MAJOR=all scripts/database-integration.sh
 ```
 
 Job logs contain diagnostics; Basic CI has no artifact upload/download graph.
