@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 )
@@ -21,7 +22,11 @@ type Backend struct {
 }
 type transaction struct {
 	store
-	tx *sql.Tx
+	conn   *sql.Conn
+	tx     *sql.Tx
+	abort  func()
+	cancel context.CancelFunc
+	done   atomic.Bool
 }
 
 func (b *Backend) Close() error { return safeError(b.pool.Close()) }
@@ -40,11 +45,43 @@ func (b *Backend) Begin(ctx context.Context, isolation database.Isolation) (data
 	default:
 		return nil, database.ErrUnsupported
 	}
-	tx, err := b.pool.BeginTx(ctx, &sql.TxOptions{Isolation: level})
+	conn, err := b.pool.Conn(ctx)
 	if err != nil {
 		return nil, safeError(err)
 	}
-	return &transaction{store{tx}, tx}, nil
+	var abort func()
+	if err = conn.Raw(func(raw any) error {
+		physical, ok := raw.(*physicalConnection)
+		if !ok {
+			return database.ErrUnsupported
+		}
+		abort = physical.abort
+		return nil
+	}); err != nil {
+		_ = conn.Close()
+		return nil, safeError(err)
+	}
+	// Detach only the transaction lifetime, not Begin's cancellation. Otherwise
+	// database/sql starts an unbounded background rollback on request cancellation
+	// before Within can supply its independent cleanup context.
+	lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, cancel)
+	tx, err := conn.BeginTx(lifetime, &sql.TxOptions{Isolation: level})
+	stop()
+	if err != nil || ctx.Err() != nil {
+		abort()
+		cancel()
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+		discard(conn)
+		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, safeError(err)
+	}
+	return &transaction{store: store{tx}, conn: conn, tx: tx, abort: abort, cancel: cancel}, nil
 }
 func (s store) Exec(ctx context.Context, query string, args ...any) (int64, error) {
 	r, err := s.executor.ExecContext(ctx, query, args...)
@@ -75,13 +112,44 @@ func (s store) Query(ctx context.Context, query string, args ...any) (database.R
 	return rows{r}, nil
 }
 func (t *transaction) Commit(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		_ = t.tx.Rollback()
-		return err
-	}
-	return safeError(t.tx.Commit())
+	return t.finish(ctx, t.tx.Commit)
 }
-func (t *transaction) Rollback(context.Context) error { return safeError(t.tx.Rollback()) }
+func (t *transaction) Rollback(ctx context.Context) error { return t.finish(ctx, t.tx.Rollback) }
+
+func (t *transaction) finish(ctx context.Context, finish func() error) error {
+	if !t.done.CompareAndSwap(false, true) {
+		return database.ErrTxClosed
+	}
+	defer t.cancel()
+	// Close the raw socket, not Conn.Raw/Close: those can wait behind the very
+	// driver operation being interrupted. Do not detach a live Commit/Rollback
+	// goroutine or return a session to the pool while a watchdog can still fire.
+	aborted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { t.abort(); close(aborted) })
+	var err error
+	if ctx.Err() != nil {
+		t.abort()
+		_ = t.tx.Rollback()
+		err = ctx.Err()
+	} else {
+		err = finish()
+	}
+	if !stop() {
+		<-aborted
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		t.abort()
+		discard(t.conn)
+	}
+	closeErr := t.conn.Close()
+	if err != nil {
+		return safeError(err)
+	}
+	return safeError(closeErr)
+}
 
 func classifyNumber(code uint16) error {
 	switch code {

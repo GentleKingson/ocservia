@@ -89,3 +89,39 @@ The unapproved indexed-text limits and remaining JSON/array/NUL/regexp/time/
 partition semantics are explicit blockers in `database-pr02-foundation.md`.
 No MySQL/MariaDB Controller business workflow or production startup is enabled
 or claimed as tested. The PR must remain Draft.
+
+## PR #193 review corrections
+
+The two additional review findings against `f6cd0e0` were reproduced and fixed
+in the same isolated BuildServer checkout on 2026-09-09:
+
+- The original bootstrap contract script exits 1 against the PR workflow:
+  `database-smoke must run only basic commands`. Its matrix, environment and
+  backend command routing assertions now match all four independent jobs.
+  The corrected `bash scripts/test-bootstrap-profiles.sh` exits 0 in an
+  ephemeral `ruby:3.4-bookworm` container with jq installed. Evidence:
+  `artifacts/review-bootstrap-before.log` and `review-bootstrap-after.log`.
+- Real TCP proxy tests blackhole ROLLBACK, blackhole COMMIT, or forward COMMIT
+  and drop its response. With the original `backend.go` exported from
+  `f6cd0e0` into a disposable source copy, all three tests fail because the
+  finalizer ignores its context. The copy and isolated MySQL container were
+  removed after the test. Evidence: `artifacts/review-transaction-before.log`.
+- The corrected finalizers use a 300ms deadline in those tests while the
+  driver's I/O timeout remains 30s. Tests require bounded completion, actual
+  socket closure and a different subsequent connection ID. The lost-response
+  case explicitly verifies that COMMIT was durable despite returning a timeout.
+- Additional tests exercise request cancellation followed by independent
+  rollback, pre-cancelled Commit/Rollback, successful connection reuse after
+  cleanup-context cancellation, each isolation selector, and `Within` cleanup
+  after callback errors and panics.
+
+Final reruns (same private TMPDIR, all exit 0):
+
+| Command | Result | Evidence under checkout |
+| --- | --- | --- |
+| `PG_MAJOR=all ARTIFACT_DIR=.../artifacts/review-postgres bash scripts/database-integration.sh` | PostgreSQL 17 and 18 integration passed | `artifacts/review-postgres.log`, `artifacts/review-postgres/` |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | MySQL 8.4.10, `-race` passed in 46.511s; config and CLI compilation passed | `artifacts/review-mysql.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | MariaDB 12.3.2, `-race` passed in 17.225s; config and CLI compilation passed | `artifacts/review-mariadb.log` |
+
+These corrections do not resolve the schema/semantic acceptance blockers
+listed above and do not make this Draft ready for another acceptance review.

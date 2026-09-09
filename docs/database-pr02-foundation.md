@@ -81,6 +81,21 @@ Primary references: [driver configuration](https://github.com/go-sql-driver/mysq
 [MySQL fractional precision](https://dev.mysql.com/doc/refman/8.4/en/fractional-seconds.html),
 [MariaDB SQL modes](https://mariadb.com/docs/server/server-management/variables-and-modes/sql-mode).
 
+## Transaction finalization
+
+Each business transaction owns a dedicated `sql.Conn` and native `sql.Tx`.
+Begin remains request-cancellable, but the transaction lifetime is detached
+after Begin so request cancellation cannot race `database.Within`'s independent
+five-second rollback context with database/sql's automatic rollback.
+
+Commit and Rollback install a context watchdog that closes the exact underlying
+network connection if their context expires. It does not wait for the driver's
+connection mutex, abandon an in-flight finalizer goroutine, or merely return
+the connection to the pool. Finalization joins the watchdog before connection
+reuse; failed finalization evicts the connection. An already-cancelled Commit
+does not send COMMIT. A timeout after sending COMMIT still has an **unknown
+commit outcome**, not a rollback guarantee, and must not be blindly retried.
+
 ## Mapping details
 
 | PostgreSQL contract | Draft representation |

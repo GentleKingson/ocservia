@@ -126,11 +126,11 @@ func Open(ctx context.Context, o Options) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	connector, err := driver.NewConnector(c)
+	_, err = driver.NewConnector(c)
 	if err != nil {
 		return nil, errors.New("experimental database: invalid connector")
 	}
-	db := sql.OpenDB(connector)
+	db := sql.OpenDB(&connector{config: c})
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(time.Hour)
@@ -163,7 +163,7 @@ func safeError(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return database.ErrNotFound
 	}
-	if errors.Is(err, sql.ErrTxDone) {
+	if errors.Is(err, sql.ErrTxDone) || errors.Is(err, sql.ErrConnDone) {
 		return database.ErrTxClosed
 	}
 	var e *driver.MySQLError
