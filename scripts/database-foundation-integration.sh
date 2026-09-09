@@ -34,11 +34,13 @@ docker run -d --name "${NAME}" -p 127.0.0.1::3306 \
   --ssl-ca=/tls/server-cert.pem --ssl-cert=/tls/server-cert.pem --ssl-key=/tls/server-key.pem >/dev/null
 ready=false
 for ((i=0; i<90; i++)); do
-  if docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then ready=true; break; fi
+  # The image initializes through a temporary socket-only server. Wait for
+  # the final TCP listener, not that server which is about to shut down.
+  if docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then ready=true; break; fi
   sleep 1
 done
 [[ "${ready}" == true ]] || { echo 'database did not become ready' >&2; exit 1; }
-docker exec -i -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" -uroot <<'SQL'
+docker exec -i -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot <<'SQL'
 CREATE USER 'ocservia_owner'@'%' IDENTIFIED BY 'pr02-owner-test-only';
 CREATE USER 'ocservia_app'@'%' IDENTIFIED BY 'pr02-runtime-test-only';
 CREATE USER 'ocservia_maintenance'@'%' IDENTIFIED BY 'pr02-maintenance-test-only';

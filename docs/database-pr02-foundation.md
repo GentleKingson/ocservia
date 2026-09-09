@@ -243,6 +243,28 @@ scope. Lossless alternate representations and actual read/write adapters,
 telemetry physical storage/retention parity, common business transactions and
 three-engine Controller workflow acceptance remain required before review.
 
+### Usage transaction adapter
+
+The production telemetry usage call now passes its exact shared transaction
+to `userusage.RecordTransaction`; the transaction supplies its backend-owned
+domain store. MySQL/MariaDB implement cursor reads/upserts and monthly/lifetime
+usage accumulation, including exact saturating BIGINT arithmetic. PostgreSQL
+retains its own SQL. Neither store opens or commits a separate transaction.
+The usage entry point takes the node lock before the cursor lock, matching
+telemetry ingestion's existing order and serializing missing cursors too.
+
+`useroperations.RecordUsageTx` also takes the common Tx, but currently has only
+test callers; it is not a second production workflow. Telemetry ingestion's
+outer transaction and other queries remain pgx-owned. Real-server shared usage
+tests run the production usage function with each backend and actual migrated
+tables/runtime grants, not temporary simplified schemas. They are a prerequisite
+for the telemetry port, not full Controller workflow acceptance.
+
+This adapter still uses the Draft's finite DATETIME representation. It does
+not resolve the eleven remaining length restrictions, JSON/array mappings,
+full timestamp/infinity semantics, telemetry physical storage/retention or the
+advisory-lock business call-site migration. No migration artifact changed.
+
 ## Accounts and lock scopes
 
 The administrator creates three distinct accounts. Owner has schema-scoped

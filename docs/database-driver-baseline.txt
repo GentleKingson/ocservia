@@ -140,17 +140,13 @@
    1 control-plane/internal/telemetry/service.go:pgx.ErrNoRows
    5 control-plane/internal/telemetry/service.go:pgx.Tx
    3 control-plane/internal/telemetry/service.go:pgxpool.Pool
-   1 control-plane/internal/telemetry/service.go:postgres.NewUsageStore
    1 control-plane/internal/telemetry/service.go:postgres.WrapTx
-   1 control-plane/internal/useroperations/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
    1 control-plane/internal/useroperations/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/useroperations/service.go:"github.com/jackc/pgx/v5/pgxpool"
    6 control-plane/internal/useroperations/service.go:pgx.ErrNoRows
    1 control-plane/internal/useroperations/service.go:pgx.Row
-   2 control-plane/internal/useroperations/service.go:pgx.Tx
+   1 control-plane/internal/useroperations/service.go:pgx.Tx
    3 control-plane/internal/useroperations/service.go:pgxpool.Pool
-   1 control-plane/internal/useroperations/service.go:postgres.NewUsageStore
-   1 control-plane/internal/useroperations/service.go:postgres.WrapTx
    1 control-plane/internal/userstate/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/userstate/service.go:"github.com/jackc/pgx/v5/pgxpool"
    4 control-plane/internal/userstate/service.go:pgx.ErrNoRows

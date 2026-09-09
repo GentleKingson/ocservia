@@ -9,6 +9,8 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -74,7 +76,8 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	}
 
 	connected := now.Add(-time.Hour)
-	tx, err := pool.Begin(ctx)
+	backend := postgres.WrapPool(pool)
+	tx, err := backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,21 +87,21 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	tx, _ = pool.Begin(ctx)
+	tx, _ = backend.Begin(ctx, database.ReadCommitted)
 	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{{SessionID: "session-a", Username: "alice", Connected: connected, RXBytes: 1, TXBytes: 2, ObservedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	tx, _ = pool.Begin(ctx)
+	tx, _ = backend.Begin(ctx, database.ReadCommitted)
 	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{{SessionID: "session-a", Username: "alice", Connected: connected, RXBytes: 130, TXBytes: 260, ObservedAt: now.Add(time.Minute)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	tx, _ = pool.Begin(ctx)
+	tx, _ = backend.Begin(ctx, database.ReadCommitted)
 	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{{SessionID: "session-a", Username: "alice", Connected: connected, RXBytes: 110, TXBytes: 220, ObservedAt: now.Add(30 * time.Second)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,13 +112,13 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if err != nil || policy.ObservedRXBytes != 130 || policy.ObservedTXBytes != 260 || !policy.Exceeded || policy.Convergence != "pending" {
 		t.Fatalf("observed policy=%+v err=%v", policy, err)
 	}
-	tx, _ = pool.Begin(ctx)
+	tx, _ = backend.Begin(ctx, database.ReadCommitted)
 	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{{SessionID: "session-a", Username: "bob", Connected: connected, RXBytes: 140, TXBytes: 280, ObservedAt: now.Add(2 * time.Minute)}}); err != ErrInvalidRequest {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("session username change err=%v", err)
 	}
 	_ = tx.Rollback(ctx)
-	tx, _ = pool.Begin(ctx)
+	tx, _ = backend.Begin(ctx, database.ReadCommitted)
 	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{
 		{SessionID: "saturate-a", Username: "bob", Connected: connected, RXBytes: 1<<63 - 1, TXBytes: 1<<63 - 1, ObservedAt: now.Add(3 * time.Minute)},
 		{SessionID: "saturate-b", Username: "bob", Connected: connected.Add(time.Second), RXBytes: 1<<63 - 1, TXBytes: 1<<63 - 1, ObservedAt: now.Add(3 * time.Minute)},

@@ -24,12 +24,34 @@ type Sample struct {
 // Store is bound to the caller's transaction. LockCursor holds its row lock
 // until that transaction ends; neither write method may commit independently.
 type Store interface {
+	LockNode(context.Context, uuid.UUID) error
 	LockCursor(context.Context, uuid.UUID, Sample) (Sample, error)
 	PutCursor(context.Context, uuid.UUID, Sample) error
 	AddUsage(context.Context, uuid.UUID, Sample, string, time.Time, int64, int64) error
 }
 
-// RecordTx applies monotonically increasing session samples exactly once.
+// RecordTransaction resolves the backend's usage store from the exact shared
+// transaction, not a pool. It retains telemetry's node-before-cursor lock order,
+// including for a missing cursor. Reacquiring telemetry's existing node lock
+// neither broadens its scope nor releases it before the outer commit.
+func RecordTransaction(ctx context.Context, tx database.Tx, nodeID uuid.UUID, samples []Sample) error {
+	provider, ok := tx.(interface{ UsageStore() Store })
+	if !ok {
+		return database.ErrUnsupported
+	}
+	if len(samples) == 0 {
+		return nil
+	}
+	store := provider.UsageStore()
+	if err := store.LockNode(ctx, nodeID); err != nil {
+		return err
+	}
+	return RecordTx(ctx, store, nodeID, samples)
+}
+
+// RecordTx applies monotonically increasing session samples exactly once when
+// the caller holds the node lock. Business callers use RecordTransaction to
+// establish that lock, including before inserting the first cursor.
 func RecordTx(ctx context.Context, store Store, nodeID uuid.UUID, samples []Sample) error {
 	for _, sample := range samples {
 		if sample.RXBytes < 0 || sample.TXBytes < 0 || sample.ObservedAt.IsZero() || sample.Connected.IsZero() {

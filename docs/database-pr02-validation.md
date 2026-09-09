@@ -227,3 +227,49 @@ PR-02 acceptance. Eleven unapproved text limits, lossless JSON/array/time
 representations with actual adapters, telemetry physical storage/retention,
 common business transactions and real three-engine Controller workflows remain
 unfinished. Draft status and production refusal remain in force.
+
+## Usage transaction prerequisite
+
+The shared real-server corpus now invokes the production
+`userusage.RecordTransaction` function through `database.Within` on actual
+migrated tables with runtime credentials on all engines. The backend-owned
+store locks the node before any cursor read, including missing cursors. Tests
+do not supply a substitute business algorithm or acquire the lock for it.
+
+Coverage includes the existing 256-character session range, replay/stale
+observation suppression, counter reset, UTC month rollover, exact BIGINT
+saturation, username-conflict rollback of the whole batch, a later business
+error, request cancellation followed by independent rollback, and concurrent
+first observations over multiple physical connections.
+
+The production telemetry call resolves the usage store from its own wrapped
+transaction. The `useroperations.RecordUsageTx` compatibility entry point now
+accepts the common Tx directly; its existing integration test uses that boundary.
+Its call graph currently contains only test callers, so it is not counted as
+another production Controller workflow. Driver-boundary allowances were reduced,
+not expanded to permit new business-layer driver dependencies.
+
+The first MySQL attempt failed during fixture provisioning before Go tests:
+the readiness probe had accepted the image's temporary socket-only server,
+which then shut down. Inspection of the pinned image's entrypoint confirmed
+its temporary server uses `--skip-networking`. The script now waits for the
+final TCP listener and provisions accounts through TCP. The failed run remains
+at `artifacts/usage-mysql.log`.
+
+Final verification on BuildServer, 2026-09-09, same isolated checkout/private
+TMPDIR; all commands exited 0:
+
+| Command | Result | Evidence under checkout |
+| --- | --- | --- |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | MySQL 8.4.10, `-race` passed in 109.366s; config/CLI checks passed | `artifacts/usage-node-lock-mysql.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | MariaDB 12.3.2, `-race` passed in 46.080s; config/CLI checks passed | `artifacts/usage-node-lock-mariadb.log` |
+| `PG_MAJOR=all ARTIFACT_DIR=.../artifacts/usage-node-lock-postgres bash scripts/database-integration.sh` | PostgreSQL 17/18 integration, shared usage tests, driver-boundary and historical migration checks passed | `artifacts/usage-node-lock-postgres.log`, `artifacts/usage-node-lock-postgres/` |
+| `bash scripts/docs-check.sh` | Passed with new source paths indexed in the isolated server checkout | `artifacts/usage-docs.log` |
+
+Worktree `git diff --check` passed. No PostgreSQL migration or published
+MySQL/MariaDB migration artifact changed.
+
+This is a usage-storage prerequisite only. It does not complete telemetry
+ingestion/maintenance, the eleven length restrictions, JSON/arrays, full time
+semantics or the advisory-lock transaction ports. MySQL/MariaDB Controller
+startup is still refused and expanded PR-02 acceptance remains incomplete.
