@@ -337,6 +337,49 @@ func TestAuthHTTPLoginLogoutIntegration(t *testing.T) {
 					t.Fatal("upstream failure accepted")
 				}
 				assertAuthLog(t, logs, "oidc", "rejected", "callback_rejected")
+				t.Run("session-write-failure", func(t *testing.T) {
+					ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+					if ownerURL == "" {
+						t.Skip("isolated owner database URL required")
+					}
+					ctx := context.Background()
+					owner, err := pgxpool.New(ctx, ownerURL)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer owner.Close()
+					constraint := "r6_oidc_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+					if _, err := owner.Exec(ctx, `ALTER TABLE auth_sessions ADD CONSTRAINT `+constraint+` CHECK (false) NOT VALID`); err != nil {
+						t.Fatal(err)
+					}
+					defer func() {
+						if _, err := owner.Exec(ctx, `ALTER TABLE auth_sessions DROP CONSTRAINT `+constraint); err != nil {
+							t.Error(err)
+						}
+					}()
+					var before, after int
+					if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions`).Scan(&before); err != nil {
+						t.Fatal(err)
+					}
+					previousLogs := len(authLogRecords(t, logs))
+					failed := do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
+					if failed.Code != 401 || failed.Header().Get("Location") != "" || !strings.Contains(failed.Body.String(), "oidc-callback-rejected") {
+						t.Fatal("session failure changed public callback contract")
+					}
+					for _, c := range failed.Result().Cookies() {
+						if c.Name != auth.LoginCookieName || c.MaxAge != -1 {
+							t.Fatal("failed session issued a cookie")
+						}
+					}
+					assertAuthLog(t, logs, "oidc", "unavailable", "infrastructure_failure")
+					if len(authLogRecords(t, logs)) != previousLogs+1 {
+						t.Fatal("duplicate session failure result")
+					}
+					if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions`).Scan(&after); err != nil || after != before {
+						t.Fatal("failed session write did not roll back")
+					}
+					assertNoAuthSecrets(t, logs, constraint, cookie.Value, query.Get("state"), "access-token-bait-r6", "refresh-token-bait-r6", "upstream-secret-bait-r6")
+				})
 				w = do("callback?state="+url.QueryEscape(query.Get("state"))+"&code=test", cookie)
 				if w.Code != 302 {
 					t.Fatalf("OIDC callback: %d %s", w.Code, w.Body)

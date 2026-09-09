@@ -35,6 +35,7 @@ const (
 	oidcGlobalLimited
 	oidcConcurrencyLimited
 	oidcSourceCapacityLimited
+	oidcSessionUnavailable
 	authLogKinds
 )
 
@@ -61,6 +62,7 @@ var authLogDefinitions = [authLogKinds]struct{ method, outcome, reason string }{
 	{"oidc", "rejected", "global_limited"},
 	{"oidc", "rejected", "concurrency_limited"},
 	{"oidc", "rejected", "source_capacity"},
+	{"oidc", "unavailable", "infrastructure_failure"},
 }
 
 const authLogSamples = 10

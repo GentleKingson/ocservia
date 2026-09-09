@@ -31,12 +31,13 @@ const (
 )
 
 var (
-	ErrUnauthenticated       = errors.New("principal is not authenticated")
-	ErrOIDCState             = errors.New("OIDC state is invalid")
-	ErrOIDCDisabled          = errors.New("OIDC is disabled")
-	ErrLocalDisabled         = errors.New("local authentication is disabled")
-	ErrBreakGlassDisabled    = errors.New("break-glass is disabled")
-	ErrBreakGlassRotationDue = errors.New("break-glass credential rotation is required")
+	ErrUnauthenticated        = errors.New("principal is not authenticated")
+	ErrOIDCState              = errors.New("OIDC state is invalid")
+	ErrOIDCSessionUnavailable = errors.New("OIDC session creation is unavailable")
+	ErrOIDCDisabled           = errors.New("OIDC is disabled")
+	ErrLocalDisabled          = errors.New("local authentication is disabled")
+	ErrBreakGlassDisabled     = errors.New("break-glass is disabled")
+	ErrBreakGlassRotationDue  = errors.New("break-glass credential rotation is required")
 )
 
 type Config struct {
@@ -118,7 +119,7 @@ func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
 	return &Service{
 		localEnabled: cfg.LocalEnabled, oidcEnabled: oidcEnabled,
 		accountLogKey: deriveAccountLogKey(cfg.SessionKey),
-		pool: pool, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
+		pool:          pool, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
 		breakGlassEnabled: cfg.BreakGlassEnabled, breakGlassTokenHash: cfg.BreakGlassTokenHash,
 		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader,
 	}, nil
@@ -176,7 +177,12 @@ func (s *Service) CompleteLogin(ctx context.Context, state, code string, cookie 
 	if identity.Subject == "" || subtle.ConstantTimeCompare([]byte(identity.Nonce), []byte(attempt.Nonce)) != 1 {
 		return nil, Principal{}, errors.New("OIDC nonce or subject is invalid")
 	}
-	return s.createSession(ctx, s.issuer, identity.Subject, identity.Email, identity.Name, false, nil)
+	session, principal, err := s.createSession(ctx, s.issuer, identity.Subject, identity.Email, identity.Name, false, nil)
+	// Disabled identities remain authentication denials, not infrastructure failures.
+	if err != nil && !errors.Is(err, ErrUnauthenticated) {
+		return nil, Principal{}, fmt.Errorf("%w: %w", ErrOIDCSessionUnavailable, err)
+	}
+	return session, principal, err
 }
 
 func (s *Service) LocalEnabled() bool { return s.localEnabled }

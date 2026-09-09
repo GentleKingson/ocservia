@@ -113,6 +113,8 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		kind := oidcCallbackRejected
 		if errors.Is(err, auth.ErrOIDCState) {
 			kind = oidcStateRejected
+		} else if errors.Is(err, auth.ErrOIDCSessionUnavailable) {
+			kind = oidcSessionUnavailable
 		}
 		s.logAuth(r, kind, uuid.Nil, "")
 		writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/oidc-callback-rejected", "Login rejected", "the OIDC response could not be validated")

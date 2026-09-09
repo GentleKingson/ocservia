@@ -465,7 +465,7 @@ or external logging service are required.
 | Local infrastructure | `infrastructure_failure` (DB, hash verification, attempt completion, or session creation failure) |
 | Local input boundary | `disabled`, `origin_rejected`, `invalid_request` |
 | OIDC start | `disabled`, `start_failed`, `redirect_created` |
-| OIDC callback | `disabled`, `state_rejected`, `callback_rejected`, `session_created` |
+| OIDC callback | `disabled`, `state_rejected`, `callback_rejected`, `session_created`; post-validation session/DB failure: `infrastructure_failure` (`unavailable`) |
 | Both methods' resource admission | `source_limited`, `global_limited`, `concurrency_limited`, `source_capacity` |
 
 Unknown users, wrong passwords and disabled accounts retain the same credential
@@ -486,7 +486,7 @@ allows username enumeration. Do not expose logs or keys to login clients.
 
 Each Controller samples the first **10 results per fixed category per 60-second
 window**, including successes, with a saturating suppressed counter. There are
-22 fixed categories: at most 220 result entries plus 22 summaries per window,
+23 fixed categories: at most 230 result entries plus 23 summaries per window,
 constant memory, no per-account/IP log map, queue or timer. The next authentication
 event after expiry flushes summaries; idle periods delay them, and process exit
 loses pending counts. Summaries carry no individual request/account attribution.
