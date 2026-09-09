@@ -129,7 +129,7 @@ func TestRealSchemaDriftRepairRefused(t *testing.T) {
 	if _, err := b.Exec(ctx, "ALTER TABLE workspaces ADD COLUMN unexpected INT"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Exec(ctx, "UPDATE backend_migrations SET dirty=TRUE,version=0"); err != nil {
+	if _, err := b.Exec(ctx, "UPDATE backend_schema_revisions SET state='running'"); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
@@ -326,6 +326,17 @@ func TestRealPrivileges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
+	for _, table := range []string{"backend_schema_revisions", "backend_schema_revision_steps"} {
+		var count int
+		if err := runtime.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil {
+			t.Fatalf("runtime cannot read revision history: %v", err)
+		}
+		for _, query := range []string{"UPDATE " + table + " SET state='verified'", "DELETE FROM " + table, "INSERT INTO " + table + "(version) VALUES(999)"} {
+			if _, err := runtime.Exec(ctx, query); !errors.Is(err, database.ErrPermission) {
+				t.Fatalf("runtime can mutate revision history: %v", err)
+			}
+		}
+	}
 	for _, query := range []string{"SELECT * FROM backend_migrations", "UPDATE local_auth_bootstrap SET completion_pending=completion_pending WHERE singleton=0", "UPDATE transport_events SET transport_cursor_valid=transport_cursor_valid WHERE 1=0"} {
 		if _, err := runtime.Exec(ctx, query); err != nil {
 			t.Fatalf("allowed operation denied: %v", err)

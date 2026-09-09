@@ -18,7 +18,7 @@ import (
 
 // These are new backend histories, not records of PostgreSQL migrations.
 //
-//go:embed mysql/manifest.json mariadb/manifest.json
+//go:embed mysql/manifest.json mariadb/manifest.json history/f6cd0e0/*.json mysql/000002.json mariadb/000002.json
 var manifests embed.FS
 
 type step struct {
@@ -44,12 +44,15 @@ var ErrUnlock = errors.New("experimental database: migration unlock not confirme
 
 func digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
 func loadManifest(engine Engine) (manifest, string, error) {
-	var m manifest
 	data, err := manifests.ReadFile(string(engine) + "/manifest.json")
 	if err != nil {
-		return m, "", ErrChecksum
+		return manifest{}, "", ErrChecksum
 	}
-	if err = json.Unmarshal(data, &m); err != nil {
+	return decodeManifest(engine, data)
+}
+func decodeManifest(engine Engine, data []byte) (manifest, string, error) {
+	var m manifest
+	if err := json.Unmarshal(data, &m); err != nil {
 		return m, "", ErrChecksum
 	}
 	if m.Engine != engine || m.Version != 1 || m.ControllerSchema != 34 || m.MinimumControllerSchema != 34 || len(m.Steps) == 0 {
@@ -68,7 +71,7 @@ func loadManifest(engine Engine) (manifest, string, error) {
 	return m, digest(data), nil
 }
 func ManifestChecksum(engine Engine) (string, error) {
-	_, sum, err := loadManifest(engine)
+	_, sum, err := loadRevision(engine)
 	return sum, err
 }
 
@@ -179,19 +182,11 @@ const stepsDDL = `CREATE TABLE IF NOT EXISTS backend_migration_steps (
 // resume, authorized by the exact manifest checksum, never a force-clean flag.
 // DDL is autocommitted; each statement is journaled before execution and its
 // postcondition is checked before the next step. No history row is fabricated.
-func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result error) {
-	m, sum, err := loadManifest(b.engine)
-	if err != nil {
-		return err
-	}
+func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifest, sum, repairChecksum string) error {
+	var err error
 	if repairChecksum != "" && repairChecksum != sum {
 		return ErrChecksum
 	}
-	conn, name, err := migrationConnection(ctx, b)
-	if err != nil {
-		return err
-	}
-	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
 	for _, ddl := range []string{metadataDDL, stepsDDL} {
 		if _, err = conn.ExecContext(ctx, ddl); err != nil {
 			return safeError(err)
@@ -236,7 +231,7 @@ func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result er
 			return ErrSchema
 		}
 	}
-	if repairChecksum != "" {
+	if repairChecksum != "" && dirty {
 		if _, err = conn.ExecContext(ctx, "UPDATE backend_migrations SET repair_count=repair_count+1,updated_at=CURRENT_TIMESTAMP(6) WHERE singleton=1"); err != nil {
 			return safeError(err)
 		}
@@ -312,7 +307,7 @@ func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result er
 		}
 	}
 	if version == m.Version {
-		return b.validateOn(ctx, conn, m, sum)
+		return b.validateOn(ctx, conn, m, sum, 0)
 	}
 	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
@@ -328,7 +323,7 @@ func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result er
 	return safeError(tx.Commit())
 }
 
-func (b *Backend) validateOn(ctx context.Context, conn *sql.Conn, m manifest, sum string) error {
+func (b *Backend) validateOn(ctx context.Context, conn *sql.Conn, m manifest, sum string, extraTables int) error {
 	var tableCount, triggerCount int
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()").Scan(&tableCount); err != nil {
 		return safeError(err)
@@ -336,7 +331,7 @@ func (b *Backend) validateOn(ctx context.Context, conn *sql.Conn, m manifest, su
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE()").Scan(&triggerCount); err != nil {
 		return safeError(err)
 	}
-	expectedTables, expectedTriggers := 2, 0
+	expectedTables, expectedTriggers := 2+extraTables, 0
 	for _, s := range m.Steps {
 		if s.Kind == "table" {
 			expectedTables++
@@ -406,22 +401,7 @@ func (b *Backend) validateOn(ctx context.Context, conn *sql.Conn, m manifest, su
 	return nil
 }
 
-func (b *Backend) ValidateSchema(ctx context.Context, expectedController int) (result error) {
-	m, sum, err := loadManifest(b.engine)
-	if err != nil {
-		return err
-	}
-	if expectedController < m.MinimumControllerSchema || expectedController > m.ControllerSchema {
-		return ErrSchema
-	}
-	conn, name, err := migrationConnection(ctx, b)
-	if err != nil {
-		return err
-	}
-	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
-	if err = b.validateOn(ctx, conn, m, sum); err != nil {
-		return err
-	}
+func validateSnapshot(ctx context.Context, conn *sql.Conn, m manifest) error {
 	for _, s := range m.Steps {
 		actual, err := schemaHash(ctx, conn, s)
 		if err != nil {

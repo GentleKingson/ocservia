@@ -23,8 +23,8 @@ equivalence of the entire schema.** Outstanding acceptance blockers are:
    secret key paths the existing 512-character range. See
    `database-pr02-bounded-keys.tsv`. No prefix-only
    unique indexes or collision-prone hash substitutions are presented as
-   exact uniqueness. These keys need a reviewed contract or an exact alternate
-   design before the baseline can be accepted.
+   exact uniqueness. The expanded PR-02 scope requires exact alternate storage
+   and actual business read/write adapters, not approval of narrower limits.
 2. JSON is native MySQL JSON and MariaDB's validated JSON alias, not PostgreSQL
    jsonb equality/canonicalization. The member-list codec preserves SQL NULL,
    empty arrays and NULL elements, but accepts only one-dimensional arrays.
@@ -36,8 +36,9 @@ equivalence of the entire schema.** Outstanding acceptance blockers are:
    this is not a general POSIX/ICU/PCRE compatibility claim. These limitations
    must not be silently accepted as full PostgreSQL type semantics.
 3. `DATETIME(6)` represents finite UTC instants, not PostgreSQL's entire
-   timestamp range. `1000-01-01` is the proposed expired-lease sentinel for
-   historical `-infinity`; the reserved-range contract has not been approved.
+   timestamp range. `1000-01-01` is the existing Draft's expired-lease sentinel
+   for historical `-infinity`; this narrower representation is not accepted
+   and must be replaced together with actual business read/write adapters.
    PostgreSQL transaction-start `now()` and wall-clock functions cannot be
    indiscriminately substituted by MySQL statement time in future stores.
 4. Telemetry has an unpartitioned InnoDB logical table and equivalent query
@@ -51,6 +52,15 @@ equivalence of the entire schema.** Outstanding acceptance blockers are:
 
 Do not remove the production gate or mark this PR ready based on green
 foundation tests. The complete acceptance request is not yet satisfied.
+
+The expanded scope includes telemetry physical storage redesign preserving
+foreign-key integrity, retention and query behavior, and migration of actual
+advisory-lock/pgx transactions to the common Store/Tx boundary. Final acceptance
+must run the same real Controller business workflows on PostgreSQL, MySQL and
+MariaDB. Standalone schema, codec and transaction-primitive tests are necessary
+regressions, not substitutes for those workflows. All published Draft migration
+artifacts must remain immutable; further storage changes require appended
+versions and tests upgrading real prior Draft databases without resetting them.
 
 ## Baseline and connection policy
 
@@ -144,21 +154,22 @@ by a newline is not the same path segment under the existing PostgreSQL CHECK.
 See the [MySQL regex reference](https://dev.mysql.com/doc/refman/8.4/en/regexp.html)
 and [MariaDB PCRE reference](https://mariadb.com/docs/server/reference/sql-functions/string-functions/regular-expressions-functions/pcre).
 
-These are revisions of the **unaccepted Draft** manifests. SQL checksums and
-postcondition hashes were independently re-authored on the pinned engines.
-An already-initialized database from an earlier Draft must fail checksum
-validation, including explicit repair. Do not rewrite its metadata to adopt
-this revision. Use a fresh, disposable development/test database; there is no
-upgrade path or permission to reset an existing database automatically.
+Both published version-1 artifacts are now frozen. The original
+`f6cd0e0` artifact (also used by `6a6e3c5`) is archived byte-for-byte under
+`history/f6cd0e0/`; the `144b660` artifact remains at each engine's original
+`manifest.json` path, unchanged. Version 2 appends an explicit parent-bound
+transition for either lineage. No original checksum or step receipt is
+rewritten and no database is reset automatically. Unknown artifacts are
+rejected, not adopted as a known lineage.
 
 ## Migration and repair
 
-Each backend embeds its own `manifest.json`. Manifest version **1** maps
+Each backend embeds its own frozen `manifest.json`. Baseline version **1** maps
 explicitly to logical Controller schema **34..34**. This is a logical shape
 mapping for the isolated schema tool, not permission to run Controller stores.
 Every step has its own SHA-256 of SQL and a pinned postcondition fingerprint;
 the entire manifest also has a SHA-256, stored in `backend_migrations`.
-The manifests are immutable after acceptance. They are not loaded from the
+All published manifests, including Draft artifacts, are immutable. They are not loaded from the
 database, and a migration never learns/accepts a changed schema fingerprint.
 
 `backend_migrations` and `backend_migration_steps` are independent of
@@ -192,6 +203,45 @@ count/time and resumes only if the interrupted object is absent or already
 matches its exact postcondition. Other partial/foreign objects require manual
 owner investigation. There is no force-clean flag, checksum rewriting,
 down-migration, automatic retry, audit deletion or fencing-epoch reset.
+
+### Appended version 2
+
+`000002.json` is independent for MySQL and MariaDB. It identifies both exact
+parent checksums and pins each ALTER's SQL checksum, before fingerprint and
+after fingerprint. It does not rename the old version-1 artifact to version 2
+or insert receipts claiming that ALTER statements ran on `144b660` databases.
+For that parent, the transition verifies the existing schema and records zero
+ALTER steps. For `f6cd0e0`/`6a6e3c5`, it executes the 58 table alterations which
+bring text constraints and the three corrected lengths forward, preserving
+existing rows. The physical postcondition hashes are pinned per lineage.
+
+`backend_schema_revisions` is the appended version journal and
+`backend_schema_revision_steps` is its statement journal. The old two tables
+remain the actual version-1 history, not the current-version pointer. Runtime
+has SELECT only on all four history tables; maintenance cannot modify them.
+Schema fingerprint verification is an owner operation and does not give
+runtime TRIGGER or DDL privileges to inspect restricted trigger definitions.
+
+The same exclusive migration connection holds GET_LOCK across baseline and
+revision work. New metadata definitions are checked before use. A running
+revision is durable before the first ALTER and refuses ordinary migration or
+startup validation. Repair requires the checksum printed by the current
+`--mode=manifest-checksum`, verifies the original parent and all old receipts,
+and resumes only from a pinned before/after state. An ALTER committed before
+process death is verified, not blindly re-executed. Only complete statement
+receipts plus a full target schema verification publish the verified version.
+
+Legacy values accepted by an earlier erroneous Draft but rejected by the
+corrected CHECKs cause a dirty, refused upgrade. The owner must inspect and
+explicitly correct those values before repair; the migrator does not sanitize
+or delete data. A clean version-1 metadata row and its step rows remain
+unchanged through upgrade, failure and version-2 repair. Repair of an actually
+interrupted version-1 initialization still records its real completion.
+
+This appended-history milestone does **not** complete the expanded PR-02
+scope. Lossless alternate representations and actual read/write adapters,
+telemetry physical storage/retention parity, common business transactions and
+three-engine Controller workflow acceptance remain required before review.
 
 ## Accounts and lock scopes
 

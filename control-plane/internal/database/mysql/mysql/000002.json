@@ -1,0 +1,425 @@
+{
+  "version": 2,
+  "engine": "mysql",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "identities",
+          "sql": "ALTER TABLE `identities` ADD CONSTRAINT `identities_text_no_nul` CHECK (LOCATE(0x00,CAST(`issuer` AS BINARY))=0 AND LOCATE(0x00,CAST(`subject` AS BINARY))=0 AND LOCATE(0x00,CAST(`email` AS BINARY))=0 AND LOCATE(0x00,CAST(`display_name` AS BINARY))=0)",
+          "checksum": "1e40d2886a61faa648dd8a2ecec4b950c8f5d0b23077b15da45c25245cc82a51",
+          "before": "c98ec5b53844e5cdd9340d80c06456258b72dd9213941a3ebf3c49ead3730ffa",
+          "after": "63150cb6fcfb2bad9db6e47ea9c1c68b7bae28171715249c9b08665830b16ee6"
+        },
+        {
+          "name": "local_auth_attempts",
+          "sql": "ALTER TABLE `local_auth_attempts` DROP CHECK `local_auth_attempts_local_auth_attempts_username_check`,\nADD CONSTRAINT `local_auth_attempts_local_auth_attempts_username_check` CHECK ((((OCTET_LENGTH(username) \u003e= 1) AND (OCTET_LENGTH(username) \u003c= 128)) AND ((username) REGEXP '(?-i)\\\\A[a-z0-9][a-z0-9._-]*\\\\z'))),\nADD CONSTRAINT `local_auth_attempts_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0)",
+          "checksum": "0e982a0a42eec4399ddb4fdcc1292d0446e2ce8f118f210fd98982d8f39a1dc5",
+          "before": "a4d579d82853b984b58523649d3e07153063be385a6900c2e4d8fe67f201898f",
+          "after": "df1d9f6e13dc1f2f8e46d49b6c879585a2a3f1ab665c182cd11f0ed5d0d3a81b"
+        },
+        {
+          "name": "local_credentials",
+          "sql": "ALTER TABLE `local_credentials` DROP CHECK `local_credentials_local_credentials_username_check`,\nADD CONSTRAINT `local_credentials_local_credentials_username_check` CHECK ((((OCTET_LENGTH(username) \u003e= 1) AND (OCTET_LENGTH(username) \u003c= 128)) AND ((username) REGEXP '(?-i)\\\\A[a-z0-9][a-z0-9._-]*\\\\z'))),\nADD CONSTRAINT `local_credentials_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0 AND LOCATE(0x00,CAST(`password_hash` AS BINARY))=0)",
+          "checksum": "ac9003bc08bdf4f223317c1be52a6f624fbf5c3476d62a070de859499f419d9a",
+          "before": "fee1a5818e5ce435014da5e6e9efe29ed637fc8340fc93ad6adf9ad5c72ffb37",
+          "after": "e3e467c953f42cf4afb8bfc37fc0fd74d291b94108277f5aa5c69880b41f5fe8"
+        },
+        {
+          "name": "node_agent_upgrade_results",
+          "sql": "ALTER TABLE `node_agent_upgrade_results` ADD CONSTRAINT `node_agent_upgrade_results_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`target_version` AS BINARY))=0 AND LOCATE(0x00,CAST(`detail` AS BINARY))=0)",
+          "checksum": "99af763a46ac11f033162f3b5d816f5492bd2d4995a0fa49a573c4e67e08b732",
+          "before": "48a46d41787c3b968f61c0df20a749064b7a93a6ada9b36f33c354b2e40ad03b",
+          "after": "ec4defc1b75005f4bc35efd0801dc626fa4f50212e0a3da9887daab4c108b211"
+        },
+        {
+          "name": "roles",
+          "sql": "ALTER TABLE `roles` ADD CONSTRAINT `roles_text_no_nul` CHECK (LOCATE(0x00,CAST(`name` AS BINARY))=0)",
+          "checksum": "d0d7b82122eed10a08db275c18cb1c752a580326304144ebfa47313c21c09fc4",
+          "before": "aa7eb5f5c1f790a99a78e3699bbd24034ff9b7d7fd69ddb6d7f7d885c33a163d",
+          "after": "46eda1a93e1889c6cb1c5549f286c8a9da452fc1b2a7423fba78000e35e3b416"
+        },
+        {
+          "name": "scheduler_leases",
+          "sql": "ALTER TABLE `scheduler_leases` ADD CONSTRAINT `scheduler_leases_text_no_nul` CHECK (LOCATE(0x00,CAST(`lease_name` AS BINARY))=0)",
+          "checksum": "be5396332160f12d1ddf6831111c07bf068030d56f3fe48ea54120d6306bbd4e",
+          "before": "f9f60e5431955af635a58d234440ba90dbddaa755e5aaa3c0db99755084f0870",
+          "after": "7f0a552130e048d6d8e876c2dbe8ae385f913e016b83edac268fd8f5a2f5c052"
+        },
+        {
+          "name": "telemetry_rollups_1h",
+          "sql": "ALTER TABLE `telemetry_rollups_1h` ADD CONSTRAINT `telemetry_rollups_1h_text_no_nul` CHECK (LOCATE(0x00,CAST(`metric` AS BINARY))=0)",
+          "checksum": "58c9588791d801760113b9fde5d3563425c46985279cb5c9e6904e0c38c78a84",
+          "before": "9c0a62ff93c0167f9cdf1554e3fa314aa54192b540a86aab2a304a9e0fd3f1f5",
+          "after": "95aab65546e14751857c368082253cd80db75b42751029ccc690ce7a03ef3188"
+        },
+        {
+          "name": "transport_event_quarantine",
+          "sql": "ALTER TABLE `transport_event_quarantine` DROP CHECK `transport_event_quarantine_transport_event_quaranti_3d26b180e849`,\nADD CONSTRAINT `transport_event_quarantine_transport_event_quaranti_3d26b180e849` CHECK ((reason_code REGEXP '(?-i)\\\\A[a-z][a-z0-9_]{0,63}\\\\z')),\nADD CONSTRAINT `transport_event_quarantine_text_no_nul` CHECK (LOCATE(0x00,CAST(`reason_code` AS BINARY))=0 AND LOCATE(0x00,CAST(`reason_detail` AS BINARY))=0)",
+          "checksum": "da83615c05c3144c3ec55727513606cdb11039bc44b2467d878f1a956043220f",
+          "before": "b97d4be14024a9ef37bf2763f05a064dbf31a791e1e38bad95f4b7c306edb64b",
+          "after": "655f2a9906178832e924f1855e4d817afe0aff7c63111f09323fa0286dd019f8"
+        },
+        {
+          "name": "upstream_sync_records",
+          "sql": "ALTER TABLE `upstream_sync_records` DROP CHECK `upstream_sync_records_upstream_sync_records_new_commit_check`,\nADD CONSTRAINT `upstream_sync_records_upstream_sync_records_new_commit_check` CHECK ((new_commit REGEXP '(?-i)\\\\A[0-9a-f]{40}\\\\z')),\nDROP CHECK `upstream_sync_records_upstream_sync_records_old_commit_check`,\nADD CONSTRAINT `upstream_sync_records_upstream_sync_records_old_commit_check` CHECK ((old_commit REGEXP '(?-i)\\\\A[0-9a-f]{40}\\\\z')),\nADD CONSTRAINT `upstream_sync_records_text_no_nul` CHECK (LOCATE(0x00,CAST(`repository` AS BINARY))=0 AND LOCATE(0x00,CAST(`old_ref` AS BINARY))=0 AND LOCATE(0x00,CAST(`old_commit` AS BINARY))=0 AND LOCATE(0x00,CAST(`new_ref` AS BINARY))=0 AND LOCATE(0x00,CAST(`new_commit` AS BINARY))=0 AND LOCATE(0x00,CAST(`rollback_ref` AS BINARY))=0)",
+          "checksum": "597db428958f9fb5713b79218d53beb9b80529ac31eb7b8a18d0cf458185864e",
+          "before": "6ea9ce3d5fd11d59e2e47e78d0d4b4331890b77a3788a3206fc78015526edf12",
+          "after": "3f3db6008996dbb267df91c7ec3593783843c29343f531c49c23d715bed4bce8"
+        },
+        {
+          "name": "workspaces",
+          "sql": "ALTER TABLE `workspaces` ADD CONSTRAINT `workspaces_text_no_nul` CHECK (LOCATE(0x00,CAST(`name` AS BINARY))=0 AND LOCATE(0x00,CAST(`slug` AS BINARY))=0)",
+          "checksum": "d7fd43b5065e62ca8a361caeb34e3a158703d778911fee9c94ea4bea1364258a",
+          "before": "fb7bb305ad779eedca1a10377fe4fb512bace05b72844d24b108b371d2baad7d",
+          "after": "f8c15a0909c74af2a29c7092ab59bc4428a599c672c3a032fbea00426672eabf"
+        },
+        {
+          "name": "approval_requests",
+          "sql": "ALTER TABLE `approval_requests` ADD CONSTRAINT `approval_requests_text_no_nul` CHECK (LOCATE(0x00,CAST(`action` AS BINARY))=0 AND LOCATE(0x00,CAST(`resource_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`reason` AS BINARY))=0 AND LOCATE(0x00,CAST(`status` AS BINARY))=0 AND LOCATE(0x00,CAST(`approval_reason` AS BINARY))=0)",
+          "checksum": "a146bc61a239f14da94515572e9fca8de4d8482df77c72aefc65a0358201a144",
+          "before": "bb3012ad7f2d655a464d22e5c5b273af0a2a06c35bd4642814a3edda4c441daa",
+          "after": "397860fb7480251c179f5a088ae54ff7f75e50f43c9e1173ca6fd9396eb8e61e"
+        },
+        {
+          "name": "agent_rollouts",
+          "sql": "ALTER TABLE `agent_rollouts` ADD CONSTRAINT `agent_rollouts_text_no_nul` CHECK (LOCATE(0x00,CAST(`target_version` AS BINARY))=0 AND LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`reason` AS BINARY))=0 AND LOCATE(0x00,CAST(`pause_code` AS BINARY))=0 AND LOCATE(0x00,CAST(`idempotency_key` AS BINARY))=0)",
+          "checksum": "7069df744a72651165a261dc352d05246b95afd0812223999f3b47f1cd342902",
+          "before": "f8e71f905cf5efcdde74bc8b657a144aa32481d8e8d69b2b1cd576e5cccebd2d",
+          "after": "902bcc0cb576ce07bc533cfec16de7b14c009a85e151c2e6dc74b5119af9a10c"
+        },
+        {
+          "name": "agent_rollout_nodes",
+          "sql": "ALTER TABLE `agent_rollout_nodes` ADD CONSTRAINT `agent_rollout_nodes_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`from_version` AS BINARY))=0 AND LOCATE(0x00,CAST(`failure_code` AS BINARY))=0)",
+          "checksum": "8b7e56ba0da34e2d80f6d7f4d37c569300b6edcd860b91bbd6d8b9e59ea6675a",
+          "before": "71bb0297cff41c8406d51d4d7cb6e78a688a5d35867cad1443b20cc3cbaebacc",
+          "after": "8af6618713eeab05fe7455db2f032530b7c3f5dfc3053955bdeb4e8818337618"
+        },
+        {
+          "name": "approval_authority_resources",
+          "sql": "ALTER TABLE `approval_authority_resources` ADD CONSTRAINT `approval_authority_resources_text_no_nul` CHECK (LOCATE(0x00,CAST(`resource_type` AS BINARY))=0)",
+          "checksum": "ee9405ffd1777e2d0b126f15a4a4557c2882417cfad76c849897d9f6dacf9630",
+          "before": "5397b941388f9dc90ae4b01af069cc9c035fbfb56a8a3bbcc85ac0fe8e15f165",
+          "after": "c0ab6709f2572097b7325212f5159ae817940ab0a97ee78e4ceb34d28c77b77b"
+        },
+        {
+          "name": "batch_operations",
+          "sql": "ALTER TABLE `batch_operations` DROP CHECK `batch_operations_batch_operations_traceparent_check`,\nADD CONSTRAINT `batch_operations_batch_operations_traceparent_check` CHECK ((traceparent REGEXP '(?-i)\\\\A00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\\\\z')),\nADD CONSTRAINT `batch_operations_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`actor_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`reason` AS BINARY))=0 AND LOCATE(0x00,CAST(`request_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`traceparent` AS BINARY))=0 AND LOCATE(0x00,CAST(`idempotency_key` AS BINARY))=0)",
+          "checksum": "2bf96a6ee5880b4afa68ad4372bb042454192706a80c53cf180cec1ef5985075",
+          "before": "cdad5c308b3d18cb7967d5eadcc33141b5cab6a624a7ca39d1882fef8dc687f7",
+          "after": "3b34f08b3afa432c493a48ceccd4af552da7aa907f501ce75f9db6e6c3103c87"
+        },
+        {
+          "name": "nodes",
+          "sql": "ALTER TABLE `nodes` ADD CONSTRAINT `nodes_text_no_nul` CHECK (LOCATE(0x00,CAST(`name` AS BINARY))=0 AND LOCATE(0x00,CAST(`status` AS BINARY))=0 AND LOCATE(0x00,CAST(`policy` AS BINARY))=0)",
+          "checksum": "de4d3e82fc8983a6b9bdf183c6f8506887c9b91d6b886beb858a53dd720e7753",
+          "before": "ccc6db753db28e1c679cf4de34e7cc9c22cc8a308a1017401378b03766232ea6",
+          "after": "2206158b65794c6ae70a101db711863225ff7f8adef258ad097df0c84835d1ff"
+        },
+        {
+          "name": "approval_batch_items",
+          "sql": "ALTER TABLE `approval_batch_items` DROP CHECK `approval_batch_items_approval_batch_items_username_check`,\nADD CONSTRAINT `approval_batch_items_approval_batch_items_username_check` CHECK ((username REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `approval_batch_items_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0 AND LOCATE(0x00,CAST(`action` AS BINARY))=0)",
+          "checksum": "e8f752f92c77ccd8141bed8d385518fdf8434a12b11786c6b879ba622b84c07a",
+          "before": "bb9763bef3ad035d2d58cbcaa519dd02bf01a07a63bcdadaa0a9c270ffee9685",
+          "after": "f1ed94dd72a7c8a9f9f708ee811a2a3d9eb93c0ae63a05c047cc354ac336392f"
+        },
+        {
+          "name": "audit_events",
+          "sql": "ALTER TABLE `audit_events` DROP CHECK `audit_events_audit_event_auth_fields`,\nADD CONSTRAINT `audit_events_audit_event_auth_fields` CHECK ((((auth_version = 0) AND (event_key_id IS NULL) AND (event_mac IS NULL)) OR ((auth_version = 1) AND ((CHAR_LENGTH(event_key_id) \u003e= 1) AND (CHAR_LENGTH(event_key_id) \u003c= 128)) AND (event_key_id REGEXP '(?-i)\\\\A[A-Za-z0-9._-]+\\\\z') AND (OCTET_LENGTH(event_mac) = 32)))),\nADD CONSTRAINT `audit_events_text_no_nul` CHECK (LOCATE(0x00,CAST(`actor_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`actor_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`action` AS BINARY))=0 AND LOCATE(0x00,CAST(`resource_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`request_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`trace_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`result` AS BINARY))=0 AND LOCATE(0x00,CAST(`reason` AS BINARY))=0 AND LOCATE(0x00,CAST(`error_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`event_key_id` AS BINARY))=0)",
+          "checksum": "b19d6c026cfbade07559617cd143c6457ed46fcd1f3508eddd0c2be958e05384",
+          "before": "965cb30f66e632b4f1a5c151e6af6688d009a6d051d115cbda48c5f72c3ffbf7",
+          "after": "6b317f7037a1a2b149bab64d54c8899d9938acbe6e1063232d6f4244beca8423"
+        },
+        {
+          "name": "desired_groups",
+          "sql": "ALTER TABLE `desired_groups` DROP CHECK `desired_groups_desired_groups_group_name_check`,\nADD CONSTRAINT `desired_groups_desired_groups_group_name_check` CHECK ((group_name REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `desired_groups_text_no_nul` CHECK (LOCATE(0x00,CAST(`group_name` AS BINARY))=0)",
+          "checksum": "b145524210b6744d2f762a9085d3408752009819be0f7314fda7caaea8098960",
+          "before": "9c751efd32fc20a86f5bace1a10773c346eeac97ab1d84afaac1c58eaea10b76",
+          "after": "0f6e69c15c9eea628d4be3348ccfa978a4254af74f37b1b54671869fcc9d1d3f"
+        },
+        {
+          "name": "desired_users",
+          "sql": "ALTER TABLE `desired_users` DROP CHECK `desired_users_desired_users_username_check`,\nADD CONSTRAINT `desired_users_desired_users_username_check` CHECK ((username REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `desired_users_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0)",
+          "checksum": "85f0dc179e17ed8517cbda3d3fe15e3457e924b6ad729d749fcfe5369cf19c4c",
+          "before": "2173f7bf3eeaf1d4457c2b6808a15cf56d2e75dc7022002634f5961ad2c2808d",
+          "after": "41b0addcdff60961eed38f8b254d853c1ee6f3a7b07d5852d8ea8779f84a3d3a"
+        },
+        {
+          "name": "desired_user_policies",
+          "sql": "ALTER TABLE `desired_user_policies` DROP CHECK `desired_user_policies_desired_user_policies_username_check`,\nADD CONSTRAINT `desired_user_policies_desired_user_policies_username_check` CHECK ((username REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `desired_user_policies_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0 AND LOCATE(0x00,CAST(`quota_period` AS BINARY))=0 AND LOCATE(0x00,CAST(`quota_direction` AS BINARY))=0)",
+          "checksum": "9461e484a4d30f3218528bb05ea6ebd0a5b51c717282151b422b140489683838",
+          "before": "ba1797a3d182da120f65e40e1b9228c217b3b92f275d7d367ee230a1557ef08f",
+          "after": "99f8512c5e9cd548f6e9b67b42ec78a28e34d3cde51055fc5b02c006d55d8f0b"
+        },
+        {
+          "name": "enrollment_tokens",
+          "sql": "ALTER TABLE `enrollment_tokens` ADD CONSTRAINT `enrollment_tokens_text_no_nul` CHECK (LOCATE(0x00,CAST(`expected_environment` AS BINARY))=0 AND LOCATE(0x00,CAST(`expected_node_name` AS BINARY))=0 AND LOCATE(0x00,CAST(`created_by` AS BINARY))=0)",
+          "checksum": "7eb4f116514e86cc419ca712ccddb193a87571f7fcc3e519a36f2a1fa64362e3",
+          "before": "06b2eea71aa45eb317009c7ebc45f92bd20b3ba314524226456fde592e279eca",
+          "after": "9442dd492e8d7a94d574bc093ccf8a2a778ec44972ca143635cd00ece9c79495"
+        },
+        {
+          "name": "node_bootstrap_tokens",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` ADD CONSTRAINT `node_bootstrap_tokens_text_no_nul` CHECK (LOCATE(0x00,CAST(`expected_environment` AS BINARY))=0 AND LOCATE(0x00,CAST(`expected_node_name` AS BINARY))=0 AND LOCATE(0x00,CAST(`created_by` AS BINARY))=0)",
+          "checksum": "faec585d5afdde6ca91a6cb375547f20be2520b68139dd57596ec80891804ff7",
+          "before": "1ee01754749ecc9f90df31cf5ef73758c65b058ec78fed43abe813ff97e11e23",
+          "after": "a835db938b5c362533165f8002e0d833c7259612f5372b05999ee3370ed71e16"
+        },
+        {
+          "name": "node_capabilities",
+          "sql": "ALTER TABLE `node_capabilities` ADD CONSTRAINT `node_capabilities_text_no_nul` CHECK (LOCATE(0x00,CAST(`capability` AS BINARY))=0)",
+          "checksum": "65eb47d648903521902c934a7cacc3e9490edba4fdd4512aee0fda1db245c4b9",
+          "before": "29a3ce00e05768c36e25eb7203781b694c5e445b2ef4ea61eb21c10802f01864",
+          "after": "662913f77ecb54d1e749cdf65d6d4f13353fd3418b368387dc2b1c8d7f4e309e"
+        },
+        {
+          "name": "node_endpoint_keys",
+          "sql": "ALTER TABLE `node_endpoint_keys` ADD CONSTRAINT `node_endpoint_keys_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0)",
+          "checksum": "5a6ab917f816768e2d1124ea5d9ec11e48fa1eb005d0a71b972a48fd4edff0b8",
+          "before": "c27d83ddb5dc6e24d7bde1185b28f2c37ee8d91b4061c27ecbe53cfc2a8d8a9f",
+          "after": "e6b66f47029d47cf4937dca84649fe06c541b6bd514de807f476310b2e2b5971"
+        },
+        {
+          "name": "node_observed_snapshots",
+          "sql": "ALTER TABLE `node_observed_snapshots` ADD CONSTRAINT `node_observed_snapshots_text_no_nul` CHECK (LOCATE(0x00,CAST(`boot_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`agent_version` AS BINARY))=0 AND LOCATE(0x00,CAST(`ocserv_version` AS BINARY))=0 AND LOCATE(0x00,CAST(`os_release` AS BINARY))=0 AND LOCATE(0x00,CAST(`architecture` AS BINARY))=0)",
+          "checksum": "2e25354d42e8ccc48ae4b95321e544b650900d7141e977d3a8818374142d26ae",
+          "before": "e79df35120b661bccb2f30619bb9040bb851e75e0c7a8bb2bb4f0f67805e752d",
+          "after": "bda25a292084ef1bcc32b3c7a50e73692b325ad1e48dc91bfe7ae7a09989356e"
+        },
+        {
+          "name": "node_sealing_keys",
+          "sql": "ALTER TABLE `node_sealing_keys` DROP CHECK `node_sealing_keys_node_sealing_keys_key_id_check`,\nADD CONSTRAINT `node_sealing_keys_node_sealing_keys_key_id_check` CHECK ((key_id REGEXP '(?-i)\\\\A[A-Za-z0-9_.-]{1,128}\\\\z')),\nADD CONSTRAINT `node_sealing_keys_text_no_nul` CHECK (LOCATE(0x00,CAST(`key_id` AS BINARY))=0)",
+          "checksum": "5fde3c2b33eb6ad847cb9dba0d17041eec7f4a6906eb81dbac48928a0c3b193f",
+          "before": "94c0b5316ed40a06ce29d2a8b91b46cda819d995e1ff27597ce76bc8598158dd",
+          "after": "eab4b23388a6b74b57a9315fab9c803ca2e7a6ce02245ceb025e943c006c12ef"
+        },
+        {
+          "name": "node_sessions",
+          "sql": "ALTER TABLE `node_sessions` MODIFY COLUMN `session_id` VARCHAR(257) NOT NULL,\nADD CONSTRAINT `node_sessions_text_no_nul` CHECK (LOCATE(0x00,CAST(`session_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`username` AS BINARY))=0)",
+          "checksum": "91a71fee79edcf46f9578128c616054b08fe73f3b6764707d1e97a00f8ed4701",
+          "before": "a329497b14311842a48a808ec6450db879dcc3eda97d3cf8f227349231f00442",
+          "after": "47876a713d379125840496f9245c53334143eb4cc97a78a3e5da0fdb62f482ac"
+        },
+        {
+          "name": "node_trust_convergence",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD CONSTRAINT `node_trust_convergence_text_no_nul` CHECK (LOCATE(0x00,CAST(`desired_state` AS BINARY))=0 AND LOCATE(0x00,CAST(`reason` AS BINARY))=0 AND LOCATE(0x00,CAST(`last_error` AS BINARY))=0)",
+          "checksum": "bdc8877bf25e3f7874bb5c721c3c3ab06966a64c7aaa91cd73c79941389ebca8",
+          "before": "bb5a263bd9164f14eefea3e88e8b7d5b159129b697c3c85a9c18ae0e55c2aea7",
+          "after": "30040f5bbd0ce4f5ec41b6453b42f28598abef48b39cdfd96f9af00a243edeed"
+        },
+        {
+          "name": "observed_groups",
+          "sql": "ALTER TABLE `observed_groups` DROP CHECK `observed_groups_observed_groups_group_name_check`,\nADD CONSTRAINT `observed_groups_observed_groups_group_name_check` CHECK ((group_name REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `observed_groups_text_no_nul` CHECK (LOCATE(0x00,CAST(`group_name` AS BINARY))=0)",
+          "checksum": "3d0f16af61906c9b1820fff322eea37ebe66bebdb1149115927a48423295a2db",
+          "before": "f578912bca1f9e1007ad213e676dcc6ed046698a32a8b1fba895c961cf3b8552",
+          "after": "a66288833227cdad024f609002d8800bf9c954e8a05d5dfa4905e11d7ab4d029"
+        },
+        {
+          "name": "observed_user_usage",
+          "sql": "ALTER TABLE `observed_user_usage` DROP CHECK `observed_user_usage_observed_user_usage_username_check`,\nADD CONSTRAINT `observed_user_usage_observed_user_usage_username_check` CHECK ((username REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `observed_user_usage_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0 AND LOCATE(0x00,CAST(`period` AS BINARY))=0)",
+          "checksum": "fcc3dd477bf1912ce7ab0a20b845979f14cff12c91e7e17460051a6d22d1114f",
+          "before": "050ae7726c76ab2e88f405ca428dc77996a4768f715ba8d02222c60437295a9f",
+          "after": "9121f8e596f1fe4745678110be52843a87f7a20dfb0625334299c50c7733049a"
+        },
+        {
+          "name": "observed_users",
+          "sql": "ALTER TABLE `observed_users` DROP CHECK `observed_users_observed_users_username_check`,\nADD CONSTRAINT `observed_users_observed_users_username_check` CHECK ((username REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `observed_users_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0)",
+          "checksum": "2a0cd91f6143af7f23339d805af86389a8ae8cf0b899fbb79c27f0fc6c907778",
+          "before": "03dfc9322a4fdc18116d6ab3a015abcf4d8ab62abb3a81ec7190afdea921bb71",
+          "after": "e3fb8006a42a050960fab3fbabf44dc922f3989a81bd3313bcb4bd92529a4fe0"
+        },
+        {
+          "name": "operations",
+          "sql": "ALTER TABLE `operations` ADD CONSTRAINT `operations_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`request_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`trace_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`idempotency_key` AS BINARY))=0)",
+          "checksum": "efa6758175e49bf5fd9ae63f392450f2eb0e42e4000d8799afe5b984d3fbe0c1",
+          "before": "d346b5e8139833ba55838d2a668ad4871bebbd8f7343fe227120bb6ab7292eaf",
+          "after": "a36ecb87dc5ea483f44786557e5f1f54c525fcccf0665eea690efba94e6d3827"
+        },
+        {
+          "name": "agent_upgrade_operations",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD CONSTRAINT `agent_upgrade_operations_text_no_nul` CHECK (LOCATE(0x00,CAST(`target_version` AS BINARY))=0 AND LOCATE(0x00,CAST(`architecture` AS BINARY))=0 AND LOCATE(0x00,CAST(`from_version` AS BINARY))=0 AND LOCATE(0x00,CAST(`state` AS BINARY))=0)",
+          "checksum": "c159fc88177089b20f0d6b1ef5c41fadd80be9b584e4e6dac06b89d75b49d837",
+          "before": "e2b612ce46e3fe35dbf00ab31e0d570384fbd742a46fbae76da5de0fee9e41e6",
+          "after": "d7dd851c0837e278435c9c4c64bb76d5c61b09cb33cc740da7abbd661aaabd5a"
+        },
+        {
+          "name": "batch_operation_items",
+          "sql": "ALTER TABLE `batch_operation_items` DROP CHECK `batch_operation_items_batch_operation_items_username_check`,\nADD CONSTRAINT `batch_operation_items_batch_operation_items_username_check` CHECK ((username REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `batch_operation_items_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0 AND LOCATE(0x00,CAST(`action` AS BINARY))=0 AND LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`error_type` AS BINARY))=0)",
+          "checksum": "8abeb1723a85ab65b646addf6a8ce44c7476dffb2318659e40eed1af61606764",
+          "before": "ebbc6420b021cbb0942c8fcac668d23f9c5d48dcf2bc8af5a9c5a713fc9ac6ab",
+          "after": "ed9c0cec0ceb92f1205be4ba7cabd096b7fcc089c225401f40b15f01a5aec005"
+        },
+        {
+          "name": "commands",
+          "sql": "ALTER TABLE `commands` DROP CHECK `commands_commands_traceparent_check`,\nADD CONSTRAINT `commands_commands_traceparent_check` CHECK ((traceparent REGEXP '(?-i)\\\\A00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\\\\z')),\nADD CONSTRAINT `commands_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`payload_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`idempotency_key` AS BINARY))=0 AND LOCATE(0x00,CAST(`traceparent` AS BINARY))=0 AND LOCATE(0x00,CAST(`resource_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`resource_key` AS BINARY))=0)",
+          "checksum": "9d982343c994a23c4d03ddff974be046b95edcc787f64fcdfb192c01075a8326",
+          "before": "c7672c2cf4b4dbd4669004d23c6b78c435917f7bd60e8228f771fb5a14ed1974",
+          "after": "d855e290b6b3021253936dc8a3df2b7cd205bd74296790c6d4510fcb8a4fbb17"
+        },
+        {
+          "name": "config_plans",
+          "sql": "ALTER TABLE `config_plans` ADD CONSTRAINT `config_plans_text_no_nul` CHECK (LOCATE(0x00,CAST(`template_name` AS BINARY))=0 AND LOCATE(0x00,CAST(`candidate_redacted` AS BINARY))=0)",
+          "checksum": "f5c8be2d8ff0acf86d1dc43a9ead6178982d74fc6163b344584be6fd1fca2623",
+          "before": "ed90f8380778bb3d86ff04ad1604d2e3b8eebc3e20b220f7fa8afb8114319d17",
+          "after": "163983e7f3e6446b1efca5a17cce599513ff42e42c09a0b929bbdc8d84a1ba26"
+        },
+        {
+          "name": "config_apply_operations",
+          "sql": "ALTER TABLE `config_apply_operations` ADD CONSTRAINT `config_apply_operations_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`failure_code` AS BINARY))=0)",
+          "checksum": "48bc81681dfb675b601d2b20c5e7f8f4212540688a515e84f1875bb84acb3250",
+          "before": "c7885544494fa7451088a9029a50894fe11caec8edad491c4f84a1a249d91354",
+          "after": "577223f4234564a79a27c17dc3ed1b1b2be18c5bc323a0ffcb08435d8c2a600d"
+        },
+        {
+          "name": "local_slice_jobs",
+          "sql": "ALTER TABLE `local_slice_jobs` DROP CHECK `local_slice_jobs_local_slice_jobs_traceparent_check`,\nADD CONSTRAINT `local_slice_jobs_local_slice_jobs_traceparent_check` CHECK ((traceparent REGEXP '(?-i)\\\\A00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\\\\z')),\nADD CONSTRAINT `local_slice_jobs_text_no_nul` CHECK (LOCATE(0x00,CAST(`traceparent` AS BINARY))=0 AND LOCATE(0x00,CAST(`last_error` AS BINARY))=0)",
+          "checksum": "5fb287635562cdd2f873f5f5d80eebdaa54699a21d3f705a4485d3f27792063b",
+          "before": "fea33f825351b15ea49633efc10976c709c3ba25487003aca5a5850e96309b80",
+          "after": "b33a89119f8e1e741e249faba7957bd08dace0044ccd507a347578876421e2d5"
+        },
+        {
+          "name": "node_config_state",
+          "sql": "ALTER TABLE `node_config_state` ADD CONSTRAINT `node_config_state_text_no_nul` CHECK (LOCATE(0x00,CAST(`redacted_config` AS BINARY))=0 AND LOCATE(0x00,CAST(`automation_lock_reason` AS BINARY))=0)",
+          "checksum": "ccd1374b2680ac7227aea2029519a175e7579cbe370e3fd191f1e324d6287e6b",
+          "before": "7665b3165a1cb3d4e34eaddaf1b632b9f8049f0262896149392f3ca528c88fe6",
+          "after": "02b52e4fc86fa93c59a13b9f149f078dbc63235a3b426b1c17f96a0693b7af49"
+        },
+        {
+          "name": "operation_events",
+          "sql": "ALTER TABLE `operation_events` ADD CONSTRAINT `operation_events_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0)",
+          "checksum": "3c4fa09f499fe3d8794bce3bf127d4c7508a4f8745cd205bd8278297b98c1aba",
+          "before": "180a9fd99ef8931f213b605646d49b137d1dbe79bb6c0a8cdc5947adc394d00d",
+          "after": "d9ebf145b31427fd050cc24a1f331fd7b49d36efd856d3619e0a02e1f7e27c84"
+        },
+        {
+          "name": "outbox_events",
+          "sql": "ALTER TABLE `outbox_events` ADD CONSTRAINT `outbox_events_text_no_nul` CHECK (LOCATE(0x00,CAST(`event_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`last_error` AS BINARY))=0)",
+          "checksum": "731a66d7c3cfd156ab7a93458112e42d8aa09c7b649b187d1db332ddea6c1f58",
+          "before": "f0a4cdd28402204478284937a3271a22fd6aaf097a4f3bbe5db2e2cfe24226e0",
+          "after": "0a98c52683d39e49e22cd7a25ff2d62a09a02eb48d6d81fb5fe1f9c5e80b5152"
+        },
+        {
+          "name": "command_attempts",
+          "sql": "ALTER TABLE `command_attempts` ADD CONSTRAINT `command_attempts_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`error_code` AS BINARY))=0)",
+          "checksum": "b1d21ddccb3a1cb7801498c65b2e8636e1b960f4372a3ff5003ac7673e714f21",
+          "before": "f71aba8b67a06f488a5e615b0fdaff4b50741cac74b54586b4c9237f11f39f8a",
+          "after": "f4a4d05cea59698099d959ab054d77af42f2e9ae9d25cb9ba47915c28a87ad00"
+        },
+        {
+          "name": "node_privd_attestation_keys",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` DROP CHECK `node_privd_attestation_keys_node_privd_attestation__57a7fe3617d1`,\nADD CONSTRAINT `node_privd_attestation_keys_node_privd_attestation__57a7fe3617d1` CHECK ((key_id REGEXP '(?-i)\\\\Aed25519-sha256:[0-9a-f]{64}\\\\z')),\nADD CONSTRAINT `node_privd_attestation_keys_text_no_nul` CHECK (LOCATE(0x00,CAST(`key_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`algorithm` AS BINARY))=0 AND LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`predecessor_key_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`successor_key_id` AS BINARY))=0)",
+          "checksum": "9724b9c29940804531fb1b49d9d1cbeed47fa3380d091d8ab52e16e785cce716",
+          "before": "f7025ce32b3746593cc31cac01031d88c5ecd44ac128c7cc7c8b52a50be01c99",
+          "after": "a74f58fbc22741b87c125f0b592f16295f52289d2ce78fc8866075d69a971149"
+        },
+        {
+          "name": "certificates",
+          "sql": "ALTER TABLE `certificates` ADD CONSTRAINT `certificates_text_no_nul` CHECK (LOCATE(0x00,CAST(`common_name` AS BINARY))=0 AND LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`serial_number` AS BINARY))=0 AND LOCATE(0x00,CAST(`revocation_reason` AS BINARY))=0 AND LOCATE(0x00,CAST(`csr_privd_attestation_key_id` AS BINARY))=0)",
+          "checksum": "787448571ae46e3cadfb1927754ea8036bf7b7878a48f71a74b7466f25e2b911",
+          "before": "9fdefbe03e9e9e661134c2589d571b90c06ce717138776bfd1382c409bdcc88f",
+          "after": "6e5a4cf59f919d09b94e903f3fe1956197495298b7f4159cc02d3a2b719dd07d"
+        },
+        {
+          "name": "artifact_operations",
+          "sql": "ALTER TABLE `artifact_operations` ADD CONSTRAINT `artifact_operations_text_no_nul` CHECK (LOCATE(0x00,CAST(`purpose` AS BINARY))=0 AND LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`active_grant_subject` AS BINARY))=0 AND LOCATE(0x00,CAST(`consume_request_id` AS BINARY))=0)",
+          "checksum": "8a56e542455f134b032f7ffc358167241cb044374f03cd6605094c3f9c9ab805",
+          "before": "a326ea024b654e927bdf22946384a20e82dfceb193969105d82062d05615ee5d",
+          "after": "1e81feb2a4c069faf78b72ce9292b93317e18d52f8fc25805942fc4b1ebe7d80"
+        },
+        {
+          "name": "role_bindings",
+          "sql": "ALTER TABLE `role_bindings` ADD CONSTRAINT `role_bindings_text_no_nul` CHECK (LOCATE(0x00,CAST(`role_name` AS BINARY))=0 AND LOCATE(0x00,CAST(`resource_type` AS BINARY))=0)",
+          "checksum": "afbb36e7945c21604b4275d45303a4eaec73b856acf955581095f3be8c49ca12",
+          "before": "32b62e414fc97b9595256c71ab4e92f5a9f578f39c19284312bb3d1f9c204af6",
+          "after": "3569eb26ae10d80255496d0a2d8f0bc34b21668cf3925be9879f31aabd83d7f0"
+        },
+        {
+          "name": "secret_provider_refs",
+          "sql": "ALTER TABLE `secret_provider_refs` MODIFY COLUMN `key_path` VARCHAR(513) NOT NULL,\nDROP CHECK `secret_provider_refs_secret_provider_refs_key_path_check`,\nADD CONSTRAINT `secret_provider_refs_secret_provider_refs_key_path_check` CHECK ((((CHAR_LENGTH(key_path) \u003e= 1) AND (CHAR_LENGTH(key_path) \u003c= 512)) AND (key_path NOT REGEXP '(?-i)(\\\\A|/)\\\\.\\\\.(/|\\\\z)'))),\nDROP CHECK `secret_provider_refs_secret_provider_refs_provider_check`,\nADD CONSTRAINT `secret_provider_refs_secret_provider_refs_provider_check` CHECK ((provider REGEXP '(?-i)\\\\A[A-Za-z0-9._-]{1,64}\\\\z')),\nADD CONSTRAINT `secret_provider_refs_text_no_nul` CHECK (LOCATE(0x00,CAST(`provider` AS BINARY))=0 AND LOCATE(0x00,CAST(`key_path` AS BINARY))=0 AND LOCATE(0x00,CAST(`version` AS BINARY))=0 AND LOCATE(0x00,CAST(`state` AS BINARY))=0)",
+          "checksum": "a6c1f3ccb9d91988f62df8bb0f37f01cad2809a31924e3f2dbcde1f2e1c58d30",
+          "before": "3e52f6e6c0882bf27d06a3c6ce2e763c3da2d122f274be8458fefe82927bb65d",
+          "after": "d60640e690e8415c6800edd1cf79162f9ea0eaf0ab5f79a0ae0e7e0389881a02"
+        },
+        {
+          "name": "security_alerts",
+          "sql": "ALTER TABLE `security_alerts` ADD CONSTRAINT `security_alerts_text_no_nul` CHECK (LOCATE(0x00,CAST(`severity` AS BINARY))=0 AND LOCATE(0x00,CAST(`kind` AS BINARY))=0 AND LOCATE(0x00,CAST(`resource_type` AS BINARY))=0)",
+          "checksum": "c5bae4d27aaba755f08fe5cd1dadec0dd6b42601f42012a42d0b8191b795da8c",
+          "before": "c859899511f4c53b89ae4709987f382effb9baefc0d949f15b44429eb78dce94",
+          "after": "fde3421e34914411c540a1fb67a8ea8e3f489d82776997d0f24c4f0d1acd95d0"
+        },
+        {
+          "name": "telemetry_ingest_batches",
+          "sql": "ALTER TABLE `telemetry_ingest_batches` ADD CONSTRAINT `telemetry_ingest_batches_text_no_nul` CHECK (LOCATE(0x00,CAST(`kind` AS BINARY))=0)",
+          "checksum": "08f6e1e302fddf629bca962c0ffe3e925d5d16c860a1b96dc7affff3319c1f0c",
+          "before": "4d436a98fc0accec513f97ee38209bbb317b8c3b9c3ae54d9768525526b6c932",
+          "after": "02b7e376c59450b8d59f6495b21f1007f9736a86402036e55f91d8af68f426c3"
+        },
+        {
+          "name": "telemetry_rollups_5m",
+          "sql": "ALTER TABLE `telemetry_rollups_5m` ADD CONSTRAINT `telemetry_rollups_5m_text_no_nul` CHECK (LOCATE(0x00,CAST(`metric` AS BINARY))=0)",
+          "checksum": "1e0ac690c5db050f2e2f4612896b31e87bca191f35a381d7d4b96172d5cb58b9",
+          "before": "a3aa53c79eaf207ca1e9f5562af377c102062c0c1011cc74865e5fec23f4d533",
+          "after": "78ecdf6766e53cc028ca88d5130b6a56e445c64888c5c71e7f19fe6870d1bf55"
+        },
+        {
+          "name": "telemetry_samples",
+          "sql": "ALTER TABLE `telemetry_samples` ADD CONSTRAINT `telemetry_samples_text_no_nul` CHECK (LOCATE(0x00,CAST(`metric` AS BINARY))=0)",
+          "checksum": "0668ebbc1d25729d9cb654a3689cd27e1c1895235de11926fd2fd0a67f85d89b",
+          "before": "771ba53ec69c3f4784c9ee7e66fb6f69db667a68a545dfee91e4d116f21e6bb8",
+          "after": "0076debdf35a6eb3ec049a120353eac8c2c5fb02a15ed91afd3e8f974e7c20ca"
+        },
+        {
+          "name": "telemetry_security_events",
+          "sql": "ALTER TABLE `telemetry_security_events` ADD CONSTRAINT `telemetry_security_events_text_no_nul` CHECK (LOCATE(0x00,CAST(`severity` AS BINARY))=0 AND LOCATE(0x00,CAST(`event_type` AS BINARY))=0)",
+          "checksum": "4b569f05bd03ae28e5b5e4ff2b91f6f5a5e41624e27ea534d411fa8e2cee70d2",
+          "before": "d0b171ebae7e0527bc3588fb95af30235e4b1e796ec3321f857db17ae2eb6ec3",
+          "after": "e3a46b43b4aa8299c9836b9562fe1d4e2d94d22742fe4812739f42a20b52c44e"
+        },
+        {
+          "name": "transport_events",
+          "sql": "ALTER TABLE `transport_events` DROP CHECK `transport_events_transport_events_traceparent_check`,\nADD CONSTRAINT `transport_events_transport_events_traceparent_check` CHECK ((traceparent REGEXP '(?-i)\\\\A00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\\\\z')),\nADD CONSTRAINT `transport_events_text_no_nul` CHECK (LOCATE(0x00,CAST(`event_type` AS BINARY))=0 AND LOCATE(0x00,CAST(`traceparent` AS BINARY))=0)",
+          "checksum": "7cff21db916373735b95da329d640298b9367734d9e489c3e02230d7073f1cba",
+          "before": "c6a960d02a47cbc4ded8f3692cbf6b2b5e33e500cf04aae5a5f85d73ff6fa3ed",
+          "after": "72d5202765852764814961f7563c2d4f2ae4c3d2e9f56240e19867f4c05f5bf7"
+        },
+        {
+          "name": "agent_command_results",
+          "sql": "ALTER TABLE `agent_command_results` ADD CONSTRAINT `agent_command_results_text_no_nul` CHECK (LOCATE(0x00,CAST(`state` AS BINARY))=0 AND LOCATE(0x00,CAST(`error_code` AS BINARY))=0 AND LOCATE(0x00,CAST(`receipt_verification_status` AS BINARY))=0 AND LOCATE(0x00,CAST(`receipt_failure_reason` AS BINARY))=0 AND LOCATE(0x00,CAST(`privd_attestation_key_id` AS BINARY))=0)",
+          "checksum": "74510eab0d6b6dddbe5dd5fe59fa1867b1a3366933494e03e671d9d98df0e991",
+          "before": "820cd35457543874d8f8ca245171a3377bb38f09c622732e029a66c3d025e365",
+          "after": "3abb71c63278e99b718dfabe6317e60cb3b1417498570887365fcb79dbbc6998"
+        },
+        {
+          "name": "user_policy_enforcements",
+          "sql": "ALTER TABLE `user_policy_enforcements` ADD CONSTRAINT `user_policy_enforcements_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0 AND LOCATE(0x00,CAST(`cause` AS BINARY))=0)",
+          "checksum": "3a82aa3cd9c43090c825cbfa3400114c06c69b2887101260ff6c8d910decebad",
+          "before": "56ca7b882690a9c69c7933c8d8755d54b425b79f66b46101d040c5657f85ee81",
+          "after": "6e6b02d3b82e22a072799cf53499ac3a03b6cb96fc295f59534a46f7d9d88193"
+        },
+        {
+          "name": "user_policy_mutations",
+          "sql": "ALTER TABLE `user_policy_mutations` ADD CONSTRAINT `user_policy_mutations_text_no_nul` CHECK (LOCATE(0x00,CAST(`username` AS BINARY))=0 AND LOCATE(0x00,CAST(`idempotency_key` AS BINARY))=0)",
+          "checksum": "0007938df40e114f123536cc431bbf4c79af03d986fdf9556368870abc2f5a4e",
+          "before": "4db6d7e4a1f4f953a97c640cbe7d3220d26ce815575fbbf55ea0fd17a2f7a6b9",
+          "after": "c16b3f6804a6c5275537eecaef9f08ce517f3c5fe8bf4d49adc78cd82a8b68bb"
+        },
+        {
+          "name": "user_usage_cursors",
+          "sql": "ALTER TABLE `user_usage_cursors` MODIFY COLUMN `session_id` VARCHAR(257) NOT NULL,\nDROP CHECK `user_usage_cursors_user_usage_cursors_username_check`,\nADD CONSTRAINT `user_usage_cursors_user_usage_cursors_username_check` CHECK ((username REGEXP '(?-i)\\\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\\\z')),\nADD CONSTRAINT `user_usage_cursors_text_no_nul` CHECK (LOCATE(0x00,CAST(`session_id` AS BINARY))=0 AND LOCATE(0x00,CAST(`username` AS BINARY))=0)",
+          "checksum": "397344b6576d9b84c1d356efcbddb3a96f0d7c4c99aba631a049a2eba2e77874",
+          "before": "dd60e29cff1de12be9603aacbeaf460b3ca30476ff4319505b47e2308b4f6b25",
+          "after": "81ab7725e2941b571fcfe2b960d6a1f5bf6e10c6bbb6c167e3545b1d07f93487"
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": []
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

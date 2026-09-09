@@ -176,3 +176,54 @@ No length restriction for those eleven fields has been approved or hidden by
 a prefix/hash unique index. JSON/arrays, full timestamp/sentinel semantics,
 telemetry maintenance parity and business lock call sites remain open. This
 is incremental progress, not full PR-02 acceptance; production remains denied.
+
+## Append-only Draft history
+
+The expanded PR-02 scope requires preserving every published Draft artifact.
+The original `f6cd0e0` manifests (also used by `6a6e3c5`) are now archived
+byte-for-byte, and the `144b660` manifests remain unchanged at their original
+paths. Independent appended version-2 manifests identify both exact parent
+checksums. This supersedes the earlier Draft behavior of rejecting all prior
+Draft databases: known histories now have an explicit forward upgrade, while
+unknown/conflicting checksums are still refused, including during repair.
+
+Real-server tests instantiate each published baseline by executing its actual
+SQL, insert existing application data, then run concurrent/repeated upgrades.
+They compare all original metadata and step receipts, including timestamps,
+before/after, and verify preserved application values. The original baseline
+executes 58 ALTER steps; the already-corrected parent has zero ALTER receipts.
+No synthetic PostgreSQL or prior-Draft execution history is inserted.
+
+Failure tests put an invalid legacy NUL value into the original schema and
+verify durable dirty refusal, explicit owner data correction and checksum-bound
+repair without rewriting baseline receipts. Another test forwards an ALTER to
+the real server, observes its committed response, suppresses that response and
+kills the upgrader subprocess. Repair verifies the pinned postcondition without
+repeating committed DDL. Conflicting revision/step checksums remain refused.
+Runtime can SELECT both new metadata tables but cannot INSERT, UPDATE or DELETE
+either; existing owner/runtime/maintenance and audit/DDL denials still run.
+
+Version-2 SQL and postcondition fingerprints were authored independently on
+the pinned engines. Physical CHECK ordering differs between the two upgrade
+lineages, so the manifests pin each lineage's actual resulting definitions.
+The temporary authoring test was removed before regression runs. Evidence is
+`artifacts/revision-author.log`; migration has no hash-learning mode.
+
+Final reruns on BuildServer, 2026-09-09, same isolated checkout and
+private TMPDIR (exit 0):
+
+| Command | Result | Evidence under checkout |
+| --- | --- | --- |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | MySQL 8.4.10, `-race` passed in 102.509s; config and CLI checks passed | `artifacts/revisions-mysql-final.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | MariaDB 12.3.2, `-race` passed in 43.707s; config and CLI checks passed | `artifacts/revisions-mariadb-final.log` |
+| `PG_MAJOR=all ARTIFACT_DIR=.../artifacts/revisions-postgres bash scripts/database-integration.sh` | PostgreSQL 17/18 integration, historical SHA-256 checks and driver-boundary tests passed | `artifacts/revisions-postgres.log`, `artifacts/revisions-postgres/` |
+| `bash scripts/docs-check.sh` | Passed with source documentation/code paths indexed in the isolated server checkout | `artifacts/revisions-docs.log` |
+
+Worktree `git diff --check` passed. PostgreSQL historical migrations and all
+published version-1 manifest bytes are unchanged by this update.
+
+This evidence establishes the appended-history milestone, not the expanded
+PR-02 acceptance. Eleven unapproved text limits, lossless JSON/array/time
+representations with actual adapters, telemetry physical storage/retention,
+common business transactions and real three-engine Controller workflows remain
+unfinished. Draft status and production refusal remain in force.
