@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/coreos/go-oidc/v3 v3.17.0
+	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
@@ -20,6 +21,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

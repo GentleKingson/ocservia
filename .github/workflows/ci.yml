@@ -99,15 +99,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["17", "18"]
+        include:
+          - engine: postgres
+            postgres: "17"
+          - engine: postgres
+            postgres: "18"
+          - engine: mysql
+          - engine: mariadb
     env:
       PG_MAJOR: ${{ matrix.postgres }}
+      ENGINE: ${{ matrix.engine }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - run: scripts/bootstrap.sh go-test
-      - run: scripts/database-integration.sh
+      - if: matrix.engine == 'postgres'
+        run: scripts/database-integration.sh
+      - if: matrix.engine != 'postgres'
+        run: bash scripts/database-foundation-integration.sh
 
   basic-ci-result:
     name: Basic CI Result
