@@ -60,7 +60,7 @@ expected_commands = {
   "docs" => ["scripts/docs-check.sh"],
   "go" => ["scripts/bootstrap.sh go-test", "scripts/go-check.sh standard"],
   "rust" => ["scripts/bootstrap.sh rust-basic", "scripts/rust-check.sh"],
-  "web" => ["scripts/bootstrap.sh web", "scripts/web-check.sh"],
+  "web" => ["scripts/bootstrap.sh web", "source scripts/env.sh\ncd web\nnpx playwright install --with-deps chromium\n", "scripts/web-check.sh"],
   "database-smoke" => ["scripts/bootstrap.sh go-test", "scripts/database-integration.sh"]
 }
 expected_commands.each do |id, commands|
