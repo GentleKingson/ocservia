@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http/httptest"
@@ -31,6 +32,7 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 	}
 	defer otherPool.Close()
 	servers := []*Server{newAuthHTTPServer(t, pool, true, ""), newAuthHTTPServer(t, otherPool, true, "")}
+	logs := []*bytes.Buffer{captureAuthLogs(servers[0]), captureAuthLogs(servers[1])}
 	name := "r2-http-" + uuid.NewString()
 	missing := "missing-" + name
 	defer func() {
@@ -53,6 +55,14 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		for _, username := range []string{name, missing} {
 			w := request(i, " "+strings.ToUpper(username)+" ", "wrong")
+			reason := "credentials_rejected"
+			if i >= 5 {
+				reason = "account_limited"
+			}
+			record := assertAuthLog(t, logs[i%2], "local", "rejected", reason)
+			if record["account_ref"] != servers[0].auth.LocalAccountRef(username) {
+				t.Fatal("cross-instance account log correlation differs")
+			}
 			if body == "" {
 				body = w.Body.String()
 			}

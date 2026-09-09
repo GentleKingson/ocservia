@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const authSourceCapacity = 4096
@@ -30,6 +32,11 @@ func newAuthAdmission(perSource, globalLimit, concurrent int) *authAdmission {
 }
 
 func (a *authAdmission) admit(source netip.Addr, now time.Time, emergency bool) (func(), time.Duration) {
+	release, retry, _ := a.admitReason(source, now, emergency)
+	return release, retry
+}
+
+func (a *authAdmission) admitReason(source netip.Addr, now time.Time, emergency bool) (func(), time.Duration, authLogKind) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !emergency {
@@ -44,19 +51,19 @@ func (a *authAdmission) admit(source netip.Addr, now time.Time, emergency bool) 
 		window, exists := a.sources[source]
 		// Do not evict live windows: cycling source addresses must not reset limits.
 		if !exists && len(a.sources) >= authSourceCapacity {
-			return nil, time.Minute
+			return nil, time.Minute, localSourceCapacityLimited
 		}
 		if !now.Before(window.until) {
 			window = authWindow{until: now.Add(time.Minute)}
 		}
 		if window.count >= a.perSource {
-			return nil, window.until.Sub(now)
+			return nil, window.until.Sub(now), localSourceLimited
 		}
 		if !now.Before(a.global.until) {
 			a.global = authWindow{until: now.Add(time.Minute)}
 		}
 		if a.globalLimit > 0 && a.global.count >= a.globalLimit {
-			return nil, a.global.until.Sub(now)
+			return nil, a.global.until.Sub(now), localGlobalLimited
 		}
 		window.count++
 		a.sources[source] = window
@@ -64,9 +71,9 @@ func (a *authAdmission) admit(source netip.Addr, now time.Time, emergency bool) 
 	}
 	select {
 	case a.active <- struct{}{}:
-		return func() { <-a.active }, 0
+		return func() { <-a.active }, 0, 0
 	default:
-		return nil, time.Second
+		return nil, time.Second, localConcurrencyLimited
 	}
 }
 
@@ -99,8 +106,14 @@ func (s *Server) authSource(r *http.Request) netip.Addr {
 }
 
 func (s *Server) admitAuthentication(w http.ResponseWriter, r *http.Request, budget *authAdmission, emergency bool) func() {
-	release, retry := budget.admit(s.authSource(r), time.Now(), emergency)
+	release, retry, kind := budget.admitReason(s.authSource(r), time.Now(), emergency)
 	if release == nil {
+		if authResultRoute(r) {
+			if r.Method != http.MethodPost {
+				kind += oidcSourceLimited - localSourceLimited
+			}
+			s.logAuth(r, kind, uuid.Nil, "")
+		}
 		w.Header().Set("Retry-After", strconv.Itoa(int((retry+time.Second-1)/time.Second)))
 		w.Header().Set("Cache-Control", "no-store")
 		writeProblem(w, r, http.StatusTooManyRequests, "https://ocservia.dev/problems/authentication-limit", "Authentication limit reached", "retry authentication after the indicated delay")

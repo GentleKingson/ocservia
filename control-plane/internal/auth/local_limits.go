@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,7 +18,11 @@ const (
 	localAttemptLockID    int64 = 734821033
 )
 
-var errLocalAttemptCapacity = errors.New("Local authentication attempt capacity exhausted")
+var (
+	ErrLocalAccountLimited  = fmt.Errorf("%w: account admission refused", ErrUnauthenticated)
+	ErrLocalAttemptCapacity = errors.New("Local authentication attempt capacity exhausted")
+	errLocalAttemptCapacity = ErrLocalAttemptCapacity
+)
 
 // reserveLocalAttempt receives only normalizeLocalUsername output. A durable
 // single-flight lease prevents concurrent KDF work from overshooting a threshold.
@@ -69,7 +74,7 @@ func (s *Service) reserveLocalAttempt(ctx context.Context, username string) (uui
 		return uuid.Nil, err
 	}
 	if result.RowsAffected() != 1 {
-		return uuid.Nil, ErrUnauthenticated
+		return uuid.Nil, ErrLocalAccountLimited
 	}
 	return lease, nil
 }

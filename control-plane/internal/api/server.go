@@ -70,6 +70,7 @@ type Server struct {
 	authProxies      []netip.Prefix
 	breakGlassBudget *authAdmission
 	localLoginBudget *authAdmission
+	authLogs         authLogState
 	rbac             *rbac.Service
 	approvals        *approvals.Service
 	audit            *audit.Manager
@@ -490,7 +491,7 @@ func (s *Server) limitBody(next http.Handler) http.Handler {
 func (s *Server) requestContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if requestID == "" || len(requestID) > 128 {
+		if requestID == "" || len(requestID) > 128 || boundedLogField(requestID, 128) != requestID {
 			requestID = randomID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
@@ -498,7 +499,9 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 			w.Header().Set("X-Ocservia-Dev-Subject", "developer")
 		}
 		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, requestID))
-		s.logger.InfoContext(r.Context(), "http request", "request_id", requestID, "trace_id", trace.SpanContextFromContext(r.Context()).TraceID().String(), "method", r.Method, "path", r.URL.Path)
+		if !authResultRoute(r) {
+			s.logger.InfoContext(r.Context(), "http request", "request_id", requestID, "trace_id", trace.SpanContextFromContext(r.Context()).TraceID().String(), "method", r.Method, "path", r.URL.Path)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
