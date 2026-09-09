@@ -398,3 +398,68 @@ JSONB fields, one array field, approval creation/approval, certificate issuance
 and maintenance, and remaining Controller operation/transport/read-model
 transactions still require migration with their real call chains. The PR must
 remain Draft and MySQL/MariaDB production startup must remain refused.
+
+## Appended Version 5 Milestone
+
+Version 5 extends both historical roots through the exact published v4 parents.
+The MySQL manifest SHA256 is
+`0446b47cc83175873680e140e1bd20dd284a89fcd2907a79a81573152ba80ad1`;
+the MariaDB manifest SHA256 is
+`3483d0f381fd4b1b18235eef1e21a681c96b39c227f91487da09d696c281da77`.
+Both were authored against real pinned servers, including source-copy checks.
+Evidence is retained under `artifacts/v5-author-all/` and
+`artifacts/pr02-v5-author-{mysql,mariadb}3.log` on the same BuildServer checkout.
+Versions 1 through 4 and PostgreSQL migrations remain unchanged.
+
+This milestone converts 33 additional time fields and four JSONB fields,
+ports approval creation/approval and the actual telemetry ingestion transaction,
+and extends the real HTTP router workflow through independent approval of a
+password reset, replay denial and session revocation. Artifact download and
+authentication exercise explicit infinity/finite-extreme decisions rather than
+silently mapping them to native DATETIME. A populated v4 upgrade also checks
+unchanged historical receipts and exact finite/NULL preservation.
+
+Development failures are retained, not counted as acceptance passes:
+
+- Initial authoring exposed overlapping snapshot time/JSON writer guards and
+  uppercase trigger names. The unpublished candidate uses one guarded sequence
+  and valid lowercase identifiers. No published checksums were changed.
+- The first focused workflow runs exposed missing v5 embed declarations.
+  Both manifests are now explicitly embedded and checksum-pinned.
+- The second MySQL focused run passed the database and authentication HTTP
+  tests, then failed telemetry snapshot insertion because `system` is reserved.
+  The adapter and readback query now quote that column; the failure remains in
+  `artifacts/pr02-v5-workflows-mysql2.log`.
+- Early PostgreSQL attempts failed in the exported-checkout VCS wrapper and
+  during a source update while compiling embed inputs. These were setup/build
+  failures, not successful database runs.
+
+The focused MariaDB workflow script passed database authentication/approval/
+artifact tests, the actual HTTP test and the actual telemetry test in
+`artifacts/pr02-v5-workflows-mariadb2.log`. Full-script verification is recorded
+separately below; focused runs are not substitutes for the full matrix.
+
+All full scripts below ran without filtering database test names, using the
+root-owned TMPDIR and the exported-checkout `-buildvcs=false` wrapper. All
+commands exited 0. MySQL/MariaDB use distinct digest-pinned real containers.
+
+| Command | Result | Evidence under BuildServer checkout |
+| --- | --- | --- |
+| `PG_MAJOR=all bash scripts/database-integration.sh` | Full PostgreSQL 17/18 integration passed, including the new approval service, authentication HTTP and telemetry ingestion workflows | `artifacts/pr02-v5-postgres3.log` |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | MySQL 8.4.10 database suite with `-race` passed in 1515.060s; actual HTTP workflow in 32.69s and telemetry workflow in 23.65s; config/CLI checks passed | `artifacts/pr02-v5-full-mysql.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | MariaDB 12.3.2 database suite with `-race` passed in 1112.700s; actual HTTP workflow in 29.74s and telemetry workflow in 18.96s; config/CLI checks passed | `artifacts/pr02-v5-full-mariadb.log` |
+| `go test -buildvcs=false -run '^$' ./...` | All Controller packages compile | `artifacts/pr02-v5-compile-final.log` |
+| `go test -buildvcs=false -count=1 ./internal/audit` | Unit regressions, including legacy payload/signature preservation and large JSONB numbers, passed | `artifacts/pr02-v5-audit-final.log` |
+| `bash scripts/docs-check.sh` | Passed | `artifacts/pr02-v5-docs-final.log` |
+| `bash scripts/test-bootstrap-profiles.sh` | Passed using container Ruby/jq dependencies; matrix/backend contract unchanged | `artifacts/pr02-v5-profiles-final.log` |
+
+This is still **not complete PR-02 acceptance**. Of the historical pre-v4
+inventory, 97 time fields, five JSONB fields and one array remain on earlier
+representations. Certificate issuance/maintenance, remaining Controller outer
+transactions, telemetry transport/read models/maintenance and extended-time
+API representations still need their real adapters and workflows. The ingest
+workflow does not yet establish signed upgrade-result/key-rotation coverage or
+equivalence for caller-owned old RepeatableRead snapshots. Audit v1 retains its
+existing ordinary-number float64 canonicalization; the narrow large-number
+fallback preserves old signatures, not a claim to solve that older ambiguity.
+Draft and the production rejection gate remain mandatory.

@@ -1,4 +1,4 @@
-# PR-02 Version 4 Controller Workflows
+# PR-02 Version 5 Controller Workflows
 
 This is still Draft and not final PR-02 acceptance. Controller startup rejects
 MySQL/MariaDB; tests explicitly construct backend-owned services and the actual
@@ -7,13 +7,13 @@ route, transport consumer, upgrade or read model is portable.
 
 ## Recorded Migration
 
-Version 4 appends to the exact published version-3 checksum on both historical
-roots. Versions 1 through 3 and all PostgreSQL migration files are unchanged.
+Version 5 appends to the exact published version-4 checksum on both historical
+roots. Versions 1 through 4 and all PostgreSQL migration files are unchanged.
 Both engine manifests are authored by executing SQL and checking the resulting
 objects and copied values on the pinned real databases, never by adopting live
 hashes during application startup.
 
-Thirteen additional business time columns use signed PostgreSQL-epoch
+Version 4 added thirteen business time columns using signed PostgreSQL-epoch
 microseconds: four local-auth attempt fields, two scheduler leadership fields,
 two audit fields, role-binding creation, bootstrap completion, and three
 approval fields. Audit before/after summaries use lossless, arbitrary JSONB
@@ -24,6 +24,13 @@ An interrupted migration still refuses startup and requires checksum repair.
 Ambiguous historical auth lease/block timestamps require explicit owner
 decisions, as documented in [logical time](database-pr02-time-decisions.md).
 A normal owner connection cannot change guarded source rows during repair.
+
+Version 5 adds 33 more time columns: 13 identity/authentication fields, seven
+artifact/certificate fields, two approval fields, and 11 telemetry ingestion
+fields. Approval request summaries and the three snapshot JSON objects receive
+lossless storage and server validation. Populated v4 upgrade coverage checks
+that the prior migration receipts remain unchanged and that finite historical
+year-1000 values remain finite, rather than being guessed to be infinity.
 
 ## Actual Business Boundaries
 
@@ -56,8 +63,21 @@ The cross-engine HTTP test executes login, authentication, logout, local admin
 bootstrap, authorized user creation, unauthorized management denial, password
 change/session revocation, user disable and last-administrator protection.
 Other tests exercise the real audit/RBAC, scheduler and download service
-methods. Approval request/approval creation is still fixture setup in the
-audit/RBAC corpus, not an end-to-end approval API acceptance claim.
+methods. Version 5 also runs the real approval service create/approve/consume
+chain and extends HTTP coverage to independently approved password resets,
+self-approval refusal, replay refusal and session revocation. Approval creation,
+approval and validation now use the common Store boundary.
+
+Artifact download tests cover NULL, minimum/maximum finite timestamps and both
+infinities. Authentication honors an infinite stored session expiry without
+extending the independently signed finite cookie lifetime. These are explicit
+domain decisions, not general JSON API support for extended timestamps.
+
+Audit canonicalization retains every previously signable v1 payload byte and
+extends only its formerly rejected large-number domain. This permits summaries
+such as `1e1000` without invalidating historical signatures. The existing v1
+float64 canonicalization of ordinary large integers is not changed; lossless
+storage is not a claim that this historical authentication ambiguity is solved.
 
 ## Historical Telemetry
 
@@ -80,14 +100,22 @@ The owner must grant newly created monthly tables through the existing explicit
 test-account provisioning command. Existing inconsistent retired/dropped shard
 history is refused rather than silently revived or discarded.
 
+The actual telemetry ingest service now owns common transactions, including
+wire decoding, batch deduplication, node locking, snapshots, sessions, bans,
+users/groups, usage accounting and history writes. Its cross-engine workflow
+checks outer rollback/retry, concurrent duplicate delivery, stale snapshots,
+usage-conflict rollback, JSON rejection and cancellation. The PostgreSQL
+transport transaction bridge remains; the MySQL constructor is ingestion-only,
+not a portable implementation of all telemetry service methods.
+
 ## Remaining Acceptance
 
-Of the pre-v4 inventory, 130 DATETIME fields, nine JSONB fields and one text-array
+Of the pre-v4 inventory, 97 DATETIME fields, five JSONB fields and one text-array
 field remain on their earlier representations. Each needs its writers/readers
-ported together with an appended migration. In particular, native artifact
-times are still range-limited despite correct transaction-clock usage.
+ported together with an appended migration. Converted physical columns alone
+do not prove every writer and API representation supports the full domain.
 
-Approval creation/approval, certificate issuance/maintenance, complete
-operation/transport/telemetry ingestion and read-model transactions, and full
+Certificate issuance/maintenance, complete operation/transport and telemetry
+read-model/maintenance transactions, extended-time API representation, and full
 Controller startup/workflow parity remain outstanding. No deployment, release,
 merge, ready-for-review transition or claim of complete support is authorized.

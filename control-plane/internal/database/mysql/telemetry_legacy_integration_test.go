@@ -25,7 +25,7 @@ func legacyTelemetryFixture(t *testing.T) (*Backend, Options, uuid.UUID, uuid.UU
 	if _, err := b.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'legacy-history','active',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))`, UUIDBytes(node), UUIDBytes(workspace)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES(?,?,1,'raw_history',CURRENT_TIMESTAMP(6),1)`, UUIDBytes(batch), UUIDBytes(node)); err != nil {
+	if _, err := b.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES(?,?,1,'raw_history',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',CURRENT_TIMESTAMP(6)),1)`, UUIDBytes(batch), UUIDBytes(node)); err != nil {
 		t.Fatal(err)
 	}
 	return b, options, node, batch

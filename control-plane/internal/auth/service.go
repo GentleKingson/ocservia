@@ -21,6 +21,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/identityprofile"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
@@ -237,8 +238,24 @@ func (s *Service) Authenticate(ctx context.Context, cookie *http.Cookie) (Princi
 	principal := Principal{SessionID: sessionID, IdentityID: identityID}
 	err = s.withAuthentication(ctx, func(_ database.Tx, store authstore.Store) error {
 		session, err := store.Session(ctx, sessionID, identityID)
-		principal.Issuer, principal.Subject, principal.BreakGlass, principal.ExpiresAt = session.Issuer, session.Subject, session.BreakGlass, session.ExpiresAt
-		return err
+		if err != nil {
+			return err
+		}
+		principal.Issuer, principal.Subject, principal.BreakGlass = session.Issuer, session.Subject, session.BreakGlass
+		principal.ExpiresAt = envelope.ExpiresAt
+		if !session.ExpiresAt.Valid {
+			return ErrUnauthenticated
+		}
+		if session.ExpiresAt.Micros != value.PositiveInfinity {
+			expires, err := session.ExpiresAt.Time()
+			if err != nil {
+				return err
+			}
+			if expires.Before(principal.ExpiresAt) {
+				principal.ExpiresAt = expires
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return Principal{}, ErrUnauthenticated

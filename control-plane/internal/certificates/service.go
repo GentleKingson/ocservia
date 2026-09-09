@@ -27,6 +27,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
@@ -695,11 +696,20 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 		}
 		issuedAt := s.now().UTC()
 		expires := issuedAt.Add(time.Minute)
-		if eligible.ArtifactExpires.Before(expires) {
-			expires = eligible.ArtifactExpires
-		}
-		if eligible.CertificateExpires.Before(expires) {
-			expires = eligible.CertificateExpires
+		for _, deadline := range []value.Timestamp{eligible.ArtifactExpires, eligible.CertificateExpires} {
+			if !deadline.Valid || deadline.Validate() != nil {
+				return ErrArtifactDenied
+			}
+			if deadline.Micros == value.PositiveInfinity {
+				continue
+			}
+			finite, timeErr := deadline.Time()
+			if timeErr != nil {
+				return ErrArtifactDenied
+			}
+			if finite.Before(expires) {
+				expires = finite
+			}
 		}
 		grant, err = s.grantSigner.IssueArtifactGrant(eligible.NodeID, id, eligible.CertificateID, eligible.CertificateVersion, eligible.OperationID, eligible.RequesterID.String(), uint64(eligible.Size), grantID, issuedAt, expires)
 		if err != nil {

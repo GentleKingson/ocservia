@@ -23,10 +23,10 @@
    1 control-plane/internal/approvals/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/approvals/service.go:"github.com/jackc/pgx/v5/pgxpool"
    1 control-plane/internal/approvals/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-   1 control-plane/internal/approvals/service.go:postgres.WrapTx
-   1 control-plane/internal/approvals/service.go:pgx.Row
-   4 control-plane/internal/approvals/service.go:pgx.Tx
-   2 control-plane/internal/approvals/service.go:pgxpool.Pool
+   2 control-plane/internal/approvals/service.go:postgres.WrapTx
+   1 control-plane/internal/approvals/service.go:postgres.WrapPool
+   2 control-plane/internal/approvals/service.go:pgx.Tx
+   1 control-plane/internal/approvals/service.go:pgxpool.Pool
    1 control-plane/internal/attestationtest/helper.go:"github.com/jackc/pgx/v5/pgxpool"
    1 control-plane/internal/attestationtest/helper.go:pgxpool.Pool
    1 control-plane/internal/audit/chain.go:"github.com/jackc/pgx/v5"
@@ -129,13 +129,11 @@
    1 control-plane/internal/rbac/service.go:pgxpool.Pool
    1 control-plane/internal/telemetry/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
    1 control-plane/internal/telemetry/service.go:"github.com/jackc/pgx/v5"
-   1 control-plane/internal/telemetry/service.go:"github.com/jackc/pgx/v5/pgconn"
    1 control-plane/internal/telemetry/service.go:"github.com/jackc/pgx/v5/pgxpool"
-   1 control-plane/internal/telemetry/service.go:pgconn.PgError
-   1 control-plane/internal/telemetry/service.go:pgx.ErrNoRows
-   5 control-plane/internal/telemetry/service.go:pgx.Tx
+   3 control-plane/internal/telemetry/service.go:pgx.Tx
    3 control-plane/internal/telemetry/service.go:pgxpool.Pool
-   1 control-plane/internal/telemetry/service.go:postgres.WrapTx
+   2 control-plane/internal/telemetry/service.go:postgres.WrapTx
+   2 control-plane/internal/telemetry/service.go:postgres.WrapPool
    1 control-plane/internal/useroperations/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/useroperations/service.go:"github.com/jackc/pgx/v5/pgxpool"
    6 control-plane/internal/useroperations/service.go:pgx.ErrNoRows

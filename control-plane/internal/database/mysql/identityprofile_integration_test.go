@@ -27,7 +27,7 @@ func TestRealIdentityProfiles(t *testing.T) {
 	}
 	defer b.Close()
 	semantictest.IdentityProfiles(t, b, func(id uuid.UUID) error {
-		_, err := b.Exec(ctx, `UPDATE identities SET disabled_at=CURRENT_TIMESTAMP(6) WHERE id=?`, UUIDBytes(id))
+		_, err := b.Exec(ctx, `UPDATE identities SET disabled_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) WHERE id=?`, UUIDBytes(id))
 		return err
 	})
 }

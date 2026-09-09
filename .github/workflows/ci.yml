@@ -95,7 +95,7 @@ jobs:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:

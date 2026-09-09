@@ -14,6 +14,8 @@ func TestPublishedDraftArtifactsAreImmutable(t *testing.T) {
 		"mariadb/000003.json":          "9a0353fd6b518b062f15bd5608a1777dd596175d028a36867a29c124e27f7e1d",
 		"mysql/000004.json":            "d67c7a44b41c716c6ff19c5ea49b26febb842f8869a8f2a6d1d696fb5aa5e11d",
 		"mariadb/000004.json":          "66cb14281fcfc42268260ab4a75826e1b3bc3047f1a6576f8d7206eef9a1b038",
+		"mysql/000005.json":            "0446b47cc83175873680e140e1bd20dd284a89fcd2907a79a81573152ba80ad1",
+		"mariadb/000005.json":          "3483d0f381fd4b1b18235eef1e21a681c96b39c227f91487da09d696c281da77",
 	} {
 		data, err := manifests.ReadFile(path)
 		if err != nil || digest(data) != want {

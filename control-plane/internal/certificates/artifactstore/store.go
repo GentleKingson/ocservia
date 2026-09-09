@@ -4,6 +4,7 @@ package artifactstore
 import (
 	"context"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"time"
 )
@@ -13,7 +14,7 @@ type Eligible struct {
 	CertificateVersion                              uint64
 	Digest                                          []byte
 	Size                                            int64
-	ArtifactExpires, CertificateExpires             time.Time
+	ArtifactExpires, CertificateExpires             value.Timestamp
 }
 type Consumption struct {
 	ID, GrantID, ActorID, SessionID, NodeID, CertificateID, OperationID uuid.UUID

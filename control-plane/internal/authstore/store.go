@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -20,7 +21,7 @@ type Credential struct {
 type Session struct {
 	Issuer, Subject string
 	BreakGlass      bool
-	ExpiresAt       time.Time
+	ExpiresAt       value.Timestamp
 }
 type Bootstrap struct {
 	IdentityID, WorkspaceID uuid.UUID
@@ -65,6 +66,15 @@ type Store interface {
 // later request cancellation. Session issuance still rechecks under a Tx lock.
 type CredentialReader interface {
 	ReadLocalCredential(context.Context, string) (Credential, error)
+	HasLocalCredential(context.Context, uuid.UUID) (bool, error)
+}
+
+func HasLocalCredential(ctx context.Context, backend database.Backend, id uuid.UUID) (bool, error) {
+	reader, ok := backend.(CredentialReader)
+	if !ok {
+		return false, database.ErrUnsupported
+	}
+	return reader.HasLocalCredential(ctx, id)
 }
 
 func ReadCredential(ctx context.Context, backend database.Backend, username string) (Credential, error) {

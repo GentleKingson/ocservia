@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates/artifactstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"time"
 )
@@ -17,12 +18,8 @@ func (s artifactStore) Resource(ctx context.Context, id uuid.UUID) (workspace, n
 }
 
 func (t *transaction) ArtifactStore() artifactstore.Store { return artifactStore{t} }
-func (s artifactStore) clock(ctx context.Context) (time.Time, error) {
-	v, err := database.TransactionTime(ctx, s.Tx)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return v.Time()
+func (s artifactStore) clock(ctx context.Context) (value.Timestamp, error) {
+	return database.TransactionTime(ctx, s.Tx)
 }
 func (s artifactStore) LockCapacity(ctx context.Context) error {
 	return LockTransaction(ctx, s.Tx, "pg-advisory:6820260817")
@@ -50,11 +47,15 @@ func (s artifactStore) Eligible(ctx context.Context, id uuid.UUID, hash []byte) 
 	return
 }
 func (s artifactStore) Lease(ctx context.Context, id, grant, subject uuid.UUID, expires time.Time) error {
+	expiration, err := value.FromTime(expires)
+	if err != nil {
+		return err
+	}
 	now, err := s.clock(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `UPDATE artifact_operations SET state='leased',lease_until=?,active_grant_id=?,active_grant_subject=?,active_grant_expires_at=?,updated_at=? WHERE id=?`, expires, UUIDBytes(grant), subject.String(), expires, now, UUIDBytes(id))
+	_, err = s.Exec(ctx, `UPDATE artifact_operations SET state='leased',lease_until=?,active_grant_id=?,active_grant_subject=?,active_grant_expires_at=?,updated_at=? WHERE id=?`, expiration, UUIDBytes(grant), subject.String(), expiration, now, UUIDBytes(id))
 	return err
 }
 func (s artifactStore) StartConsumption(ctx context.Context, v artifactstore.Consumption) (bool, error) {

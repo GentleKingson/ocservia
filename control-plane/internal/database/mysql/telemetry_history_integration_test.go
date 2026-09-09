@@ -37,7 +37,7 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	if _, err = owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'history','active',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))`, UUIDBytes(node), UUIDBytes(workspace)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = owner.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES(?,?,1,'raw_history',?,1)`, UUIDBytes(batch), UUIDBytes(node), now); err != nil {
+	if _, err = owner.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES(?,?,1,'raw_history',?,1)`, UUIDBytes(batch), UUIDBytes(node), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
 	semantictest.TelemetryHistoryWorkflow(t, semantictest.TelemetryHistoryHarness{

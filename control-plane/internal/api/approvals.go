@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
@@ -324,12 +325,11 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		managementWorkspace, scopeErr := s.auth.LocalManagementWorkspace(r.Context())
-		var local bool
 		if scopeErr != nil || managementWorkspace != resource.WorkspaceID {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
 			return
 		}
-		if err := s.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=$1 AND i.issuer='local' AND i.subject=c.username)`, resource.ID).Scan(&local); err != nil || !local {
+		if local, err := s.auth.HasLocalCredential(r.Context(), resource.ID); err != nil || !local {
 			s.writeAuthorizationError(w, r, pgx.ErrNoRows)
 			return
 		}
@@ -401,7 +401,7 @@ func writeApprovalError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-not-ready", "Approval unavailable", "the approval is expired, consumed, or does not match")
 	case errors.Is(err, approvals.ErrInvalid):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the approval request is invalid")
-	case errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, pgx.ErrNoRows), errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the approval does not exist")
 	default:
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Approval unavailable", "approval state is temporarily unavailable")

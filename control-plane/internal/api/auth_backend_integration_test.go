@@ -13,10 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
@@ -120,6 +122,23 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if err != nil || principal.IdentityID != id {
 		t.Fatalf("session: %+v %v", principal, err)
 	}
+	// Stored infinite or extended-range expiry must never lengthen the finite
+	// lifetime authenticated by the signed cookie.
+	query := `UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`
+	var sessionID any = principal.SessionID
+	if _, ok := backend.(*mysql.Backend); ok {
+		query = `UPDATE auth_sessions SET expires_at=? WHERE id=?`
+		sessionID = mysql.UUIDBytes(principal.SessionID)
+	}
+	for _, micros := range []int64{value.PositiveInfinity, value.EndTimestamp - 1} {
+		if _, err := backend.Exec(ctx, query, value.Timestamp{Micros: micros, Valid: true}, sessionID); err != nil {
+			t.Fatal(err)
+		}
+		bounded, err := service.Authenticate(ctx, cookie)
+		if err != nil || !bounded.ExpiresAt.Truncate(time.Microsecond).Equal(principal.ExpiresAt) {
+			t.Fatalf("logical session expiry %d: %+v %v", micros, bounded, err)
+		}
+	}
 	logout := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
 	logout.Header.Set("Origin", authTestOrigin)
 	logout.AddCookie(cookie)
@@ -186,12 +205,17 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if admin.IdentityID != adminID {
 		t.Fatal("wrong bootstrap principal")
 	}
-	server.EnableAuthorization(service, rbac.NewBackend(backend), nil, nil)
+	server.EnableAuthorization(service, rbac.NewBackend(backend), approvals.NewBackend(backend), nil)
+	approvalHeader := ""
 	call := func(path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", path, strings.NewReader(body))
 		r.Header.Set("Origin", authTestOrigin)
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("X-Request-ID", uuid.NewString())
+		r.Header.Set("X-Workspace-ID", workspace.String())
+		if approvalHeader != "" {
+			r.Header.Set("X-Approval-ID", approvalHeader)
+		}
 		r.AddCookie(cookie)
 		w := httptest.NewRecorder()
 		server.http.Handler.ServeHTTP(w, r)
@@ -224,6 +248,43 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 		t.Fatalf("old password session survived: %v", err)
 	}
 	memberCookie, _, err = service.AuthenticateLocal(ctx, memberName, newPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested := call("/api/v1/approval-requests", `{"action":"local_user.reset-password","resource_type":"local_user","resource_id":"`+member.IdentityID.String()+`","reason":"restore local access","ttl_seconds":300}`, adminCookie)
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("HTTP approval request: %d %s", requested.Code, requested.Body)
+	}
+	var approval approvals.Approval
+	if err = json.Unmarshal(requested.Body.Bytes(), &approval); err != nil {
+		t.Fatal(err)
+	}
+	decision := `{"reason":"independent review","expected_request_hash":"` + approval.RequestHash + `"}`
+	path := "/api/v1/approval-requests/" + approval.ID.String() + ":approve"
+	if self := call(path, decision, adminCookie); self.Code != http.StatusForbidden {
+		t.Fatalf("HTTP self approval: %d %s", self.Code, self.Body)
+	}
+	approverCookie, _, err := service.AuthenticateLocal(ctx, "approver-"+name, "a separate independent approver password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved := call(path, decision, approverCookie); approved.Code != http.StatusOK {
+		t.Fatalf("HTTP approval: %d %s", approved.Code, approved.Body)
+	}
+	approvalHeader = approval.ID.String()
+	resetPassword := "an independently approved replacement password"
+	reset := call("/api/v1/local-users/"+member.IdentityID.String()+":reset-password", `{"password":"`+resetPassword+`"}`, adminCookie)
+	if reset.Code != http.StatusNoContent {
+		t.Fatalf("HTTP approved reset: %d %s", reset.Code, reset.Body)
+	}
+	if _, err = service.Authenticate(ctx, memberCookie); !errors.Is(err, auth.ErrUnauthenticated) {
+		t.Fatalf("reset left session active: %v", err)
+	}
+	if replay := call("/api/v1/local-users/"+member.IdentityID.String()+":reset-password", `{"password":"`+newPassword+`"}`, adminCookie); replay.Code != http.StatusConflict {
+		t.Fatalf("HTTP approval replay: %d %s", replay.Code, replay.Body)
+	}
+	approvalHeader = ""
+	memberCookie, _, err = service.AuthenticateLocal(ctx, memberName, resetPassword)
 	if err != nil {
 		t.Fatal(err)
 	}

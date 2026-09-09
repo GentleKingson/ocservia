@@ -11,6 +11,12 @@ import (
 
 type authenticationStore struct{ tx database.Tx }
 
+func (b *Backend) HasLocalCredential(ctx context.Context, id uuid.UUID) (bool, error) {
+	var found bool
+	err := b.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=$1 AND i.issuer='local' AND i.subject=c.username)`, id).Scan(&found)
+	return found, err
+}
+
 func (s authenticationStore) LockManagement(ctx context.Context) error {
 	_, err := s.tx.Exec(ctx, `SELECT pg_advisory_xact_lock(734821032)`)
 	return err

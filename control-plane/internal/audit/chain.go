@@ -271,12 +271,17 @@ func encodeChainPayload(previous []byte, record ChainRecord) ([]byte, error) {
 	})
 }
 
-func canonicalJSON(value json.RawMessage) (json.RawMessage, error) {
-	if len(value) == 0 || string(value) == "null" {
+func canonicalJSON(input json.RawMessage) (json.RawMessage, error) {
+	if len(input) == 0 || string(input) == "null" {
 		return nil, nil
 	}
 	var decoded any
-	if err := json.Unmarshal(value, &decoded); err != nil {
+	if err := json.Unmarshal(input, &decoded); err != nil {
+		// Preserve every previously signable v1 payload byte. Only extend the
+		// formerly rejected domain for valid JSONB numbers outside float64.
+		if logical, parseErr := value.ParseJSONB(input); parseErr == nil {
+			return json.RawMessage(logical.Bytes()), nil
+		}
 		return nil, err
 	}
 	encoded, err := json.Marshal(decoded)

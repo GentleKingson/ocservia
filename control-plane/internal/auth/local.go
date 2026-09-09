@@ -12,6 +12,13 @@ import (
 
 const LocalIssuer = "local"
 
+func (s *Service) HasLocalCredential(ctx context.Context, id uuid.UUID) (bool, error) {
+	if !s.localEnabled {
+		return false, ErrLocalDisabled
+	}
+	return authstore.HasLocalCredential(ctx, s.backend, id)
+}
+
 type localCredential struct {
 	identityID   uuid.UUID
 	passwordHash string

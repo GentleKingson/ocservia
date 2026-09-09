@@ -10,7 +10,7 @@ published baseline fields not converted in version 3: 143 DATETIME fields,
 11 JSONB fields and one text-array field. It records the original physical
 definition rather than inferring that every native JSON column is JSONB.
 The inventory is a pre-version-4 coverage denominator, not a statement that
-all listed domains have been adapted. New version-4 adapters must be matched
+all listed domains have been adapted. Version-4 and version-5 adapters are matched
 against those entries during acceptance.
 
 ## Scheduler Store
@@ -73,11 +73,11 @@ fence within the same transaction. Abort retains the outstanding grant lease.
 Exact completion replay does not repeat the root mutation or audit append.
 MySQL/MariaDB use the corresponding transaction lock record, never GET_LOCK.
 
-The artifact and certificate time fields remain native DATETIME in this
-adapter. Statements use the captured database transaction time, but this does
-not remove their historical range or sentinel limitations. Converting them
-requires adapting certificate issuance, revocation and maintenance writers
-together in a subsequent append-only migration. The download-only backend
-constructor does not claim those other Service methods are portable. Existing
+Version 5 converts all six artifact operation times and certificate `not_after`
+to checked PostgreSQL-epoch microseconds. Download eligibility distinguishes
+NULL, both infinities and finite extremes; positive infinity does not extend
+the bounded grant deadline. Other certificate times remain native. Certificate
+issuance, revocation and maintenance writers still require adaptation: the
+download-only backend constructor does not claim those methods are portable. Existing
 owner-fencing RPC integration remains unchanged, not reimplemented by a
 database-lock primitive.

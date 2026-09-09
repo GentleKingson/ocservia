@@ -56,19 +56,19 @@ func TestRealArtifactDownloadTransactions(t *testing.T) {
 	}
 	run(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,?,?,?,?)`, UUIDBytes(workspace), "artifact", "artifact-"+workspace.String(), now, now)
 	run(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES(?,?,?,'offline',1,?,?)`, UUIDBytes(node), UUIDBytes(workspace), "node-"+node.String(), now, now)
-	run(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,?,?,?,?)`, UUIDBytes(actor), "artifact", actor.String(), now, now)
+	run(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES(?,?,?,?,?)`, UUIDBytes(actor), "artifact", actor.String(), stamp, stamp)
 	for _, operation := range []uuid.UUID{issueOperation, exportOperation} {
 		run(`INSERT INTO operations(id,workspace_id,node_id,state,request_id,created_at,updated_at)VALUES(?,?,?,'succeeded',?,?,?)`, UUIDBytes(operation), UUIDBytes(workspace), UUIDBytes(node), operation.String(), now, now)
 	}
 	run(`INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,expires_at,created_at)VALUES(?,?,?,'certificate.p12','certificate',?,'test','pending',?,?)`, UUIDBytes(approval), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(certificate), expires, stamp)
 	// This fixture starts at a previously issued, explicitly legacy certificate;
 	// issuance/attestation is exercised by the PostgreSQL lifecycle suite.
-	run(`INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,version,csr_receipt_legacy,not_after,created_at,updated_at)VALUES(?,?,?,?,?,'[]',2048,'issued',1,1,?,?,?)`, UUIDBytes(certificate), UUIDBytes(workspace), UUIDBytes(node), UUIDBytes(issueOperation), "artifact.example.test", later, now, now)
+	run(`INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,version,csr_receipt_legacy,not_after,created_at,updated_at)VALUES(?,?,?,?,?,'[]',2048,'issued',1,1,?,?,?)`, UUIDBytes(certificate), UUIDBytes(workspace), UUIDBytes(node), UUIDBytes(issueOperation), "artifact.example.test", expires, now, now)
 	data := []byte("isolated encrypted artifact")
 	digest := sha256.Sum256(data)
 	token := strings.Repeat("a", 43)
 	tokenHash := sha256.Sum256([]byte(token))
-	run(`INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,content_sha256,content_size,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id,certificate_version)VALUES(?,?,?,?,?,'certificate_p12','ready',?,?,?,?,?,?,?,?,1)`, UUIDBytes(artifact), UUIDBytes(workspace), UUIDBytes(node), UUIDBytes(certificate), UUIDBytes(exportOperation), digest[:], len(data), tokenHash[:], tokenHash[:], later, now, now, UUIDBytes(approval))
+	run(`INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,content_sha256,content_size,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id,certificate_version)VALUES(?,?,?,?,?,'certificate_p12','ready',?,?,?,?,?,?,?,?,1)`, UUIDBytes(artifact), UUIDBytes(workspace), UUIDBytes(node), UUIDBytes(certificate), UUIDBytes(exportOperation), digest[:], len(data), tokenHash[:], tokenHash[:], expires, stamp, stamp, UUIDBytes(approval))
 	if err := owner.GrantTestPrivileges(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +87,47 @@ func TestRealArtifactDownloadTransactions(t *testing.T) {
 	var seed [32]byte
 	seed[0] = 12
 	service := certificates.NewArtifactDownloads(backend, transport, commandauth.NewSignerFromSeed(seed))
+	for _, tc := range []struct {
+		name     string
+		deadline value.Timestamp
+		allowed  bool
+	}{
+		{"null", value.Timestamp{}, false},
+		{"negative_infinity", value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, false},
+		{"minimum_finite", value.Timestamp{Valid: true, Micros: value.MinTimestamp}, false},
+		{"positive_infinity", value.Timestamp{Valid: true, Micros: value.PositiveInfinity}, true},
+		{"maximum_finite", value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run(`UPDATE certificates SET not_after=? WHERE id=?`, tc.deadline, UUIDBytes(certificate))
+			artifactDeadline := tc.deadline
+			if !artifactDeadline.Valid {
+				artifactDeadline = expires
+			}
+			run(`UPDATE artifact_operations SET expires_at=? WHERE id=?`, artifactDeadline, UUIDBytes(artifact))
+			download, err := service.OpenArtifact(ctx, artifact, token, actor)
+			if !tc.allowed {
+				if !errors.Is(err, certificates.ErrArtifactDenied) {
+					t.Fatal("expired or NULL certificate accepted", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			download.Reader.Close()
+			var lease, granted value.Timestamp
+			if err := owner.QueryRow(ctx, `SELECT lease_until,active_grant_expires_at FROM artifact_operations WHERE id=?`, UUIDBytes(artifact)).Scan(&lease, &granted); err != nil {
+				t.Fatal(err)
+			}
+			if lease != granted || !lease.Valid || lease.Micros <= stamp.Micros || lease.Micros >= stamp.Micros+int64(2*time.Minute/time.Microsecond) {
+				t.Fatal("unbounded grant deadline", lease, granted)
+			}
+			run(`UPDATE artifact_operations SET state='ready',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL WHERE id=?`, UUIDBytes(artifact))
+		})
+	}
+	run(`UPDATE certificates SET not_after=? WHERE id=?`, expires, UUIDBytes(certificate))
+	run(`UPDATE artifact_operations SET expires_at=? WHERE id=?`, expires, UUIDBytes(artifact))
 	if _, err := service.OpenArtifact(ctx, artifact, token, id()); !errors.Is(err, certificates.ErrArtifactDenied) {
 		t.Fatal("requester mismatch", err)
 	}

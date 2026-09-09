@@ -13,6 +13,12 @@ import (
 
 type authenticationStore struct{ tx database.Tx }
 
+func (b *Backend) HasLocalCredential(ctx context.Context, id uuid.UUID) (bool, error) {
+	var found bool
+	err := b.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=? AND CAST(i.issuer AS BINARY)=_binary'local' AND CAST(i.subject AS BINARY)=CAST(c.username AS BINARY))`, UUIDBytes(id)).Scan(&found)
+	return found, err
+}
+
 func (s authenticationStore) LockManagement(ctx context.Context) error {
 	if err := LockTransaction(ctx, s.tx, "pg-advisory:734821032"); err != nil {
 		return err
@@ -64,7 +70,7 @@ func (s authenticationStore) InsertBootstrap(ctx context.Context, id, workspace 
 	if err != nil {
 		return err
 	}
-	_, err = s.tx.Exec(ctx, `INSERT INTO local_auth_bootstrap(singleton,identity_id,workspace_id,created_at,completed_at) VALUES(true,?,?,?,?)`, UUIDBytes(id), UUIDBytes(workspace), now, stamp)
+	_, err = s.tx.Exec(ctx, `INSERT INTO local_auth_bootstrap(singleton,identity_id,workspace_id,created_at,completed_at) VALUES(true,?,?,?,?)`, UUIDBytes(id), UUIDBytes(workspace), stamp, stamp)
 	return err
 }
 func (s authenticationStore) CompleteBootstrap(ctx context.Context, approver uuid.UUID, now time.Time) error {
@@ -94,7 +100,11 @@ func (s authenticationStore) Protected(ctx context.Context, workspace, id uuid.U
 	return yes, err
 }
 func (s authenticationStore) Disable(ctx context.Context, id uuid.UUID, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE identities SET disabled_at=COALESCE(disabled_at,?),updated_at=? WHERE id=?`, now, now, UUIDBytes(id))
+	stamp, err := value.FromTime(now)
+	if err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `UPDATE identities SET disabled_at=COALESCE(disabled_at,?),updated_at=? WHERE id=?`, stamp, stamp, UUIDBytes(id))
 	return err
 }
 func (s authenticationStore) DeleteIdentityAttempts(ctx context.Context, id uuid.UUID) error {
@@ -107,13 +117,17 @@ func (s authenticationStore) BreakGlassUsed(ctx context.Context, fingerprint []b
 	return used, err
 }
 func (s authenticationStore) BreakGlassIdentity(ctx context.Context, id uuid.UUID, now time.Time) (uuid.UUID, error) {
+	stamp, err := value.FromTime(now)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	if err := LockExactKey(ctx, s.tx, "identities"); err != nil {
 		return uuid.Nil, err
 	}
 	var raw []byte
-	err := s.tx.QueryRow(ctx, `SELECT id FROM identities WHERE CAST(issuer AS BINARY)=_binary'break-glass' AND CAST(subject AS BINARY)=_binary'offline' FOR UPDATE`).Scan(&raw)
+	err = s.tx.QueryRow(ctx, `SELECT id FROM identities WHERE CAST(issuer AS BINARY)=_binary'break-glass' AND CAST(subject AS BINARY)=_binary'offline' FOR UPDATE`).Scan(&raw)
 	if errors.Is(err, database.ErrNotFound) {
-		_, err = s.tx.Exec(ctx, `INSERT INTO identities(id,issuer,subject,display_name,created_at,updated_at) VALUES(?,'break-glass','offline','Break-glass',?,?)`, UUIDBytes(id), now, now)
+		_, err = s.tx.Exec(ctx, `INSERT INTO identities(id,issuer,subject,display_name,created_at,updated_at) VALUES(?,'break-glass','offline','Break-glass',?,?)`, UUIDBytes(id), stamp, stamp)
 		return id, err
 	}
 	if err != nil {
@@ -123,14 +137,18 @@ func (s authenticationStore) BreakGlassIdentity(ctx context.Context, id uuid.UUI
 	if err != nil {
 		return uuid.Nil, err
 	}
-	_, err = s.tx.Exec(ctx, `UPDATE identities SET updated_at=? WHERE id=?`, now, raw)
+	_, err = s.tx.Exec(ctx, `UPDATE identities SET updated_at=? WHERE id=?`, stamp, raw)
 	return id, err
 }
 func (s authenticationStore) RecordBreakGlass(ctx context.Context, fingerprint []byte, id, session, alert uuid.UUID, now time.Time) error {
-	if _, err := s.tx.Exec(ctx, `INSERT INTO break_glass_uses(credential_fingerprint,identity_id,used_at,source_session_id,rotation_required) VALUES(?,?,?,?,true)`, fingerprint, UUIDBytes(id), now, UUIDBytes(session)); err != nil {
+	stamp, err := value.FromTime(now)
+	if err != nil {
 		return err
 	}
-	_, err := s.tx.Exec(ctx, `INSERT INTO security_alerts(id,severity,kind,source_session_id,created_at) VALUES(?,'critical','break_glass.used',?,?)`, UUIDBytes(alert), UUIDBytes(session), now)
+	if _, err := s.tx.Exec(ctx, `INSERT INTO break_glass_uses(credential_fingerprint,identity_id,used_at,source_session_id,rotation_required) VALUES(?,?,?,?,true)`, fingerprint, UUIDBytes(id), stamp, UUIDBytes(session)); err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `INSERT INTO security_alerts(id,severity,kind,source_session_id,created_at) VALUES(?,'critical','break_glass.used',?,?)`, UUIDBytes(alert), UUIDBytes(session), stamp)
 	return err
 }
 func (s authenticationStore) Workspaces(ctx context.Context) ([]uuid.UUID, error) {
@@ -163,7 +181,7 @@ func (s authenticationStore) LockActiveSession(ctx context.Context, identity, se
 	if err := s.tx.QueryRow(ctx, `SELECT id FROM identities WHERE id=? AND disabled_at IS NULL AND (NOT ? OR CAST(issuer AS BINARY)=_binary'local') FOR UPDATE`, UUIDBytes(identity), local).Scan(&id); err != nil {
 		return err
 	}
-	var expires time.Time
+	var expires value.Timestamp
 	if err := s.tx.QueryRow(ctx, `SELECT expires_at FROM auth_sessions WHERE id=? AND identity_id=? AND revoked_at IS NULL AND (NOT ? OR NOT break_glass) FOR UPDATE`, UUIDBytes(session), UUIDBytes(identity), local).Scan(&expires); err != nil {
 		return err
 	}
@@ -171,11 +189,7 @@ func (s authenticationStore) LockActiveSession(ctx context.Context, identity, se
 	if err != nil {
 		return err
 	}
-	stamp, err := value.FromTime(expires)
-	if err != nil {
-		return err
-	}
-	if stamp.Micros <= now {
+	if !expires.Valid || expires.Micros <= now {
 		return database.ErrNotFound
 	}
 	return nil
@@ -193,11 +207,19 @@ func (s authenticationStore) ManagementWorkspace(ctx context.Context) (uuid.UUID
 	return uuid.FromBytes(raw)
 }
 func (s authenticationStore) SetPassword(ctx context.Context, id uuid.UUID, hash string, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE local_credentials SET password_hash=?,password_changed_at=?,updated_at=? WHERE identity_id=?`, hash, now, now, UUIDBytes(id))
+	stamp, err := value.FromTime(now)
+	if err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `UPDATE local_credentials SET password_hash=?,password_changed_at=?,updated_at=? WHERE identity_id=?`, hash, stamp, stamp, UUIDBytes(id))
 	return err
 }
 func (s authenticationStore) RevokeIdentitySessions(ctx context.Context, id uuid.UUID, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=? WHERE identity_id=? AND revoked_at IS NULL`, now, UUIDBytes(id))
+	stamp, err := value.FromTime(now)
+	if err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=? WHERE identity_id=? AND revoked_at IS NULL`, stamp, UUIDBytes(id))
 	return err
 }
 func (t *transaction) AuthenticationStore() authstore.Store { return authenticationStore{t} }
@@ -211,13 +233,17 @@ func (b *Backend) ReadLocalCredential(ctx context.Context, username string) (aut
 	return c, err
 }
 func (s authenticationStore) InsertCredential(ctx context.Context, id uuid.UUID, username, hash string, now time.Time) error {
+	stamp, err := value.FromTime(now)
+	if err != nil {
+		return err
+	}
 	if err := LockExactKey(ctx, s.tx, "identities"); err != nil {
 		return err
 	}
-	if _, err := s.tx.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,'local',?,?,?)`, UUIDBytes(id), username, now, now); err != nil {
+	if _, err := s.tx.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,'local',?,?,?)`, UUIDBytes(id), username, stamp, stamp); err != nil {
 		return err
 	}
-	_, err := s.tx.Exec(ctx, `INSERT INTO local_credentials(identity_id,username,password_hash,created_at,updated_at,password_changed_at) VALUES(?,?,?,?,?,?)`, UUIDBytes(id), username, hash, now, now, now)
+	_, err = s.tx.Exec(ctx, `INSERT INTO local_credentials(identity_id,username,password_hash,created_at,updated_at,password_changed_at) VALUES(?,?,?,?,?,?)`, UUIDBytes(id), username, hash, stamp, stamp, stamp)
 	return err
 }
 func (s authenticationStore) LockCredential(ctx context.Context, id uuid.UUID, issuer, subject, hash string) (uuid.UUID, error) {
@@ -230,16 +256,24 @@ func (s authenticationStore) LockCredential(ctx context.Context, id uuid.UUID, i
 	return id, err
 }
 func (s authenticationStore) InsertSession(ctx context.Context, id, identity uuid.UUID, expires time.Time, glass bool, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,break_glass,created_at) VALUES(?,?,?,?,?)`, UUIDBytes(id), UUIDBytes(identity), expires, glass, now)
+	stamp, err := value.FromTime(now)
+	if err != nil {
+		return err
+	}
+	end, err := value.FromTime(expires)
+	if err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,break_glass,created_at) VALUES(?,?,?,?,?)`, UUIDBytes(id), UUIDBytes(identity), end, glass, stamp)
 	return err
 }
 func (s authenticationStore) Session(ctx context.Context, id, identity uuid.UUID) (authstore.Session, error) {
 	var session authstore.Session
-	err := s.tx.QueryRow(ctx, `SELECT i.issuer,i.subject,s.break_glass,s.expires_at FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE s.id=? AND s.identity_id=? AND s.revoked_at IS NULL AND s.expires_at>UTC_TIMESTAMP(6) AND i.disabled_at IS NULL`, UUIDBytes(id), UUIDBytes(identity)).Scan(&session.Issuer, &session.Subject, &session.BreakGlass, &session.ExpiresAt)
+	err := s.tx.QueryRow(ctx, `SELECT i.issuer,i.subject,s.break_glass,s.expires_at FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE s.id=? AND s.identity_id=? AND s.revoked_at IS NULL AND s.expires_at>TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',UTC_TIMESTAMP(6)) AND i.disabled_at IS NULL`, UUIDBytes(id), UUIDBytes(identity)).Scan(&session.Issuer, &session.Subject, &session.BreakGlass, &session.ExpiresAt)
 	return session, err
 }
 func (s authenticationStore) RevokeSession(ctx context.Context, id, identity uuid.UUID) error {
-	_, err := s.tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(6) WHERE id=? AND identity_id=? AND revoked_at IS NULL`, UUIDBytes(id), UUIDBytes(identity))
+	_, err := s.tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',UTC_TIMESTAMP(6)) WHERE id=? AND identity_id=? AND revoked_at IS NULL`, UUIDBytes(id), UUIDBytes(identity))
 	return err
 }
 func (s authenticationStore) clock(ctx context.Context) (int64, error) {

@@ -389,7 +389,7 @@ func TestRealValueConstraints(t *testing.T) {
 		t.Fatal("foreign key not enforced")
 	}
 	identity := UUIDBytes(uuid.New())
-	if _, err := b.Exec(ctx, "INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,'local','person',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", identity); err != nil {
+	if _, err := b.Exec(ctx, "INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,'local','person',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))", identity); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {

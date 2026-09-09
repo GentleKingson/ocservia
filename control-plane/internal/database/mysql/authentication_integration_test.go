@@ -92,7 +92,7 @@ func TestRealAuthenticationExpiryAfterLockWait(t *testing.T) {
 			if kind == "lease" {
 				_, err = blocker.Exec(ctx, `INSERT INTO local_auth_attempts(username,window_until,expires_at,lease_id,lease_until) VALUES(?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))+900000000,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))+900000000,?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))+150000)`, username, UUIDBytes(lease))
 			} else {
-				_, err = blocker.Exec(ctx, `UPDATE auth_sessions SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 150000 MICROSECOND WHERE id=?`, UUIDBytes(session))
+				_, err = blocker.Exec(ctx, `UPDATE auth_sessions SET expires_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))+150000 WHERE id=?`, UUIDBytes(session))
 			}
 			if err != nil {
 				t.Fatal(err)

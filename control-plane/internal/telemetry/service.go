@@ -13,7 +13,6 @@ import (
 	"net"
 	"regexp"
 	"slices"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -26,10 +25,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
@@ -208,19 +207,25 @@ func (s *Service) ListIPBans(ctx context.Context, nodeID uuid.UUID, limit int) (
 }
 
 type Service struct {
+	backend                 database.Backend
 	pool                    *pgxpool.Pool
 	now                     func() time.Time
 	recommendedAgentVersion string
 	agentUpgradeCatalog     *releasecatalog.Catalog
 }
 
-func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.Now} }
+func New(pool *pgxpool.Pool) *Service {
+	return &Service{pool: pool, backend: postgres.WrapPool(pool), now: time.Now}
+}
+
+// NewBackend enables transactional ingestion; PostgreSQL read-model construction remains separate.
+func NewBackend(backend database.Backend) *Service { return &Service{backend: backend, now: time.Now} }
 
 // NewWithRecommendedAgentVersion builds the read model with the
 // operator-configured recommended agent version used to derive per-node
 // agent version state.
 func NewWithRecommendedAgentVersion(pool *pgxpool.Pool, recommendedAgentVersion string) *Service {
-	return &Service{pool: pool, now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
+	return &Service{pool: pool, backend: postgres.WrapPool(pool), now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
 }
 
 // EnableAgentUpgradeEligibility installs the trusted release catalog used to
@@ -239,19 +244,7 @@ func (s *Service) IngestWire(ctx context.Context, expectedNodeID uuid.UUID, payl
 	if err != nil {
 		return false, err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin telemetry ingest: %w", err)
-	}
-	defer rollback(tx)
-	ingested, err := s.ingestTx(ctx, tx, batch, payloadBytes)
-	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, err
-	}
-	return ingested, nil
+	return s.ingest(ctx, batch, payloadBytes)
 }
 
 // IngestWireTx writes a validated telemetry batch using the caller's
@@ -262,7 +255,7 @@ func (s *Service) IngestWireTx(ctx context.Context, tx pgx.Tx, expectedNodeID uu
 	if err != nil {
 		return false, err
 	}
-	return s.ingestTx(ctx, tx, batch, payloadBytes)
+	return s.ingestTx(ctx, postgres.WrapTx(tx), batch, payloadBytes)
 }
 
 func (s *Service) validateWire(expectedNodeID uuid.UUID, payload []byte) (Batch, int, error) {
@@ -364,19 +357,7 @@ func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin telemetry ingest: %w", err)
-	}
-	defer rollback(tx)
-	ingested, err := s.ingestTx(ctx, tx, batch, payloadBytes)
-	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, err
-	}
-	return ingested, nil
+	return s.ingest(ctx, batch, payloadBytes)
 }
 
 func (s *Service) validateForIngest(batch Batch) (int, error) {
@@ -390,114 +371,122 @@ func (s *Service) validateForIngest(batch Batch) (int, error) {
 	return len(payload), nil
 }
 
-func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadBytes int) (bool, error) {
-	businessTx := telemetryTransaction(tx)
-	var nodeID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, batch.NodeID).Scan(&nodeID); errors.Is(err, pgx.ErrNoRows) {
+func (s *Service) ingest(ctx context.Context, batch Batch, payloadBytes int) (bool, error) {
+	var ingested bool
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		var err error
+		ingested, err = s.ingestTx(ctx, tx, batch, payloadBytes)
+		return err
+	})
+	return ingested && err == nil, err
+}
+
+// IngestWireTransaction keeps authentication and all ingestion writes in the caller's transaction.
+func (s *Service) IngestWireTransaction(ctx context.Context, tx database.Tx, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
+	batch, size, err := s.validateWire(expectedNodeID, payload)
+	if err != nil {
+		return false, err
+	}
+	return s.ingestTx(ctx, tx, batch, size)
+}
+func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, payloadBytes int) (bool, error) {
+	store, err := telemetrywrite.From(tx)
+	if err != nil {
+		return false, err
+	}
+	if err := store.LockNode(ctx, batch.NodeID); errors.Is(err, database.ErrNotFound) {
 		return false, fmt.Errorf("%w: telemetry node is unavailable", ErrInvalidTelemetry)
 	} else if err != nil {
 		return false, fmt.Errorf("lock telemetry node: %w", err)
 	}
-	if err := validatePostgresJSONDocuments(ctx, tx, batch); err != nil {
+	documents := []json.RawMessage{batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path}
+	for _, e := range batch.Security {
+		documents = append(documents, e.Detail)
+	}
+	if err := store.ValidateJSON(ctx, documents); err != nil {
+		if errors.Is(err, telemetrywrite.ErrInvalidJSON) {
+			return false, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
+		}
 		return false, err
 	}
-	result, err := tx.Exec(ctx, `INSERT INTO telemetry_ingest_batches
-		(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES ($1,$2,$3,$4,$5,$6)
-		ON CONFLICT DO NOTHING`, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, payloadBytes)
+	inserted, err := store.InsertBatch(ctx, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, payloadBytes)
 	if err != nil {
 		return false, fmt.Errorf("insert telemetry batch: %w", err)
 	}
-	if result.RowsAffected() == 0 {
+	if !inserted {
 		return false, nil
 	}
-
-	updated, err := tx.Exec(ctx, `INSERT INTO node_observed_snapshots
-		(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at,dropped_security,dropped_health,dropped_aggregate,dropped_raw)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$15,$8,$9,$10,$2,$11,$12,$13,$14)
-		ON CONFLICT (node_id) DO UPDATE SET observed_at=EXCLUDED.observed_at,received_at=now(),boot_id=EXCLUDED.boot_id,
-		agent_instance_id=EXCLUDED.agent_instance_id,agent_version=EXCLUDED.agent_version,ocserv_version=EXCLUDED.ocserv_version,
-		os_release=EXCLUDED.os_release,architecture=EXCLUDED.architecture,ocserv=EXCLUDED.ocserv,system=EXCLUDED.system,path=EXCLUDED.path,
-		last_heartbeat_at=GREATEST(node_observed_snapshots.last_heartbeat_at,EXCLUDED.last_heartbeat_at),
-		dropped_security=GREATEST(node_observed_snapshots.dropped_security,EXCLUDED.dropped_security),
-		dropped_health=GREATEST(node_observed_snapshots.dropped_health,EXCLUDED.dropped_health),
-		dropped_aggregate=GREATEST(node_observed_snapshots.dropped_aggregate,EXCLUDED.dropped_aggregate),
-		dropped_raw=GREATEST(node_observed_snapshots.dropped_raw,EXCLUDED.dropped_raw)
-		WHERE EXCLUDED.observed_at > node_observed_snapshots.observed_at`,
-		batch.NodeID, batch.Snapshot.ObservedAt, batch.Snapshot.BootID, batch.Snapshot.AgentInstance,
-		batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease,
-		batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path,
-		batch.Snapshot.Dropped.Security, batch.Snapshot.Dropped.Health, batch.Snapshot.Dropped.Aggregate, batch.Snapshot.Dropped.Raw,
-		batch.Snapshot.Architecture)
+	snap := batch.Snapshot
+	updated, err := store.UpsertSnapshot(ctx, batch.NodeID, telemetrywrite.Snapshot{
+		ObservedAt: snap.ObservedAt, BootID: snap.BootID, AgentInstance: snap.AgentInstance,
+		AgentVersion: snap.AgentVersion, OcservVersion: snap.OcservVersion, OSRelease: snap.OSRelease, Architecture: snap.Architecture,
+		Ocserv: snap.Ocserv, System: snap.System, Path: snap.Path, Security: snap.Dropped.Security, Health: snap.Dropped.Health, Aggregate: snap.Dropped.Aggregate, Raw: snap.Dropped.Raw,
+	})
 	if err != nil {
 		return false, fmt.Errorf("upsert observed snapshot: %w", err)
 	}
-	if updated.RowsAffected() > 0 {
+	if updated {
 		usage := make([]userusage.Sample, 0, len(batch.Sessions))
 		for _, session := range batch.Sessions {
 			usage = append(usage, userusage.Sample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
 		}
-		if err := userusage.RecordTransaction(ctx, businessTx, batch.NodeID, usage); err != nil {
+		if err := userusage.RecordTransaction(ctx, tx, batch.NodeID, usage); err != nil {
 			if errors.Is(err, userusage.ErrInvalidSample) {
 				return false, fmt.Errorf("%w: session usage identity conflict", ErrInvalidTelemetry)
 			}
 			return false, fmt.Errorf("record observed user usage: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM node_sessions WHERE node_id=$1`, batch.NodeID); err != nil {
+
+		sessions := make([]telemetrywrite.Session, 0, len(batch.Sessions))
+		for _, v := range batch.Sessions {
+			sessions = append(sessions, telemetrywrite.Session{ID: v.ID, Username: v.Username, ClientIP: v.ClientIP, ConnectedAt: v.ConnectedAt, BytesIn: v.BytesIn, BytesOut: v.BytesOut})
+		}
+		if err := store.ReplaceSessions(ctx, batch.NodeID, snap.ObservedAt, sessions); err != nil {
 			return false, err
 		}
-		for _, session := range batch.Sessions {
-			if _, err := tx.Exec(ctx, `INSERT INTO node_sessions (node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, batch.NodeID, session.ID, session.Username, session.ClientIP, session.ConnectedAt, session.BytesIn, session.BytesOut, batch.Snapshot.ObservedAt); err != nil {
-				return false, fmt.Errorf("insert observed session: %w", err)
-			}
+		bans := make([]telemetrywrite.IPBan, 0, len(batch.IPBans))
+		for _, v := range batch.IPBans {
+			bans = append(bans, telemetrywrite.IPBan{IP: v.IP, SecondsRemaining: v.SecondsRemaining})
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM node_ip_bans WHERE node_id=$1`, batch.NodeID); err != nil {
+		if err := store.ReplaceIPBans(ctx, batch.NodeID, snap.ObservedAt, bans); err != nil {
 			return false, err
 		}
-		for _, ban := range batch.IPBans {
-			if _, err := tx.Exec(ctx, `INSERT INTO node_ip_bans (node_id,ip,seconds_remaining,observed_at) VALUES ($1,$2,$3,$4)`, batch.NodeID, ban.IP, ban.SecondsRemaining, batch.Snapshot.ObservedAt); err != nil {
-				return false, fmt.Errorf("insert observed IP ban: %w", err)
-			}
+		users := make([]telemetrywrite.User, 0, len(batch.Users))
+		for _, v := range batch.Users {
+			users = append(users, telemetrywrite.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision, Fingerprint: v.Fingerprint})
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM observed_users WHERE node_id=$1`, batch.NodeID); err != nil {
+		if err := store.ReplaceUsers(ctx, batch.NodeID, snap.ObservedAt, users); err != nil {
 			return false, err
 		}
-		for _, user := range batch.Users {
-			if _, err := tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at) VALUES($1,$2,$3,$4,$5,$6)`, batch.NodeID, user.Username, user.Enabled, user.Revision, user.Fingerprint, batch.Snapshot.ObservedAt); err != nil {
-				return false, fmt.Errorf("insert observed user: %w", err)
-			}
-		}
-		if err := replaceObservedGroups(ctx, businessTx, batch); err != nil {
+		if err := replaceObservedGroups(ctx, tx, batch); err != nil {
 			return false, fmt.Errorf("replace observed groups: %w", err)
 		}
-		if batch.Snapshot.ObservedAt.After(s.now().Add(-OfflineAfter)) {
-			if _, err := tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,$2),version=version+1 WHERE id=$1 AND status='offline'`, batch.NodeID, batch.Snapshot.ObservedAt); err != nil {
-				return false, err
-			}
-			if _, err := tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, batch.NodeID.String()); err != nil {
+
+		if snap.ObservedAt.After(s.now().Add(-OfflineAfter)) {
+			if err := store.Activate(ctx, batch.NodeID, snap.ObservedAt); err != nil {
 				return false, err
 			}
 		}
 	}
-	for _, report := range batch.Snapshot.UpgradeResults {
-		verification, err := privdattestation.VerifyUpgradeResult(ctx, tx, batch.NodeID, report.OperationID, agentUpgradeOutcomeProtoState(report.State), report.TargetVersion, report.CompletedAt, report.Proof)
+	for _, report := range snap.UpgradeResults {
+		verification, err := privdattestation.VerifyUpgradeResultWithLookup(ctx, func(ctx context.Context, node uuid.UUID, id string) (privdattestation.UpgradeKey, error) {
+			k, err := store.AttestationKey(ctx, node, id)
+			return privdattestation.UpgradeKey{PublicKey: k.PublicKey, State: k.State, ActivatedAt: k.ActivatedAt, ValidUntil: k.ValidUntil}, err
+		}, batch.NodeID, report.OperationID, agentUpgradeOutcomeProtoState(report.State), report.TargetVersion, report.CompletedAt, report.Proof)
 		if err != nil {
 			return false, fmt.Errorf("verify reported agent upgrade result: %w", err)
 		}
 		if !verification.Verified() {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at,privileged_result_proof)
-			SELECT $1,$2,$3,$4,$5,$6,now(),$7
-			WHERE EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.operation_id=$1 AND u.node_id=$2 AND u.target_version=$4 AND u.package_sha256=$8 AND u.state IN ('accepted','running','unknown') AND u.completed_at IS NULL)
-			ON CONFLICT (operation_id) DO NOTHING`,
-			report.OperationID, batch.NodeID, report.State, report.TargetVersion, report.Detail, verification.CompletedAt, verification.EncodedProof, verification.PackageSHA256); err != nil {
-			return false, fmt.Errorf("insert reported agent upgrade result: %w", err)
+		if err := store.InsertUpgrade(ctx, batch.NodeID, telemetrywrite.Upgrade{OperationID: report.OperationID, State: report.State, TargetVersion: report.TargetVersion, Detail: report.Detail, CompletedAt: verification.CompletedAt, Proof: verification.EncodedProof, PackageSHA256: verification.PackageSHA256}); err != nil {
+			return false, err
 		}
 	}
-	if err := insertObservedSecurity(ctx, businessTx, batch); err != nil {
+	if err := insertObservedSecurity(ctx, tx, batch); err != nil {
 		return false, fmt.Errorf("insert security event: %w", err)
 	}
-	history, err := telemetryhistory.FromTransaction(businessTx)
+	history, err := telemetryhistory.FromTransaction(tx)
 	if err != nil {
 		return false, err
 	}
@@ -658,34 +647,6 @@ func validObject(value json.RawMessage) bool {
 		return false
 	}
 	return decoder.Decode(&struct{}{}) == io.EOF
-}
-
-func validatePostgresJSONDocuments(ctx context.Context, tx pgx.Tx, batch Batch) error {
-	documents := make([]json.RawMessage, 0, 3+len(batch.Security))
-	documents = append(documents, batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path)
-	for _, event := range batch.Security {
-		documents = append(documents, event.Detail)
-	}
-	encoded, err := json.Marshal(documents)
-	if err != nil {
-		return fmt.Errorf("%w: encode JSON documents", ErrInvalidTelemetry)
-	}
-	var documentCount int
-	err = tx.QueryRow(ctx, `SELECT jsonb_array_length($1::jsonb)`, string(encoded)).Scan(&documentCount)
-	if err != nil {
-		var postgresError *pgconn.PgError
-		// This statement performs only the input cast, so its data exceptions
-		// describe deterministic payload incompatibility rather than a failed
-		// business write. Operational database errors remain retryable.
-		if errors.As(err, &postgresError) && (strings.HasPrefix(postgresError.Code, "22") || postgresError.Code == "54001") {
-			return fmt.Errorf("%w: JSON document is not PostgreSQL-compatible", ErrInvalidTelemetry)
-		}
-		return fmt.Errorf("validate telemetry JSON storage compatibility: %w", err)
-	}
-	if documentCount != len(documents) {
-		return fmt.Errorf("%w: JSON document count changed during validation", ErrInvalidTelemetry)
-	}
-	return nil
 }
 
 func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]Node, bool, error) {

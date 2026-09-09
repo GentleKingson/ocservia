@@ -15,6 +15,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -189,6 +190,21 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 // lookup errors are returned separately; an invalid proof is represented in
 // the result and must not be persisted by the caller.
 func VerifyUpgradeResult(ctx context.Context, tx pgx.Tx, nodeID, operationID uuid.UUID, state agentv1.AgentUpgradeOutcomeState, targetVersion string, completedAt time.Time, proof *agentv1.AgentUpgradeResultProof) (verification UpgradeResultVerification, err error) {
+	return VerifyUpgradeResultWithLookup(ctx, func(ctx context.Context, node uuid.UUID, key string) (UpgradeKey, error) {
+		if tx == nil {
+			return UpgradeKey{}, errors.New("privd upgrade result key transaction is unavailable")
+		}
+		var k UpgradeKey
+		err := tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2`, node, key).Scan(&k.PublicKey, &k.State, &k.ActivatedAt, &k.ValidUntil)
+		return k, err
+	}, nodeID, operationID, state, targetVersion, completedAt, proof)
+}
+
+// UpgradeKey is the read-only key material needed by upgrade proof verification.
+type UpgradeKey = attestationKeyRecord
+
+// VerifyUpgradeResultWithLookup verifies the same proof using the enclosing transaction's key store.
+func VerifyUpgradeResultWithLookup(ctx context.Context, lookup func(context.Context, uuid.UUID, string) (UpgradeKey, error), nodeID, operationID uuid.UUID, state agentv1.AgentUpgradeOutcomeState, targetVersion string, completedAt time.Time, proof *agentv1.AgentUpgradeResultProof) (verification UpgradeResultVerification, err error) {
 	encoded, marshalErr := proto.MarshalOptions{Deterministic: true}.Marshal(proof)
 	if marshalErr != nil || len(encoded) == 0 || len(encoded) > 64*1024 {
 		return UpgradeResultVerification{Status: "invalid", FailureReason: "upgrade_result_proof_malformed"}, nil
@@ -213,12 +229,11 @@ func VerifyUpgradeResult(ctx context.Context, tx pgx.Tx, nodeID, operationID uui
 		proof.GetState() != state || proof.GetTargetVersion() != targetVersion {
 		return verification, nil
 	}
-	if tx == nil {
+	if lookup == nil {
 		return UpgradeResultVerification{}, errors.New("privd upgrade result key transaction is unavailable")
 	}
-	var record attestationKeyRecord
-	err = tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2`, nodeID, proof.GetPrivdAttestationKeyId()).Scan(&record.PublicKey, &record.State, &record.ActivatedAt, &record.ValidUntil)
-	if errors.Is(err, pgx.ErrNoRows) {
+	record, err := lookup(ctx, nodeID, proof.GetPrivdAttestationKeyId())
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, database.ErrNotFound) {
 		verification.Status, verification.FailureReason = "unknown_key", "upgrade_result_key_unknown"
 		return verification, nil
 	}

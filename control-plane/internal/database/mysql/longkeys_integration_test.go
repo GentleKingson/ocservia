@@ -19,6 +19,15 @@ func longKeyFixture(t *testing.T) *Backend {
 	return b
 }
 
+func fixtureTimestamp(t *testing.T, now time.Time) value.Timestamp {
+	t.Helper()
+	stamp, err := value.FromTime(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stamp
+}
+
 func TestRealLongKeyWrites(t *testing.T) {
 	b := longKeyFixture(t)
 	ctx := context.Background()
@@ -40,7 +49,7 @@ func TestRealLongKeyWrites(t *testing.T) {
 		t.Fatal("long duplicate accepted", err)
 	}
 	for _, values := range [][2]string{{large, "a"}, {large + "a", ""}, {large, "a "}} {
-		exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(uuid.New()), values[0], values[1], now, now)
+		exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(uuid.New()), values[0], values[1], fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 	}
 	op := UUIDBytes(uuid.New())
 	exec(`INSERT INTO operations(id,workspace_id,state,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES(?,?,'draft','long',?,REPEAT('x',32),?,?)`, op, workspace, large, now, now)
@@ -104,7 +113,7 @@ func TestRealLongKeyWrites(t *testing.T) {
 func TestRealLongKeyUpdateAndConcurrency(t *testing.T) {
 	b := longKeyFixture(t)
 	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	now := fixtureTimestamp(t, time.Now().UTC())
 	key := strings.Repeat("x", 4096)
 	first, second := UUIDBytes(uuid.New()), UUIDBytes(uuid.New())
 	for index, id := range [][]byte{first, second} {
@@ -221,7 +230,7 @@ func TestRealLongIdentityUpsert(t *testing.T) {
 	if id != <-ids {
 		t.Fatal("concurrent upsert returned different identities")
 	}
-	if _, err := b.Exec(ctx, `UPDATE identities SET disabled_at=? WHERE id=?`, now, UUIDBytes(id)); err != nil {
+	if _, err := b.Exec(ctx, `UPDATE identities SET disabled_at=? WHERE id=?`, fixtureTimestamp(t, now), UUIDBytes(id)); err != nil {
 		t.Fatal(err)
 	}
 	err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {

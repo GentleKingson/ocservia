@@ -28,7 +28,7 @@ func TestRealAuditRBACController(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []uuid.UUID{actor, target} {
-		if _, err = owner.Exec(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, UUIDBytes(id), "audit-test", id.String(), "", "audit", now, now); err != nil {
+		if _, err = owner.Exec(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, UUIDBytes(id), "audit-test", id.String(), "", "audit", fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -52,7 +52,7 @@ func TestRealAuditRBACController(t *testing.T) {
 	audittest.Controller(t, b, workspace, actor, target, func(id, resource uuid.UUID, hash []byte, expiry time.Time) error {
 		expires, _ := value.FromTime(expiry)
 		created, _ := value.FromTime(expiry.Add(-time.Hour))
-		_, err := owner.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES(?,?,?,'role_binding.elevate','role_binding',?,'test','approved',?,'test',?,?,?,?,?)`, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(resource), UUIDBytes(target), expires, expiry.Add(-time.Minute), created, hash, `{}`)
+		_, err := owner.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES(?,?,?,'role_binding.elevate','role_binding',?,'test','approved',?,'test',?,?,?,?,?)`, UUIDBytes(id), UUIDBytes(workspace), UUIDBytes(actor), UUIDBytes(resource), UUIDBytes(target), expires, fixtureTimestamp(t, expiry.Add(-time.Minute)), created, hash, `{}`)
 		return err
 	})
 	for _, query := range []string{`UPDATE audit_events SET event_hash=event_hash WHERE workspace_id=?`, `UPDATE audit_events SET event_hash=REPEAT(0x00,32) WHERE workspace_id=?`, `DELETE FROM audit_events WHERE workspace_id=?`} {

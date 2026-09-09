@@ -27,7 +27,7 @@ equivalence of the entire schema.** Outstanding acceptance blockers are:
    read/write adapters; other JSON/array fields still use the narrower native
    representation. Existing regex regression cases are not a general
    POSIX/ICU/PCRE equivalence guarantee.
-3. Eighteen business time columns use checked PostgreSQL-epoch BIGINT values
+3. Fifty-one business time columns use checked PostgreSQL-epoch BIGINT values
    with full range and infinity support. Version 4 also records explicit owner
    decisions for ambiguous auth/scheduler sentinels. Other DATETIME columns
    still require business adapters and migration.
@@ -38,15 +38,16 @@ equivalence of the entire schema.** Outstanding acceptance blockers are:
    history, rollups and bounded retirement have adapters; owner provisioning
    atomically drains the corresponding legacy month and owner GC drops retired
    tables. Version 4 adds automatic legacy migration with durable completion
-   and write/retirement guards. Complete Controller ingestion/read-model
-   integration remains open.
+   and write/retirement guards. Version 5 ports the actual ingestion service;
+   complete transport, read-model and maintenance integration remains open.
 5. Command admission/backlog uses common Tx and domain Stores with the original
    PostgreSQL advisory keys and MySQL transaction lock rows. Seven production
    call sites borrow their original PG transaction. Version 4 ports auth,
-   audit, RBAC, scheduler and certificate-download lock workflows. Other outer
-   business transactions still need complete Store/Tx ports.
+   audit, RBAC, scheduler and certificate-download lock workflows. Version 5
+   adds approval creation/approval and telemetry ingest transactions. Other
+   outer business transactions still need complete Store/Tx ports.
 
-See [version-4 Controller workflows](database-pr02-controller-workflows.md)
+See [version-5 Controller workflows](database-pr02-controller-workflows.md)
 for exact call-chain coverage and remaining fields. Authenticated HTTP tests
 are not a substitute for the remaining Controller routes and startup wiring.
 

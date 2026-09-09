@@ -84,7 +84,7 @@ func TestRealSchemaTextRegex(t *testing.T) {
 		}
 	}
 	identity := UUIDBytes(uuid.New())
-	if _, err = b.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,?,?,?,?)`, identity, "issuer", "subject", now, now); err != nil {
+	if _, err = b.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,?,?,?,?)`, identity, "issuer", "subject", window, window); err != nil {
 		t.Fatal(err)
 	}
 	for _, value := range []any{nil, "", "a\x00b"} {
@@ -115,7 +115,7 @@ func TestRealExistingLongTextBounds(t *testing.T) {
 			var err error
 			switch table {
 			case "node_sessions":
-				_, err = b.Exec(ctx, `INSERT INTO node_sessions(node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at) VALUES(?,?,?, ?,?,0,0,?)`, node, value, "alice", []byte{4, 32, 127, 0, 0, 1}, now, now)
+				_, err = b.Exec(ctx, `INSERT INTO node_sessions(node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at) VALUES(?,?,?, ?,?,0,0,?)`, node, value, "alice", []byte{4, 32, 127, 0, 0, 1}, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 			case "user_usage_cursors":
 				_, err = b.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) VALUES(?,?,?, ?,0,0,?)`, node, value, now, "alice", now)
 			case "secret_provider_refs":
