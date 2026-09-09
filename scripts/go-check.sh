@@ -23,12 +23,16 @@ if [[ "${MODE}" != "race" ]]; then
   test -z "$(gofmt -l "${ROOT}/control-plane" "${ROOT}/tools/g6-harness")"
   for module in "${GO_MODULES[@]}"; do
     (cd "${ROOT}/${module}" && go vet ./...)
-    (cd "${ROOT}/${module}" && go test ./...)
+    if [[ "${module}" == control-plane ]]; then
+      (cd "${ROOT}/${module}" && bash "${ROOT}/scripts/required-go-tests.sh" unit ./...)
+    else
+      (cd "${ROOT}/${module}" && go test -count=1 ./...)
+    fi
   done
 fi
 
 if [[ "${MODE}" != "standard" ]]; then
   for module in "${GO_MODULES[@]}"; do
-    (cd "${ROOT}/${module}" && go test -race ./...)
+    (cd "${ROOT}/${module}" && go test -race -count=1 ./...)
   done
 fi

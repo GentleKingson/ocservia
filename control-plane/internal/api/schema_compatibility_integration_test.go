@@ -26,6 +26,15 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Skip("isolated owner database URL required")
+	}
+	owner, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
 	expected, err := migrations.LatestSchemaVersion()
 	if err != nil {
 		t.Fatal(err)
@@ -38,19 +47,19 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 	}
 
 	reset := func() {
-		if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version > $1", expected); err != nil {
+		if _, err := owner.Exec(ctx, "DELETE FROM schema_migrations WHERE version > $1", expected); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, "UPDATE controller_schema_compatibility SET \"current_schema\" = $1, minimum_compatible_controller_schema = $1 WHERE singleton", expected); err != nil {
+		if _, err := owner.Exec(ctx, "UPDATE controller_schema_compatibility SET \"current_schema\" = $1, minimum_compatible_controller_schema = $1 WHERE singleton", expected); err != nil {
 			t.Fatal(err)
 		}
 	}
 	reset()
 	defer func() {
-		if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version > $1", expected); err != nil {
+		if _, err := owner.Exec(ctx, "DELETE FROM schema_migrations WHERE version > $1", expected); err != nil {
 			t.Error(err)
 		}
-		if _, err := pool.Exec(ctx, `UPDATE controller_schema_compatibility SET "current_schema" = $1, minimum_compatible_controller_schema = $2 WHERE singleton`, originalCurrent, originalMinimum); err != nil {
+		if _, err := owner.Exec(ctx, `UPDATE controller_schema_compatibility SET "current_schema" = $1, minimum_compatible_controller_schema = $2 WHERE singleton`, originalCurrent, originalMinimum); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -75,10 +84,10 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 	}
 
 	future := expected + 1
-	if _, err := pool.Exec(ctx, "INSERT INTO schema_migrations(version, name, checksum) VALUES($1, $2, $3)", future, "000030_future.up.sql", make([]byte, 32)); err != nil {
+	if _, err := owner.Exec(ctx, "INSERT INTO schema_migrations(version, name, checksum) VALUES($1, $2, $3)", future, "000030_future.up.sql", make([]byte, 32)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, "UPDATE controller_schema_compatibility SET \"current_schema\" = $1, minimum_compatible_controller_schema = $2 WHERE singleton", future, expected); err != nil {
+	if _, err := owner.Exec(ctx, "UPDATE controller_schema_compatibility SET \"current_schema\" = $1, minimum_compatible_controller_schema = $2 WHERE singleton", future, expected); err != nil {
 		t.Fatal(err)
 	}
 	body = readyStatus("declared compatible newer schema", server, http.StatusOK)
@@ -89,7 +98,7 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 	defer oldServer.closeEventStreams()
 	readyStatus("Controller below declared minimum", oldServer, http.StatusServiceUnavailable)
 
-	if _, err := pool.Exec(ctx, "UPDATE controller_schema_compatibility SET \"current_schema\" = $1, minimum_compatible_controller_schema = $1 WHERE singleton", expected); err != nil {
+	if _, err := owner.Exec(ctx, "UPDATE controller_schema_compatibility SET \"current_schema\" = $1, minimum_compatible_controller_schema = $1 WHERE singleton", expected); err != nil {
 		t.Fatal(err)
 	}
 	readyStatus("newer schema without declaration", server, http.StatusServiceUnavailable)

@@ -10,3 +10,4 @@ source "${ROOT}/scripts/env.sh"
 (cd "${ROOT}/web" && npm run build)
 (cd "${ROOT}/web/src/api/generated" && npm run build)
 (cd "${ROOT}/web" && npm run test:generated-auth)
+(cd "${ROOT}/web" && node test/run-auth-browser.mjs)
