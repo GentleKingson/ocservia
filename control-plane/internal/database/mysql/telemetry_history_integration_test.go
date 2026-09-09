@@ -18,6 +18,9 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	if err := owner.ProvisionTelemetryMonth(ctx, now); err != nil {
 		t.Fatal(err)
 	}
+	if err := owner.MigrateTelemetryHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := owner.GrantTestPrivileges(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +47,17 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			_, err = owner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'cpu_usage_ratio',1)`, UUIDBytes(node), UUIDBytes(batch), v)
+			if err = owner.ProvisionTelemetryMonth(ctx, at); err != nil {
+				return err
+			}
+			if err = owner.GrantTestPrivileges(ctx); err != nil {
+				return err
+			}
+			name, _, _, err := telemetryMonth(at)
+			if err != nil {
+				return err
+			}
+			_, err = owner.Exec(ctx, `INSERT INTO `+name+`(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'cpu_usage_ratio',1)`, UUIDBytes(node), UUIDBytes(batch), v)
 			return err
 		},
 		SeedExpiredRollups: func(five, hour time.Time) error {

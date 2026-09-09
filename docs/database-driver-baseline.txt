@@ -22,6 +22,8 @@
    1 control-plane/internal/api/useroperations.go:pgx.ErrNoRows
    1 control-plane/internal/approvals/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/approvals/service.go:"github.com/jackc/pgx/v5/pgxpool"
+   1 control-plane/internal/approvals/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/approvals/service.go:postgres.WrapTx
    1 control-plane/internal/approvals/service.go:pgx.Row
    4 control-plane/internal/approvals/service.go:pgx.Tx
    2 control-plane/internal/approvals/service.go:pgxpool.Pool
@@ -29,33 +31,20 @@
    1 control-plane/internal/attestationtest/helper.go:pgxpool.Pool
    1 control-plane/internal/audit/chain.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/audit/chain.go:"github.com/jackc/pgx/v5/pgxpool"
-   1 control-plane/internal/audit/chain.go:pgx.ErrNoRows
-   1 control-plane/internal/audit/chain.go:pgx.ReadOnly
-   3 control-plane/internal/audit/chain.go:pgx.RepeatableRead
-   6 control-plane/internal/audit/chain.go:pgx.Tx
-   3 control-plane/internal/audit/chain.go:pgx.TxOptions
-   4 control-plane/internal/audit/chain.go:pgxpool.Pool
-   1 control-plane/internal/auth/local.go:"github.com/jackc/pgx/v5"
-   1 control-plane/internal/auth/local.go:pgx.ErrNoRows
-   1 control-plane/internal/auth/local.go:pgx.Tx
-   1 control-plane/internal/auth/local_lifecycle.go:"github.com/jackc/pgx/v5"
-   1 control-plane/internal/auth/local_lifecycle.go:"github.com/jackc/pgx/v5/pgconn"
-   1 control-plane/internal/auth/local_lifecycle.go:pgconn.PgError
-   1 control-plane/internal/auth/local_lifecycle.go:pgx.ErrNoRows
-   1 control-plane/internal/auth/local_lifecycle.go:pgx.Tx
-   1 control-plane/internal/auth/local_limits.go:"github.com/jackc/pgx/v5"
-   1 control-plane/internal/auth/local_limits.go:pgx.Tx
-   1 control-plane/internal/auth/local_password.go:"github.com/jackc/pgx/v5"
-   2 control-plane/internal/auth/local_password.go:pgx.ErrNoRows
-   1 control-plane/internal/auth/service.go:"github.com/jackc/pgx/v5"
+   4 control-plane/internal/audit/chain.go:pgx.Tx
+   2 control-plane/internal/audit/chain.go:pgxpool.Pool
+   1 control-plane/internal/audit/chain.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   2 control-plane/internal/audit/chain.go:postgres.WrapPool
+   3 control-plane/internal/audit/chain.go:postgres.WrapTx
    1 control-plane/internal/auth/service.go:"github.com/jackc/pgx/v5/pgxpool"
-   1 control-plane/internal/auth/service.go:pgx.ErrNoRows
    1 control-plane/internal/auth/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-   1 control-plane/internal/auth/service.go:postgres.WrapTx
+   1 control-plane/internal/auth/service.go:postgres.WrapPool
    2 control-plane/internal/auth/service.go:pgxpool.Pool
    1 control-plane/internal/certificates/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/certificates/service.go:"github.com/jackc/pgx/v5/pgxpool"
-   5 control-plane/internal/certificates/service.go:pgx.ErrNoRows
+   1 control-plane/internal/certificates/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/certificates/service.go:postgres.WrapPool
+   4 control-plane/internal/certificates/service.go:pgx.ErrNoRows
    1 control-plane/internal/certificates/service.go:pgx.Row
    4 control-plane/internal/certificates/service.go:pgxpool.Pool
    1 control-plane/internal/configplan/service.go:"github.com/jackc/pgx/v5"
@@ -74,13 +63,15 @@
    1 control-plane/internal/coordination/exec.go:pgxpool.Pool
    1 control-plane/internal/coordination/leadership.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/coordination/leadership.go:"github.com/jackc/pgx/v5/pgxpool"
-   2 control-plane/internal/coordination/leadership.go:pgx.ErrNoRows
+   1 control-plane/internal/coordination/leadership.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/coordination/leadership.go:postgres.WrapPool
+   1 control-plane/internal/coordination/leadership.go:postgres.WrapTx
    2 control-plane/internal/coordination/leadership.go:pgx.Tx
-   4 control-plane/internal/coordination/leadership.go:pgxpool.Pool
+   5 control-plane/internal/coordination/leadership.go:pgxpool.Pool
    1 control-plane/internal/coordination/maintenance.go:"github.com/jackc/pgx/v5/pgxpool"
    1 control-plane/internal/coordination/maintenance.go:pgxpool.Pool
    1 control-plane/internal/coordination/runner.go:"github.com/jackc/pgx/v5/pgxpool"
-   2 control-plane/internal/coordination/runner.go:pgxpool.Pool
+   1 control-plane/internal/coordination/runner.go:pgxpool.Pool
    1 control-plane/internal/enrollment/convergence.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/enrollment/convergence.go:"github.com/jackc/pgx/v5/pgxpool"
    1 control-plane/internal/enrollment/convergence.go:pgx.ErrNoRows
@@ -132,12 +123,10 @@
    2 control-plane/internal/privdattestation/receipt.go:pgx.Tx
    1 control-plane/internal/privdattestation/service.go:"github.com/jackc/pgx/v5/pgxpool"
    3 control-plane/internal/privdattestation/service.go:pgxpool.Pool
-   1 control-plane/internal/rbac/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/rbac/service.go:"github.com/jackc/pgx/v5/pgxpool"
-   1 control-plane/internal/rbac/service.go:pgx.ErrNoRows
-   1 control-plane/internal/rbac/service.go:pgx.Rows
-   1 control-plane/internal/rbac/service.go:pgx.Tx
-   2 control-plane/internal/rbac/service.go:pgxpool.Pool
+   1 control-plane/internal/rbac/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+   1 control-plane/internal/rbac/service.go:postgres.WrapPool
+   1 control-plane/internal/rbac/service.go:pgxpool.Pool
    1 control-plane/internal/telemetry/service.go:"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
    1 control-plane/internal/telemetry/service.go:"github.com/jackc/pgx/v5"
    1 control-plane/internal/telemetry/service.go:"github.com/jackc/pgx/v5/pgconn"

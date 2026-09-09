@@ -26,7 +26,7 @@ func (t *transaction) TelemetryHistoryStore() telemetryhistory.Store {
 	return NewTelemetryHistoryStore(t)
 }
 
-var telemetryShardName = regexp.MustCompile(`\Atelemetry_samples_m_[0-9]{6}\z`)
+var telemetryShardName = regexp.MustCompile(`\Atelemetry_samples_(m_[0-9]{6}|x_[pn][0-9]{7})\z`)
 
 func (s *TelemetryHistoryStore) lockCatalog(ctx context.Context) error {
 	var key []byte

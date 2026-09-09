@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
@@ -375,7 +376,7 @@ func workspace(r *http.Request) uuid.UUID {
 }
 
 func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, database.ErrNotFound) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}

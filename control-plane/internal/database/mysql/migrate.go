@@ -19,7 +19,7 @@ import (
 
 // These are new backend histories, not records of PostgreSQL migrations.
 //
-//go:embed mysql/manifest.json mariadb/manifest.json history/f6cd0e0/*.json mysql/000002.json mariadb/000002.json mysql/000003.json mariadb/000003.json
+//go:embed mysql/manifest.json mariadb/manifest.json history/f6cd0e0/*.json mysql/000002.json mariadb/000002.json mysql/000003.json mariadb/000003.json mysql/000004.json mariadb/000004.json
 var manifests embed.FS
 
 type step struct {

@@ -11,8 +11,10 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,14 +29,15 @@ type Resource struct {
 	ID          uuid.UUID
 }
 
-type Service struct{ pool *pgxpool.Pool }
+type Service struct{ backend database.Backend }
 
 type BindingRequest struct {
 	IdentityID, WorkspaceID, ResourceID, ActorID, SessionID, ApprovalID uuid.UUID
 	Role, ResourceType, RequestID, Reason                               string
 }
 
-func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
+func New(pool *pgxpool.Pool) *Service              { return NewBackend(postgres.WrapPool(pool)) }
+func NewBackend(backend database.Backend) *Service { return &Service{backend: backend} }
 
 var roleActions = map[string][]string{
 	"Viewer":        {"node.read", "operation.read"},
@@ -53,9 +56,11 @@ func (s *Service) Authorize(ctx context.Context, identityID uuid.UUID, action st
 	if breakGlass {
 		return nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT role_name FROM role_bindings
-		WHERE identity_id=$1 AND workspace_id=$2
-		  AND (resource_type='workspace' OR (resource_type=$3 AND resource_id=$4))`, identityID, resource.WorkspaceID, resource.Type, nullable(resource.ID))
+	store, err := rbacstore.From(s.backend)
+	if err != nil {
+		return err
+	}
+	rows, err := store.Roles(ctx, identityID, resource.WorkspaceID, resource.Type, resource.ID)
 	if err != nil {
 		return fmt.Errorf("read role bindings: %w", err)
 	}
@@ -78,7 +83,11 @@ func (s *Service) Authorize(ctx context.Context, identityID uuid.UUID, action st
 
 func (s *Service) Node(ctx context.Context, nodeID uuid.UUID) (Resource, error) {
 	var resource Resource
-	err := s.pool.QueryRow(ctx, `SELECT workspace_id FROM nodes WHERE id=$1`, nodeID).Scan(&resource.WorkspaceID)
+	store, err := rbacstore.From(s.backend)
+	if err != nil {
+		return Resource{}, err
+	}
+	err = store.Node(ctx, nodeID).Scan(&resource.WorkspaceID)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -89,7 +98,11 @@ func (s *Service) Node(ctx context.Context, nodeID uuid.UUID) (Resource, error) 
 func (s *Service) Operation(ctx context.Context, operationID uuid.UUID) (Resource, error) {
 	var resource Resource
 	var nodeID *uuid.UUID
-	err := s.pool.QueryRow(ctx, `SELECT workspace_id,node_id FROM operations WHERE id=$1`, operationID).Scan(&resource.WorkspaceID, &nodeID)
+	store, err := rbacstore.From(s.backend)
+	if err != nil {
+		return Resource{}, err
+	}
+	err = store.Operation(ctx, operationID).Scan(&resource.WorkspaceID, &nodeID)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -102,23 +115,25 @@ func (s *Service) Operation(ctx context.Context, operationID uuid.UUID) (Resourc
 
 func (s *Service) Workspace(ctx context.Context, workspaceID uuid.UUID) (Resource, error) {
 	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=$1)`, workspaceID).Scan(&exists); err != nil {
+	store, err := rbacstore.From(s.backend)
+	if err != nil {
+		return Resource{}, err
+	}
+	if err := store.Workspace(ctx, workspaceID).Scan(&exists); err != nil {
 		return Resource{}, err
 	}
 	if !exists {
-		return Resource{}, pgx.ErrNoRows
+		return Resource{}, database.ErrNotFound
 	}
 	return Resource{WorkspaceID: workspaceID, Type: "workspace"}, nil
 }
 
 func (s *Service) AuthorizedWorkspaces(ctx context.Context, identityID uuid.UUID, action string, breakGlass bool) ([]uuid.UUID, error) {
-	var rows pgx.Rows
-	var err error
-	if breakGlass {
-		rows, err = s.pool.Query(ctx, `SELECT id,'PlatformAdmin' FROM workspaces`)
-	} else {
-		rows, err = s.pool.Query(ctx, `SELECT DISTINCT workspace_id,role_name FROM role_bindings WHERE identity_id=$1`, identityID)
+	store, err := rbacstore.From(s.backend)
+	if err != nil {
+		return nil, err
 	}
+	rows, err := store.AuthorizedWorkspaces(ctx, identityID, breakGlass)
 	if err != nil {
 		return nil, err
 	}
@@ -148,42 +163,44 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 		!slices.Contains([]string{"workspace", "node", "resource", "secret_ref", "certificate", "config_plan", "batch_operation", "role_binding"}, request.ResourceType) || (request.ResourceType == "workspace") != (request.ResourceID == uuid.Nil) {
 		return uuid.Nil, errors.New("role binding is invalid")
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	// Serialize with one-shot completion and management account protection.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(734821032)`); err != nil {
-		return uuid.Nil, err
-	}
-	allowed, err := canGrantRole(ctx, tx, request.ActorID, request.WorkspaceID, request.Role)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	if !allowed {
-		return uuid.Nil, ErrGrantForbidden
-	}
-	if slices.Contains([]string{"SecurityAdmin", "PlatformAdmin"}, request.Role) {
-		hash, _ := BindingApprovalContent(request.IdentityID, request.WorkspaceID, request.Role, request.ResourceType, request.ResourceID)
-		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorID, "role_binding.elevate", "role_binding", request.IdentityID, hash); err != nil {
-			return uuid.Nil, err
-		}
-	}
 	id := uuid.Must(uuid.NewV7())
-	now := time.Now().UTC()
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at,approval_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, request.IdentityID, request.WorkspaceID, request.Role, request.ResourceType, nullable(request.ResourceID), request.ActorID, now, nullable(request.ApprovalID)); err != nil {
-		return uuid.Nil, err
-	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID.String(), SessionID: &request.SessionID, Action: "role_binding.create", ResourceType: "role_binding", ResourceID: id, RequestID: request.RequestID, Result: "succeeded", Reason: request.Reason, At: now}); err != nil {
-		return uuid.Nil, err
-	}
-	if slices.Contains([]string{"SecurityAdmin", "PlatformAdmin"}, request.Role) {
-		if _, err := tx.Exec(ctx, `UPDATE local_auth_bootstrap SET completion_pending=false,completed_at=$1 WHERE completion_pending AND workspace_id=$2 AND identity_id<>$3`, now, request.WorkspaceID, request.IdentityID); err != nil {
-			return uuid.Nil, err
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := rbacstore.From(tx)
+		if err != nil {
+			return err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
+		// Serialize with one-shot completion and management account protection.
+		if err := store.LockManagement(ctx); err != nil {
+			return err
+		}
+		allowed, err := canGrantRole(ctx, tx, request.ActorID, request.WorkspaceID, request.Role)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrGrantForbidden
+		}
+		if slices.Contains([]string{"SecurityAdmin", "PlatformAdmin"}, request.Role) {
+			hash, _ := BindingApprovalContent(request.IdentityID, request.WorkspaceID, request.Role, request.ResourceType, request.ResourceID)
+			if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorID, "role_binding.elevate", "role_binding", request.IdentityID, hash); err != nil {
+				return err
+			}
+		}
+		now := time.Now().UTC()
+		if err := store.Insert(ctx, rbacstore.Binding{ID: id, IdentityID: request.IdentityID, WorkspaceID: request.WorkspaceID, Role: request.Role, ResourceType: request.ResourceType, ResourceID: request.ResourceID, ActorID: request.ActorID, At: now, ApprovalID: request.ApprovalID}); err != nil {
+			return err
+		}
+		if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID.String(), SessionID: &request.SessionID, Action: "role_binding.create", ResourceType: "role_binding", ResourceID: id, RequestID: request.RequestID, Result: "succeeded", Reason: request.Reason, At: now}); err != nil {
+			return err
+		}
+		if slices.Contains([]string{"SecurityAdmin", "PlatformAdmin"}, request.Role) {
+			if err := store.CompleteBootstrap(ctx, request.WorkspaceID, request.IdentityID, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return uuid.Nil, err
 	}
 	return id, nil
@@ -208,8 +225,12 @@ func optionalID(id uuid.UUID) *uuid.UUID {
 	return &id
 }
 
-func canGrantRole(ctx context.Context, tx pgx.Tx, actorID, workspaceID uuid.UUID, role string) (bool, error) {
-	rows, err := tx.Query(ctx, `SELECT role_name FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2 AND resource_type='workspace'`, actorID, workspaceID)
+func canGrantRole(ctx context.Context, tx database.Tx, actorID, workspaceID uuid.UUID, role string) (bool, error) {
+	store, err := rbacstore.From(tx)
+	if err != nil {
+		return false, err
+	}
+	rows, err := store.WorkspaceRoles(ctx, actorID, workspaceID)
 	if err != nil {
 		return false, err
 	}
@@ -236,11 +257,4 @@ func canGrantRole(ctx context.Context, tx pgx.Tx, actorID, workspaceID uuid.UUID
 		}
 	}
 	return true, nil
-}
-
-func nullable(id uuid.UUID) any {
-	if id == uuid.Nil {
-		return nil
-	}
-	return id
 }

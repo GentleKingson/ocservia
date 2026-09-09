@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const latestRevisionVersion = 3
+const latestRevisionVersion = 4
 
 type revisionArtifact struct {
 	revision
@@ -461,38 +461,48 @@ func (b *Backend) ValidateSchema(ctx context.Context, expectedController int) (r
 		return err
 	}
 	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
-	root, parent, err := b.rootOn(ctx, conn)
+	snapshot, err := b.verifiedSnapshotOn(ctx, conn, chain)
 	if err != nil {
 		return err
+	}
+	return validateRevisionSnapshot(ctx, conn, snapshot)
+}
+
+// verifiedSnapshotOn checks immutable history and every static object without
+// requiring an interrupted owner-managed dynamic shard to be active already.
+func (b *Backend) verifiedSnapshotOn(ctx context.Context, conn *sql.Conn, chain []revisionArtifact) (manifest, error) {
+	root, parent, err := b.rootOn(ctx, conn)
+	if err != nil {
+		return manifest{}, err
 	}
 	if n, err := revisionTables(ctx, conn, chain[0].revision); err != nil || n != 2 {
 		if err != nil {
-			return err
+			return manifest{}, err
 		}
-		return ErrSchema
+		return manifest{}, ErrSchema
 	}
 	states, _, err := readRevisionHistory(ctx, conn, chain, parent)
 	if err != nil {
-		return err
+		return manifest{}, err
 	}
 	for _, state := range states {
 		if state == "running" {
-			return ErrDirty
+			return manifest{}, ErrDirty
 		}
 	}
 	if len(states) != len(chain) {
-		return ErrSchema
+		return manifest{}, ErrSchema
 	}
 	if err = b.validateBaselineReceipts(ctx, conn, root, parent); err != nil {
-		return err
+		return manifest{}, err
 	}
 	snapshot := root
 	for _, r := range chain {
 		plan, ok := r.Parents[parent]
 		if !ok {
-			return ErrChecksum
+			return manifest{}, ErrChecksum
 		}
 		snapshot = revisedSnapshot(snapshot, plan)
 	}
-	return validateRevisionSnapshot(ctx, conn, snapshot)
+	return snapshot, validateSnapshot(ctx, conn, snapshot)
 }

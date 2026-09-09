@@ -22,8 +22,11 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/certificates/artifactstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
@@ -75,6 +78,7 @@ type RevokeSignerRequest struct {
 
 type Service struct {
 	pool        *pgxpool.Pool
+	backend     database.Backend
 	operations  *operationstore.Service
 	approvals   *approvals.Service
 	signer      Signer
@@ -150,7 +154,13 @@ type ArtifactDownload struct {
 }
 
 func New(pool *pgxpool.Pool, operations *operationstore.Service) *Service {
-	return &Service{pool: pool, operations: operations, approvals: approvals.New(pool), now: func() time.Time { return time.Now().UTC() }}
+	return &Service{pool: pool, backend: postgres.WrapPool(pool), operations: operations, approvals: approvals.New(pool), now: func() time.Time { return time.Now().UTC() }}
+}
+
+// NewArtifactDownloads constructs the adapted download boundary only. Certificate
+// issuance, revocation and maintenance still require the existing service.
+func NewArtifactDownloads(backend database.Backend, artifacts ArtifactFetcher, signer *commandauth.Signer) *Service {
+	return &Service{backend: backend, artifacts: artifacts, grantSigner: signer, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func NewWithSigner(pool *pgxpool.Pool, operations *operationstore.Service, signer Signer) *Service {
@@ -642,7 +652,14 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 }
 
 func (s *Service) ArtifactResource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT workspace_id,node_id FROM artifact_operations WHERE id=$1`, id).Scan(&workspaceID, &nodeID)
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		workspaceID, nodeID, err = store.Resource(ctx, id)
+		return err
+	})
 	return
 }
 
@@ -651,55 +668,50 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 		return ArtifactDownload{}, ErrArtifactDenied
 	}
 	tokenHash := sha256.Sum256([]byte(token))
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return ArtifactDownload{}, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(6820260817)`); err != nil {
-		return ArtifactDownload{}, err
-	}
-	var active int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM artifact_operations WHERE state='leased' AND lease_until>now()`).Scan(&active); err != nil {
-		return ArtifactDownload{}, err
-	}
-	if active >= 4 {
-		return ArtifactDownload{}, ErrArtifactCapacity
-	}
-	var nodeID, certificateID, operationID uuid.UUID
-	var expected []byte
-	var size int64
-	var certificateVersion uint64
-	var artifactExpires, certificateExpires time.Time
-	var requesterID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after,r.requester_id FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id JOIN approval_requests r ON r.id=a.approval_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND a.certificate_version=c.version AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &certificateID, &operationID, &certificateVersion, &expected, &size, &artifactExpires, &certificateExpires, &requesterID)
-	if err != nil {
-		return ArtifactDownload{}, ErrArtifactDenied
-	}
-	if requesterID != subject {
-		return ArtifactDownload{}, ErrArtifactDenied
-	}
 	grantID := uuid.Must(uuid.NewV7())
-	issuedAt := s.now().UTC()
-	grantExpires := issuedAt.Add(time.Minute)
-	if artifactExpires.Before(grantExpires) {
-		grantExpires = artifactExpires
-	}
-	if certificateExpires.Before(grantExpires) {
-		grantExpires = certificateExpires
-	}
-	grant, err := s.grantSigner.IssueArtifactGrant(nodeID, id, certificateID, certificateVersion, operationID, requesterID.String(), uint64(size), grantID, issuedAt, grantExpires)
+	var eligible artifactstore.Eligible
+	var grant *agentv1.ArtifactGrantV1
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		if err = store.LockCapacity(ctx); err != nil {
+			return err
+		}
+		active, err := store.Active(ctx)
+		if err != nil {
+			return err
+		}
+		if active >= 4 {
+			return ErrArtifactCapacity
+		}
+		eligible, err = store.Eligible(ctx, id, tokenHash[:])
+		if err != nil {
+			return ErrArtifactDenied
+		}
+		if eligible.RequesterID != subject {
+			return ErrArtifactDenied
+		}
+		issuedAt := s.now().UTC()
+		expires := issuedAt.Add(time.Minute)
+		if eligible.ArtifactExpires.Before(expires) {
+			expires = eligible.ArtifactExpires
+		}
+		if eligible.CertificateExpires.Before(expires) {
+			expires = eligible.CertificateExpires
+		}
+		grant, err = s.grantSigner.IssueArtifactGrant(eligible.NodeID, id, eligible.CertificateID, eligible.CertificateVersion, eligible.OperationID, eligible.RequesterID.String(), uint64(eligible.Size), grantID, issuedAt, expires)
+		if err != nil {
+			return err
+		}
+		return store.Lease(ctx, id, grantID, subject, expires)
+	})
 	if err != nil {
-		return ArtifactDownload{}, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='leased',lease_until=$2,active_grant_id=$3,active_grant_subject=$4,active_grant_expires_at=$2,updated_at=now() WHERE id=$1`, id, grantExpires, grantID, subject.String()); err != nil {
-		return ArtifactDownload{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return ArtifactDownload{}, err
 	}
 	var reader io.ReadCloser
-	if err := s.executeArtifactFenced(ctx, nodeID, id,
+	if err := s.executeArtifactFenced(ctx, eligible.NodeID, id,
 		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
 			fetched, err := s.artifacts.FetchArtifact(ctx, grant, binding)
 			if err != nil {
@@ -711,7 +723,7 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 		_ = s.AbortArtifact(context.WithoutCancel(ctx), id, grantID)
 		return ArtifactDownload{}, err
 	}
-	return ArtifactDownload{Reader: reader, ExpectedSHA256: expected, Size: size, NodeID: nodeID, GrantID: grantID, Grant: grant}, nil
+	return ArtifactDownload{Reader: reader, ExpectedSHA256: eligible.Digest, Size: eligible.Size, NodeID: eligible.NodeID, GrantID: grantID, Grant: grant}, nil
 }
 
 func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
@@ -728,27 +740,34 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 	if err != nil || len(grantBytes) == 0 || len(grantBytes) > 4096 {
 		return ErrArtifactDenied
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	command, err := tx.Exec(ctx, `UPDATE artifact_operations a SET state='consuming',consume_grant=$6,consume_sha256=$3,consume_size=$4,consume_actor_id=$7,consume_session_id=$8,consume_request_id=$9,updated_at=now() FROM certificates c WHERE a.id=$1 AND a.active_grant_id=$2 AND a.active_grant_subject=$5 AND a.state='leased' AND a.content_sha256=$3 AND a.content_size=$4 AND a.expires_at>now() AND a.certificate_id=c.id AND a.node_id=$10 AND a.certificate_id=$11 AND a.certificate_version=$12 AND a.operation_id=$13 AND a.certificate_version=c.version AND c.state IN ('issued','expiring') AND c.not_after>now()`, id, grantID, digest, size, actorID.String(), grantBytes, actorID, sessionID, requestID, nodeID, certificateID, grant.GetCertificateVersion(), operationID)
-	if err != nil {
-		return err
-	}
-	if command.RowsAffected() != 1 {
-		var exactReplay bool
-		if queryErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id WHERE a.id=$1 AND a.active_grant_id=$2 AND a.state='consumed' AND a.consume_grant=$3 AND a.consume_sha256=$4 AND a.consume_size=$5 AND a.consume_actor_id=$6 AND a.consume_session_id=$7 AND a.consume_request_id=$8 AND a.node_id=$9 AND a.certificate_id=$10 AND a.certificate_version=$11 AND a.operation_id=$12 AND a.certificate_version=c.version AND c.state IN ('issued','expiring') AND c.not_after>now())`, id, grantID, grantBytes, digest, size, actorID, sessionID, requestID, nodeID, certificateID, grant.GetCertificateVersion(), operationID).Scan(&exactReplay); queryErr != nil {
-			return queryErr
+	consumption := artifactstore.Consumption{ID: id, GrantID: grantID, ActorID: actorID, SessionID: sessionID, NodeID: nodeID, CertificateID: certificateID, OperationID: operationID, CertificateVersion: grant.GetCertificateVersion(), Grant: grantBytes, Digest: digest, Size: size, RequestID: requestID}
+	exactReplay := false
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
 		}
-		if exactReplay {
+		changed, err := store.StartConsumption(ctx, consumption)
+		if err != nil {
+			return err
+		}
+		if changed {
 			return nil
 		}
-		return ErrArtifactDenied
-	}
-	if err := tx.Commit(ctx); err != nil {
+		exactReplay, err = store.ExactReplay(ctx, consumption)
+		if err != nil {
+			return err
+		}
+		if !exactReplay {
+			return ErrArtifactDenied
+		}
+		return nil
+	})
+	if err != nil {
 		return err
+	}
+	if exactReplay {
+		return nil
 	}
 	// Run the root consume inside the owner fencing interval: the binding is
 	// signed and the mutation RPC completes before the ownership guard is
@@ -782,43 +801,39 @@ const (
 )
 
 func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID uuid.UUID) (artifactConsumptionFinalization, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	var workspaceID, nodeID, certificateID, actorID, sessionID uuid.UUID
-	var digest []byte
-	var size int64
-	var requestID string
-	err = tx.QueryRow(ctx, `UPDATE artifact_operations SET state='consumed',consumed_at=now(),lease_until=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming' RETURNING workspace_id,node_id,certificate_id,consume_actor_id,consume_session_id,consume_request_id,consume_sha256,consume_size`, id, grantID).Scan(&workspaceID, &nodeID, &certificateID, &actorID, &sessionID, &requestID, &digest, &size)
-	if errors.Is(err, pgx.ErrNoRows) {
-		var state string
-		if queryErr := tx.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1 AND active_grant_id=$2`, id, grantID).Scan(&state); queryErr != nil {
-			return 0, ErrArtifactDenied
+	result := artifactConsumptionFinalized
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
 		}
-		switch state {
-		case "consumed":
-			return artifactConsumptionAlreadyFinalized, nil
-		case "revoked":
-			return artifactConsumptionRevoked, nil
-		case "expired":
-			return artifactConsumptionExpired, nil
-		default:
-			return 0, ErrArtifactDenied
+		v, err := store.Finalize(ctx, id, grantID)
+		if errors.Is(err, database.ErrNotFound) {
+			state, err := store.State(ctx, id, grantID)
+			if err != nil {
+				return ErrArtifactDenied
+			}
+			switch state {
+			case "consumed":
+				result = artifactConsumptionAlreadyFinalized
+			case "revoked":
+				result = artifactConsumptionRevoked
+			case "expired":
+				result = artifactConsumptionExpired
+			default:
+				return ErrArtifactDenied
+			}
+			return nil
 		}
-	}
-	if err != nil {
-		return 0, err
-	}
-	now := s.now()
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID.String(), SessionID: &sessionID, Action: "certificate.p12.download", ResourceType: "artifact", ResourceID: id, NodeID: &nodeID, RequestID: requestID, Result: "succeeded", AfterSummary: json.RawMessage(fmt.Sprintf(`{"certificate_id":%q,"sha256":%q,"size":%d}`, certificateID, hex.EncodeToString(digest), size)), At: now}); err != nil {
-		return 0, err
-	}
-	if err := coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
-		return 0, err
-	}
-	return artifactConsumptionFinalized, nil
+		if err != nil {
+			return err
+		}
+		if err = audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: v.WorkspaceID, ActorType: "user", ActorID: v.ActorID.String(), SessionID: &v.SessionID, Action: "certificate.p12.download", ResourceType: "artifact", ResourceID: id, NodeID: &v.NodeID, RequestID: v.RequestID, Result: "succeeded", AfterSummary: json.RawMessage(fmt.Sprintf(`{"certificate_id":%q,"sha256":%q,"size":%d}`, v.CertificateID, hex.EncodeToString(v.Digest), v.Size)), At: s.now()}); err != nil {
+			return err
+		}
+		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+	})
+	return result, err
 }
 
 func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
@@ -907,8 +922,13 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 func (s *Service) AbortArtifact(ctx context.Context, id, grantID uuid.UUID) error {
 	// Preserve the durable lease until its bounded expiry. A transport failure
 	// must not make a second concurrently valid grant immediately issuable.
-	_, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, id, grantID)
-	return err
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return store.Abort(ctx, id, grantID)
+	})
 }
 
 func (s *Service) Maintain(ctx context.Context) error {

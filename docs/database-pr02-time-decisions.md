@@ -1,0 +1,83 @@
+# PR-02 Logical Time and Scheduler Adaptation
+
+This work remains Draft. It does not enable Controller production startup or
+establish complete Controller workflow parity.
+
+## Remaining Type Inventory
+
+`database-pr02-type-inventory.json` is the machine-readable inventory of the
+published baseline fields not converted in version 3: 143 DATETIME fields,
+11 JSONB fields and one text-array field. It records the original physical
+definition rather than inferring that every native JSON column is JSONB.
+The inventory is a pre-version-4 coverage denominator, not a statement that
+all listed domains have been adapted. New version-4 adapters must be matched
+against those entries during acceptance.
+
+## Scheduler Store
+
+The coordination Runner now uses a database Backend. Acquisition and renewal
+run through the same generic transaction and scheduler Store on all engines.
+The original PostgreSQL construction and Fence interfaces remain explicit
+compatibility bridges for existing callers. `AssertFenceTx` supports actual
+Session fences without committing the caller's transaction, and rejects an
+unsupported legacy-only fence rather than silently skipping it.
+
+Acquisition and renewal use the captured database transaction timestamp.
+Fencing instead checks database wall-clock time and holds the shared singleton
+row lock through commit. MySQL/MariaDB recheck wall-clock time after acquiring
+that lock, so waiting for a lock cannot authorize an already-expired lease.
+The generic Store preserves owner identity, incarnation and epoch checks.
+
+`SchedulerTimeSteps` converts only `scheduler_leadership.lease_until` and
+`updated_at`; the separate `scheduler_leases` domain is not silently converted.
+The new storage is signed PostgreSQL-epoch microseconds with finite-range and
+infinity checks. Callers bind explicit Timestamp values rather than rewriting
+all `time.Time` arguments globally.
+
+## Historical Sentinel Decisions
+
+The published year-1000 representation is ambiguous. A non-seed value cannot
+be classified as finite or negative infinity from the DATETIME alone.
+The append-only migration therefore keeps the source column, leaves the
+shadow unresolved, and fails verification until an owner records a decision.
+The only automatic negative-infinity decision is the exact never-acquired
+scheduler singleton: id 1, zero instance UUID, incarnation 0, epoch 0 and the
+published year-1000 lease value. Its generated `updated_at` remains finite.
+
+The owner-only `time_migration_decisions` table records table, column, row key,
+exact source value and either `finite` or `negative_infinity`. An existing
+owner decision is never overwritten. The decision must match the old value;
+it does not authorize translating a subsequently changed source.
+
+Repair must acquire the same database migration GET_LOCK on a dedicated
+connection, inspect the preserved source, and insert the decision using that
+connection. The owner then releases the lock with confirmed unlock/connection
+discard and invokes explicit checksum-bound migration repair. Ordinary owner
+connections are also denied writes to guarded source tables while the
+migration is incomplete. Runtime has no access to the decision table.
+
+Repair repeats the complete data copy and null-safe verification. The runner
+checks source/shadow equality again immediately before dropping source
+columns; it cannot adopt an unverified shadow. Writer guards survive failure
+and are removed only after the switch. Published version-1 through version-3
+artifacts are unchanged; these helpers are inputs to a new version, not a
+permission to rerun candidate DDL outside the recorded migration chain.
+
+## Certificate Download Boundary
+
+The existing Service download methods now use the generic artifact Store:
+OpenArtifact takes the original global capacity lock before its eligibility
+read and lease update; CompleteArtifact persists the consuming evidence before
+the root RPC; finalization appends its audit event and asserts the scheduler
+fence within the same transaction. Abort retains the outstanding grant lease.
+Exact completion replay does not repeat the root mutation or audit append.
+MySQL/MariaDB use the corresponding transaction lock record, never GET_LOCK.
+
+The artifact and certificate time fields remain native DATETIME in this
+adapter. Statements use the captured database transaction time, but this does
+not remove their historical range or sentinel limitations. Converting them
+requires adapting certificate issuance, revocation and maintenance writers
+together in a subsequent append-only migration. The download-only backend
+constructor does not claim those other Service methods are portable. Existing
+owner-fencing RPC integration remains unchanged, not reimplemented by a
+database-lock primitive.

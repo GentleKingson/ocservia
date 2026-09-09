@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,19 +108,62 @@ func telemetryShardDDL(name string, start, end int64, collation string) string {
 
 func telemetryMonth(month time.Time) (string, int64, int64, error) {
 	month = month.UTC()
-	if month.Year() < 1 || month.Year() > 9999 {
+	if month.Year() < -4713 || month.Year() > 294276 {
 		return "", 0, 0, ErrSchema
 	}
 	start := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
-	lo, err := telemetryMicros(start)
-	if err != nil {
-		return "", 0, 0, err
+	// Only the first and final PostgreSQL timestamp months may have clipped
+	// bounds. Unix seconds, unlike UnixNano, cover the complete finite range.
+	lo := (start.Unix() - 946684800) * 1000000
+	hi := (start.AddDate(0, 1, 0).Unix() - 946684800) * 1000000
+	if lo < value.MinTimestamp {
+		lo = value.MinTimestamp
 	}
-	hi, err := telemetryMicros(start.AddDate(0, 1, 0))
-	if err != nil {
-		return "", 0, 0, err
+	if hi > value.EndTimestamp {
+		hi = value.EndTimestamp
 	}
-	return "telemetry_samples_m_" + start.Format("200601"), lo, hi, nil
+	if lo >= hi || lo >= value.EndTimestamp || hi <= value.MinTimestamp {
+		return "", 0, 0, ErrSchema
+	}
+	name := "telemetry_samples_m_" + start.Format("200601")
+	if month.Year() < 1 || month.Year() > 9999 {
+		ordinal := month.Year()*12 + int(month.Month()) - 1
+		sign := "p"
+		if ordinal < 0 {
+			sign = "n"
+			ordinal = -ordinal
+		}
+		name = fmt.Sprintf("telemetry_samples_x_%s%07d", sign, ordinal)
+	}
+	return name, lo, hi, nil
+}
+
+func telemetryMonthFromName(name string) (time.Time, error) {
+	if !telemetryShardName.MatchString(name) {
+		return time.Time{}, ErrSchema
+	}
+	if strings.HasPrefix(name, "telemetry_samples_m_") {
+		return time.Parse("200601", strings.TrimPrefix(name, "telemetry_samples_m_"))
+	}
+	encoded := strings.TrimPrefix(name, "telemetry_samples_x_")
+	ordinal, err := strconv.Atoi(encoded[1:])
+	if err != nil {
+		return time.Time{}, ErrSchema
+	}
+	if encoded[0] == 'n' {
+		ordinal = -ordinal
+	}
+	year, remainder := ordinal/12, ordinal%12
+	if remainder < 0 {
+		year--
+		remainder += 12
+	}
+	month := time.Date(year, time.Month(remainder+1), 1, 0, 0, 0, 0, time.UTC)
+	canonical, _, _, err := telemetryMonth(month)
+	if err != nil || canonical != name {
+		return time.Time{}, ErrSchema
+	}
+	return month, nil
 }
 
 func shardDefinition(ctx context.Context, conn *sql.Conn, name string) (string, error) {
@@ -136,7 +181,7 @@ func checkTelemetryShard(ctx context.Context, conn *sql.Conn, name string, start
 	if !telemetryShardName.MatchString(name) {
 		return ErrSchema
 	}
-	month, err := time.Parse("200601", strings.TrimPrefix(name, "telemetry_samples_m_"))
+	month, err := telemetryMonthFromName(name)
 	if err != nil {
 		return ErrSchema
 	}
@@ -223,7 +268,7 @@ func validateTelemetryShards(ctx context.Context, conn *sql.Conn) ([]string, err
 		if !telemetryShardName.MatchString(s.name) || i > 0 && s.start < shards[i-1].end {
 			return nil, ErrSchema
 		}
-		month, err := time.Parse("200601", strings.TrimPrefix(s.name, "telemetry_samples_m_"))
+		month, err := telemetryMonthFromName(s.name)
 		if err != nil {
 			return nil, ErrSchema
 		}
@@ -267,15 +312,19 @@ func validateTelemetryShards(ctx context.Context, conn *sql.Conn) ([]string, err
 // DDL; rerunning it verifies an already-created table, never silently adopting
 // an unknown object. Activation is last, so runtime never sees partial DDL.
 func (b *Backend) ProvisionTelemetryMonth(ctx context.Context, month time.Time) (result error) {
-	name, start, end, err := telemetryMonth(month)
-	if err != nil {
-		return err
-	}
 	conn, lock, err := migrationConnection(ctx, b)
 	if err != nil {
 		return err
 	}
 	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, lock)) }()
+	return b.provisionTelemetryMonth(ctx, conn, month)
+}
+
+func (b *Backend) provisionTelemetryMonth(ctx context.Context, conn *sql.Conn, month time.Time) error {
+	name, start, end, err := telemetryMonth(month)
+	if err != nil {
+		return err
+	}
 	var state string
 	err = conn.QueryRowContext(ctx, `SELECT state FROM telemetry_sample_shards WHERE table_name=?`, name).Scan(&state)
 	if err == sql.ErrNoRows {
@@ -315,9 +364,6 @@ func (b *Backend) ProvisionTelemetryMonth(ctx context.Context, month time.Time) 
 	if err = checkTelemetryShard(ctx, conn, name, start, end); err != nil {
 		return err
 	}
-	if state == "active" {
-		return nil
-	}
 	return activateTelemetryShard(ctx, conn, name, start, end)
 }
 
@@ -351,17 +397,47 @@ func activateTelemetryShard(ctx context.Context, conn *sql.Conn, name string, st
 	if err := conn.QueryRowContext(ctx, `SELECT state FROM telemetry_sample_shards WHERE table_name=? AND start_at=? AND end_at=? FOR UPDATE`, name, start, end).Scan(&state); err != nil {
 		return safeError(err)
 	}
-	if state != "planned" {
+	if state != "planned" && state != "active" {
 		return ErrSchema
 	}
 	var count int64
-	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM `+name).Scan(&count); err != nil {
+	if state == "planned" {
+		var existing int64
+		err := conn.QueryRowContext(ctx, `SELECT sampled_at FROM `+name+` LIMIT 1 FOR UPDATE NOWAIT`).Scan(&existing)
+		if err == nil {
+			return ErrSchema
+		}
+		if err != sql.ErrNoRows {
+			return safeError(err)
+		}
+	}
+	count = 0
+	rows, err := conn.QueryContext(ctx, `SELECT sampled_at,node_id,batch_id FROM telemetry_samples WHERE sampled_at>=? AND sampled_at<? FOR UPDATE NOWAIT`, start, end)
+	if err != nil {
 		return safeError(err)
 	}
-	if count != 0 {
-		return ErrSchema
+	nodes := map[string]struct{}{}
+	batches := map[string]struct{}{}
+	for rows.Next() {
+		var at int64
+		var node, batch []byte
+		if err = rows.Scan(&at, &node, &batch); err != nil {
+			rows.Close()
+			return safeError(err)
+		}
+		nodes[string(node)] = struct{}{}
+		batches[string(batch)] = struct{}{}
+		count++
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT sampled_at FROM telemetry_samples WHERE sampled_at>=? AND sampled_at<? FOR UPDATE`, start, end)
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return safeError(err)
+	}
+	// Do not wait on business node locks while holding the catalog guard.
+	// NOWAIT preserves the existing node-first business order without retrying
+	// or partially moving a busy month's data.
+	rows, err = conn.QueryContext(ctx, `SELECT sampled_at FROM `+name+` WHERE sampled_at>=? AND sampled_at<? FOR UPDATE NOWAIT`, start, end)
 	if err != nil {
 		return safeError(err)
 	}
@@ -371,23 +447,37 @@ func activateTelemetryShard(ctx context.Context, conn *sql.Conn, name string, st
 			rows.Close()
 			return safeError(err)
 		}
-		count++
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return safeError(err)
 	}
-	inserted, err := conn.ExecContext(ctx, `INSERT INTO `+name+`(node_id,batch_id,sampled_at,metric,value) SELECT node_id,batch_id,sampled_at,metric,value FROM telemetry_samples WHERE sampled_at>=? AND sampled_at<?`, start, end)
+	keys := make([]string, 0, len(nodes))
+	for node := range nodes {
+		keys = append(keys, node)
+	}
+	sort.Strings(keys)
+	for _, node := range keys {
+		var id []byte
+		if err = conn.QueryRowContext(ctx, `SELECT id FROM nodes WHERE id=? FOR UPDATE NOWAIT`, []byte(node)).Scan(&id); err != nil {
+			return safeError(err)
+		}
+	}
+	keys = keys[:0]
+	for batch := range batches {
+		keys = append(keys, batch)
+	}
+	sort.Strings(keys)
+	for _, batch := range keys {
+		var id []byte
+		if err = conn.QueryRowContext(ctx, `SELECT batch_id FROM telemetry_ingest_batches WHERE batch_id=? FOR UPDATE NOWAIT`, []byte(batch)).Scan(&id); err != nil {
+			return safeError(err)
+		}
+	}
+	_, err = conn.ExecContext(ctx, `INSERT INTO `+name+`(node_id,batch_id,sampled_at,metric,value) SELECT source.node_id,source.batch_id,source.sampled_at,source.metric,source.value FROM telemetry_samples AS source WHERE source.sampled_at>=? AND source.sampled_at<? AND NOT EXISTS(SELECT 1 FROM `+name+` AS target WHERE source.sampled_at=target.sampled_at AND source.node_id=target.node_id AND source.batch_id=target.batch_id AND BINARY source.metric=BINARY target.metric)`, start, end)
 	if err != nil {
 		return safeError(err)
-	}
-	n, err := inserted.RowsAffected()
-	if err != nil {
-		return safeError(err)
-	}
-	if n != count {
-		return ErrSchema
 	}
 	var matches int64
 	if err = conn.QueryRowContext(ctx, `SELECT count(*) FROM telemetry_samples AS source JOIN `+name+` AS target ON source.sampled_at=target.sampled_at AND source.node_id=target.node_id AND source.batch_id=target.batch_id AND BINARY source.metric=BINARY target.metric AND source.value=target.value WHERE source.sampled_at>=? AND source.sampled_at<?`, start, end).Scan(&matches); err != nil {
@@ -400,7 +490,7 @@ func activateTelemetryShard(ctx context.Context, conn *sql.Conn, name string, st
 	if err != nil {
 		return safeError(err)
 	}
-	n, err = deleted.RowsAffected()
+	n, err := deleted.RowsAffected()
 	if err != nil {
 		return safeError(err)
 	}

@@ -323,3 +323,78 @@ This is not full PR-02 acceptance. The remaining JSON/array/time columns,
 sentinel semantics, outer Controller transactions and advisory-lock workflows,
 automatic legacy telemetry migration, and authenticated cross-engine Controller
 workflows remain outstanding. Draft and production refusal stay in force.
+
+## Version 4 Controller and history milestone
+
+This follow-up starts at `c3148a473169e1654a33f57ae1fc66c400cc12a1`.
+The appended v4 artifacts were executed and fingerprinted independently on
+MySQL 8.4.10 and MariaDB 12.3.2 against both published baseline lineages.
+PostgreSQL migrations and all published v1-v3 artifacts remain byte-for-byte
+unchanged. Final candidate authoring evidence is under
+`artifacts/v4-author-retention/` and
+`artifacts/pr02-v4-author-retention-{mysql,mariadb}.log` on BuildServer.
+
+The exact ported service boundaries, fields and remaining gaps are recorded in
+[Controller workflows](database-pr02-controller-workflows.md) and
+[time decisions](database-pr02-time-decisions.md). Authentication now owns its
+outer transactions through the common backend, including local administration,
+session revocation and audited break-glass. Audit/RBAC, scheduler leadership and
+certificate download methods use their actual domain Stores. Approval
+consumption joins the caller's transaction; approval creation is not yet ported.
+
+Thirteen more business time columns and both audit JSON summaries receive
+verified read/write representations. Ambiguous historical sentinel values
+require explicit owner decisions, with guarded source rows, dirty refusal and
+repair. Historical telemetry now has an owner-only automatic discovery/copy
+workflow, atomic source removal, recovery receipts, finite-write guards and a
+retention gate. Completion cannot silently discard a concurrent legacy write.
+
+The cross-engine HTTP test uses the real router for local login, cookie
+authentication/logout, bootstrap, authorized creation, denied management,
+password changes, disable/session revocation and last-administrator protection.
+It does not bypass the production startup gate or stand in for every Controller
+route, transport consumer, read model or certificate lifecycle.
+
+Unsuccessful integration runs are retained, not counted as passes:
+
+- `artifacts/pr02-v4-full-postgres.log` exposed a new latest-schema audit test
+  being run against the historical schema-33 fixture. The database adapter
+  tests now use the separately preserved latest schema; historical checks
+  remain unchanged.
+- `artifacts/pr02-v4-full-postgres-final.log` exposed a cancellation tracer
+  fixture replacing only the legacy pool, not the newly used backend. Both
+  handles now refer to the traced pool; the cancellation assertions remain.
+- `artifacts/pr02-v4-full-postgres-final2.log` then exposed a genuine cancellation
+  regression: a completed credential read was hidden by the subsequently
+  cancelled read-only commit, skipping failed-password accounting. Credential
+  lookup again uses a single query through a backend-owned reader; session
+  issuance still rechecks credentials under transaction locks.
+- The first full MariaDB run exposed its explicit serialization conflict when
+  history completion races a committed writer. The test now accepts only that
+  mapped conflict, verifies the receipt stays running and the source remains,
+  then exercises explicit owner recovery. No production retry was introduced.
+- Earlier full new-backend runs also exposed a regex fixture still writing
+  native time values into the v4 auth-attempt BIGINT columns. It now uses the
+  actual typed timestamp values; all username rejection assertions remain.
+- Independent review found session TTL calculation moved before acquiring a
+  transaction. It is restored to the previous post-acquisition point, so pool
+  waits do not consume a newly issued session's lifetime.
+
+Final verification uses the same isolated BuildServer checkout and root-owned
+TMPDIR. The Go wrapper disables VCS stamping because this exported checkout has
+no HEAD; no database test names are filtered from the full scripts.
+
+| Command | Result | Evidence under checkout |
+| --- | --- | --- |
+| `PG_MAJOR=all bash scripts/database-integration.sh` | Exit 0; full PostgreSQL 17/18 integration, including actual authentication HTTP routes, cancellation accounting, historical SQL checks and driver ratchet | `artifacts/pr02-v4-full-postgres-final3.log` |
+| `ENGINE=mysql bash scripts/database-foundation-integration.sh` | Exit 0; full MySQL 8.4.10 database suite with `-race` passed in 1326.788s; actual authentication HTTP workflow and config/CLI checks passed | `artifacts/pr02-v4-full-mysql-final2.log` |
+| `ENGINE=mariadb bash scripts/database-foundation-integration.sh` | Exit 0; full MariaDB 12.3.2 database suite with `-race` passed in 1135.238s; actual authentication HTTP workflow and config/CLI checks passed | `artifacts/pr02-v4-full-mariadb-final2.log` |
+| `go test -buildvcs=false -run '^$' ./...` | Exit 0; all Controller packages compile | `artifacts/pr02-v4-compile-final.log` |
+| `bash scripts/docs-check.sh` | Exit 0 | `artifacts/pr02-v4-docs-final.log` |
+| `bash scripts/test-bootstrap-profiles.sh` | Exit 0; unmodified contract executed with container Ruby/jq dependencies | `artifacts/pr02-v4-profiles-final.log` |
+
+This remains **incomplete PR-02 acceptance**: 130 earlier DATETIME fields, nine
+JSONB fields, one array field, approval creation/approval, certificate issuance
+and maintenance, and remaining Controller operation/transport/read-model
+transactions still require migration with their real call chains. The PR must
+remain Draft and MySQL/MariaDB production startup must remain refused.

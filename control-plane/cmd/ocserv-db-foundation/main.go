@@ -16,7 +16,7 @@ import (
 )
 
 func run() error {
-	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, telemetry-provision, or telemetry-collect")
+	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
 	checksum := flag.String("repair-checksum", "", "reviewed manifest checksum for forward repair")
 	month := flag.String("month", "", "UTC month YYYY-MM for owner-only telemetry provisioning")
 	flag.Parse()
@@ -36,7 +36,7 @@ func run() error {
 		fmt.Println(sum)
 		return nil
 	}
-	if *mode != "check" && *mode != "migrate" && *mode != "repair" && *mode != "grant-test-privileges" && *mode != "telemetry-provision" && *mode != "telemetry-collect" {
+	if *mode != "check" && *mode != "migrate" && *mode != "repair" && *mode != "grant-test-privileges" && *mode != "telemetry-provision" && *mode != "telemetry-migrate-history" && *mode != "telemetry-collect" {
 		return fmt.Errorf("invalid foundation mode")
 	}
 	if (*mode == "repair") != (*checksum != "") {
@@ -73,6 +73,15 @@ func run() error {
 			return err
 		}
 		return b.ValidateSchema(ctx, 34)
+	}
+	if *mode == "telemetry-migrate-history" {
+		if err := b.MigrateTelemetryHistory(ctx); err != nil {
+			return err
+		}
+		if err := b.ValidateSchema(ctx, 34); err != nil {
+			return err
+		}
+		return b.ValidateTelemetryHistoryReady(ctx)
 	}
 	if *mode == "telemetry-collect" {
 		if err := b.ValidateSchema(ctx, 34); err != nil {

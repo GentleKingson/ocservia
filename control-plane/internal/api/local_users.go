@@ -7,6 +7,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -70,7 +71,7 @@ func (s *Server) mutateLocalUser(w http.ResponseWriter, r *http.Request, mutatio
 			status, detail = http.StatusBadRequest, "invalid Local username or password"
 		case errors.Is(err, auth.ErrLocalDuplicate):
 			status, detail = http.StatusConflict, "Local username already exists"
-		case errors.Is(err, pgx.ErrNoRows):
+		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, database.ErrNotFound):
 			status, detail = http.StatusNotFound, "Local identity does not exist"
 		case errors.Is(err, auth.ErrLocalDisabled):
 			status, detail = http.StatusForbidden, "Local authentication is disabled"

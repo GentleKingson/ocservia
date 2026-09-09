@@ -11,7 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals/approvalstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -223,10 +226,25 @@ func (s *Service) Approve(ctx context.Context, decision Decision) (Approval, err
 }
 
 func ConsumeBound(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
-	if len(requestHash) != sha256.Size {
+	return ConsumeBoundTx(ctx, postgres.WrapTx(tx), approvalID, workspaceID, requesterID, action, resourceType, resourceID, requestHash)
+}
+
+func ConsumeBoundTx(ctx context.Context, tx database.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
+	if len(requestHash) != sha256.Size || approvalID == uuid.Nil {
 		return ErrNotReady
 	}
-	return consume(ctx, tx, approvalID, workspaceID, requesterID, action, resourceType, resourceID, requestHash)
+	p, ok := tx.(approvalstore.Provider)
+	if !ok {
+		return database.ErrUnsupported
+	}
+	consumed, err := p.ApprovalStore().ConsumeBound(ctx, approvalID, workspaceID, requesterID, action, resourceType, resourceID, requestHash)
+	if err != nil {
+		return fmt.Errorf("consume approval: %w", err)
+	}
+	if !consumed {
+		return ErrNotReady
+	}
+	return nil
 }
 
 func (s *Service) ValidateApprovedBound(ctx context.Context, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {

@@ -5,8 +5,9 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 const LocalIssuer = "local"
@@ -32,37 +33,19 @@ func (s *Service) CreateLocalCredential(ctx context.Context, username, password 
 	if err != nil {
 		return uuid.Nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	id, err := s.insertLocalCredential(ctx, tx, username, hash)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, err
-	}
-	return id, nil
-}
-
-func (s *Service) insertLocalCredential(ctx context.Context, tx pgx.Tx, username, hash string) (uuid.UUID, error) {
 	id := uuid.Must(uuid.NewV7())
-	now := s.now()
-	if _, err := tx.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,$2,$3,$4,$4)`, id, LocalIssuer, username, now); err != nil {
-		return uuid.Nil, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO local_credentials(identity_id,username,password_hash,created_at,updated_at,password_changed_at) VALUES($1,$2,$3,$4,$4,$4)`, id, username, hash, now); err != nil {
+	err = s.withAuthentication(ctx, func(_ database.Tx, store authstore.Store) error {
+		return store.InsertCredential(ctx, id, username, hash, s.now())
+	})
+	if err != nil {
 		return uuid.Nil, err
 	}
 	return id, nil
 }
 
 func (s *Service) localCredential(ctx context.Context, username string) (localCredential, error) {
-	var credential localCredential
-	err := s.pool.QueryRow(ctx, `SELECT i.id,c.password_hash,i.disabled_at IS NOT NULL FROM local_credentials c JOIN identities i ON i.id=c.identity_id WHERE c.username=$1 AND i.issuer=$2 AND i.subject=c.username`, username, LocalIssuer).Scan(&credential.identityID, &credential.passwordHash, &credential.disabled)
-	return credential, err
+	c, err := authstore.ReadCredential(ctx, s.backend, username)
+	return localCredential{identityID: c.ID, passwordHash: c.Hash, disabled: c.Disabled}, err
 }
 
 // AuthenticateLocal returns the same session cookie and principal as OIDC.
@@ -90,7 +73,7 @@ func (s *Service) AuthenticateLocal(ctx context.Context, username, password stri
 	ctx, cancel := context.WithTimeout(ctx, localAttemptLease)
 	defer cancel()
 	credential, err := s.localCredential(ctx, username)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return nil, Principal{}, err
 	}
 	found := err == nil

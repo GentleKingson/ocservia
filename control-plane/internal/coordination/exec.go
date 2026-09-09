@@ -3,9 +3,24 @@ package coordination
 import (
 	"context"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// AssertFenceTx does not commit: database.Within remains the transaction owner.
+func AssertFenceTx(ctx context.Context, tx database.Tx, fence Fence) error {
+	if fence == nil {
+		return nil
+	}
+	generic, ok := fence.(interface {
+		AssertTransaction(context.Context, database.Tx) error
+	})
+	if !ok {
+		return database.ErrUnsupported
+	}
+	return generic.AssertTransaction(ctx, tx)
+}
 
 // CommitFenced asserts leadership inside the transaction immediately before
 // commit. A nil fence preserves the legacy unfenced path used by direct

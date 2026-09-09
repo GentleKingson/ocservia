@@ -4,6 +4,10 @@ This remains Draft, not complete PR-02 acceptance. Controller startup still
 rejects MySQL/MariaDB, including development Controller startup. Domain tests
 are not authenticated Controller workflow acceptance.
 
+This document records the version-3 milestone. The appended
+[version-4 workflows](database-pr02-controller-workflows.md) supersede the
+corresponding remaining-item statuses below without rewriting version 3.
+
 ## Append-only history
 
 Version 3 follows the exact version-2 artifact checksum. Both genuine version-1

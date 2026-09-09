@@ -445,7 +445,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-audit-preflight-retry.log" 2>&1
 
-  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
+  # Current backend workflows require schema 34. Keep the independent schema-33
+  # fixture below intact for historical rollback and compatibility assertions.
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     go test -p 1 ./internal/database/... -count=1)
 
   # Scheduler leadership tests need an idle lease, so they run before any
@@ -616,7 +618,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   assert_auth_fixture_cleanup "${container}" ocservia_latest
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     checked_go_tests database-api -p 1 -parallel 1 ./internal/api \
-      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration)$'
+      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration|TestAuthenticationBackendHTTPIntegration)$'
   assert_auth_fixture_cleanup "${container}" ocservia_latest
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_lifecycle}" \
     OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_lifecycle}" \

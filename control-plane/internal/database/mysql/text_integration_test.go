@@ -10,6 +10,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/semantictest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -64,8 +65,16 @@ func TestRealSchemaTextRegex(t *testing.T) {
 			t.Fatal("text changed", err)
 		}
 	}
+	window, err := value.FromTime(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires, err := value.FromTime(now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, username := range []string{"alice", "Alice", "alice\n", "alice\r\n", "alice\u2028", "ali\u017fce"} {
-		_, err = b.Exec(ctx, `INSERT INTO local_auth_attempts(username,window_until,expires_at) VALUES(?,?,?)`, username, now, now.Add(time.Minute))
+		_, err = b.Exec(ctx, `INSERT INTO local_auth_attempts(username,window_until,expires_at) VALUES(?,?,?)`, username, window, expires)
 		if username == "alice" {
 			if err != nil {
 				t.Fatal(err)
