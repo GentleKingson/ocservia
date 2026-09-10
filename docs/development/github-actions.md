@@ -69,8 +69,9 @@ not every possible vulnerability or the state of a deployed service.
 
 ## Path routing
 
-`scripts/ci-relevance.sh` emits only five execution flags:
+`scripts/ci-relevance.sh` emits five execution flags:
 `run_docs`, `run_go`, `run_rust`, `run_web`, and `run_database`.
+`run_database_full` selects the database acceptance scope.
 Reason and changed-file count are diagnostic metadata.
 
 | Changed paths | Selected checks |
@@ -84,7 +85,7 @@ Reason and changed-file count are diagnostic metadata.
 | Workflows, scripts, shared toolchain files, Makefile | All five basic checks |
 | Unrecognized paths | All five basic checks |
 
-Mixed changes use the union of their checks. Documentation-only changes do
+Mixed changes use the union of their checks. Documentation-only PRs do
 not activate language or database checks. Infrastructure changes, unknown
 paths, and unclassifiable diffs conservatively run all five, never acceptance.
 G6-specific and script-level manual acceptance paths are the exceptions: they
@@ -94,6 +95,24 @@ PR routing uses `base...head`, excluding base-only changes after the branch
 point. Main pushes use `before..head`. Deletions and both sides of renames
 retain their path impact. Manual dispatch, empty diffs, invalid/all-zero or
 unresolvable SHAs, and diff failures select all basic checks.
+
+Database jobs retain PostgreSQL 17/18, MySQL, MariaDB, and their existing race,
+TLS and permission checks. Main pushes always select full database acceptance;
+manual dispatch also runs full acceptance. Only PR changes confined to the
+API, auth, audit, RBAC, domain, operations and approvals implementation paths
+qualify for MySQL/MariaDB regression scope. Tests/testdata, other controller
+paths, database backends, migrations, shared transaction/value code, dependencies
+and infrastructure select full scope. Mixed changes retain the broader scope.
+
+Regression excludes only the exact historical tests listed in the
+`backend-mysql-history` group of `scripts/required-go-tests.txt`. New tests run
+by default. Current initialization, runtime telemetry legacy handling and all
+business regressions remain selected; the required-test guard checks every
+listed regression, including the existing outbox subtests. Full scope adds all
+historical checks. PostgreSQL retains its complete existing script in both
+scopes because its upgrade fixtures and business checks are interleaved.
+Direct script invocations default to full; `DATABASE_TEST_SCOPE=regression`
+selects the lighter MySQL/MariaDB path explicitly.
 
 ## Required check migration
 

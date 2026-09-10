@@ -53,7 +53,7 @@ func TestRealLogicalValueValidators(t *testing.T) {
 }
 
 func TestRealFiniteTimestampBackfill(t *testing.T) {
-	b, _, _ := migrateFixture(t)
+	b, _, _ := fixture(t)
 	ctx := context.Background()
 	tx, err := b.Begin(ctx, 0)
 	if err != nil {

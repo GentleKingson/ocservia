@@ -24,6 +24,7 @@ jobs:
       run_rust: ${{ steps.relevance.outputs.run_rust }}
       run_web: ${{ steps.relevance.outputs.run_web }}
       run_database: ${{ steps.relevance.outputs.run_database }}
+      run_database_full: ${{ steps.relevance.outputs.run_database_full }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -109,6 +110,7 @@ jobs:
     env:
       PG_MAJOR: ${{ matrix.postgres }}
       ENGINE: ${{ matrix.engine }}
+      DATABASE_TEST_SCOPE: ${{ needs.ci-relevance.outputs.run_database_full == 'false' && 'regression' || 'full' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

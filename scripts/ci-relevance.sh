@@ -8,7 +8,7 @@ if (($# != 4)); then
 fi
 
 event="$1"; base_sha="$2"; head_sha="$3"; output="$4"
-flags=(run_docs run_go run_rust run_web run_database)
+flags=(run_docs run_go run_rust run_web run_database run_database_full)
 for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
 changed=()
@@ -34,8 +34,12 @@ classify_path() {
       fail_closed infrastructure_changed ;;
     web/*)
       run_web=true; run_docs=true ;;
-    control-plane/*|go.work|go.work.sum|*.go|*/go.mod|*/go.sum)
+    control-plane/*_test.go|control-plane/*/testdata/*)
+      run_go=true; run_database=true; run_database_full=true ;;
+    control-plane/internal/api/*|control-plane/internal/auth/*|control-plane/internal/audit/*|control-plane/internal/rbac/*|control-plane/internal/domain/*|control-plane/internal/operations/*|control-plane/internal/approvals/*)
       run_go=true; run_database=true ;;
+    control-plane/*|go.work|go.work.sum|*.go|*/go.mod|*/go.sum)
+      run_go=true; run_database=true; run_database_full=true ;;
     rust/*)
       run_rust=true ;;
     *)
@@ -76,6 +80,12 @@ else
       for path in "${changed[@]}"; do classify_path "${path}"; done
     fi
   fi
+fi
+
+# Main is the full database acceptance gate, even for documentation-only pushes.
+if [[ "${event}" == push ]]; then
+  run_database=true
+  run_database_full=true
 fi
 
 {

@@ -53,7 +53,7 @@ worker_flags.each do |id, flag|
   reject("#{id} must use its basic flag") unless job.fetch("if") == "needs.ci-relevance.outputs.#{flag} == 'true'"
 end
 router = jobs.fetch("ci-relevance")
-reject("router must expose only five flags") unless router.fetch("outputs").keys.sort == worker_flags.values.sort
+reject("router must expose five domains and database scope") unless router.fetch("outputs").keys.sort == (worker_flags.values + ["run_database_full"]).sort
 reject("router requires full history") unless router.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
 
 expected_commands = {
@@ -82,7 +82,8 @@ rust_check = File.read(File.join(root, "scripts/rust-check.sh"))
 reject("basic Rust checks must not run audit or license checks") if rust_check.match?(/cargo (audit|deny)/)
 database = jobs.fetch("database-smoke")
 reject("database smoke must cover PostgreSQL 17/18, MySQL and MariaDB independently") unless
-  database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}", "ENGINE" => "${{ matrix.engine }}"} &&
+  database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}", "ENGINE" => "${{ matrix.engine }}",
+    "DATABASE_TEST_SCOPE" => "${{ needs.ci-relevance.outputs.run_database_full == 'false' && 'regression' || 'full' }}"} &&
   database.fetch("strategy") == {"fail-fast" => false, "matrix" => {"include" => [
     {"engine" => "postgres", "postgres" => "17"},
     {"engine" => "postgres", "postgres" => "18"},

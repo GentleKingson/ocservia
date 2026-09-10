@@ -1,6 +1,11 @@
 # Exact names prevent a removed/renamed subtest from silently weakening the gate.
 ($manifest | split("\n") | map(select(length > 0 and (startswith("#") | not)) | split(" "))
- | map(select(.[0] == $group) | {package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), test: .[2]})) as $required
+ | map(select(length < 4 or .[3] == env.PR02_ENGINE)
+   | select(.[0] == $group or
+     (($group == "backend-mysql-full" or $group == "backend-mysql-regression") and
+       (.[0] == "backend-mysql-regression" or .[0] == "backend-audit-mysql")) or
+     ($group == "backend-mysql-full" and .[0] == "backend-mysql-history"))
+   | {package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), test: .[2]})) as $required
 | . as $events
 | [$required[] | . as $want
    | [$events[] | select(.Package == $want.package and .Test == $want.test) | .Action] as $actions
