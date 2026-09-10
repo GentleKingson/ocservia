@@ -22,13 +22,23 @@ func (s *SchedulerLeaseStore) Lock(ctx context.Context) (schedulerlease.State, e
 	return v, err
 }
 func (s *SchedulerLeaseStore) Put(ctx context.Context, v schedulerlease.State, now value.Timestamp) error {
-	_, err := s.tx.Exec(ctx, `UPDATE scheduler_leadership SET instance_id=$1,incarnation=$2,epoch=$3,lease_until=$4,updated_at=$5 WHERE id=1`, v.Owner.InstanceID, v.Owner.Incarnation, v.Epoch, v.Until, now)
+	n, err := s.tx.Exec(ctx, `UPDATE scheduler_leadership SET instance_id=$1,incarnation=$2,epoch=$3,lease_until=$4,updated_at=$5 WHERE id=1`, v.Owner.InstanceID, v.Owner.Incarnation, v.Epoch, v.Until, now)
+	if err == nil && n != 1 {
+		return database.ErrNotFound
+	}
 	return err
 }
 func (s *SchedulerLeaseStore) Assert(ctx context.Context, owner schedulerlease.Owner, epoch int64) error {
-	var one int
-	err := s.tx.QueryRow(ctx, `SELECT 1 FROM scheduler_leadership WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership`, owner.InstanceID, owner.Incarnation, epoch).Scan(&one)
+	var until value.Timestamp
+	err := s.tx.QueryRow(ctx, `SELECT lease_until FROM scheduler_leadership WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership`, owner.InstanceID, owner.Incarnation, epoch).Scan(&until)
 	if errors.Is(err, database.ErrNotFound) {
+		return schedulerlease.ErrLost
+	}
+	if err != nil {
+		return err
+	}
+	at, err := database.WallTime(ctx, s.tx)
+	if err == nil && until.Micros <= at.Micros {
 		return schedulerlease.ErrLost
 	}
 	return err

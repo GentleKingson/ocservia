@@ -22,7 +22,7 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 	if maxAttempts < 1 {
 		return ErrInvalidRequest
 	}
-	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	return database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		if err := commandlimit.Lock(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch lease reaping: %w", err)
 		}

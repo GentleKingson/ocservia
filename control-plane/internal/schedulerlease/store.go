@@ -55,20 +55,21 @@ func deadline(now value.Timestamp, ttl time.Duration) (value.Timestamp, error) {
 
 func Acquire(ctx context.Context, b database.Backend, owner Owner, ttl time.Duration) (int64, error) {
 	var epoch int64
-	err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+	var next State
+	err := database.WithinRetry(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 		s, err := FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		now, err := database.TransactionTime(ctx, tx)
+		prior, err := s.Lock(ctx)
+		if err != nil {
+			return err
+		}
+		now, err := database.WallTime(ctx, tx)
 		if err != nil {
 			return err
 		}
 		until, err := deadline(now, ttl)
-		if err != nil {
-			return err
-		}
-		prior, err := s.Lock(ctx)
 		if err != nil {
 			return err
 		}
@@ -79,22 +80,19 @@ func Acquire(ctx context.Context, b database.Backend, owner Owner, ttl time.Dura
 			return errors.New("coordination: fencing epoch exhausted")
 		}
 		epoch = prior.Epoch + 1
-		return s.Put(ctx, State{Owner: owner, Epoch: epoch, Until: until}, now)
+		next = State{Owner: owner, Epoch: epoch, Until: until}
+		return s.Put(ctx, next, now)
 	})
+	if errors.Is(err, database.ErrCommitUnknown) && confirmState(ctx, b, next) == nil {
+		err = nil
+	}
 	return epoch, err
 }
 
 func Renew(ctx context.Context, b database.Backend, owner Owner, epoch int64, ttl time.Duration) error {
-	return database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+	var next State
+	err := database.WithinRetry(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 		s, err := FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		now, err := database.TransactionTime(ctx, tx)
-		if err != nil {
-			return err
-		}
-		until, err := deadline(now, ttl)
 		if err != nil {
 			return err
 		}
@@ -102,11 +100,43 @@ func Renew(ctx context.Context, b database.Backend, owner Owner, epoch int64, tt
 		if err != nil {
 			return err
 		}
+		now, err := database.WallTime(ctx, tx)
+		if err != nil {
+			return err
+		}
+		until, err := deadline(now, ttl)
+		if err != nil {
+			return err
+		}
 		if prior.Owner != owner || prior.Epoch != epoch || prior.Until.Micros <= now.Micros {
 			return ErrLost
 		}
 		prior.Until = until
+		next = prior
 		return s.Put(ctx, prior, now)
+	})
+	if errors.Is(err, database.ErrCommitUnknown) && confirmState(ctx, b, next) == nil {
+		return nil
+	}
+	return err
+}
+
+func confirmState(ctx context.Context, backend database.Backend, want State) error {
+	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return database.Within(check, backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		state, err := store.Lock(check)
+		if err != nil {
+			return err
+		}
+		if state.Owner != want.Owner || state.Epoch != want.Epoch || !want.Until.Valid || state.Until.Micros < want.Until.Micros {
+			return ErrLost
+		}
+		return store.Assert(check, want.Owner, want.Epoch)
 	})
 }
 

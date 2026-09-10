@@ -30,6 +30,7 @@ type State struct {
 	Incarnation     int64
 	ConnectionID    [16]byte
 	Epoch           int64
+	Until           value.Timestamp
 	LeaseUntilValid bool
 }
 

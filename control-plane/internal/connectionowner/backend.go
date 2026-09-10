@@ -17,7 +17,7 @@ func AcquireBackend(ctx context.Context, backend database.Backend, nodeID [16]by
 		return nil, errors.New("connectionowner: lease TTL must be positive")
 	}
 	var lease ownerstore.Lease
-	err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
+	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := ownerstore.FromTransaction(tx)
 		if err != nil {
 			return err
@@ -25,6 +25,12 @@ func AcquireBackend(ctx context.Context, backend database.Backend, nodeID [16]by
 		lease, err = store.Acquire(ctx, ownerstore.Term{Identity: identity, NodeID: nodeID, ConnectionID: connectionID}, leaseTTL)
 		return err
 	})
+	if errors.Is(err, database.ErrCommitUnknown) {
+		term := ownerstore.Term{Identity: identity, NodeID: nodeID, ConnectionID: connectionID, Epoch: lease.Epoch}
+		if confirmTerm(ctx, backend, term, lease.Until, true) == nil {
+			err = nil
+		}
+	}
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, ErrLeaseHeld
 	}
@@ -44,7 +50,7 @@ func (t *Term) storedTerm() ownerstore.Term {
 
 func (t *Term) RenewBackend(ctx context.Context, backend database.Backend) (time.Time, error) {
 	var until value.Timestamp
-	err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
+	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := ownerstore.FromTransaction(tx)
 		if err != nil {
 			return err
@@ -52,6 +58,9 @@ func (t *Term) RenewBackend(ctx context.Context, backend database.Backend) (time
 		until, err = store.Renew(ctx, t.storedTerm(), t.leaseTTL)
 		return err
 	})
+	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, t.storedTerm(), until, true) == nil {
+		err = nil
+	}
 	if errors.Is(err, database.ErrNotFound) {
 		return time.Time{}, ErrNotOwner
 	}
@@ -62,17 +71,33 @@ func (t *Term) RenewBackend(ctx context.Context, backend database.Backend) (time
 }
 
 func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) error {
-	err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
+	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := ownerstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
 		return store.Release(ctx, t.storedTerm())
 	})
+	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, t.storedTerm(), value.Timestamp{}, false) == nil {
+		err = nil
+	}
 	if errors.Is(err, database.ErrNotFound) {
 		return ErrNotOwner
 	}
 	return err
+}
+
+func confirmTerm(ctx context.Context, backend database.Backend, term ownerstore.Term, until value.Timestamp, live bool) error {
+	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	state, err := ReadStateBackend(check, backend, term.NodeID)
+	if err != nil {
+		return err
+	}
+	if state.InstanceID != term.Identity.InstanceID || state.Incarnation != term.Identity.Incarnation || state.ConnectionID != term.ConnectionID || state.Epoch != term.Epoch || state.LeaseUntilValid != live || (live && (!until.Valid || state.Until.Micros < until.Micros)) {
+		return ErrNotOwner
+	}
+	return nil
 }
 
 func (t *Term) AssertTransaction(ctx context.Context, tx database.Tx) error {
