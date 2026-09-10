@@ -40,27 +40,27 @@ func TestRealLongKeyWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'long',?,?,?)`, workspace, large, now, now)
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, node, workspace, large, now, now)
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'long',?,?,?)`, workspace, large, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, node, workspace, large, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 	for _, value := range []string{large + " ", strings.ToUpper(large), large + "  "} {
-		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'long',?,?,?)`, UUIDBytes(uuid.New()), value, now, now)
+		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'long',?,?,?)`, UUIDBytes(uuid.New()), value, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 	}
-	if _, err := b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'duplicate',?,?,?)`, UUIDBytes(uuid.New()), large, now, now); !errors.Is(err, database.ErrUnique) {
+	if _, err := b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'duplicate',?,?,?)`, UUIDBytes(uuid.New()), large, fixtureTimestamp(t, now), fixtureTimestamp(t, now)); !errors.Is(err, database.ErrUnique) {
 		t.Fatal("long duplicate accepted", err)
 	}
 	for _, values := range [][2]string{{large, "a"}, {large + "a", ""}, {large, "a "}} {
 		exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(uuid.New()), values[0], values[1], fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 	}
 	op := UUIDBytes(uuid.New())
-	exec(`INSERT INTO operations(id,workspace_id,state,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES(?,?,'draft','long',?,REPEAT('x',32),?,?)`, op, workspace, large, now, now)
+	exec(`INSERT INTO operations(id,workspace_id,state,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES(?,?,'draft','long',?,REPEAT('x',32),?,?)`, op, workspace, large, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 	for range 2 {
-		exec(`INSERT INTO operations(id,workspace_id,state,request_id,created_at,updated_at) VALUES(?,?,'draft','null',?,?)`, UUIDBytes(uuid.New()), workspace, now, now)
+		exec(`INSERT INTO operations(id,workspace_id,state,request_id,created_at,updated_at) VALUES(?,?,'draft','null',?,?)`, UUIDBytes(uuid.New()), workspace, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 	}
-	if _, err := b.Exec(ctx, `INSERT INTO operations(id,workspace_id,state,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES(?,?,'draft','long',?,REPEAT('x',32),?,?)`, UUIDBytes(uuid.New()), workspace, large, now, now); !errors.Is(err, database.ErrUnique) {
+	if _, err := b.Exec(ctx, `INSERT INTO operations(id,workspace_id,state,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES(?,?,'draft','long',?,REPEAT('x',32),?,?)`, UUIDBytes(uuid.New()), workspace, large, fixtureTimestamp(t, now), fixtureTimestamp(t, now)); !errors.Is(err, database.ErrUnique) {
 		t.Fatal("partial duplicate accepted", err)
 	}
 	exec(`UPDATE operations SET idempotency_key=NULL,request_hash=NULL WHERE id=?`, op)
-	exec(`INSERT INTO operations(id,workspace_id,state,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES(?,?,'draft','reuse',?,REPEAT('x',32),?,?)`, UUIDBytes(uuid.New()), workspace, large, now, now)
+	exec(`INSERT INTO operations(id,workspace_id,state,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES(?,?,'draft','reuse',?,REPEAT('x',32),?,?)`, UUIDBytes(uuid.New()), workspace, large, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 	for _, table := range []string{"telemetry_rollups_5m", "telemetry_rollups_1h"} {
 		stamp, err := value.FromTime(now)
 		if err != nil {
@@ -73,8 +73,8 @@ func TestRealLongKeyWrites(t *testing.T) {
 			t.Fatal(table, "duplicate accepted", err)
 		}
 	}
-	exec(`INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES(?,?,1,'quota',?,1,?)`, node, large, now, now)
-	exec(`INSERT INTO upstream_sync_records(id,repository,old_ref,old_commit,new_ref,new_commit,classification,rollback_ref,synced_at) VALUES(?,?,'old',?,'new',?,'{}','rollback',?)`, UUIDBytes(uuid.New()), large, strings.Repeat("a", 40), strings.Repeat("b", 40), now)
+	exec(`INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES(?,?,1,'quota',?,1,?)`, node, large, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
+	exec(`INSERT INTO upstream_sync_records(id,repository,old_ref,old_commit,new_ref,new_commit,classification,rollback_ref,synced_at) VALUES(?,?,'old',?,'new',?,'{}','rollback',?)`, UUIDBytes(uuid.New()), large, strings.Repeat("a", 40), strings.Repeat("b", 40), fixtureTimestamp(t, now))
 	var got string
 	if err := b.QueryRow(ctx, `SELECT name FROM nodes WHERE id=?`, node).Scan(&got); err != nil || got != large {
 		t.Fatal("long value changed", err)
@@ -255,18 +255,18 @@ func TestRealLongReceiptAndResourceKey(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'receipt','receipt',?,?)`, workspace, now, now)
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'receipt','active',?,?)`, node, workspace, now, now)
-	exec(`INSERT INTO operations(id,workspace_id,node_id,state,request_id,created_at,updated_at) VALUES(?,?,?,'draft','receipt',?,?)`, operation, workspace, node, now, now)
-	exec(`INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,traceparent,expires_at,created_at,updated_at,resource_type,resource_key) VALUES(?,?,?,?,'queued','synthetic_noop','x','receipt',1,?,?,?,?,'user',?)`, command, operation, workspace, node, trace, now.Add(time.Minute), now, now, large)
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'receipt','receipt',?,?)`, workspace, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'receipt','active',?,?)`, node, workspace, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
+	exec(`INSERT INTO operations(id,workspace_id,node_id,state,request_id,created_at,updated_at) VALUES(?,?,?,'draft','receipt',?,?)`, operation, workspace, node, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
+	exec(`INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,traceparent,expires_at,created_at,updated_at,resource_type,resource_key) VALUES(?,?,?,?,'queued','synthetic_noop','x','receipt',1,?,?,?,?,'user',?)`, command, operation, workspace, node, trace, fixtureTimestamp(t, now.Add(time.Minute)), fixtureTimestamp(t, now), fixtureTimestamp(t, now), large)
 	var read string
 	if err := b.QueryRow(ctx, `SELECT resource_key FROM commands WHERE id=?`, command).Scan(&read); err != nil || read != large {
 		t.Fatal("resource key truncated", err)
 	}
 	insert := func(key, status string) ([]byte, error) {
 		id := UUIDBytes(uuid.New())
-		exec(`INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload) VALUES(?,?,'command_result',?,?,'')`, id, node, now, trace)
-		_, err := b.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,state,result,error_code,completed_at,replayed,created_at,receipt_verification_status,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof) VALUES(?,?,?,'rejected','','rejected',?,FALSE,?,?,?,REPEAT('x',16),1,REPEAT('x',32),'proof')`, id, command, UUIDBytes(uuid.New()), now, now, status, key)
+		exec(`INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload) VALUES(?,?,'command_result',?,?,'')`, id, node, fixtureTimestamp(t, now), trace)
+		_, err := b.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,state,result,error_code,completed_at,replayed,created_at,receipt_verification_status,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof) VALUES(?,?,?,'rejected','','rejected',?,FALSE,?,?,?,REPEAT('x',16),1,REPEAT('x',32),'proof')`, id, command, UUIDBytes(uuid.New()), fixtureTimestamp(t, now), fixtureTimestamp(t, now), status, key)
 		return id, err
 	}
 	first, err := insert(large, "verified")

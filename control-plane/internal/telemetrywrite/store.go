@@ -1,4 +1,4 @@
-// Package telemetrywrite defines persistence operations within one ingest transaction.
+// Package telemetrywrite defines persistence operations for ingest and maintenance transactions.
 package telemetrywrite
 
 import (
@@ -42,12 +42,6 @@ type Upgrade struct {
 	CompletedAt                  time.Time
 	Proof, PackageSHA256         []byte
 }
-type Key struct {
-	PublicKey   []byte
-	State       string
-	ActivatedAt time.Time
-	ValidUntil  *time.Time
-}
 
 type Store interface {
 	LockNode(context.Context, uuid.UUID) error
@@ -58,7 +52,8 @@ type Store interface {
 	ReplaceIPBans(context.Context, uuid.UUID, time.Time, []IPBan) error
 	ReplaceUsers(context.Context, uuid.UUID, time.Time, []User) error
 	Activate(context.Context, uuid.UUID, time.Time) error
-	AttestationKey(context.Context, uuid.UUID, string) (Key, error)
+	LockOfflineCandidates(context.Context, time.Time) ([]uuid.UUID, error)
+	MarkOffline(context.Context, uuid.UUID, uuid.UUID, time.Time, string) error
 	InsertUpgrade(context.Context, uuid.UUID, Upgrade) error
 }
 type Provider interface{ TelemetryWriteStore() Store }

@@ -21,6 +21,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
@@ -33,7 +35,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
-	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
@@ -48,7 +49,7 @@ type BuildInfo struct {
 
 type Server struct {
 	http             *http.Server
-	pool             *pgxpool.Pool
+	backend          database.Backend
 	build            BuildInfo
 	logger           *slog.Logger
 	bodyLimit        int64
@@ -87,7 +88,15 @@ type Server struct {
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
-	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, devAuthToken: devAuthToken, expectedSchema: expectedSchema}
+	var backend database.Backend
+	if pool != nil {
+		backend = postgres.WrapPool(pool)
+	}
+	return NewBackend(address, backend, build, logger, bodyLimit, requestTimeout, devAuth, devAuthToken, expectedSchema)
+}
+
+func NewBackend(address string, backend database.Backend, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
+	s := &Server{backend: backend, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, devAuthToken: devAuthToken, expectedSchema: expectedSchema}
 	s.breakGlassBudget = newAuthAdmission(5, 0, 4)
 	s.localLoginBudget = newAuthAdmission(5, 120, 4)
 	if err := s.configureEventStreams(eventstream.DefaultConfig()); err != nil {
@@ -272,11 +281,16 @@ func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if err := s.pool.Ping(ctx); err != nil {
+	diagnostics, ok := s.backend.(database.Diagnostics)
+	if !ok {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is not ready", "database dependency is unavailable")
 		return
 	}
-	compatibility, err := migrations.ValidateControllerSchema(ctx, s.pool, s.expectedSchema)
+	if err := diagnostics.Ping(ctx); err != nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is not ready", "database dependency is unavailable")
+		return
+	}
+	schema, err := diagnostics.ControllerSchema(ctx, s.expectedSchema)
 	if err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/schema-unavailable", "Service is not ready", "database schema is unavailable")
 		return
@@ -286,7 +300,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/event-stream-unavailable", "Service is not ready", "event stream watcher is recovering")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schema_version": compatibility.CurrentSchema})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schema_version": schema})
 }
 
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
@@ -298,23 +312,26 @@ func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	pool := s.pool.Stat()
+	var pool database.PoolStats
+	if diagnostics, ok := s.backend.(database.Diagnostics); ok {
+		pool = diagnostics.PoolStats()
+	}
 	admission, platformHub, operationHub := s.eventStreamSnapshots()
 	metricsContext, cancelMetrics := context.WithTimeout(r.Context(), time.Second)
 	defer cancelMetrics()
-	keyStates, err := privdattestation.KeyStateMetrics(metricsContext, s.pool)
-	keyStatesAvailable := err == nil
+	keyStates, err := privdattestation.KeyStateMetricsBackend(metricsContext, s.backend)
+	keyStatesAvailable := s.backend != nil && err == nil
 	if err != nil {
-		// Keep process and SSE diagnostics available while PostgreSQL is down.
+		// Keep process and SSE diagnostics available while the database is down.
 		// The availability bit prevents the bounded zero-value series from being
 		// mistaken for a successful database observation.
-		keyStates, _ = privdattestation.KeyStateMetrics(r.Context(), nil)
+		keyStates, _ = privdattestation.KeyStateMetricsBackend(r.Context(), nil)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"goroutines":                             runtime.NumGoroutine(),
-		"db_acquired":                            pool.AcquiredConns(),
-		"db_idle":                                pool.IdleConns(),
-		"db_total":                               pool.TotalConns(),
+		"db_acquired":                            pool.Acquired,
+		"db_idle":                                pool.Idle,
+		"db_total":                               pool.Total,
 		"sse_active_streams":                     admission.Active,
 		"sse_rejected_streams":                   admission.RejectedGlobal + admission.RejectedIdentity + admission.RejectedSession + admission.RejectedWorkspace + admission.RejectedResource,
 		"sse_watchers":                           platformHub.Watchers + operationHub.Watchers,

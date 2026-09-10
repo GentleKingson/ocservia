@@ -11,8 +11,8 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -84,7 +84,7 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 			result.PrivilegedResultProof.Signature[0] ^= 1
 		}, status: "invalid", reason: "receipt_signature_invalid"},
 		{name: "unknown key", lookup: func(context.Context, uuid.UUID, string) (attestationKeyRecord, error) {
-			return attestationKeyRecord{}, pgx.ErrNoRows
+			return attestationKeyRecord{}, database.ErrNotFound
 		}, status: "unknown_key", reason: "receipt_key_unknown"},
 		{name: "revoked key", lookup: lookupFor(trustedKey.Public().(ed25519.PublicKey), "revoked", time.Unix(1_699_999_999, 0), nil), status: "revoked_key", reason: "receipt_key_revoked"},
 		{name: "expired rotation overlap", lookup: lookupFor(trustedKey.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), timePointer(time.Unix(1_700_000_000, 500))), status: "invalid", reason: "receipt_key_outside_validity"},
@@ -117,7 +117,7 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 	}
 	attackerResult.PrivilegedResultProof.Signature = ed25519.Sign(attackerPrivate, canonical)
 	verification := verifyResult(context.Background(), func(context.Context, uuid.UUID, string) (attestationKeyRecord, error) {
-		return attestationKeyRecord{}, pgx.ErrNoRows
+		return attestationKeyRecord{}, database.ErrNotFound
 	}, nodeID, envelope, attackerResult)
 	if verification.FailureReason != "receipt_key_unknown" {
 		t.Fatalf("attacker-selected key verification=%+v", verification)
@@ -140,6 +140,18 @@ func TestReceiptUnknownProtobufFieldsDoNotChangeSignatureSemantics(t *testing.T)
 	verification := verifyResult(context.Background(), lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil), nodeID, envelope, result)
 	if !verification.Verified() {
 		t.Fatalf("unknown Protobuf field changed canonical signature semantics: %+v", verification)
+	}
+}
+
+func TestReceiptMissingTransactionFailsClosed(t *testing.T) {
+	node, envelope, result, _ := receiptVerificationFixture(t)
+	for _, verification := range []Verification{
+		VerifyResult(context.Background(), nil, node, envelope, result),
+		VerifyResultTransaction(context.Background(), nil, node, envelope, result),
+	} {
+		if verification.Status != "invalid" || verification.FailureReason != "receipt_key_lookup_failed" {
+			t.Fatalf("missing transaction verification = %+v", verification)
+		}
 	}
 }
 

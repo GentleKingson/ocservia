@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -30,6 +31,46 @@ var runtimePrivileges = []struct{ privileges, tables string }{
 // No wildcard grants, metadata writes or DDL go to runtime. Audit mutations
 // remain prohibited by immutable triggers, including the lock-read column.
 func (b *Backend) GrantTestPrivileges(ctx context.Context) error {
+	if err := b.GrantRuntimePrivileges(ctx, "ocservia_app@%"); err != nil {
+		return err
+	}
+	var name string
+	if err := b.QueryRow(ctx, "SELECT DATABASE()").Scan(&name); err != nil {
+		return err
+	}
+	if !identifier.MatchString(name) {
+		return fmt.Errorf("experimental database: invalid schema identifier")
+	}
+	// Retention is restricted to telemetry; no audit, authorization, or
+	// migration writes and no arbitrary DDL are granted to maintenance.
+	for _, table := range []string{"telemetry_samples", "telemetry_rollups_5m", "telemetry_rollups_1h"} {
+		if _, err := b.Exec(ctx, "GRANT SELECT,DELETE ON `"+name+"`.`"+table+"` TO 'ocservia_maintenance'@'%'"); err != nil {
+			return err
+		}
+	}
+	return b.grantTelemetryPrivileges(ctx, "'ocservia_maintenance'@'%'", false)
+}
+
+var accountUser = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
+var accountHost = regexp.MustCompile(`^[A-Za-z0-9.%:_-]{1,255}$`)
+
+// An explicit user@host names one pre-provisioned account. Neither SQL quoting
+// nor driver DSN syntax is accepted here; GRANT cannot bind identifiers.
+func quotedRuntimeAccount(account string) (string, error) {
+	user, host, ok := strings.Cut(account, "@")
+	if !ok || !accountUser.MatchString(user) || !accountHost.MatchString(host) {
+		return "", fmt.Errorf("database runtime account must be an explicit user@host without SQL quoting")
+	}
+	return "'" + user + "'@'" + host + "'", nil
+}
+
+// GrantRuntimePrivileges grants only named runtime objects to an existing
+// account. It neither creates accounts nor grants owner/maintenance privileges.
+func (b *Backend) GrantRuntimePrivileges(ctx context.Context, account string) error {
+	quoted, err := quotedRuntimeAccount(account)
+	if err != nil {
+		return err
+	}
 	var name string
 	if err := b.QueryRow(ctx, "SELECT DATABASE()").Scan(&name); err != nil {
 		return err
@@ -39,17 +80,10 @@ func (b *Backend) GrantTestPrivileges(ctx context.Context) error {
 	}
 	for _, g := range runtimePrivileges {
 		for _, table := range strings.Split(g.tables, ",") {
-			if _, err := b.Exec(ctx, "GRANT "+g.privileges+" ON `"+name+"`.`"+table+"` TO 'ocservia_app'@'%'"); err != nil {
+			if _, err := b.Exec(ctx, "GRANT "+g.privileges+" ON `"+name+"`.`"+table+"` TO "+quoted); err != nil {
 				return err
 			}
 		}
 	}
-	// Retention is restricted to telemetry; no audit, authorization, or
-	// migration writes and no arbitrary DDL are granted to maintenance.
-	for _, table := range []string{"telemetry_samples", "telemetry_rollups_5m", "telemetry_rollups_1h"} {
-		if _, err := b.Exec(ctx, "GRANT SELECT,DELETE ON `"+name+"`.`"+table+"` TO 'ocservia_maintenance'@'%'"); err != nil {
-			return err
-		}
-	}
-	return b.GrantTelemetryTestPrivileges(ctx)
+	return b.grantTelemetryPrivileges(ctx, quoted, true)
 }

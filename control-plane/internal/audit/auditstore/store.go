@@ -15,6 +15,7 @@ type Store interface {
 	Previous(context.Context, uuid.UUID) ([]byte, error)
 	Append(context.Context, []any) error
 	Events(context.Context, uuid.UUID) (database.Rows, error)
+	RecentEvents(context.Context, uuid.UUID, int) (database.Rows, error)
 	Checkpoints(context.Context, uuid.UUID) (database.Rows, error)
 	AddCheckpoint(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []byte, []byte) error
 	Workspaces(context.Context) (database.Rows, error)

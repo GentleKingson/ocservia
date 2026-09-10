@@ -147,31 +147,14 @@ func (s telemetryWriteStore) ReplaceUsers(ctx context.Context, node uuid.UUID, o
 	return nil
 }
 func (s telemetryWriteStore) Activate(ctx context.Context, node uuid.UUID, observed time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,?),version=version+1 WHERE id=? AND status='offline'`, observed, UUIDBytes(node))
+	at, err := value.FromTime(observed)
+	if err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,?),version=version+1 WHERE id=? AND status='offline'`, at, UUIDBytes(node))
 	// The PostgreSQL NOTIFY wakeup is not a durable write. MySQL transport
 	// polling is a separate, still-unported Controller integration boundary.
 	return err
-}
-func (s telemetryWriteStore) AttestationKey(ctx context.Context, node uuid.UUID, id string) (telemetrywrite.Key, error) {
-	var k telemetrywrite.Key
-	var activated, validUntil value.Timestamp
-	err := s.tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=? AND CAST(key_id AS BINARY)=CAST(? AS BINARY)`, UUIDBytes(node), id).Scan(&k.PublicKey, &k.State, &activated, &validUntil)
-	if err != nil {
-		return k, err
-	}
-	// The domain stores business-finite activation and validity instants; an
-	// infinity sentinel or NULL activation is refused instead of being mapped.
-	if k.ActivatedAt, err = activated.Time(); err != nil {
-		return k, err
-	}
-	if validUntil.Valid {
-		until, err := validUntil.Time()
-		if err != nil {
-			return k, err
-		}
-		k.ValidUntil = &until
-	}
-	return k, nil
 }
 func (s telemetryWriteStore) InsertUpgrade(ctx context.Context, node uuid.UUID, r telemetrywrite.Upgrade) error {
 	at, err := value.FromTime(r.CompletedAt)

@@ -1,5 +1,5 @@
-// Package mysql implements the experimental MySQL and MariaDB foundation.
-// It does not provide Controller business stores or production support.
+// Package mysql implements the test/development MySQL and MariaDB backends.
+// Production startup remains gated pending complete Controller acceptance.
 package mysql
 
 import (
@@ -42,6 +42,12 @@ func (o Options) GoString() string { return o.String() }
 type quietLogger struct{}
 
 func (quietLogger) Print(...any) {}
+
+// ValidateOptions checks DSN and TLS policy without opening a connection.
+func ValidateOptions(o Options) error {
+	_, err := configuration(o)
+	return err
+}
 
 func configuration(o Options) (*driver.Config, error) {
 	if o.Environment != "test" && o.Environment != "development" {

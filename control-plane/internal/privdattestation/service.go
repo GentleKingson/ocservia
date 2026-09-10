@@ -39,28 +39,45 @@ type KeyStateMetric struct {
 // KeyStateMetrics returns only the three protocol-defined states, keeping the
 // metric label set bounded even when a node fleet grows.
 func KeyStateMetrics(ctx context.Context, pool *pgxpool.Pool) ([]KeyStateMetric, error) {
-	metrics := []KeyStateMetric{{State: "pending"}, {State: "active"}, {State: "revoked"}}
 	if pool == nil {
+		return KeyStateMetricsBackend(ctx, nil)
+	}
+	return KeyStateMetricsBackend(ctx, postgres.WrapPool(pool))
+}
+
+func KeyStateMetricsBackend(ctx context.Context, backend database.Backend) ([]KeyStateMetric, error) {
+	metrics := []KeyStateMetric{{State: "pending"}, {State: "active"}, {State: "revoked"}}
+	if backend == nil {
 		return metrics, nil
 	}
-	rows, err := pool.Query(ctx, `SELECT state,count(*) FROM node_privd_attestation_keys GROUP BY state`)
+	err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := attestationstore.From(tx)
+		if err != nil {
+			return err
+		}
+		rows, err := store.KeyStateCounts(ctx)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var state string
+			var total int64
+			if err := rows.Scan(&state, &total); err != nil {
+				return err
+			}
+			for index := range metrics {
+				if metrics[index].State == state {
+					metrics[index].Total = total
+				}
+			}
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var state string
-		var total int64
-		if err := rows.Scan(&state, &total); err != nil {
-			return nil, err
-		}
-		for index := range metrics {
-			if metrics[index].State == state {
-				metrics[index].Total = total
-			}
-		}
-	}
-	return metrics, rows.Err()
+	return metrics, nil
 }
 
 type Service struct {

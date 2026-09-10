@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const latestRevisionVersion = 6
+const latestRevisionVersion = 23
 
 type revisionArtifact struct {
 	revision

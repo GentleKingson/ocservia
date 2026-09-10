@@ -43,6 +43,35 @@ END`
 // Runtime gets immutable history access and the bounded retention procedure;
 // neither runtime nor maintenance receives catalog writes or arbitrary DDL.
 func (b *Backend) GrantTelemetryTestPrivileges(ctx context.Context) error {
+	if err := b.grantTelemetryPrivileges(ctx, "'ocservia_app'@'%'", true); err != nil {
+		return err
+	}
+	return b.grantTelemetryPrivileges(ctx, "'ocservia_maintenance'@'%'", false)
+}
+
+// PrepareControllerTelemetry is owner-only startup work. Runtime ingestion
+// accepts the last 14 days, so provision that window and two future months.
+// Re-running --migrate-only advances this horizon without granting runtime DDL.
+func (b *Backend) PrepareControllerTelemetry(ctx context.Context) error {
+	if err := b.MigrateTelemetryHistory(ctx); err != nil {
+		return err
+	}
+	var now time.Time
+	if err := b.QueryRow(ctx, `SELECT UTC_TIMESTAMP(6)`).Scan(&now); err != nil {
+		return err
+	}
+	oldest := now.Add(-14 * 24 * time.Hour)
+	start := time.Date(oldest.Year(), oldest.Month(), 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(now.Year(), now.Month()+3, 1, 0, 0, 0, 0, time.UTC)
+	for month := start; month.Before(end); month = month.AddDate(0, 1, 0) {
+		if err := b.ProvisionTelemetryMonth(ctx, month); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *Backend) grantTelemetryPrivileges(ctx context.Context, quotedAccount string, runtime bool) error {
 	conn, err := b.pool.Conn(ctx)
 	if err != nil {
 		return safeError(err)
@@ -59,20 +88,18 @@ func (b *Backend) GrantTelemetryTestPrivileges(ctx context.Context) error {
 	if !identifier.MatchString(schema) {
 		return ErrSchema
 	}
-	for _, account := range []string{"ocservia_app", "ocservia_maintenance"} {
-		for _, grant := range []string{"GRANT SELECT ON `" + schema + "`.`telemetry_sample_shards`", "GRANT SELECT ON `" + schema + "`.`business_locks`", "GRANT EXECUTE ON PROCEDURE `" + schema + "`.`telemetry_retire_shards`"} {
-			if _, err = conn.ExecContext(ctx, grant+" TO '"+account+"'@'%'"); err != nil {
-				return safeError(err)
-			}
+	for _, grant := range []string{"GRANT SELECT ON `" + schema + "`.`telemetry_sample_shards`", "GRANT SELECT ON `" + schema + "`.`business_locks`", "GRANT EXECUTE ON PROCEDURE `" + schema + "`.`telemetry_retire_shards`"} {
+		if _, err = conn.ExecContext(ctx, grant+" TO "+quotedAccount); err != nil {
+			return safeError(err)
 		}
-		for _, name := range names {
-			privileges := "SELECT"
-			if account == "ocservia_app" {
-				privileges = "SELECT,INSERT"
-			}
-			if _, err = conn.ExecContext(ctx, "GRANT "+privileges+" ON `"+schema+"`.`"+name+"` TO '"+account+"'@'%'"); err != nil {
-				return safeError(err)
-			}
+	}
+	for _, name := range names {
+		privileges := "SELECT"
+		if runtime {
+			privileges = "SELECT,INSERT"
+		}
+		if _, err = conn.ExecContext(ctx, "GRANT "+privileges+" ON `"+schema+"`.`"+name+"` TO "+quotedAccount); err != nil {
+			return safeError(err)
 		}
 	}
 	return nil

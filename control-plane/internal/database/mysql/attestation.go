@@ -14,6 +14,31 @@ type privdAttestationStore struct{ tx database.Tx }
 
 func (t *transaction) PrivdAttestationStore() attestationstore.Store { return privdAttestationStore{t} }
 
+func (s privdAttestationStore) KeyStateCounts(ctx context.Context) (database.Rows, error) {
+	return s.tx.Query(ctx, `SELECT state,count(*) FROM node_privd_attestation_keys GROUP BY state`)
+}
+
+func (s privdAttestationStore) VerificationKey(ctx context.Context, node uuid.UUID, id string) (attestationstore.VerificationKey, error) {
+	var k attestationstore.VerificationKey
+	var activated, validUntil value.Timestamp
+	err := s.tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=? AND CAST(key_id AS BINARY)=CAST(? AS BINARY)`, UUIDBytes(node), id).Scan(&k.PublicKey, &k.State, &activated, &validUntil)
+	if err != nil {
+		return k, err
+	}
+	// Refuse infinity instead of changing the existing finite key contract.
+	if k.ActivatedAt, err = activated.Time(); err != nil {
+		return k, err
+	}
+	if validUntil.Valid {
+		until, err := validUntil.Time()
+		if err != nil {
+			return k, err
+		}
+		k.ValidUntil = &until
+	}
+	return k, nil
+}
+
 // attestationTime converts a business-finite instant to the checked
 // PostgreSQL-epoch microsecond representation of the converted columns.
 func attestationTime(t time.Time) (value.Timestamp, error) {
@@ -149,7 +174,11 @@ func (s privdAttestationStore) ApproveCapability(ctx context.Context, node uuid.
 }
 
 func (s privdAttestationStore) BumpNodeRevision(ctx context.Context, node uuid.UUID, now time.Time) error {
-	_, err := s.tx.Exec(ctx, `UPDATE nodes SET authorization_revision=authorization_revision+1,version=version+1,updated_at=? WHERE id=?`, now, UUIDBytes(node))
+	at, err := attestationTime(now)
+	if err != nil {
+		return err
+	}
+	_, err = s.tx.Exec(ctx, `UPDATE nodes SET authorization_revision=authorization_revision+1,version=version+1,updated_at=? WHERE id=?`, at, UUIDBytes(node))
 	return err
 }
 

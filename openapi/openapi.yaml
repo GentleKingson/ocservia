@@ -859,7 +859,7 @@ paths:
           in: query
           required: false
           schema:
-            $ref: "#/components/schemas/UtcDateTime"
+            $ref: "#/components/schemas/TelemetryTimestamp"
       responses:
         "200":
           description: At most 2000 chronological telemetry points.
@@ -1603,6 +1603,12 @@ paths:
         "200":
           description: Public authentication capabilities only.
           content: { application/json: { schema: { $ref: "#/components/schemas/AuthMethods" } } }
+        "405":
+          description: Unsupported HTTP method; this route accepts GET only.
+          headers:
+            Allow:
+              schema: { type: string, const: GET }
+          content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
         default: { $ref: "#/components/responses/Problem" }
   /auth/callback:
     get:
@@ -2049,11 +2055,11 @@ components:
           format: int64
           minimum: 1
         created_at:
-          $ref: "#/components/schemas/UtcDateTime"
+          $ref: "#/components/schemas/TelemetryTimestamp"
         updated_at:
-          $ref: "#/components/schemas/UtcDateTime"
+          $ref: "#/components/schemas/TelemetryTimestamp"
         expires_at:
-          $ref: "#/components/schemas/UtcDateTime"
+          $ref: "#/components/schemas/TelemetryTimestamp"
     SyntheticCommandRequest:
       type: object
       additionalProperties: false
@@ -2190,8 +2196,18 @@ components:
         name: { $ref: "#/components/schemas/OcservName" }
         desired_enabled: { type: boolean }
         observed_enabled: { type: boolean }
-        desired_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 384 }
-        observed_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 384 }
+        desired_members:
+          type: array
+          items: { type: [string, "null"] }
+          maxItems: 4096
+        observed_members:
+          type: array
+          items: { type: [string, "null"] }
+          maxItems: 4096
+        desired_member_dimensions:
+          $ref: "#/components/schemas/ResourceMemberDimensions"
+        observed_member_dimensions:
+          $ref: "#/components/schemas/ResourceMemberDimensions"
         desired_version: { type: integer, format: int64, minimum: 1 }
         desired_revision: { type: integer, format: int64, minimum: 1 }
         observed_revision: { type: integer, format: int64, minimum: 0 }
@@ -2204,7 +2220,19 @@ components:
         recovery_mutation_kind:
           type: string
           enum: [user_create, user_disable, user_enable, user_password_rotate, group_apply]
-        observed_at: { $ref: "#/components/schemas/UtcDateTime" }
+        observed_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+    ResourceMemberDimensions:
+      type: array
+      minItems: 1
+      maxItems: 6
+      description: Present only for multidimensional or non-one-based arrays. Members are in row-major order; absence means an ordinary one-based list or empty array.
+      items:
+        type: object
+        additionalProperties: false
+        required: [length, lower_bound]
+        properties:
+          length: { type: integer, format: int32, minimum: 1 }
+          lower_bound: { type: integer, format: int32 }
     UserGroupStatePage:
       type: object
       additionalProperties: false
@@ -2268,14 +2296,14 @@ components:
         state: { $ref: "#/components/schemas/OperationState" }
         validation: { type: string, enum: [pending, valid, failed, rejected, unknown, expired] }
         diff_redacted: { type: string, maxLength: 262144, description: Secret-safe line diff; secret keys and values are never included. }
-        warnings: { type: array, maxItems: 128, items: { type: string, maxLength: 256 } }
+        warnings: { type: array, items: {}, description: Stored JSONB warning array plus verified validation warning strings. }
         current_unchanged: { type: boolean }
         staging_cleaned: { type: boolean }
         current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         approval_id: { $ref: "#/components/schemas/UuidV7" }
         approval_status: { type: string, enum: [pending, approved, rejected, expired, consumed] }
-        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
-        created_at: { $ref: "#/components/schemas/UtcDateTime" }
+        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     ConfigApplyRequest:
       type: object
       additionalProperties: false
@@ -2293,7 +2321,7 @@ components:
         candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         diff_redacted: { type: string, maxLength: 262144, description: "Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values." }
-        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     CertificateRequest:
       type: object
       additionalProperties: false
@@ -2342,7 +2370,7 @@ components:
         operation: { $ref: "#/components/schemas/Operation" }
         download_token: { type: string, minLength: 43, maxLength: 43, writeOnly: true }
         password: { type: string, minLength: 32, maxLength: 32, writeOnly: true }
-        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     SecretProviderRefRequest:
       type: object
       additionalProperties: false
@@ -2370,9 +2398,9 @@ components:
         key_path: { type: string, maxLength: 512 }
         version: { type: string, maxLength: 128 }
         state: { type: string, enum: [active, rotating, disabled, unavailable] }
-        rotated_at: { $ref: "#/components/schemas/UtcDateTime" }
-        created_at: { $ref: "#/components/schemas/UtcDateTime" }
-        updated_at: { $ref: "#/components/schemas/UtcDateTime" }
+        rotated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     CertificateApprovalSummary:
       oneOf:
         - $ref: "#/components/schemas/CertificateIssueApprovalSummary"
@@ -2410,17 +2438,17 @@ components:
         node_id: { $ref: "#/components/schemas/UuidV7" }
         operation_id: { $ref: "#/components/schemas/UuidV7" }
         common_name: { type: string, minLength: 1, maxLength: 253 }
-        dns_names: { type: array, maxItems: 32, items: { type: string, maxLength: 253 } }
+        dns_names: { type: array, items: {} }
         key_bits: { type: integer, format: int32, enum: [2048, 3072, 4096] }
         state: { type: string, enum: [csr_pending, csr_ready, signing, signer_unavailable, issued, expiring, expired, revoking, revocation_unknown, revoked, failed, unknown] }
         version: { type: integer, format: int64, minimum: 1 }
         public_key_sha256: { type: string, format: byte, description: SHA-256 of the node-local public key. }
         serial_number: { type: string, maxLength: 128 }
-        not_before: { $ref: "#/components/schemas/UtcDateTime" }
-        not_after: { $ref: "#/components/schemas/UtcDateTime" }
-        revoked_at: { $ref: "#/components/schemas/UtcDateTime" }
-        created_at: { $ref: "#/components/schemas/UtcDateTime" }
-        updated_at: { $ref: "#/components/schemas/UtcDateTime" }
+        not_before: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        not_after: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        revoked_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     UserPolicyRequest:
       type: object
       additionalProperties: false
@@ -2449,12 +2477,12 @@ components:
         quota_period: { type: string, enum: [none, monthly, lifetime] }
         quota_direction: { type: string, enum: [rx, tx, rxtx] }
         quota_bytes: { type: integer, format: int64, minimum: 0, maximum: 9007199254740991 }
-        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         version: { type: integer, format: int64, minimum: 1 }
-        period_start: { $ref: "#/components/schemas/UtcDateTime" }
+        period_start: { $ref: "#/components/schemas/TelemetryTimestamp" }
         observed_rx_bytes: { type: integer, format: int64, minimum: 0 }
         observed_tx_bytes: { type: integer, format: int64, minimum: 0 }
-        observed_at: { $ref: "#/components/schemas/UtcDateTime" }
+        observed_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         exceeded: { type: boolean }
         expired: { type: boolean }
         convergence: { type: string, enum: [converged, pending, offline_pending, drifted] }
@@ -2503,8 +2531,8 @@ components:
           type: array
           maxItems: 500
           items: { $ref: "#/components/schemas/UserBatchItem" }
-        created_at: { $ref: "#/components/schemas/UtcDateTime" }
-        updated_at: { $ref: "#/components/schemas/UtcDateTime" }
+        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     AgentRolloutCreateRequest:
       type: object
       additionalProperties: false
@@ -2550,16 +2578,6 @@ components:
         from_version: { type: string }
         failure_code: { type: string }
       description: One selected node in stable sorted order; operation_id links to the underlying single-node upgrade operation.
-    AgentRolloutExclusion:
-      type: object
-      additionalProperties: false
-      required: [node_id, reason]
-      properties:
-        node_id: { $ref: "#/components/schemas/UuidV7" }
-        reason:
-          type: string
-          enum: [not_trusted, offline, stale, missing_release_metadata, unknown_version, already_current, ahead, missing_capability, upgrade_in_progress]
-      description: Why a requested node was not selected at creation time.
     AgentRollout:
       type: object
       additionalProperties: false
@@ -2576,8 +2594,8 @@ components:
         created_by: { $ref: "#/components/schemas/UuidV7" }
         current_batch: { type: integer, minimum: 0 }
         pause_code: { type: string }
-        created_at: { $ref: "#/components/schemas/UtcDateTime" }
-        updated_at: { $ref: "#/components/schemas/UtcDateTime" }
+        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         nodes:
           type: array
           maxItems: 500
@@ -2585,7 +2603,7 @@ components:
         excluded:
           type: array
           maxItems: 500
-          items: { $ref: "#/components/schemas/AgentRolloutExclusion" }
+          items: {}
       description: Durable server-side orchestration state; failed and unknown node outcomes always pause the rollout.
     AgentRolloutPage:
       type: object
@@ -2920,8 +2938,8 @@ components:
         trust_status: { type: string, enum: [pending, active, revoked, offline] }
         connection_state: { type: string, enum: [online, offline] }
         freshness: { type: string, enum: [fresh, stale, never] }
-        observed_at: { $ref: "#/components/schemas/UtcDateTime" }
-        last_heartbeat_at: { $ref: "#/components/schemas/UtcDateTime" }
+        observed_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        last_heartbeat_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         boot_id: { type: string, minLength: 1, maxLength: 128 }
         agent_instance_id: { $ref: "#/components/schemas/UuidV7" }
         agent_version: { type: string, minLength: 1, maxLength: 128 }
@@ -2974,7 +2992,7 @@ components:
         id: { type: string, minLength: 1, maxLength: 256 }
         username: { type: string, minLength: 1, maxLength: 256 }
         client_ip: { type: string, format: ip }
-        connected_at: { $ref: "#/components/schemas/UtcDateTime" }
+        connected_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         bytes_in: { type: integer, format: int64, minimum: 0 }
         bytes_out: { type: integer, format: int64, minimum: 0 }
     NodeSessionPage:
@@ -3006,12 +3024,21 @@ components:
     TelemetryMetric:
       type: string
       enum: [cpu_usage_ratio, memory_used_bytes, network_rx_bytes, network_tx_bytes, session_count, connection_rtt_ms]
+    TelemetryTimestamp:
+      type: string
+      description: >-
+        Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339;
+        years outside 0000..9999 use an ISO 8601 signed six-digit year.
+        Infinite values are the strings infinity and -infinity. Responses
+        are normalized to UTC with microsecond precision. Keep this as text,
+        not a JavaScript Date, which cannot represent the complete domain.
+      example: "2026-09-10T04:34:56.123456Z"
     TelemetryPoint:
       type: object
       additionalProperties: false
       required: [at, metric, count, minimum, maximum, average]
       properties:
-        at: { $ref: "#/components/schemas/UtcDateTime" }
+        at: { $ref: "#/components/schemas/TelemetryTimestamp" }
         metric: { $ref: "#/components/schemas/TelemetryMetric" }
         count: { type: integer, format: int64, minimum: 1 }
         minimum: { type: number }
@@ -3047,7 +3074,7 @@ components:
         traceparent:
           $ref: "#/components/schemas/Traceparent"
         occurred_at:
-          $ref: "#/components/schemas/UtcDateTime"
+          $ref: "#/components/schemas/TelemetryTimestamp"
     PlatformEventPage:
       type: object
       additionalProperties: false
@@ -3224,8 +3251,8 @@ components:
           $ref: "#/components/schemas/ConfigPlanApprovalSummary"
         certificate_summary:
           $ref: "#/components/schemas/CertificateApprovalSummary"
-        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
-        created_at: { $ref: "#/components/schemas/UtcDateTime" }
+        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
     AuditEventPage:
       type: object
       additionalProperties: false

@@ -37,6 +37,12 @@ function eventLabel(type: string): string {
   };
   return labels[type] ?? type;
 }
+
+function timeLabel(value: string): string {
+  if (!/^\d{4}-/.test(value)) return value;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : value;
+}
 </script>
 
 <template>
@@ -118,8 +124,8 @@ function eventLabel(type: string): string {
         <li v-for="event in [...slice.events].reverse()" :key="event.id">
           <span class="event-type">{{ $t(eventLabel(event.type)) }}</span>
           <code>{{ event.nodeId.slice(0, 8) }}</code>
-          <time :datetime="event.occurredAt.toISOString()">{{
-            event.occurredAt.toLocaleTimeString()
+          <time :datetime="event.occurredAt">{{
+            timeLabel(event.occurredAt)
           }}</time>
         </li>
       </ol>

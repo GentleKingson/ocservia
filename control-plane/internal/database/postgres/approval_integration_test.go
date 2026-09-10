@@ -8,6 +8,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals/approvaltest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -42,4 +43,19 @@ func TestApprovalControllerWorkflowIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	approvaltest.Workflow(t, postgres.WrapPool(pool), workspace, requester, approver, session, approverSession)
+	ownerDSN := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerDSN == "" {
+		ownerDSN = dsn
+	}
+	ownerPool, err := pgxpool.New(ctx, ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerPool.Close()
+	owner := postgres.WrapPool(ownerPool)
+	approvaltest.ExtendedTimes(t, postgres.WrapPool(pool), workspace, requester, approver, session, approverSession, func(id uuid.UUID, created, expires value.Timestamp) {
+		if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=$2,expires_at=$3 WHERE id=$1`, id, created, expires); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

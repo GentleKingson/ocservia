@@ -50,11 +50,11 @@ export interface ConfigPlanApprovalSummary {
    */
   diffRedacted: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof ConfigPlanApprovalSummary
    */
-  expiresAt: Date;
+  expiresAt: string;
 }
 
 /**
@@ -127,7 +127,7 @@ export function ConfigPlanApprovalSummaryFromJSONTyped(
     candidateHash: json["candidate_hash"],
     currentHash: json["current_hash"],
     diffRedacted: json["diff_redacted"],
-    expiresAt: new Date(json["expires_at"]),
+    expiresAt: json["expires_at"],
   };
 }
 
@@ -151,6 +151,6 @@ export function ConfigPlanApprovalSummaryToJSONTyped(
     candidate_hash: value["candidateHash"],
     current_hash: value["currentHash"],
     diff_redacted: value["diffRedacted"],
-    expires_at: value["expiresAt"].toISOString(),
+    expires_at: value["expiresAt"],
   };
 }

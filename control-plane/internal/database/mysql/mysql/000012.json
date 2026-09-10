@@ -1,0 +1,243 @@
+{
+  "version": 12,
+  "previous_checksum": "73d40ddefb81fbbe214cc63620059c2eaf41ad1f1236018a6ab81d5fed0ba874",
+  "engine": "mysql",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_agent_upgrade_operations_insert",
+          "object": "migrate_v4_time_agent_upgrade_operations_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_upgrade_operations_insert` BEFORE INSERT ON `agent_upgrade_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "065fa1d55e66c9c244c89e08b49287c045b6728459e2438b9a0b17305c40a475",
+          "before": "",
+          "after": "68e12e547d6bb78ba66a7df85c1176d6aa26d54d6faffdc0d047b46b6a0428e1"
+        },
+        {
+          "name": "migrate_v4_time_agent_upgrade_operations_update",
+          "object": "migrate_v4_time_agent_upgrade_operations_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_upgrade_operations_update` BEFORE UPDATE ON `agent_upgrade_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9da852f656d4208b9a801e610afbdeb9208a98cbb4245f370281bd5327cd3dd3",
+          "before": "",
+          "after": "8c11d1ca8c59597ded8b595c1b0585706d1d9a8315ba177088821c911635d8e9"
+        },
+        {
+          "name": "migrate_v4_time_agent_upgrade_operations_delete",
+          "object": "migrate_v4_time_agent_upgrade_operations_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_upgrade_operations_delete` BEFORE DELETE ON `agent_upgrade_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "172e90a91719aad4614db13059c986073f7b32d58657b63f17a8b90983f060e6",
+          "before": "",
+          "after": "1fbf711a3e94c615c11d31dfc7a8733096814a1a15b1aa7e3ea226d069add0ae"
+        },
+        {
+          "name": "agent_upgrade_operations_scheduled_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_scheduled_at` BIGINT NULL",
+          "checksum": "2993f7e8382c753706df23d0d313186b33972f54f3b8b66e32faa317e30209fb",
+          "before": "d7dd851c0837e278435c9c4c64bb76d5c61b09cb33cc740da7abbd661aaabd5a",
+          "after": "59581854c553299fb050563612dc716d4ed07f424211c7a0fff633f6ceee7513"
+        },
+        {
+          "name": "agent_upgrade_operations_completed_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_completed_at` BIGINT NULL",
+          "checksum": "bc285f5d1fa628904f2e42781d1ccd196cac11659d7073b68fcb44e5c5087d07",
+          "before": "59581854c553299fb050563612dc716d4ed07f424211c7a0fff633f6ceee7513",
+          "after": "e1d31ce3ac281eff7e6dbbc10eca48f6d83994d1065f426fcbef50dc65307be2"
+        },
+        {
+          "name": "agent_upgrade_operations_created_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "53aa144263bd12cb1a96146d1b641957e49a4cdfaa389d077f09e43d3c16c027",
+          "before": "e1d31ce3ac281eff7e6dbbc10eca48f6d83994d1065f426fcbef50dc65307be2",
+          "after": "45bbf3dbb0e19c2e265df11fbfd68a4a43e0ff8ad9e258f702afbf749e6e4cc7"
+        },
+        {
+          "name": "agent_upgrade_operations_updated_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "e72d4804e4d7d30a97ea8b638eb9eec8eb717b42d4d6fc2e78a083e662e6c411",
+          "before": "45bbf3dbb0e19c2e265df11fbfd68a4a43e0ff8ad9e258f702afbf749e6e4cc7",
+          "after": "e214bd51fffd38cb6a2f0408d5fb64b6089be98d216eda3dc0650bac995bd8fd"
+        },
+        {
+          "name": "agent_upgrade_operations_times_backfill",
+          "object": "agent_upgrade_operations",
+          "kind": "data",
+          "sql": "UPDATE `agent_upgrade_operations` source SET `logical_scheduled_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`scheduled_at`),`logical_completed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "b32caa860d0aedc109abb655bdfa50a5099805b2ff18280630c11d5b6b10114a",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_upgrade_operations` source WHERE (source.`scheduled_at` IS NOT NULL AND source.`logical_scheduled_at` IS NULL) OR NOT(source.`logical_scheduled_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`scheduled_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_upgrade_operations_times_switch",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` DROP COLUMN `scheduled_at`,CHANGE COLUMN `logical_scheduled_at` `scheduled_at` BIGINT NULL,ADD CONSTRAINT `agent_upgrade_operations_scheduled_at_range` CHECK (`scheduled_at` IS NULL OR `scheduled_at` IN (-9223372036854775808,9223372036854775807) OR (`scheduled_at`\u003e=-211813488000000000 AND `scheduled_at`\u003c9223371331200000000)),DROP COLUMN `completed_at`,CHANGE COLUMN `logical_completed_at` `completed_at` BIGINT NULL,ADD CONSTRAINT `agent_upgrade_operations_completed_at_range` CHECK (`completed_at` IS NULL OR `completed_at` IN (-9223372036854775808,9223372036854775807) OR (`completed_at`\u003e=-211813488000000000 AND `completed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_upgrade_operations_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_upgrade_operations_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "88fad1f38b7badcd47f9ea652e31ab4d013eb0b28a4802b6ac790bfd4c4e3143",
+          "before": "e214bd51fffd38cb6a2f0408d5fb64b6089be98d216eda3dc0650bac995bd8fd",
+          "after": "c41e661c81c7c337c4ebe64fc212cb4c74c29e534c3824e61937f2a2c3d28cb3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_upgrade_operations` source WHERE (source.`scheduled_at` IS NOT NULL AND source.`logical_scheduled_at` IS NULL) OR NOT(source.`logical_scheduled_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`scheduled_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_upgrade_operations_insert",
+          "object": "migrate_v4_time_agent_upgrade_operations_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_upgrade_operations_insert`",
+          "checksum": "dbe1e6e63c38e471f10ca0cea92585b328fa0bab19aa123e1ad240f76e1ba533",
+          "before": "68e12e547d6bb78ba66a7df85c1176d6aa26d54d6faffdc0d047b46b6a0428e1",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_upgrade_operations_update",
+          "object": "migrate_v4_time_agent_upgrade_operations_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_upgrade_operations_update`",
+          "checksum": "4daf55489b805bff3f20eb1e30e62d67ec24b4ae379d89bca43b6fe42fc1811a",
+          "before": "8c11d1ca8c59597ded8b595c1b0585706d1d9a8315ba177088821c911635d8e9",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_upgrade_operations_delete",
+          "object": "migrate_v4_time_agent_upgrade_operations_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_upgrade_operations_delete`",
+          "checksum": "a052ec6722adc7978d53d180802e0b811f5df914a4eae9e216dc10ca302dd804",
+          "before": "1fbf711a3e94c615c11d31dfc7a8733096814a1a15b1aa7e3ea226d069add0ae",
+          "after": ""
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_agent_upgrade_operations_insert",
+          "object": "migrate_v4_time_agent_upgrade_operations_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_upgrade_operations_insert` BEFORE INSERT ON `agent_upgrade_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "065fa1d55e66c9c244c89e08b49287c045b6728459e2438b9a0b17305c40a475",
+          "before": "",
+          "after": "68e12e547d6bb78ba66a7df85c1176d6aa26d54d6faffdc0d047b46b6a0428e1"
+        },
+        {
+          "name": "migrate_v4_time_agent_upgrade_operations_update",
+          "object": "migrate_v4_time_agent_upgrade_operations_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_upgrade_operations_update` BEFORE UPDATE ON `agent_upgrade_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9da852f656d4208b9a801e610afbdeb9208a98cbb4245f370281bd5327cd3dd3",
+          "before": "",
+          "after": "8c11d1ca8c59597ded8b595c1b0585706d1d9a8315ba177088821c911635d8e9"
+        },
+        {
+          "name": "migrate_v4_time_agent_upgrade_operations_delete",
+          "object": "migrate_v4_time_agent_upgrade_operations_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_upgrade_operations_delete` BEFORE DELETE ON `agent_upgrade_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "172e90a91719aad4614db13059c986073f7b32d58657b63f17a8b90983f060e6",
+          "before": "",
+          "after": "1fbf711a3e94c615c11d31dfc7a8733096814a1a15b1aa7e3ea226d069add0ae"
+        },
+        {
+          "name": "agent_upgrade_operations_scheduled_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_scheduled_at` BIGINT NULL",
+          "checksum": "2993f7e8382c753706df23d0d313186b33972f54f3b8b66e32faa317e30209fb",
+          "before": "d7dd851c0837e278435c9c4c64bb76d5c61b09cb33cc740da7abbd661aaabd5a",
+          "after": "59581854c553299fb050563612dc716d4ed07f424211c7a0fff633f6ceee7513"
+        },
+        {
+          "name": "agent_upgrade_operations_completed_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_completed_at` BIGINT NULL",
+          "checksum": "bc285f5d1fa628904f2e42781d1ccd196cac11659d7073b68fcb44e5c5087d07",
+          "before": "59581854c553299fb050563612dc716d4ed07f424211c7a0fff633f6ceee7513",
+          "after": "e1d31ce3ac281eff7e6dbbc10eca48f6d83994d1065f426fcbef50dc65307be2"
+        },
+        {
+          "name": "agent_upgrade_operations_created_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "53aa144263bd12cb1a96146d1b641957e49a4cdfaa389d077f09e43d3c16c027",
+          "before": "e1d31ce3ac281eff7e6dbbc10eca48f6d83994d1065f426fcbef50dc65307be2",
+          "after": "45bbf3dbb0e19c2e265df11fbfd68a4a43e0ff8ad9e258f702afbf749e6e4cc7"
+        },
+        {
+          "name": "agent_upgrade_operations_updated_at_column",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "e72d4804e4d7d30a97ea8b638eb9eec8eb717b42d4d6fc2e78a083e662e6c411",
+          "before": "45bbf3dbb0e19c2e265df11fbfd68a4a43e0ff8ad9e258f702afbf749e6e4cc7",
+          "after": "e214bd51fffd38cb6a2f0408d5fb64b6089be98d216eda3dc0650bac995bd8fd"
+        },
+        {
+          "name": "agent_upgrade_operations_times_backfill",
+          "object": "agent_upgrade_operations",
+          "kind": "data",
+          "sql": "UPDATE `agent_upgrade_operations` source SET `logical_scheduled_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`scheduled_at`),`logical_completed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "b32caa860d0aedc109abb655bdfa50a5099805b2ff18280630c11d5b6b10114a",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_upgrade_operations` source WHERE (source.`scheduled_at` IS NOT NULL AND source.`logical_scheduled_at` IS NULL) OR NOT(source.`logical_scheduled_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`scheduled_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_upgrade_operations_times_switch",
+          "object": "agent_upgrade_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_upgrade_operations` DROP COLUMN `scheduled_at`,CHANGE COLUMN `logical_scheduled_at` `scheduled_at` BIGINT NULL,ADD CONSTRAINT `agent_upgrade_operations_scheduled_at_range` CHECK (`scheduled_at` IS NULL OR `scheduled_at` IN (-9223372036854775808,9223372036854775807) OR (`scheduled_at`\u003e=-211813488000000000 AND `scheduled_at`\u003c9223371331200000000)),DROP COLUMN `completed_at`,CHANGE COLUMN `logical_completed_at` `completed_at` BIGINT NULL,ADD CONSTRAINT `agent_upgrade_operations_completed_at_range` CHECK (`completed_at` IS NULL OR `completed_at` IN (-9223372036854775808,9223372036854775807) OR (`completed_at`\u003e=-211813488000000000 AND `completed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_upgrade_operations_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_upgrade_operations_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "88fad1f38b7badcd47f9ea652e31ab4d013eb0b28a4802b6ac790bfd4c4e3143",
+          "before": "e214bd51fffd38cb6a2f0408d5fb64b6089be98d216eda3dc0650bac995bd8fd",
+          "after": "c41e661c81c7c337c4ebe64fc212cb4c74c29e534c3824e61937f2a2c3d28cb3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_upgrade_operations` source WHERE (source.`scheduled_at` IS NOT NULL AND source.`logical_scheduled_at` IS NULL) OR NOT(source.`logical_scheduled_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`scheduled_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_upgrade_operations_insert",
+          "object": "migrate_v4_time_agent_upgrade_operations_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_upgrade_operations_insert`",
+          "checksum": "dbe1e6e63c38e471f10ca0cea92585b328fa0bab19aa123e1ad240f76e1ba533",
+          "before": "68e12e547d6bb78ba66a7df85c1176d6aa26d54d6faffdc0d047b46b6a0428e1",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_upgrade_operations_update",
+          "object": "migrate_v4_time_agent_upgrade_operations_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_upgrade_operations_update`",
+          "checksum": "4daf55489b805bff3f20eb1e30e62d67ec24b4ae379d89bca43b6fe42fc1811a",
+          "before": "8c11d1ca8c59597ded8b595c1b0585706d1d9a8315ba177088821c911635d8e9",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_upgrade_operations_delete",
+          "object": "migrate_v4_time_agent_upgrade_operations_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_upgrade_operations_delete`",
+          "checksum": "a052ec6722adc7978d53d180802e0b811f5df914a4eae9e216dc10ca302dd804",
+          "before": "1fbf711a3e94c615c11d31dfc7a8733096814a1a15b1aa7e3ea226d069add0ae",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

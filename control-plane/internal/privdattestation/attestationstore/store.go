@@ -40,7 +40,18 @@ type Key struct {
 	RegistrationCredentialID uuid.UUID
 }
 
+// VerificationKey preserves the business-finite validity contract used by
+// receipt verification. NULL ValidUntil means unlimited validity.
+type VerificationKey struct {
+	PublicKey   []byte
+	State       string
+	ActivatedAt time.Time
+	ValidUntil  *time.Time
+}
+
 type Store interface {
+	KeyStateCounts(context.Context) (database.Rows, error)
+	VerificationKey(context.Context, uuid.UUID, string) (VerificationKey, error)
 	// LockActiveNode takes the node row lock for an active or offline node and
 	// returns its workspace.
 	LockActiveNode(context.Context, uuid.UUID) (uuid.UUID, error)

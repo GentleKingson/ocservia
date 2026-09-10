@@ -19,7 +19,10 @@ import (
 
 // These are new backend histories, not records of PostgreSQL migrations.
 //
-//go:embed mysql/manifest.json mariadb/manifest.json history/f6cd0e0/*.json mysql/000002.json mariadb/000002.json mysql/000003.json mariadb/000003.json mysql/000004.json mariadb/000004.json mysql/000005.json mariadb/000005.json mysql/000006.json mariadb/000006.json
+//go:embed mysql/manifest.json mariadb/manifest.json history/f6cd0e0/*.json mysql/000002.json mariadb/000002.json mysql/000003.json mariadb/000003.json mysql/000004.json mariadb/000004.json mysql/000005.json mariadb/000005.json mysql/000006.json mariadb/000006.json mysql/000007.json mariadb/000007.json mysql/000008.json mariadb/000008.json mysql/000009.json mariadb/000009.json mysql/000010.json mariadb/000010.json mysql/000011.json mariadb/000011.json mysql/000012.json mariadb/000012.json mysql/000013.json mariadb/000013.json mysql/000014.json mariadb/000014.json mysql/000015.json mariadb/000015.json mysql/000016.json mariadb/000016.json mysql/000017.json mariadb/000017.json mysql/000018.json mariadb/000018.json mysql/000019.json mariadb/000019.json mysql/000020.json mariadb/000020.json
+//go:embed mysql/000021.json mariadb/000021.json
+//go:embed mysql/000022.json mariadb/000022.json
+//go:embed mysql/000023.json mariadb/000023.json
 var manifests embed.FS
 
 type step struct {

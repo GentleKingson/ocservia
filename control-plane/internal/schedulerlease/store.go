@@ -28,6 +28,7 @@ type Store interface {
 	Lock(context.Context) (State, error)
 	Put(context.Context, State, value.Timestamp) error
 	Assert(context.Context, Owner, int64) error
+	RecordMaintenanceCompletion(context.Context, Owner, int64) error
 }
 
 func FromTransaction(tx database.Tx) (Store, error) {

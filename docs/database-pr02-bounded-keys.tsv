@@ -39,7 +39,7 @@ secret_provider_refs	key_path	text	VARCHAR(513)	FIXED: existing 512-character CH
 telemetry_rollups_1h	metric	text	LONGTEXT	V3: exact natural key side table and history Store
 telemetry_rollups_5m	metric	text	LONGTEXT	V3: exact natural key side table and history Store
 telemetry_samples	metric	text	VARCHAR(191)	EXISTING: metric enum CHECK
-upstream_sync_records	repository	text	LONGTEXT	V3: exact composite side table; Controller sync workflow port pending
+upstream_sync_records	repository	text	LONGTEXT	V3: exact composite side table; owner migration seed only, runtime SELECT only
 upstream_sync_records	old_commit	text	VARCHAR(191)	EXISTING: 40-character ASCII hex CHECK
 upstream_sync_records	new_commit	text	VARCHAR(191)	EXISTING: 40-character ASCII hex CHECK
 user_policy_enforcements	username	text	LONGTEXT	V3: exact natural key side table; Controller enforcement workflow port pending

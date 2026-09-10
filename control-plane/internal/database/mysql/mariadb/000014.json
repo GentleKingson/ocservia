@@ -1,0 +1,393 @@
+{
+  "version": 14,
+  "previous_checksum": "5eaf4f0b04e7a64af8f207520d272d38da8003b68558c9d87afffa9b3e0525d4",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_node_command_leases_insert",
+          "object": "migrate_v4_time_node_command_leases_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_command_leases_insert` BEFORE INSERT ON `node_command_leases` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1e850e43dbbddc349b0418ccdb4b673355c6ad868540f556f41c92bc71d22d9d",
+          "before": "",
+          "after": "39efe2ce7d32a24ac44413f5cfd5ce58e2823b2a632e6b18be601df870980fc2"
+        },
+        {
+          "name": "migrate_v4_time_node_command_leases_update",
+          "object": "migrate_v4_time_node_command_leases_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_command_leases_update` BEFORE UPDATE ON `node_command_leases` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3bb585483fb246c2f807a948642650622745fd49314765d956923180ce7b884c",
+          "before": "",
+          "after": "3bad55fd25152179417de23107658f3b5b3daad0048e94d45ba10404a3a1c0c2"
+        },
+        {
+          "name": "migrate_v4_time_node_command_leases_delete",
+          "object": "migrate_v4_time_node_command_leases_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_command_leases_delete` BEFORE DELETE ON `node_command_leases` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "188784683f31d381fe488e0e2739ef028c9def5247942229af9b76f85eda9ddb",
+          "before": "",
+          "after": "54be9cbea693989c957097d2a05833e8d26b4fa13d7996ea9929f169f76c56bd"
+        },
+        {
+          "name": "node_command_leases_leased_until_column",
+          "object": "node_command_leases",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_command_leases` ADD COLUMN `logical_leased_until` BIGINT NULL",
+          "checksum": "e6417316d956a0258594ccdc8821dc83edef9af0d567ecba0e2d2abde2db89b0",
+          "before": "804532252299596f96e016942e3c70af39ae952fb9d394d2ead66b6c61af61ba",
+          "after": "1ded880db4db92cbefd28594704d6513873016a3a4346c7fe05858b8e03cde7c"
+        },
+        {
+          "name": "node_command_leases_created_at_column",
+          "object": "node_command_leases",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_command_leases` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "832f4f9f7ea5566cfedc3cdce03497aabc4bac7d68e1586d515e6b4da10411f7",
+          "before": "1ded880db4db92cbefd28594704d6513873016a3a4346c7fe05858b8e03cde7c",
+          "after": "83170577b26f0a240f5ed148bec6fb7fdc2957cb2be28d0f55fba1d548f729ef"
+        },
+        {
+          "name": "node_command_leases_times_backfill",
+          "object": "node_command_leases",
+          "kind": "data",
+          "sql": "UPDATE `node_command_leases` source SET `logical_leased_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`leased_until`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "4d1f6d15cee395cd95438bd91bc367f7ce857fea2b7fa0bd11ead6aa93866155",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_command_leases` source WHERE (source.`leased_until` IS NOT NULL AND source.`logical_leased_until` IS NULL) OR NOT(source.`logical_leased_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`leased_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_command_leases_times_switch",
+          "object": "node_command_leases",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_command_leases` DROP INDEX node_command_leases_expiry_idx,DROP COLUMN `leased_until`,CHANGE COLUMN `logical_leased_until` `leased_until` BIGINT NOT NULL,ADD CONSTRAINT `node_command_leases_leased_until_range` CHECK (`leased_until` IS NULL OR `leased_until` IN (-9223372036854775808,9223372036854775807) OR (`leased_until`\u003e=-211813488000000000 AND `leased_until`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_command_leases_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD KEY node_command_leases_expiry_idx(leased_until)",
+          "checksum": "1950d989099991341c1e9322d9326ba0ae50502278e6caa97f3079f3bbb318ec",
+          "before": "83170577b26f0a240f5ed148bec6fb7fdc2957cb2be28d0f55fba1d548f729ef",
+          "after": "732a4052b0e54a5f54f43ece02093fbe7af940363d085ea84ebdb8686d11ab45",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_command_leases` source WHERE (source.`leased_until` IS NOT NULL AND source.`logical_leased_until` IS NULL) OR NOT(source.`logical_leased_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`leased_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_command_leases_insert",
+          "object": "migrate_v4_time_node_command_leases_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_command_leases_insert`",
+          "checksum": "502aad6b5e05ca87089d920dab4fe43c08dd114d0b3c2a1fe6a06812e4a6fdde",
+          "before": "39efe2ce7d32a24ac44413f5cfd5ce58e2823b2a632e6b18be601df870980fc2",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_command_leases_update",
+          "object": "migrate_v4_time_node_command_leases_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_command_leases_update`",
+          "checksum": "f5e15e7ffb3f120a46deac9a31a70731b551f5516979f6a403841a74ff30f865",
+          "before": "3bad55fd25152179417de23107658f3b5b3daad0048e94d45ba10404a3a1c0c2",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_command_leases_delete",
+          "object": "migrate_v4_time_node_command_leases_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_command_leases_delete`",
+          "checksum": "9106b9b8a2d5ab40e985cb039a701f6d148693b42b88a77390ea42d8c8174c6e",
+          "before": "54be9cbea693989c957097d2a05833e8d26b4fa13d7996ea9929f169f76c56bd",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_command_attempts_insert",
+          "object": "migrate_v4_time_command_attempts_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_command_attempts_insert` BEFORE INSERT ON `command_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f4c64af3695ad4418b4540343d804b5b75abf32b2b00a1390d33e2e66518108d",
+          "before": "",
+          "after": "289cad9a7187383b6b71fb13bffb380df9deaeb244e2f32e36fe519b07f79945"
+        },
+        {
+          "name": "migrate_v4_time_command_attempts_update",
+          "object": "migrate_v4_time_command_attempts_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_command_attempts_update` BEFORE UPDATE ON `command_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "6bb5f44c53cebb58af3ca2d92c93497d437ec37861ebd23f6532b1dc89ddefaf",
+          "before": "",
+          "after": "667dc25c3725e57e7fe81433cfb6b010d9e8b213852526ad8e8e240e1bfd5f2f"
+        },
+        {
+          "name": "migrate_v4_time_command_attempts_delete",
+          "object": "migrate_v4_time_command_attempts_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_command_attempts_delete` BEFORE DELETE ON `command_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3e04cf46ffea3ef328fcb3e43de615957bc404a552cb5d2d68ed43f7d601167c",
+          "before": "",
+          "after": "a72a6f844ed5e87ca685d2fd617d218a66ff568356be813fecfe568a2c072976"
+        },
+        {
+          "name": "command_attempts_started_at_column",
+          "object": "command_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `command_attempts` ADD COLUMN `logical_started_at` BIGINT NULL",
+          "checksum": "7ed6ac0bd2e41a4cc50394c0b4bbb88a51a63ec9409ea01377022e32782319cc",
+          "before": "2da0f36bbe729889e8fb3543b25f3fa04fbe0c1704ff8a2f9abe2b2a21b9048b",
+          "after": "5ad180bd08dcff03174968849213f6293593b64b0cd1f821c0b351dffc28a859"
+        },
+        {
+          "name": "command_attempts_finished_at_column",
+          "object": "command_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `command_attempts` ADD COLUMN `logical_finished_at` BIGINT NULL",
+          "checksum": "efb596c694d778b85903470712d2d7f165f340825aa539307a25f4881a6a4446",
+          "before": "5ad180bd08dcff03174968849213f6293593b64b0cd1f821c0b351dffc28a859",
+          "after": "edadcc21636ddb1d2c2450bd92ddbc94988bf4dc4d0e455621a6447c89d0f028"
+        },
+        {
+          "name": "command_attempts_times_backfill",
+          "object": "command_attempts",
+          "kind": "data",
+          "sql": "UPDATE `command_attempts` source SET `logical_started_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`started_at`),`logical_finished_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`finished_at`)",
+          "checksum": "06bc5c49ad9b765861b138694c616b1847d2e312525bef5bf4e0a3b92b4c3c2f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `command_attempts` source WHERE (source.`started_at` IS NOT NULL AND source.`logical_started_at` IS NULL) OR NOT(source.`logical_started_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`started_at`)) OR (source.`finished_at` IS NOT NULL AND source.`logical_finished_at` IS NULL) OR NOT(source.`logical_finished_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`finished_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "command_attempts_times_switch",
+          "object": "command_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `command_attempts` DROP CONSTRAINT command_attempts_command_attempts_check,DROP COLUMN `started_at`,CHANGE COLUMN `logical_started_at` `started_at` BIGINT NOT NULL,ADD CONSTRAINT `command_attempts_started_at_range` CHECK (`started_at` IS NULL OR `started_at` IN (-9223372036854775808,9223372036854775807) OR (`started_at`\u003e=-211813488000000000 AND `started_at`\u003c9223371331200000000)),DROP COLUMN `finished_at`,CHANGE COLUMN `logical_finished_at` `finished_at` BIGINT NULL,ADD CONSTRAINT `command_attempts_finished_at_range` CHECK (`finished_at` IS NULL OR `finished_at` IN (-9223372036854775808,9223372036854775807) OR (`finished_at`\u003e=-211813488000000000 AND `finished_at`\u003c9223371331200000000)),ADD CONSTRAINT command_attempts_command_attempts_check CHECK ((state='sending')=(finished_at IS NULL))",
+          "checksum": "b022201d52b3ff2b77d3349a96243799914d1e1b5eeea98053c17dbad18946c1",
+          "before": "edadcc21636ddb1d2c2450bd92ddbc94988bf4dc4d0e455621a6447c89d0f028",
+          "after": "46e16cdd72d9b3dc528a4db1da8095a2e12768f841eb8ff202b2ac359f988916",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `command_attempts` source WHERE (source.`started_at` IS NOT NULL AND source.`logical_started_at` IS NULL) OR NOT(source.`logical_started_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`started_at`)) OR (source.`finished_at` IS NOT NULL AND source.`logical_finished_at` IS NULL) OR NOT(source.`logical_finished_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`finished_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_command_attempts_insert",
+          "object": "migrate_v4_time_command_attempts_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_command_attempts_insert`",
+          "checksum": "bad102983996fb1982a8c3b43bbf92f18df31878734126d6416208a6b6eef986",
+          "before": "289cad9a7187383b6b71fb13bffb380df9deaeb244e2f32e36fe519b07f79945",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_command_attempts_update",
+          "object": "migrate_v4_time_command_attempts_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_command_attempts_update`",
+          "checksum": "77877f8143e69a687a8d9e1842f3d0803a188bbdd7faa9a03e38020bc0427e91",
+          "before": "667dc25c3725e57e7fe81433cfb6b010d9e8b213852526ad8e8e240e1bfd5f2f",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_command_attempts_delete",
+          "object": "migrate_v4_time_command_attempts_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_command_attempts_delete`",
+          "checksum": "2ed3361f97f43d0291d07c42f8685dbc57e7f8d4b468a047c8ce18d43733e862",
+          "before": "a72a6f844ed5e87ca685d2fd617d218a66ff568356be813fecfe568a2c072976",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_node_command_leases_insert",
+          "object": "migrate_v4_time_node_command_leases_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_command_leases_insert` BEFORE INSERT ON `node_command_leases` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1e850e43dbbddc349b0418ccdb4b673355c6ad868540f556f41c92bc71d22d9d",
+          "before": "",
+          "after": "39efe2ce7d32a24ac44413f5cfd5ce58e2823b2a632e6b18be601df870980fc2"
+        },
+        {
+          "name": "migrate_v4_time_node_command_leases_update",
+          "object": "migrate_v4_time_node_command_leases_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_command_leases_update` BEFORE UPDATE ON `node_command_leases` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3bb585483fb246c2f807a948642650622745fd49314765d956923180ce7b884c",
+          "before": "",
+          "after": "3bad55fd25152179417de23107658f3b5b3daad0048e94d45ba10404a3a1c0c2"
+        },
+        {
+          "name": "migrate_v4_time_node_command_leases_delete",
+          "object": "migrate_v4_time_node_command_leases_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_command_leases_delete` BEFORE DELETE ON `node_command_leases` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "188784683f31d381fe488e0e2739ef028c9def5247942229af9b76f85eda9ddb",
+          "before": "",
+          "after": "54be9cbea693989c957097d2a05833e8d26b4fa13d7996ea9929f169f76c56bd"
+        },
+        {
+          "name": "node_command_leases_leased_until_column",
+          "object": "node_command_leases",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_command_leases` ADD COLUMN `logical_leased_until` BIGINT NULL",
+          "checksum": "e6417316d956a0258594ccdc8821dc83edef9af0d567ecba0e2d2abde2db89b0",
+          "before": "804532252299596f96e016942e3c70af39ae952fb9d394d2ead66b6c61af61ba",
+          "after": "1ded880db4db92cbefd28594704d6513873016a3a4346c7fe05858b8e03cde7c"
+        },
+        {
+          "name": "node_command_leases_created_at_column",
+          "object": "node_command_leases",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_command_leases` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "832f4f9f7ea5566cfedc3cdce03497aabc4bac7d68e1586d515e6b4da10411f7",
+          "before": "1ded880db4db92cbefd28594704d6513873016a3a4346c7fe05858b8e03cde7c",
+          "after": "83170577b26f0a240f5ed148bec6fb7fdc2957cb2be28d0f55fba1d548f729ef"
+        },
+        {
+          "name": "node_command_leases_times_backfill",
+          "object": "node_command_leases",
+          "kind": "data",
+          "sql": "UPDATE `node_command_leases` source SET `logical_leased_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`leased_until`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "4d1f6d15cee395cd95438bd91bc367f7ce857fea2b7fa0bd11ead6aa93866155",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_command_leases` source WHERE (source.`leased_until` IS NOT NULL AND source.`logical_leased_until` IS NULL) OR NOT(source.`logical_leased_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`leased_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_command_leases_times_switch",
+          "object": "node_command_leases",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_command_leases` DROP INDEX node_command_leases_expiry_idx,DROP COLUMN `leased_until`,CHANGE COLUMN `logical_leased_until` `leased_until` BIGINT NOT NULL,ADD CONSTRAINT `node_command_leases_leased_until_range` CHECK (`leased_until` IS NULL OR `leased_until` IN (-9223372036854775808,9223372036854775807) OR (`leased_until`\u003e=-211813488000000000 AND `leased_until`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_command_leases_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD KEY node_command_leases_expiry_idx(leased_until)",
+          "checksum": "1950d989099991341c1e9322d9326ba0ae50502278e6caa97f3079f3bbb318ec",
+          "before": "83170577b26f0a240f5ed148bec6fb7fdc2957cb2be28d0f55fba1d548f729ef",
+          "after": "732a4052b0e54a5f54f43ece02093fbe7af940363d085ea84ebdb8686d11ab45",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_command_leases` source WHERE (source.`leased_until` IS NOT NULL AND source.`logical_leased_until` IS NULL) OR NOT(source.`logical_leased_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`leased_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_command_leases_insert",
+          "object": "migrate_v4_time_node_command_leases_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_command_leases_insert`",
+          "checksum": "502aad6b5e05ca87089d920dab4fe43c08dd114d0b3c2a1fe6a06812e4a6fdde",
+          "before": "39efe2ce7d32a24ac44413f5cfd5ce58e2823b2a632e6b18be601df870980fc2",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_command_leases_update",
+          "object": "migrate_v4_time_node_command_leases_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_command_leases_update`",
+          "checksum": "f5e15e7ffb3f120a46deac9a31a70731b551f5516979f6a403841a74ff30f865",
+          "before": "3bad55fd25152179417de23107658f3b5b3daad0048e94d45ba10404a3a1c0c2",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_command_leases_delete",
+          "object": "migrate_v4_time_node_command_leases_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_command_leases_delete`",
+          "checksum": "9106b9b8a2d5ab40e985cb039a701f6d148693b42b88a77390ea42d8c8174c6e",
+          "before": "54be9cbea693989c957097d2a05833e8d26b4fa13d7996ea9929f169f76c56bd",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_command_attempts_insert",
+          "object": "migrate_v4_time_command_attempts_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_command_attempts_insert` BEFORE INSERT ON `command_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f4c64af3695ad4418b4540343d804b5b75abf32b2b00a1390d33e2e66518108d",
+          "before": "",
+          "after": "289cad9a7187383b6b71fb13bffb380df9deaeb244e2f32e36fe519b07f79945"
+        },
+        {
+          "name": "migrate_v4_time_command_attempts_update",
+          "object": "migrate_v4_time_command_attempts_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_command_attempts_update` BEFORE UPDATE ON `command_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "6bb5f44c53cebb58af3ca2d92c93497d437ec37861ebd23f6532b1dc89ddefaf",
+          "before": "",
+          "after": "667dc25c3725e57e7fe81433cfb6b010d9e8b213852526ad8e8e240e1bfd5f2f"
+        },
+        {
+          "name": "migrate_v4_time_command_attempts_delete",
+          "object": "migrate_v4_time_command_attempts_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_command_attempts_delete` BEFORE DELETE ON `command_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3e04cf46ffea3ef328fcb3e43de615957bc404a552cb5d2d68ed43f7d601167c",
+          "before": "",
+          "after": "a72a6f844ed5e87ca685d2fd617d218a66ff568356be813fecfe568a2c072976"
+        },
+        {
+          "name": "command_attempts_started_at_column",
+          "object": "command_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `command_attempts` ADD COLUMN `logical_started_at` BIGINT NULL",
+          "checksum": "7ed6ac0bd2e41a4cc50394c0b4bbb88a51a63ec9409ea01377022e32782319cc",
+          "before": "2da0f36bbe729889e8fb3543b25f3fa04fbe0c1704ff8a2f9abe2b2a21b9048b",
+          "after": "5ad180bd08dcff03174968849213f6293593b64b0cd1f821c0b351dffc28a859"
+        },
+        {
+          "name": "command_attempts_finished_at_column",
+          "object": "command_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `command_attempts` ADD COLUMN `logical_finished_at` BIGINT NULL",
+          "checksum": "efb596c694d778b85903470712d2d7f165f340825aa539307a25f4881a6a4446",
+          "before": "5ad180bd08dcff03174968849213f6293593b64b0cd1f821c0b351dffc28a859",
+          "after": "edadcc21636ddb1d2c2450bd92ddbc94988bf4dc4d0e455621a6447c89d0f028"
+        },
+        {
+          "name": "command_attempts_times_backfill",
+          "object": "command_attempts",
+          "kind": "data",
+          "sql": "UPDATE `command_attempts` source SET `logical_started_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`started_at`),`logical_finished_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`finished_at`)",
+          "checksum": "06bc5c49ad9b765861b138694c616b1847d2e312525bef5bf4e0a3b92b4c3c2f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `command_attempts` source WHERE (source.`started_at` IS NOT NULL AND source.`logical_started_at` IS NULL) OR NOT(source.`logical_started_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`started_at`)) OR (source.`finished_at` IS NOT NULL AND source.`logical_finished_at` IS NULL) OR NOT(source.`logical_finished_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`finished_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "command_attempts_times_switch",
+          "object": "command_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `command_attempts` DROP CONSTRAINT command_attempts_command_attempts_check,DROP COLUMN `started_at`,CHANGE COLUMN `logical_started_at` `started_at` BIGINT NOT NULL,ADD CONSTRAINT `command_attempts_started_at_range` CHECK (`started_at` IS NULL OR `started_at` IN (-9223372036854775808,9223372036854775807) OR (`started_at`\u003e=-211813488000000000 AND `started_at`\u003c9223371331200000000)),DROP COLUMN `finished_at`,CHANGE COLUMN `logical_finished_at` `finished_at` BIGINT NULL,ADD CONSTRAINT `command_attempts_finished_at_range` CHECK (`finished_at` IS NULL OR `finished_at` IN (-9223372036854775808,9223372036854775807) OR (`finished_at`\u003e=-211813488000000000 AND `finished_at`\u003c9223371331200000000)),ADD CONSTRAINT command_attempts_command_attempts_check CHECK ((state='sending')=(finished_at IS NULL))",
+          "checksum": "b022201d52b3ff2b77d3349a96243799914d1e1b5eeea98053c17dbad18946c1",
+          "before": "edadcc21636ddb1d2c2450bd92ddbc94988bf4dc4d0e455621a6447c89d0f028",
+          "after": "46e16cdd72d9b3dc528a4db1da8095a2e12768f841eb8ff202b2ac359f988916",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `command_attempts` source WHERE (source.`started_at` IS NOT NULL AND source.`logical_started_at` IS NULL) OR NOT(source.`logical_started_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`started_at`)) OR (source.`finished_at` IS NOT NULL AND source.`logical_finished_at` IS NULL) OR NOT(source.`logical_finished_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`finished_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_command_attempts_insert",
+          "object": "migrate_v4_time_command_attempts_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_command_attempts_insert`",
+          "checksum": "bad102983996fb1982a8c3b43bbf92f18df31878734126d6416208a6b6eef986",
+          "before": "289cad9a7187383b6b71fb13bffb380df9deaeb244e2f32e36fe519b07f79945",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_command_attempts_update",
+          "object": "migrate_v4_time_command_attempts_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_command_attempts_update`",
+          "checksum": "77877f8143e69a687a8d9e1842f3d0803a188bbdd7faa9a03e38020bc0427e91",
+          "before": "667dc25c3725e57e7fe81433cfb6b010d9e8b213852526ad8e8e240e1bfd5f2f",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_command_attempts_delete",
+          "object": "migrate_v4_time_command_attempts_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_command_attempts_delete`",
+          "checksum": "2ed3361f97f43d0291d07c42f8685dbc57e7f8d4b468a047c8ce18d43733e862",
+          "before": "a72a6f844ed5e87ca685d2fd617d218a66ff568356be813fecfe568a2c072976",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

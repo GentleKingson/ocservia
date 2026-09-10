@@ -111,11 +111,6 @@ func (s telemetryWriteStore) Activate(ctx context.Context, node uuid.UUID, obser
 	_, err := s.tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, node.String())
 	return err
 }
-func (s telemetryWriteStore) AttestationKey(ctx context.Context, node uuid.UUID, id string) (telemetrywrite.Key, error) {
-	var k telemetrywrite.Key
-	err := s.tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2`, node, id).Scan(&k.PublicKey, &k.State, &k.ActivatedAt, &k.ValidUntil)
-	return k, err
-}
 func (s telemetryWriteStore) InsertUpgrade(ctx context.Context, node uuid.UUID, r telemetrywrite.Upgrade) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at,privileged_result_proof)
  SELECT $1,$2,$3,$4,$5,$6,now(),$7

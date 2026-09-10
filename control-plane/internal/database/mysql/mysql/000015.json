@@ -1,0 +1,207 @@
+{
+  "version": 15,
+  "previous_checksum": "0a0469e93f519cdbf794052872467cfd4d98f0f428668761488cb7f1bbbe2fec",
+  "engine": "mysql",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_connection_owner_fencing_insert",
+          "object": "migrate_v4_time_connection_owner_fencing_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_connection_owner_fencing_insert` BEFORE INSERT ON `connection_owner_fencing` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "85242acf4a0a55a693ea6305e531c26f685699e93ed0551c4c1ec396dafd587d",
+          "before": "",
+          "after": "8fd334e68efcfdfee16f2fada6c911dccc8e7c68bc18eec0f1fdeee3c510153d"
+        },
+        {
+          "name": "migrate_v4_time_connection_owner_fencing_update",
+          "object": "migrate_v4_time_connection_owner_fencing_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_connection_owner_fencing_update` BEFORE UPDATE ON `connection_owner_fencing` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4c17be7c4616b478e566c977120f5cd78c9f41e502ce75dc5587f9cc2e39c5dc",
+          "before": "",
+          "after": "7eeb195f3a1a103fc05570528e4c12b55e3225919c87eddf03cbfe0fcd5491e8"
+        },
+        {
+          "name": "migrate_v4_time_connection_owner_fencing_delete",
+          "object": "migrate_v4_time_connection_owner_fencing_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_connection_owner_fencing_delete` BEFORE DELETE ON `connection_owner_fencing` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "edaf1fd14b18acd0165c6c9788e08c63c1522049d9c6e3ee3a8f434a5dfeb8c9",
+          "before": "",
+          "after": "7a824889374166c7bc5c318a11d4a6877db100b25bd4ab01e9cc8100ea747510"
+        },
+        {
+          "name": "connection_owner_fencing_lease_until_column",
+          "object": "connection_owner_fencing",
+          "kind": "table",
+          "sql": "ALTER TABLE `connection_owner_fencing` ADD COLUMN `logical_lease_until` BIGINT NULL",
+          "checksum": "718c52e88f9680ece20ee3def2c7efc15ee7f9fa78760a2f673e0980feeacc82",
+          "before": "77f1b00e1a41c5e5783aca12be2c28159c4033138a456c95dd04ed87ec7686af",
+          "after": "512eeed82e06568a6d37867d22827bb5f6ce606b0f42a3c853fa5bd2ee4a74ac"
+        },
+        {
+          "name": "connection_owner_fencing_updated_at_column",
+          "object": "connection_owner_fencing",
+          "kind": "table",
+          "sql": "ALTER TABLE `connection_owner_fencing` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "9d7567198ac618d3ea021b04ab5ec7a48068b096d160eea13e2506154b56cf03",
+          "before": "512eeed82e06568a6d37867d22827bb5f6ce606b0f42a3c853fa5bd2ee4a74ac",
+          "after": "3a878c9ec0e8409d49f74ef46e35362080f39a8da48e1d07e2955bf1476b4a02"
+        },
+        {
+          "name": "connection_owner_fencing_times_backfill",
+          "object": "connection_owner_fencing",
+          "kind": "data",
+          "sql": "UPDATE `connection_owner_fencing` source SET `logical_lease_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "e6520d9d7e1b99e61ef5bb3769dab3557142199e227530ff9a5cdb196f8b8699",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `connection_owner_fencing` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "connection_owner_fencing_times_switch",
+          "object": "connection_owner_fencing",
+          "kind": "table",
+          "sql": "ALTER TABLE `connection_owner_fencing` DROP COLUMN `lease_until`,CHANGE COLUMN `logical_lease_until` `lease_until` BIGINT NOT NULL,ADD CONSTRAINT `connection_owner_fencing_lease_until_range` CHECK (`lease_until` IS NULL OR `lease_until` IN (-9223372036854775808,9223372036854775807) OR (`lease_until`\u003e=-211813488000000000 AND `lease_until`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL DEFAULT (TIMESTAMPDIFF(MICROSECOND,'2000-01-01',CURRENT_TIMESTAMP(6))),ADD CONSTRAINT `connection_owner_fencing_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "f7b9039f3810f4ca3f55d10f289f4e36ecf6606a7cd4e0cb7d33daf6ab6a99f5",
+          "before": "3a878c9ec0e8409d49f74ef46e35362080f39a8da48e1d07e2955bf1476b4a02",
+          "after": "30692d33c2b08b901a42308fdd06763f70f4d778e064d6a4d8384bbb0218dddb",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `connection_owner_fencing` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_connection_owner_fencing_insert",
+          "object": "migrate_v4_time_connection_owner_fencing_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_connection_owner_fencing_insert`",
+          "checksum": "e7c2071c2a5b6a361a70b5d3d02744c49860a0cd0478e1d912cf620199a3aea5",
+          "before": "8fd334e68efcfdfee16f2fada6c911dccc8e7c68bc18eec0f1fdeee3c510153d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_connection_owner_fencing_update",
+          "object": "migrate_v4_time_connection_owner_fencing_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_connection_owner_fencing_update`",
+          "checksum": "8cc49f33e6f90f83399a879602f8cb0fd14938dd789a92210a6db1c90eb67598",
+          "before": "7eeb195f3a1a103fc05570528e4c12b55e3225919c87eddf03cbfe0fcd5491e8",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_connection_owner_fencing_delete",
+          "object": "migrate_v4_time_connection_owner_fencing_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_connection_owner_fencing_delete`",
+          "checksum": "06e8fba1dd1207e20bc5aa8087e1eeac8a19359c13aa8e864247b9664401fd9b",
+          "before": "7a824889374166c7bc5c318a11d4a6877db100b25bd4ab01e9cc8100ea747510",
+          "after": ""
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_connection_owner_fencing_insert",
+          "object": "migrate_v4_time_connection_owner_fencing_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_connection_owner_fencing_insert` BEFORE INSERT ON `connection_owner_fencing` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "85242acf4a0a55a693ea6305e531c26f685699e93ed0551c4c1ec396dafd587d",
+          "before": "",
+          "after": "8fd334e68efcfdfee16f2fada6c911dccc8e7c68bc18eec0f1fdeee3c510153d"
+        },
+        {
+          "name": "migrate_v4_time_connection_owner_fencing_update",
+          "object": "migrate_v4_time_connection_owner_fencing_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_connection_owner_fencing_update` BEFORE UPDATE ON `connection_owner_fencing` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4c17be7c4616b478e566c977120f5cd78c9f41e502ce75dc5587f9cc2e39c5dc",
+          "before": "",
+          "after": "7eeb195f3a1a103fc05570528e4c12b55e3225919c87eddf03cbfe0fcd5491e8"
+        },
+        {
+          "name": "migrate_v4_time_connection_owner_fencing_delete",
+          "object": "migrate_v4_time_connection_owner_fencing_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_connection_owner_fencing_delete` BEFORE DELETE ON `connection_owner_fencing` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "edaf1fd14b18acd0165c6c9788e08c63c1522049d9c6e3ee3a8f434a5dfeb8c9",
+          "before": "",
+          "after": "7a824889374166c7bc5c318a11d4a6877db100b25bd4ab01e9cc8100ea747510"
+        },
+        {
+          "name": "connection_owner_fencing_lease_until_column",
+          "object": "connection_owner_fencing",
+          "kind": "table",
+          "sql": "ALTER TABLE `connection_owner_fencing` ADD COLUMN `logical_lease_until` BIGINT NULL",
+          "checksum": "718c52e88f9680ece20ee3def2c7efc15ee7f9fa78760a2f673e0980feeacc82",
+          "before": "77f1b00e1a41c5e5783aca12be2c28159c4033138a456c95dd04ed87ec7686af",
+          "after": "512eeed82e06568a6d37867d22827bb5f6ce606b0f42a3c853fa5bd2ee4a74ac"
+        },
+        {
+          "name": "connection_owner_fencing_updated_at_column",
+          "object": "connection_owner_fencing",
+          "kind": "table",
+          "sql": "ALTER TABLE `connection_owner_fencing` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "9d7567198ac618d3ea021b04ab5ec7a48068b096d160eea13e2506154b56cf03",
+          "before": "512eeed82e06568a6d37867d22827bb5f6ce606b0f42a3c853fa5bd2ee4a74ac",
+          "after": "3a878c9ec0e8409d49f74ef46e35362080f39a8da48e1d07e2955bf1476b4a02"
+        },
+        {
+          "name": "connection_owner_fencing_times_backfill",
+          "object": "connection_owner_fencing",
+          "kind": "data",
+          "sql": "UPDATE `connection_owner_fencing` source SET `logical_lease_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "e6520d9d7e1b99e61ef5bb3769dab3557142199e227530ff9a5cdb196f8b8699",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `connection_owner_fencing` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "connection_owner_fencing_times_switch",
+          "object": "connection_owner_fencing",
+          "kind": "table",
+          "sql": "ALTER TABLE `connection_owner_fencing` DROP COLUMN `lease_until`,CHANGE COLUMN `logical_lease_until` `lease_until` BIGINT NOT NULL,ADD CONSTRAINT `connection_owner_fencing_lease_until_range` CHECK (`lease_until` IS NULL OR `lease_until` IN (-9223372036854775808,9223372036854775807) OR (`lease_until`\u003e=-211813488000000000 AND `lease_until`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL DEFAULT (TIMESTAMPDIFF(MICROSECOND,'2000-01-01',CURRENT_TIMESTAMP(6))),ADD CONSTRAINT `connection_owner_fencing_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "f7b9039f3810f4ca3f55d10f289f4e36ecf6606a7cd4e0cb7d33daf6ab6a99f5",
+          "before": "3a878c9ec0e8409d49f74ef46e35362080f39a8da48e1d07e2955bf1476b4a02",
+          "after": "30692d33c2b08b901a42308fdd06763f70f4d778e064d6a4d8384bbb0218dddb",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `connection_owner_fencing` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_connection_owner_fencing_insert",
+          "object": "migrate_v4_time_connection_owner_fencing_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_connection_owner_fencing_insert`",
+          "checksum": "e7c2071c2a5b6a361a70b5d3d02744c49860a0cd0478e1d912cf620199a3aea5",
+          "before": "8fd334e68efcfdfee16f2fada6c911dccc8e7c68bc18eec0f1fdeee3c510153d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_connection_owner_fencing_update",
+          "object": "migrate_v4_time_connection_owner_fencing_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_connection_owner_fencing_update`",
+          "checksum": "8cc49f33e6f90f83399a879602f8cb0fd14938dd789a92210a6db1c90eb67598",
+          "before": "7eeb195f3a1a103fc05570528e4c12b55e3225919c87eddf03cbfe0fcd5491e8",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_connection_owner_fencing_delete",
+          "object": "migrate_v4_time_connection_owner_fencing_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_connection_owner_fencing_delete`",
+          "checksum": "06e8fba1dd1207e20bc5aa8087e1eeac8a19359c13aa8e864247b9664401fd9b",
+          "before": "7a824889374166c7bc5c318a11d4a6877db100b25bd4ab01e9cc8100ea747510",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

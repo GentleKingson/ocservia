@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
 	"github.com/google/uuid"
 )
@@ -16,6 +17,7 @@ type TelemetryHistoryHarness struct {
 	Now                time.Time
 	Node, Batch        uuid.UUID
 	SeedOldRaw         func(time.Time) error
+	SeedInfinity       func(value.Timestamp) error
 	SeedExpiredRollups func(time.Time, time.Time) error
 	DeleteBatch        func() error
 }
@@ -47,8 +49,11 @@ func TelemetryHistoryWorkflow(t *testing.T, h TelemetryHistoryHarness) {
 	read := func(resolution string, since time.Time) []telemetryhistory.Point {
 		var points []telemetryhistory.Point
 		if err := within(func(s telemetryhistory.Store) error {
-			var err error
-			points, err = s.History(ctx, h.Node, "cpu_usage_ratio", resolution, since)
+			at, err := value.FromTime(since)
+			if err != nil {
+				return err
+			}
+			points, err = s.History(ctx, h.Node, "cpu_usage_ratio", resolution, at)
 			return err
 		}); err != nil {
 			t.Fatal(err)
@@ -90,8 +95,44 @@ func TelemetryHistoryWorkflow(t *testing.T, h TelemetryHistoryHarness) {
 		t.Fatal(err)
 	}
 	old := read("raw", beforeEpoch.Add(-time.Second))
-	if len(old) != 4 || !old[0].At.Equal(beforeEpoch) {
+	expected, _ := value.FromTime(beforeEpoch)
+	if len(old) != 4 || old[0].At != expected {
 		t.Fatalf("signed microsecond history changed: %+v", old)
+	}
+	negative := value.Timestamp{Micros: value.NegativeInfinity, Valid: true}
+	positive := value.Timestamp{Micros: value.PositiveInfinity, Valid: true}
+	for _, at := range []value.Timestamp{negative, positive} {
+		if err := h.SeedInfinity(at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if err := within(func(s telemetryhistory.Store) error { return s.Maintain(ctx, h.Now) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := within(func(s telemetryhistory.Store) error {
+		points, err := s.History(ctx, h.Node, "cpu_usage_ratio", "raw", negative)
+		if err != nil {
+			return err
+		}
+		// Retention may retire the old finite shard, but neither infinity is
+		// a finite month and both must remain readable in their original order.
+		if len(points) < 2 || points[0].At != negative || points[len(points)-1].At != positive {
+			t.Fatalf("infinite raw timestamps lost: %+v", points)
+		}
+		for _, resolution := range []string{"raw", "5m", "1h"} {
+			points, err = s.History(ctx, h.Node, "cpu_usage_ratio", resolution, positive)
+			if err != nil {
+				return err
+			}
+			if len(points) != 1 || points[0].At != positive || points[0].Count != 1 || points[0].Average != 7 {
+				t.Fatalf("%s infinite bucket changed: %+v", resolution, points)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if err := h.DeleteBatch(); err != nil {
 		t.Fatal(err)

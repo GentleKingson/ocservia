@@ -31,10 +31,10 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	}
 	defer b.Close()
 	workspace, node, batch := uuid.New(), uuid.New(), uuid.New()
-	if _, err = owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'history',?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))`, UUIDBytes(workspace), workspace.String()); err != nil {
+	if _, err = owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'history',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, UUIDBytes(workspace), workspace.String()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'history','active',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))`, UUIDBytes(node), UUIDBytes(workspace)); err != nil {
+	if _, err = owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'history','active',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, UUIDBytes(node), UUIDBytes(workspace)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = owner.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES(?,?,1,'raw_history',?,1)`, UUIDBytes(batch), UUIDBytes(node), fixtureTimestamp(t, now)); err != nil {
@@ -42,6 +42,10 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	}
 	semantictest.TelemetryHistoryWorkflow(t, semantictest.TelemetryHistoryHarness{
 		Backend: b, Now: now, Node: node, Batch: batch,
+		SeedInfinity: func(at value.Timestamp) error {
+			_, err := owner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'cpu_usage_ratio',7)`, UUIDBytes(node), UUIDBytes(batch), at)
+			return err
+		},
 		SeedOldRaw: func(at time.Time) error {
 			v, err := value.FromTime(at)
 			if err != nil {

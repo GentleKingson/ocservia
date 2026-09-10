@@ -20,11 +20,13 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryread"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
@@ -99,10 +101,7 @@ type Session struct {
 	BytesOut    int64     `json:"bytes_out"`
 }
 
-type IPBan struct {
-	IP               string  `json:"ip"`
-	SecondsRemaining *uint64 `json:"seconds_remaining,omitempty"`
-}
+type IPBan = telemetryread.IPBan
 
 type User struct {
 	Username    string `json:"username"`
@@ -147,17 +146,17 @@ type Batch struct {
 }
 
 type Node struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	Version         int64      `json:"version"`
-	TrustStatus     string     `json:"trust_status"`
-	ConnectionState string     `json:"connection_state"`
-	Freshness       string     `json:"freshness"`
-	ObservedAt      *time.Time `json:"observed_at,omitempty"`
-	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
-	BootID          string     `json:"boot_id,omitempty"`
-	AgentInstanceID string     `json:"agent_instance_id,omitempty"`
-	AgentVersion    string     `json:"agent_version,omitempty"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	Version         int64            `json:"version"`
+	TrustStatus     string           `json:"trust_status"`
+	ConnectionState string           `json:"connection_state"`
+	Freshness       string           `json:"freshness"`
+	ObservedAt      *value.Timestamp `json:"observed_at,omitempty"`
+	LastHeartbeatAt *value.Timestamp `json:"last_heartbeat_at,omitempty"`
+	BootID          string           `json:"boot_id,omitempty"`
+	AgentInstanceID string           `json:"agent_instance_id,omitempty"`
+	AgentVersion    string           `json:"agent_version,omitempty"`
 	// AgentVersionState and RecommendedAgentVersion are derived at read time
 	// from AgentVersion and the configured recommendation; they are never
 	// persisted.
@@ -177,55 +176,47 @@ type Node struct {
 	SessionCount         int             `json:"session_count"`
 }
 
-type HistoryPoint struct {
-	At      time.Time `json:"at"`
-	Metric  string    `json:"metric"`
-	Count   int64     `json:"count"`
-	Minimum float64   `json:"minimum"`
-	Maximum float64   `json:"maximum"`
-	Average float64   `json:"average"`
-}
+type HistoryPoint = telemetryhistory.Point
 
 func (s *Service) ListIPBans(ctx context.Context, nodeID uuid.UUID, limit int) ([]IPBan, error) {
 	if nodeID == uuid.Nil || limit < 1 || limit > 200 {
 		return nil, errors.New("IP ban query is invalid")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT host(ip),seconds_remaining FROM node_ip_bans WHERE node_id=$1 ORDER BY ip LIMIT $2`, nodeID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("list node IP bans: %w", err)
-	}
-	defer rows.Close()
-	result := []IPBan{}
-	for rows.Next() {
-		var ban IPBan
-		if err := rows.Scan(&ban.IP, &ban.SecondsRemaining); err != nil {
-			return nil, err
+	var result []IPBan
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := telemetryread.From(tx)
+		if err != nil {
+			return err
 		}
-		result = append(result, ban)
-	}
-	return result, rows.Err()
+		result, err = store.IPBans(ctx, nodeID, limit)
+		return err
+	})
+	return result, err
 }
 
 type Service struct {
 	backend                 database.Backend
-	pool                    *pgxpool.Pool
 	now                     func() time.Time
 	recommendedAgentVersion string
 	agentUpgradeCatalog     *releasecatalog.Catalog
 }
 
 func New(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, backend: postgres.WrapPool(pool), now: time.Now}
+	return &Service{backend: postgres.WrapPool(pool), now: time.Now}
 }
 
-// NewBackend enables transactional ingestion; PostgreSQL read-model construction remains separate.
+// NewBackend enables ingestion, read models and maintenance through domain stores.
 func NewBackend(backend database.Backend) *Service { return &Service{backend: backend, now: time.Now} }
 
 // NewWithRecommendedAgentVersion builds the read model with the
 // operator-configured recommended agent version used to derive per-node
 // agent version state.
 func NewWithRecommendedAgentVersion(pool *pgxpool.Pool, recommendedAgentVersion string) *Service {
-	return &Service{pool: pool, backend: postgres.WrapPool(pool), now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
+	return NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), recommendedAgentVersion)
+}
+
+func NewWithRecommendedAgentVersionBackend(backend database.Backend, recommendedAgentVersion string) *Service {
+	return &Service{backend: backend, now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
 }
 
 // EnableAgentUpgradeEligibility installs the trusted release catalog used to
@@ -469,10 +460,7 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		}
 	}
 	for _, report := range snap.UpgradeResults {
-		verification, err := privdattestation.VerifyUpgradeResultWithLookup(ctx, func(ctx context.Context, node uuid.UUID, id string) (privdattestation.UpgradeKey, error) {
-			k, err := store.AttestationKey(ctx, node, id)
-			return privdattestation.UpgradeKey{PublicKey: k.PublicKey, State: k.State, ActivatedAt: k.ActivatedAt, ValidUntil: k.ValidUntil}, err
-		}, batch.NodeID, report.OperationID, agentUpgradeOutcomeProtoState(report.State), report.TargetVersion, report.CompletedAt, report.Proof)
+		verification, err := privdattestation.VerifyUpgradeResultTransaction(ctx, tx, batch.NodeID, report.OperationID, agentUpgradeOutcomeProtoState(report.State), report.TargetVersion, report.CompletedAt, report.Proof)
 		if err != nil {
 			return false, fmt.Errorf("verify reported agent upgrade result: %w", err)
 		}
@@ -657,26 +645,23 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("node page size must be between 1 and 200")
 	}
-	var cursor any
-	if after != uuid.Nil {
-		cursor = after
-	}
-	rows, err := s.pool.Query(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.architecture,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE ($1::uuid IS NULL OR n.id>$1) AND ($3::uuid IS NULL OR n.workspace_id=$3) ORDER BY n.id LIMIT $2`, cursor, limit+1, nullableWorkspace(workspaceID))
+	var stored []telemetryread.Node
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := telemetryread.From(tx)
+		if err != nil {
+			return err
+		}
+		stored, err = store.Nodes(ctx, workspaceID, after, limit+1)
+		return err
+	})
 	if err != nil {
 		return nil, false, fmt.Errorf("list nodes: %w", err)
 	}
-	defer rows.Close()
 	result := []Node{}
-	for rows.Next() {
-		node, err := scanNode(rows, s.now())
-		if err != nil {
-			return nil, false, err
-		}
+	for _, v := range stored {
+		node := readNode(v, s.now())
 		s.applyAgentVersionState(&node)
 		result = append(result, node)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, false, err
 	}
 	hasMore := len(result) > limit
 	if hasMore {
@@ -685,19 +670,20 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 	return result, hasMore, nil
 }
 
-func nullableWorkspace(id uuid.UUID) any {
-	if id == uuid.Nil {
-		return nil
-	}
-	return id
-}
-
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
-	row := s.pool.QueryRow(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.architecture,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, id)
-	node, err := scanNode(row, s.now())
+	var stored telemetryread.Node
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := telemetryread.From(tx)
+		if err != nil {
+			return err
+		}
+		stored, err = store.Node(ctx, id)
+		return err
+	})
 	if err != nil {
 		return Node{}, err
 	}
+	node := readNode(stored, s.now())
 	s.applyAgentVersionState(&node)
 	s.applyAgentUpgradeEligibility(ctx, &node)
 	return node, nil
@@ -722,14 +708,20 @@ func (s *Service) applyAgentUpgradeEligibility(ctx context.Context, node *Node) 
 	// Only nodes that advertise the fence-capable v2 capability are eligible:
 	// a v1 source runner would execute the first hop without the
 	// execution-time downgrade fence and installation commit record.
-	var capable, conflict bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v2' AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, nodeID).Scan(&capable, &conflict); err != nil {
+	var eligible bool
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := telemetryread.From(tx)
+		if err != nil {
+			return err
+		}
+		eligible, err = store.UpgradeEligibility(ctx, nodeID)
+		return err
+	})
+	if err != nil {
 		return
 	}
-	node.AgentUpgradeEligible = capable && !conflict
+	node.AgentUpgradeEligible = eligible
 }
-
-type scanner interface{ Scan(...any) error }
 
 func agentUpgradeOutcomeState(state agentv1.AgentUpgradeOutcomeState) string {
 	switch state {
@@ -764,23 +756,27 @@ func upgradeResultCompletedAtMatches(proof *agentv1.AgentUpgradeResultProof, com
 	return completedAt.Equal(time.UnixMilli(int64(proof.GetCompletedUnixMs())).UTC())
 }
 
-func scanNode(row scanner, now time.Time) (Node, error) {
-	var n Node
-	var observed, heartbeat *time.Time
-	var boot, instance, agent, ocserv, os, arch *string
-	var ocservJSON, systemJSON, pathJSON []byte
-	var ds, dh, da, dr *int64
-	if err := row.Scan(&n.ID, &n.Name, &n.Version, &n.TrustStatus, &observed, &heartbeat, &boot, &instance, &agent, &ocserv, &os, &arch, &ocservJSON, &systemJSON, &pathJSON, &ds, &dh, &da, &dr, &n.SessionCount); err != nil {
-		return Node{}, err
+func readNode(v telemetryread.Node, now time.Time) Node {
+	n := Node{ID: v.ID.String(), Name: v.Name, Version: v.Version, TrustStatus: v.Status,
+		BootID: v.BootID, AgentInstanceID: v.InstanceID, AgentVersion: v.AgentVersion,
+		OcservVersion: v.OcservVersion, OSRelease: v.OSRelease, Architecture: v.Architecture,
+		Ocserv: v.Ocserv.Bytes(), System: v.System.Bytes(), Path: v.Path.Bytes(), SessionCount: v.Sessions,
+		Dropped: DropCounters{Security: v.Security, Health: v.Health, Aggregate: v.Aggregate, Raw: v.Raw}}
+	if v.ObservedAt.Valid {
+		n.ObservedAt = &v.ObservedAt
 	}
-	n.ObservedAt = observed
-	n.LastHeartbeatAt = heartbeat
-	if heartbeat == nil {
+	if v.Heartbeat.Valid {
+		n.LastHeartbeatAt = &v.Heartbeat
+	}
+	if !v.Heartbeat.Valid {
 		n.Freshness = "never"
 		n.ConnectionState = "offline"
 	} else {
-		age := now.Sub(*heartbeat)
-		if age <= OfflineAfter {
+		cutoff, err := value.FromTime(now.Add(-OfflineAfter))
+		if err == nil && now.Nanosecond()%1000 != 0 {
+			cutoff.Micros++
+		}
+		if err == nil && v.Heartbeat.Micros >= cutoff.Micros {
 			n.Freshness = "fresh"
 			n.ConnectionState = "online"
 		} else {
@@ -788,60 +784,23 @@ func scanNode(row scanner, now time.Time) (Node, error) {
 			n.ConnectionState = "offline"
 		}
 	}
-	if boot != nil {
-		n.BootID = *boot
-	}
-	if instance != nil {
-		n.AgentInstanceID = *instance
-	}
-	if agent != nil {
-		n.AgentVersion = *agent
-	}
-	if ocserv != nil {
-		n.OcservVersion = *ocserv
-	}
-	if os != nil {
-		n.OSRelease = *os
-	}
-	if arch != nil {
-		n.Architecture = *arch
-	}
-	n.Ocserv = ocservJSON
-	n.System = systemJSON
-	n.Path = pathJSON
-	if ds != nil {
-		n.Dropped.Security = uint64(*ds)
-	}
-	if dh != nil {
-		n.Dropped.Health = uint64(*dh)
-	}
-	if da != nil {
-		n.Dropped.Aggregate = uint64(*da)
-	}
-	if dr != nil {
-		n.Dropped.Raw = uint64(*dr)
-	}
-	return n, nil
+	return n
 }
 
-func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after string, limit int) ([]Session, bool, error) {
+func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after string, limit int) ([]telemetryread.Session, bool, error) {
 	if limit < 1 || limit > 200 || len(after) > 256 {
 		return nil, false, errors.New("session page is invalid")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT session_id,username,host(client_ip),connected_at,bytes_in,bytes_out FROM node_sessions WHERE node_id=$1 AND session_id>$2 ORDER BY session_id LIMIT $3`, nodeID, after, limit+1)
-	if err != nil {
-		return nil, false, err
-	}
-	defer rows.Close()
-	result := []Session{}
-	for rows.Next() {
-		var item Session
-		if err := rows.Scan(&item.ID, &item.Username, &item.ClientIP, &item.ConnectedAt, &item.BytesIn, &item.BytesOut); err != nil {
-			return nil, false, err
+	var result []telemetryread.Session
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := telemetryread.From(tx)
+		if err != nil {
+			return err
 		}
-		result = append(result, item)
-	}
-	if err := rows.Err(); err != nil {
+		result, err = store.Sessions(ctx, nodeID, after, limit+1)
+		return err
+	})
+	if err != nil {
 		return nil, false, err
 	}
 	hasMore := len(result) > limit
@@ -852,89 +811,73 @@ func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after stri
 }
 
 func (s *Service) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since time.Time) ([]HistoryPoint, error) {
+	if since.IsZero() {
+		since = s.now().Add(-24 * time.Hour)
+	}
+	at, err := value.FromTime(since)
+	if err != nil {
+		return nil, err
+	}
+	return s.HistoryFrom(ctx, nodeID, metric, resolution, at)
+}
+
+// HistoryFrom retains infinite and extended finite query bounds and results.
+// A NULL bound means the same default window as an omitted HTTP query.
+func (s *Service) HistoryFrom(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]HistoryPoint, error) {
 	if !allowedMetrics[metric] {
 		return nil, ErrInvalidMetric
 	}
-	if since.IsZero() {
-		since = s.now().Add(-24 * time.Hour)
+	if !since.Valid {
+		var err error
+		since, err = value.FromTime(s.now().Add(-24 * time.Hour))
+		if err != nil {
+			return nil, err
+		}
 	}
 	if resolution != "raw" && resolution != "5m" && resolution != "1h" {
 		return nil, ErrInvalidResolution
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer rollback(tx)
-	history, err := telemetryhistory.FromTransaction(telemetryTransaction(tx))
-	if err != nil {
-		return nil, err
-	}
-	stored, err := history.History(ctx, nodeID, metric, resolution, since)
-	if err != nil {
-		return nil, err
-	}
-	points := make([]HistoryPoint, 0, len(stored))
-	for _, p := range stored {
-		points = append(points, HistoryPoint(p))
-	}
-	return points, nil
+	var points []HistoryPoint
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		history, err := telemetryhistory.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		points, err = history.History(ctx, nodeID, metric, resolution, since)
+		return err
+	})
+	return points, err
 }
 
 func (s *Service) Maintain(ctx context.Context) error {
 	now := s.now().UTC()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer rollback(tx)
-	rows, err := tx.Query(ctx, `SELECT n.id FROM nodes n JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.status='active' AND o.last_heartbeat_at < ($1::timestamptz - interval '90 seconds') FOR UPDATE OF n SKIP LOCKED`, now)
-	if err != nil {
-		return err
-	}
-	var offline []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := telemetrywrite.From(tx)
+		if err != nil {
 			return err
 		}
-		offline = append(offline, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	for _, id := range offline {
-		if _, err := tx.Exec(ctx, `UPDATE nodes SET status='offline',updated_at=$2,version=version+1 WHERE id=$1 AND status='active'`, id, now); err != nil {
+		offline, err := store.LockOfflineCandidates(ctx, now.Add(-OfflineAfter))
+		if err != nil {
 			return err
 		}
-		eventID := uuid.Must(uuid.NewV7())
-		if _, err := tx.Exec(ctx, `INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload) VALUES($1,$2,'disconnected',$3,$4,$5)`, eventID, id, now, newTraceparent(), []byte("heartbeat timeout")); err != nil {
+		for _, id := range offline {
+			if err := store.MarkOffline(ctx, id, uuid.Must(uuid.NewV7()), now, newTraceparent()); err != nil {
+				return err
+			}
+		}
+		history, err := telemetryhistory.FromTransaction(tx)
+		if err != nil {
 			return err
 		}
-	}
-	history, err := telemetryhistory.FromTransaction(telemetryTransaction(tx))
-	if err != nil {
-		return err
-	}
-	if err := history.Maintain(ctx, now); err != nil {
-		return err
-	}
-	return coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx))
+		if err := history.Maintain(ctx, now); err != nil {
+			return err
+		}
+		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+	})
 }
-
-func telemetryTransaction(tx pgx.Tx) database.Tx { return postgres.WrapTx(tx) }
 
 func newTraceparent() string {
 	trace := uuid.Must(uuid.NewV7())
 	span := uuid.Must(uuid.NewV7())
 	return "00-" + hex.EncodeToString(trace[:]) + "-" + hex.EncodeToString(span[:8]) + "-01"
-}
-
-func rollback(tx pgx.Tx) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = tx.Rollback(ctx)
 }

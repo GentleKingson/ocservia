@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/semantictest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -45,7 +46,7 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		for _, query := range []string{`DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, `DELETE FROM telemetry_rollups_1h WHERE node_id=$1`, `DELETE FROM nodes WHERE id=$1`} {
+		for _, query := range []string{`DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, `DELETE FROM telemetry_rollups_5m WHERE node_id=$1`, `DELETE FROM telemetry_rollups_1h WHERE node_id=$1`, `DELETE FROM nodes WHERE id=$1`} {
 			if _, err := owner.Exec(ctx, query, node); err != nil {
 				t.Error(err)
 			}
@@ -56,6 +57,10 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 	}()
 	semantictest.TelemetryHistoryWorkflow(t, semantictest.TelemetryHistoryHarness{
 		Backend: b, Now: now, Node: node, Batch: batch,
+		SeedInfinity: func(at value.Timestamp) error {
+			_, err := b.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',7)`, node, batch, at)
+			return err
+		},
 		SeedOldRaw: func(at time.Time) error {
 			_, err := b.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',1)`, node, batch, at)
 			return err

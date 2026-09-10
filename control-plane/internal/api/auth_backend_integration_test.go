@@ -61,6 +61,9 @@ func authenticationBackend(t *testing.T) database.Backend {
 		if err = owner.Migrate(ctx, ""); err != nil {
 			t.Fatal(err)
 		}
+		if err = owner.MigrateTelemetryHistory(ctx); err != nil {
+			t.Fatal(err)
+		}
 		if err = owner.GrantTestPrivileges(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -103,7 +106,7 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if _, err = service.CreateLocalCredential(ctx, name, password); !errors.Is(err, database.ErrUnique) {
 		t.Fatalf("duplicate credential: %v", err)
 	}
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 34)
+	server := NewBackend("127.0.0.1:0", backend, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 34)
 	server.auth = service
 	server.EnableBrowserOrigin(authTestOrigin)
 	login := func(password string) *httptest.ResponseRecorder {
@@ -166,7 +169,7 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	}
 	workspace := uuid.Must(uuid.NewV7())
 	if _, ok := backend.(*mysql.Backend); ok {
-		_, err = backend.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'HTTP management',?,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`, mysql.UUIDBytes(workspace), name)
+		_, err = backend.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'HTTP management',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, mysql.UUIDBytes(workspace), name)
 	} else {
 		_, err = backend.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP management',$2,now(),now())`, workspace, name)
 		ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
@@ -206,6 +209,15 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 		t.Fatal("wrong bootstrap principal")
 	}
 	server.EnableAuthorization(service, rbac.NewBackend(backend), approvals.NewBackend(backend), nil)
+	for _, node := range []string{"invalid", uuid.Must(uuid.NewV7()).String()} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/"+node, nil)
+		r.AddCookie(adminCookie)
+		w := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound || w.Header().Get("Content-Type") != "application/problem+json" {
+			t.Fatalf("missing node authorization: %d %s", w.Code, w.Body)
+		}
+	}
 	approvalHeader := ""
 	call := func(path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", path, strings.NewReader(body))

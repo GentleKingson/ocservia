@@ -1,0 +1,507 @@
+{
+  "version": 13,
+  "previous_checksum": "5e7a4e21b2066147b5b17ba126b0fbad775f98044322870075c33e8bad6803bf",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "rollout_exclusions_validator",
+          "object": "ocserv_rollout_exclusions_valid",
+          "kind": "function",
+          "sql": "CREATE FUNCTION ocserv_rollout_exclusions_valid(doc LONGBLOB) RETURNS BOOLEAN DETERMINISTIC NO SQL SQL SECURITY DEFINER\nBEGIN\n DECLARE source LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE masked LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '';\n DECLARE token LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE digits LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE c CHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE posn BIGINT DEFAULT 1;\n DECLARE startn BIGINT;\n DECLARE n BIGINT;\n DECLARE dotn BIGINT;\n DECLARE en BIGINT;\n DECLARE expo BIGINT;\n DECLARE scale_n BIGINT;\n DECLARE integer_n BIGINT;\n DECLARE leading_n BIGINT;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION RETURN FALSE;\n IF doc IS NULL THEN RETURN FALSE; END IF;\n SET source=CONVERT(doc USING utf8mb4);\n IF CAST(source AS BINARY)\u003c\u003edoc THEN RETURN FALSE; END IF;\n SET n=CHAR_LENGTH(source);\n WHILE posn\u003c=n DO\n  SET c=SUBSTRING(source,posn,1);\n  IF c='\"' THEN\n   SET startn=posn;\n   SET posn=posn+1;\n   WHILE posn\u003c=n AND SUBSTRING(source,posn,1)\u003c\u003e'\"' DO\n    IF ASCII(SUBSTRING(source,posn,1))=92 THEN SET posn=posn+1; END IF;\n    SET posn=posn+1;\n   END WHILE;\n   IF posn\u003en THEN RETURN FALSE; END IF;\n   SET token=SUBSTRING(source,startn,posn-startn+1);\n   IF NOT JSON_VALID(token) OR LOCATE(0x00,CAST(JSON_UNQUOTE(token) AS BINARY))\u003c\u003e0 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,token);\n   SET posn=posn+1;\n  ELSEIF c='-' OR (ASCII(c)\u003e=48 AND ASCII(c)\u003c=57) THEN\n   SET startn=posn;\n   WHILE posn\u003c=n AND LOCATE(SUBSTRING(source,posn,1),'0123456789.eE+-')\u003e0 DO SET posn=posn+1; END WHILE;\n   SET token=SUBSTRING(source,startn,posn-startn);\n   IF NOT (token REGEXP '(?-i)\\\\A-?(0|[1-9][0-9]*)(\\\\.[0-9]+)?([eE][+-]?[0-9]+)?\\\\z') THEN RETURN FALSE; END IF;\n   IF LEFT(token,1)='-' THEN SET token=SUBSTRING(token,2); END IF;\n   SET en=LOCATE('e',LOWER(token)); SET expo=0;\n   IF en\u003e0 THEN\n    SET digits=SUBSTRING(token,en+1);\n    IF LEFT(digits,1) IN ('-','+') THEN SET digits=SUBSTRING(digits,2); END IF;\n    SET digits=TRIM(LEADING '0' FROM digits);\n    IF CHAR_LENGTH(digits)\u003e10 THEN RETURN FALSE; END IF;\n    IF digits\u003c\u003e'' AND CAST(digits AS UNSIGNED)\u003e1073741823 THEN RETURN FALSE; END IF;\n    SET expo=CAST(SUBSTRING(token,en+1) AS SIGNED);\n    SET token=LEFT(token,en-1);\n   END IF;\n   SET dotn=LOCATE('.',token);\n   SET scale_n=IF(dotn=0,0,CHAR_LENGTH(token)-dotn)-expo;\n   IF scale_n\u003e16383 THEN RETURN FALSE; END IF;\n   SET digits=REPLACE(token,'.','');\n   SET leading_n=CHAR_LENGTH(digits)-CHAR_LENGTH(TRIM(LEADING '0' FROM digits));\n   SET integer_n=IF(dotn=0,CHAR_LENGTH(token),dotn-1)+expo-leading_n;\n   IF leading_n\u003c\u003eCHAR_LENGTH(digits) AND integer_n\u003e131072 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,'0');\n  ELSE\n   SET masked=CONCAT(masked,c); SET posn=posn+1;\n  END IF;\n END WHILE;\n IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;\n RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'ARRAY' AND JSON_LENGTH(masked)\u003c=500;\nEND",
+          "checksum": "438c9e766c36d4e9e8319877e582cb7755c1df588ee4f5c61290eda9b41024eb",
+          "before": "",
+          "after": "7aba97e8a8191e844ce5d1949b68312404dbcf9db960d6eac43ace96bd4f6594"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollouts_insert",
+          "object": "migrate_v4_time_agent_rollouts_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollouts_insert` BEFORE INSERT ON `agent_rollouts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "7b0c3f20e98ee9c698fa64e30e46e7ceba1159309deef34f17bc1c6ec0e36db2",
+          "before": "",
+          "after": "9d98282b0d78d4669e48dab7fdb79b7d60df0bd36e549ee8256d60c70ce0a5c1"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollouts_update",
+          "object": "migrate_v4_time_agent_rollouts_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollouts_update` BEFORE UPDATE ON `agent_rollouts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9eb1722cbc74d3ec73b7d4092f10311f709454f82deaae98724a6893d994e11a",
+          "before": "",
+          "after": "22d943921b5b66072ffe2b313d81f966c058b438ff01b9c63e323fe5e1443650"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollouts_delete",
+          "object": "migrate_v4_time_agent_rollouts_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollouts_delete` BEFORE DELETE ON `agent_rollouts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3c156b0fb9e2148abe00b74e5fb1d71b9bebffdd592541b275355b94cc5a6275",
+          "before": "",
+          "after": "fdb82d5f1ef999ebd74d62a6815db4e699e1c14954a3b0f6f4799792e1876c52"
+        },
+        {
+          "name": "agent_rollouts_created_at_column",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollouts` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "7b8ca816303c3bda7f518877ff2088617ef5f3cb9246ddf20a8756389dc93d57",
+          "before": "b417c7ed6c37a9244b5122da96507aca9eb6f9670b8354d0980d288b9abffc43",
+          "after": "8781c11891fbc5ea0afe696f343ae28b2b023f28998ae7b846dc9478408f03ac"
+        },
+        {
+          "name": "agent_rollouts_updated_at_column",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollouts` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "e50232295d17451af44cb511aa651258da33c1b367a2ab1f19a7c3a6ff9cdbd3",
+          "before": "8781c11891fbc5ea0afe696f343ae28b2b023f28998ae7b846dc9478408f03ac",
+          "after": "b158cff132107d12aed08acec15ff3e5500d5a2d85ba5763c09b7bc9dfc4d48e"
+        },
+        {
+          "name": "agent_rollouts_times_backfill",
+          "object": "agent_rollouts",
+          "kind": "data",
+          "sql": "UPDATE `agent_rollouts` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "ca5ed0fa49d85c2add9b4f679fcfa0f3f8fb6e67cac94dae445679625c919b03",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollouts` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_rollouts_times_switch",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollouts` DROP INDEX agent_rollouts_active_idx,DROP INDEX agent_rollouts_workspace_created_idx,DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_rollouts_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_rollouts_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),ADD KEY agent_rollouts_active_idx(created_at),ADD KEY agent_rollouts_workspace_created_idx(workspace_id,created_at DESC)",
+          "checksum": "aedc1e41a233a5c274217c6d77a16b868a27ad3ebe80560f0308c3804e6b95d7",
+          "before": "b158cff132107d12aed08acec15ff3e5500d5a2d85ba5763c09b7bc9dfc4d48e",
+          "after": "05ae5fb75f3b318fb03a395beebe0f00c7bbf19d1e087faa9fc34d6ad01bcdec",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollouts` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "rollout_exclusions_blob",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE agent_rollouts ADD COLUMN logical_exclusions LONGBLOB NULL",
+          "checksum": "6b399d8dd2e5a5e47e0c33aa0020747d0ac8d966b7f3b921425e73145ed1520c",
+          "before": "05ae5fb75f3b318fb03a395beebe0f00c7bbf19d1e087faa9fc34d6ad01bcdec",
+          "after": "23caa09f972cc0b3c890de221542d8c80573035063ec8e18849b7765a08714dd"
+        },
+        {
+          "name": "rollout_exclusions_copy",
+          "object": "agent_rollouts",
+          "kind": "data",
+          "sql": "UPDATE agent_rollouts SET logical_exclusions=CAST(exclusions AS BINARY)",
+          "checksum": "c3297b011478b81c674f39534d18b00be66e58b7bc94954e2946c06f5a263ec5",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM agent_rollouts WHERE NOT (logical_exclusions \u003c=\u003e CAST(exclusions AS BINARY)) OR NOT ocserv_rollout_exclusions_valid(logical_exclusions)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "rollout_exclusions_switch",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE agent_rollouts DROP CONSTRAINT agent_rollouts_agent_rollouts_exclusions_check,DROP COLUMN exclusions,CHANGE COLUMN logical_exclusions exclusions LONGBLOB NOT NULL DEFAULT ('[]')",
+          "checksum": "0aa22c53ee8d37079951c853e23e67e6a82129dfc1545b5507108fc0bd5a33e4",
+          "before": "23caa09f972cc0b3c890de221542d8c80573035063ec8e18849b7765a08714dd",
+          "after": "e17e45bbac73b82d66a6b023aaf29d6cbebb2583639bf02fa376ad047af9641b",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM agent_rollouts WHERE NOT (logical_exclusions \u003c=\u003e CAST(exclusions AS BINARY)) OR NOT ocserv_rollout_exclusions_valid(logical_exclusions)),'valid','invalid')"
+        },
+        {
+          "name": "rollout_jsonb_insert",
+          "object": "rollout_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `rollout_jsonb_insert` BEFORE INSERT ON agent_rollouts FOR EACH ROW BEGIN IF NOT ocserv_rollout_exclusions_valid(NEW.exclusions) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid rollout exclusions JSON array'; END IF; END",
+          "checksum": "af20431d60cc6ca12f7f611e846027df658c2b7049a65309924c61e5575c7599",
+          "before": "",
+          "after": "beeb2867a49fcf468ee4a3736e8abb8b4646d66df8d9bdf2acd0c808379bef4a"
+        },
+        {
+          "name": "rollout_jsonb_update",
+          "object": "rollout_jsonb_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `rollout_jsonb_update` BEFORE UPDATE ON agent_rollouts FOR EACH ROW BEGIN IF NOT ocserv_rollout_exclusions_valid(NEW.exclusions) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid rollout exclusions JSON array'; END IF; END",
+          "checksum": "d3ff640a71fc485ef21221669a4868882f68c63636ae6c3daf817c26e0bc6b98",
+          "before": "",
+          "after": "6380761b964605df6d5e073b0db4ffdbd5784ac0057c047e26e92f9842df6d93"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollouts_insert",
+          "object": "migrate_v4_time_agent_rollouts_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollouts_insert`",
+          "checksum": "a187cb65d39a0ce69c900027efd0b451034cb2f3ad68345d8429d7e96743438d",
+          "before": "9d98282b0d78d4669e48dab7fdb79b7d60df0bd36e549ee8256d60c70ce0a5c1",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollouts_update",
+          "object": "migrate_v4_time_agent_rollouts_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollouts_update`",
+          "checksum": "9136aa6cae965223c06875f8687239b21ceeda0a2da6b6de8957cfee9aa23f57",
+          "before": "22d943921b5b66072ffe2b313d81f966c058b438ff01b9c63e323fe5e1443650",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollouts_delete",
+          "object": "migrate_v4_time_agent_rollouts_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollouts_delete`",
+          "checksum": "3f22a366e878edecf6ac7b9bc34e010ec1edfefdf3fa5bf3e662723a91863aa7",
+          "before": "fdb82d5f1ef999ebd74d62a6815db4e699e1c14954a3b0f6f4799792e1876c52",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_agent_rollout_nodes_insert",
+          "object": "migrate_v4_time_agent_rollout_nodes_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollout_nodes_insert` BEFORE INSERT ON `agent_rollout_nodes` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3aff3956444066e99802443807fd460dfc67d49940796206bedb57b5fae6aff0",
+          "before": "",
+          "after": "38df41f14c47a4a99f0f36d3caf180dff65fc87a7ed08313e23b8ced83003df5"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollout_nodes_update",
+          "object": "migrate_v4_time_agent_rollout_nodes_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollout_nodes_update` BEFORE UPDATE ON `agent_rollout_nodes` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4858169ca2117d37a88190e00cf72506d12820c11171b4b8b1a210a44fa10dce",
+          "before": "",
+          "after": "6dc6dad5b7837719aabc839ec82c7d7796b7337f39fc6f6636a66f2284e6dddb"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollout_nodes_delete",
+          "object": "migrate_v4_time_agent_rollout_nodes_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollout_nodes_delete` BEFORE DELETE ON `agent_rollout_nodes` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "17c48c6456a23cea19f8adc0c33c810432cf9d8fc32a8b691307914a2a9fdd47",
+          "before": "",
+          "after": "3d4cbf7f62fb398f620f919e67181e6e978e37197a8fe7392dcf975b493d74ea"
+        },
+        {
+          "name": "agent_rollout_nodes_dispatch_lease_until_column",
+          "object": "agent_rollout_nodes",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollout_nodes` ADD COLUMN `logical_dispatch_lease_until` BIGINT NULL",
+          "checksum": "fd65d3613e49a9f477f3d610ee648b25b954e9c19bac2e3460267029997b2d71",
+          "before": "db5d34c2654843d2c62e24014ba61580d76a7cbe8205ab76686f09dd3f452a80",
+          "after": "eabf850201f2471a13eba1f27141f623d02d6f1bada3689a421be7df3b83485d"
+        },
+        {
+          "name": "agent_rollout_nodes_updated_at_column",
+          "object": "agent_rollout_nodes",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollout_nodes` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "e5d8a370015081d9f6056977890969fe9f8c7a6d0645ac365222b3ab92fee166",
+          "before": "eabf850201f2471a13eba1f27141f623d02d6f1bada3689a421be7df3b83485d",
+          "after": "2efa8ec63529e039fa1fb4fef3fd4c62a9030882c7255ab7ecdc8dfd9c51d3d8"
+        },
+        {
+          "name": "agent_rollout_nodes_times_backfill",
+          "object": "agent_rollout_nodes",
+          "kind": "data",
+          "sql": "UPDATE `agent_rollout_nodes` source SET `logical_dispatch_lease_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`dispatch_lease_until`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "f4c901d56dea5f52e831bfbcb9b4ca79a100f4a48021f94b38753f32a12c56d9",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollout_nodes` source WHERE (source.`dispatch_lease_until` IS NOT NULL AND source.`logical_dispatch_lease_until` IS NULL) OR NOT(source.`logical_dispatch_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`dispatch_lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_rollout_nodes_times_switch",
+          "object": "agent_rollout_nodes",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollout_nodes` DROP COLUMN `dispatch_lease_until`,CHANGE COLUMN `logical_dispatch_lease_until` `dispatch_lease_until` BIGINT NULL,ADD CONSTRAINT `agent_rollout_nodes_dispatch_lease_until_range` CHECK (`dispatch_lease_until` IS NULL OR `dispatch_lease_until` IN (-9223372036854775808,9223372036854775807) OR (`dispatch_lease_until`\u003e=-211813488000000000 AND `dispatch_lease_until`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_rollout_nodes_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "25b9132b19ff20866409d71d1b81355ba84e98d771f01f368c264c69666d5641",
+          "before": "2efa8ec63529e039fa1fb4fef3fd4c62a9030882c7255ab7ecdc8dfd9c51d3d8",
+          "after": "6aa144ba77695dda625f173ec80fec7fdee33b4197bb26afad94bd0326c8af2c",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollout_nodes` source WHERE (source.`dispatch_lease_until` IS NOT NULL AND source.`logical_dispatch_lease_until` IS NULL) OR NOT(source.`logical_dispatch_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`dispatch_lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollout_nodes_insert",
+          "object": "migrate_v4_time_agent_rollout_nodes_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollout_nodes_insert`",
+          "checksum": "b1c6bd194da15b09df86c36b76a9efb6a922ebc847317f25b3e0acab5ed2e2b6",
+          "before": "38df41f14c47a4a99f0f36d3caf180dff65fc87a7ed08313e23b8ced83003df5",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollout_nodes_update",
+          "object": "migrate_v4_time_agent_rollout_nodes_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollout_nodes_update`",
+          "checksum": "a8d1959b5edf4e16b98b0e76c76817064c706a5e212ace0524f23a3919a5ab58",
+          "before": "6dc6dad5b7837719aabc839ec82c7d7796b7337f39fc6f6636a66f2284e6dddb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollout_nodes_delete",
+          "object": "migrate_v4_time_agent_rollout_nodes_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollout_nodes_delete`",
+          "checksum": "c977780b788dd4be5ef45dacf4e2c4e6dd9a0a9fe75a84cb39649f983569b3e1",
+          "before": "3d4cbf7f62fb398f620f919e67181e6e978e37197a8fe7392dcf975b493d74ea",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "rollout_exclusions_validator",
+          "object": "ocserv_rollout_exclusions_valid",
+          "kind": "function",
+          "sql": "CREATE FUNCTION ocserv_rollout_exclusions_valid(doc LONGBLOB) RETURNS BOOLEAN DETERMINISTIC NO SQL SQL SECURITY DEFINER\nBEGIN\n DECLARE source LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE masked LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '';\n DECLARE token LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE digits LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE c CHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE posn BIGINT DEFAULT 1;\n DECLARE startn BIGINT;\n DECLARE n BIGINT;\n DECLARE dotn BIGINT;\n DECLARE en BIGINT;\n DECLARE expo BIGINT;\n DECLARE scale_n BIGINT;\n DECLARE integer_n BIGINT;\n DECLARE leading_n BIGINT;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION RETURN FALSE;\n IF doc IS NULL THEN RETURN FALSE; END IF;\n SET source=CONVERT(doc USING utf8mb4);\n IF CAST(source AS BINARY)\u003c\u003edoc THEN RETURN FALSE; END IF;\n SET n=CHAR_LENGTH(source);\n WHILE posn\u003c=n DO\n  SET c=SUBSTRING(source,posn,1);\n  IF c='\"' THEN\n   SET startn=posn;\n   SET posn=posn+1;\n   WHILE posn\u003c=n AND SUBSTRING(source,posn,1)\u003c\u003e'\"' DO\n    IF ASCII(SUBSTRING(source,posn,1))=92 THEN SET posn=posn+1; END IF;\n    SET posn=posn+1;\n   END WHILE;\n   IF posn\u003en THEN RETURN FALSE; END IF;\n   SET token=SUBSTRING(source,startn,posn-startn+1);\n   IF NOT JSON_VALID(token) OR LOCATE(0x00,CAST(JSON_UNQUOTE(token) AS BINARY))\u003c\u003e0 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,token);\n   SET posn=posn+1;\n  ELSEIF c='-' OR (ASCII(c)\u003e=48 AND ASCII(c)\u003c=57) THEN\n   SET startn=posn;\n   WHILE posn\u003c=n AND LOCATE(SUBSTRING(source,posn,1),'0123456789.eE+-')\u003e0 DO SET posn=posn+1; END WHILE;\n   SET token=SUBSTRING(source,startn,posn-startn);\n   IF NOT (token REGEXP '(?-i)\\\\A-?(0|[1-9][0-9]*)(\\\\.[0-9]+)?([eE][+-]?[0-9]+)?\\\\z') THEN RETURN FALSE; END IF;\n   IF LEFT(token,1)='-' THEN SET token=SUBSTRING(token,2); END IF;\n   SET en=LOCATE('e',LOWER(token)); SET expo=0;\n   IF en\u003e0 THEN\n    SET digits=SUBSTRING(token,en+1);\n    IF LEFT(digits,1) IN ('-','+') THEN SET digits=SUBSTRING(digits,2); END IF;\n    SET digits=TRIM(LEADING '0' FROM digits);\n    IF CHAR_LENGTH(digits)\u003e10 THEN RETURN FALSE; END IF;\n    IF digits\u003c\u003e'' AND CAST(digits AS UNSIGNED)\u003e1073741823 THEN RETURN FALSE; END IF;\n    SET expo=CAST(SUBSTRING(token,en+1) AS SIGNED);\n    SET token=LEFT(token,en-1);\n   END IF;\n   SET dotn=LOCATE('.',token);\n   SET scale_n=IF(dotn=0,0,CHAR_LENGTH(token)-dotn)-expo;\n   IF scale_n\u003e16383 THEN RETURN FALSE; END IF;\n   SET digits=REPLACE(token,'.','');\n   SET leading_n=CHAR_LENGTH(digits)-CHAR_LENGTH(TRIM(LEADING '0' FROM digits));\n   SET integer_n=IF(dotn=0,CHAR_LENGTH(token),dotn-1)+expo-leading_n;\n   IF leading_n\u003c\u003eCHAR_LENGTH(digits) AND integer_n\u003e131072 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,'0');\n  ELSE\n   SET masked=CONCAT(masked,c); SET posn=posn+1;\n  END IF;\n END WHILE;\n IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;\n RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'ARRAY' AND JSON_LENGTH(masked)\u003c=500;\nEND",
+          "checksum": "438c9e766c36d4e9e8319877e582cb7755c1df588ee4f5c61290eda9b41024eb",
+          "before": "",
+          "after": "7aba97e8a8191e844ce5d1949b68312404dbcf9db960d6eac43ace96bd4f6594"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollouts_insert",
+          "object": "migrate_v4_time_agent_rollouts_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollouts_insert` BEFORE INSERT ON `agent_rollouts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "7b0c3f20e98ee9c698fa64e30e46e7ceba1159309deef34f17bc1c6ec0e36db2",
+          "before": "",
+          "after": "9d98282b0d78d4669e48dab7fdb79b7d60df0bd36e549ee8256d60c70ce0a5c1"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollouts_update",
+          "object": "migrate_v4_time_agent_rollouts_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollouts_update` BEFORE UPDATE ON `agent_rollouts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9eb1722cbc74d3ec73b7d4092f10311f709454f82deaae98724a6893d994e11a",
+          "before": "",
+          "after": "22d943921b5b66072ffe2b313d81f966c058b438ff01b9c63e323fe5e1443650"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollouts_delete",
+          "object": "migrate_v4_time_agent_rollouts_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollouts_delete` BEFORE DELETE ON `agent_rollouts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3c156b0fb9e2148abe00b74e5fb1d71b9bebffdd592541b275355b94cc5a6275",
+          "before": "",
+          "after": "fdb82d5f1ef999ebd74d62a6815db4e699e1c14954a3b0f6f4799792e1876c52"
+        },
+        {
+          "name": "agent_rollouts_created_at_column",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollouts` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "7b8ca816303c3bda7f518877ff2088617ef5f3cb9246ddf20a8756389dc93d57",
+          "before": "b417c7ed6c37a9244b5122da96507aca9eb6f9670b8354d0980d288b9abffc43",
+          "after": "8781c11891fbc5ea0afe696f343ae28b2b023f28998ae7b846dc9478408f03ac"
+        },
+        {
+          "name": "agent_rollouts_updated_at_column",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollouts` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "e50232295d17451af44cb511aa651258da33c1b367a2ab1f19a7c3a6ff9cdbd3",
+          "before": "8781c11891fbc5ea0afe696f343ae28b2b023f28998ae7b846dc9478408f03ac",
+          "after": "b158cff132107d12aed08acec15ff3e5500d5a2d85ba5763c09b7bc9dfc4d48e"
+        },
+        {
+          "name": "agent_rollouts_times_backfill",
+          "object": "agent_rollouts",
+          "kind": "data",
+          "sql": "UPDATE `agent_rollouts` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "ca5ed0fa49d85c2add9b4f679fcfa0f3f8fb6e67cac94dae445679625c919b03",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollouts` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_rollouts_times_switch",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollouts` DROP INDEX agent_rollouts_active_idx,DROP INDEX agent_rollouts_workspace_created_idx,DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_rollouts_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_rollouts_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),ADD KEY agent_rollouts_active_idx(created_at),ADD KEY agent_rollouts_workspace_created_idx(workspace_id,created_at DESC)",
+          "checksum": "aedc1e41a233a5c274217c6d77a16b868a27ad3ebe80560f0308c3804e6b95d7",
+          "before": "b158cff132107d12aed08acec15ff3e5500d5a2d85ba5763c09b7bc9dfc4d48e",
+          "after": "05ae5fb75f3b318fb03a395beebe0f00c7bbf19d1e087faa9fc34d6ad01bcdec",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollouts` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "rollout_exclusions_blob",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE agent_rollouts ADD COLUMN logical_exclusions LONGBLOB NULL",
+          "checksum": "6b399d8dd2e5a5e47e0c33aa0020747d0ac8d966b7f3b921425e73145ed1520c",
+          "before": "05ae5fb75f3b318fb03a395beebe0f00c7bbf19d1e087faa9fc34d6ad01bcdec",
+          "after": "23caa09f972cc0b3c890de221542d8c80573035063ec8e18849b7765a08714dd"
+        },
+        {
+          "name": "rollout_exclusions_copy",
+          "object": "agent_rollouts",
+          "kind": "data",
+          "sql": "UPDATE agent_rollouts SET logical_exclusions=CAST(exclusions AS BINARY)",
+          "checksum": "c3297b011478b81c674f39534d18b00be66e58b7bc94954e2946c06f5a263ec5",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM agent_rollouts WHERE NOT (logical_exclusions \u003c=\u003e CAST(exclusions AS BINARY)) OR NOT ocserv_rollout_exclusions_valid(logical_exclusions)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "rollout_exclusions_switch",
+          "object": "agent_rollouts",
+          "kind": "table",
+          "sql": "ALTER TABLE agent_rollouts DROP CONSTRAINT agent_rollouts_agent_rollouts_exclusions_check,DROP COLUMN exclusions,CHANGE COLUMN logical_exclusions exclusions LONGBLOB NOT NULL DEFAULT ('[]')",
+          "checksum": "0aa22c53ee8d37079951c853e23e67e6a82129dfc1545b5507108fc0bd5a33e4",
+          "before": "23caa09f972cc0b3c890de221542d8c80573035063ec8e18849b7765a08714dd",
+          "after": "e17e45bbac73b82d66a6b023aaf29d6cbebb2583639bf02fa376ad047af9641b",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM agent_rollouts WHERE NOT (logical_exclusions \u003c=\u003e CAST(exclusions AS BINARY)) OR NOT ocserv_rollout_exclusions_valid(logical_exclusions)),'valid','invalid')"
+        },
+        {
+          "name": "rollout_jsonb_insert",
+          "object": "rollout_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `rollout_jsonb_insert` BEFORE INSERT ON agent_rollouts FOR EACH ROW BEGIN IF NOT ocserv_rollout_exclusions_valid(NEW.exclusions) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid rollout exclusions JSON array'; END IF; END",
+          "checksum": "af20431d60cc6ca12f7f611e846027df658c2b7049a65309924c61e5575c7599",
+          "before": "",
+          "after": "beeb2867a49fcf468ee4a3736e8abb8b4646d66df8d9bdf2acd0c808379bef4a"
+        },
+        {
+          "name": "rollout_jsonb_update",
+          "object": "rollout_jsonb_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `rollout_jsonb_update` BEFORE UPDATE ON agent_rollouts FOR EACH ROW BEGIN IF NOT ocserv_rollout_exclusions_valid(NEW.exclusions) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid rollout exclusions JSON array'; END IF; END",
+          "checksum": "d3ff640a71fc485ef21221669a4868882f68c63636ae6c3daf817c26e0bc6b98",
+          "before": "",
+          "after": "6380761b964605df6d5e073b0db4ffdbd5784ac0057c047e26e92f9842df6d93"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollouts_insert",
+          "object": "migrate_v4_time_agent_rollouts_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollouts_insert`",
+          "checksum": "a187cb65d39a0ce69c900027efd0b451034cb2f3ad68345d8429d7e96743438d",
+          "before": "9d98282b0d78d4669e48dab7fdb79b7d60df0bd36e549ee8256d60c70ce0a5c1",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollouts_update",
+          "object": "migrate_v4_time_agent_rollouts_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollouts_update`",
+          "checksum": "9136aa6cae965223c06875f8687239b21ceeda0a2da6b6de8957cfee9aa23f57",
+          "before": "22d943921b5b66072ffe2b313d81f966c058b438ff01b9c63e323fe5e1443650",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollouts_delete",
+          "object": "migrate_v4_time_agent_rollouts_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollouts_delete`",
+          "checksum": "3f22a366e878edecf6ac7b9bc34e010ec1edfefdf3fa5bf3e662723a91863aa7",
+          "before": "fdb82d5f1ef999ebd74d62a6815db4e699e1c14954a3b0f6f4799792e1876c52",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_agent_rollout_nodes_insert",
+          "object": "migrate_v4_time_agent_rollout_nodes_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollout_nodes_insert` BEFORE INSERT ON `agent_rollout_nodes` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3aff3956444066e99802443807fd460dfc67d49940796206bedb57b5fae6aff0",
+          "before": "",
+          "after": "38df41f14c47a4a99f0f36d3caf180dff65fc87a7ed08313e23b8ced83003df5"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollout_nodes_update",
+          "object": "migrate_v4_time_agent_rollout_nodes_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollout_nodes_update` BEFORE UPDATE ON `agent_rollout_nodes` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4858169ca2117d37a88190e00cf72506d12820c11171b4b8b1a210a44fa10dce",
+          "before": "",
+          "after": "6dc6dad5b7837719aabc839ec82c7d7796b7337f39fc6f6636a66f2284e6dddb"
+        },
+        {
+          "name": "migrate_v4_time_agent_rollout_nodes_delete",
+          "object": "migrate_v4_time_agent_rollout_nodes_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_rollout_nodes_delete` BEFORE DELETE ON `agent_rollout_nodes` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "17c48c6456a23cea19f8adc0c33c810432cf9d8fc32a8b691307914a2a9fdd47",
+          "before": "",
+          "after": "3d4cbf7f62fb398f620f919e67181e6e978e37197a8fe7392dcf975b493d74ea"
+        },
+        {
+          "name": "agent_rollout_nodes_dispatch_lease_until_column",
+          "object": "agent_rollout_nodes",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollout_nodes` ADD COLUMN `logical_dispatch_lease_until` BIGINT NULL",
+          "checksum": "fd65d3613e49a9f477f3d610ee648b25b954e9c19bac2e3460267029997b2d71",
+          "before": "db5d34c2654843d2c62e24014ba61580d76a7cbe8205ab76686f09dd3f452a80",
+          "after": "eabf850201f2471a13eba1f27141f623d02d6f1bada3689a421be7df3b83485d"
+        },
+        {
+          "name": "agent_rollout_nodes_updated_at_column",
+          "object": "agent_rollout_nodes",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollout_nodes` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "e5d8a370015081d9f6056977890969fe9f8c7a6d0645ac365222b3ab92fee166",
+          "before": "eabf850201f2471a13eba1f27141f623d02d6f1bada3689a421be7df3b83485d",
+          "after": "2efa8ec63529e039fa1fb4fef3fd4c62a9030882c7255ab7ecdc8dfd9c51d3d8"
+        },
+        {
+          "name": "agent_rollout_nodes_times_backfill",
+          "object": "agent_rollout_nodes",
+          "kind": "data",
+          "sql": "UPDATE `agent_rollout_nodes` source SET `logical_dispatch_lease_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`dispatch_lease_until`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "f4c901d56dea5f52e831bfbcb9b4ca79a100f4a48021f94b38753f32a12c56d9",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollout_nodes` source WHERE (source.`dispatch_lease_until` IS NOT NULL AND source.`logical_dispatch_lease_until` IS NULL) OR NOT(source.`logical_dispatch_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`dispatch_lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_rollout_nodes_times_switch",
+          "object": "agent_rollout_nodes",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_rollout_nodes` DROP COLUMN `dispatch_lease_until`,CHANGE COLUMN `logical_dispatch_lease_until` `dispatch_lease_until` BIGINT NULL,ADD CONSTRAINT `agent_rollout_nodes_dispatch_lease_until_range` CHECK (`dispatch_lease_until` IS NULL OR `dispatch_lease_until` IN (-9223372036854775808,9223372036854775807) OR (`dispatch_lease_until`\u003e=-211813488000000000 AND `dispatch_lease_until`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_rollout_nodes_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "25b9132b19ff20866409d71d1b81355ba84e98d771f01f368c264c69666d5641",
+          "before": "2efa8ec63529e039fa1fb4fef3fd4c62a9030882c7255ab7ecdc8dfd9c51d3d8",
+          "after": "6aa144ba77695dda625f173ec80fec7fdee33b4197bb26afad94bd0326c8af2c",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_rollout_nodes` source WHERE (source.`dispatch_lease_until` IS NOT NULL AND source.`logical_dispatch_lease_until` IS NULL) OR NOT(source.`logical_dispatch_lease_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`dispatch_lease_until`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollout_nodes_insert",
+          "object": "migrate_v4_time_agent_rollout_nodes_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollout_nodes_insert`",
+          "checksum": "b1c6bd194da15b09df86c36b76a9efb6a922ebc847317f25b3e0acab5ed2e2b6",
+          "before": "38df41f14c47a4a99f0f36d3caf180dff65fc87a7ed08313e23b8ced83003df5",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollout_nodes_update",
+          "object": "migrate_v4_time_agent_rollout_nodes_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollout_nodes_update`",
+          "checksum": "a8d1959b5edf4e16b98b0e76c76817064c706a5e212ace0524f23a3919a5ab58",
+          "before": "6dc6dad5b7837719aabc839ec82c7d7796b7337f39fc6f6636a66f2284e6dddb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_rollout_nodes_delete",
+          "object": "migrate_v4_time_agent_rollout_nodes_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_rollout_nodes_delete`",
+          "checksum": "c977780b788dd4be5ef45dacf4e2c4e6dd9a0a9fe75a84cb39649f983569b3e1",
+          "before": "3d4cbf7f62fb398f620f919e67181e6e978e37197a8fe7392dcf975b493d74ea",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

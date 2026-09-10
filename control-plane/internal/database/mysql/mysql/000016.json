@@ -1,0 +1,225 @@
+{
+  "version": 16,
+  "previous_checksum": "754244efb4e71292ceb52e572418d5ad1aeb50aa22e67eba0df44f3b4ab7a8b9",
+  "engine": "mysql",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_agent_command_results_insert",
+          "object": "migrate_v4_time_agent_command_results_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_command_results_insert` BEFORE INSERT ON `agent_command_results` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "cf90aef37a8bf42fc07e6cf17df6bf6bfe23244ac0cfbcac610c8f0620e54c5c",
+          "before": "",
+          "after": "fb70a0d2478a300ed861b976e30b9ede97f559cc1c1995b560a28ec758666d8d"
+        },
+        {
+          "name": "migrate_v4_time_agent_command_results_update",
+          "object": "migrate_v4_time_agent_command_results_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_command_results_update` BEFORE UPDATE ON `agent_command_results` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "7dee8c3b9ef63dbe1daacdc5a75999407c8503f908aa39f94cbc5f8fcac047c3",
+          "before": "",
+          "after": "ee61373e315d3cb94fca7fd7b12c3ef380338b0fec66c3501864863634d0cee5"
+        },
+        {
+          "name": "migrate_v4_time_agent_command_results_delete",
+          "object": "migrate_v4_time_agent_command_results_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_command_results_delete` BEFORE DELETE ON `agent_command_results` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "7c89fae082be5f01ab2f90f2b234e18dccdaee8b2182af4cda2c8b5a70e202c4",
+          "before": "",
+          "after": "2022defe9f3b0df9b1eb85482f0b7457dcc9562b46cfee6c393e2559fcf9c97d"
+        },
+        {
+          "name": "agent_command_results_accepted_at_column",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` ADD COLUMN `logical_accepted_at` BIGINT NULL",
+          "checksum": "9e5e5e741f38af880b999b899ec31bc6fe4382a2ded68ab59d41dbff988f832c",
+          "before": "86029c0c6aa62639f8f05a2cad5ae74bb4c941581c80929b6bbdad55760225d1",
+          "after": "f7f9c14c33517b5afd99040bcf6d58cea0cf2e13afd29e088fbcc7ae2f4ea8e6"
+        },
+        {
+          "name": "agent_command_results_completed_at_column",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` ADD COLUMN `logical_completed_at` BIGINT NULL",
+          "checksum": "a135d4279a3681855dbb467f8e799b99a26d9e103b9e54e5bebb849b06a9405b",
+          "before": "f7f9c14c33517b5afd99040bcf6d58cea0cf2e13afd29e088fbcc7ae2f4ea8e6",
+          "after": "6bc4363bbd7e59d5198e91e008134c92db5f5e62c4c2ae4d2043e270562e24be"
+        },
+        {
+          "name": "agent_command_results_created_at_column",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "303750a02ac796da40fd05b2add2fe67901082ef001cde055347bdebe02868ce",
+          "before": "6bc4363bbd7e59d5198e91e008134c92db5f5e62c4c2ae4d2043e270562e24be",
+          "after": "c0b413058353015232f4408b2d698ac90d32fa5c7072dd7d8a051661222474f9"
+        },
+        {
+          "name": "agent_command_results_times_backfill",
+          "object": "agent_command_results",
+          "kind": "data",
+          "sql": "UPDATE `agent_command_results` source SET `logical_accepted_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`accepted_at`),`logical_completed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "984da2faad234a34000141c0b463307a6263ee412070390b79bf394f409a8fcf",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_command_results` source WHERE (source.`accepted_at` IS NOT NULL AND source.`logical_accepted_at` IS NULL) OR NOT(source.`logical_accepted_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`accepted_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_command_results_times_switch",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` DROP CHECK agent_command_results_agent_command_results_check,DROP CHECK agent_command_results_agent_command_results_check1,DROP INDEX agent_command_results_command_created_idx,DROP COLUMN `accepted_at`,CHANGE COLUMN `logical_accepted_at` `accepted_at` BIGINT NULL,ADD CONSTRAINT `agent_command_results_accepted_at_range` CHECK (`accepted_at` IS NULL OR `accepted_at` IN (-9223372036854775808,9223372036854775807) OR (`accepted_at`\u003e=-211813488000000000 AND `accepted_at`\u003c9223371331200000000)),DROP COLUMN `completed_at`,CHANGE COLUMN `logical_completed_at` `completed_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_command_results_completed_at_range` CHECK (`completed_at` IS NULL OR `completed_at` IN (-9223372036854775808,9223372036854775807) OR (`completed_at`\u003e=-211813488000000000 AND `completed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_command_results_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT agent_command_results_agent_command_results_check CHECK (accepted_at IS NULL OR accepted_at\u003c=completed_at),ADD CONSTRAINT agent_command_results_agent_command_results_check1 CHECK ((state='succeeded' AND payload_sha256 IS NOT NULL AND accepted_at IS NOT NULL AND error_code IS NULL) OR (state IN ('failed','unknown') AND payload_sha256 IS NOT NULL AND accepted_at IS NOT NULL AND error_code IS NOT NULL AND (state\u003c\u003e'unknown' OR OCTET_LENGTH(result)=0)) OR (state='rejected' AND accepted_at IS NULL AND error_code IS NOT NULL AND OCTET_LENGTH(result)=0)),ADD KEY agent_command_results_command_created_idx(command_id,created_at)",
+          "checksum": "92ac79563ffb3dde6c3ff92be6a7e8a4dc74108f973223323e1ebd6c8cf3a844",
+          "before": "c0b413058353015232f4408b2d698ac90d32fa5c7072dd7d8a051661222474f9",
+          "after": "d9a6f6c2b17e0df20db2e26919b2bf474cc4399313e74ea5fc5c657a8d74cc84",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_command_results` source WHERE (source.`accepted_at` IS NOT NULL AND source.`logical_accepted_at` IS NULL) OR NOT(source.`logical_accepted_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`accepted_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_command_results_insert",
+          "object": "migrate_v4_time_agent_command_results_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_command_results_insert`",
+          "checksum": "eff00f5f1fb7dcee9ae5c6ad11297c57bfa968d731899e98f563009eb1d53371",
+          "before": "fb70a0d2478a300ed861b976e30b9ede97f559cc1c1995b560a28ec758666d8d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_command_results_update",
+          "object": "migrate_v4_time_agent_command_results_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_command_results_update`",
+          "checksum": "d97ab27c316873a53c6f6de3842e78302fdc04dd2b0c51384d318ef098b01f63",
+          "before": "ee61373e315d3cb94fca7fd7b12c3ef380338b0fec66c3501864863634d0cee5",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_command_results_delete",
+          "object": "migrate_v4_time_agent_command_results_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_command_results_delete`",
+          "checksum": "acdf30a67da88339119ceda3effb315dd7d6d4fd3045522026bef76354a9c144",
+          "before": "2022defe9f3b0df9b1eb85482f0b7457dcc9562b46cfee6c393e2559fcf9c97d",
+          "after": ""
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_agent_command_results_insert",
+          "object": "migrate_v4_time_agent_command_results_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_command_results_insert` BEFORE INSERT ON `agent_command_results` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "cf90aef37a8bf42fc07e6cf17df6bf6bfe23244ac0cfbcac610c8f0620e54c5c",
+          "before": "",
+          "after": "fb70a0d2478a300ed861b976e30b9ede97f559cc1c1995b560a28ec758666d8d"
+        },
+        {
+          "name": "migrate_v4_time_agent_command_results_update",
+          "object": "migrate_v4_time_agent_command_results_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_command_results_update` BEFORE UPDATE ON `agent_command_results` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "7dee8c3b9ef63dbe1daacdc5a75999407c8503f908aa39f94cbc5f8fcac047c3",
+          "before": "",
+          "after": "ee61373e315d3cb94fca7fd7b12c3ef380338b0fec66c3501864863634d0cee5"
+        },
+        {
+          "name": "migrate_v4_time_agent_command_results_delete",
+          "object": "migrate_v4_time_agent_command_results_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_agent_command_results_delete` BEFORE DELETE ON `agent_command_results` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "7c89fae082be5f01ab2f90f2b234e18dccdaee8b2182af4cda2c8b5a70e202c4",
+          "before": "",
+          "after": "2022defe9f3b0df9b1eb85482f0b7457dcc9562b46cfee6c393e2559fcf9c97d"
+        },
+        {
+          "name": "agent_command_results_accepted_at_column",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` ADD COLUMN `logical_accepted_at` BIGINT NULL",
+          "checksum": "9e5e5e741f38af880b999b899ec31bc6fe4382a2ded68ab59d41dbff988f832c",
+          "before": "86029c0c6aa62639f8f05a2cad5ae74bb4c941581c80929b6bbdad55760225d1",
+          "after": "f7f9c14c33517b5afd99040bcf6d58cea0cf2e13afd29e088fbcc7ae2f4ea8e6"
+        },
+        {
+          "name": "agent_command_results_completed_at_column",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` ADD COLUMN `logical_completed_at` BIGINT NULL",
+          "checksum": "a135d4279a3681855dbb467f8e799b99a26d9e103b9e54e5bebb849b06a9405b",
+          "before": "f7f9c14c33517b5afd99040bcf6d58cea0cf2e13afd29e088fbcc7ae2f4ea8e6",
+          "after": "6bc4363bbd7e59d5198e91e008134c92db5f5e62c4c2ae4d2043e270562e24be"
+        },
+        {
+          "name": "agent_command_results_created_at_column",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "303750a02ac796da40fd05b2add2fe67901082ef001cde055347bdebe02868ce",
+          "before": "6bc4363bbd7e59d5198e91e008134c92db5f5e62c4c2ae4d2043e270562e24be",
+          "after": "c0b413058353015232f4408b2d698ac90d32fa5c7072dd7d8a051661222474f9"
+        },
+        {
+          "name": "agent_command_results_times_backfill",
+          "object": "agent_command_results",
+          "kind": "data",
+          "sql": "UPDATE `agent_command_results` source SET `logical_accepted_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`accepted_at`),`logical_completed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "984da2faad234a34000141c0b463307a6263ee412070390b79bf394f409a8fcf",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_command_results` source WHERE (source.`accepted_at` IS NOT NULL AND source.`logical_accepted_at` IS NULL) OR NOT(source.`logical_accepted_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`accepted_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "agent_command_results_times_switch",
+          "object": "agent_command_results",
+          "kind": "table",
+          "sql": "ALTER TABLE `agent_command_results` DROP CHECK agent_command_results_agent_command_results_check,DROP CHECK agent_command_results_agent_command_results_check1,DROP INDEX agent_command_results_command_created_idx,DROP COLUMN `accepted_at`,CHANGE COLUMN `logical_accepted_at` `accepted_at` BIGINT NULL,ADD CONSTRAINT `agent_command_results_accepted_at_range` CHECK (`accepted_at` IS NULL OR `accepted_at` IN (-9223372036854775808,9223372036854775807) OR (`accepted_at`\u003e=-211813488000000000 AND `accepted_at`\u003c9223371331200000000)),DROP COLUMN `completed_at`,CHANGE COLUMN `logical_completed_at` `completed_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_command_results_completed_at_range` CHECK (`completed_at` IS NULL OR `completed_at` IN (-9223372036854775808,9223372036854775807) OR (`completed_at`\u003e=-211813488000000000 AND `completed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `agent_command_results_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT agent_command_results_agent_command_results_check CHECK (accepted_at IS NULL OR accepted_at\u003c=completed_at),ADD CONSTRAINT agent_command_results_agent_command_results_check1 CHECK ((state='succeeded' AND payload_sha256 IS NOT NULL AND accepted_at IS NOT NULL AND error_code IS NULL) OR (state IN ('failed','unknown') AND payload_sha256 IS NOT NULL AND accepted_at IS NOT NULL AND error_code IS NOT NULL AND (state\u003c\u003e'unknown' OR OCTET_LENGTH(result)=0)) OR (state='rejected' AND accepted_at IS NULL AND error_code IS NOT NULL AND OCTET_LENGTH(result)=0)),ADD KEY agent_command_results_command_created_idx(command_id,created_at)",
+          "checksum": "92ac79563ffb3dde6c3ff92be6a7e8a4dc74108f973223323e1ebd6c8cf3a844",
+          "before": "c0b413058353015232f4408b2d698ac90d32fa5c7072dd7d8a051661222474f9",
+          "after": "d9a6f6c2b17e0df20db2e26919b2bf474cc4399313e74ea5fc5c657a8d74cc84",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `agent_command_results` source WHERE (source.`accepted_at` IS NOT NULL AND source.`logical_accepted_at` IS NULL) OR NOT(source.`logical_accepted_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`accepted_at`)) OR (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_command_results_insert",
+          "object": "migrate_v4_time_agent_command_results_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_command_results_insert`",
+          "checksum": "eff00f5f1fb7dcee9ae5c6ad11297c57bfa968d731899e98f563009eb1d53371",
+          "before": "fb70a0d2478a300ed861b976e30b9ede97f559cc1c1995b560a28ec758666d8d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_command_results_update",
+          "object": "migrate_v4_time_agent_command_results_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_command_results_update`",
+          "checksum": "d97ab27c316873a53c6f6de3842e78302fdc04dd2b0c51384d318ef098b01f63",
+          "before": "ee61373e315d3cb94fca7fd7b12c3ef380338b0fec66c3501864863634d0cee5",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_agent_command_results_delete",
+          "object": "migrate_v4_time_agent_command_results_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_agent_command_results_delete`",
+          "checksum": "acdf30a67da88339119ceda3effb315dd7d6d4fd3045522026bef76354a9c144",
+          "before": "2022defe9f3b0df9b1eb85482f0b7457dcc9562b46cfee6c393e2559fcf9c97d",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

@@ -4,7 +4,9 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strconv"
-	"time"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 
 	"github.com/google/uuid"
 )
@@ -19,7 +21,12 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
-	rows, err := s.pool.Query(r.Context(), `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,approval_id,result,reason,error_type,previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT $2`, workspace(r), limit)
+	store, err := auditstore.From(s.backend)
+	if err != nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
+		return
+	}
+	rows, err := store.RecentEvents(r.Context(), workspace(r), limit)
 	if err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
 		return
@@ -28,7 +35,7 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 	items := []map[string]any{}
 	for rows.Next() {
 		var id uuid.UUID
-		var occurred time.Time
+		var occurred value.Timestamp
 		var actorType, actorID, action, resourceType, requestID, result string
 		var resourceID, nodeID, commandID, approvalID *uuid.UUID
 		var traceID, reason, errorType *string
@@ -38,6 +45,10 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"id": id, "occurred_at": occurred, "actor_type": actorType, "actor_id": actorID, "action": action, "resource_type": resourceType, "resource_id": resourceID, "node_id": nodeID, "request_id": requestID, "trace_id": traceID, "command_id": commandID, "approval_id": approvalID, "result": result, "reason": reason, "error_type": errorType, "previous_event_hash": hex.EncodeToString(previous), "event_hash": hex.EncodeToString(hash)})
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

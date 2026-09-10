@@ -13,34 +13,17 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // pendingUpgrade is one scheduled single-node agent upgrade together with the
 // durable Controller-side evidence needed to reconcile it.
-type pendingUpgrade struct {
-	OperationID     uuid.UUID
-	WorkspaceID     uuid.UUID
-	NodeID          uuid.UUID
-	CommandID       uuid.UUID
-	TargetVersion   string
-	FromVersion     string
-	State           string
-	ScheduledAt     time.Time
-	CreatedAt       time.Time
-	OperationState  string
-	NodeStatus      string
-	ObservedVersion string
-	ObservedAt      time.Time
-	LastHeartbeatAt time.Time
-	DurableState    string
-	DurableDetail   string
-}
+type pendingUpgrade = operationstore.ScheduledUpgrade
 
 // agentUpgradeDecision is the terminal or progress conclusion for one
 // scheduled upgrade derived only from durable Controller-side evidence.
@@ -56,32 +39,17 @@ type agentUpgradeDecision struct {
 // proves success: terminal success additionally needs the durable local
 // outcome and a fresh observation of the target version.
 func (s *Service) ReconcileAgentUpgrades(ctx context.Context) error {
-	rows, err := s.pool.Query(ctx, `
-		SELECT u.operation_id,u.workspace_id,u.node_id,op.command_id,u.target_version,u.from_version,u.state,COALESCE(u.scheduled_at,u.created_at),u.created_at,
-		       op.state,n.status,COALESCE(snap.agent_version,''),COALESCE(snap.observed_at,to_timestamp(0)),COALESCE(snap.last_heartbeat_at,to_timestamp(0)),
-		       COALESCE(r.state,''),COALESCE(r.detail,'')
-		FROM agent_upgrade_operations u
-		JOIN operations op ON op.id=u.operation_id
-		JOIN nodes n ON n.id=u.node_id
-		LEFT JOIN node_observed_snapshots snap ON snap.node_id=u.node_id
-		LEFT JOIN node_agent_upgrade_results r ON r.operation_id=u.operation_id
-		WHERE u.completed_at IS NULL
-		  AND u.state IN ('queued','accepted','running','unknown')
-		LIMIT $1`, reconciliationBatchLimit)
+	var pending []pendingUpgrade
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		pending, err = store.PendingUpgrades(ctx, reconciliationBatchLimit)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("scan pending agent upgrades: %w", err)
-	}
-	defer rows.Close()
-	pending := make([]pendingUpgrade, 0, reconciliationBatchLimit)
-	for rows.Next() {
-		var upgrade pendingUpgrade
-		if err := rows.Scan(&upgrade.OperationID, &upgrade.WorkspaceID, &upgrade.NodeID, &upgrade.CommandID, &upgrade.TargetVersion, &upgrade.FromVersion, &upgrade.State, &upgrade.ScheduledAt, &upgrade.CreatedAt, &upgrade.OperationState, &upgrade.NodeStatus, &upgrade.ObservedVersion, &upgrade.ObservedAt, &upgrade.LastHeartbeatAt, &upgrade.DurableState, &upgrade.DurableDetail); err != nil {
-			return fmt.Errorf("read pending agent upgrade: %w", err)
-		}
-		pending = append(pending, upgrade)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate pending agent upgrades: %w", err)
 	}
 	for _, upgrade := range pending {
 		decision, changed := s.decideAgentUpgrade(s.now(), upgrade)
@@ -117,8 +85,14 @@ func (s *Service) decideAgentUpgrade(now time.Time, upgrade pendingUpgrade) (age
 		// machinery and command expiry own this phase.
 		return agentUpgradeDecision{}, false
 	}
-	online := upgrade.NodeStatus == "active" && now.Sub(upgrade.LastHeartbeatAt) <= telemetry.OfflineAfter
-	base := upgrade.ScheduledAt
+	online := upgrade.NodeStatus == "active" && upgradeHeartbeatFresh(now, upgrade.LastHeartbeatAt)
+	deadline, err := value.FromTime(now.Add(-s.agentUpgradeReconcileTime))
+	if err != nil {
+		return agentUpgradeDecision{}, false
+	}
+	if now.Nanosecond()%1000 != 0 {
+		deadline.Micros++
+	}
 	switch {
 	case upgrade.DurableState == "failed":
 		return agentUpgradeDecision{State: "failed", Terminal: true, Reason: "durable_local_failure"}, true
@@ -126,21 +100,31 @@ func (s *Service) decideAgentUpgrade(now time.Time, upgrade pendingUpgrade) (age
 		return agentUpgradeDecision{State: "rolled_back", Terminal: true, Reason: "durable_local_rollback"}, true
 	case upgrade.DurableState == "succeeded" && online && upgrade.ObservedVersion == upgrade.TargetVersion:
 		return agentUpgradeDecision{State: "succeeded", Terminal: true, Reason: "durable_success_and_target_version_observed"}, true
-	case now.After(base.Add(s.agentUpgradeReconcileTime)):
+	case upgrade.ScheduledAt.Valid && upgrade.ScheduledAt.Micros < deadline.Micros:
 		return agentUpgradeDecision{State: "unknown", Terminal: true, Reason: "reconciliation_deadline_exceeded"}, true
-	case upgrade.State == "accepted" && online && upgrade.ObservedAt.After(upgrade.ScheduledAt):
+	case upgrade.State == "accepted" && online && upgrade.ObservedAt.Valid && upgrade.ScheduledAt.Valid && upgrade.ObservedAt.Micros > upgrade.ScheduledAt.Micros:
 		return agentUpgradeDecision{State: "running", Terminal: false, Reason: "node_reconnected_verifying_target_version"}, true
 	}
 	return agentUpgradeDecision{}, false
 }
 
+func upgradeHeartbeatFresh(now time.Time, heartbeat value.Timestamp) bool {
+	cutoff, err := value.FromTime(now.Add(-telemetry.OfflineAfter))
+	if err != nil || !heartbeat.Valid {
+		return false
+	}
+	if now.Nanosecond()%1000 != 0 {
+		cutoff.Micros++
+	}
+	return heartbeat.Micros >= cutoff.Micros
+}
+
 func (s *Service) applyAgentUpgradeTerminal(ctx context.Context, upgrade pendingUpgrade, decision agentUpgradeDecision) error {
 	now := s.now()
-	tx, err := s.pool.Begin(ctx)
+	at, err := value.FromTime(now)
 	if err != nil {
-		return fmt.Errorf("begin agent upgrade reconciliation: %w", err)
+		return err
 	}
-	defer rollback(tx)
 	commandState := decision.State
 	if commandState == "unknown" {
 		// No terminal command result will ever arrive; expire the delivery
@@ -150,93 +134,67 @@ func (s *Service) applyAgentUpgradeTerminal(ctx context.Context, upgrade pending
 	// A generic-engine terminal (expired or superseded) already closed the
 	// operation, command, and outbox; only the projection lags behind.
 	genericTerminal := upgrade.OperationState == "expired" || upgrade.OperationState == "superseded"
-	if !genericTerminal && decision.State != upgrade.OperationState {
-		tag, err := tx.Exec(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=$3,completed_at=GREATEST(COALESCE(completed_at,$3),$3) WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, upgrade.OperationID, decision.State, now)
+	unchanged := false
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
-			return fmt.Errorf("apply agent upgrade operation outcome: %w", err)
+			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return nil
+		if err := store.UpgradeTerminal(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, CommandID: upgrade.CommandID, State: decision.State, OperationState: upgrade.OperationState, CommandState: commandState, GenericTerminal: genericTerminal, At: at}); err != nil {
+			unchanged = errors.Is(err, database.ErrNotFound)
+			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=$3 WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, upgrade.CommandID, commandState, now); err != nil {
-			return fmt.Errorf("apply agent upgrade command outcome: %w", err)
+		auditID, err := uuid.NewV7()
+		if err != nil {
+			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, upgrade.CommandID, now); err != nil {
-			return fmt.Errorf("complete agent upgrade outbox: %w", err)
+		auditResult := "failed"
+		if decision.State == "succeeded" {
+			auditResult = "succeeded"
 		}
-	}
-	projectionTag, err := tx.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,completed_at=$3,updated_at=$3 WHERE operation_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown')`, upgrade.OperationID, decision.State, now)
-	if err != nil {
-		return fmt.Errorf("apply agent upgrade projection outcome: %w", err)
-	}
-	if projectionTag.RowsAffected() == 0 {
+		summary, _ := json.Marshal(map[string]any{
+			"terminal_outcome": decision.State,
+			"from_version":     upgrade.FromVersion,
+			"target_version":   upgrade.TargetVersion,
+			"observed_version": upgrade.ObservedVersion,
+			"durable_state":    upgrade.DurableState,
+			"reason":           decision.Reason,
+		})
+		if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{
+			EventID: auditID, WorkspaceID: upgrade.WorkspaceID, ActorType: "controller", ActorID: "agent-upgrade-reconciler",
+			Action: "agent.upgrade", ResourceType: "operation", ResourceID: upgrade.OperationID,
+			NodeID: &upgrade.NodeID, CommandID: &upgrade.CommandID, Result: auditResult,
+			AfterSummary: summary, At: now,
+		}); err != nil {
+			return fmt.Errorf("append agent upgrade outcome audit: %w", err)
+		}
+		return nil
+	})
+	if unchanged {
 		return nil
 	}
-	eventID, err := uuid.NewV7()
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,$3,$4)`, eventID, upgrade.OperationID, decision.State, now); err != nil {
-		return fmt.Errorf("append agent upgrade outcome event: %w", err)
-	}
-	auditID, err := uuid.NewV7()
-	if err != nil {
-		return err
-	}
-	auditResult := "failed"
-	if decision.State == "succeeded" {
-		auditResult = "succeeded"
-	}
-	summary, _ := json.Marshal(map[string]any{
-		"terminal_outcome": decision.State,
-		"from_version":     upgrade.FromVersion,
-		"target_version":   upgrade.TargetVersion,
-		"observed_version": upgrade.ObservedVersion,
-		"durable_state":    upgrade.DurableState,
-		"reason":           decision.Reason,
-	})
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{
-		EventID: auditID, WorkspaceID: upgrade.WorkspaceID, ActorType: "controller", ActorID: "agent-upgrade-reconciler",
-		Action: "agent.upgrade", ResourceType: "operation", ResourceID: upgrade.OperationID,
-		NodeID: &upgrade.NodeID, CommandID: &upgrade.CommandID, Result: auditResult,
-		AfterSummary: summary, At: now,
-	}); err != nil {
-		return fmt.Errorf("append agent upgrade outcome audit: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit agent upgrade reconciliation: %w", err)
-	}
-	return nil
+	return err
 }
 
 func (s *Service) applyAgentUpgradeProgress(ctx context.Context, upgrade pendingUpgrade, decision agentUpgradeDecision) error {
-	now := s.now()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin agent upgrade progress: %w", err)
-	}
-	defer rollback(tx)
-	tag, err := tx.Exec(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=$3 WHERE id=$1 AND state='accepted'`, upgrade.OperationID, decision.State, now)
-	if err != nil {
-		return fmt.Errorf("apply agent upgrade progress: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return nil
-	}
-	if _, err := tx.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,updated_at=$3 WHERE operation_id=$1 AND state='accepted'`, upgrade.OperationID, decision.State, now); err != nil {
-		return fmt.Errorf("apply agent upgrade projection progress: %w", err)
-	}
-	eventID, err := uuid.NewV7()
+	at, err := value.FromTime(s.now())
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,$3,$4)`, eventID, upgrade.OperationID, decision.State, now); err != nil {
-		return fmt.Errorf("append agent upgrade progress event: %w", err)
+	unchanged := false
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		err = store.UpgradeProgress(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, State: decision.State, At: at})
+		unchanged = errors.Is(err, database.ErrNotFound)
+		return err
+	})
+	if unchanged {
+		return nil
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit agent upgrade progress: %w", err)
-	}
-	return nil
+	return err
 }
 
 var (
@@ -302,21 +260,21 @@ type AgentRolloutExclusion struct {
 // owns the canary and batch advancement; the browser never loops over
 // per-node upgrade calls.
 type AgentRollout struct {
-	ID            string                  `json:"id"`
-	WorkspaceID   string                  `json:"workspace_id"`
-	TargetVersion string                  `json:"target_version"`
-	State         string                  `json:"state"`
-	BatchSize     int                     `json:"batch_size"`
-	StopOnFailure bool                    `json:"stop_on_failure"`
-	Reason        string                  `json:"reason"`
-	ApprovalID    string                  `json:"approval_id"`
-	CreatedBy     string                  `json:"created_by"`
-	CurrentBatch  int                     `json:"current_batch"`
-	PauseCode     string                  `json:"pause_code,omitempty"`
-	CreatedAt     time.Time               `json:"created_at"`
-	UpdatedAt     time.Time               `json:"updated_at"`
-	Nodes         []AgentRolloutNode      `json:"nodes,omitempty"`
-	Excluded      []AgentRolloutExclusion `json:"excluded,omitempty"`
+	ID            string             `json:"id"`
+	WorkspaceID   string             `json:"workspace_id"`
+	TargetVersion string             `json:"target_version"`
+	State         string             `json:"state"`
+	BatchSize     int                `json:"batch_size"`
+	StopOnFailure bool               `json:"stop_on_failure"`
+	Reason        string             `json:"reason"`
+	ApprovalID    string             `json:"approval_id"`
+	CreatedBy     string             `json:"created_by"`
+	CurrentBatch  int                `json:"current_batch"`
+	PauseCode     string             `json:"pause_code,omitempty"`
+	CreatedAt     value.Timestamp    `json:"created_at"`
+	UpdatedAt     value.Timestamp    `json:"updated_at"`
+	Nodes         []AgentRolloutNode `json:"nodes,omitempty"`
+	Excluded      []json.RawMessage  `json:"excluded,omitempty"`
 }
 
 type CreateAgentRolloutRequest struct {
@@ -337,37 +295,9 @@ type CreateAgentRolloutRequest struct {
 
 // rolloutRow is the durable rollout header read back inside the advancement
 // and resume transactions.
-type rolloutRow struct {
-	ID            uuid.UUID
-	WorkspaceID   uuid.UUID
-	TargetVersion string
-	State         string
-	BatchSize     int
-	StopOnFailure bool
-	Reason        string
-	ApprovalID    uuid.UUID
-	RequestHash   []byte
-	CreatedBy     uuid.UUID
-	ActorSession  uuid.UUID
-	CurrentBatch  int
-	PauseCode     string
-	Excluded      []AgentRolloutExclusion
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-}
+type rolloutRow = operationstore.Rollout
 
-type rolloutNodeRow struct {
-	NodeID          uuid.UUID
-	Ordinal         int
-	Batch           int
-	State           string
-	OperationID     uuid.UUID
-	FromVersion     string
-	FailureCode     string
-	DispatchVersion int64
-	DispatchAttempt int
-	DispatchLease   time.Time
-}
+type rolloutNodeRow = operationstore.RolloutNode
 
 type claimedRolloutNode struct {
 	rolloutNodeRow
@@ -376,15 +306,7 @@ type claimedRolloutNode struct {
 }
 
 // rolloutNodeObservation is the durable evidence eligibility derives from.
-type rolloutNodeObservation struct {
-	NodeID          uuid.UUID
-	Status          string
-	Architecture    string
-	AgentVersion    string
-	LastHeartbeatAt time.Time
-	CapabilityOK    bool
-	UpgradeActive   bool
-}
+type rolloutNodeObservation = operationstore.RolloutObservation
 
 // rolloutNodeEligibility recomputes server-side eligibility from durable
 // evidence only. The returned reason code is empty exactly when the node is
@@ -396,7 +318,7 @@ func (s *Service) rolloutNodeEligibility(now time.Time, node rolloutNodeObservat
 		return "not_trusted", [sha256.Size]byte{}, false
 	case node.Status == "offline":
 		return "offline", [sha256.Size]byte{}, false
-	case now.Sub(node.LastHeartbeatAt) > telemetry.OfflineAfter:
+	case !upgradeHeartbeatFresh(now, node.LastHeartbeatAt):
 		return "stale", [sha256.Size]byte{}, false
 	case node.Architecture == "":
 		return "missing_release_metadata", [sha256.Size]byte{}, false
@@ -462,24 +384,6 @@ func nodeIDStrings(ids []uuid.UUID) []string {
 	return values
 }
 
-func scanRolloutRow(row pgx.Row) (rolloutRow, error) {
-	var rollout rolloutRow
-	var id, workspace, approval, createdBy, actorSession uuid.UUID
-	var requestHash, exclusionsJSON []byte
-	err := row.Scan(&id, &workspace, &rollout.TargetVersion, &rollout.State, &rollout.BatchSize, &rollout.StopOnFailure,
-		&rollout.Reason, &approval, &requestHash, &createdBy, &actorSession, &rollout.CurrentBatch, &rollout.PauseCode,
-		&exclusionsJSON, &rollout.CreatedAt, &rollout.UpdatedAt)
-	if err != nil {
-		return rolloutRow{}, err
-	}
-	if err := json.Unmarshal(exclusionsJSON, &rollout.Excluded); err != nil {
-		return rolloutRow{}, fmt.Errorf("decode agent rollout exclusions: %w", err)
-	}
-	rollout.ID, rollout.WorkspaceID, rollout.ApprovalID = id, workspace, approval
-	rollout.RequestHash, rollout.CreatedBy, rollout.ActorSession = requestHash, createdBy, actorSession
-	return rollout, nil
-}
-
 func rolloutFromRow(rollout rolloutRow, nodes []AgentRolloutNode) AgentRollout {
 	return AgentRollout{
 		ID: rollout.ID.String(), WorkspaceID: rollout.WorkspaceID.String(), TargetVersion: rollout.TargetVersion,
@@ -498,63 +402,34 @@ func rolloutTraceparent(rolloutID, nodeID uuid.UUID) string {
 	return fmt.Sprintf("00-%032x-%016x-01", digest[:16], digest[16:24])
 }
 
-// rolloutQueryer abstracts the pool and transaction query surface so the
-// rollout helpers run inside the caller's transaction or standalone.
-type rolloutQueryer interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-const rolloutHeaderSelect = "SELECT id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,created_at,updated_at" +
-	" FROM agent_rollouts"
-
-func loadRolloutNodeObservation(ctx context.Context, q rolloutQueryer, nodeID, workspaceID uuid.UUID) (rolloutNodeObservation, error) {
-	var node rolloutNodeObservation
-	node.NodeID = nodeID
-	err := q.QueryRow(ctx, "SELECT n.status,COALESCE(o.architecture,''),COALESCE(o.agent_version,''),COALESCE(o.last_heartbeat_at,to_timestamp(0)),"+
-		"EXISTS(SELECT 1 FROM node_capabilities c WHERE c.node_id=n.id AND c.capability='ocserv.agent.upgrade.v2' AND c.approved=true),"+
-		"EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.node_id=n.id AND u.completed_at IS NULL AND u.state IN ('queued','accepted','running','unknown'))"+
-		" FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1 AND n.workspace_id=$2", nodeID, workspaceID).Scan(
-		&node.Status, &node.Architecture, &node.AgentVersion, &node.LastHeartbeatAt, &node.CapabilityOK, &node.UpgradeActive)
-	if errors.Is(err, pgx.ErrNoRows) {
+func loadRolloutNodeObservation(ctx context.Context, store operationstore.Store, nodeID, workspaceID uuid.UUID) (rolloutNodeObservation, error) {
+	node, err := store.RolloutObservation(ctx, nodeID, workspaceID)
+	if errors.Is(err, database.ErrNotFound) {
 		return node, ErrRolloutInvalid
 	}
 	return node, err
 }
 
-func readRolloutByIdempotencyKey(ctx context.Context, q rolloutQueryer, workspaceID uuid.UUID, key string) (uuid.UUID, bool, error) {
-	var id, workspace uuid.UUID
-	var state string
-	err := q.QueryRow(ctx, "SELECT id,workspace_id,state FROM agent_rollouts WHERE workspace_id=$1 AND idempotency_key=$2", workspaceID, key).Scan(&id, &workspace, &state)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, false, nil
-	}
-	if err != nil {
-		return uuid.Nil, false, fmt.Errorf("read agent rollout idempotency: %w", err)
-	}
-	return id, true, nil
-}
-
-func rolloutRequestHashByID(ctx context.Context, q rolloutQueryer, rolloutID uuid.UUID) (string, error) {
-	var storedHash []byte
-	if err := q.QueryRow(ctx, "SELECT request_hash FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&storedHash); err != nil {
-		return "", fmt.Errorf("read agent rollout request hash: %w", err)
-	}
-	return string(storedHash), nil
-}
-
 // GetAgentRollout reads the rollout header and its nodes in stable ordinal order.
 func (s *Service) GetAgentRollout(ctx context.Context, rolloutID uuid.UUID) (AgentRollout, error) {
-	rollout, err := scanRolloutRow(s.pool.QueryRow(ctx, rolloutHeaderSelect+" WHERE id=$1", rolloutID))
-	if err != nil {
-		return AgentRollout{}, err
-	}
-	nodes, err := s.rolloutNodes(ctx, s.pool, rollout.ID)
-	if err != nil {
-		return AgentRollout{}, err
-	}
-	return rolloutFromRow(rollout, nodes), nil
+	var result AgentRollout
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		rollout, err := store.Rollout(ctx, rolloutID, false)
+		if err != nil {
+			return err
+		}
+		nodes, err := store.RolloutNodes(ctx, rolloutID)
+		if err != nil {
+			return err
+		}
+		result = rolloutFromRow(rollout, rolloutNodeModels(nodes))
+		return nil
+	})
+	return result, err
 }
 
 // ListAgentRollouts returns the workspace's most recent rollouts with their
@@ -563,60 +438,66 @@ func (s *Service) ListAgentRollouts(ctx context.Context, workspaceID uuid.UUID, 
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
-	rows, err := s.pool.Query(ctx, rolloutHeaderSelect+" WHERE workspace_id=$1 ORDER BY created_at DESC LIMIT $2", workspaceID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("list agent rollouts: %w", err)
-	}
-	defer rows.Close()
 	rollouts := []AgentRollout{}
-	for rows.Next() {
-		rollout, scanErr := scanRolloutRow(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		rollouts = append(rollouts, rolloutFromRow(rollout, nil))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for index := range rollouts {
-		rolloutID, parseErr := uuid.Parse(rollouts[index].ID)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		nodes, err := s.rolloutNodes(ctx, s.pool, rolloutID)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		rollouts[index].Nodes = nodes
-	}
-	return rollouts, nil
+		rows, err := store.Rollouts(ctx, workspaceID, limit)
+		if err != nil {
+			return err
+		}
+		for _, rollout := range rows {
+			nodes, err := store.RolloutNodes(ctx, rollout.ID)
+			if err != nil {
+				return err
+			}
+			rollouts = append(rollouts, rolloutFromRow(rollout, rolloutNodeModels(nodes)))
+		}
+		return nil
+	})
+	return rollouts, err
 }
 
 // RolloutWorkspace resolves the owning workspace of a rollout for
 // workspace-scoped request authorization.
-func RolloutWorkspace(ctx context.Context, pool *pgxpool.Pool, rolloutID uuid.UUID) (uuid.UUID, error) {
+func (s *Service) RolloutWorkspace(ctx context.Context, rolloutID uuid.UUID) (uuid.UUID, error) {
 	var workspaceID uuid.UUID
-	err := pool.QueryRow(ctx, "SELECT workspace_id FROM agent_rollouts WHERE id=$1", rolloutID).Scan(&workspaceID)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		workspaceID, err = store.RolloutWorkspace(ctx, rolloutID)
+		return err
+	})
 	return workspaceID, err
 }
 
-func (s *Service) rolloutNodes(ctx context.Context, q rolloutQueryer, rolloutID uuid.UUID) ([]AgentRolloutNode, error) {
-	rows, err := q.Query(ctx, "SELECT node_id::text,ordinal,batch,state,COALESCE(operation_id::text,''),from_version,failure_code"+
-		" FROM agent_rollout_nodes WHERE rollout_id=$1 ORDER BY ordinal", rolloutID)
-	if err != nil {
-		return nil, fmt.Errorf("read agent rollout nodes: %w", err)
-	}
-	defer rows.Close()
+func rolloutNodeModels(rows []operationstore.RolloutNode) []AgentRolloutNode {
 	nodes := []AgentRolloutNode{}
-	for rows.Next() {
-		var node AgentRolloutNode
-		if err := rows.Scan(&node.NodeID, &node.Ordinal, &node.Batch, &node.State, &node.OperationID, &node.FromVersion, &node.FailureCode); err != nil {
-			return nil, err
+	for _, row := range rows {
+		node := AgentRolloutNode{NodeID: row.NodeID.String(), Ordinal: row.Ordinal, Batch: row.Batch, State: row.State, FromVersion: row.FromVersion, FailureCode: row.FailureCode}
+		if row.OperationID != uuid.Nil {
+			node.OperationID = row.OperationID.String()
 		}
 		nodes = append(nodes, node)
 	}
-	return nodes, rows.Err()
+	return nodes
+}
+
+func (s *Service) loadRollout(ctx context.Context, id uuid.UUID) (rolloutRow, error) {
+	var row rolloutRow
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		row, err = store.Rollout(ctx, id, false)
+		return err
+	})
+	return row, err
 }
 
 // CreateAgentRollout durably records a canary and rolling agent upgrade
@@ -643,45 +524,52 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	}
 	requestHash, _ := approvals.AgentRolloutBinding(target, sorted, request.BatchSize, request.StopOnFailure)
 	now := s.now()
-	tx, err := s.pool.Begin(ctx)
+	at, err := value.FromTime(now)
+	if err != nil {
+		return AgentRollout{}, false, err
+	}
+	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return AgentRollout{}, false, fmt.Errorf("begin agent rollout creation: %w", err)
 	}
-	defer rollback(tx)
-	q := rolloutQueryer(tx)
-	if existingID, found, err := readRolloutByIdempotencyKey(ctx, q, request.WorkspaceID, request.IdempotencyKey); err != nil {
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	store, err := operationstore.FromTransaction(tx)
+	if err != nil {
 		return AgentRollout{}, false, err
-	} else if found {
-		if existingHash, hashErr := rolloutRequestHashByID(ctx, q, existingID); hashErr != nil || string(existingHash) != string(requestHash) {
+	}
+	existingID, existingHash, err := store.FindRollout(ctx, request.WorkspaceID, request.IdempotencyKey)
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
+		return AgentRollout{}, false, err
+	} else if err == nil {
+		if string(existingHash) != string(requestHash) {
 			return AgentRollout{}, false, ErrIdempotencyConflict
 		}
-		rollout, loadErr := s.GetAgentRollout(ctx, existingID)
+		rollout, loadErr := store.Rollout(ctx, existingID, false)
 		if loadErr != nil {
 			return AgentRollout{}, false, loadErr
 		}
-		return rollout, true, nil
+		nodes, loadErr := store.RolloutNodes(ctx, existingID)
+		if loadErr != nil {
+			return AgentRollout{}, false, loadErr
+		}
+		return rolloutFromRow(rollout, rolloutNodeModels(nodes)), true, nil
 	}
 	// The approval row carries the rollout identity: the requester pinned the
 	// exact rollout request at approval time and consumption binds this
 	// rollout to it. A reused, mismatched, or unapproved approval fails
 	// closed.
-	var approvedWorkspace, approvedResource, approvedRequester uuid.UUID
-	var approvedAction, approvedType, approvedStatus string
-	var approvedHash []byte
-	var approvedExpiry time.Time
-	err = q.QueryRow(ctx, "SELECT workspace_id,resource_id,requester_id,action,resource_type,status,expires_at,request_hash"+
-		" FROM approval_requests WHERE id=$1 FOR UPDATE", request.ApprovalID).Scan(
-		&approvedWorkspace, &approvedResource, &approvedRequester, &approvedAction, &approvedType, &approvedStatus, &approvedExpiry, &approvedHash)
-	if errors.Is(err, pgx.ErrNoRows) {
+	approvedResource, err := store.RolloutApproval(ctx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, requestHash, at)
+	if errors.Is(err, database.ErrNotFound) {
 		return AgentRollout{}, false, approvals.ErrNotReady
 	}
 	if err != nil {
 		return AgentRollout{}, false, fmt.Errorf("lock rollout approval: %w", err)
 	}
-	if approvedWorkspace != request.WorkspaceID || approvedRequester != request.ActorIdentityID ||
-		approvedAction != "agent.rollout" || approvedType != "batch_operation" ||
-		approvedStatus != "approved" || !approvedExpiry.After(now) || approvedResource.Version() != 7 ||
-		len(approvedHash) != sha256.Size || string(approvedHash) != string(requestHash) {
+	if approvedResource.Version() != 7 {
 		return AgentRollout{}, false, approvals.ErrNotReady
 	}
 	rolloutID := approvedResource
@@ -692,7 +580,10 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	}
 	eligible := make([]eligibleNode, 0, len(sorted))
 	for _, nodeID := range sorted {
-		node, loadErr := loadRolloutNodeObservation(ctx, q, nodeID, request.WorkspaceID)
+		node, loadErr := store.RolloutObservation(ctx, nodeID, request.WorkspaceID)
+		if errors.Is(loadErr, database.ErrNotFound) {
+			return AgentRollout{}, false, ErrRolloutInvalid
+		}
 		if loadErr != nil {
 			return AgentRollout{}, false, loadErr
 		}
@@ -710,18 +601,19 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
+	var storedExclusions []json.RawMessage
+	if err := json.Unmarshal(exclusionsJSON, &storedExclusions); err != nil {
+		return AgentRollout{}, false, err
+	}
 	auditID, err := uuid.NewV7()
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	if _, err := q.Exec(ctx, "INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at)"+
-		" VALUES($1,$2,$3,'queued',$4,true,$5,$6,$7,$8,$9,0,'',$10,$11,$12,$12)",
-		rolloutID, request.WorkspaceID, target, request.BatchSize, reason, request.ApprovalID, requestHash[:], request.ActorIdentityID, request.ActorSessionID, string(exclusionsJSON), request.IdempotencyKey, now); err != nil {
+	if err := store.InsertRollout(ctx, operationstore.PendingRollout{Rollout: operationstore.Rollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, ApprovalID: request.ApprovalID, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Excluded: storedExclusions, CreatedAt: at}, IdempotencyKey: request.IdempotencyKey}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("insert agent rollout: %w", err)
 	}
 	for ordinal, node := range eligible {
-		if _, err := q.Exec(ctx, "INSERT INTO agent_rollout_nodes(rollout_id,node_id,ordinal,batch,state,from_version,updated_at)"+
-			" VALUES($1,$2,$3,$4,'pending','',$5)", rolloutID, node.nodeID, ordinal, rolloutBatchForOrdinal(ordinal, request.BatchSize), now); err != nil {
+		if err := store.InsertRolloutNode(ctx, rolloutID, operationstore.RolloutNode{NodeID: node.nodeID, Ordinal: ordinal, Batch: rolloutBatchForOrdinal(ordinal, request.BatchSize)}, at); err != nil {
 			return AgentRollout{}, false, fmt.Errorf("insert agent rollout node: %w", err)
 		}
 	}
@@ -729,7 +621,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 		"target_version": target, "batch_size": request.BatchSize, "stop_on_failure": true,
 		"node_count": len(eligible), "node_ids": nodeIDStrings(sorted), "excluded": exclusions,
 	})
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{
 		EventID: auditID, WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID,
 		SessionID: &request.ActorSessionID, Action: "agent.rollout", ResourceType: "agent_rollout",
 		ResourceID: rolloutID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID,
@@ -737,7 +629,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("append agent rollout audit: %w", err)
 	}
-	if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "agent.rollout", "batch_operation", rolloutID, requestHash[:]); err != nil {
+	if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "agent.rollout", "batch_operation", rolloutID, requestHash[:]); err != nil {
 		return AgentRollout{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -760,34 +652,32 @@ func (s *Service) ResumeAgentRollout(ctx context.Context, rolloutID uuid.UUID, a
 		return AgentRollout{}, ErrRolloutInvalid
 	}
 	now := s.now()
-	tx, err := s.pool.Begin(ctx)
+	at, err := value.FromTime(now)
+	if err != nil {
+		return AgentRollout{}, err
+	}
+	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return AgentRollout{}, fmt.Errorf("begin agent rollout resume: %w", err)
 	}
-	defer rollback(tx)
-	q := rolloutQueryer(tx)
-	rollout, err := scanRolloutRow(q.QueryRow(ctx, rolloutHeaderSelect+" WHERE id=$1 FOR UPDATE", rolloutID))
+	defer rollbackRollout(tx)
+	rollout, err := q.Rollout(ctx, rolloutID, true)
 	if err != nil {
 		return AgentRollout{}, err
 	}
 	if rollout.State != RolloutStatePaused {
 		return AgentRollout{}, ErrRolloutState
 	}
-	tag, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='pending',failure_code='',dispatch_node_version=NULL,dispatch_attempt=dispatch_attempt+1,dispatch_lease_until=NULL,updated_at=$3"+
-		" WHERE rollout_id=$1 AND batch=$2 AND (state IN ('failed','rolled_back','unknown') OR (state='skipped' AND batch=0))", rolloutID, rollout.CurrentBatch, now)
+	requeued, err := q.ResumeRollout(ctx, rolloutID, rollout.CurrentBatch, at)
 	if err != nil {
 		return AgentRollout{}, fmt.Errorf("requeue failed rollout nodes: %w", err)
-	}
-	requeued := tag.RowsAffected()
-	if _, err := q.Exec(ctx, "UPDATE agent_rollouts SET state='running',pause_code='',updated_at=$2 WHERE id=$1 AND state='paused'", rolloutID, now); err != nil {
-		return AgentRollout{}, fmt.Errorf("resume agent rollout: %w", err)
 	}
 	summary, _ := json.Marshal(map[string]any{"event": "rollout_resumed", "current_batch": rollout.CurrentBatch, "requeued_nodes": requeued})
 	auditID, err := uuid.NewV7()
 	if err != nil {
 		return AgentRollout{}, err
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{
 		EventID: auditID, WorkspaceID: rollout.WorkspaceID, ActorType: "user", ActorID: actorID,
 		SessionID: &actorSessionID, Action: "agent.rollout", ResourceType: "agent_rollout",
 		ResourceID: rollout.ID, RequestID: requestID, TraceID: traceID(traceparent),
@@ -811,21 +701,16 @@ func (s *Service) AdvanceAgentRollouts(ctx context.Context) error {
 	if s.releaseCatalog == nil {
 		return nil
 	}
-	rows, err := s.pool.Query(ctx, "SELECT id FROM agent_rollouts WHERE state IN ('queued','running') ORDER BY created_at LIMIT $1", rolloutAdvanceLimit)
-	if err != nil {
-		return fmt.Errorf("list advancing rollouts: %w", err)
-	}
 	rolloutIDs := []uuid.UUID{}
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
 			return err
 		}
-		rolloutIDs = append(rolloutIDs, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+		rolloutIDs, err = store.ActiveRollouts(ctx, rolloutAdvanceLimit)
+		return err
+	})
+	if err != nil {
 		return err
 	}
 	var advanceErrs []error
@@ -869,13 +754,16 @@ func (s *Service) advanceAgentRollout(ctx context.Context, rolloutID uuid.UUID) 
 // rollout moved forward and another pass may make further progress.
 func (s *Service) prepareRolloutAdvance(ctx context.Context, rolloutID uuid.UUID) ([]claimedRolloutNode, bool, error) {
 	now := s.now()
-	tx, err := s.pool.Begin(ctx)
+	at, err := value.FromTime(now)
+	if err != nil {
+		return nil, false, err
+	}
+	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("begin rollout advance: %w", err)
 	}
-	defer rollback(tx)
-	q := rolloutQueryer(tx)
-	rollout, err := scanRolloutRow(q.QueryRow(ctx, rolloutHeaderSelect+" WHERE id=$1 FOR UPDATE", rolloutID))
+	defer rollbackRollout(tx)
+	rollout, err := q.Rollout(ctx, rolloutID, true)
 	if err != nil {
 		return nil, false, err
 	}
@@ -897,7 +785,7 @@ func (s *Service) prepareRolloutAdvance(ctx context.Context, rolloutID uuid.UUID
 		return nil
 	}
 	if rollout.State == RolloutStateQueued {
-		if _, err := q.Exec(ctx, "UPDATE agent_rollouts SET state='running',updated_at=$2 WHERE id=$1", rolloutID, now); err != nil {
+		if err := q.SetRolloutState(ctx, rolloutID, "running", rollout.PauseCode, at); err != nil {
 			return nil, false, fmt.Errorf("start rollout: %w", err)
 		}
 		rollout.State = RolloutStateRunning
@@ -917,7 +805,7 @@ func (s *Service) prepareRolloutAdvance(ctx context.Context, rolloutID uuid.UUID
 		progressed = true
 	}
 	for _, event := range events {
-		if err := audit.AppendChain(ctx, tx, event); err != nil {
+		if err := audit.AppendChainTx(ctx, tx, event); err != nil {
 			return nil, false, fmt.Errorf("append rollout audit: %w", err)
 		}
 	}
@@ -932,46 +820,23 @@ func (s *Service) prepareRolloutAdvance(ctx context.Context, rolloutID uuid.UUID
 // rule: a node succeeds only when its reconciled single-node operation
 // succeeded (durable outcome, online, fresh telemetry, target version
 // observed).
-func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q rolloutQueryer, rollout *rolloutRow, now time.Time, appendEvent func(map[string]any) error) error {
-	rows, err := q.Query(ctx, "SELECT rn.node_id,rn.ordinal,rn.batch,COALESCE(rn.operation_id::text,''),u.state"+
-		" FROM agent_rollout_nodes rn"+
-		" JOIN operations op ON op.id=rn.operation_id"+
-		" JOIN agent_upgrade_operations u ON u.operation_id=rn.operation_id"+
-		" WHERE rn.rollout_id=$1 AND rn.state='running' AND u.completed_at IS NOT NULL", rollout.ID)
+func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q operationstore.Store, rollout *rolloutRow, now time.Time, appendEvent func(map[string]any) error) error {
+	at, err := value.FromTime(now)
+	if err != nil {
+		return err
+	}
+	terminal, err := q.TerminalRolloutNodes(ctx, rollout.ID)
 	if err != nil {
 		return fmt.Errorf("read terminal rollout nodes: %w", err)
 	}
-	type terminalNode struct {
-		nodeID      uuid.UUID
-		ordinal     int
-		batch       int
-		operationID string
-		outcome     string
-	}
-	terminal := []terminalNode{}
-	for rows.Next() {
-		var node terminalNode
-		var operationID, upgradeState string
-		if err := rows.Scan(&node.nodeID, &node.ordinal, &node.batch, &operationID, &upgradeState); err != nil {
-			rows.Close()
-			return err
-		}
-		node.operationID = operationID
-		node.outcome = upgradeState
-		if !slices.Contains([]string{"succeeded", "failed", "rolled_back", "unknown"}, node.outcome) {
+	for _, node := range terminal {
+		if !slices.Contains([]string{"succeeded", "failed", "rolled_back", "unknown"}, node.Outcome) {
 			// The operation lifecycle closed without a reconciled upgrade
 			// outcome (expired command); the upgrade outcome is unknown.
-			node.outcome = RolloutNodeUnknown
+			node.Outcome = RolloutNodeUnknown
 		}
-		terminal = append(terminal, node)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, node := range terminal {
 		failureCode := ""
-		switch node.outcome {
+		switch node.Outcome {
 		case RolloutNodeFailed:
 			failureCode = "upgrade_failed"
 		case RolloutNodeRolledBack:
@@ -979,18 +844,17 @@ func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q rolloutQuery
 		case RolloutNodeUnknown:
 			failureCode = "outcome_unknown"
 		}
-		tag, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state=$3,failure_code=$4,updated_at=$5"+
-			" WHERE rollout_id=$1 AND node_id=$2 AND state='running'", rollout.ID, node.nodeID, node.outcome, failureCode, now)
+		changed, err := q.SetRolloutNodeOutcome(ctx, rollout.ID, node.NodeID, node.Outcome, failureCode, at)
 		if err != nil {
 			return fmt.Errorf("roll up rollout node outcome: %w", err)
 		}
-		if tag.RowsAffected() == 0 {
+		if !changed {
 			continue
 		}
-		if node.outcome != RolloutNodeSucceeded {
+		if node.Outcome != RolloutNodeSucceeded {
 			if err := appendEvent(map[string]any{
-				"event": "node_" + node.outcome, "batch": node.batch, "node_id": node.nodeID.String(),
-				"operation_id": node.operationID, "failure_code": failureCode,
+				"event": "node_" + node.Outcome, "batch": node.Batch, "node_id": node.NodeID.String(),
+				"operation_id": node.OperationID.String(), "failure_code": failureCode,
 			}); err != nil {
 				return err
 			}
@@ -1004,8 +868,12 @@ func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q rolloutQuery
 // batch. A skipped node can only be observed here after an operator resumes
 // the rollout; it never counts as an upgrade.
 // The second return reports whether the batch pointer advanced.
-func (s *Service) evaluateRolloutBatch(ctx context.Context, q rolloutQueryer, rollout *rolloutRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, bool, error) {
-	nodes, err := readRolloutNodesLocked(ctx, q, rollout.ID)
+func (s *Service) evaluateRolloutBatch(ctx context.Context, q operationstore.Store, rollout *rolloutRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, bool, error) {
+	at, err := value.FromTime(now)
+	if err != nil {
+		return nil, false, err
+	}
+	nodes, err := q.RolloutNodes(ctx, rollout.ID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1020,7 +888,7 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q rolloutQueryer, ro
 		// P0 fixes the stop-on-failure policy to true; the stored policy is
 		// part of the approved rollout request hash.
 		pauseCode := "node_" + blocked.State
-		if _, err := q.Exec(ctx, "UPDATE agent_rollouts SET state='paused',pause_code=$2,updated_at=$3 WHERE id=$1", rollout.ID, pauseCode, now); err != nil {
+		if err := q.SetRolloutState(ctx, rollout.ID, "paused", pauseCode, at); err != nil {
 			return nil, false, fmt.Errorf("pause rollout: %w", err)
 		}
 		rollout.State = RolloutStatePaused
@@ -1052,7 +920,7 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q rolloutQueryer, ro
 	}
 	if pendingElsewhere {
 		nextBatch := rollout.CurrentBatch + 1
-		if _, err := q.Exec(ctx, "UPDATE agent_rollouts SET current_batch=$2,updated_at=$3 WHERE id=$1", rollout.ID, nextBatch, now); err != nil {
+		if err := q.SetRolloutBatch(ctx, rollout.ID, nextBatch, at); err != nil {
 			return nil, false, fmt.Errorf("advance rollout batch: %w", err)
 		}
 		if err := appendEvent(map[string]any{"event": "batch_completed", "batch": rollout.CurrentBatch}); err != nil {
@@ -1083,7 +951,7 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q rolloutQueryer, ro
 		terminalPauseCode = "all_nodes_skipped"
 		terminalEvent = "rollout_failed"
 	}
-	if _, err := q.Exec(ctx, "UPDATE agent_rollouts SET state=$2,pause_code=$3,updated_at=$4 WHERE id=$1", rollout.ID, terminalState, terminalPauseCode, now); err != nil {
+	if err := q.SetRolloutState(ctx, rollout.ID, terminalState, terminalPauseCode, at); err != nil {
 		return nil, false, fmt.Errorf("complete rollout: %w", err)
 	}
 	if err := appendEvent(map[string]any{"event": "batch_completed", "batch": rollout.CurrentBatch}); err != nil {
@@ -1096,34 +964,16 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q rolloutQueryer, ro
 	return nil, false, nil
 }
 
-func readRolloutNodesLocked(ctx context.Context, q rolloutQueryer, rolloutID uuid.UUID) ([]rolloutNodeRow, error) {
-	rows, err := q.Query(ctx, "SELECT node_id,ordinal,batch,state,operation_id,from_version,failure_code,COALESCE(dispatch_node_version,0),dispatch_attempt,COALESCE(dispatch_lease_until,to_timestamp(0))"+
-		" FROM agent_rollout_nodes WHERE rollout_id=$1 ORDER BY ordinal", rolloutID)
-	if err != nil {
-		return nil, fmt.Errorf("read rollout nodes: %w", err)
-	}
-	defer rows.Close()
-	nodes := []rolloutNodeRow{}
-	for rows.Next() {
-		var node rolloutNodeRow
-		var operationID *uuid.UUID
-		if err := rows.Scan(&node.NodeID, &node.Ordinal, &node.Batch, &node.State, &operationID, &node.FromVersion, &node.FailureCode, &node.DispatchVersion, &node.DispatchAttempt, &node.DispatchLease); err != nil {
-			return nil, err
-		}
-		if operationID != nil {
-			node.OperationID = *operationID
-		}
-		nodes = append(nodes, node)
-	}
-	return nodes, rows.Err()
-}
-
 // claimRolloutPendingNodes rechecks eligibility under the rollout lock and
 // either claims a node for dispatch or records it as skipped with the
 // exclusion reason. A skipped node pauses the rollout so the operator sees
 // that the fleet no longer matches the approved request before the next
 // batch starts.
-func (s *Service) claimRolloutPendingNodes(ctx context.Context, q rolloutQueryer, rollout *rolloutRow, current []*rolloutNodeRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, error) {
+func (s *Service) claimRolloutPendingNodes(ctx context.Context, q operationstore.Store, rollout *rolloutRow, current []*rolloutNodeRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, error) {
+	at, err := value.FromTime(now)
+	if err != nil {
+		return nil, err
+	}
 	type eligibleClaim struct {
 		observation rolloutNodeObservation
 		digest      [sha256.Size]byte
@@ -1133,7 +983,7 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q rolloutQueryer
 	// one node changed eligibility, no peer from the approved batch may be
 	// dispatched until an operator explicitly resumes the rollout.
 	for _, node := range current {
-		if node.State != RolloutNodePending || node.DispatchLease.After(now) {
+		if node.State != RolloutNodePending || (node.DispatchLease.Valid && node.DispatchLease.Micros > at.Micros) {
 			continue
 		}
 		observation, err := loadRolloutNodeObservation(ctx, q, node.NodeID, rollout.WorkspaceID)
@@ -1161,20 +1011,25 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q rolloutQueryer
 			// reuses it so the deterministic idempotency key replays the exact
 			// same operation instead of creating a duplicate upgrade.
 			nodeVersion = node.DispatchVersion
-		} else if err := q.QueryRow(ctx, "SELECT version FROM nodes WHERE id=$1", node.NodeID).Scan(&nodeVersion); err != nil {
-			return nil, fmt.Errorf("read rollout node version: %w", err)
+		} else {
+			nodeVersion, err = q.RolloutNodeVersion(ctx, node.NodeID)
+			if err != nil {
+				return nil, fmt.Errorf("read rollout node version: %w", err)
+			}
 		}
 		attempt := node.DispatchAttempt
 		if attempt < 1 {
 			attempt = 1
 		}
-		tag, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET dispatch_node_version=$3,dispatch_attempt=$4,dispatch_lease_until=$5,updated_at=$6"+
-			" WHERE rollout_id=$1 AND node_id=$2 AND state='pending' AND (dispatch_lease_until IS NULL OR dispatch_lease_until<=$7)",
-			rollout.ID, node.NodeID, nodeVersion, attempt, now.Add(rolloutDispatchLease), now, now)
+		lease, err := value.FromTime(now.Add(rolloutDispatchLease))
+		if err != nil {
+			return nil, err
+		}
+		changed, err := q.ClaimRolloutNode(ctx, rollout.ID, operationstore.RolloutNode{NodeID: node.NodeID, DispatchVersion: nodeVersion, DispatchAttempt: attempt}, lease, at)
 		if err != nil {
 			return nil, fmt.Errorf("claim rollout node: %w", err)
 		}
-		if tag.RowsAffected() == 0 {
+		if !changed {
 			continue
 		}
 		node.DispatchVersion = nodeVersion
@@ -1184,21 +1039,17 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q rolloutQueryer
 	return claimed, nil
 }
 
-func pauseRolloutForSkippedNode(ctx context.Context, q rolloutQueryer, rollout *rolloutRow, node *rolloutNodeRow, reason string, now time.Time, appendEvent func(map[string]any) error) (bool, error) {
-	tag, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='skipped',failure_code=$3,dispatch_lease_until=NULL,updated_at=$4"+
-		" WHERE rollout_id=$1 AND node_id=$2 AND state='pending'", rollout.ID, node.NodeID, reason, now)
+func pauseRolloutForSkippedNode(ctx context.Context, q operationstore.Store, rollout *rolloutRow, node *rolloutNodeRow, reason string, now time.Time, appendEvent func(map[string]any) error) (bool, error) {
+	at, err := value.FromTime(now)
+	if err != nil {
+		return false, err
+	}
+	changed, err := q.SkipRolloutNode(ctx, rollout.ID, *node, reason, at)
 	if err != nil {
 		return false, fmt.Errorf("skip rollout node: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if !changed {
 		return false, nil
-	}
-	if _, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET dispatch_lease_until=NULL,updated_at=$3"+
-		" WHERE rollout_id=$1 AND batch=$2 AND state='pending'", rollout.ID, node.Batch, now); err != nil {
-		return false, fmt.Errorf("release skipped rollout batch claims: %w", err)
-	}
-	if _, err := q.Exec(ctx, "UPDATE agent_rollouts SET state='paused',pause_code='node_skipped',updated_at=$2 WHERE id=$1", rollout.ID, now); err != nil {
-		return false, fmt.Errorf("pause skipped rollout: %w", err)
 	}
 	node.State = RolloutNodeSkipped
 	node.FailureCode = reason
@@ -1218,7 +1069,7 @@ func pauseRolloutForSkippedNode(ctx context.Context, q rolloutQueryer, rollout *
 // version make a reclaim after a Controller crash replay the exact same
 // operation instead of dispatching a duplicate upgrade.
 func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, node claimedRolloutNode) (bool, error) {
-	rollout, err := scanRolloutRow(s.pool.QueryRow(ctx, rolloutHeaderSelect+" WHERE id=$1", rolloutID))
+	rollout, err := s.loadRollout(ctx, rolloutID)
 	if err != nil {
 		return false, fmt.Errorf("reload rollout for dispatch: %w", err)
 	}
@@ -1268,14 +1119,20 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 	default:
 		return false, fmt.Errorf("dispatch rollout node upgrade: %w", err)
 	}
-	tx, err := s.pool.Begin(ctx)
+	at, err := value.FromTime(s.now())
+	if err != nil {
+		return false, err
+	}
+	operationID, err := uuid.Parse(operation.ID)
+	if err != nil {
+		return false, err
+	}
+	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin rollout dispatch record: %w", err)
 	}
-	defer rollback(tx)
-	q := rolloutQueryer(tx)
-	if _, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='running',operation_id=$3,from_version=$4,dispatch_lease_until=NULL,updated_at=$5"+
-		" WHERE rollout_id=$1 AND node_id=$2 AND state='pending'", rolloutID, node.NodeID, operation.ID, node.Observation.AgentVersion, s.now()); err != nil {
+	defer rollbackRollout(tx)
+	if err := q.AttachRolloutOperation(ctx, rolloutID, node.NodeID, operationID, node.Observation.AgentVersion, at); err != nil {
 		return false, fmt.Errorf("record rollout dispatch: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1285,19 +1142,17 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 }
 
 func (s *Service) recordRolloutNodeSkipped(ctx context.Context, rolloutID uuid.UUID, nodeID uuid.UUID, reason string) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin rollout skip record: %w", err)
 	}
-	defer rollback(tx)
-	q := rolloutQueryer(tx)
-	rollout, err := scanRolloutRow(q.QueryRow(ctx, rolloutHeaderSelect+" WHERE id=$1 FOR UPDATE", rolloutID))
+	defer rollbackRollout(tx)
+	rollout, err := q.Rollout(ctx, rolloutID, true)
 	if err != nil {
 		return false, fmt.Errorf("lock rollout skip record: %w", err)
 	}
-	var node rolloutNodeRow
-	node.NodeID = nodeID
-	if err := q.QueryRow(ctx, "SELECT batch,state FROM agent_rollout_nodes WHERE rollout_id=$1 AND node_id=$2 FOR UPDATE", rolloutID, nodeID).Scan(&node.Batch, &node.State); err != nil {
+	node, err := q.LockRolloutNode(ctx, rolloutID, nodeID)
+	if err != nil {
 		return false, fmt.Errorf("lock skipped rollout node: %w", err)
 	}
 	now := s.now()
@@ -1319,7 +1174,7 @@ func (s *Service) recordRolloutNodeSkipped(ctx context.Context, rolloutID uuid.U
 		return false, err
 	}
 	for _, event := range events {
-		if err := audit.AppendChain(ctx, tx, event); err != nil {
+		if err := audit.AppendChainTx(ctx, tx, event); err != nil {
 			return false, fmt.Errorf("append rollout skip audit: %w", err)
 		}
 	}
@@ -1330,18 +1185,39 @@ func (s *Service) recordRolloutNodeSkipped(ctx context.Context, rolloutID uuid.U
 }
 
 func (s *Service) releaseRolloutNodeClaim(ctx context.Context, rolloutID uuid.UUID, nodeID uuid.UUID) error {
-	tx, err := s.pool.Begin(ctx)
+	at, err := value.FromTime(s.now())
+	if err != nil {
+		return err
+	}
+	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return fmt.Errorf("begin rollout claim release: %w", err)
 	}
-	defer rollback(tx)
-	q := rolloutQueryer(tx)
-	if _, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET dispatch_lease_until=NULL,updated_at=$3"+
-		" WHERE rollout_id=$1 AND node_id=$2", rolloutID, nodeID, s.now()); err != nil {
+	defer rollbackRollout(tx)
+	if err := q.ReleaseRolloutClaim(ctx, rolloutID, nodeID, at); err != nil {
 		return fmt.Errorf("release rollout node claim: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit rollout claim release: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) beginRollout(ctx context.Context) (database.Tx, operationstore.Store, error) {
+	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := operationstore.FromTransaction(tx)
+	if err != nil {
+		rollbackRollout(tx)
+		return nil, nil, err
+	}
+	return tx, store, nil
+}
+
+func rollbackRollout(tx database.Tx) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = tx.Rollback(ctx)
 }

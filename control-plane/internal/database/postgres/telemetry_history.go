@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
 	"github.com/google/uuid"
 )
@@ -31,7 +32,13 @@ func (s *TelemetryHistoryStore) Insert(ctx context.Context, nodeID, batchID uuid
 	return nil
 }
 
-func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since time.Time) ([]telemetryhistory.Point, error) {
+func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetryhistory.Point, error) {
+	if err := since.Validate(); err != nil {
+		return nil, err
+	}
+	if !since.Valid {
+		return nil, database.ErrConstraint
+	}
 	query := `SELECT sampled_at,metric,1,value,value,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at >= $3 ORDER BY sampled_at LIMIT 2000`
 	switch resolution {
 	case "raw":

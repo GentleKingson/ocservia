@@ -25,6 +25,9 @@ func (s rbacStore) WorkspaceRoles(ctx context.Context, identity, workspace uuid.
 func (s rbacStore) Node(ctx context.Context, id uuid.UUID) database.Row {
 	return s.QueryRow(ctx, `SELECT workspace_id FROM nodes WHERE id=$1`, id)
 }
+func (s rbacStore) UpgradeNode(ctx context.Context, id uuid.UUID) database.Row {
+	return s.QueryRow(ctx, `SELECT n.workspace_id,COALESCE(o.architecture,''),COALESCE(o.agent_version,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, id)
+}
 func (s rbacStore) Operation(ctx context.Context, id uuid.UUID) database.Row {
 	return s.QueryRow(ctx, `SELECT workspace_id,node_id FROM operations WHERE id=$1`, id)
 }
@@ -36,6 +39,12 @@ func (s rbacStore) AuthorizedWorkspaces(ctx context.Context, id uuid.UUID, break
 		return s.Query(ctx, `SELECT id,'PlatformAdmin' FROM workspaces`)
 	}
 	return s.Query(ctx, `SELECT DISTINCT workspace_id,role_name FROM role_bindings WHERE identity_id=$1`, id)
+}
+func (s rbacStore) Workspaces(ctx context.Context, ids []uuid.UUID, all bool) (database.Rows, error) {
+	if all {
+		return s.Query(ctx, `SELECT id,name,slug,version FROM workspaces ORDER BY name,id`)
+	}
+	return s.Query(ctx, `SELECT id,name,slug,version FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY name,id`, ids)
 }
 func (s rbacStore) Insert(ctx context.Context, b rbacstore.Binding) error {
 	_, err := s.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at,approval_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, b.ID, b.IdentityID, b.WorkspaceID, b.Role, b.ResourceType, rbacID(b.ResourceID), b.ActorID, b.At, rbacID(b.ApprovalID))

@@ -1,0 +1,375 @@
+{
+  "version": 7,
+  "previous_checksum": "63d54a9b8ef56ce50d7a7581f00f0a05e4acf6d341f5e5ba5aa06d5593bcd540",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "jsonb_array_validator",
+          "object": "ocserv_jsonb_array_valid",
+          "kind": "function",
+          "sql": "CREATE FUNCTION ocserv_jsonb_array_valid(doc LONGBLOB) RETURNS BOOLEAN DETERMINISTIC NO SQL SQL SECURITY DEFINER\nBEGIN\n DECLARE source LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE masked LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '';\n DECLARE token LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE digits LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE c CHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE posn BIGINT DEFAULT 1;\n DECLARE startn BIGINT;\n DECLARE n BIGINT;\n DECLARE dotn BIGINT;\n DECLARE en BIGINT;\n DECLARE expo BIGINT;\n DECLARE scale_n BIGINT;\n DECLARE integer_n BIGINT;\n DECLARE leading_n BIGINT;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION RETURN FALSE;\n IF doc IS NULL THEN RETURN FALSE; END IF;\n SET source=CONVERT(doc USING utf8mb4);\n IF CAST(source AS BINARY)\u003c\u003edoc THEN RETURN FALSE; END IF;\n SET n=CHAR_LENGTH(source);\n WHILE posn\u003c=n DO\n  SET c=SUBSTRING(source,posn,1);\n  IF c='\"' THEN\n   SET startn=posn;\n   SET posn=posn+1;\n   WHILE posn\u003c=n AND SUBSTRING(source,posn,1)\u003c\u003e'\"' DO\n    IF ASCII(SUBSTRING(source,posn,1))=92 THEN SET posn=posn+1; END IF;\n    SET posn=posn+1;\n   END WHILE;\n   IF posn\u003en THEN RETURN FALSE; END IF;\n   SET token=SUBSTRING(source,startn,posn-startn+1);\n   IF NOT JSON_VALID(token) OR LOCATE(0x00,CAST(JSON_UNQUOTE(token) AS BINARY))\u003c\u003e0 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,token);\n   SET posn=posn+1;\n  ELSEIF c='-' OR (ASCII(c)\u003e=48 AND ASCII(c)\u003c=57) THEN\n   SET startn=posn;\n   WHILE posn\u003c=n AND LOCATE(SUBSTRING(source,posn,1),'0123456789.eE+-')\u003e0 DO SET posn=posn+1; END WHILE;\n   SET token=SUBSTRING(source,startn,posn-startn);\n   IF NOT (token REGEXP '(?-i)\\\\A-?(0|[1-9][0-9]*)(\\\\.[0-9]+)?([eE][+-]?[0-9]+)?\\\\z') THEN RETURN FALSE; END IF;\n   IF LEFT(token,1)='-' THEN SET token=SUBSTRING(token,2); END IF;\n   SET en=LOCATE('e',LOWER(token)); SET expo=0;\n   IF en\u003e0 THEN\n    SET digits=SUBSTRING(token,en+1);\n    IF LEFT(digits,1) IN ('-','+') THEN SET digits=SUBSTRING(digits,2); END IF;\n    SET digits=TRIM(LEADING '0' FROM digits);\n    IF CHAR_LENGTH(digits)\u003e10 THEN RETURN FALSE; END IF;\n    IF digits\u003c\u003e'' AND CAST(digits AS UNSIGNED)\u003e1073741823 THEN RETURN FALSE; END IF;\n    SET expo=CAST(SUBSTRING(token,en+1) AS SIGNED);\n    SET token=LEFT(token,en-1);\n   END IF;\n   SET dotn=LOCATE('.',token);\n   SET scale_n=IF(dotn=0,0,CHAR_LENGTH(token)-dotn)-expo;\n   IF scale_n\u003e16383 THEN RETURN FALSE; END IF;\n   SET digits=REPLACE(token,'.','');\n   SET leading_n=CHAR_LENGTH(digits)-CHAR_LENGTH(TRIM(LEADING '0' FROM digits));\n   SET integer_n=IF(dotn=0,CHAR_LENGTH(token),dotn-1)+expo-leading_n;\n   IF leading_n\u003c\u003eCHAR_LENGTH(digits) AND integer_n\u003e131072 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,'0');\n  ELSE\n   SET masked=CONCAT(masked,c); SET posn=posn+1;\n  END IF;\n END WHILE;\n IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;\n RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'ARRAY';\nEND",
+          "checksum": "9c4ccb301e24766e496de731b67c1c90bd507baaaa01fbb30c17a52b441d720f",
+          "before": "",
+          "after": "2d82dbe3f4411ac5cbae67769b9125788819b3231afa579f63120d138986d450"
+        },
+        {
+          "name": "migrate_v4_time_certificates_insert",
+          "object": "migrate_v4_time_certificates_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_certificates_insert` BEFORE INSERT ON `certificates` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "8a94da07f1eded794c00ab62ae7ef8f88b26b0a566760b7b686c5affaac05a21",
+          "before": "",
+          "after": "e9b7edb2ed7716447ef1d528f67f45a57e91dbd628ec18a44e36e80b93ce2bf7"
+        },
+        {
+          "name": "migrate_v4_time_certificates_update",
+          "object": "migrate_v4_time_certificates_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_certificates_update` BEFORE UPDATE ON `certificates` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b98e2a904b4338823d903ccb4a919b14caf71a04b693c958852c528e80f9fe0c",
+          "before": "",
+          "after": "d19f89c29e00628156274e2b14697551caada7fc31ba2d2cc6baf2f5c2443eff"
+        },
+        {
+          "name": "migrate_v4_time_certificates_delete",
+          "object": "migrate_v4_time_certificates_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_certificates_delete` BEFORE DELETE ON `certificates` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1a1fec7a1cf364876c7977a56d7b6c8084382dbde41da7e2f6f937a45ef806d3",
+          "before": "",
+          "after": "48574bda3dd6499039691674339c845df520a485ad2b7a28ca84c9ee388ae4ce"
+        },
+        {
+          "name": "certificates_not_before_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_not_before` BIGINT NULL",
+          "checksum": "5b28854adeaa184b3f55a5090816879c0c9b95ce58dcc0cce463c41be60fb9ad",
+          "before": "8f58bdf897607e43a1dd101ec62b0cda4bf0215d3f0a24fe5c725974cf9412c2",
+          "after": "2c9d50825cc793a72a4ee7b4dde1e39cdf8c6044693844477cd7e401d37848ac"
+        },
+        {
+          "name": "certificates_revoked_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_revoked_at` BIGINT NULL",
+          "checksum": "4bebbece5421cd101e1e6925197d173b3475f5479c60e323b41789d2ddb3f879",
+          "before": "2c9d50825cc793a72a4ee7b4dde1e39cdf8c6044693844477cd7e401d37848ac",
+          "after": "3b17eadf2e6e341f1d3ac164c51ac7d33bf30275b45f3aeefec45cc2d2e53d9b"
+        },
+        {
+          "name": "certificates_created_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "b0803628e2412b5ea383b67ee10ff27a13231a4c8277e77413c1599d18830219",
+          "before": "3b17eadf2e6e341f1d3ac164c51ac7d33bf30275b45f3aeefec45cc2d2e53d9b",
+          "after": "581c645cdc8ce9c9963bd1c36dcf7be71f66f0c0d330267628a513d1ee7a62f3"
+        },
+        {
+          "name": "certificates_updated_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "08970ece0686a930162528b348e4a80ce4efff2d6bc5a35ffb8735b6fca2f0ac",
+          "before": "581c645cdc8ce9c9963bd1c36dcf7be71f66f0c0d330267628a513d1ee7a62f3",
+          "after": "5c47a302900ff2ff32b89e4784b2c100eedfcafeada0c125690c8ec9e2c1ae9b"
+        },
+        {
+          "name": "certificates_csr_receipt_verified_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_csr_receipt_verified_at` BIGINT NULL",
+          "checksum": "11c6e8ba4ffdd85152a9c1e6b24fcbebab98514cd12d58e53c9e61c9c0e64f76",
+          "before": "5c47a302900ff2ff32b89e4784b2c100eedfcafeada0c125690c8ec9e2c1ae9b",
+          "after": "cb25d59fe0f10362f845a8f81cbcff9d582a64ac4d3e7ed3b57386068b3ac208"
+        },
+        {
+          "name": "certificates_times_backfill",
+          "object": "certificates",
+          "kind": "data",
+          "sql": "UPDATE `certificates` source SET `logical_not_before`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`not_before`),`logical_revoked_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`),`logical_csr_receipt_verified_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`csr_receipt_verified_at`)",
+          "checksum": "b9353f304a054801c1dd9746591dabbacf84b116afbb303c0412ba509e7475ba",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `certificates` source WHERE (source.`not_before` IS NOT NULL AND source.`logical_not_before` IS NULL) OR NOT(source.`logical_not_before` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`not_before`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)) OR (source.`csr_receipt_verified_at` IS NOT NULL AND source.`logical_csr_receipt_verified_at` IS NULL) OR NOT(source.`logical_csr_receipt_verified_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`csr_receipt_verified_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "certificates_times_switch",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` DROP CONSTRAINT certificates_certificates_csr_receipt_check,DROP COLUMN `not_before`,CHANGE COLUMN `logical_not_before` `not_before` BIGINT NULL,ADD CONSTRAINT `certificates_not_before_range` CHECK (`not_before` IS NULL OR `not_before` IN (-9223372036854775808,9223372036854775807) OR (`not_before`\u003e=-211813488000000000 AND `not_before`\u003c9223371331200000000)),DROP COLUMN `revoked_at`,CHANGE COLUMN `logical_revoked_at` `revoked_at` BIGINT NULL,ADD CONSTRAINT `certificates_revoked_at_range` CHECK (`revoked_at` IS NULL OR `revoked_at` IN (-9223372036854775808,9223372036854775807) OR (`revoked_at`\u003e=-211813488000000000 AND `revoked_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `certificates_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `certificates_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),DROP COLUMN `csr_receipt_verified_at`,CHANGE COLUMN `logical_csr_receipt_verified_at` `csr_receipt_verified_at` BIGINT NULL,ADD CONSTRAINT `certificates_csr_receipt_verified_at_range` CHECK (`csr_receipt_verified_at` IS NULL OR `csr_receipt_verified_at` IN (-9223372036854775808,9223372036854775807) OR (`csr_receipt_verified_at`\u003e=-211813488000000000 AND `csr_receipt_verified_at`\u003c9223371331200000000)),ADD CONSTRAINT certificates_certificates_csr_receipt_check CHECK (((state IN ('csr_ready','signing','signer_unavailable','issued','expiring','expired','revoking','revocation_unknown','revoked')) AND csr_receipt_verified_at IS NOT NULL AND OCTET_LENGTH(csr_receipt_sha256)=32 AND csr_privd_attestation_key_id IS NOT NULL AND OCTET_LENGTH(csr_effect_record_id) BETWEEN 16 AND 32 AND OCTET_LENGTH(csr_der_sha256)=32 AND OCTET_LENGTH(csr_requested_subject_sha256)=32) OR csr_receipt_legacy OR state IN ('csr_pending','failed','unknown'))",
+          "checksum": "b3c765bac9577f5d6c79f16020ab7feb6b9bc6f8f04d7ec55c6edb6b94e64205",
+          "before": "cb25d59fe0f10362f845a8f81cbcff9d582a64ac4d3e7ed3b57386068b3ac208",
+          "after": "6684c3764344bf140dc719f9fb8f226f92bdd3508d24da0af19afa63cb43a90c",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `certificates` source WHERE (source.`not_before` IS NOT NULL AND source.`logical_not_before` IS NULL) OR NOT(source.`logical_not_before` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`not_before`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)) OR (source.`csr_receipt_verified_at` IS NOT NULL AND source.`logical_csr_receipt_verified_at` IS NULL) OR NOT(source.`logical_csr_receipt_verified_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`csr_receipt_verified_at`))),'valid','invalid')"
+        },
+        {
+          "name": "certificate_dns_names_blob",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE certificates ADD COLUMN logical_dns_names LONGBLOB NULL",
+          "checksum": "c300cbbe1db220277da367999e936f9cd5130eb16158120fa5d73b49c5313152",
+          "before": "6684c3764344bf140dc719f9fb8f226f92bdd3508d24da0af19afa63cb43a90c",
+          "after": "e824e452b20a8223cd1ff3ec5c8657957ac484f2a1b31a00806f7a87f9520ad7"
+        },
+        {
+          "name": "certificate_dns_names_copy",
+          "object": "certificates",
+          "kind": "data",
+          "sql": "UPDATE certificates SET logical_dns_names=CAST(dns_names AS BINARY)",
+          "checksum": "338c0d5106504c734dcb89218578e2a1b470ff7260423a8411eebd29403acae0",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM certificates WHERE NOT (logical_dns_names \u003c=\u003e CAST(dns_names AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_dns_names)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "certificate_dns_names_switch",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE certificates DROP CONSTRAINT certificates_certificates_dns_names_check,DROP COLUMN dns_names,CHANGE COLUMN logical_dns_names dns_names LONGBLOB NOT NULL DEFAULT ('[]')",
+          "checksum": "b5ccc1f57b6578ce794195cfe72cc3d345d160ada055b09f3b3dd71c706f68c5",
+          "before": "e824e452b20a8223cd1ff3ec5c8657957ac484f2a1b31a00806f7a87f9520ad7",
+          "after": "52d4488ed9fb5a68d744745ed23f960135f6d64006a11f2bebcccddf7e76a597",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM certificates WHERE NOT (logical_dns_names \u003c=\u003e CAST(dns_names AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_dns_names)),'valid','invalid')"
+        },
+        {
+          "name": "certificate_jsonb_insert",
+          "object": "certificate_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `certificate_jsonb_insert` BEFORE INSERT ON certificates FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.dns_names) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid certificate JSON array'; END IF; END",
+          "checksum": "c669fc749cf33fe26b625b41b0425afb3504c8960127b8cb33dd4be0709152e7",
+          "before": "",
+          "after": "ddd44daf8d76e6a3b474a15fb633921653270d10a0417fd1d72ceb19b3e5ec90"
+        },
+        {
+          "name": "certificate_jsonb_update",
+          "object": "certificate_jsonb_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `certificate_jsonb_update` BEFORE UPDATE ON certificates FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.dns_names) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid certificate JSON array'; END IF; END",
+          "checksum": "0f21bb633764ab652278ca8814cc42b1fd7dfe28774f0d76ddc082bc2d528e27",
+          "before": "",
+          "after": "43c332e97b9e57a92c039952985c886f6864787ce6f7fb2d914df43d8013bb20"
+        },
+        {
+          "name": "drop_migrate_v4_time_certificates_insert",
+          "object": "migrate_v4_time_certificates_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_certificates_insert`",
+          "checksum": "c8f00bcfedf887524519c3345c4086620610184dfcff9e4c721cdca13b1ab05d",
+          "before": "e9b7edb2ed7716447ef1d528f67f45a57e91dbd628ec18a44e36e80b93ce2bf7",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_certificates_update",
+          "object": "migrate_v4_time_certificates_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_certificates_update`",
+          "checksum": "5e1f8196058cf7556267b471f08a88aa3ce9c18af8bd0f29175909969d6220e6",
+          "before": "d19f89c29e00628156274e2b14697551caada7fc31ba2d2cc6baf2f5c2443eff",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_certificates_delete",
+          "object": "migrate_v4_time_certificates_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_certificates_delete`",
+          "checksum": "6328956553ead059acd08a91259152efa78ec94fe2a84ea4d201793afdf2b4e6",
+          "before": "48574bda3dd6499039691674339c845df520a485ad2b7a28ca84c9ee388ae4ce",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "jsonb_array_validator",
+          "object": "ocserv_jsonb_array_valid",
+          "kind": "function",
+          "sql": "CREATE FUNCTION ocserv_jsonb_array_valid(doc LONGBLOB) RETURNS BOOLEAN DETERMINISTIC NO SQL SQL SECURITY DEFINER\nBEGIN\n DECLARE source LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE masked LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '';\n DECLARE token LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE digits LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE c CHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE posn BIGINT DEFAULT 1;\n DECLARE startn BIGINT;\n DECLARE n BIGINT;\n DECLARE dotn BIGINT;\n DECLARE en BIGINT;\n DECLARE expo BIGINT;\n DECLARE scale_n BIGINT;\n DECLARE integer_n BIGINT;\n DECLARE leading_n BIGINT;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION RETURN FALSE;\n IF doc IS NULL THEN RETURN FALSE; END IF;\n SET source=CONVERT(doc USING utf8mb4);\n IF CAST(source AS BINARY)\u003c\u003edoc THEN RETURN FALSE; END IF;\n SET n=CHAR_LENGTH(source);\n WHILE posn\u003c=n DO\n  SET c=SUBSTRING(source,posn,1);\n  IF c='\"' THEN\n   SET startn=posn;\n   SET posn=posn+1;\n   WHILE posn\u003c=n AND SUBSTRING(source,posn,1)\u003c\u003e'\"' DO\n    IF ASCII(SUBSTRING(source,posn,1))=92 THEN SET posn=posn+1; END IF;\n    SET posn=posn+1;\n   END WHILE;\n   IF posn\u003en THEN RETURN FALSE; END IF;\n   SET token=SUBSTRING(source,startn,posn-startn+1);\n   IF NOT JSON_VALID(token) OR LOCATE(0x00,CAST(JSON_UNQUOTE(token) AS BINARY))\u003c\u003e0 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,token);\n   SET posn=posn+1;\n  ELSEIF c='-' OR (ASCII(c)\u003e=48 AND ASCII(c)\u003c=57) THEN\n   SET startn=posn;\n   WHILE posn\u003c=n AND LOCATE(SUBSTRING(source,posn,1),'0123456789.eE+-')\u003e0 DO SET posn=posn+1; END WHILE;\n   SET token=SUBSTRING(source,startn,posn-startn);\n   IF NOT (token REGEXP '(?-i)\\\\A-?(0|[1-9][0-9]*)(\\\\.[0-9]+)?([eE][+-]?[0-9]+)?\\\\z') THEN RETURN FALSE; END IF;\n   IF LEFT(token,1)='-' THEN SET token=SUBSTRING(token,2); END IF;\n   SET en=LOCATE('e',LOWER(token)); SET expo=0;\n   IF en\u003e0 THEN\n    SET digits=SUBSTRING(token,en+1);\n    IF LEFT(digits,1) IN ('-','+') THEN SET digits=SUBSTRING(digits,2); END IF;\n    SET digits=TRIM(LEADING '0' FROM digits);\n    IF CHAR_LENGTH(digits)\u003e10 THEN RETURN FALSE; END IF;\n    IF digits\u003c\u003e'' AND CAST(digits AS UNSIGNED)\u003e1073741823 THEN RETURN FALSE; END IF;\n    SET expo=CAST(SUBSTRING(token,en+1) AS SIGNED);\n    SET token=LEFT(token,en-1);\n   END IF;\n   SET dotn=LOCATE('.',token);\n   SET scale_n=IF(dotn=0,0,CHAR_LENGTH(token)-dotn)-expo;\n   IF scale_n\u003e16383 THEN RETURN FALSE; END IF;\n   SET digits=REPLACE(token,'.','');\n   SET leading_n=CHAR_LENGTH(digits)-CHAR_LENGTH(TRIM(LEADING '0' FROM digits));\n   SET integer_n=IF(dotn=0,CHAR_LENGTH(token),dotn-1)+expo-leading_n;\n   IF leading_n\u003c\u003eCHAR_LENGTH(digits) AND integer_n\u003e131072 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,'0');\n  ELSE\n   SET masked=CONCAT(masked,c); SET posn=posn+1;\n  END IF;\n END WHILE;\n IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;\n RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'ARRAY';\nEND",
+          "checksum": "9c4ccb301e24766e496de731b67c1c90bd507baaaa01fbb30c17a52b441d720f",
+          "before": "",
+          "after": "2d82dbe3f4411ac5cbae67769b9125788819b3231afa579f63120d138986d450"
+        },
+        {
+          "name": "migrate_v4_time_certificates_insert",
+          "object": "migrate_v4_time_certificates_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_certificates_insert` BEFORE INSERT ON `certificates` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "8a94da07f1eded794c00ab62ae7ef8f88b26b0a566760b7b686c5affaac05a21",
+          "before": "",
+          "after": "e9b7edb2ed7716447ef1d528f67f45a57e91dbd628ec18a44e36e80b93ce2bf7"
+        },
+        {
+          "name": "migrate_v4_time_certificates_update",
+          "object": "migrate_v4_time_certificates_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_certificates_update` BEFORE UPDATE ON `certificates` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b98e2a904b4338823d903ccb4a919b14caf71a04b693c958852c528e80f9fe0c",
+          "before": "",
+          "after": "d19f89c29e00628156274e2b14697551caada7fc31ba2d2cc6baf2f5c2443eff"
+        },
+        {
+          "name": "migrate_v4_time_certificates_delete",
+          "object": "migrate_v4_time_certificates_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_certificates_delete` BEFORE DELETE ON `certificates` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1a1fec7a1cf364876c7977a56d7b6c8084382dbde41da7e2f6f937a45ef806d3",
+          "before": "",
+          "after": "48574bda3dd6499039691674339c845df520a485ad2b7a28ca84c9ee388ae4ce"
+        },
+        {
+          "name": "certificates_not_before_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_not_before` BIGINT NULL",
+          "checksum": "5b28854adeaa184b3f55a5090816879c0c9b95ce58dcc0cce463c41be60fb9ad",
+          "before": "8f58bdf897607e43a1dd101ec62b0cda4bf0215d3f0a24fe5c725974cf9412c2",
+          "after": "2c9d50825cc793a72a4ee7b4dde1e39cdf8c6044693844477cd7e401d37848ac"
+        },
+        {
+          "name": "certificates_revoked_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_revoked_at` BIGINT NULL",
+          "checksum": "4bebbece5421cd101e1e6925197d173b3475f5479c60e323b41789d2ddb3f879",
+          "before": "2c9d50825cc793a72a4ee7b4dde1e39cdf8c6044693844477cd7e401d37848ac",
+          "after": "3b17eadf2e6e341f1d3ac164c51ac7d33bf30275b45f3aeefec45cc2d2e53d9b"
+        },
+        {
+          "name": "certificates_created_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "b0803628e2412b5ea383b67ee10ff27a13231a4c8277e77413c1599d18830219",
+          "before": "3b17eadf2e6e341f1d3ac164c51ac7d33bf30275b45f3aeefec45cc2d2e53d9b",
+          "after": "581c645cdc8ce9c9963bd1c36dcf7be71f66f0c0d330267628a513d1ee7a62f3"
+        },
+        {
+          "name": "certificates_updated_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "08970ece0686a930162528b348e4a80ce4efff2d6bc5a35ffb8735b6fca2f0ac",
+          "before": "581c645cdc8ce9c9963bd1c36dcf7be71f66f0c0d330267628a513d1ee7a62f3",
+          "after": "5c47a302900ff2ff32b89e4784b2c100eedfcafeada0c125690c8ec9e2c1ae9b"
+        },
+        {
+          "name": "certificates_csr_receipt_verified_at_column",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` ADD COLUMN `logical_csr_receipt_verified_at` BIGINT NULL",
+          "checksum": "11c6e8ba4ffdd85152a9c1e6b24fcbebab98514cd12d58e53c9e61c9c0e64f76",
+          "before": "5c47a302900ff2ff32b89e4784b2c100eedfcafeada0c125690c8ec9e2c1ae9b",
+          "after": "cb25d59fe0f10362f845a8f81cbcff9d582a64ac4d3e7ed3b57386068b3ac208"
+        },
+        {
+          "name": "certificates_times_backfill",
+          "object": "certificates",
+          "kind": "data",
+          "sql": "UPDATE `certificates` source SET `logical_not_before`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`not_before`),`logical_revoked_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`),`logical_csr_receipt_verified_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`csr_receipt_verified_at`)",
+          "checksum": "b9353f304a054801c1dd9746591dabbacf84b116afbb303c0412ba509e7475ba",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `certificates` source WHERE (source.`not_before` IS NOT NULL AND source.`logical_not_before` IS NULL) OR NOT(source.`logical_not_before` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`not_before`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)) OR (source.`csr_receipt_verified_at` IS NOT NULL AND source.`logical_csr_receipt_verified_at` IS NULL) OR NOT(source.`logical_csr_receipt_verified_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`csr_receipt_verified_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "certificates_times_switch",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE `certificates` DROP CONSTRAINT certificates_certificates_csr_receipt_check,DROP COLUMN `not_before`,CHANGE COLUMN `logical_not_before` `not_before` BIGINT NULL,ADD CONSTRAINT `certificates_not_before_range` CHECK (`not_before` IS NULL OR `not_before` IN (-9223372036854775808,9223372036854775807) OR (`not_before`\u003e=-211813488000000000 AND `not_before`\u003c9223371331200000000)),DROP COLUMN `revoked_at`,CHANGE COLUMN `logical_revoked_at` `revoked_at` BIGINT NULL,ADD CONSTRAINT `certificates_revoked_at_range` CHECK (`revoked_at` IS NULL OR `revoked_at` IN (-9223372036854775808,9223372036854775807) OR (`revoked_at`\u003e=-211813488000000000 AND `revoked_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `certificates_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `certificates_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),DROP COLUMN `csr_receipt_verified_at`,CHANGE COLUMN `logical_csr_receipt_verified_at` `csr_receipt_verified_at` BIGINT NULL,ADD CONSTRAINT `certificates_csr_receipt_verified_at_range` CHECK (`csr_receipt_verified_at` IS NULL OR `csr_receipt_verified_at` IN (-9223372036854775808,9223372036854775807) OR (`csr_receipt_verified_at`\u003e=-211813488000000000 AND `csr_receipt_verified_at`\u003c9223371331200000000)),ADD CONSTRAINT certificates_certificates_csr_receipt_check CHECK (((state IN ('csr_ready','signing','signer_unavailable','issued','expiring','expired','revoking','revocation_unknown','revoked')) AND csr_receipt_verified_at IS NOT NULL AND OCTET_LENGTH(csr_receipt_sha256)=32 AND csr_privd_attestation_key_id IS NOT NULL AND OCTET_LENGTH(csr_effect_record_id) BETWEEN 16 AND 32 AND OCTET_LENGTH(csr_der_sha256)=32 AND OCTET_LENGTH(csr_requested_subject_sha256)=32) OR csr_receipt_legacy OR state IN ('csr_pending','failed','unknown'))",
+          "checksum": "b3c765bac9577f5d6c79f16020ab7feb6b9bc6f8f04d7ec55c6edb6b94e64205",
+          "before": "cb25d59fe0f10362f845a8f81cbcff9d582a64ac4d3e7ed3b57386068b3ac208",
+          "after": "6684c3764344bf140dc719f9fb8f226f92bdd3508d24da0af19afa63cb43a90c",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `certificates` source WHERE (source.`not_before` IS NOT NULL AND source.`logical_not_before` IS NULL) OR NOT(source.`logical_not_before` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`not_before`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)) OR (source.`csr_receipt_verified_at` IS NOT NULL AND source.`logical_csr_receipt_verified_at` IS NULL) OR NOT(source.`logical_csr_receipt_verified_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`csr_receipt_verified_at`))),'valid','invalid')"
+        },
+        {
+          "name": "certificate_dns_names_blob",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE certificates ADD COLUMN logical_dns_names LONGBLOB NULL",
+          "checksum": "c300cbbe1db220277da367999e936f9cd5130eb16158120fa5d73b49c5313152",
+          "before": "6684c3764344bf140dc719f9fb8f226f92bdd3508d24da0af19afa63cb43a90c",
+          "after": "e824e452b20a8223cd1ff3ec5c8657957ac484f2a1b31a00806f7a87f9520ad7"
+        },
+        {
+          "name": "certificate_dns_names_copy",
+          "object": "certificates",
+          "kind": "data",
+          "sql": "UPDATE certificates SET logical_dns_names=CAST(dns_names AS BINARY)",
+          "checksum": "338c0d5106504c734dcb89218578e2a1b470ff7260423a8411eebd29403acae0",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM certificates WHERE NOT (logical_dns_names \u003c=\u003e CAST(dns_names AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_dns_names)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "certificate_dns_names_switch",
+          "object": "certificates",
+          "kind": "table",
+          "sql": "ALTER TABLE certificates DROP CONSTRAINT certificates_certificates_dns_names_check,DROP COLUMN dns_names,CHANGE COLUMN logical_dns_names dns_names LONGBLOB NOT NULL DEFAULT ('[]')",
+          "checksum": "b5ccc1f57b6578ce794195cfe72cc3d345d160ada055b09f3b3dd71c706f68c5",
+          "before": "e824e452b20a8223cd1ff3ec5c8657957ac484f2a1b31a00806f7a87f9520ad7",
+          "after": "52d4488ed9fb5a68d744745ed23f960135f6d64006a11f2bebcccddf7e76a597",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM certificates WHERE NOT (logical_dns_names \u003c=\u003e CAST(dns_names AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_dns_names)),'valid','invalid')"
+        },
+        {
+          "name": "certificate_jsonb_insert",
+          "object": "certificate_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `certificate_jsonb_insert` BEFORE INSERT ON certificates FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.dns_names) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid certificate JSON array'; END IF; END",
+          "checksum": "c669fc749cf33fe26b625b41b0425afb3504c8960127b8cb33dd4be0709152e7",
+          "before": "",
+          "after": "ddd44daf8d76e6a3b474a15fb633921653270d10a0417fd1d72ceb19b3e5ec90"
+        },
+        {
+          "name": "certificate_jsonb_update",
+          "object": "certificate_jsonb_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `certificate_jsonb_update` BEFORE UPDATE ON certificates FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.dns_names) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid certificate JSON array'; END IF; END",
+          "checksum": "0f21bb633764ab652278ca8814cc42b1fd7dfe28774f0d76ddc082bc2d528e27",
+          "before": "",
+          "after": "43c332e97b9e57a92c039952985c886f6864787ce6f7fb2d914df43d8013bb20"
+        },
+        {
+          "name": "drop_migrate_v4_time_certificates_insert",
+          "object": "migrate_v4_time_certificates_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_certificates_insert`",
+          "checksum": "c8f00bcfedf887524519c3345c4086620610184dfcff9e4c721cdca13b1ab05d",
+          "before": "e9b7edb2ed7716447ef1d528f67f45a57e91dbd628ec18a44e36e80b93ce2bf7",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_certificates_update",
+          "object": "migrate_v4_time_certificates_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_certificates_update`",
+          "checksum": "5e1f8196058cf7556267b471f08a88aa3ce9c18af8bd0f29175909969d6220e6",
+          "before": "d19f89c29e00628156274e2b14697551caada7fc31ba2d2cc6baf2f5c2443eff",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_certificates_delete",
+          "object": "migrate_v4_time_certificates_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_certificates_delete`",
+          "checksum": "6328956553ead059acd08a91259152efa78ec94fe2a84ea4d201793afdf2b4e6",
+          "before": "48574bda3dd6499039691674339c845df520a485ad2b7a28ca84c9ee388ae4ce",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

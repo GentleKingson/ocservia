@@ -1,0 +1,225 @@
+{
+  "version": 8,
+  "previous_checksum": "83cf9c6f0e98d59199ee9a7d4a364a0d0ba6e7e1787b8d4d75640ac17360515f",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_secret_provider_refs_insert",
+          "object": "migrate_v4_time_secret_provider_refs_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_secret_provider_refs_insert` BEFORE INSERT ON `secret_provider_refs` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "a63db1d8034bbd6f66be94fd2a3525c343818c1caf1db99e3dbc5e3e8cb39a29",
+          "before": "",
+          "after": "a84f9be602b95fdcfbc87ef75699c45c0dbd6c9f087de11e2d2bd7e734df916c"
+        },
+        {
+          "name": "migrate_v4_time_secret_provider_refs_update",
+          "object": "migrate_v4_time_secret_provider_refs_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_secret_provider_refs_update` BEFORE UPDATE ON `secret_provider_refs` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3f3578d23433046f2c9df55868d78486bcb61f7ad94245896ccf7834aec2eeac",
+          "before": "",
+          "after": "1c346cc5aa5ab8f1d291a7ca11b5910fce5ac29b9692206017704b95402aef97"
+        },
+        {
+          "name": "migrate_v4_time_secret_provider_refs_delete",
+          "object": "migrate_v4_time_secret_provider_refs_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_secret_provider_refs_delete` BEFORE DELETE ON `secret_provider_refs` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "0e223f14844353e7bd9db3dc173bd75435da0a90e2fc9592f76c96695061a5e6",
+          "before": "",
+          "after": "d4329b35836064e7b91bc33e5ec831ca30b3ef79839a2844df9b894512913f66"
+        },
+        {
+          "name": "secret_provider_refs_rotated_at_column",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` ADD COLUMN `logical_rotated_at` BIGINT NULL",
+          "checksum": "a397fbb1bc3976edd9f8cfc9a7320a27f2b143b7bf5a1f546746e0cfc7c201f8",
+          "before": "7be17179a1cb5c4550298a87c62d631852547530c2c73885e259b1c64551d5a9",
+          "after": "11049d43552616ac40a0f08f572e6a929f6b99bf8082bcf7d7b3361f18d6c30b"
+        },
+        {
+          "name": "secret_provider_refs_created_at_column",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "a753398fa5b10bbfaf359fc993ca11ac12ffe89942228d0d2278dd933294236e",
+          "before": "11049d43552616ac40a0f08f572e6a929f6b99bf8082bcf7d7b3361f18d6c30b",
+          "after": "dcd78888c179f669923c153b180a06cf33abeb1142ea218e7d2ce9ba18474637"
+        },
+        {
+          "name": "secret_provider_refs_updated_at_column",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "7e2daaa84c9d9e063cc421ce75361e87c4bc79ea8cbcfeb7dc9587dec3a04d3f",
+          "before": "dcd78888c179f669923c153b180a06cf33abeb1142ea218e7d2ce9ba18474637",
+          "after": "25655883fd8dbc80708c8a4997d40afe784b8889197702289eac64b7eeab0d80"
+        },
+        {
+          "name": "secret_provider_refs_times_backfill",
+          "object": "secret_provider_refs",
+          "kind": "data",
+          "sql": "UPDATE `secret_provider_refs` source SET `logical_rotated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`rotated_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "9717a843142d9ce668fb3458db194e71aaa71e3c24d48499b76fc134e854fcc7",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `secret_provider_refs` source WHERE (source.`rotated_at` IS NOT NULL AND source.`logical_rotated_at` IS NULL) OR NOT(source.`logical_rotated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`rotated_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "secret_provider_refs_times_switch",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` DROP COLUMN `rotated_at`,CHANGE COLUMN `logical_rotated_at` `rotated_at` BIGINT NULL,ADD CONSTRAINT `secret_provider_refs_rotated_at_range` CHECK (`rotated_at` IS NULL OR `rotated_at` IN (-9223372036854775808,9223372036854775807) OR (`rotated_at`\u003e=-211813488000000000 AND `rotated_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `secret_provider_refs_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `secret_provider_refs_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "33d434a560a970a9cfc0f8326ed12d061ce6cba6c044068103fb188d0bae6983",
+          "before": "25655883fd8dbc80708c8a4997d40afe784b8889197702289eac64b7eeab0d80",
+          "after": "33cda7bb7aaea266fbebde7c4ba58e0f9acc35eff8c72c91b0f1ed676707e31f",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `secret_provider_refs` source WHERE (source.`rotated_at` IS NOT NULL AND source.`logical_rotated_at` IS NULL) OR NOT(source.`logical_rotated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`rotated_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_secret_provider_refs_insert",
+          "object": "migrate_v4_time_secret_provider_refs_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_secret_provider_refs_insert`",
+          "checksum": "6bde9c10a903e56b96b31344c85b6a8557ff462f026de233cfd537c83484bfd7",
+          "before": "a84f9be602b95fdcfbc87ef75699c45c0dbd6c9f087de11e2d2bd7e734df916c",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_secret_provider_refs_update",
+          "object": "migrate_v4_time_secret_provider_refs_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_secret_provider_refs_update`",
+          "checksum": "1c16be5256f66000e64c991808fd4d49b0cf6d6ea3b3ff4fc4ba188a2d61cab5",
+          "before": "1c346cc5aa5ab8f1d291a7ca11b5910fce5ac29b9692206017704b95402aef97",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_secret_provider_refs_delete",
+          "object": "migrate_v4_time_secret_provider_refs_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_secret_provider_refs_delete`",
+          "checksum": "1baccd9e97141fdd05e90f6f6ee54033de1467ac28c12b6bb737c435fc200d03",
+          "before": "d4329b35836064e7b91bc33e5ec831ca30b3ef79839a2844df9b894512913f66",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_secret_provider_refs_insert",
+          "object": "migrate_v4_time_secret_provider_refs_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_secret_provider_refs_insert` BEFORE INSERT ON `secret_provider_refs` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "a63db1d8034bbd6f66be94fd2a3525c343818c1caf1db99e3dbc5e3e8cb39a29",
+          "before": "",
+          "after": "a84f9be602b95fdcfbc87ef75699c45c0dbd6c9f087de11e2d2bd7e734df916c"
+        },
+        {
+          "name": "migrate_v4_time_secret_provider_refs_update",
+          "object": "migrate_v4_time_secret_provider_refs_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_secret_provider_refs_update` BEFORE UPDATE ON `secret_provider_refs` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "3f3578d23433046f2c9df55868d78486bcb61f7ad94245896ccf7834aec2eeac",
+          "before": "",
+          "after": "1c346cc5aa5ab8f1d291a7ca11b5910fce5ac29b9692206017704b95402aef97"
+        },
+        {
+          "name": "migrate_v4_time_secret_provider_refs_delete",
+          "object": "migrate_v4_time_secret_provider_refs_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_secret_provider_refs_delete` BEFORE DELETE ON `secret_provider_refs` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "0e223f14844353e7bd9db3dc173bd75435da0a90e2fc9592f76c96695061a5e6",
+          "before": "",
+          "after": "d4329b35836064e7b91bc33e5ec831ca30b3ef79839a2844df9b894512913f66"
+        },
+        {
+          "name": "secret_provider_refs_rotated_at_column",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` ADD COLUMN `logical_rotated_at` BIGINT NULL",
+          "checksum": "a397fbb1bc3976edd9f8cfc9a7320a27f2b143b7bf5a1f546746e0cfc7c201f8",
+          "before": "ed7331bf610decb67f295716319d972bcc1bdd24a2a70c048b17a965c48aa890",
+          "after": "c5e9af101144d8271cc073ee125e389a30e766343dd1c99482a3726e1d984534"
+        },
+        {
+          "name": "secret_provider_refs_created_at_column",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "a753398fa5b10bbfaf359fc993ca11ac12ffe89942228d0d2278dd933294236e",
+          "before": "c5e9af101144d8271cc073ee125e389a30e766343dd1c99482a3726e1d984534",
+          "after": "595643d299cda25d8b5b5010fc790df7ecbc2aea3571bf885cd39bf27aae2080"
+        },
+        {
+          "name": "secret_provider_refs_updated_at_column",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "7e2daaa84c9d9e063cc421ce75361e87c4bc79ea8cbcfeb7dc9587dec3a04d3f",
+          "before": "595643d299cda25d8b5b5010fc790df7ecbc2aea3571bf885cd39bf27aae2080",
+          "after": "9874383c19f6ae71dafcf1e3956b4c586d5c3e4b1a3b57700108bc78706d8b5c"
+        },
+        {
+          "name": "secret_provider_refs_times_backfill",
+          "object": "secret_provider_refs",
+          "kind": "data",
+          "sql": "UPDATE `secret_provider_refs` source SET `logical_rotated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`rotated_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "9717a843142d9ce668fb3458db194e71aaa71e3c24d48499b76fc134e854fcc7",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `secret_provider_refs` source WHERE (source.`rotated_at` IS NOT NULL AND source.`logical_rotated_at` IS NULL) OR NOT(source.`logical_rotated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`rotated_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "secret_provider_refs_times_switch",
+          "object": "secret_provider_refs",
+          "kind": "table",
+          "sql": "ALTER TABLE `secret_provider_refs` DROP COLUMN `rotated_at`,CHANGE COLUMN `logical_rotated_at` `rotated_at` BIGINT NULL,ADD CONSTRAINT `secret_provider_refs_rotated_at_range` CHECK (`rotated_at` IS NULL OR `rotated_at` IN (-9223372036854775808,9223372036854775807) OR (`rotated_at`\u003e=-211813488000000000 AND `rotated_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `secret_provider_refs_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `secret_provider_refs_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "33d434a560a970a9cfc0f8326ed12d061ce6cba6c044068103fb188d0bae6983",
+          "before": "9874383c19f6ae71dafcf1e3956b4c586d5c3e4b1a3b57700108bc78706d8b5c",
+          "after": "2f4a5527fe3f67d95f13a8414d4fb7e24b9227906601d3da3e802c9e6281c2bf",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `secret_provider_refs` source WHERE (source.`rotated_at` IS NOT NULL AND source.`logical_rotated_at` IS NULL) OR NOT(source.`logical_rotated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`rotated_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_secret_provider_refs_insert",
+          "object": "migrate_v4_time_secret_provider_refs_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_secret_provider_refs_insert`",
+          "checksum": "6bde9c10a903e56b96b31344c85b6a8557ff462f026de233cfd537c83484bfd7",
+          "before": "a84f9be602b95fdcfbc87ef75699c45c0dbd6c9f087de11e2d2bd7e734df916c",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_secret_provider_refs_update",
+          "object": "migrate_v4_time_secret_provider_refs_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_secret_provider_refs_update`",
+          "checksum": "1c16be5256f66000e64c991808fd4d49b0cf6d6ea3b3ff4fc4ba188a2d61cab5",
+          "before": "1c346cc5aa5ab8f1d291a7ca11b5910fce5ac29b9692206017704b95402aef97",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_secret_provider_refs_delete",
+          "object": "migrate_v4_time_secret_provider_refs_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_secret_provider_refs_delete`",
+          "checksum": "1baccd9e97141fdd05e90f6f6ee54033de1467ac28c12b6bb737c435fc200d03",
+          "before": "d4329b35836064e7b91bc33e5ec831ca30b3ef79839a2844df9b894512913f66",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

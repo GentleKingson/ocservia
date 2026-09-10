@@ -50,3 +50,19 @@ func (t Timestamp) Time() (time.Time, error) {
 	}
 	return time.Unix(t.Micros/1000000+unixEpochOffset, (t.Micros%1000000)*1000).UTC(), nil
 }
+
+// Add preserves NULL and infinity and refuses finite arithmetic overflow.
+func (t Timestamp) Add(duration time.Duration) (Timestamp, error) {
+	if err := t.Validate(); err != nil {
+		return Timestamp{}, err
+	}
+	if !t.Valid || t.Micros == NegativeInfinity || t.Micros == PositiveInfinity {
+		return t, nil
+	}
+	delta := duration.Microseconds()
+	if (delta > 0 && t.Micros > EndTimestamp-1-delta) || (delta < 0 && t.Micros < MinTimestamp-delta) {
+		return Timestamp{}, errors.New("database: timestamp out of range")
+	}
+	t.Micros += delta
+	return t, nil
+}

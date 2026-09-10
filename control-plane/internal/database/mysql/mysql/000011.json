@@ -1,0 +1,657 @@
+{
+  "version": 11,
+  "previous_checksum": "7f019c127107f9ae812f89ecc988864a611eabe69ea62514539d5f0421757e89",
+  "engine": "mysql",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_config_plans_insert",
+          "object": "migrate_v4_time_config_plans_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_plans_insert` BEFORE INSERT ON `config_plans` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "6a6c846c43eda082cbf8787344313347c6dafaac1d093ee483d0aaa62fa0fd17",
+          "before": "",
+          "after": "ecc3aa78352be215b55368326ae207fa9863708da86178c9d31ae662a500b082"
+        },
+        {
+          "name": "migrate_v4_time_config_plans_update",
+          "object": "migrate_v4_time_config_plans_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_plans_update` BEFORE UPDATE ON `config_plans` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b1c9c59a39b851ee6436e73b46ac47510ff0f1e778151d0eae43d00056f25ea8",
+          "before": "",
+          "after": "cc96a1e24ab9ba86ac7389c929b440d501962df2b899c3f6bdc495cd93186b9d"
+        },
+        {
+          "name": "migrate_v4_time_config_plans_delete",
+          "object": "migrate_v4_time_config_plans_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_plans_delete` BEFORE DELETE ON `config_plans` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9d308cc5564e33346e37dbfd62cda95478826390f6af60c48337606512f47f6f",
+          "before": "",
+          "after": "fe0f3f6b25d12c4fadcfef9ff295731ab49446ad7fe692f85632036466dbe2ec"
+        },
+        {
+          "name": "config_plans_expires_at_column",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_plans` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "f341b4e7220017a38d6515bc01830858f4e493d681b84d46182cc430d2622df9",
+          "before": "163983e7f3e6446b1efca5a17cce599513ff42e42c09a0b929bbdc8d84a1ba26",
+          "after": "0e5287cfc9e45d2c83a3160ab08abc1721222181a3b310aa2be805215c083608"
+        },
+        {
+          "name": "config_plans_created_at_column",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_plans` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "e0376b3ca1376226ec4a30f6bc09a7a1eab0252ab2c02480b2f9085c8fa6113a",
+          "before": "0e5287cfc9e45d2c83a3160ab08abc1721222181a3b310aa2be805215c083608",
+          "after": "1348532caf462aa59f420c52098ca542e9ab8b8fd82d5d1cfa14bfdb82740c61"
+        },
+        {
+          "name": "config_plans_times_backfill",
+          "object": "config_plans",
+          "kind": "data",
+          "sql": "UPDATE `config_plans` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "bc165f0fee95827d331b655e6b4263ba38448baacd39513f71838d509a1444cb",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_plans` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "config_plans_times_switch",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_plans` DROP INDEX config_plans_node_created_idx,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `config_plans_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `config_plans_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD KEY config_plans_node_created_idx(node_id,created_at DESC,id DESC)",
+          "checksum": "67cd5410222964bfff743ec71adf5a5947429e4a9b386ee6052045d27d2e618f",
+          "before": "1348532caf462aa59f420c52098ca542e9ab8b8fd82d5d1cfa14bfdb82740c61",
+          "after": "a4b6ffcf6c1c218c9efa49f23b6e11eeb773628fa8704497bd6fedc7479922cf",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_plans` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "config_warnings_blob",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE config_plans ADD COLUMN logical_warnings LONGBLOB NULL",
+          "checksum": "c182153745c8a4df30564b0c6c877a1a9fc6e8894816c0828135b2a94f49f84a",
+          "before": "a4b6ffcf6c1c218c9efa49f23b6e11eeb773628fa8704497bd6fedc7479922cf",
+          "after": "f9e91dcc4f46b00147b3abbb92f9a8474c9020e867adbb8d603b33d70c0fe1a2"
+        },
+        {
+          "name": "config_warnings_copy",
+          "object": "config_plans",
+          "kind": "data",
+          "sql": "UPDATE config_plans SET logical_warnings=CAST(warnings AS BINARY)",
+          "checksum": "201b086733818869c2741b2f5de7461543d6986879594f72307c30ff306d999e",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM config_plans WHERE NOT (logical_warnings \u003c=\u003e CAST(warnings AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_warnings)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "config_warnings_switch",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE config_plans DROP CHECK config_plans_config_plans_warnings_check,DROP COLUMN warnings,CHANGE COLUMN logical_warnings warnings LONGBLOB NOT NULL DEFAULT ('[]')",
+          "checksum": "2c242b2b7105b4bbdfaf33946de9cf02f0b933bc6cf457dc06768a78480ec7c4",
+          "before": "f9e91dcc4f46b00147b3abbb92f9a8474c9020e867adbb8d603b33d70c0fe1a2",
+          "after": "b7161a297d8ac719cffcf41821a66c67bc3db122046712be0c514e4fee77c3b0",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM config_plans WHERE NOT (logical_warnings \u003c=\u003e CAST(warnings AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_warnings)),'valid','invalid')"
+        },
+        {
+          "name": "config_plan_jsonb_insert",
+          "object": "config_plan_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `config_plan_jsonb_insert` BEFORE INSERT ON config_plans FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.warnings) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid configuration warnings JSON array'; END IF; END",
+          "checksum": "99d6da9f24bd3901fec91e60796fa44efaecdd287530ae85838ab5a38b8ecc9c",
+          "before": "",
+          "after": "838904042e42da2cf634f08ef75458e6e04d63646356045701d221dc64f39493"
+        },
+        {
+          "name": "config_plan_jsonb_update",
+          "object": "config_plan_jsonb_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `config_plan_jsonb_update` BEFORE UPDATE ON config_plans FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.warnings) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid configuration warnings JSON array'; END IF; END",
+          "checksum": "2e6ee62b295f3cca954dfeaaa880937dd6ae7b82fb9997ed7f6dd1ee93ddfd62",
+          "before": "",
+          "after": "5a23716d47378b81a8870bdfe82ba3ff7bfd661582f1bcbf2917bca815885c0d"
+        },
+        {
+          "name": "drop_migrate_v4_time_config_plans_insert",
+          "object": "migrate_v4_time_config_plans_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_plans_insert`",
+          "checksum": "2beadc59f0129f8fb2fab6d75adbe4a5de52f9e703902afa14c320ad649c886c",
+          "before": "ecc3aa78352be215b55368326ae207fa9863708da86178c9d31ae662a500b082",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_plans_update",
+          "object": "migrate_v4_time_config_plans_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_plans_update`",
+          "checksum": "e567f39df7e22414fda429f6eb1176f35cd97f67830ca483973e5f4a7d89cec3",
+          "before": "cc96a1e24ab9ba86ac7389c929b440d501962df2b899c3f6bdc495cd93186b9d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_plans_delete",
+          "object": "migrate_v4_time_config_plans_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_plans_delete`",
+          "checksum": "ce4b9055d8737611d6c30c143a7dd41cc422d9bb3aa5fa1d0d1ee297442ccc66",
+          "before": "fe0f3f6b25d12c4fadcfef9ff295731ab49446ad7fe692f85632036466dbe2ec",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_config_apply_operations_insert",
+          "object": "migrate_v4_time_config_apply_operations_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_apply_operations_insert` BEFORE INSERT ON `config_apply_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9f8d3433d0c2a102e40647c4d3c134d8e7cc1c13b2c0b10baf8c11332724caf5",
+          "before": "",
+          "after": "a71348d3bd26a015d40de73e3e1185bf293dabe3643172d44b53466ae31cb820"
+        },
+        {
+          "name": "migrate_v4_time_config_apply_operations_update",
+          "object": "migrate_v4_time_config_apply_operations_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_apply_operations_update` BEFORE UPDATE ON `config_apply_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "66ab7126ec71e430c90bb9711ffc0f213fdd67c562605b255eaa15504cfd763a",
+          "before": "",
+          "after": "6be5663294efce023ef357790ed03d554636bd95feecc86d291fcc6c175b34a3"
+        },
+        {
+          "name": "migrate_v4_time_config_apply_operations_delete",
+          "object": "migrate_v4_time_config_apply_operations_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_apply_operations_delete` BEFORE DELETE ON `config_apply_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "898db177e80e3c44e7daff40b15f063ccb83780a7e34bbf239cc971048ed7f3e",
+          "before": "",
+          "after": "552094720bf9f6562752cf7d73dde445b41661802fd716d3ae1c750e95bd6dad"
+        },
+        {
+          "name": "config_apply_operations_created_at_column",
+          "object": "config_apply_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_apply_operations` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "2026c42e2cb75269279d8ec789b4221e0c8a421e3f0d711bfa977b7d312801fd",
+          "before": "577223f4234564a79a27c17dc3ed1b1b2be18c5bc323a0ffcb08435d8c2a600d",
+          "after": "655f8600458948d5f417a85340bc87e72f9021e3c6d4afb12e5b3086132a101f"
+        },
+        {
+          "name": "config_apply_operations_updated_at_column",
+          "object": "config_apply_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_apply_operations` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "11feba08e3e9016c280c40053965ad7eecd3a96ed1b2b3110e941d3a04cf44a5",
+          "before": "655f8600458948d5f417a85340bc87e72f9021e3c6d4afb12e5b3086132a101f",
+          "after": "073826372d3babc9b033155986b8baf8989024c3bc013892dbedcc6634f1254c"
+        },
+        {
+          "name": "config_apply_operations_times_backfill",
+          "object": "config_apply_operations",
+          "kind": "data",
+          "sql": "UPDATE `config_apply_operations` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "bf1174acc11ece8e1aa73e30cc60bcf8463184f7ac71859e3f4987ee0e554bf0",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_apply_operations` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "config_apply_operations_times_switch",
+          "object": "config_apply_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_apply_operations` DROP INDEX config_apply_operations_node_created_idx,DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `config_apply_operations_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `config_apply_operations_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),ADD KEY config_apply_operations_node_created_idx(node_id,created_at DESC,operation_id DESC)",
+          "checksum": "1b5d894fa4f3baca44b049f0d6a55795eb8c59045f86151e0b07ddaee75f6414",
+          "before": "073826372d3babc9b033155986b8baf8989024c3bc013892dbedcc6634f1254c",
+          "after": "a154f572a0991d968c7ddc671372d6cba272c0ac40c6af5d1e0e7c6d2d3b577a",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_apply_operations` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_config_apply_operations_insert",
+          "object": "migrate_v4_time_config_apply_operations_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_apply_operations_insert`",
+          "checksum": "8ac983ec05e56150851dd7347ab13eb114bc3c53f2b2fff59d6d3ed951c78ae5",
+          "before": "a71348d3bd26a015d40de73e3e1185bf293dabe3643172d44b53466ae31cb820",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_apply_operations_update",
+          "object": "migrate_v4_time_config_apply_operations_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_apply_operations_update`",
+          "checksum": "329843e11da6a087c8c1e5e292a88650ef029aaae63f25615ebcec2c97e546b6",
+          "before": "6be5663294efce023ef357790ed03d554636bd95feecc86d291fcc6c175b34a3",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_apply_operations_delete",
+          "object": "migrate_v4_time_config_apply_operations_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_apply_operations_delete`",
+          "checksum": "a1bbc6a7e9d6ea1a22a13734c8671678c601946d02632b0e14fbb811ac6475f8",
+          "before": "552094720bf9f6562752cf7d73dde445b41661802fd716d3ae1c750e95bd6dad",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_node_config_state_insert",
+          "object": "migrate_v4_time_node_config_state_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_config_state_insert` BEFORE INSERT ON `node_config_state` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c86f452bab0bc9b3699213eae0bc68a90aa25fe07f7ca529e37a0a156725ebcf",
+          "before": "",
+          "after": "59ad3e6a9bc071aa695cacf822a21c213c1b9a4747ccecb3839b751db3d3c796"
+        },
+        {
+          "name": "migrate_v4_time_node_config_state_update",
+          "object": "migrate_v4_time_node_config_state_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_config_state_update` BEFORE UPDATE ON `node_config_state` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "a5f1234f4bd662894f63f4157548982ab706f422e10ec08facd2d2347c44724d",
+          "before": "",
+          "after": "ae49b0e01960844effa97c3c15e13b1b29c32ae2ab55faebfd6e19fcf3906a40"
+        },
+        {
+          "name": "migrate_v4_time_node_config_state_delete",
+          "object": "migrate_v4_time_node_config_state_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_config_state_delete` BEFORE DELETE ON `node_config_state` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d5e5c5d1fc227c3fabbd270453680545e8500e3ae04ed924a8620a58cad10710",
+          "before": "",
+          "after": "75571604e2d869a4beba4ea8c35142791cdb80ef64e48d6ab42f7dcafc79f1e2"
+        },
+        {
+          "name": "node_config_state_updated_at_column",
+          "object": "node_config_state",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_config_state` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "c8f82745a2f516d22b7b68b07d755e21856fe510a777326c569cafbee8270e3c",
+          "before": "02b52e4fc86fa93c59a13b9f149f078dbc63235a3b426b1c17f96a0693b7af49",
+          "after": "8c7c043e438c50017c5bed0146d68dc7d9daf127a52e1c9e5ae361049d2622e0"
+        },
+        {
+          "name": "node_config_state_times_backfill",
+          "object": "node_config_state",
+          "kind": "data",
+          "sql": "UPDATE `node_config_state` source SET `logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "d526ea73db0112f4ad9f60f3a630287a02a0f2ec4b80e392a7efc2db16669691",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_config_state` source WHERE (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_config_state_times_switch",
+          "object": "node_config_state",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_config_state` DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `node_config_state_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "2e1a29c57f39ab713a03178a137c3d4b815addf961b2f0a754812c6ceab9abdd",
+          "before": "8c7c043e438c50017c5bed0146d68dc7d9daf127a52e1c9e5ae361049d2622e0",
+          "after": "ab117e3e63eb979858073c8b46db5137a5a4546aff2966b5453dd7aac6a914e3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_config_state` source WHERE (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_config_state_insert",
+          "object": "migrate_v4_time_node_config_state_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_config_state_insert`",
+          "checksum": "48536e69c4a2001898958df2d57b7f4797d9a25e6ae77c9b7a5545848ed12bd5",
+          "before": "59ad3e6a9bc071aa695cacf822a21c213c1b9a4747ccecb3839b751db3d3c796",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_config_state_update",
+          "object": "migrate_v4_time_node_config_state_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_config_state_update`",
+          "checksum": "7bb9276bf635f923f8508f9cdae72f81c42dd52baa8ce9de7a8fe30cdabb46d6",
+          "before": "ae49b0e01960844effa97c3c15e13b1b29c32ae2ab55faebfd6e19fcf3906a40",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_config_state_delete",
+          "object": "migrate_v4_time_node_config_state_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_config_state_delete`",
+          "checksum": "aaeb607885f74dc3aaa41a541eb82a7339f6fdfcb21fd62f4f7fcd42944fbaff",
+          "before": "75571604e2d869a4beba4ea8c35142791cdb80ef64e48d6ab42f7dcafc79f1e2",
+          "after": ""
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_config_plans_insert",
+          "object": "migrate_v4_time_config_plans_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_plans_insert` BEFORE INSERT ON `config_plans` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "6a6c846c43eda082cbf8787344313347c6dafaac1d093ee483d0aaa62fa0fd17",
+          "before": "",
+          "after": "ecc3aa78352be215b55368326ae207fa9863708da86178c9d31ae662a500b082"
+        },
+        {
+          "name": "migrate_v4_time_config_plans_update",
+          "object": "migrate_v4_time_config_plans_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_plans_update` BEFORE UPDATE ON `config_plans` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b1c9c59a39b851ee6436e73b46ac47510ff0f1e778151d0eae43d00056f25ea8",
+          "before": "",
+          "after": "cc96a1e24ab9ba86ac7389c929b440d501962df2b899c3f6bdc495cd93186b9d"
+        },
+        {
+          "name": "migrate_v4_time_config_plans_delete",
+          "object": "migrate_v4_time_config_plans_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_plans_delete` BEFORE DELETE ON `config_plans` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9d308cc5564e33346e37dbfd62cda95478826390f6af60c48337606512f47f6f",
+          "before": "",
+          "after": "fe0f3f6b25d12c4fadcfef9ff295731ab49446ad7fe692f85632036466dbe2ec"
+        },
+        {
+          "name": "config_plans_expires_at_column",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_plans` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "f341b4e7220017a38d6515bc01830858f4e493d681b84d46182cc430d2622df9",
+          "before": "163983e7f3e6446b1efca5a17cce599513ff42e42c09a0b929bbdc8d84a1ba26",
+          "after": "0e5287cfc9e45d2c83a3160ab08abc1721222181a3b310aa2be805215c083608"
+        },
+        {
+          "name": "config_plans_created_at_column",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_plans` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "e0376b3ca1376226ec4a30f6bc09a7a1eab0252ab2c02480b2f9085c8fa6113a",
+          "before": "0e5287cfc9e45d2c83a3160ab08abc1721222181a3b310aa2be805215c083608",
+          "after": "1348532caf462aa59f420c52098ca542e9ab8b8fd82d5d1cfa14bfdb82740c61"
+        },
+        {
+          "name": "config_plans_times_backfill",
+          "object": "config_plans",
+          "kind": "data",
+          "sql": "UPDATE `config_plans` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "bc165f0fee95827d331b655e6b4263ba38448baacd39513f71838d509a1444cb",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_plans` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "config_plans_times_switch",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_plans` DROP INDEX config_plans_node_created_idx,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `config_plans_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `config_plans_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD KEY config_plans_node_created_idx(node_id,created_at DESC,id DESC)",
+          "checksum": "67cd5410222964bfff743ec71adf5a5947429e4a9b386ee6052045d27d2e618f",
+          "before": "1348532caf462aa59f420c52098ca542e9ab8b8fd82d5d1cfa14bfdb82740c61",
+          "after": "a4b6ffcf6c1c218c9efa49f23b6e11eeb773628fa8704497bd6fedc7479922cf",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_plans` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "config_warnings_blob",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE config_plans ADD COLUMN logical_warnings LONGBLOB NULL",
+          "checksum": "c182153745c8a4df30564b0c6c877a1a9fc6e8894816c0828135b2a94f49f84a",
+          "before": "a4b6ffcf6c1c218c9efa49f23b6e11eeb773628fa8704497bd6fedc7479922cf",
+          "after": "f9e91dcc4f46b00147b3abbb92f9a8474c9020e867adbb8d603b33d70c0fe1a2"
+        },
+        {
+          "name": "config_warnings_copy",
+          "object": "config_plans",
+          "kind": "data",
+          "sql": "UPDATE config_plans SET logical_warnings=CAST(warnings AS BINARY)",
+          "checksum": "201b086733818869c2741b2f5de7461543d6986879594f72307c30ff306d999e",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM config_plans WHERE NOT (logical_warnings \u003c=\u003e CAST(warnings AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_warnings)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "config_warnings_switch",
+          "object": "config_plans",
+          "kind": "table",
+          "sql": "ALTER TABLE config_plans DROP CHECK config_plans_config_plans_warnings_check,DROP COLUMN warnings,CHANGE COLUMN logical_warnings warnings LONGBLOB NOT NULL DEFAULT ('[]')",
+          "checksum": "2c242b2b7105b4bbdfaf33946de9cf02f0b933bc6cf457dc06768a78480ec7c4",
+          "before": "f9e91dcc4f46b00147b3abbb92f9a8474c9020e867adbb8d603b33d70c0fe1a2",
+          "after": "b7161a297d8ac719cffcf41821a66c67bc3db122046712be0c514e4fee77c3b0",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM config_plans WHERE NOT (logical_warnings \u003c=\u003e CAST(warnings AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_warnings)),'valid','invalid')"
+        },
+        {
+          "name": "config_plan_jsonb_insert",
+          "object": "config_plan_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `config_plan_jsonb_insert` BEFORE INSERT ON config_plans FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.warnings) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid configuration warnings JSON array'; END IF; END",
+          "checksum": "99d6da9f24bd3901fec91e60796fa44efaecdd287530ae85838ab5a38b8ecc9c",
+          "before": "",
+          "after": "838904042e42da2cf634f08ef75458e6e04d63646356045701d221dc64f39493"
+        },
+        {
+          "name": "config_plan_jsonb_update",
+          "object": "config_plan_jsonb_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `config_plan_jsonb_update` BEFORE UPDATE ON config_plans FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.warnings) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid configuration warnings JSON array'; END IF; END",
+          "checksum": "2e6ee62b295f3cca954dfeaaa880937dd6ae7b82fb9997ed7f6dd1ee93ddfd62",
+          "before": "",
+          "after": "5a23716d47378b81a8870bdfe82ba3ff7bfd661582f1bcbf2917bca815885c0d"
+        },
+        {
+          "name": "drop_migrate_v4_time_config_plans_insert",
+          "object": "migrate_v4_time_config_plans_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_plans_insert`",
+          "checksum": "2beadc59f0129f8fb2fab6d75adbe4a5de52f9e703902afa14c320ad649c886c",
+          "before": "ecc3aa78352be215b55368326ae207fa9863708da86178c9d31ae662a500b082",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_plans_update",
+          "object": "migrate_v4_time_config_plans_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_plans_update`",
+          "checksum": "e567f39df7e22414fda429f6eb1176f35cd97f67830ca483973e5f4a7d89cec3",
+          "before": "cc96a1e24ab9ba86ac7389c929b440d501962df2b899c3f6bdc495cd93186b9d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_plans_delete",
+          "object": "migrate_v4_time_config_plans_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_plans_delete`",
+          "checksum": "ce4b9055d8737611d6c30c143a7dd41cc422d9bb3aa5fa1d0d1ee297442ccc66",
+          "before": "fe0f3f6b25d12c4fadcfef9ff295731ab49446ad7fe692f85632036466dbe2ec",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_config_apply_operations_insert",
+          "object": "migrate_v4_time_config_apply_operations_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_apply_operations_insert` BEFORE INSERT ON `config_apply_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9f8d3433d0c2a102e40647c4d3c134d8e7cc1c13b2c0b10baf8c11332724caf5",
+          "before": "",
+          "after": "a71348d3bd26a015d40de73e3e1185bf293dabe3643172d44b53466ae31cb820"
+        },
+        {
+          "name": "migrate_v4_time_config_apply_operations_update",
+          "object": "migrate_v4_time_config_apply_operations_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_apply_operations_update` BEFORE UPDATE ON `config_apply_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "66ab7126ec71e430c90bb9711ffc0f213fdd67c562605b255eaa15504cfd763a",
+          "before": "",
+          "after": "6be5663294efce023ef357790ed03d554636bd95feecc86d291fcc6c175b34a3"
+        },
+        {
+          "name": "migrate_v4_time_config_apply_operations_delete",
+          "object": "migrate_v4_time_config_apply_operations_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_config_apply_operations_delete` BEFORE DELETE ON `config_apply_operations` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "898db177e80e3c44e7daff40b15f063ccb83780a7e34bbf239cc971048ed7f3e",
+          "before": "",
+          "after": "552094720bf9f6562752cf7d73dde445b41661802fd716d3ae1c750e95bd6dad"
+        },
+        {
+          "name": "config_apply_operations_created_at_column",
+          "object": "config_apply_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_apply_operations` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "2026c42e2cb75269279d8ec789b4221e0c8a421e3f0d711bfa977b7d312801fd",
+          "before": "577223f4234564a79a27c17dc3ed1b1b2be18c5bc323a0ffcb08435d8c2a600d",
+          "after": "655f8600458948d5f417a85340bc87e72f9021e3c6d4afb12e5b3086132a101f"
+        },
+        {
+          "name": "config_apply_operations_updated_at_column",
+          "object": "config_apply_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_apply_operations` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "11feba08e3e9016c280c40053965ad7eecd3a96ed1b2b3110e941d3a04cf44a5",
+          "before": "655f8600458948d5f417a85340bc87e72f9021e3c6d4afb12e5b3086132a101f",
+          "after": "073826372d3babc9b033155986b8baf8989024c3bc013892dbedcc6634f1254c"
+        },
+        {
+          "name": "config_apply_operations_times_backfill",
+          "object": "config_apply_operations",
+          "kind": "data",
+          "sql": "UPDATE `config_apply_operations` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "bf1174acc11ece8e1aa73e30cc60bcf8463184f7ac71859e3f4987ee0e554bf0",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_apply_operations` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "config_apply_operations_times_switch",
+          "object": "config_apply_operations",
+          "kind": "table",
+          "sql": "ALTER TABLE `config_apply_operations` DROP INDEX config_apply_operations_node_created_idx,DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `config_apply_operations_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `config_apply_operations_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),ADD KEY config_apply_operations_node_created_idx(node_id,created_at DESC,operation_id DESC)",
+          "checksum": "1b5d894fa4f3baca44b049f0d6a55795eb8c59045f86151e0b07ddaee75f6414",
+          "before": "073826372d3babc9b033155986b8baf8989024c3bc013892dbedcc6634f1254c",
+          "after": "a154f572a0991d968c7ddc671372d6cba272c0ac40c6af5d1e0e7c6d2d3b577a",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `config_apply_operations` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_config_apply_operations_insert",
+          "object": "migrate_v4_time_config_apply_operations_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_apply_operations_insert`",
+          "checksum": "8ac983ec05e56150851dd7347ab13eb114bc3c53f2b2fff59d6d3ed951c78ae5",
+          "before": "a71348d3bd26a015d40de73e3e1185bf293dabe3643172d44b53466ae31cb820",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_apply_operations_update",
+          "object": "migrate_v4_time_config_apply_operations_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_apply_operations_update`",
+          "checksum": "329843e11da6a087c8c1e5e292a88650ef029aaae63f25615ebcec2c97e546b6",
+          "before": "6be5663294efce023ef357790ed03d554636bd95feecc86d291fcc6c175b34a3",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_config_apply_operations_delete",
+          "object": "migrate_v4_time_config_apply_operations_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_config_apply_operations_delete`",
+          "checksum": "a1bbc6a7e9d6ea1a22a13734c8671678c601946d02632b0e14fbb811ac6475f8",
+          "before": "552094720bf9f6562752cf7d73dde445b41661802fd716d3ae1c750e95bd6dad",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_node_config_state_insert",
+          "object": "migrate_v4_time_node_config_state_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_config_state_insert` BEFORE INSERT ON `node_config_state` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c86f452bab0bc9b3699213eae0bc68a90aa25fe07f7ca529e37a0a156725ebcf",
+          "before": "",
+          "after": "59ad3e6a9bc071aa695cacf822a21c213c1b9a4747ccecb3839b751db3d3c796"
+        },
+        {
+          "name": "migrate_v4_time_node_config_state_update",
+          "object": "migrate_v4_time_node_config_state_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_config_state_update` BEFORE UPDATE ON `node_config_state` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "a5f1234f4bd662894f63f4157548982ab706f422e10ec08facd2d2347c44724d",
+          "before": "",
+          "after": "ae49b0e01960844effa97c3c15e13b1b29c32ae2ab55faebfd6e19fcf3906a40"
+        },
+        {
+          "name": "migrate_v4_time_node_config_state_delete",
+          "object": "migrate_v4_time_node_config_state_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_config_state_delete` BEFORE DELETE ON `node_config_state` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d5e5c5d1fc227c3fabbd270453680545e8500e3ae04ed924a8620a58cad10710",
+          "before": "",
+          "after": "75571604e2d869a4beba4ea8c35142791cdb80ef64e48d6ab42f7dcafc79f1e2"
+        },
+        {
+          "name": "node_config_state_updated_at_column",
+          "object": "node_config_state",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_config_state` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "c8f82745a2f516d22b7b68b07d755e21856fe510a777326c569cafbee8270e3c",
+          "before": "02b52e4fc86fa93c59a13b9f149f078dbc63235a3b426b1c17f96a0693b7af49",
+          "after": "8c7c043e438c50017c5bed0146d68dc7d9daf127a52e1c9e5ae361049d2622e0"
+        },
+        {
+          "name": "node_config_state_times_backfill",
+          "object": "node_config_state",
+          "kind": "data",
+          "sql": "UPDATE `node_config_state` source SET `logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "d526ea73db0112f4ad9f60f3a630287a02a0f2ec4b80e392a7efc2db16669691",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_config_state` source WHERE (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_config_state_times_switch",
+          "object": "node_config_state",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_config_state` DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `node_config_state_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "2e1a29c57f39ab713a03178a137c3d4b815addf961b2f0a754812c6ceab9abdd",
+          "before": "8c7c043e438c50017c5bed0146d68dc7d9daf127a52e1c9e5ae361049d2622e0",
+          "after": "ab117e3e63eb979858073c8b46db5137a5a4546aff2966b5453dd7aac6a914e3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_config_state` source WHERE (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_config_state_insert",
+          "object": "migrate_v4_time_node_config_state_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_config_state_insert`",
+          "checksum": "48536e69c4a2001898958df2d57b7f4797d9a25e6ae77c9b7a5545848ed12bd5",
+          "before": "59ad3e6a9bc071aa695cacf822a21c213c1b9a4747ccecb3839b751db3d3c796",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_config_state_update",
+          "object": "migrate_v4_time_node_config_state_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_config_state_update`",
+          "checksum": "7bb9276bf635f923f8508f9cdae72f81c42dd52baa8ce9de7a8fe30cdabb46d6",
+          "before": "ae49b0e01960844effa97c3c15e13b1b29c32ae2ab55faebfd6e19fcf3906a40",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_config_state_delete",
+          "object": "migrate_v4_time_node_config_state_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_config_state_delete`",
+          "checksum": "aaeb607885f74dc3aaa41a541eb82a7339f6fdfcb21fd62f4f7fcd42944fbaff",
+          "before": "75571604e2d869a4beba4ea8c35142791cdb80ef64e48d6ab42f7dcafc79f1e2",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

@@ -321,6 +321,31 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 			if _, err := pool.Exec(ctx, `UPDATE certificates SET not_after=$2 WHERE id=$1`, certificate.ID, tc.deadline); err != nil {
 				t.Fatal(err)
 			}
+			got, err := service.Get(ctx, certificate.ID)
+			if err != nil {
+				t.Fatal("extended certificate read", err)
+			}
+			if !tc.deadline.Valid {
+				if got.NotAfter != nil {
+					t.Fatal("NULL deadline became finite", got.NotAfter)
+				}
+			} else {
+				want := value.Timestamp{Valid: true}
+				switch tc.deadline.InfinityModifier {
+				case pgtype.Infinity:
+					want.Micros = value.PositiveInfinity
+				case pgtype.NegativeInfinity:
+					want.Micros = value.NegativeInfinity
+				default:
+					want, err = value.FromTime(tc.deadline.Time)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if got.NotAfter == nil || *got.NotAfter != want {
+					t.Fatal("certificate deadline changed", got.NotAfter, want)
+				}
+			}
 			artifactDeadline := tc.deadline
 			if !artifactDeadline.Valid {
 				artifactDeadline = originalArtifactExpiry

@@ -30,10 +30,10 @@ func TestRealUsageTransactions(t *testing.T) {
 		Backend: b,
 		SeedNode: func(t *testing.T) uuid.UUID {
 			workspace, node := uuid.New(), uuid.New()
-			if _, err := b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'usage',?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))`, UUIDBytes(workspace), workspace.String()); err != nil {
+			if _, err := b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'usage',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, UUIDBytes(workspace), workspace.String()); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := b.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'usage','active',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))`, UUIDBytes(node), UUIDBytes(workspace)); err != nil {
+			if _, err := b.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'usage','active',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, UUIDBytes(node), UUIDBytes(workspace)); err != nil {
 				t.Fatal(err)
 			}
 			return node
@@ -44,7 +44,7 @@ func TestRealUsageTransactions(t *testing.T) {
 			return count, err
 		},
 		ReadTotals: func(ctx context.Context, node uuid.UUID) ([]semantictest.UsageTotal, error) {
-			rows, err := b.Query(ctx, `SELECT period,period_start,rx_bytes,tx_bytes FROM observed_user_usage WHERE node_id=?`, UUIDBytes(node))
+			rows, err := b.Query(ctx, `SELECT period,period_start,rx_bytes,tx_bytes,observed_at FROM observed_user_usage WHERE node_id=?`, UUIDBytes(node))
 			if err != nil {
 				return nil, err
 			}
@@ -52,7 +52,7 @@ func TestRealUsageTransactions(t *testing.T) {
 			var totals []semantictest.UsageTotal
 			for rows.Next() {
 				var total semantictest.UsageTotal
-				if err := rows.Scan(&total.Period, &total.Start, &total.RX, &total.TX); err != nil {
+				if err := rows.Scan(&total.Period, &total.Start, &total.RX, &total.TX, &total.ObservedAt); err != nil {
 					return nil, err
 				}
 				totals = append(totals, total)

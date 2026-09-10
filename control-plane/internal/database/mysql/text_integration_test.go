@@ -46,7 +46,7 @@ func TestRealSchemaTextRegex(t *testing.T) {
 	})
 	id := UUIDBytes(uuid.New())
 	now := time.Now().UTC()
-	if _, err = b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, id, "name", "slug", now, now); err != nil {
+	if _, err = b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, id, "name", "slug", fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
 	for _, value := range []string{"a\x00b", `a\u0000b`, "a\ufffdb", "a ", "a  "} {
@@ -104,10 +104,10 @@ func TestRealExistingLongTextBounds(t *testing.T) {
 	ctx := context.Background()
 	workspace, node := UUIDBytes(uuid.New()), UUIDBytes(uuid.New())
 	now := time.Now().UTC()
-	if _, err := b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, workspace, "name", "slug", now, now); err != nil {
+	if _, err := b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, workspace, "name", "slug", fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,?,?,?,?)`, node, workspace, "node", "active", now, now); err != nil {
+	if _, err := b.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,?,?,?,?)`, node, workspace, "node", "active", fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
 	for _, table := range []string{"node_sessions", "user_usage_cursors", "secret_provider_refs"} {
@@ -117,9 +117,9 @@ func TestRealExistingLongTextBounds(t *testing.T) {
 			case "node_sessions":
 				_, err = b.Exec(ctx, `INSERT INTO node_sessions(node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at) VALUES(?,?,?, ?,?,0,0,?)`, node, value, "alice", []byte{4, 32, 127, 0, 0, 1}, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 			case "user_usage_cursors":
-				_, err = b.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) VALUES(?,?,?, ?,0,0,?)`, node, value, now, "alice", now)
+				_, err = b.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) VALUES(?,?,?, ?,0,0,?)`, node, value, fixtureTimestamp(t, now), "alice", fixtureTimestamp(t, now))
 			case "secret_provider_refs":
-				_, err = b.Exec(ctx, `INSERT INTO secret_provider_refs(id,workspace_id,provider,key_path,version,state,created_at,updated_at) VALUES(?,?,?,?,'1','active',?,?)`, UUIDBytes(uuid.New()), workspace, "provider", value, now, now)
+				_, err = b.Exec(ctx, `INSERT INTO secret_provider_refs(id,workspace_id,provider,key_path,version,state,created_at,updated_at) VALUES(?,?,?,?,'1','active',?,?)`, UUIDBytes(uuid.New()), workspace, "provider", value, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 			}
 			return err
 		}

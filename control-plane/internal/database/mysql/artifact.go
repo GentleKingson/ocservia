@@ -114,3 +114,33 @@ func (s artifactStore) Abort(ctx context.Context, id, grant uuid.UUID) error {
 	_, err = s.Exec(ctx, `UPDATE artifact_operations SET updated_at=? WHERE id=? AND active_grant_id=? AND state='leased'`, now, UUIDBytes(id), UUIDBytes(grant))
 	return err
 }
+
+func (s artifactStore) PendingConsumptions(ctx context.Context) ([]artifactstore.PendingConsumption, error) {
+	rows, err := s.Query(ctx, `SELECT id,active_grant_id,consume_grant,consume_sha256,consume_size,consume_actor_id,expires_at FROM artifact_operations WHERE state='consuming' ORDER BY updated_at,id LIMIT 20`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make([]artifactstore.PendingConsumption, 0, 20)
+	for rows.Next() {
+		var v artifactstore.PendingConsumption
+		if err := rows.Scan(&v.ID, &v.GrantID, &v.Grant, &v.Digest, &v.Size, &v.ActorID, &v.ExpiresAt); err != nil {
+			return nil, err
+		}
+		values = append(values, v)
+	}
+	return values, rows.Err()
+}
+
+func (s artifactStore) ResetConsumption(ctx context.Context, id, grant uuid.UUID, expired bool) error {
+	now, err := s.clock(ctx)
+	if err != nil {
+		return err
+	}
+	state := "ready"
+	if expired {
+		state = "expired"
+	}
+	_, err = s.Exec(ctx, `UPDATE artifact_operations SET state=?,lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=? WHERE id=? AND active_grant_id=? AND state='consuming'`, state, now, UUIDBytes(id), UUIDBytes(grant))
+	return err
+}

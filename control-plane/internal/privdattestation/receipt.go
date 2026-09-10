@@ -16,6 +16,8 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -58,12 +60,7 @@ type UpgradeResultVerification struct {
 
 func (v UpgradeResultVerification) Verified() bool { return v.Status == "verified" }
 
-type attestationKeyRecord struct {
-	PublicKey   []byte
-	State       string
-	ActivatedAt time.Time
-	ValidUntil  *time.Time
-}
+type attestationKeyRecord = attestationstore.VerificationKey
 
 type keyLookup func(context.Context, uuid.UUID, string) (attestationKeyRecord, error)
 
@@ -114,14 +111,26 @@ func recordVerificationMetric(verification Verification) {
 }
 
 func VerifyResult(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) Verification {
-	return verifyResult(ctx, func(ctx context.Context, nodeID uuid.UUID, keyID string) (attestationKeyRecord, error) {
-		if tx == nil {
-			return attestationKeyRecord{}, errors.New("privd receipt key transaction is unavailable")
+	var common database.Tx
+	if tx != nil {
+		common = postgres.WrapTx(tx)
+	}
+	return VerifyResultTransaction(ctx, common, nodeID, envelope, result)
+}
+
+// VerifyResultTransaction reads the key inside the caller-owned result transaction.
+func VerifyResultTransaction(ctx context.Context, tx database.Tx, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) Verification {
+	return verifyResult(ctx, transactionKeyLookup(tx), nodeID, envelope, result)
+}
+
+func transactionKeyLookup(tx database.Tx) keyLookup {
+	return func(ctx context.Context, node uuid.UUID, key string) (attestationKeyRecord, error) {
+		store, err := attestationstore.From(tx)
+		if err != nil {
+			return attestationKeyRecord{}, err
 		}
-		var record attestationKeyRecord
-		err := tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2`, nodeID, keyID).Scan(&record.PublicKey, &record.State, &record.ActivatedAt, &record.ValidUntil)
-		return record, err
-	}, nodeID, envelope, result)
+		return store.VerificationKey(ctx, node, key)
+	}
 }
 
 func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) (verification Verification) {
@@ -160,7 +169,7 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 		return verification
 	}
 	record, err := lookup(ctx, nodeID, receipt.GetPrivdAttestationKeyId())
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, database.ErrNotFound) {
 		verification.Status, verification.FailureReason = "unknown_key", "receipt_key_unknown"
 		return verification
 	}
@@ -190,14 +199,15 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 // lookup errors are returned separately; an invalid proof is represented in
 // the result and must not be persisted by the caller.
 func VerifyUpgradeResult(ctx context.Context, tx pgx.Tx, nodeID, operationID uuid.UUID, state agentv1.AgentUpgradeOutcomeState, targetVersion string, completedAt time.Time, proof *agentv1.AgentUpgradeResultProof) (verification UpgradeResultVerification, err error) {
-	return VerifyUpgradeResultWithLookup(ctx, func(ctx context.Context, node uuid.UUID, key string) (UpgradeKey, error) {
-		if tx == nil {
-			return UpgradeKey{}, errors.New("privd upgrade result key transaction is unavailable")
-		}
-		var k UpgradeKey
-		err := tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2`, node, key).Scan(&k.PublicKey, &k.State, &k.ActivatedAt, &k.ValidUntil)
-		return k, err
-	}, nodeID, operationID, state, targetVersion, completedAt, proof)
+	var common database.Tx
+	if tx != nil {
+		common = postgres.WrapTx(tx)
+	}
+	return VerifyUpgradeResultTransaction(ctx, common, nodeID, operationID, state, targetVersion, completedAt, proof)
+}
+
+func VerifyUpgradeResultTransaction(ctx context.Context, tx database.Tx, nodeID, operationID uuid.UUID, state agentv1.AgentUpgradeOutcomeState, targetVersion string, completedAt time.Time, proof *agentv1.AgentUpgradeResultProof) (UpgradeResultVerification, error) {
+	return VerifyUpgradeResultWithLookup(ctx, transactionKeyLookup(tx), nodeID, operationID, state, targetVersion, completedAt, proof)
 }
 
 // UpgradeKey is the read-only key material needed by upgrade proof verification.
@@ -233,7 +243,7 @@ func VerifyUpgradeResultWithLookup(ctx context.Context, lookup func(context.Cont
 		return UpgradeResultVerification{}, errors.New("privd upgrade result key transaction is unavailable")
 	}
 	record, err := lookup(ctx, nodeID, proof.GetPrivdAttestationKeyId())
-	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, database.ErrNotFound) {
+	if errors.Is(err, database.ErrNotFound) {
 		verification.Status, verification.FailureReason = "unknown_key", "upgrade_result_key_unknown"
 		return verification, nil
 	}

@@ -18,7 +18,7 @@ func TestRealApprovalControllerWorkflow(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	stamp, _ := value.FromTime(now)
 	expires, _ := value.FromTime(now.Add(time.Hour))
-	if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(workspace), "approval", "approval-"+workspace.String(), now, now); err != nil {
+	if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(workspace), "approval", "approval-"+workspace.String(), fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []uuid.UUID{requester, approver} {
@@ -49,4 +49,9 @@ func TestRealApprovalControllerWorkflow(t *testing.T) {
 	}
 	defer runtime.Close()
 	approvaltest.Workflow(t, runtime, workspace, requester, approver, session, approverSession)
+	approvaltest.ExtendedTimes(t, runtime, workspace, requester, approver, session, approverSession, func(id uuid.UUID, created, expires value.Timestamp) {
+		if _, err := owner.Exec(ctx, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, created, expires, UUIDBytes(id)); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

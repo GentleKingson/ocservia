@@ -2,9 +2,9 @@ package mysql
 
 import (
 	"context"
-	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 )
@@ -23,13 +23,13 @@ func (s *UsageStore) LockNode(ctx context.Context, nodeID uuid.UUID) error {
 	return s.tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=? FOR UPDATE`, UUIDBytes(nodeID)).Scan(&id)
 }
 
-func (s *UsageStore) LockCursor(ctx context.Context, nodeID uuid.UUID, sample userusage.Sample) (userusage.Sample, error) {
-	var prior userusage.Sample
+func (s *UsageStore) LockCursor(ctx context.Context, nodeID uuid.UUID, sample userusage.Cursor) (userusage.Cursor, error) {
+	prior := userusage.Cursor{SessionID: sample.SessionID, Connected: sample.Connected}
 	err := s.tx.QueryRow(ctx, `SELECT username,rx_bytes,tx_bytes,observed_at FROM user_usage_cursors WHERE node_id=? AND session_id=? AND connected_at=? FOR UPDATE`, UUIDBytes(nodeID), sample.SessionID, sample.Connected).Scan(&prior.Username, &prior.RXBytes, &prior.TXBytes, &prior.ObservedAt)
 	return prior, err
 }
 
-func (s *UsageStore) PutCursor(ctx context.Context, nodeID uuid.UUID, sample userusage.Sample) error {
+func (s *UsageStore) PutCursor(ctx context.Context, nodeID uuid.UUID, sample userusage.Cursor) error {
 	// MySQL evaluates assignments left-to-right. Keep observed_at last so
 	// every conditional compares against the same stored observation time.
 	_, err := s.tx.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE
@@ -40,7 +40,7 @@ func (s *UsageStore) PutCursor(ctx context.Context, nodeID uuid.UUID, sample use
 	return err
 }
 
-func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample userusage.Sample, period string, start time.Time, rx, tx int64) error {
+func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample userusage.Cursor, period string, start value.Timestamp, rx, tx int64) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO observed_user_usage(node_id,username,period,period_start,rx_bytes,tx_bytes,observed_at) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE
 		rx_bytes=LEAST(9223372036854775807,CAST(rx_bytes AS DECIMAL(20,0))+CAST(VALUES(rx_bytes) AS DECIMAL(20,0))),
 		tx_bytes=LEAST(9223372036854775807,CAST(tx_bytes AS DECIMAL(20,0))+CAST(VALUES(tx_bytes) AS DECIMAL(20,0))),

@@ -4,17 +4,20 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"testing"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // TestRealPrivdAttestationWorkflow drives the production service over the
@@ -27,10 +30,10 @@ func TestRealPrivdAttestationWorkflow(t *testing.T) {
 	ctx := context.Background()
 	workspace, node, identity, session := uuid.New(), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(workspace), "attest", "attest-"+workspace.String(), now, now); err != nil {
+	if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(workspace), "attest", "attest-"+workspace.String(), fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'attest-node','active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), now, now); err != nil {
+	if _, err := owner.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'attest-node','active',?,?)`, UUIDBytes(node), UUIDBytes(workspace), fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := owner.Exec(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES(?,?,?,'','attest',?,?)`, UUIDBytes(identity), "attest-test", identity.String(), fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
@@ -63,12 +66,14 @@ func TestRealPrivdAttestationWorkflow(t *testing.T) {
 	if _, err = service.CreateCredential(ctx, request); !errors.Is(err, privdattestation.ErrCredential) {
 		t.Fatalf("outstanding credential accepted: %v", err)
 	}
+	keys := make(map[string]ed25519.PrivateKey)
 	register := func(credential privdattestation.Credential) string {
 		t.Helper()
-		keyID, err := registerRaw(t, service, node, credential)
+		keyID, private, err := registerRaw(t, service, node, credential)
 		if err != nil {
 			t.Fatal(err)
 		}
+		keys[keyID] = private
 		return keyID
 	}
 	first := register(credential)
@@ -98,7 +103,7 @@ func TestRealPrivdAttestationWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = registerRaw(t, service, node, third); !errors.Is(err, privdattestation.ErrRotationLimit) {
+	if _, _, err = registerRaw(t, service, node, third); !errors.Is(err, privdattestation.ErrRotationLimit) {
 		t.Fatalf("rotation limit: %v", err)
 	}
 
@@ -149,11 +154,11 @@ func TestRealPrivdAttestationWorkflow(t *testing.T) {
 	// Telemetry ingestion reads the converted columns through the same typed
 	// contract, including the predecessor's bounded validity.
 	err = database.Within(ctx, runtime, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrywrite.From(tx)
+		store, err := attestationstore.From(tx)
 		if err != nil {
 			return err
 		}
-		key, err := store.AttestationKey(ctx, node, first)
+		key, err := store.VerificationKey(ctx, node, first)
 		if err != nil {
 			return err
 		}
@@ -175,13 +180,23 @@ func TestRealPrivdAttestationWorkflow(t *testing.T) {
 		if key.ValidUntil == nil || key.ValidUntil.Sub(successorActivated) != 24*time.Hour {
 			t.Fatalf("telemetry key times: %v %v", key.ActivatedAt, key.ValidUntil)
 		}
-		key, err = store.AttestationKey(ctx, node, second)
+		key, err = store.VerificationKey(ctx, node, second)
 		if err != nil {
 			return err
 		}
 		if key.ValidUntil == nil || !key.ValidUntil.After(key.ActivatedAt) {
 			t.Fatalf("revoked key validity: %v %v", key.ActivatedAt, key.ValidUntil)
 		}
+		testRegisteredReceipt(t, ctx, tx, node, keys[first], "verified", "")
+		testRegisteredReceipt(t, ctx, tx, node, keys[second], "revoked_key", "receipt_key_revoked")
+		_, unknownKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		testRegisteredReceipt(t, ctx, tx, node, unknownKey, "unknown_key", "receipt_key_unknown")
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		testRegisteredReceipt(t, cancelled, tx, node, keys[first], "invalid", "receipt_key_lookup_failed")
 		return nil
 	})
 	if err != nil {
@@ -192,7 +207,7 @@ func TestRealPrivdAttestationWorkflow(t *testing.T) {
 	}
 }
 
-func registerRaw(t *testing.T, service *privdattestation.Service, node uuid.UUID, credential privdattestation.Credential) (string, error) {
+func registerRaw(t *testing.T, service *privdattestation.Service, node uuid.UUID, credential privdattestation.Credential) (string, ed25519.PrivateKey, error) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -211,5 +226,32 @@ func registerRaw(t *testing.T, service *privdattestation.Service, node uuid.UUID
 		t.Fatal(err)
 	}
 	registration.Signature = ed25519.Sign(private, canonical)
-	return service.Register(context.Background(), privdattestation.RegistrationRequest{NodeID: node, Credential: credential.Value, Registration: registration, RequestID: uuid.NewString()})
+	id, err := service.Register(context.Background(), privdattestation.RegistrationRequest{NodeID: node, Credential: credential.Value, Registration: registration, RequestID: uuid.NewString()})
+	return id, private, err
+}
+
+func testRegisteredReceipt(t *testing.T, ctx context.Context, tx database.Tx, node uuid.UUID, key ed25519.PrivateKey, status, reason string) {
+	t.Helper()
+	command, operation, idempotency := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	at := time.Now().UTC()
+	semantic := sha256.Sum256([]byte("attestation lookup workflow"))
+	envelope := &agentv1.CommandEnvelope{
+		NodeId: node[:], CommandId: command[:], OperationId: operation[:], IdempotencyKey: idempotency[:],
+		IssuedAt: timestamppb.New(at.Add(-time.Second)), ExpiresAt: timestamppb.New(at.Add(time.Minute)),
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, SemanticPayloadSha256: semantic[:],
+		Payload: &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: "session", BootId: "boot"}},
+	}
+	result := &agentv1.CommandResult{
+		CommandId: command[:], IdempotencyKey: idempotency[:], PayloadSha256: semantic[:],
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
+		State:                      agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: []byte{0x08, 0x01},
+		AcceptedAt: timestamppb.New(at), CompletedAt: timestamppb.New(at),
+	}
+	if err := attestationtest.AttachProof(envelope, result, key, 1); err != nil {
+		t.Fatal(err)
+	}
+	verification := privdattestation.VerifyResultTransaction(ctx, tx, node, envelope, result)
+	if verification.Status != status || verification.FailureReason != reason {
+		t.Fatalf("receipt verification = %+v, want %s/%s", verification, status, reason)
+	}
 }

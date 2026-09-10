@@ -52,5 +52,5 @@ export PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tl
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=60m -v ./internal/database/mysql)
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/api -run '^TestAuthenticationBackendHTTPIntegration$')
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/telemetry -run '^TestTelemetryBackendWorkflowIntegration$')
-# A schema-only tool must never unlock Controller production or business startup.
+# Controller test/development selection must not unlock production startup.
 (cd "${ROOT}/control-plane" && go test -count=1 ./internal/platform/config ./cmd/ocserv-db-foundation)

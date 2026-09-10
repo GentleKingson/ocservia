@@ -17,9 +17,11 @@ type Store interface {
 	Roles(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (database.Rows, error)
 	WorkspaceRoles(context.Context, uuid.UUID, uuid.UUID) (database.Rows, error)
 	Node(context.Context, uuid.UUID) database.Row
+	UpgradeNode(context.Context, uuid.UUID) database.Row
 	Operation(context.Context, uuid.UUID) database.Row
 	Workspace(context.Context, uuid.UUID) database.Row
 	AuthorizedWorkspaces(context.Context, uuid.UUID, bool) (database.Rows, error)
+	Workspaces(context.Context, []uuid.UUID, bool) (database.Rows, error)
 	Insert(context.Context, Binding) error
 	CompleteBootstrap(context.Context, uuid.UUID, uuid.UUID, time.Time) error
 }

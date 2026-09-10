@@ -68,8 +68,8 @@ type Approval struct {
 	ResourceID         uuid.UUID       `json:"resource_id"`
 	Reason             string          `json:"reason"`
 	Status             string          `json:"status"`
-	ExpiresAt          time.Time       `json:"expires_at"`
-	CreatedAt          time.Time       `json:"created_at"`
+	ExpiresAt          value.Timestamp `json:"expires_at"`
+	CreatedAt          value.Timestamp `json:"created_at"`
 	RequestHash        string          `json:"request_hash,omitempty"`
 	RequestSummary     json.RawMessage `json:"request_summary,omitempty"`
 	ConfigPlanSummary  json.RawMessage `json:"config_plan_summary,omitempty"`
@@ -143,8 +143,16 @@ func (s *Service) Create(ctx context.Context, request Request) (Approval, error)
 		}
 	}
 	now := s.now()
-	approval := Approval{ID: uuid.Must(uuid.NewV7()), WorkspaceID: request.WorkspaceID, RequesterID: request.RequesterID, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, Reason: request.Reason, Status: "pending", ExpiresAt: now.Add(request.TTL), CreatedAt: now}
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	created, err := value.FromTime(now)
+	if err != nil {
+		return Approval{}, err
+	}
+	expires, err := value.FromTime(now.Add(request.TTL))
+	if err != nil {
+		return Approval{}, err
+	}
+	approval := Approval{ID: uuid.Must(uuid.NewV7()), WorkspaceID: request.WorkspaceID, RequesterID: request.RequesterID, Action: request.Action, ResourceType: request.ResourceType, ResourceID: request.ResourceID, Reason: request.Reason, Status: "pending", ExpiresAt: expires, CreatedAt: created}
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		data, err := store(tx)
 		if err != nil {
 			return err
@@ -205,7 +213,11 @@ func (s *Service) Approve(ctx context.Context, decision Decision) (Approval, err
 		if approval.RequestHash != "" && decision.ExpectedRequestHash != approval.RequestHash {
 			return ErrNotReady
 		}
-		if approval.Status != "pending" || !approval.ExpiresAt.After(s.now()) {
+		at, err := value.FromTime(s.now())
+		if err != nil {
+			return err
+		}
+		if approval.Status != "pending" || !approval.ExpiresAt.Valid || approval.ExpiresAt.Micros <= at.Micros {
 			return ErrNotReady
 		}
 		authorized, err := data.Authorized(ctx, approval.ID, decision.ApproverID)
@@ -324,14 +336,7 @@ func (s *Service) AuthorityResources(ctx context.Context, id uuid.UUID) ([]Autho
 
 func scan(row database.Row) (Approval, error) {
 	var record Approval
-	var expires, created value.Timestamp
-	err := row.Scan(&record.ID, &record.WorkspaceID, &record.RequesterID, &record.ApproverID, &record.Action, &record.ResourceType, &record.ResourceID, &record.Reason, &record.Status, &expires, &created, &record.RequestHash, &record.RequestSummary)
-	if err == nil {
-		record.ExpiresAt, err = expires.Time()
-	}
-	if err == nil {
-		record.CreatedAt, err = created.Time()
-	}
+	err := row.Scan(&record.ID, &record.WorkspaceID, &record.RequesterID, &record.ApproverID, &record.Action, &record.ResourceType, &record.ResourceID, &record.Reason, &record.Status, &record.ExpiresAt, &record.CreatedAt, &record.RequestHash, &record.RequestSummary)
 	if err == nil && record.ResourceType == "config_plan" {
 		record.ConfigPlanSummary = record.RequestSummary
 		record.RequestSummary = nil

@@ -120,17 +120,17 @@ export interface Approval {
    */
   certificateSummary?: CertificateApprovalSummary;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Approval
    */
-  expiresAt: Date;
+  expiresAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Approval
    */
-  createdAt: Date;
+  createdAt: string;
 }
 
 /**
@@ -234,8 +234,8 @@ export function ApprovalFromJSONTyped(
       json["certificate_summary"] == null
         ? undefined
         : CertificateApprovalSummaryFromJSON(json["certificate_summary"]),
-    expiresAt: new Date(json["expires_at"]),
-    createdAt: new Date(json["created_at"]),
+    expiresAt: json["expires_at"],
+    createdAt: json["created_at"],
   };
 }
 
@@ -269,7 +269,7 @@ export function ApprovalToJSONTyped(
     certificate_summary: CertificateApprovalSummaryToJSON(
       value["certificateSummary"],
     ),
-    expires_at: value["expiresAt"].toISOString(),
-    created_at: value["createdAt"].toISOString(),
+    expires_at: value["expiresAt"],
+    created_at: value["createdAt"],
   };
 }

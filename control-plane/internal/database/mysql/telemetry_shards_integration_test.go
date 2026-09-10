@@ -48,7 +48,7 @@ func TestRealTelemetryShardLifecycle(t *testing.T) {
 	}
 	defer reader.Rollback(ctx)
 	readerStore, _ := telemetryhistory.FromTransaction(reader)
-	legacyPoints, err := readerStore.History(ctx, node, "cpu_usage_ratio", "raw", at.Add(-time.Second))
+	legacyPoints, err := readerStore.History(ctx, node, "cpu_usage_ratio", "raw", fixtureTimestamp(t, at.Add(-time.Second)))
 	if err != nil || len(legacyPoints) != 1 {
 		t.Fatal(legacyPoints, err)
 	}
@@ -117,11 +117,11 @@ func TestRealTelemetryShardLifecycle(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 	history, _ := telemetryhistory.FromTransaction(tx)
-	points, err := history.History(ctx, node, "cpu_usage_ratio", "raw", at.Add(-time.Second))
+	points, err := history.History(ctx, node, "cpu_usage_ratio", "raw", fixtureTimestamp(t, at.Add(-time.Second)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(points) != 1 || !points[0].At.Equal(at) || points[0].Average != 0.5 {
+	if len(points) != 1 || points[0].At != fixtureTimestamp(t, at) || points[0].Average != 0.5 {
 		t.Fatalf("history lost precision or replay uniqueness: %+v", points)
 	}
 	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)

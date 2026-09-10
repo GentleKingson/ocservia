@@ -23,6 +23,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates/artifactstore"
+	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -32,7 +33,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
@@ -78,7 +78,6 @@ type RevokeSignerRequest struct {
 }
 
 type Service struct {
-	pool        *pgxpool.Pool
 	backend     database.Backend
 	operations  *operationstore.Service
 	approvals   *approvals.Service
@@ -100,22 +99,22 @@ type CreateRequest struct {
 }
 
 type Certificate struct {
-	ID              uuid.UUID  `json:"id"`
-	WorkspaceID     uuid.UUID  `json:"workspace_id"`
-	NodeID          uuid.UUID  `json:"node_id"`
-	OperationID     uuid.UUID  `json:"operation_id"`
-	CommonName      string     `json:"common_name"`
-	DNSNames        []string   `json:"dns_names"`
-	KeyBits         uint32     `json:"key_bits"`
-	State           string     `json:"state"`
-	Version         int64      `json:"version"`
-	PublicKeySHA256 []byte     `json:"public_key_sha256,omitempty"`
-	SerialNumber    string     `json:"serial_number,omitempty"`
-	NotBefore       *time.Time `json:"not_before,omitempty"`
-	NotAfter        *time.Time `json:"not_after,omitempty"`
-	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID              uuid.UUID        `json:"id"`
+	WorkspaceID     uuid.UUID        `json:"workspace_id"`
+	NodeID          uuid.UUID        `json:"node_id"`
+	OperationID     uuid.UUID        `json:"operation_id"`
+	CommonName      string           `json:"common_name"`
+	DNSNames        json.RawMessage  `json:"dns_names"`
+	KeyBits         uint32           `json:"key_bits"`
+	State           string           `json:"state"`
+	Version         int64            `json:"version"`
+	PublicKeySHA256 []byte           `json:"public_key_sha256,omitempty"`
+	SerialNumber    string           `json:"serial_number,omitempty"`
+	NotBefore       *value.Timestamp `json:"not_before,omitempty"`
+	NotAfter        *value.Timestamp `json:"not_after,omitempty"`
+	RevokedAt       *value.Timestamp `json:"revoked_at,omitempty"`
+	CreatedAt       value.Timestamp  `json:"created_at"`
+	UpdatedAt       value.Timestamp  `json:"updated_at"`
 }
 
 type IssueRequest struct {
@@ -142,7 +141,7 @@ type ArtifactGrant struct {
 	Operation     operationstore.Operation `json:"operation"`
 	DownloadToken string                   `json:"download_token,omitempty"`
 	Password      string                   `json:"password,omitempty"`
-	ExpiresAt     time.Time                `json:"expires_at"`
+	ExpiresAt     value.Timestamp          `json:"expires_at"`
 }
 
 type ArtifactDownload struct {
@@ -155,11 +154,17 @@ type ArtifactDownload struct {
 }
 
 func New(pool *pgxpool.Pool, operations *operationstore.Service) *Service {
-	return &Service{pool: pool, backend: postgres.WrapPool(pool), operations: operations, approvals: approvals.New(pool), now: func() time.Time { return time.Now().UTC() }}
+	return NewBackend(postgres.WrapPool(pool), operations, nil, nil, nil, nil)
 }
 
-// NewArtifactDownloads constructs the adapted download boundary only. Certificate
-// issuance, revocation and maintenance still require the existing service.
+// NewBackend uses common certificate transactions. CSR/P12/revocation also
+// require an operations service configured for the same backend.
+func NewBackend(backend database.Backend, operations *operationstore.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
+	return &Service{backend: backend, operations: operations, approvals: approvals.NewBackend(backend), signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// NewArtifactDownloads constructs downloads, durable consumption recovery and
+// expiry maintenance, and certificate reads without issuance dependencies.
 func NewArtifactDownloads(backend database.Backend, artifacts ArtifactFetcher, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, artifacts: artifacts, grantSigner: signer, now: func() time.Time { return time.Now().UTC() }}
 }
@@ -229,35 +234,46 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 }
 
 func (s *Service) ApprovalBinding(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, requestHash []byte, summary json.RawMessage, err error) {
-	var csrDER, receiptDigest []byte
-	var commonName string
-	var dnsNames []string
-	var version int64
-	err = s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,common_name,dns_names,version,csr_receipt_sha256 FROM certificates WHERE id=$1 AND state='csr_ready' AND csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy`, id).Scan(&workspaceID, &nodeID, &csrDER, &commonName, &dnsNames, &version, &receiptDigest)
+	var binding certificatestore.IssueState
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		binding, err = store.IssueBinding(ctx, id)
+		return err
+	})
 	if err != nil {
 		return
 	}
-	requestHash = certificateIssueBinding(id, version, csrDER, receiptDigest)
-	summary, err = json.Marshal(map[string]any{"certificate_id": id, "node_id": nodeID, "common_name": commonName, "dns_names": dnsNames, "csr_sha256": hex.EncodeToString(sha256Bytes(csrDER))})
+	workspaceID, nodeID = binding.WorkspaceID, binding.NodeID
+	requestHash = certificateIssueBinding(id, binding.Version, binding.CSR, binding.ReceiptDigest)
+	summary, err = json.Marshal(map[string]any{"certificate_id": id, "node_id": nodeID, "common_name": binding.CommonName, "dns_names": json.RawMessage(binding.DNSNames.Bytes()), "csr_sha256": hex.EncodeToString(sha256Bytes(binding.CSR))})
 	return
 }
 
 func (s *Service) ActionApprovalBinding(ctx context.Context, action string, certificateID uuid.UUID, certificateVersion int64, purpose string, artifactRequestID uuid.UUID) (workspaceID, nodeID uuid.UUID, requestHash []byte, summary json.RawMessage, err error) {
-	var currentVersion int64
-	var serial string
-	var chain []byte
-	err = s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,version,COALESCE(serial_number,''),COALESCE(certificate_chain_pem,''::bytea) FROM certificates WHERE id=$1`, certificateID).Scan(&workspaceID, &nodeID, &currentVersion, &serial, &chain)
+	var binding certificatestore.ActionBinding
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		binding, err = store.ActionBinding(ctx, certificateID)
+		return err
+	})
 	if err != nil {
 		return
 	}
-	if certificateVersion < 1 || currentVersion != certificateVersion {
+	workspaceID, nodeID = binding.WorkspaceID, binding.NodeID
+	if certificateVersion < 1 || binding.Version != certificateVersion {
 		err = ErrNotReady
 		return
 	}
 	if action == "certificate.revoke" {
-		chain = nil
+		binding.Chain = nil
 	}
-	requestHash, summary, err = certificateActionBinding(action, certificateID, nodeID, currentVersion, purpose, artifactRequestID, serial, chain)
+	requestHash, summary, err = certificateActionBinding(action, certificateID, nodeID, binding.Version, purpose, artifactRequestID, binding.Serial, binding.Chain)
 	return
 }
 
@@ -306,135 +322,129 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	if err != nil {
 		return Certificate{}, err
 	}
-	var approvedNodeID uuid.UUID
-	var approvedReceiptKey string
-	var approvedReceiptDigest, approvedCSRDigest, approvedSubjectDigest, approvedRequestHash []byte
-	var approvedReceiptCurrent, approvedKeyActive bool
-	err = s.pool.QueryRow(ctx, `SELECT node_id,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,
-		csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),
-		EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id
-		  AND k.key_id=certificates.csr_privd_attestation_key_id AND k.state='active'
-		  AND (k.valid_until IS NULL OR k.valid_until>now()))
-		FROM certificates WHERE id=$1 AND state='signing' AND issue_approval_id=$2`, request.CertificateID, request.ApprovalID).
-		Scan(&approvedNodeID, &approvedReceiptKey, &approvedReceiptDigest, &approvedCSRDigest, &approvedSubjectDigest, &approvedRequestHash, &approvedReceiptCurrent, &approvedKeyActive)
+	var approved certificatestore.IssueReceipt
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		approved, err = store.ApprovedReceipt(ctx, request.CertificateID, request.ApprovalID)
+		return err
+	})
 	csrDigest := sha256.Sum256(csrDER)
-	if err != nil || approvedNodeID != nodeID || !approvedReceiptCurrent || !approvedKeyActive || !bytes.Equal(approvedRequestHash, requestHash) || !bytes.Equal(approvedCSRDigest, csrDigest[:]) {
+	if err != nil || approved.NodeID != nodeID || !approved.Current || !approved.KeyActive || !bytes.Equal(approved.RequestHash, requestHash) || !bytes.Equal(approved.CSRDigest, csrDigest[:]) {
 		return Certificate{}, ErrNotReady
 	}
 	result, err := s.signer.Sign(ctx, SignRequest{CertificateID: request.CertificateID, CSRDER: append([]byte(nil), csrDER...)})
 	if err != nil {
-		_, _ = s.pool.Exec(context.WithoutCancel(ctx), `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=$2 WHERE id=$1 AND state='signing' AND issue_approval_id=$3 AND issue_request_hash=$4`, request.CertificateID, s.now(), request.ApprovalID, requestHash)
+		_ = database.Within(context.WithoutCancel(ctx), s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			store, storeErr := certificatestore.FromTransaction(tx)
+			if storeErr != nil {
+				return storeErr
+			}
+			return store.SignerUnavailable(context.WithoutCancel(ctx), request.CertificateID, request.ApprovalID, requestHash, s.now())
+		})
 		return Certificate{}, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
 	leaf, err := validateSignedCertificate(csrDER, result.CertificateChainPEM, s.now())
 	if err != nil {
 		return Certificate{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		now := s.now()
+		current, err := store.LockReceipt(ctx, request.CertificateID)
+		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || !bytes.Equal(current.SubjectDigest, approved.SubjectDigest) || !bytes.Equal(current.RequestHash, requestHash) {
+			return ErrNotReady
+		}
+		at, err := value.FromTime(now)
+		if err != nil {
+			return err
+		}
+		active, err := store.KeyActive(ctx, nodeID, current.ReceiptKey, at)
+		if err != nil || !active {
+			return ErrNotReady
+		}
+		changed, err := store.CompleteIssue(ctx, certificatestore.Issued{ID: request.CertificateID, ApprovalID: request.ApprovalID, Chain: result.CertificateChainPEM, RequestHash: requestHash, Serial: leaf.SerialNumber.String(), NotBefore: leaf.NotBefore.UTC(), NotAfter: leaf.NotAfter.UTC(), At: now})
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return ErrNotReady
+		}
+		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID, Result: "succeeded", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"node_id":%q,"serial_number":%q,"not_after":%q}`, nodeID, leaf.SerialNumber.String(), leaf.NotAfter.UTC().Format(time.RFC3339))), At: now})
+	})
 	if err != nil {
-		return Certificate{}, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	now := s.now()
-	var currentNodeID uuid.UUID
-	var currentCSR, currentReceiptDigest, currentCSRDigest, currentSubjectDigest, currentRequestHash []byte
-	var currentReceiptKey string
-	var receiptCurrent bool
-	if err := tx.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,
-		csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy)
-		FROM certificates WHERE id=$1 FOR UPDATE`, request.CertificateID).
-		Scan(&currentNodeID, &currentCSR, &currentReceiptKey, &currentReceiptDigest, &currentCSRDigest, &currentSubjectDigest, &currentRequestHash, &receiptCurrent); err != nil ||
-		currentNodeID != nodeID || !receiptCurrent || currentReceiptKey != approvedReceiptKey ||
-		!bytes.Equal(currentCSR, csrDER) || !bytes.Equal(currentReceiptDigest, approvedReceiptDigest) ||
-		!bytes.Equal(currentCSRDigest, approvedCSRDigest) || !bytes.Equal(currentSubjectDigest, approvedSubjectDigest) ||
-		!bytes.Equal(currentRequestHash, requestHash) {
-		return Certificate{}, ErrNotReady
-	}
-	var keyActive bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>$3))`, nodeID, currentReceiptKey, now).Scan(&keyActive); err != nil || !keyActive {
-		return Certificate{}, ErrNotReady
-	}
-	resultTag, err := tx.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=$2,serial_number=$3,not_before=$4,not_after=$5,updated_at=$6 WHERE id=$1 AND state IN ('signing','signer_unavailable') AND issue_approval_id=$7 AND issue_request_hash=$8`, request.CertificateID, result.CertificateChainPEM, leaf.SerialNumber.String(), leaf.NotBefore.UTC(), leaf.NotAfter.UTC(), now, request.ApprovalID, requestHash)
-	if err != nil {
-		return Certificate{}, err
-	}
-	if resultTag.RowsAffected() != 1 {
-		return Certificate{}, ErrNotReady
-	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID, Result: "succeeded", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"node_id":%q,"serial_number":%q,"not_after":%q}`, nodeID, leaf.SerialNumber.String(), leaf.NotAfter.UTC().Format(time.RFC3339))), At: now}); err != nil {
-		return Certificate{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return Certificate{}, err
 	}
 	return s.Get(ctx, request.CertificateID)
 }
 
 func (s *Service) prepareIssue(ctx context.Context, request IssueRequest) (workspaceID, nodeID uuid.UUID, csrDER, requestHash []byte, err error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, uuid.Nil, nil, nil, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	var state string
-	var storedApproval, storedActor *uuid.UUID
-	var storedHash, receiptDigest, attestedCSRDigest, requestedSubjectDigest []byte
-	var receiptKeyID, commonName string
-	var dnsNames []string
-	var keyBits uint32
-	var certificateVersion int64
-	var issueCertificateVersion *int64
-	var receiptVerifiedAt *time.Time
-	var receiptLegacy bool
-	err = tx.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,state,issue_approval_id,issue_request_hash,issue_actor_identity_id,version,issue_certificate_version,csr_receipt_verified_at,csr_receipt_sha256,csr_privd_attestation_key_id,csr_der_sha256,csr_requested_subject_sha256,csr_receipt_legacy,common_name,dns_names,key_bits FROM certificates WHERE id=$1 FOR UPDATE`, request.CertificateID).Scan(&workspaceID, &nodeID, &csrDER, &state, &storedApproval, &storedHash, &storedActor, &certificateVersion, &issueCertificateVersion, &receiptVerifiedAt, &receiptDigest, &receiptKeyID, &attestedCSRDigest, &requestedSubjectDigest, &receiptLegacy, &commonName, &dnsNames, &keyBits)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
-	}
-	if err != nil {
-		return uuid.Nil, uuid.Nil, nil, nil, err
-	}
-	csrDigest := sha256.Sum256(csrDER)
-	subjectDigest, subjectErr := privdattestation.RequestedSubjectDigest(&agentv1.CertificateCsr{CertificateId: request.CertificateID[:], CommonName: commonName, DnsNames: dnsNames, KeyBits: keyBits})
-	if receiptLegacy || receiptVerifiedAt == nil || len(receiptDigest) != sha256.Size || len(receiptKeyID) == 0 || !bytes.Equal(attestedCSRDigest, csrDigest[:]) || subjectErr != nil || !bytes.Equal(requestedSubjectDigest, subjectDigest) {
-		return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
-	}
-	var keyActive bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>now()))`, nodeID, receiptKeyID).Scan(&keyActive); err != nil || !keyActive {
-		return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
-	}
-	switch state {
-	case "csr_ready":
-		requestHash = certificateIssueBinding(request.CertificateID, certificateVersion, csrDER, receiptDigest)
-		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "certificate.issue", "certificate", request.CertificateID, requestHash); err != nil {
-			return uuid.Nil, uuid.Nil, nil, nil, err
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
 		}
-		now := s.now()
-		if _, err := tx.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_approval_id=$2,issue_request_hash=$3,issue_actor_identity_id=$4,issue_certificate_version=$5,updated_at=$6 WHERE id=$1`, request.CertificateID, request.ApprovalID, requestHash, request.ActorIdentityID, certificateVersion, now); err != nil {
-			return uuid.Nil, uuid.Nil, nil, nil, err
+		stored, err := store.LockIssue(ctx, request.CertificateID)
+		if errors.Is(err, database.ErrNotFound) {
+			return ErrNotReady
 		}
-		if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(sha256Bytes(csrDER)))), At: now}); err != nil {
-			return uuid.Nil, uuid.Nil, nil, nil, err
+		if err != nil {
+			return err
 		}
-	case "signing", "signer_unavailable":
-		if issueCertificateVersion == nil || *issueCertificateVersion < 1 {
-			return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
+		workspaceID, nodeID, csrDER = stored.WorkspaceID, stored.NodeID, stored.CSR
+		var dnsNames []string
+		if err := json.Unmarshal(stored.DNSNames.Bytes(), &dnsNames); err != nil {
+			return ErrNotReady
 		}
-		requestHash = certificateIssueBinding(request.CertificateID, *issueCertificateVersion, csrDER, receiptDigest)
-		if storedApproval == nil || storedActor == nil || *storedApproval != request.ApprovalID || *storedActor != request.ActorIdentityID || !bytes.Equal(storedHash, requestHash) {
-			return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
+		csrDigest := sha256.Sum256(csrDER)
+		subjectDigest, subjectErr := privdattestation.RequestedSubjectDigest(&agentv1.CertificateCsr{CertificateId: request.CertificateID[:], CommonName: stored.CommonName, DnsNames: dnsNames, KeyBits: stored.KeyBits})
+		if !stored.ReceiptCurrent || len(stored.ReceiptDigest) != sha256.Size || len(stored.ReceiptKey) == 0 || !bytes.Equal(stored.CSRDigest, csrDigest[:]) || subjectErr != nil || !bytes.Equal(stored.SubjectDigest, subjectDigest) {
+			return ErrNotReady
 		}
-		if state == "signer_unavailable" {
-			if _, err := tx.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,updated_at=$2 WHERE id=$1`, request.CertificateID, s.now()); err != nil {
-				return uuid.Nil, uuid.Nil, nil, nil, err
+		at, err := database.TransactionTime(ctx, tx)
+		if err != nil {
+			return err
+		}
+		active, err := store.KeyActive(ctx, nodeID, stored.ReceiptKey, at)
+		if err != nil || !active {
+			return ErrNotReady
+		}
+		switch stored.State {
+		case "csr_ready":
+			requestHash = certificateIssueBinding(request.CertificateID, stored.Version, csrDER, stored.ReceiptDigest)
+			if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "certificate.issue", "certificate", request.CertificateID, requestHash); err != nil {
+				return err
 			}
+			now := s.now()
+			if err := store.StartIssue(ctx, certificatestore.Signing{ID: request.CertificateID, ApprovalID: request.ApprovalID, ActorID: request.ActorIdentityID, RequestHash: requestHash, Version: stored.Version, At: now}); err != nil {
+				return err
+			}
+			return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(sha256Bytes(csrDER)))), At: now})
+		case "signing", "signer_unavailable":
+			if stored.IssueVersion == nil || *stored.IssueVersion < 1 {
+				return ErrNotReady
+			}
+			requestHash = certificateIssueBinding(request.CertificateID, *stored.IssueVersion, csrDER, stored.ReceiptDigest)
+			if stored.ApprovalID == nil || stored.ActorID == nil || *stored.ApprovalID != request.ApprovalID || *stored.ActorID != request.ActorIdentityID || !bytes.Equal(stored.RequestHash, requestHash) {
+				return ErrNotReady
+			}
+			if stored.State == "signer_unavailable" {
+				return store.ResumeIssue(ctx, request.CertificateID, s.now())
+			}
+			return nil
+		default:
+			return ErrNotReady
 		}
-	default:
-		return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
-	}
-	if err := tx.Commit(ctx); err != nil {
+	})
+	if err != nil {
 		return uuid.Nil, uuid.Nil, nil, nil, err
 	}
-	return workspaceID, nodeID, csrDER, requestHash, nil
+	return
 }
 
 func certificateIssueBinding(certificateID uuid.UUID, version int64, csrDER, receiptDigest []byte) []byte {
@@ -454,14 +464,13 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if s.signer == nil {
 		return operationstore.Operation{}, false, ErrSignerUnavailable
 	}
-	var workspaceID, nodeID uuid.UUID
-	var serialNumber, state string
-	var certificateVersion int64
-	if err := s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,COALESCE(serial_number,''),state,version FROM certificates WHERE id=$1`, request.CertificateID).Scan(&workspaceID, &nodeID, &serialNumber, &state, &certificateVersion); err != nil {
+	certificate, err := s.Get(ctx, request.CertificateID)
+	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
-	var existingRequest bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE workspace_id=$1 AND idempotency_key=$2)`, workspaceID, request.IdempotencyKey).Scan(&existingRequest); err != nil {
+	workspaceID, nodeID, serialNumber, state, certificateVersion := certificate.WorkspaceID, certificate.NodeID, certificate.SerialNumber, certificate.State, certificate.Version
+	existingRequest, err := s.operationExists(ctx, workspaceID, request.IdempotencyKey)
+	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	if certificateVersion != request.CertificateVersion && !existingRequest {
@@ -472,8 +481,8 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 		return operationstore.Operation{}, false, err
 	}
 	if state == "revoked" {
-		var exists bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE workspace_id=$1 AND idempotency_key=$2)`, workspaceID, request.IdempotencyKey).Scan(&exists); err != nil {
+		exists, err := s.operationExists(ctx, workspaceID, request.IdempotencyKey)
+		if err != nil {
 			return operationstore.Operation{}, false, err
 		}
 		if !exists {
@@ -493,22 +502,23 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if replay && state == "revoked" {
 		return op, true, nil
 	}
-	tx, txErr := s.pool.Begin(ctx)
-	if txErr != nil {
-		return op, replay, txErr
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, txErr = tx.Exec(ctx, `UPDATE certificates SET state='revoking',version=version+1,updated_at=$2 WHERE id=$1 AND state IN ('issued','expiring','expired','revocation_unknown')`, request.CertificateID, s.now()); txErr != nil {
-		return op, replay, txErr
-	}
-	if _, txErr = tx.Exec(ctx, `UPDATE artifact_operations SET state='revoked',lease_until=NULL,active_grant_expires_at=now(),updated_at=now() WHERE certificate_id=$1 AND state IN ('pending','ready','leased','consuming')`, request.CertificateID); txErr != nil {
-		return op, replay, txErr
-	}
-	if txErr = tx.Commit(ctx); txErr != nil {
+	if txErr := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return store.BeginRevocation(ctx, request.CertificateID, s.now())
+	}); txErr != nil {
 		return op, replay, txErr
 	}
 	if err := s.signer.Revoke(ctx, RevokeSignerRequest{CertificateID: request.CertificateID, SerialNumber: serialNumber, Reason: request.Reason}); err != nil {
-		_, _ = s.pool.Exec(context.WithoutCancel(ctx), `UPDATE certificates SET state='revocation_unknown',version=version+1,updated_at=$2 WHERE id=$1 AND state='revoking'`, request.CertificateID, s.now())
+		_ = database.Within(context.WithoutCancel(ctx), s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			store, storeErr := certificatestore.FromTransaction(tx)
+			if storeErr != nil {
+				return storeErr
+			}
+			return store.RevocationUnknown(context.WithoutCancel(ctx), request.CertificateID, s.now())
+		})
 		return op, replay, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
 	operationID, parseErr := uuid.Parse(op.ID)
@@ -522,23 +532,25 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 }
 
 func (s *Service) releaseOperation(ctx context.Context, operationID uuid.UUID) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return store.ReleaseOperation(ctx, operationID)
+	})
+}
+
+func (s *Service) operationExists(ctx context.Context, workspace uuid.UUID, key string) (exists bool, err error) {
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		exists, err = store.OperationExists(ctx, workspace, key)
 		return err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	var outboxID uuid.UUID
-	err = tx.QueryRow(ctx, `UPDATE outbox_events SET available_at=now() WHERE command_id=(SELECT command_id FROM operations WHERE id=$1) AND published_at IS NULL RETURNING id`, operationID).Scan(&outboxID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, outboxID.String()); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	})
+	return
 }
 
 func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGrant, bool, error) {
@@ -562,36 +574,39 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	if s.sealer == nil {
 		return ArtifactGrant{}, false, ErrSignerUnavailable
 	}
-	var workspaceID, nodeID uuid.UUID
-	var chain []byte
-	var serialNumber string
-	var certificateVersion int64
-	if err := s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,certificate_chain_pem,serial_number,version FROM certificates WHERE id=$1 AND state IN ('issued','expiring') AND not_after>now()`, request.CertificateID).Scan(&workspaceID, &nodeID, &chain, &serialNumber, &certificateVersion); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	var eligible certificatestore.ActionBinding
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		eligible, err = store.P12Eligible(ctx, request.CertificateID)
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
 			return ArtifactGrant{}, false, ErrNotReady
 		}
 		return ArtifactGrant{}, false, err
 	}
+	workspaceID, nodeID, chain, serialNumber, certificateVersion := eligible.WorkspaceID, eligible.NodeID, eligible.Chain, eligible.Serial, eligible.Version
 	if certificateVersion != request.CertificateVersion {
 		return ArtifactGrant{}, false, ErrNotReady
 	}
 	intent, _ := json.Marshal(map[string]any{"certificate_id": request.CertificateID, "certificate_version": request.CertificateVersion, "artifact_request_id": request.ArtifactRequestID, "approval_id": request.ApprovalID, "node_id": nodeID, "expected_version": request.ExpectedVersion, "actor_identity_id": request.ActorIdentityID, "actor_session_id": request.ActorSessionID, "reason": request.Reason})
 	intentHash := sha256.Sum256(intent)
-	var existingArtifactID, existingOperationID uuid.UUID
-	var existingExpires time.Time
-	var sameIntent bool
-	err := s.pool.QueryRow(ctx, `SELECT a.id,a.operation_id,a.expires_at,a.request_hash=$3 FROM operations o JOIN artifact_operations a ON a.operation_id=o.id WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspaceID, request.IdempotencyKey, intentHash[:]).Scan(&existingArtifactID, &existingOperationID, &existingExpires, &sameIntent)
+	existing, err := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])
 	if err == nil {
-		if !sameIntent {
+		if !existing.SameIntent {
 			return ArtifactGrant{}, false, operationstore.ErrIdempotencyConflict
 		}
-		op, getErr := s.operations.Get(ctx, existingOperationID)
+		op, getErr := s.operations.Get(ctx, existing.OperationID)
 		if getErr != nil {
 			return ArtifactGrant{}, false, getErr
 		}
-		return ArtifactGrant{ArtifactID: existingArtifactID, Operation: op, ExpiresAt: existingExpires}, true, nil
+		return ArtifactGrant{ArtifactID: existing.ID, Operation: op, ExpiresAt: existing.ExpiresAt}, true, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, database.ErrNotFound) {
 		return ArtifactGrant{}, false, err
 	}
 	passwordBytes, tokenBytes := make([]byte, 24), make([]byte, 32)
@@ -611,7 +626,14 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		return ArtifactGrant{}, false, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
 	var registeredKey bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_sealing_keys WHERE node_id=$1 AND purpose=2 AND version=$2 AND key_id=$3)`, nodeID, sealed.GetVersion(), sealed.GetKeyId()).Scan(&registeredKey); err != nil {
+	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		registeredKey, err = store.SealingKeyExists(ctx, nodeID, uint32(sealed.GetVersion()), sealed.GetKeyId())
+		return err
+	}); err != nil {
 		return ArtifactGrant{}, false, err
 	}
 	if !registeredKey {
@@ -619,6 +641,10 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	}
 	artifactID := request.ArtifactRequestID
 	expiresAt := s.now().Add(10 * time.Minute)
+	expiry, err := value.FromTime(expiresAt)
+	if err != nil {
+		return ArtifactGrant{}, false, err
+	}
 	tokenHash := sha256.Sum256([]byte(token))
 	approvalHash, _, err := certificateActionBinding("certificate.private_key.export", request.CertificateID, nodeID, certificateVersion, "certificate_p12", artifactID, serialNumber, chain)
 	if err != nil {
@@ -627,29 +653,48 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	op, replay, err := s.operations.CreateSynthetic(ctx, operationstore.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operationstore.CertificateP12, CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, SealedPassword: sealed, ArtifactID: artifactID, ArtifactMetadata: &operationstore.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: approvalHash, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
 	if err != nil {
 		if errors.Is(err, operationstore.ErrIdempotencyConflict) {
-			var id, operationID uuid.UUID
-			var expiration time.Time
-			var same bool
-			lookupErr := s.pool.QueryRow(ctx, `SELECT a.id,a.operation_id,a.expires_at,a.request_hash=$3 FROM operations o JOIN artifact_operations a ON a.operation_id=o.id WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspaceID, request.IdempotencyKey, intentHash[:]).Scan(&id, &operationID, &expiration, &same)
-			if lookupErr == nil && same {
-				existingOperation, getErr := s.operations.Get(ctx, operationID)
+			found, lookupErr := s.artifactByRequest(ctx, workspaceID, request.IdempotencyKey, intentHash[:])
+			if lookupErr == nil && found.SameIntent {
+				existingOperation, getErr := s.operations.Get(ctx, found.OperationID)
 				if getErr != nil {
 					return ArtifactGrant{}, false, getErr
 				}
-				return ArtifactGrant{ArtifactID: id, Operation: existingOperation, ExpiresAt: expiration}, true, nil
+				return ArtifactGrant{ArtifactID: found.ID, Operation: existingOperation, ExpiresAt: found.ExpiresAt}, true, nil
 			}
 		}
 		return ArtifactGrant{}, false, err
 	}
 	if replay {
-		var existingID uuid.UUID
-		var existingExpiry time.Time
-		if err := s.pool.QueryRow(ctx, `SELECT id,expires_at FROM artifact_operations WHERE operation_id=$1`, op.ID).Scan(&existingID, &existingExpiry); err != nil {
+		operationID, err := uuid.Parse(op.ID)
+		if err != nil {
 			return ArtifactGrant{}, false, err
 		}
-		return ArtifactGrant{ArtifactID: existingID, Operation: op, ExpiresAt: existingExpiry}, true, nil
+		var found certificatestore.Artifact
+		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			store, err := certificatestore.FromTransaction(tx)
+			if err != nil {
+				return err
+			}
+			found, err = store.ArtifactByOperation(ctx, operationID)
+			return err
+		}); err != nil {
+			return ArtifactGrant{}, false, err
+		}
+		return ArtifactGrant{ArtifactID: found.ID, Operation: op, ExpiresAt: found.ExpiresAt}, true, nil
 	}
-	return ArtifactGrant{ArtifactID: artifactID, Operation: op, DownloadToken: token, Password: password, ExpiresAt: expiresAt}, false, nil
+	return ArtifactGrant{ArtifactID: artifactID, Operation: op, DownloadToken: token, Password: password, ExpiresAt: expiry}, false, nil
+}
+
+func (s *Service) artifactByRequest(ctx context.Context, workspace uuid.UUID, key string, hash []byte) (v certificatestore.Artifact, err error) {
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		v, err = store.ArtifactByRequest(ctx, workspace, key, hash)
+		return err
+	})
+	return
 }
 
 func (s *Service) ArtifactResource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
@@ -847,7 +892,15 @@ func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID u
 }
 
 func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
-	rows, err := s.pool.Query(ctx, `SELECT id,active_grant_id,consume_grant,consume_sha256,consume_size,consume_actor_id,expires_at FROM artifact_operations WHERE state='consuming' ORDER BY updated_at,id LIMIT 20`)
+	var records []artifactstore.PendingConsumption
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := artifactstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		records, err = store.PendingConsumptions(ctx)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -857,37 +910,25 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 		digest      []byte
 		size        int64
 		actorID     uuid.UUID
-		expiresAt   time.Time
+		expiresAt   value.Timestamp
 	}
 	values := make([]pending, 0, 20)
-	for rows.Next() {
-		var value pending
-		var grantBytes []byte
-		value.grant = &agentv1.ArtifactGrantV1{}
-		if err := rows.Scan(&value.id, &value.grantID, &grantBytes, &value.digest, &value.size, &value.actorID, &value.expiresAt); err != nil {
-			rows.Close()
-			return err
-		}
-		if err := proto.Unmarshal(grantBytes, value.grant); err != nil || !bytes.Equal(value.grant.GetArtifactId(), value.id[:]) || !bytes.Equal(value.grant.GetGrantId(), value.grantID[:]) || value.grant.GetAuthorizedSubject() != value.actorID.String() || value.grant.GetMaxBytes() != uint64(value.size) {
-			rows.Close()
+	for _, record := range records {
+		value := pending{id: record.ID, grantID: record.GrantID, grant: &agentv1.ArtifactGrantV1{}, digest: record.Digest, size: record.Size, actorID: record.ActorID, expiresAt: record.ExpiresAt}
+		if err := proto.Unmarshal(record.Grant, value.grant); err != nil || !bytes.Equal(value.grant.GetArtifactId(), value.id[:]) || !bytes.Equal(value.grant.GetGrantId(), value.grantID[:]) || value.grant.GetAuthorizedSubject() != value.actorID.String() || value.grant.GetMaxBytes() != uint64(value.size) {
 			return ErrArtifactDenied
 		}
 		values = append(values, value)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	for _, value := range values {
-		recoveryNode, nodeErr := uuid.FromBytes(value.grant.GetNodeId())
+	for _, item := range values {
+		recoveryNode, nodeErr := uuid.FromBytes(item.grant.GetNodeId())
 		if nodeErr != nil {
 			continue
 		}
 		var consumed bool
-		confirmErr := s.executeArtifactFenced(ctx, recoveryNode, value.grantID,
+		confirmErr := s.executeArtifactFenced(ctx, recoveryNode, item.grantID,
 			func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-				confirmed, err := s.artifacts.ConfirmArtifactConsumed(ctx, value.grant, value.digest, value.size, binding)
+				confirmed, err := s.artifacts.ConfirmArtifactConsumed(ctx, item.grant, item.digest, item.size, binding)
 				consumed = confirmed
 				return err
 			})
@@ -897,14 +938,14 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 			// failure; exact evidence remains in consuming for the next pass.
 			continue
 		}
-		grantExpires := value.grant.GetExpiresAt()
+		grantExpires := item.grant.GetExpiresAt()
 		if grantExpires == nil {
 			return ErrArtifactDenied
 		}
 		if !consumed && grantExpires.AsTime().After(s.now()) {
-			if err := s.executeArtifactFenced(ctx, recoveryNode, value.grantID,
+			if err := s.executeArtifactFenced(ctx, recoveryNode, item.grantID,
 				func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-					return s.artifacts.ConsumeArtifact(ctx, value.grant, value.digest, value.size, binding)
+					return s.artifacts.ConsumeArtifact(ctx, item.grant, item.digest, item.size, binding)
 				}); err != nil {
 				continue
 			}
@@ -915,15 +956,29 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 			// confirmation. They are benign for reconciliation, but the explicit
 			// result prevents an in-flight HTTP request from treating them as a
 			// successful delivery.
-			if _, err := s.finalizeArtifactConsumption(ctx, value.id, value.grantID); err != nil {
+			if _, err := s.finalizeArtifactConsumption(ctx, item.id, item.grantID); err != nil {
 				return err
 			}
-		} else if !value.expiresAt.After(s.now()) {
-			if err := coordination.FencedExec(ctx, s.pool, coordination.FenceFromContext(ctx), `UPDATE artifact_operations SET state='expired',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
+		} else {
+			now, err := value.FromTime(s.now())
+			if err != nil {
 				return err
 			}
-		} else if err := coordination.FencedExec(ctx, s.pool, coordination.FenceFromContext(ctx), `UPDATE artifact_operations SET state='ready',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
-			return err
+			if !item.expiresAt.Valid {
+				return ErrArtifactDenied
+			}
+			if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+				store, err := artifactstore.FromTransaction(tx)
+				if err != nil {
+					return err
+				}
+				if err := store.ResetConsumption(ctx, item.id, item.grantID, item.expiresAt.Micros <= now.Micros); err != nil {
+					return err
+				}
+				return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -945,115 +1000,83 @@ func (s *Service) Maintain(ctx context.Context) error {
 	if err := s.reconcileConsumingArtifacts(ctx); err != nil {
 		return err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	type expiryAlert struct {
-		id          uuid.UUID
-		workspaceID uuid.UUID
-		nodeID      uuid.UUID
-		notAfter    time.Time
-		kind        string
-	}
-	alerts := make([]expiryAlert, 0, 200)
-	rows, err := tx.Query(ctx, `WITH due AS (
-		SELECT id FROM certificates WHERE state IN ('issued','expiring') AND not_after<=now()
-		ORDER BY not_after,id LIMIT 100 FOR UPDATE SKIP LOCKED
-	) UPDATE certificates c SET state='expired',version=version+1,updated_at=now() FROM due WHERE c.id=due.id RETURNING c.id,c.workspace_id,c.node_id,c.not_after`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var alert expiryAlert
-		if err := rows.Scan(&alert.id, &alert.workspaceID, &alert.nodeID, &alert.notAfter); err != nil {
-			rows.Close()
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
 			return err
 		}
-		alert.kind = "certificate.expired"
-		alerts = append(alerts, alert)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if _, err := tx.Exec(ctx, `UPDATE artifact_operations a SET state='expired',lease_until=NULL,updated_at=now() FROM certificates c WHERE c.id=a.certificate_id AND c.state='expired' AND a.state IN ('pending','ready','leased','consuming')`); err != nil {
-		return err
-	}
-	rows, err = tx.Query(ctx, `WITH due AS (
-		SELECT id FROM certificates WHERE state='issued' AND not_after>now() AND not_after<=now()+interval '30 days'
-		ORDER BY not_after,id LIMIT 100 FOR UPDATE SKIP LOCKED
-	) UPDATE certificates c SET state='expiring',version=version+1,updated_at=now() FROM due WHERE c.id=due.id RETURNING c.id,c.workspace_id,c.node_id,c.not_after`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var alert expiryAlert
-		if err := rows.Scan(&alert.id, &alert.workspaceID, &alert.nodeID, &alert.notAfter); err != nil {
-			rows.Close()
+		if err := store.Maintain(ctx, s.now()); err != nil {
 			return err
 		}
-		alert.kind = "certificate.expiring"
-		alerts = append(alerts, alert)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	for _, alert := range alerts {
-		if _, err := tx.Exec(ctx, `INSERT INTO security_alerts(id,workspace_id,severity,kind,node_id,resource_type,resource_id,created_at) VALUES($1,$2,'high',$3,$4,'certificate',$5,$6)`, uuid.Must(uuid.NewV7()), alert.workspaceID, alert.kind, alert.nodeID, alert.id, s.now()); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='expired',lease_until=NULL,updated_at=now() WHERE state IN ('pending','ready','leased') AND expires_at<=now()`); err != nil {
-		return err
-	}
-	return coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx))
+		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+	})
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Certificate, error) {
-	return scan(s.pool.QueryRow(ctx, `SELECT id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,version,public_key_sha256,COALESCE(serial_number,''),not_before,not_after,revoked_at,created_at,updated_at FROM certificates WHERE id=$1`, id))
+	var result certificatestore.Certificate
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		result, err = store.Get(ctx, id)
+		return err
+	})
+	return readCertificate(result), err
 }
 
 func (s *Service) ListNode(ctx context.Context, nodeID uuid.UUID) ([]Certificate, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,version,public_key_sha256,COALESCE(serial_number,''),not_before,not_after,revoked_at,created_at,updated_at FROM certificates WHERE node_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100`, nodeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	values := make([]Certificate, 0)
-	for rows.Next() {
-		value, scanErr := scan(rows)
-		if scanErr != nil {
-			return nil, scanErr
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
 		}
-		values = append(values, value)
-	}
-	return values, rows.Err()
+		rows, err := store.ListNode(ctx, nodeID)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			values = append(values, readCertificate(row))
+		}
+		return nil
+	})
+	return values, err
 }
 
 func (s *Service) GetByOperation(ctx context.Context, operationID uuid.UUID, replay bool) (Certificate, bool, error) {
-	certificate, err := scan(s.pool.QueryRow(ctx, `SELECT id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,version,public_key_sha256,COALESCE(serial_number,''),not_before,not_after,revoked_at,created_at,updated_at FROM certificates WHERE operation_id=$1`, operationID))
-	return certificate, replay, err
+	var result certificatestore.Certificate
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		result, err = store.GetByOperation(ctx, operationID)
+		return err
+	})
+	return readCertificate(result), replay, err
 }
 
 func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT workspace_id,node_id FROM certificates WHERE id=$1`, id).Scan(&workspaceID, &nodeID)
+	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		workspaceID, nodeID, err = store.Resource(ctx, id)
+		return err
+	})
 	return
 }
 
-func scan(row pgx.Row) (Certificate, error) {
-	var certificate Certificate
-	var keyBits int32
-	err := row.Scan(&certificate.ID, &certificate.WorkspaceID, &certificate.NodeID, &certificate.OperationID, &certificate.CommonName, &certificate.DNSNames, &keyBits, &certificate.State, &certificate.Version, &certificate.PublicKeySHA256, &certificate.SerialNumber, &certificate.NotBefore, &certificate.NotAfter, &certificate.RevokedAt, &certificate.CreatedAt, &certificate.UpdatedAt)
-	if err != nil {
-		return Certificate{}, err
+func readCertificate(v certificatestore.Certificate) Certificate {
+	optional := func(at value.Timestamp) *value.Timestamp {
+		if !at.Valid {
+			return nil
+		}
+		return &at
 	}
-	certificate.KeyBits = uint32(keyBits)
-	return certificate, nil
+	return Certificate{ID: v.ID, WorkspaceID: v.WorkspaceID, NodeID: v.NodeID, OperationID: v.OperationID, CommonName: v.CommonName, DNSNames: v.DNSNames.Bytes(), KeyBits: v.KeyBits, State: v.State, Version: v.Version, PublicKeySHA256: v.PublicKeySHA256, SerialNumber: v.SerialNumber, NotBefore: optional(v.NotBefore), NotAfter: optional(v.NotAfter), RevokedAt: optional(v.RevokedAt), CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
 }
 
 func validateSignedCertificate(csrDER, chainPEM []byte, now time.Time) (*x509.Certificate, error) {

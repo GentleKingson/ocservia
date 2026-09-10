@@ -53,6 +53,11 @@ func TestNoNewBusinessDriverLeaks(t *testing.T) {
 		if strings.HasPrefix(rel, "control-plane/internal/database/postgres/") || strings.HasPrefix(rel, "control-plane/internal/database/mysql/") {
 			return nil
 		}
+		// The composition root selects drivers and owns migration connections;
+		// application wiring and business services still may not import them.
+		if rel == "control-plane/internal/database/connection/connection.go" {
+			return nil
+		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
 			return err

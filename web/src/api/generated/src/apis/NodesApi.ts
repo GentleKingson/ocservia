@@ -133,7 +133,7 @@ export interface ListNodeTelemetryRequest {
   nodeId: string;
   metric: TelemetryMetric;
   resolution?: ListNodeTelemetryResolutionEnum;
-  since?: Date;
+  since?: string;
 }
 
 export interface ListNodeUserGroupStateRequest {
@@ -659,9 +659,7 @@ export class NodesApi extends runtime.BaseAPI {
     }
 
     if (requestParameters["since"] != null) {
-      queryParameters["since"] = (
-        requestParameters["since"] as any
-      ).toISOString();
+      queryParameters["since"] = requestParameters["since"];
     }
 
     const headerParameters: runtime.HTTPHeaders = {};

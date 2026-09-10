@@ -13,6 +13,16 @@ type privdAttestationStore struct{ tx database.Tx }
 
 func (t *transaction) PrivdAttestationStore() attestationstore.Store { return privdAttestationStore{t} }
 
+func (s privdAttestationStore) KeyStateCounts(ctx context.Context) (database.Rows, error) {
+	return s.tx.Query(ctx, `SELECT state,count(*) FROM node_privd_attestation_keys GROUP BY state`)
+}
+
+func (s privdAttestationStore) VerificationKey(ctx context.Context, node uuid.UUID, id string) (attestationstore.VerificationKey, error) {
+	var k attestationstore.VerificationKey
+	err := s.tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2`, node, id).Scan(&k.PublicKey, &k.State, &k.ActivatedAt, &k.ValidUntil)
+	return k, err
+}
+
 func (s privdAttestationStore) LockActiveNode(ctx context.Context, node uuid.UUID) (uuid.UUID, error) {
 	var workspace uuid.UUID
 	err := s.tx.QueryRow(ctx, `SELECT workspace_id FROM nodes WHERE id=$1 AND status IN ('active','offline') FOR UPDATE`, node).Scan(&workspace)

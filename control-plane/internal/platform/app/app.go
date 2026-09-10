@@ -17,6 +17,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -33,7 +35,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -64,32 +65,37 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}()
 
-	pool, err := migrations.Open(ctx, cfg.DatabaseURL)
+	conn, err := connection.Open(ctx, connection.Options{Backend: cfg.DatabaseBackend, Environment: cfg.Environment, URL: cfg.DatabaseURL, CAFile: cfg.DatabaseTLSCAFile})
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-	databaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer conn.Close()
+	backend := conn.Store
+	databaseTimeout := 30 * time.Second
+	if cfg.MigrateOnly {
+		databaseTimeout = 10 * time.Minute
+	}
+	databaseCtx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()
 	if cfg.SchemaCompatibilityCheck > 0 {
-		if _, err := migrations.ValidateControllerSchema(databaseCtx, pool, cfg.SchemaCompatibilityCheck); err != nil {
+		if _, err := backend.ControllerSchema(databaseCtx, cfg.SchemaCompatibilityCheck); err != nil {
 			return fmt.Errorf("validate schema compatibility: %w", err)
 		}
 		logger.Info("database schema compatibility check passed", "schema", cfg.SchemaCompatibilityCheck)
 		return nil
 	}
 	if cfg.MigrateOnly {
-		auditManager, err := newAuditManager(pool, cfg)
+		auditManager, err := newAuditManager(backend, cfg)
 		if err != nil {
 			return err
 		}
-		if err := migrations.Migrate(databaseCtx, pool, auditManager.PreflightAuthenticityMigration); err != nil {
+		if err := conn.Migrate(databaseCtx, auditManager); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
 		}
 		if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
 			return fmt.Errorf("transition audit event authentication: %w", err)
 		}
-		if err := migrations.GrantRuntimePrivileges(databaseCtx, pool, cfg.RuntimeDBRole); err != nil {
+		if err := conn.GrantRuntimePrivileges(databaseCtx, cfg.RuntimeDBRole); err != nil {
 			return fmt.Errorf("grant runtime database privileges: %w", err)
 		}
 		logger.Info("database migrations complete")
@@ -99,10 +105,10 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	if err != nil {
 		return err
 	}
-	if _, err := migrations.ValidateControllerSchema(databaseCtx, pool, expectedSchemaVersion); err != nil {
+	if _, err := backend.ControllerSchema(databaseCtx, expectedSchemaVersion); err != nil {
 		return fmt.Errorf("validate database schema: %w", err)
 	}
-	auditManager, err := newAuditManager(pool, cfg)
+	auditManager, err := newAuditManager(backend, cfg)
 	if err != nil {
 		return err
 	}
@@ -111,7 +117,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 
 	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
-		service, err := auth.New(ctx, pool, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+		service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 		if err != nil {
 			return errors.New("configure bootstrap authentication failed")
 		}
@@ -166,7 +172,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
-	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
+	operationService := operationstore.NewBackend(backend, cfg.UserOperationConcurrency, commandSigner)
 	if err := operationService.SetAgentUpgradeReconcileTimeout(cfg.AgentUpgradeReconcile); err != nil {
 		return fmt.Errorf("configure agent upgrade reconciliation window: %w", err)
 	}
@@ -194,7 +200,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		// The worker-role process is the per-node connection owner: it serves
 		// session authorization and command dispatch, so its manager takes
 		// the leases, signs fences, and pushes them to transportd.
-		ownerSessions, err = ownersession.NewManager(pool, commandSigner, workerTransport, cfg.OwnerLeaseTTL, logger)
+		ownerSessions, err = ownersession.NewManagerBackend(backend, commandSigner, workerTransport, cfg.OwnerLeaseTTL, logger)
 		if err != nil {
 			return fmt.Errorf("configure connection owner sessions: %w", err)
 		}
@@ -203,15 +209,15 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		// the exact owner term behind the connection instead of letting a
 		// live process keep renewing a session whose connection is gone.
 		go func() { workerErr <- ownerSessions.WatchTransport(componentCtx, workerTransport) }()
-		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessions(pool, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions)), cfg.TransportUID)
+		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessionsBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions)), cfg.TransportUID)
 		if err != nil {
 			return fmt.Errorf("configure trust server: %w", err)
 		}
 		go func() { trustErr <- trust.Serve() }()
 	}
-	sliceService := localslice.NewWithSigner(pool, commandSigner)
+	sliceService := localslice.NewBackend(backend, commandSigner)
 	if ownerSessions != nil {
-		sliceService = localslice.NewWithCommandRecovery(pool, commandSigner, operationService, ownerSessions)
+		sliceService = localslice.NewBackendWithCommandRecovery(backend, commandSigner, operationService, ownerSessions)
 	}
 	if cfg.TestResultCommitBarrier != "" {
 		if err := sliceService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
@@ -246,16 +252,16 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 		var trustWorker *enrollment.TrustConvergenceWorker
-		trustWorker, err = enrollment.NewFencedTrustConvergenceWorker(pool, transport, fenceExecutor, logger)
+		trustWorker, err = enrollment.NewFencedTrustConvergenceWorkerBackend(backend, transport, fenceExecutor, logger)
 		if err != nil {
 			return fmt.Errorf("configure trust convergence worker: %w", err)
 		}
 		go func() { workerErr <- trustWorker.Run(componentCtx) }()
 	}
-	telemetryService := telemetrystore.NewWithRecommendedAgentVersion(pool, cfg.RecommendedAgentVersion)
+	telemetryService := telemetrystore.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
 	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
-	userStateService := userstate.NewWithSigner(pool, commandSigner)
-	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
+	userStateService := userstate.NewWithSignerBackend(backend, commandSigner)
+	userOperationsService := useroperations.NewWithConcurrencyBackend(backend, userStateService, cfg.UserOperationConcurrency)
 	var apiTransport *transportclient.Client
 	if cfg.ControllerEndpointID != "" {
 		apiTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
@@ -264,11 +270,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}
 	// Roles without the lease issue bindings for the fence transportd
-	// registered, validated against the PostgreSQL ownership authority, so
+	// registered, validated against the database ownership authority, so
 	// administrative operations stay owner-fenced without a second lease
 	// holder and a stale registered fence can never be re-signed.
 	if fenceExecutor == nil && apiTransport != nil {
-		observer, observerErr := ownersession.NewObserver(pool, apiTransport, commandSigner)
+		observer, observerErr := ownersession.NewObserverBackend(backend, apiTransport, commandSigner)
 		if observerErr != nil {
 			return fmt.Errorf("configure owner fence observer: %w", observerErr)
 		}
@@ -280,9 +286,9 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		if signerErr != nil {
 			return fmt.Errorf("configure external certificate signer: %w", signerErr)
 		}
-		certificateService = certificates.NewWithDependencies(pool, operationService, signer, signer, apiTransport, commandSigner)
+		certificateService = certificates.NewBackend(backend, operationService, signer, signer, apiTransport, commandSigner)
 	} else {
-		certificateService = certificates.New(pool, operationService)
+		certificateService = certificates.NewBackend(backend, operationService, nil, nil, nil, nil)
 	}
 	certificateService.EnableOwnerFencing(fenceExecutor)
 	if cfg.RunsScheduler() {
@@ -293,7 +299,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		// The leadership lease spans the whole maintenance session and is
 		// renewed in the background; losing renewal cancels the session
 		// context, which aborts fenced transactions before they can commit.
-		leader := coordination.NewRunner(pool, identity, 15*time.Second, 5*time.Second, logger)
+		leader := coordination.NewRunnerBackend(backend, identity, 15*time.Second, 5*time.Second, logger)
 		go func() {
 			defer leader.Stop()
 			ticker := time.NewTicker(30 * time.Second)
@@ -328,7 +334,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 						return err
 					}
 					if cfg.TestSchedulerEvidence {
-						if err := coordination.RecordMaintenanceCompletion(sessionCtx, pool, session); err != nil {
+						if err := coordination.RecordMaintenanceCompletion(sessionCtx, backend, session); err != nil {
 							return err
 						}
 					}
@@ -379,7 +385,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}
 
-	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
+	server := api.NewBackend(cfg.HTTPAddress, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
 	server.EnableBrowserOrigin(cfg.BrowserOrigin())
 	server.ConfigureAuthProxies(cfg.AuthTrustedProxyCIDRs)
 	if err := server.ConfigureEventStreams(cfg.EventStreams); err != nil {
@@ -392,22 +398,22 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 			authConfig.Issuer, authConfig.ClientID = cfg.OIDCIssuer, cfg.OIDCClientID
 			authConfig.ClientSecret, authConfig.RedirectURL = cfg.OIDCClientSecret, cfg.OIDCRedirectURL
 		}
-		authService, err = auth.New(ctx, pool, authConfig)
+		authService, err = auth.NewBackend(backend, authConfig)
 		if err != nil {
 			return fmt.Errorf("configure authentication: %w", err)
 		}
 	}
-	server.EnableAuthorization(authService, rbac.New(pool), approvals.New(pool), auditManager)
+	server.EnableAuthorization(authService, rbac.NewBackend(backend), approvals.NewBackend(backend), auditManager)
 	server.EnableOperations(operationService)
 	server.EnableReleaseCatalog(releaseCatalog)
 	server.EnableUserState(userStateService)
 	server.EnableUserOperations(userOperationsService)
-	server.EnableConfigPlans(configplan.New(pool, operationService))
+	server.EnableConfigPlans(configplan.NewBackend(backend, operationService))
 	server.EnableCertificates(certificateService)
-	server.EnablePrivdAttestation(privdattestation.New(pool))
+	server.EnablePrivdAttestation(privdattestation.NewBackend(backend))
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
-		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner), apiTransport)
+		server.EnableEnrollment(enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner), apiTransport)
 		server.EnableOwnerFencing(fenceExecutor)
 	}
 	server.EnableLocalSlice(sliceService)
@@ -457,11 +463,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 }
 
-func newAuditManager(pool *pgxpool.Pool, cfg config.Config) (*audit.Manager, error) {
+func newAuditManager(backend database.Backend, cfg config.Config) (*audit.Manager, error) {
 	if len(cfg.AuditEventKey) == 0 {
-		return audit.NewManager(pool, cfg.AuditCheckpointKey), nil
+		return audit.NewBackendManager(backend, cfg.AuditCheckpointKey), nil
 	}
-	manager, err := audit.NewManagerWithEventKey(pool, cfg.AuditCheckpointKey, cfg.AuditEventKeyID, cfg.AuditEventKey)
+	manager, err := audit.NewBackendManagerWithEventKey(backend, cfg.AuditCheckpointKey, cfg.AuditEventKeyID, cfg.AuditEventKey)
 	if err != nil {
 		return nil, fmt.Errorf("configure audit event authentication: %w", err)
 	}

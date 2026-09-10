@@ -50,6 +50,9 @@ func (s auditStore) Append(ctx context.Context, args []any) error {
 func (s auditStore) Events(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac FROM audit_events WHERE workspace_id=? ORDER BY occurred_at,id`, UUIDBytes(workspace))
 }
+func (s auditStore) RecentEvents(ctx context.Context, workspace uuid.UUID, limit int) (database.Rows, error) {
+	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,approval_id,result,reason,error_type,previous_event_hash,event_hash FROM audit_events WHERE workspace_id=? ORDER BY occurred_at DESC,id DESC LIMIT ?`, UUIDBytes(workspace), limit)
+}
 func (s auditStore) Checkpoints(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT through_event_id,through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=? ORDER BY created_at,id`, UUIDBytes(workspace))
 }

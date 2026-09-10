@@ -1,8 +1,10 @@
 # PR-02 Version 3 Storage Adapters
 
-This remains Draft, not complete PR-02 acceptance. Controller startup still
-rejects MySQL/MariaDB, including development Controller startup. Domain tests
-are not authenticated Controller workflow acceptance.
+This is the historical version-3 record, not the current acceptance status.
+The subsequent business-store migrations and real three-backend Controller
+workflows have passed [final PR-02 acceptance](database-pr02-validation.md#final-pr-02-acceptance).
+The PR remains Draft and MySQL/MariaDB production startup remains rejected;
+version-3 domain tests alone were not authenticated workflow acceptance.
 
 This document records the version-3 milestone. The appended
 [version-4 workflows](database-pr02-controller-workflows.md) supersede the
@@ -82,7 +84,7 @@ or GRANT OPTION. Exact-key guard UPDATE permission exists only to permit
 locking reads; a trigger rejects every actual update. Side tables and migration
 metadata remain unwritable by runtime, and audit mutation grants do not change.
 
-## Remaining acceptance
+## Remaining Acceptance at Version 3
 
 The other JSON/array/time fields and lease sentinel meaning still require
 actual adapters and append-only migrations. The full Controller transport,

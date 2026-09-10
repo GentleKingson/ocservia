@@ -29,6 +29,12 @@ type Finalized struct {
 	Size                                                   int64
 	RequestID                                              string
 }
+type PendingConsumption struct {
+	ID, GrantID, ActorID uuid.UUID
+	Grant, Digest        []byte
+	Size                 int64
+	ExpiresAt            value.Timestamp
+}
 type Store interface {
 	Resource(context.Context, uuid.UUID) (uuid.UUID, uuid.UUID, error)
 	LockCapacity(context.Context) error
@@ -40,6 +46,8 @@ type Store interface {
 	Finalize(context.Context, uuid.UUID, uuid.UUID) (Finalized, error)
 	State(context.Context, uuid.UUID, uuid.UUID) (string, error)
 	Abort(context.Context, uuid.UUID, uuid.UUID) error
+	PendingConsumptions(context.Context) ([]PendingConsumption, error)
+	ResetConsumption(context.Context, uuid.UUID, uuid.UUID, bool) error
 }
 
 func FromTransaction(tx database.Tx) (Store, error) {

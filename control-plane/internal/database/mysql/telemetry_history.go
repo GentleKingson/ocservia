@@ -89,11 +89,14 @@ func (s *TelemetryHistoryStore) Insert(ctx context.Context, nodeID, batchID uuid
 	return nil
 }
 
-func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since time.Time) ([]telemetryhistory.Point, error) {
-	at, err := telemetryMicros(since)
-	if err != nil {
+func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetryhistory.Point, error) {
+	if err := since.Validate(); err != nil {
 		return nil, err
 	}
+	if !since.Valid {
+		return nil, database.ErrConstraint
+	}
+	at := since.Micros
 	var query string
 	var args []any
 	switch resolution {
@@ -122,12 +125,7 @@ func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, m
 	points := []telemetryhistory.Point{}
 	for rows.Next() {
 		var p telemetryhistory.Point
-		var micros int64
-		if err := rows.Scan(&micros, &p.Metric, &p.Count, &p.Minimum, &p.Maximum, &p.Average); err != nil {
-			return nil, err
-		}
-		p.At, err = (value.Timestamp{Micros: micros, Valid: true}).Time()
-		if err != nil {
+		if err := rows.Scan(&p.At, &p.Metric, &p.Count, &p.Minimum, &p.Maximum, &p.Average); err != nil {
 			return nil, err
 		}
 		points = append(points, p)
@@ -159,7 +157,9 @@ func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) err
 			parts = append(parts, `SELECT node_id,metric,sampled_at,value FROM `+table+` WHERE sampled_at>=?`)
 			args = append(args, since)
 		}
-		query := fmt.Sprintf(`SELECT node_id,metric,FLOOR(CAST(sampled_at AS DECIMAL(20,0))/%d)*%d AS bucket_at,COUNT(*),MIN(value),MAX(value),AVG(value) FROM (%s) AS samples GROUP BY node_id,metric,bucket_at`, rollup.width, rollup.width, strings.Join(parts, ` UNION ALL `))
+		// PostgreSQL date_bin preserves infinities. They are ordered values,
+		// not finite microseconds to round (which would corrupt the sentinel).
+		query := fmt.Sprintf(`SELECT node_id,metric,CASE WHEN sampled_at IN (%d,%d) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/%d)*%d END AS bucket_at,COUNT(*),MIN(value),MAX(value),AVG(value) FROM (%s) AS samples GROUP BY node_id,metric,bucket_at`, value.NegativeInfinity, value.PositiveInfinity, rollup.width, rollup.width, strings.Join(parts, ` UNION ALL `))
 		rows, err := s.tx.Query(ctx, query, args...)
 		if err != nil {
 			return err

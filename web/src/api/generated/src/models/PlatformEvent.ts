@@ -52,11 +52,11 @@ export interface PlatformEvent {
    */
   traceparent: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof PlatformEvent
    */
-  occurredAt: Date;
+  occurredAt: string;
 }
 
 /**
@@ -100,7 +100,7 @@ export function PlatformEventFromJSONTyped(
     nodeId: json["node_id"],
     type: PlatformEventTypeFromJSON(json["type"]),
     traceparent: json["traceparent"],
-    occurredAt: new Date(json["occurred_at"]),
+    occurredAt: json["occurred_at"],
   };
 }
 
@@ -121,6 +121,6 @@ export function PlatformEventToJSONTyped(
     node_id: value["nodeId"],
     type: PlatformEventTypeToJSON(value["type"]),
     traceparent: value["traceparent"],
-    occurred_at: value["occurredAt"].toISOString(),
+    occurred_at: value["occurredAt"],
   };
 }

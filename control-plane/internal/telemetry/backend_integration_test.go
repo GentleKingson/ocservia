@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
@@ -119,9 +120,14 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingest',$2,now(),now())`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Ingest',?,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`, workspace, "ingest-"+workspace.String())
-	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','offline',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'node','offline',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))`, node, workspace)
+	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingest',$2,now(),now())`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Ingest',?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, workspace, "ingest-"+workspace.String())
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','offline',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'node','offline',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, node, workspace)
+	exec(`UPDATE nodes SET updated_at=$1 WHERE id=$2`, `UPDATE nodes SET updated_at=? WHERE id=?`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}, node)
 	service := NewBackend(backend)
+	unobserved, err := service.GetNode(ctx, node)
+	if err != nil || unobserved.ObservedAt != nil || unobserved.Freshness != "never" {
+		t.Fatalf("missing snapshot: %+v %v", unobserved, err)
+	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	wireID, instance := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	wire, err := proto.Marshal(&agentv1.TelemetryBatch{BatchId: wireID[:], NodeId: node[:], Sequence: 0, Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH, Snapshot: &agentv1.ObservedSnapshot{ObservedAt: timestamppb.New(now.Add(-time.Minute)), BootId: "wire", AgentInstanceId: instance[:], AgentVersion: "0.1.0", OcservVersion: "1.3.0", OsRelease: "debian", OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`)}})
@@ -171,6 +177,30 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if !bytes.Equal(storedJSON.Bytes(), expectedJSON.Bytes()) || storedTime != expectedTime {
 		t.Fatalf("snapshot logical values changed: %s %+v", storedJSON.Bytes(), storedTime)
 	}
+	read, err := service.GetNode(ctx, node)
+	if err != nil || read.ID != node.String() || read.ObservedAt == nil || *read.ObservedAt != expectedTime || !bytes.Equal(read.System, expectedJSON.Bytes()) || read.SessionCount != 1 {
+		t.Fatalf("node read model: %+v %v", read, err)
+	}
+	page, more, err := service.ListNodesInWorkspace(ctx, workspace, uuid.Nil, 1)
+	if err != nil || more || len(page) != 1 || page[0].ID != node.String() {
+		t.Fatalf("node workspace page: %+v %v %v", page, more, err)
+	}
+	page, more, err = service.ListNodesInWorkspace(ctx, workspace, node, 1)
+	if err != nil || more || len(page) != 0 {
+		t.Fatalf("node cursor: %+v %v %v", page, more, err)
+	}
+	if _, err := service.GetNode(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, database.ErrNotFound) {
+		t.Fatalf("missing node: %v", err)
+	}
+	sessionPage, more, err := service.ListSessions(ctx, node, "", 1)
+	connected, _ := value.FromTime(batch.Sessions[0].ConnectedAt)
+	if err != nil || more || len(sessionPage) != 1 || sessionPage[0].ConnectedAt != connected || sessionPage[0].ClientIP != batch.Sessions[0].ClientIP {
+		t.Fatalf("session read: %+v %v %v", sessionPage, more, err)
+	}
+	bans, err := service.ListIPBans(ctx, node, 200)
+	if err != nil || len(bans) != len(batch.IPBans) {
+		t.Fatalf("IP ban read: %+v %v", bans, err)
+	}
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := observedstate.FromTransaction(tx)
 		if err != nil {
@@ -195,7 +225,11 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		points, err := history.History(ctx, node, "connection_rtt_ms", "raw", now.Add(-time.Hour))
+		since, err := value.FromTime(now.Add(-time.Hour))
+		if err != nil {
+			return err
+		}
+		points, err := history.History(ctx, node, "connection_rtt_ms", "raw", since)
 		if err != nil {
 			return err
 		}
@@ -267,4 +301,85 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if _, err := service.Ingest(stopped, testBatch(node, 5, now)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled: %v", err)
 	}
+	negative := value.Timestamp{Micros: value.NegativeInfinity, Valid: true}
+	positive := value.Timestamp{Micros: value.PositiveInfinity, Valid: true}
+	for _, at := range []value.Timestamp{negative, positive} {
+		exec(`INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',7)`, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'connection_rtt_ms',7)`, node, batch.ID, at)
+	}
+	points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", "raw", negative)
+	if err != nil || len(points) < 2 || points[0].At != negative || points[len(points)-1].At != positive {
+		t.Fatalf("extended service history: %+v %v", points, err)
+	}
+	if encoded, err := json.Marshal(points); err != nil || !bytes.Contains(encoded, []byte(`"at":"infinity"`)) || !bytes.Contains(encoded, []byte(`"at":"-infinity"`)) {
+		t.Fatalf("extended history JSON: %s %v", encoded, err)
+	}
+	service.now = func() time.Time { return now.Add(5 * time.Minute) }
+	fenced := coordination.WithFence(ctx, telemetryRejectedFence{err: outerFailure})
+	if err := service.Maintain(fenced); !errors.Is(err, outerFailure) {
+		t.Fatalf("maintenance fence: %v", err)
+	}
+	statusQuery := `SELECT status,updated_at FROM nodes WHERE id=$1`
+	eventQuery := `SELECT count(*) FROM transport_events WHERE node_id=$1 AND event_type='disconnected'`
+	if mysqlEngine {
+		statusQuery = `SELECT status,updated_at FROM nodes WHERE id=?`
+		eventQuery = `SELECT count(*) FROM transport_events WHERE node_id=? AND event_type='disconnected'`
+	}
+	checkState := func(status string, events int) {
+		t.Helper()
+		var got string
+		var updated value.Timestamp
+		if err := backend.QueryRow(ctx, statusQuery, nodeArg).Scan(&got, &updated); err != nil || got != status {
+			t.Fatalf("maintenance state: %s %v", got, err)
+		}
+		want := positive
+		if status == "offline" {
+			want, err = value.FromTime(service.now())
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if updated != want {
+			t.Fatal("activation/maintenance node clock", updated, want)
+		}
+		if err := backend.QueryRow(ctx, eventQuery, nodeArg).Scan(&count); err != nil || count != events {
+			t.Fatalf("maintenance events: %d %v", count, err)
+		}
+	}
+	checkState("active", 0)
+	if points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", "5m", positive); err != nil || len(points) != 0 {
+		t.Fatalf("fence committed rollup: %+v %v", points, err)
+	}
+	for range 2 {
+		if err := service.Maintain(ctx); err != nil {
+			t.Fatal(err)
+		}
+		checkState("offline", 1)
+		for _, resolution := range []string{"5m", "1h"} {
+			points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", resolution, positive)
+			if err != nil || len(points) != 1 || points[0].At != positive || points[0].Count != 1 || points[0].Average != 7 {
+				t.Fatalf("infinite service rollup %s: %+v %v", resolution, points, err)
+			}
+		}
+	}
+	for _, at := range []value.Timestamp{negative, positive} {
+		exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1,observed_at=$2 WHERE node_id=$3`, `UPDATE node_observed_snapshots SET last_heartbeat_at=?,observed_at=? WHERE node_id=?`, at, at, node)
+		read, err := service.GetNode(ctx, node)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "stale"
+		if at == positive {
+			want = "fresh"
+		}
+		if read.ObservedAt == nil || *read.ObservedAt != at || read.Freshness != want {
+			t.Fatalf("extended node: %+v", read)
+		}
+	}
 }
+
+type telemetryRejectedFence struct {
+	coordination.Fence
+	err error
+}
+
+func (f telemetryRejectedFence) AssertTransaction(context.Context, database.Tx) error { return f.err }

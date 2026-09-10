@@ -10,6 +10,11 @@ import (
 
 type SchedulerLeaseStore struct{ tx database.Tx }
 
+func (s *SchedulerLeaseStore) RecordMaintenanceCompletion(ctx context.Context, owner schedulerlease.Owner, epoch int64) error {
+	_, err := s.tx.Exec(ctx, `SELECT public.g6_record_scheduler_maintenance($1,$2,$3)`, owner.InstanceID, owner.Incarnation, epoch)
+	return err
+}
+
 func (t *transaction) SchedulerLeaseStore() schedulerlease.Store { return &SchedulerLeaseStore{tx: t} }
 func (s *SchedulerLeaseStore) Lock(ctx context.Context) (schedulerlease.State, error) {
 	var v schedulerlease.State

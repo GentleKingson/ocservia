@@ -11,8 +11,8 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/jackc/pgx/v5"
 )
 
 type createCertificateRequest struct {
@@ -240,7 +240,7 @@ func writeCertificateError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/artifact-denied", "Artifact unavailable", "the artifact token is invalid, expired, consumed, or already in use")
 	case errors.Is(err, certificates.ErrArtifactCapacity):
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/artifact-capacity", "Artifact capacity is busy", "retry after another bounded artifact stream completes")
-	case errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the certificate or node does not exist")
 	default:
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/certificate-unavailable", "Certificate service unavailable", "certificate processing is temporarily unavailable")

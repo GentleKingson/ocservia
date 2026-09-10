@@ -1,0 +1,429 @@
+{
+  "version": 19,
+  "previous_checksum": "524030c120686414793db78cf03a22db74bd14c68e5e670d7b965ccc39d2cbd8",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_enrollment_tokens_insert",
+          "object": "migrate_v4_time_enrollment_tokens_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_enrollment_tokens_insert` BEFORE INSERT ON `enrollment_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "88199d5869ebd9bb996ad858271a1cd1556417a57f216b028d36976f212a15b8",
+          "before": "",
+          "after": "f013952cdd85bfcb88f606f7230437a77da8187f84d673f4d3d0bab3f4332fa9"
+        },
+        {
+          "name": "migrate_v4_time_enrollment_tokens_update",
+          "object": "migrate_v4_time_enrollment_tokens_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_enrollment_tokens_update` BEFORE UPDATE ON `enrollment_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d717a686a08bec4f6c7b9d1d35b16a3df31b21003142577f7040b5f640f27654",
+          "before": "",
+          "after": "dc74f0acfa248636f6c9af1dd02b96159d14e4781b252560ce1f92c08a8c90b4"
+        },
+        {
+          "name": "migrate_v4_time_enrollment_tokens_delete",
+          "object": "migrate_v4_time_enrollment_tokens_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_enrollment_tokens_delete` BEFORE DELETE ON `enrollment_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "2be50e46ef6810e735dc9fc692f72ca184e8e1bfbfff5b0c730b34540b25ba48",
+          "before": "",
+          "after": "46932fca37e5738108e2f2020c1b3bd3e285c80d510ec922e26542a2470820e5"
+        },
+        {
+          "name": "enrollment_tokens_expires_at_column",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "4c79725113d87445377973c1d770c25902ac973fc1a570b48e3768836c1ce6d1",
+          "before": "0dd4b356abd946f0dd4184caaa323d786640cd1f4c7b1817c2c5154b780725bf",
+          "after": "c662dc62290c25c8be8a3515a8c338c696c4b08eeeab8db18716d77d1ac18a84"
+        },
+        {
+          "name": "enrollment_tokens_consumed_at_column",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "206a63a41f4c087864361b89deb3805f217a94899ca51826ff3d6b25d364adde",
+          "before": "c662dc62290c25c8be8a3515a8c338c696c4b08eeeab8db18716d77d1ac18a84",
+          "after": "070f43bd57e699e7062961d436a3e782c8b6ffcc31d6c6d801e5ed1329615a1f"
+        },
+        {
+          "name": "enrollment_tokens_created_at_column",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "1113c89dc57aa516b061e7f637408a1a1ff3a8b12892741988633066c0e3eb4e",
+          "before": "070f43bd57e699e7062961d436a3e782c8b6ffcc31d6c6d801e5ed1329615a1f",
+          "after": "db5e15d8fbd41de5e8af53cb6096962488aead216a0704ddbf5d7d74d64bd57e"
+        },
+        {
+          "name": "enrollment_tokens_times_backfill",
+          "object": "enrollment_tokens",
+          "kind": "data",
+          "sql": "UPDATE `enrollment_tokens` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "c140de70d6f4663933d3fe759a422d1fd6f4f05b901f3a85b2a7650eaa2a5fbc",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `enrollment_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "enrollment_tokens_times_switch",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` DROP INDEX enrollment_tokens_workspace_expiry_idx,DROP CONSTRAINT enrollment_tokens_enrollment_tokens_check,DROP CONSTRAINT enrollment_tokens_enrollment_tokens_check1,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `enrollment_tokens_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `enrollment_tokens_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `enrollment_tokens_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT enrollment_tokens_enrollment_tokens_check CHECK(expires_at\u003ecreated_at),ADD CONSTRAINT enrollment_tokens_enrollment_tokens_check1 CHECK((consumed_at IS NULL)=(consumed_node_id IS NULL)),ADD KEY enrollment_tokens_workspace_expiry_idx(workspace_id,expires_at DESC)",
+          "checksum": "2c709dbcd9e1f749576a2d3a611a6cd09a0fd24c5f7fc3cbd07d9255f3356ceb",
+          "before": "db5e15d8fbd41de5e8af53cb6096962488aead216a0704ddbf5d7d74d64bd57e",
+          "after": "0c97fdbb37d1f610f7ec63a0f39162510011d584f8e134320ccd5d50aad5ca73",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `enrollment_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_enrollment_tokens_insert",
+          "object": "migrate_v4_time_enrollment_tokens_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_enrollment_tokens_insert`",
+          "checksum": "a593d3fb4ccbbd667348119fa0072da3a557bf5d162bdf1aeb3b75d959081f80",
+          "before": "f013952cdd85bfcb88f606f7230437a77da8187f84d673f4d3d0bab3f4332fa9",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_enrollment_tokens_update",
+          "object": "migrate_v4_time_enrollment_tokens_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_enrollment_tokens_update`",
+          "checksum": "892e7cdca55588a0b7095a9b6970c8ceb28e65a391057df29765644ec9f00e44",
+          "before": "dc74f0acfa248636f6c9af1dd02b96159d14e4781b252560ce1f92c08a8c90b4",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_enrollment_tokens_delete",
+          "object": "migrate_v4_time_enrollment_tokens_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_enrollment_tokens_delete`",
+          "checksum": "680a2d258cead65ee222d52a64091ab1c8bf77ec0470c4247a076dd8334c8f68",
+          "before": "46932fca37e5738108e2f2020c1b3bd3e285c80d510ec922e26542a2470820e5",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_node_bootstrap_tokens_insert",
+          "object": "migrate_v4_time_node_bootstrap_tokens_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_bootstrap_tokens_insert` BEFORE INSERT ON `node_bootstrap_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f26f65caa6abc2b1fe6b0b5749de61a45170ae4d98ce317b88c64e36cd7e80ef",
+          "before": "",
+          "after": "68a2586eb362c018b5840bcd1d196f5409116dc85700ebf71a185aa51e8e3b11"
+        },
+        {
+          "name": "migrate_v4_time_node_bootstrap_tokens_update",
+          "object": "migrate_v4_time_node_bootstrap_tokens_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_bootstrap_tokens_update` BEFORE UPDATE ON `node_bootstrap_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "e143965b8cee39d1b9866fea1296ef3a3d4f140cb7ff6ac1651c4602ce088c82",
+          "before": "",
+          "after": "e5a1796f02642b578c24820f04922dc91f2a2fd81a22d0321b2fb68292622c9b"
+        },
+        {
+          "name": "migrate_v4_time_node_bootstrap_tokens_delete",
+          "object": "migrate_v4_time_node_bootstrap_tokens_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_bootstrap_tokens_delete` BEFORE DELETE ON `node_bootstrap_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1c0a808047146043bc5944755fc45f8377a3353dd4c5ba92a27908b43f7c0bda",
+          "before": "",
+          "after": "b212104e668cd521b4fccc0123214257f5d2c918285cfed388b5bd0b310828e8"
+        },
+        {
+          "name": "node_bootstrap_tokens_expires_at_column",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "aca38f8696cbd22b6aa210e7cc8897cea0f715806639148cbe7fe3eb8f397a9b",
+          "before": "20a01e02cb89792c8d841261b7daebcee6bbeb750984513a2b4c8f7d6f1e77d0",
+          "after": "647c3b8c19cd1eda4d35884c3015f61cec2c24985963d2380252f820034e205a"
+        },
+        {
+          "name": "node_bootstrap_tokens_consumed_at_column",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "0dc65ee051c8fad2e3f5f59012653a0e1c1f64268ae211b735d1371677a7fad9",
+          "before": "647c3b8c19cd1eda4d35884c3015f61cec2c24985963d2380252f820034e205a",
+          "after": "c83fbe45fe9d9aab0ff2739a84a435ba9bf7885a29d5190f4481656bfbe93415"
+        },
+        {
+          "name": "node_bootstrap_tokens_created_at_column",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "a38919e06273fc7680954461a185dad42f2e516edfbfa22b9397587042986953",
+          "before": "c83fbe45fe9d9aab0ff2739a84a435ba9bf7885a29d5190f4481656bfbe93415",
+          "after": "5b7ed5ed647bc094ce3878c5634dd98d5664edbbca1d880f2916b5f9e9d51291"
+        },
+        {
+          "name": "node_bootstrap_tokens_times_backfill",
+          "object": "node_bootstrap_tokens",
+          "kind": "data",
+          "sql": "UPDATE `node_bootstrap_tokens` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "42c0127fdceba5ec8f6aad0c3a65c3a34c6431caee94ae3de2fbb9cfdeb0055f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_bootstrap_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_bootstrap_tokens_times_switch",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` DROP INDEX node_bootstrap_tokens_workspace_expiry_idx,DROP CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check,DROP CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check1,DROP CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check2,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `node_bootstrap_tokens_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `node_bootstrap_tokens_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_bootstrap_tokens_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check CHECK(expires_at\u003ecreated_at),ADD CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check1 CHECK((bound_endpoint_id IS NULL)=(consumed_at IS NULL)),ADD CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check2 CHECK((consumed_at IS NULL)=(consumed_node_id IS NULL)),ADD KEY node_bootstrap_tokens_workspace_expiry_idx(workspace_id,expires_at DESC)",
+          "checksum": "5babf661cf38b41cb3abe404bc5cc29e0f83552ce27120943a84105eaf6c778b",
+          "before": "5b7ed5ed647bc094ce3878c5634dd98d5664edbbca1d880f2916b5f9e9d51291",
+          "after": "11176596763f2a1d7737a49ba2bd5bb52cbc892c151e4b25d324203d9b36f0c1",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_bootstrap_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_bootstrap_tokens_insert",
+          "object": "migrate_v4_time_node_bootstrap_tokens_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_bootstrap_tokens_insert`",
+          "checksum": "fa0bdce63cf3ebf3e6826ea3c5a4f6435f98061cab4429b88d7f31d84f48a260",
+          "before": "68a2586eb362c018b5840bcd1d196f5409116dc85700ebf71a185aa51e8e3b11",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_bootstrap_tokens_update",
+          "object": "migrate_v4_time_node_bootstrap_tokens_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_bootstrap_tokens_update`",
+          "checksum": "d1dc96522277789544b25af1aa74f809aa360431d9a1a3a5cd3fa04b79b89f5d",
+          "before": "e5a1796f02642b578c24820f04922dc91f2a2fd81a22d0321b2fb68292622c9b",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_bootstrap_tokens_delete",
+          "object": "migrate_v4_time_node_bootstrap_tokens_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_bootstrap_tokens_delete`",
+          "checksum": "88d6a0e35bce5b576edec1fe7be8b46dca156e62a9a9f621592e4405557e8eed",
+          "before": "b212104e668cd521b4fccc0123214257f5d2c918285cfed388b5bd0b310828e8",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_enrollment_tokens_insert",
+          "object": "migrate_v4_time_enrollment_tokens_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_enrollment_tokens_insert` BEFORE INSERT ON `enrollment_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "88199d5869ebd9bb996ad858271a1cd1556417a57f216b028d36976f212a15b8",
+          "before": "",
+          "after": "f013952cdd85bfcb88f606f7230437a77da8187f84d673f4d3d0bab3f4332fa9"
+        },
+        {
+          "name": "migrate_v4_time_enrollment_tokens_update",
+          "object": "migrate_v4_time_enrollment_tokens_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_enrollment_tokens_update` BEFORE UPDATE ON `enrollment_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d717a686a08bec4f6c7b9d1d35b16a3df31b21003142577f7040b5f640f27654",
+          "before": "",
+          "after": "dc74f0acfa248636f6c9af1dd02b96159d14e4781b252560ce1f92c08a8c90b4"
+        },
+        {
+          "name": "migrate_v4_time_enrollment_tokens_delete",
+          "object": "migrate_v4_time_enrollment_tokens_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_enrollment_tokens_delete` BEFORE DELETE ON `enrollment_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "2be50e46ef6810e735dc9fc692f72ca184e8e1bfbfff5b0c730b34540b25ba48",
+          "before": "",
+          "after": "46932fca37e5738108e2f2020c1b3bd3e285c80d510ec922e26542a2470820e5"
+        },
+        {
+          "name": "enrollment_tokens_expires_at_column",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "4c79725113d87445377973c1d770c25902ac973fc1a570b48e3768836c1ce6d1",
+          "before": "0dd4b356abd946f0dd4184caaa323d786640cd1f4c7b1817c2c5154b780725bf",
+          "after": "c662dc62290c25c8be8a3515a8c338c696c4b08eeeab8db18716d77d1ac18a84"
+        },
+        {
+          "name": "enrollment_tokens_consumed_at_column",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "206a63a41f4c087864361b89deb3805f217a94899ca51826ff3d6b25d364adde",
+          "before": "c662dc62290c25c8be8a3515a8c338c696c4b08eeeab8db18716d77d1ac18a84",
+          "after": "070f43bd57e699e7062961d436a3e782c8b6ffcc31d6c6d801e5ed1329615a1f"
+        },
+        {
+          "name": "enrollment_tokens_created_at_column",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "1113c89dc57aa516b061e7f637408a1a1ff3a8b12892741988633066c0e3eb4e",
+          "before": "070f43bd57e699e7062961d436a3e782c8b6ffcc31d6c6d801e5ed1329615a1f",
+          "after": "db5e15d8fbd41de5e8af53cb6096962488aead216a0704ddbf5d7d74d64bd57e"
+        },
+        {
+          "name": "enrollment_tokens_times_backfill",
+          "object": "enrollment_tokens",
+          "kind": "data",
+          "sql": "UPDATE `enrollment_tokens` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "c140de70d6f4663933d3fe759a422d1fd6f4f05b901f3a85b2a7650eaa2a5fbc",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `enrollment_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "enrollment_tokens_times_switch",
+          "object": "enrollment_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `enrollment_tokens` DROP INDEX enrollment_tokens_workspace_expiry_idx,DROP CONSTRAINT enrollment_tokens_enrollment_tokens_check,DROP CONSTRAINT enrollment_tokens_enrollment_tokens_check1,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `enrollment_tokens_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `enrollment_tokens_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `enrollment_tokens_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT enrollment_tokens_enrollment_tokens_check CHECK(expires_at\u003ecreated_at),ADD CONSTRAINT enrollment_tokens_enrollment_tokens_check1 CHECK((consumed_at IS NULL)=(consumed_node_id IS NULL)),ADD KEY enrollment_tokens_workspace_expiry_idx(workspace_id,expires_at DESC)",
+          "checksum": "2c709dbcd9e1f749576a2d3a611a6cd09a0fd24c5f7fc3cbd07d9255f3356ceb",
+          "before": "db5e15d8fbd41de5e8af53cb6096962488aead216a0704ddbf5d7d74d64bd57e",
+          "after": "0c97fdbb37d1f610f7ec63a0f39162510011d584f8e134320ccd5d50aad5ca73",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `enrollment_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_enrollment_tokens_insert",
+          "object": "migrate_v4_time_enrollment_tokens_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_enrollment_tokens_insert`",
+          "checksum": "a593d3fb4ccbbd667348119fa0072da3a557bf5d162bdf1aeb3b75d959081f80",
+          "before": "f013952cdd85bfcb88f606f7230437a77da8187f84d673f4d3d0bab3f4332fa9",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_enrollment_tokens_update",
+          "object": "migrate_v4_time_enrollment_tokens_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_enrollment_tokens_update`",
+          "checksum": "892e7cdca55588a0b7095a9b6970c8ceb28e65a391057df29765644ec9f00e44",
+          "before": "dc74f0acfa248636f6c9af1dd02b96159d14e4781b252560ce1f92c08a8c90b4",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_enrollment_tokens_delete",
+          "object": "migrate_v4_time_enrollment_tokens_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_enrollment_tokens_delete`",
+          "checksum": "680a2d258cead65ee222d52a64091ab1c8bf77ec0470c4247a076dd8334c8f68",
+          "before": "46932fca37e5738108e2f2020c1b3bd3e285c80d510ec922e26542a2470820e5",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_node_bootstrap_tokens_insert",
+          "object": "migrate_v4_time_node_bootstrap_tokens_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_bootstrap_tokens_insert` BEFORE INSERT ON `node_bootstrap_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f26f65caa6abc2b1fe6b0b5749de61a45170ae4d98ce317b88c64e36cd7e80ef",
+          "before": "",
+          "after": "68a2586eb362c018b5840bcd1d196f5409116dc85700ebf71a185aa51e8e3b11"
+        },
+        {
+          "name": "migrate_v4_time_node_bootstrap_tokens_update",
+          "object": "migrate_v4_time_node_bootstrap_tokens_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_bootstrap_tokens_update` BEFORE UPDATE ON `node_bootstrap_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "e143965b8cee39d1b9866fea1296ef3a3d4f140cb7ff6ac1651c4602ce088c82",
+          "before": "",
+          "after": "e5a1796f02642b578c24820f04922dc91f2a2fd81a22d0321b2fb68292622c9b"
+        },
+        {
+          "name": "migrate_v4_time_node_bootstrap_tokens_delete",
+          "object": "migrate_v4_time_node_bootstrap_tokens_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_bootstrap_tokens_delete` BEFORE DELETE ON `node_bootstrap_tokens` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1c0a808047146043bc5944755fc45f8377a3353dd4c5ba92a27908b43f7c0bda",
+          "before": "",
+          "after": "b212104e668cd521b4fccc0123214257f5d2c918285cfed388b5bd0b310828e8"
+        },
+        {
+          "name": "node_bootstrap_tokens_expires_at_column",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "aca38f8696cbd22b6aa210e7cc8897cea0f715806639148cbe7fe3eb8f397a9b",
+          "before": "20a01e02cb89792c8d841261b7daebcee6bbeb750984513a2b4c8f7d6f1e77d0",
+          "after": "647c3b8c19cd1eda4d35884c3015f61cec2c24985963d2380252f820034e205a"
+        },
+        {
+          "name": "node_bootstrap_tokens_consumed_at_column",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "0dc65ee051c8fad2e3f5f59012653a0e1c1f64268ae211b735d1371677a7fad9",
+          "before": "647c3b8c19cd1eda4d35884c3015f61cec2c24985963d2380252f820034e205a",
+          "after": "c83fbe45fe9d9aab0ff2739a84a435ba9bf7885a29d5190f4481656bfbe93415"
+        },
+        {
+          "name": "node_bootstrap_tokens_created_at_column",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "a38919e06273fc7680954461a185dad42f2e516edfbfa22b9397587042986953",
+          "before": "c83fbe45fe9d9aab0ff2739a84a435ba9bf7885a29d5190f4481656bfbe93415",
+          "after": "5b7ed5ed647bc094ce3878c5634dd98d5664edbbca1d880f2916b5f9e9d51291"
+        },
+        {
+          "name": "node_bootstrap_tokens_times_backfill",
+          "object": "node_bootstrap_tokens",
+          "kind": "data",
+          "sql": "UPDATE `node_bootstrap_tokens` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "42c0127fdceba5ec8f6aad0c3a65c3a34c6431caee94ae3de2fbb9cfdeb0055f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_bootstrap_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_bootstrap_tokens_times_switch",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_bootstrap_tokens` DROP INDEX node_bootstrap_tokens_workspace_expiry_idx,DROP CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check,DROP CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check1,DROP CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check2,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `node_bootstrap_tokens_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `node_bootstrap_tokens_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_bootstrap_tokens_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check CHECK(expires_at\u003ecreated_at),ADD CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check1 CHECK((bound_endpoint_id IS NULL)=(consumed_at IS NULL)),ADD CONSTRAINT node_bootstrap_tokens_node_bootstrap_tokens_check2 CHECK((consumed_at IS NULL)=(consumed_node_id IS NULL)),ADD KEY node_bootstrap_tokens_workspace_expiry_idx(workspace_id,expires_at DESC)",
+          "checksum": "5babf661cf38b41cb3abe404bc5cc29e0f83552ce27120943a84105eaf6c778b",
+          "before": "5b7ed5ed647bc094ce3878c5634dd98d5664edbbca1d880f2916b5f9e9d51291",
+          "after": "11176596763f2a1d7737a49ba2bd5bb52cbc892c151e4b25d324203d9b36f0c1",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_bootstrap_tokens` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_bootstrap_tokens_insert",
+          "object": "migrate_v4_time_node_bootstrap_tokens_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_bootstrap_tokens_insert`",
+          "checksum": "fa0bdce63cf3ebf3e6826ea3c5a4f6435f98061cab4429b88d7f31d84f48a260",
+          "before": "68a2586eb362c018b5840bcd1d196f5409116dc85700ebf71a185aa51e8e3b11",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_bootstrap_tokens_update",
+          "object": "migrate_v4_time_node_bootstrap_tokens_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_bootstrap_tokens_update`",
+          "checksum": "d1dc96522277789544b25af1aa74f809aa360431d9a1a3a5cd3fa04b79b89f5d",
+          "before": "e5a1796f02642b578c24820f04922dc91f2a2fd81a22d0321b2fb68292622c9b",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_bootstrap_tokens_delete",
+          "object": "migrate_v4_time_node_bootstrap_tokens_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_bootstrap_tokens_delete`",
+          "checksum": "88d6a0e35bce5b576edec1fe7be8b46dca156e62a9a9f621592e4405557e8eed",
+          "before": "b212104e668cd521b4fccc0123214257f5d2c918285cfed388b5bd0b310828e8",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

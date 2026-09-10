@@ -6,6 +6,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/google/uuid"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,9 @@ func (s rbacStore) WorkspaceRoles(ctx context.Context, identity, workspace uuid.
 func (s rbacStore) Node(ctx context.Context, id uuid.UUID) database.Row {
 	return s.QueryRow(ctx, `SELECT workspace_id FROM nodes WHERE id=?`, UUIDBytes(id))
 }
+func (s rbacStore) UpgradeNode(ctx context.Context, id uuid.UUID) database.Row {
+	return s.QueryRow(ctx, `SELECT n.workspace_id,COALESCE(o.architecture,''),COALESCE(o.agent_version,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=?`, UUIDBytes(id))
+}
 func (s rbacStore) Operation(ctx context.Context, id uuid.UUID) database.Row {
 	return s.QueryRow(ctx, `SELECT workspace_id,node_id FROM operations WHERE id=?`, UUIDBytes(id))
 }
@@ -40,6 +44,19 @@ func (s rbacStore) AuthorizedWorkspaces(ctx context.Context, id uuid.UUID, break
 		return s.Query(ctx, `SELECT id,'PlatformAdmin' FROM workspaces`)
 	}
 	return s.Query(ctx, `SELECT DISTINCT workspace_id,role_name FROM role_bindings WHERE identity_id=?`, UUIDBytes(id))
+}
+func (s rbacStore) Workspaces(ctx context.Context, ids []uuid.UUID, all bool) (database.Rows, error) {
+	if all {
+		return s.Query(ctx, `SELECT id,name,slug,version FROM workspaces ORDER BY name,id`)
+	}
+	if len(ids) == 0 {
+		return s.Query(ctx, `SELECT id,name,slug,version FROM workspaces WHERE false`)
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = UUIDBytes(id)
+	}
+	return s.Query(ctx, `SELECT id,name,slug,version FROM workspaces WHERE id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`) ORDER BY name,id`, args...)
 }
 func (s rbacStore) Insert(ctx context.Context, b rbacstore.Binding) error {
 	at, err := value.FromTime(b.At)

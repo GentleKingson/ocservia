@@ -53,7 +53,7 @@ func TestUsageTransactionsIntegration(t *testing.T) {
 			return count, err
 		},
 		ReadTotals: func(ctx context.Context, node uuid.UUID) ([]semantictest.UsageTotal, error) {
-			rows, err := b.Query(ctx, `SELECT period,period_start,rx_bytes,tx_bytes FROM observed_user_usage WHERE node_id=$1`, node)
+			rows, err := b.Query(ctx, `SELECT period,period_start,rx_bytes,tx_bytes,observed_at FROM observed_user_usage WHERE node_id=$1`, node)
 			if err != nil {
 				return nil, err
 			}
@@ -61,7 +61,7 @@ func TestUsageTransactionsIntegration(t *testing.T) {
 			var totals []semantictest.UsageTotal
 			for rows.Next() {
 				var total semantictest.UsageTotal
-				if err := rows.Scan(&total.Period, &total.Start, &total.RX, &total.TX); err != nil {
+				if err := rows.Scan(&total.Period, &total.Start, &total.RX, &total.TX, &total.ObservedAt); err != nil {
 					return nil, err
 				}
 				totals = append(totals, total)

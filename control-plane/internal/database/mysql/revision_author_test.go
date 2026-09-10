@@ -45,6 +45,74 @@ func TestAuthorRevisionSix(t *testing.T) {
 	authorRevision(t, 6, AttestationTimeSteps(testOptions(t).Engine))
 }
 
+func TestAuthorRevisionSeven(t *testing.T) {
+	authorRevision(t, 7, CertificateTypeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionEight(t *testing.T) {
+	authorRevision(t, 8, SecretReferenceTimeSteps())
+}
+
+func TestAuthorRevisionNine(t *testing.T) {
+	authorRevision(t, 9, OperationReadTimeSteps())
+}
+
+func TestAuthorRevisionTen(t *testing.T) {
+	authorRevision(t, 10, CommandTimeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionEleven(t *testing.T) {
+	authorRevision(t, 11, ConfigurationTypeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionTwelve(t *testing.T) {
+	authorRevision(t, 12, UpgradeTimeSteps())
+}
+
+func TestAuthorRevisionThirteen(t *testing.T) {
+	authorRevision(t, 13, RolloutTypeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionFourteen(t *testing.T) {
+	authorRevision(t, 14, DispatchTimeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionFifteen(t *testing.T) {
+	authorRevision(t, 15, ConnectionOwnerTimeSteps())
+}
+
+func TestAuthorRevisionSixteen(t *testing.T) {
+	authorRevision(t, 16, ResultTimeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionSeventeen(t *testing.T) {
+	authorRevision(t, 17, TransportTimeSteps())
+}
+
+func TestAuthorRevisionEighteen(t *testing.T) {
+	authorRevision(t, 18, TrustConvergenceTimeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionNineteen(t *testing.T) {
+	authorRevision(t, 19, EnrollmentTokenTimeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionTwenty(t *testing.T) {
+	authorRevision(t, 20, DesiredStateTypeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionTwentyOne(t *testing.T) {
+	authorRevision(t, 21, UserOperationsTimeSteps(testOptions(t).Engine))
+}
+
+func TestAuthorRevisionTwentyTwo(t *testing.T) {
+	authorRevision(t, 22, UsageTimeSteps())
+}
+
+func TestAuthorRevisionTwentyThree(t *testing.T) {
+	authorRevision(t, 23, SharedStorageSteps(testOptions(t).Engine))
+}
+
 func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	output := os.Getenv("PR02_AUTHOR_DIRECTORY")
 	if output == "" {

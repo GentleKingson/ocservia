@@ -5,27 +5,28 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
 )
 
 // RecordMaintenanceCompletion writes the G6-only durable completion marker
 // under the same exact live scheduler term as the maintenance transaction.
-func RecordMaintenanceCompletion(ctx context.Context, pool *pgxpool.Pool, session *Session) error {
+func RecordMaintenanceCompletion(ctx context.Context, backend database.Backend, session *Session) error {
 	if session == nil {
 		return errors.New("coordination: scheduler maintenance completion requires a session")
 	}
 	identity := session.Identity()
-	tx, err := pool.Begin(ctx)
+	err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := schedulerlease.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		if err := store.RecordMaintenanceCompletion(ctx, schedulerlease.Owner(identity), session.Epoch()); err != nil {
+			return fmt.Errorf("coordination: record scheduler maintenance completion: %w", err)
+		}
+		return AssertFenceTx(ctx, tx, session)
+	})
 	if err != nil {
-		return fmt.Errorf("coordination: begin scheduler maintenance completion: %w", err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx,
-		`SELECT public.g6_record_scheduler_maintenance($1,$2,$3)`,
-		identity.InstanceID, identity.Incarnation, session.Epoch()); err != nil {
-		return fmt.Errorf("coordination: record scheduler maintenance completion: %w", err)
-	}
-	if err := CommitFenced(ctx, tx, session); err != nil {
 		return fmt.Errorf("coordination: commit scheduler maintenance completion: %w", err)
 	}
 	return nil

@@ -326,6 +326,7 @@ func TestRealPrivileges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
+	assertRuntimeDiagnostics(t, b, runtime)
 	for _, table := range []string{"backend_schema_revisions", "backend_schema_revision_steps"} {
 		var count int
 		if err := runtime.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil {
@@ -375,17 +376,17 @@ func TestRealValueConstraints(t *testing.T) {
 		if slug == "Case" {
 			id = workspace
 		}
-		if _, err := b.Exec(ctx, "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", id, "test", slug); err != nil {
+		if _, err := b.Exec(ctx, "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))", id, "test", slug); err != nil {
 			t.Fatal("case/trailing-space uniqueness mismatch", err)
 		}
 	}
-	if _, err := b.Exec(ctx, "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,'case',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", UUIDBytes(uuid.New()), "test"); !errors.Is(err, database.ErrUnique) {
+	if _, err := b.Exec(ctx, "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,'case',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))", UUIDBytes(uuid.New()), "test"); !errors.Is(err, database.ErrUnique) {
 		t.Fatal("exact duplicate accepted")
 	}
 	if _, err := b.Exec(ctx, "UPDATE workspaces SET version=0 WHERE id=?", workspace); !errors.Is(err, database.ErrConstraint) {
 		t.Fatal("CHECK not enforced")
 	}
-	if _, err := b.Exec(ctx, "INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'n','active',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", UUIDBytes(uuid.New()), UUIDBytes(uuid.New())); !errors.Is(err, database.ErrForeignKey) {
+	if _, err := b.Exec(ctx, "INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'n','active',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))", UUIDBytes(uuid.New()), UUIDBytes(uuid.New())); !errors.Is(err, database.ErrForeignKey) {
 		t.Fatal("foreign key not enforced")
 	}
 	identity := UUIDBytes(uuid.New())
@@ -403,7 +404,7 @@ func TestRealValueConstraints(t *testing.T) {
 	}
 	// NULL idempotency keys remain distinct; matching non-NULL keys do not.
 	for i := 0; i < 2; i++ {
-		if _, err := b.Exec(ctx, "INSERT INTO operations(id,workspace_id,state,request_id,created_at,updated_at) VALUES(?,?,'draft','test',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", UUIDBytes(uuid.New()), workspace); err != nil {
+		if _, err := b.Exec(ctx, "INSERT INTO operations(id,workspace_id,state,request_id,created_at,updated_at) VALUES(?,?,'draft','test',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))", UUIDBytes(uuid.New()), workspace); err != nil {
 			t.Fatal(err)
 		}
 	}

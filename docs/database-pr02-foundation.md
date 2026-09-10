@@ -1,19 +1,24 @@
 # PR-02 Draft: MySQL/MariaDB foundation
 
-## Status and blockers
+## Current Status
 
-This is a **Draft, not complete database support and not ready for phase
-acceptance**. Controller startup still rejects both new selectors, including
-development startup. The separate `ocserv-db-foundation` command permits only
-explicit `test` or `development` environments. Controller construction remains
-PostgreSQL-only; selected domain stores now have both adapters. No production migration, release, deployment, or merge is
-part of this PR.
+The requested PR-02 business-store migration and three-backend Controller
+process acceptance are complete. **The PR remains Draft; this is not production
+release approval.** Controller test/development startup selects the common
+business stores for all three backends. MySQL/MariaDB production startup remains
+rejected. See the [final acceptance record](database-pr02-validation.md#final-pr-02-acceptance)
+for the real-process matrix, regression evidence and explicit test boundaries.
+The separate `ocserv-db-foundation` owner tool also permits only explicit `test`
+or `development` environments. No production migration, release, deployment, or
+merge is part of this PR.
 
 The connection, migration/recovery, and fresh-account permission foundation is
 executable. The two baseline manifests contain all 69 existing logical tables
 plus `business_locks`; their SQL and postcondition fingerprints were exercised
 independently on the pinned servers. **That does not establish semantic
-equivalence of the entire schema.** Outstanding acceptance blockers are:
+equivalence of the entire schema.** The following initial foundation gaps are
+historical; the appended Controller workflow and validation records track their
+subsequent migrations and completed process acceptance:
 
 1. Version 3 removes all eleven unapproved `VARCHAR(191)` restrictions using
    LONGTEXT and exact, cascading natural-key side tables. OIDC profile upserts
@@ -47,12 +52,13 @@ equivalence of the entire schema.** Outstanding acceptance blockers are:
    adds approval creation/approval and telemetry ingest transactions. Other
    outer business transactions still need complete Store/Tx ports.
 
-See [version-5 Controller workflows](database-pr02-controller-workflows.md)
-for exact call-chain coverage and remaining fields. Authenticated HTTP tests
-are not a substitute for the remaining Controller routes and startup wiring.
+See [Controller workflows](database-pr02-controller-workflows.md)
+for exact call-chain coverage and appended field migrations. The final matrix
+also exercises real transportd, Agent, privd and native Ocserv processes;
+authenticated HTTP-only tests are not used as a substitute.
 
-Do not remove the production gate or mark this PR ready based on green
-foundation tests. The complete acceptance request is not yet satisfied.
+Do not remove the production gate or mark this PR ready. Completing this
+development acceptance does not authorize deployment, release or merge.
 
 The expanded scope includes telemetry physical storage redesign preserving
 foreign-key integrity, retention and query behavior, and migration of actual
@@ -299,13 +305,16 @@ or retry is used. The new adapter does not advertise native advisory locks.
 | Backlog admission, 0x4f4353564241434b | Implemented as `pg-advisory:<decimal ID>`, before node/workspace counts |
 | Audit workspace chain | `audit:<canonical workspace UUID>`, at the current chain-lock point |
 
-The remaining keys must be wired in domain stores while retaining surrounding
-row-lock and audit order. Command-limit call sites now use the shared domain;
-the other PostgreSQL-only call sites remain acceptance blockers.
+These were foundation-stage ordering obligations. The subsequent domain-store
+ports preserve the surrounding row-lock and audit order; the current workflow
+document records their completed call chains. PostgreSQL compatibility wrappers
+remain, but ordinary Controller startup no longer selects a PostgreSQL-only
+business implementation.
 
 ## Validation
 
-All execution is via `ssh BuildServer`, isolated checkout
-`/root/ocservia-pr02.YX4Vwr`. See `database-pr02-validation.md` for commands,
-results and remaining limitations. CI now retains PostgreSQL 17/18 and adds
+All execution is via `ssh BuildServer`; the initial isolated checkout was
+`/root/ocservia-pr02.YX4Vwr`, and final acceptance uses
+`/root/ocservia-telemetry-time.gXtIZO`. See `database-pr02-validation.md` for
+commands, results and test boundaries. CI retains PostgreSQL 17/18 and adds
 separate digest-pinned MySQL/MariaDB jobs, with fail-fast disabled.

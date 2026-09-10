@@ -56,23 +56,23 @@ export interface SecretProviderRef {
    */
   state: SecretProviderRefStateEnum;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof SecretProviderRef
    */
-  rotatedAt?: Date;
+  rotatedAt?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof SecretProviderRef
    */
-  createdAt: Date;
+  createdAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof SecretProviderRef
    */
-  updatedAt: Date;
+  updatedAt: string;
 }
 
 /**
@@ -146,10 +146,9 @@ export function SecretProviderRefFromJSONTyped(
     keyPath: json["key_path"],
     version: json["version"],
     state: json["state"],
-    rotatedAt:
-      json["rotated_at"] == null ? undefined : new Date(json["rotated_at"]),
-    createdAt: new Date(json["created_at"]),
-    updatedAt: new Date(json["updated_at"]),
+    rotatedAt: json["rotated_at"] == null ? undefined : json["rotated_at"],
+    createdAt: json["created_at"],
+    updatedAt: json["updated_at"],
   };
 }
 
@@ -172,11 +171,8 @@ export function SecretProviderRefToJSONTyped(
     key_path: value["keyPath"],
     version: value["version"],
     state: value["state"],
-    rotated_at:
-      value["rotatedAt"] == null
-        ? value["rotatedAt"]
-        : value["rotatedAt"].toISOString(),
-    created_at: value["createdAt"].toISOString(),
-    updated_at: value["updatedAt"].toISOString(),
+    rotated_at: value["rotatedAt"],
+    created_at: value["createdAt"],
+    updated_at: value["updatedAt"],
   };
 }

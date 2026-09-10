@@ -34,13 +34,6 @@ func (s approvalStore) Insert(ctx context.Context, args []any) error {
 			args[i] = UUIDBytes(id)
 		}
 	}
-	for _, i := range []int{7, 8} {
-		stamp, err := value.FromTime(args[i].(time.Time))
-		if err != nil {
-			return err
-		}
-		args[i] = stamp
-	}
 	summary, err := value.ParseJSONB(args[10].(json.RawMessage))
 	if err != nil {
 		return err

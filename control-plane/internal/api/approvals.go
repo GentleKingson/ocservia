@@ -11,11 +11,11 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 type createApprovalRequest struct {
@@ -156,7 +156,8 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		plan, planErr := s.configplans.Get(r.Context(), resourceID)
-		if planErr != nil || plan.Validation != "valid" || !plan.ExpiresAt.After(time.Now().UTC()) {
+		now, clockErr := value.FromTime(time.Now().UTC())
+		if planErr != nil || clockErr != nil || plan.Validation != "valid" || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= now.Micros {
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-plan-not-ready", "Configuration plan is not ready", "the plan must be valid and unexpired before approval")
 			return
 		}
@@ -228,9 +229,8 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent upgrade approval target version is invalid")
 			return
 		}
-		var nodeWorkspace uuid.UUID
-		var architecture string
-		if err := s.pool.QueryRow(r.Context(), `SELECT n.workspace_id,COALESCE(o.architecture,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, resourceID).Scan(&nodeWorkspace, &architecture); err != nil || nodeWorkspace != resource.WorkspaceID {
+		nodeWorkspace, architecture, _, err := s.upgradeNode(r.Context(), resourceID)
+		if err != nil || nodeWorkspace != resource.WorkspaceID {
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "agent upgrade approval requires an observed node in the selected workspace")
 			return
 		}
@@ -330,7 +330,7 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if local, err := s.auth.HasLocalCredential(r.Context(), resource.ID); err != nil || !local {
-			s.writeAuthorizationError(w, r, pgx.ErrNoRows)
+			s.writeAuthorizationError(w, r, database.ErrNotFound)
 			return
 		}
 		requestHash, requestSummary = approvals.GenericBinding(action, resource.Type, resource.ID)
@@ -401,7 +401,7 @@ func writeApprovalError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-not-ready", "Approval unavailable", "the approval is expired, consumed, or does not match")
 	case errors.Is(err, approvals.ErrInvalid):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the approval request is invalid")
-	case errors.Is(err, pgx.ErrNoRows), errors.Is(err, database.ErrNotFound):
+	case errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the approval does not exist")
 	default:
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Approval unavailable", "approval state is temporarily unavailable")

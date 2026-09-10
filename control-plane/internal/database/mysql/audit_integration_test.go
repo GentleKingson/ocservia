@@ -24,7 +24,7 @@ func TestRealAuditRBACController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(workspace), "audit", "audit-"+workspace.String(), now, now); err != nil {
+	if _, err = owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, UUIDBytes(workspace), "audit", "audit-"+workspace.String(), fixtureTimestamp(t, now), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []uuid.UUID{actor, target} {

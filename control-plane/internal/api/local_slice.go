@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -55,7 +55,7 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, operation)
 			return
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if !errors.Is(err, database.ErrNotFound) {
 			s.writeOperationError(w, r, err)
 			return
 		}
@@ -71,7 +71,7 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operation, err := service.GetOperation(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, database.ErrNotFound) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested operation does not exist")
 		return
 	}
