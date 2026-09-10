@@ -10,6 +10,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
@@ -24,7 +25,7 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target uuid.
 	m := audit.NewBackendManager(b, bytes.Repeat([]byte{7}, 32))
 	appendEvent := func(ctx context.Context, after func() error) error {
 		return database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-			if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspace, ActorType: "user", ActorID: actor.String(), Action: "audit.workflow", ResourceType: "workspace", ResourceID: workspace, RequestID: uuid.NewString(), BeforeSummary: json.RawMessage(`{"exact":9007199254740993.125,"null":null}`), AfterSummary: json.RawMessage(`[true,"trailing ",null]`)}); err != nil {
+			if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspace, ActorType: "user", ActorID: actor.String(), Action: "audit.workflow", ResourceType: "workspace", ResourceID: workspace, RequestID: uuid.NewString(), BeforeSummary: json.RawMessage(`{ "exact":9007199254740993.125,"null":null,"array":[true,"trailing ",null] }`), AfterSummary: json.RawMessage(" \n null \t")}); err != nil {
 				return err
 			}
 			if after != nil {
@@ -201,4 +202,71 @@ func Controller(t *testing.T, b database.Backend, workspace, actor, target uuid.
 	if err = database.Within(ctx, b, database.ReadCommitted, consume); !errors.Is(err, approvals.ErrNotReady) {
 		t.Fatal("already expired approval allowed", err)
 	}
+
+	results := make(chan error, 8)
+	for range cap(results) {
+		go func() { results <- appendEvent(ctx, nil) }()
+	}
+	for range cap(results) {
+		if err := <-results; err != nil {
+			t.Error("concurrent audit append", err)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	verified, err = m.Verify(ctx, workspace)
+	if err != nil || !verified.Valid || verified.Events != 12 {
+		t.Fatalf("concurrent audit chain: %+v %v", verified, err)
+	}
+	// Commit an append and checkpoint between the verifier's two reads. Both
+	// reads must still see the original repeatable-read snapshot.
+	snapshot := audit.NewBackendManager(snapshotBackend{Backend: b, between: func() {
+		if err := appendEvent(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Checkpoint(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+	}}, bytes.Repeat([]byte{7}, 32))
+	verified, err = snapshot.Verify(ctx, workspace)
+	if err != nil || !verified.Valid || !verified.Checkpoint || verified.Events != 12 {
+		t.Fatalf("inconsistent verification snapshot: %+v %v", verified, err)
+	}
+	verified, err = m.Verify(ctx, workspace)
+	if err != nil || !verified.Valid || !verified.Checkpoint || verified.Events != 13 {
+		t.Fatalf("committed audit tail: %+v %v", verified, err)
+	}
+}
+
+type snapshotBackend struct {
+	database.Backend
+	between func()
+}
+
+func (b snapshotBackend) Begin(ctx context.Context, isolation database.Isolation) (database.Tx, error) {
+	tx, err := b.Backend.Begin(ctx, isolation)
+	if err != nil {
+		return nil, err
+	}
+	return snapshotTx{Tx: tx, between: b.between}, nil
+}
+
+type snapshotTx struct {
+	database.Tx
+	between func()
+}
+
+func (tx snapshotTx) AuditStore() auditstore.Store {
+	return snapshotStore{Store: tx.Tx.(auditstore.Provider).AuditStore(), between: tx.between}
+}
+
+type snapshotStore struct {
+	auditstore.Store
+	between func()
+}
+
+func (s snapshotStore) Events(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
+	s.between()
+	return s.Store.Events(ctx, workspace)
 }

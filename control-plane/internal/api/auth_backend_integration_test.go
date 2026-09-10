@@ -26,6 +26,11 @@ import (
 )
 
 func authenticationBackend(t *testing.T) database.Backend {
+	backend, _ := authenticationBackendFixture(t)
+	return backend
+}
+
+func authenticationBackendFixture(t *testing.T) (database.Backend, database.Backend) {
 	t.Helper()
 	ctx := context.Background()
 	if dsn := os.Getenv("PR02_DSN"); dsn != "" {
@@ -74,7 +79,7 @@ func authenticationBackend(t *testing.T) database.Backend {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { runtime.Close() })
-		return runtime
+		return runtime, owner
 	}
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -85,7 +90,16 @@ func authenticationBackend(t *testing.T) database.Backend {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	return postgres.WrapPool(pool)
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		return postgres.WrapPool(pool), nil
+	}
+	owner, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(owner.Close)
+	return postgres.WrapPool(pool), postgres.WrapPool(owner)
 }
 
 // This executes the actual Controller HTTP login, cookie authentication and

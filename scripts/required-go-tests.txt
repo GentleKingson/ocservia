@@ -1,4 +1,7 @@
 # group package (relative to control-plane) exact test/subtest name
+unit internal/audit TestAppendHashesPersistedTime
+unit internal/audit TestAppendHashesPersistedJSON
+unit internal/audit TestLegacyNumericPayloadRemainsIdentical
 unit internal/auth TestNewPasswordPolicy
 unit internal/auth TestNewPasswordPolicy/single
 unit internal/auth TestNewPasswordPolicy/fourteen
@@ -69,3 +72,10 @@ database-api internal/api TestAuthHTTPLoginLogoutIntegration/oidc/session-write-
 database-api internal/api TestAuthHTTPLoginLogoutIntegration/both
 database-api internal/api TestAuthHTTPLoginLogoutIntegration/both/session-write-failure
 database-lifecycle internal/api TestLocalUserLifecycleIntegration
+backend-auth internal/api TestAuthenticationBackendHTTPIntegration
+backend-auth internal/api TestAuthenticationBackendSafetyIntegration
+backend-auth internal/api TestAuthenticationBackendSafetyIntegration/capacity
+backend-auth internal/api TestAuthenticationBackendSafetyIntegration/absent-singleton-lock
+backend-auth internal/api TestAuthenticationBackendLegacyIntegration
+backend-audit-postgres internal/database/postgres TestAuditRBACControllerIntegration
+backend-audit-mysql internal/database/mysql TestRealAuditRBACController

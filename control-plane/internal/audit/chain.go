@@ -200,21 +200,21 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 	if err != nil {
 		return fmt.Errorf("assign audit order: %w", err)
 	}
+	// Hash the persisted microsecond value, never a higher-precision clock value.
+	at, err := value.FromTime(record.At)
+	if err != nil {
+		return err
+	}
+	record.At, err = at.Time()
+	if err != nil {
+		return err
+	}
 	previous, err := s.Previous(ctx, record.WorkspaceID)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return fmt.Errorf("read audit chain: %w", err)
 	}
 	if record.EventID == uuid.Nil {
 		record.EventID = uuid.Must(uuid.NewV7())
-	}
-	payload, err := encodeChainPayload(previous, record)
-	if err != nil {
-		return fmt.Errorf("encode audit payload: %w", err)
-	}
-	digest := sha256.Sum256(payload)
-	var traceID any
-	if record.TraceID != "" {
-		traceID = record.TraceID
 	}
 	before, err := summaryValue(record.BeforeSummary)
 	if err != nil {
@@ -224,9 +224,17 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 	if err != nil {
 		return err
 	}
-	at, err := value.FromTime(record.At)
+	// Feed the unchanged canonicalizer the same logical JSON it will read back.
+	// In particular, whitespace around a top-level null must not add a field.
+	record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
+	payload, err := encodeChainPayload(previous, record)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode audit payload: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	var traceID any
+	if record.TraceID != "" {
+		traceID = record.TraceID
 	}
 	err = s.Append(ctx, []any{record.EventID, record.WorkspaceID, at, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), before, after, nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:])})
 	if err != nil {

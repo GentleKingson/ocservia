@@ -210,8 +210,8 @@ assert_auth_fixture_cleanup() {
   local container=$1 database=$2
   test "$(docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -Atc "
     SELECT (SELECT count(*) FROM local_auth_bootstrap)
-      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('r4_fail_approver','r4_fail_password','p4_reject_bootstrap','p4_reject_create','p4_reject_reset') OR conname LIKE 'r6_%')
-      + (SELECT count(*) FROM role_bindings b JOIN workspaces w ON w.id=b.workspace_id WHERE w.slug LIKE 'r4-%' OR w.slug LIKE 'bootstrap-%')
+      + (SELECT count(*) FROM pg_constraint WHERE conname IN ('r4_fail_approver','r4_fail_password','p4_reject_bootstrap','p4_reject_create','p4_reject_reset','pr03_audit_failure') OR conname LIKE 'r6_%')
+      + (SELECT count(*) FROM role_bindings b JOIN workspaces w ON w.id=b.workspace_id WHERE w.slug LIKE 'r4-%' OR w.slug LIKE 'bootstrap-%' OR w.slug LIKE 'pr03-%')
   ")" = 0
 }
 
@@ -448,7 +448,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # Current backend workflows require schema 34. Keep the independent schema-33
   # fixture below intact for historical rollback and compatibility assertions.
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
-    go test -p 1 ./internal/database/... -count=1)
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-audit-postgres -p 1 ./internal/database/...)
 
   # Scheduler leadership tests need an idle lease, so they run before any
   # long-lived control-plane process acquires leadership on this database.
@@ -625,6 +625,12 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # Clone before any auth fixture writes. Lifecycle bootstrap requires no prior
   # singleton/admin grants; its audit constraints must never affect other suites.
   clone_database "${container}" ocservia_latest ocservia_lifecycle
+  clone_database "${container}" ocservia_latest ocservia_auth_backend
+  OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_auth_backend}" \
+    OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_auth_backend}" \
+    checked_go_tests backend-auth -p 1 -parallel 1 ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$'
+  assert_auth_fixture_cleanup "${container}" ocservia_auth_backend
+  docker exec "${container}" dropdb -U ocservia_owner ocservia_auth_backend
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     checked_go_tests database-auth -p 1 -parallel 1 ./internal/rbac ./internal/auth -run Integration
   assert_auth_fixture_cleanup "${container}" ocservia_latest
