@@ -29,6 +29,7 @@ import type {
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
+import { formatTimestamp } from "../shared/timestamp";
 
 import {
   applyConfigPlan,
@@ -751,8 +752,9 @@ async function revokeCurrentCertificate(): Promise<void> {
               <dt>{{ $t("lastHeartbeat") }}</dt>
               <dd>
                 {{
-                  currentNode.lastHeartbeatAt?.toLocaleString() ??
-                  $t("notObserved")
+                  currentNode.lastHeartbeatAt
+                    ? formatTimestamp(currentNode.lastHeartbeatAt)
+                    : $t("notObserved")
                 }}
               </dd>
             </div>
@@ -1073,7 +1075,7 @@ async function revokeCurrentCertificate(): Promise<void> {
             <code>{{ certificate.id }}</code>
             <small v-if="certificate.notAfter"
               >{{ $t("expires") }}
-              {{ certificate.notAfter.toLocaleString() }}</small
+              {{ formatTimestamp(certificate.notAfter) }}</small
             >
           </div>
           <template
@@ -1424,7 +1426,7 @@ async function revokeCurrentCertificate(): Promise<void> {
             configPlan.diffRedacted
           }}</pre>
           <ul v-if="configPlan.warnings.length">
-            <li v-for="warning in configPlan.warnings" :key="warning">
+            <li v-for="(warning, index) in configPlan.warnings" :key="index">
               {{ warning }}
             </li>
           </ul>

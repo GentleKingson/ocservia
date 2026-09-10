@@ -9,9 +9,11 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,7 +23,7 @@ type TrustTransport interface {
 }
 
 type TrustConvergenceWorker struct {
-	pool      *pgxpool.Pool
+	backend   database.Backend
 	transport TrustTransport
 	fences    ownersession.FencedExecutor
 	logger    *slog.Logger
@@ -29,23 +31,20 @@ type TrustConvergenceWorker struct {
 }
 
 type trustConvergenceJob struct {
-	NodeID        uuid.UUID
-	EndpointID    []byte
-	State         transportv1.NodeTrustState
-	Revision      uint64
-	Reason        string
-	UpdateApplied bool
-	CloseRequired bool
-	CloseApplied  bool
-	Attempts      int
+	enrollmentstore.TrustJob
+	State transportv1.NodeTrustState
 }
 
 func NewTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTransport, logger *slog.Logger) (*TrustConvergenceWorker, error) {
+	return NewTrustConvergenceWorkerBackend(postgres.WrapPool(pool), transport, logger)
+}
+
+func NewTrustConvergenceWorkerBackend(backend database.Backend, transport TrustTransport, logger *slog.Logger) (*TrustConvergenceWorker, error) {
 	workerID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
 	}
-	return &TrustConvergenceWorker{pool: pool, transport: transport, logger: logger, workerID: workerID}, nil
+	return &TrustConvergenceWorker{backend: backend, transport: transport, logger: logger, workerID: workerID}, nil
 }
 
 // NewFencedTrustConvergenceWorker runs trust updates and connection closes
@@ -54,7 +53,11 @@ func NewTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTransport, log
 // authority backed at mutation time. Nodes without a registered fence keep
 // the unfenced compatibility path.
 func NewFencedTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTransport, fences ownersession.FencedExecutor, logger *slog.Logger) (*TrustConvergenceWorker, error) {
-	worker, err := NewTrustConvergenceWorker(pool, transport, logger)
+	return NewFencedTrustConvergenceWorkerBackend(postgres.WrapPool(pool), transport, fences, logger)
+}
+
+func NewFencedTrustConvergenceWorkerBackend(backend database.Backend, transport TrustTransport, fences ownersession.FencedExecutor, logger *slog.Logger) (*TrustConvergenceWorker, error) {
+	worker, err := NewTrustConvergenceWorkerBackend(backend, transport, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +102,7 @@ func (w *TrustConvergenceWorker) Run(ctx context.Context) error {
 
 func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 	job, err := w.claim(ctx)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, database.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
@@ -139,73 +142,56 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 }
 
 func (w *TrustConvergenceWorker) claim(ctx context.Context) (trustConvergenceJob, error) {
-	tx, err := w.pool.Begin(ctx)
-	if err != nil {
-		return trustConvergenceJob{}, err
-	}
-	defer rollback(tx)
 	var job trustConvergenceJob
-	var state string
-	err = tx.QueryRow(ctx, `SELECT node_id,endpoint_id,desired_state,revision,reason,update_applied,close_required,close_applied,attempts
-		FROM node_trust_convergence
-		WHERE (NOT update_applied OR (close_required AND NOT close_applied))
-		  AND available_at<=now() AND (locked_until IS NULL OR locked_until<now())
-		ORDER BY available_at,node_id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(
-		&job.NodeID, &job.EndpointID, &state, &job.Revision, &job.Reason, &job.UpdateApplied,
-		&job.CloseRequired, &job.CloseApplied, &job.Attempts)
-	if err != nil {
-		return trustConvergenceJob{}, err
-	}
-	if state == "active" {
-		job.State = transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE
-	} else if state == "revoked" {
-		job.State = transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED
-	} else {
-		return trustConvergenceJob{}, errors.New("stored trust convergence state is invalid")
-	}
-	result, err := tx.Exec(ctx, `UPDATE node_trust_convergence SET locked_by=$2,locked_until=now()+interval '10 seconds',attempts=attempts+1,updated_at=now()
-		WHERE node_id=$1 AND revision=$3`, job.NodeID, w.workerID, job.Revision)
-	if err != nil {
-		return trustConvergenceJob{}, fmt.Errorf("claim trust convergence: %w", err)
-	}
-	if result.RowsAffected() != 1 {
-		return trustConvergenceJob{}, errors.New("claim trust convergence changed no row")
-	}
-	job.Attempts++
-	if err := tx.Commit(ctx); err != nil {
-		return trustConvergenceJob{}, err
-	}
-	return job, nil
+	err := w.withTrust(ctx, func(store enrollmentstore.TrustStore) error {
+		var err error
+		job.TrustJob, err = store.Claim(ctx, w.workerID)
+		if err != nil {
+			return err
+		}
+		switch job.DesiredState {
+		case "active":
+			job.State = transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE
+		case "revoked":
+			job.State = transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED
+		default:
+			return errors.New("stored trust convergence state is invalid")
+		}
+		return nil
+	})
+	return job, err
 }
 
 func (w *TrustConvergenceWorker) markUpdateApplied(ctx context.Context, job trustConvergenceJob) error {
-	result, err := w.pool.Exec(ctx, `UPDATE node_trust_convergence SET update_applied=true,locked_until=now()+interval '10 seconds',last_error=NULL,updated_at=now()
-		WHERE node_id=$1 AND revision=$2 AND locked_by=$3`, job.NodeID, job.Revision, w.workerID)
-	if err != nil {
-		return fmt.Errorf("record trust update convergence: %w", err)
-	}
-	if result.RowsAffected() != 1 {
-		return errors.New("record trust update convergence changed no row")
-	}
-	return nil
+	return w.withTrust(ctx, func(store enrollmentstore.TrustStore) error {
+		changed, err := store.MarkUpdateApplied(ctx, job.TrustJob, w.workerID)
+		if err != nil {
+			return fmt.Errorf("record trust update convergence: %w", err)
+		}
+		if !changed {
+			return errors.New("record trust update convergence changed no row")
+		}
+		return nil
+	})
 }
 
 func (w *TrustConvergenceWorker) markCloseApplied(ctx context.Context, job trustConvergenceJob) error {
-	result, err := w.pool.Exec(ctx, `UPDATE node_trust_convergence SET close_applied=true,locked_by=NULL,locked_until=NULL,last_error=NULL,updated_at=now()
-		WHERE node_id=$1 AND revision=$2 AND locked_by=$3`, job.NodeID, job.Revision, w.workerID)
-	if err != nil {
-		return fmt.Errorf("record node close convergence: %w", err)
-	}
-	if result.RowsAffected() != 1 {
-		return errors.New("record node close convergence changed no row")
-	}
-	return nil
+	return w.withTrust(ctx, func(store enrollmentstore.TrustStore) error {
+		changed, err := store.MarkCloseApplied(ctx, job.TrustJob, w.workerID)
+		if err != nil {
+			return fmt.Errorf("record node close convergence: %w", err)
+		}
+		if !changed {
+			return errors.New("record node close convergence changed no row")
+		}
+		return nil
+	})
 }
 
 func (w *TrustConvergenceWorker) unlockComplete(ctx context.Context, job trustConvergenceJob) error {
-	_, err := w.pool.Exec(ctx, `UPDATE node_trust_convergence SET locked_by=NULL,locked_until=NULL,last_error=NULL,updated_at=now()
-		WHERE node_id=$1 AND revision=$2 AND locked_by=$3`, job.NodeID, job.Revision, w.workerID)
-	return err
+	return w.withTrust(ctx, func(store enrollmentstore.TrustStore) error {
+		return store.UnlockComplete(ctx, job.TrustJob, w.workerID)
+	})
 }
 
 func (w *TrustConvergenceWorker) release(ctx context.Context, job trustConvergenceJob, cause error) error {
@@ -214,10 +200,21 @@ func (w *TrustConvergenceWorker) release(ctx context.Context, job trustConvergen
 	if len(detail) > 512 {
 		detail = detail[:512]
 	}
-	_, err := w.pool.Exec(ctx, `UPDATE node_trust_convergence SET locked_by=NULL,locked_until=NULL,available_at=now()+$4::interval,last_error=$5,updated_at=now()
-		WHERE node_id=$1 AND revision=$2 AND locked_by=$3`, job.NodeID, job.Revision, w.workerID, delay.String(), detail)
+	err := w.withTrust(ctx, func(store enrollmentstore.TrustStore) error {
+		return store.Release(ctx, job.TrustJob, w.workerID, delay, detail)
+	})
 	if err != nil {
 		return errors.Join(cause, err)
 	}
 	return cause
+}
+
+func (w *TrustConvergenceWorker) withTrust(ctx context.Context, action func(enrollmentstore.TrustStore) error) error {
+	return database.Within(ctx, w.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := enrollmentstore.Trust(tx)
+		if err != nil {
+			return err
+		}
+		return action(store)
+	})
 }

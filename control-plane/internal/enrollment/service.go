@@ -20,9 +20,12 @@ import (
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -100,7 +103,7 @@ type NodeTrust struct {
 }
 
 type Service struct {
-	pool                 *pgxpool.Pool
+	backend              database.Backend
 	now                  func() time.Time
 	random               io.Reader
 	controllerEndpointID string
@@ -110,14 +113,22 @@ type Service struct {
 }
 
 func New(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
-	return &Service{pool: pool, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion, signer: signer}
+	return NewBackend(postgres.WrapPool(pool), controllerEndpointID, controllerVersion, signer)
+}
+
+func NewBackend(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
+	return &Service{backend: backend, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion, signer: signer}
 }
 
 // NewWithOwnerSessions additionally binds the per-node connection owner
 // authority: mutation-capable sessions of fence-capable agents receive a
 // Controller-signed owner fence bound to the current ownership term.
 func NewWithOwnerSessions(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {
-	service := New(pool, controllerEndpointID, controllerVersion, signer)
+	return NewWithOwnerSessionsBackend(postgres.WrapPool(pool), controllerEndpointID, controllerVersion, signer, ownerSessions)
+}
+
+func NewWithOwnerSessionsBackend(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {
+	service := NewBackend(backend, controllerEndpointID, controllerVersion, signer)
 	service.ownerSessions = ownerSessions
 	return service
 }
@@ -138,34 +149,39 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 	if _, err := io.ReadFull(s.random, raw); err != nil {
 		return Token{}, fmt.Errorf("generate enrollment token: %w", err)
 	}
-	value := base64.RawURLEncoding.EncodeToString(raw)
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
 	digest := sha256.Sum256(raw)
 	now := s.now().UTC()
-	token := Token{ID: uuid.Must(uuid.NewV7()), Value: value, ExpiresAt: now.Add(ttl)}
-	var expectedName any
-	if spec.ExpectedNodeName != "" {
-		expectedName = spec.ExpectedNodeName
+	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: now.Add(ttl)}
+	at, err := value.FromTime(now)
+	if err != nil {
+		return Token{}, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	expires, err := at.Add(ttl)
+	if err != nil {
+		return Token{}, err
+	}
+	var expectedName *string
+	if spec.ExpectedNodeName != "" {
+		expectedName = &spec.ExpectedNodeName
+	}
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return Token{}, fmt.Errorf("begin token transaction: %w", err)
 	}
 	defer rollback(tx)
-	var workspaceExists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=$1)`, spec.WorkspaceID).Scan(&workspaceExists); err != nil {
+	workspaceExists, err := store.WorkspaceExists(ctx, spec.WorkspaceID)
+	if err != nil {
 		return Token{}, fmt.Errorf("check token workspace: %w", err)
 	}
 	if !workspaceExists {
 		return Token{}, ErrNotFound
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO enrollment_tokens
-        (id, workspace_id, token_hash, expected_environment, expected_node_name, expected_endpoint_id, expires_at, created_by, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		token.ID, spec.WorkspaceID, digest[:], spec.Environment, expectedName, spec.ExpectedEndpointID, token.ExpiresAt, spec.ActorID, now)
+	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, Endpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at}, false)
 	if err != nil {
 		return Token{}, fmt.Errorf("insert enrollment token: %w", err)
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, Action: "enrollment_token.create", ResourceType: "enrollment_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, Action: "enrollment_token.create", ResourceType: "enrollment_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
 		return Token{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -189,33 +205,39 @@ func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	if _, err := io.ReadFull(s.random, raw); err != nil {
 		return Token{}, fmt.Errorf("generate node bootstrap token: %w", err)
 	}
-	value := BootstrapTokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
-	digest := sha256.Sum256([]byte(value))
+	encoded := BootstrapTokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	digest := sha256.Sum256([]byte(encoded))
 	now := s.now().UTC()
-	token := Token{ID: uuid.Must(uuid.NewV7()), Value: value, ExpiresAt: now.Add(ttl)}
-	var expectedName any
-	if spec.ExpectedNodeName != "" {
-		expectedName = spec.ExpectedNodeName
+	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: now.Add(ttl)}
+	at, err := value.FromTime(now)
+	if err != nil {
+		return Token{}, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	expires, err := at.Add(ttl)
+	if err != nil {
+		return Token{}, err
+	}
+	var expectedName *string
+	if spec.ExpectedNodeName != "" {
+		expectedName = &spec.ExpectedNodeName
+	}
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return Token{}, fmt.Errorf("begin node bootstrap token transaction: %w", err)
 	}
 	defer rollback(tx)
-	var workspaceExists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=$1)`, spec.WorkspaceID).Scan(&workspaceExists); err != nil {
+	workspaceExists, err := store.WorkspaceExists(ctx, spec.WorkspaceID)
+	if err != nil {
 		return Token{}, fmt.Errorf("check node bootstrap token workspace: %w", err)
 	}
 	if !workspaceExists {
 		return Token{}, ErrNotFound
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO node_bootstrap_tokens
-		(id,workspace_id,token_hash,expected_environment,expected_node_name,expires_at,created_by,created_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, token.ID, spec.WorkspaceID, digest[:], spec.Environment, expectedName, token.ExpiresAt, spec.ActorID, now)
+	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at}, true)
 	if err != nil {
 		return Token{}, fmt.Errorf("insert node bootstrap token: %w", err)
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, Action: "node_bootstrap_token.create", ResourceType: "node_bootstrap_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: spec.WorkspaceID, ActorType: "user", ActorID: spec.ActorID, Action: "node_bootstrap_token.create", ResourceType: "node_bootstrap_token", ResourceID: token.ID, RequestID: spec.RequestID, Reason: spec.Reason, At: now}); err != nil {
 		return Token{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -234,40 +256,43 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 	if err := verifyEnrollmentProof(request); err != nil {
 		return err
 	}
-	if strings.HasPrefix(request.GetToken(), BootstrapTokenPrefix) {
-		digest, ok := bootstrapTokenDigest(request.GetToken())
+	bootstrap := strings.HasPrefix(request.GetToken(), BootstrapTokenPrefix)
+	var digest [sha256.Size]byte
+	if bootstrap {
+		var ok bool
+		digest, ok = bootstrapTokenDigest(request.GetToken())
 		if !ok {
 			return ErrInvalidToken
 		}
-		var permitted bool
-		err := s.pool.QueryRow(ctx, `SELECT EXISTS(
-			SELECT 1 FROM node_bootstrap_tokens
-			WHERE token_hash=$1 AND expected_environment=$2
-			  AND ((consumed_at IS NULL AND expires_at>$3) OR
-			       (consumed_at IS NOT NULL AND bound_endpoint_id=$4)))`,
-			digest[:], request.GetEnvironment(), s.now(), request.GetEndpointId()).Scan(&permitted)
-		if err != nil {
-			return fmt.Errorf("validate node bootstrap token: %w", err)
+	} else {
+		raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
+		if err != nil || len(raw) != 32 {
+			return ErrInvalidToken
 		}
-		if !permitted {
+		digest = sha256.Sum256(raw)
+	}
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	token, err := store.TokenByHash(ctx, digest[:], bootstrap, false)
+	if errors.Is(err, database.ErrNotFound) {
+		return ErrInvalidToken
+	}
+	if err != nil {
+		return fmt.Errorf("validate enrollment token: %w", err)
+	}
+	if token.Environment != request.GetEnvironment() {
+		return ErrInvalidToken
+	}
+	if bootstrap && token.ConsumedAt.Valid {
+		if !slices.Equal(token.Endpoint, request.GetEndpointId()) {
 			return ErrInvalidToken
 		}
 		return nil
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
-	if err != nil || len(raw) != 32 {
-		return ErrInvalidToken
-	}
-	digest := sha256.Sum256(raw)
-	var permitted bool
-	err = s.pool.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM enrollment_tokens
-		WHERE token_hash=$1 AND expected_environment=$2 AND expected_endpoint_id=$3
-		  AND consumed_at IS NULL AND expires_at>$4)`, digest[:], request.GetEnvironment(), request.GetEndpointId(), s.now()).Scan(&permitted)
-	if err != nil {
-		return fmt.Errorf("validate enrollment token: %w", err)
-	}
-	if !permitted {
+	if token.ConsumedAt.Valid || !tokenUnexpired(token.ExpiresAt, s.now()) || (!bootstrap && !slices.Equal(token.Endpoint, request.GetEndpointId())) {
 		return ErrInvalidToken
 	}
 	return nil
@@ -288,67 +313,61 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		return nil, ErrInvalidToken
 	}
 	digest := sha256.Sum256(raw)
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return nil, fmt.Errorf("begin enrollment transaction: %w", err)
 	}
 	defer rollback(tx)
-	var tokenID, workspaceID uuid.UUID
-	var environment string
-	var expectedName *string
-	var expectedEndpoint []byte
-	var expiresAt time.Time
-	var consumedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT id, workspace_id, expected_environment, expected_node_name,
-	        expected_endpoint_id, expires_at, consumed_at FROM enrollment_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
-		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expectedEndpoint, &expiresAt, &consumedAt)
-	if err := validateLockedToken(err, consumedAt != nil, expiresAt, s.now()); err != nil {
+	token, err := store.TokenByHash(ctx, digest[:], false, true)
+	if err := validateLockedToken(err, token.ConsumedAt.Valid, token.ExpiresAt, s.now()); err != nil {
 		return nil, err
 	}
-	if environment != request.GetEnvironment() {
+	tokenID, workspaceID, expectedName := token.ID, token.WorkspaceID, token.ExpectedName
+	if token.Environment != request.GetEnvironment() {
 		return nil, ErrInvalidToken
 	}
-	if len(expectedEndpoint) != 32 || subtle.ConstantTimeCompare(expectedEndpoint, request.GetEndpointId()) != 1 {
+	if len(token.Endpoint) != 32 || subtle.ConstantTimeCompare(token.Endpoint, request.GetEndpointId()) != 1 {
 		return nil, ErrEndpointMismatch
 	}
-	if err := audit.LockChain(ctx, tx, workspaceID); err != nil {
+	if err := audit.LockChainTx(ctx, tx, workspaceID); err != nil {
 		return nil, err
 	}
 	now := s.now().UTC()
-	var existingNodeID uuid.UUID
-	var existingNodeName, existingNodeStatus, existingEndpointState string
-	existingErr := tx.QueryRow(ctx, `SELECT n.id,n.name,n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
-		WHERE n.workspace_id=$1 AND k.endpoint_id=$2 FOR UPDATE OF n,k`, workspaceID, request.GetEndpointId()).
-		Scan(&existingNodeID, &existingNodeName, &existingNodeStatus, &existingEndpointState)
+	at, err := value.FromTime(now)
+	if err != nil {
+		return nil, err
+	}
+	existing, existingErr := store.NodeByEndpoint(ctx, request.GetEndpointId(), workspaceID, enrollmentstore.ForUpdate)
 	if existingErr == nil {
-		var sealingKeyCount int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM node_sealing_keys WHERE node_id=$1`, existingNodeID).Scan(&sealingKeyCount); err != nil {
+		existingNodeID, existingNodeName, existingNodeStatus, existingEndpointState := existing.ID, existing.Name, existing.Status, existing.EndpointState
+		storedKeys, err := store.SealingKeys(ctx, existingNodeID)
+		if err != nil {
 			return nil, fmt.Errorf("count existing password sealing keys: %w", err)
 		}
-		capabilitiesMatch, err := supportedCapabilitiesMatch(ctx, tx, existingNodeID, request.GetCapabilities())
+		capabilitiesMatch, err := supportedCapabilitiesMatch(ctx, store, existingNodeID, request.GetCapabilities())
 		if err != nil {
 			return nil, fmt.Errorf("verify existing node capabilities: %w", err)
 		}
 		validState := (existingNodeStatus == "active" || existingNodeStatus == "offline") && existingEndpointState == "active" ||
 			existingNodeStatus == "pending" && existingEndpointState == "pending"
-		if sealingKeyCount != 0 || !capabilitiesMatch || !validState || expectedName != nil && *expectedName != existingNodeName {
+		if len(storedKeys) != 0 || !capabilitiesMatch || !validState || expectedName != nil && *expectedName != existingNodeName {
 			return nil, ErrInvalidToken
 		}
 		sealingKeys := slices.Clone(request.GetSealingKeys())
 		slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
 		for _, key := range sealingKeys {
-			if _, err := tx.Exec(ctx, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6)`, existingNodeID, key.GetPurpose(), key.GetVersion(), key.GetKeyId(), key.GetPublicKeySha256(), now); err != nil {
+			if err := store.InsertSealingKey(ctx, existingNodeID, sealingKey(key), at); err != nil {
 				return nil, fmt.Errorf("bind existing node password sealing key: %w", err)
 			}
 		}
-		command, err := tx.Exec(ctx, `UPDATE enrollment_tokens SET consumed_at=$1,consumed_node_id=$2 WHERE id=$3 AND consumed_at IS NULL`, now, existingNodeID, tokenID)
+		consumed, err := store.ConsumeToken(ctx, tokenID, existingNodeID, nil, at, false)
 		if err != nil {
 			return nil, fmt.Errorf("consume sealing key enrollment token: %w", err)
 		}
-		if command.RowsAffected() != 1 {
+		if !consumed {
 			return nil, ErrInvalidToken
 		}
-		if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.sealing_keys.bind", ResourceType: "node", ResourceID: existingNodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
+		if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.sealing_keys.bind", ResourceType: "node", ResourceID: existingNodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -360,7 +379,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		}
 		return &agentv1.EnrollResponse{Result: result, NodeId: existingNodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
-	if !errors.Is(existingErr, pgx.ErrNoRows) {
+	if !errors.Is(existingErr, database.ErrNotFound) {
 		return nil, fmt.Errorf("lock existing endpoint binding: %w", existingErr)
 	}
 	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
@@ -368,54 +387,52 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	claimedLegacyNode := false
 	if expectedName != nil {
 		name = *expectedName
-		err := tx.QueryRow(ctx, `SELECT n.id FROM nodes n
-			WHERE n.workspace_id=$1 AND n.name=$2 AND n.status='pending'
-			AND NOT EXISTS (SELECT 1 FROM node_endpoint_keys k WHERE k.node_id=n.id)
-			FOR UPDATE OF n`, workspaceID, name).Scan(&nodeID)
+		var err error
+		nodeID, err = store.LegacyPendingNode(ctx, workspaceID, name)
 		if err == nil {
 			claimedLegacyNode = true
-		} else if !errors.Is(err, pgx.ErrNoRows) {
+		} else if !errors.Is(err, database.ErrNotFound) {
 			return nil, fmt.Errorf("lock legacy pending node: %w", err)
 		}
 	}
 	if !claimedLegacyNode {
-		var pending int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspaceID).Scan(&pending); err != nil {
+		pending, err := store.PendingCount(ctx, workspaceID)
+		if err != nil {
 			return nil, fmt.Errorf("count pending nodes: %w", err)
 		}
 		if pending >= MaxPendingNodes {
 			return nil, ErrPendingLimit
 		}
 		nodeID = uuid.Must(uuid.NewV7())
-		if _, err := tx.Exec(ctx, `INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($1,$2,$3,'pending',$4,$4)`, nodeID, workspaceID, name, now); err != nil {
+		if err := store.InsertNode(ctx, nodeID, workspaceID, name, at); err != nil {
 			return nil, fmt.Errorf("insert pending node: %w", err)
 		}
-	} else if _, err := tx.Exec(ctx, `UPDATE nodes SET version=version+1,updated_at=$2 WHERE id=$1`, nodeID, now); err != nil {
+	} else if err := store.TouchNode(ctx, nodeID, at); err != nil {
 		return nil, fmt.Errorf("prepare legacy pending node: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO node_endpoint_keys (node_id,endpoint_id,state,bound_at) VALUES ($1,$2,'pending',$3)`, nodeID, request.GetEndpointId(), now); err != nil {
+	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), at); err != nil {
 		return nil, fmt.Errorf("bind pending endpoint: %w", err)
 	}
 	sealingKeys := slices.Clone(request.GetSealingKeys())
 	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
 	for _, key := range sealingKeys {
-		if _, err := tx.Exec(ctx, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6)`, nodeID, key.GetPurpose(), key.GetVersion(), key.GetKeyId(), key.GetPublicKeySha256(), now); err != nil {
+		if err := store.InsertSealingKey(ctx, nodeID, sealingKey(key), at); err != nil {
 			return nil, fmt.Errorf("record password sealing key: %w", err)
 		}
 	}
 	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
-		if _, err := tx.Exec(ctx, `INSERT INTO node_capabilities (node_id,capability,approved) VALUES ($1,$2,false)`, nodeID, capability); err != nil {
+		if err := store.PutCapability(ctx, nodeID, capability, false); err != nil {
 			return nil, fmt.Errorf("record requested capability: %w", err)
 		}
 	}
-	command, err := tx.Exec(ctx, `UPDATE enrollment_tokens SET consumed_at=$1,consumed_node_id=$2 WHERE id=$3 AND consumed_at IS NULL`, now, nodeID, tokenID)
+	consumed, err := store.ConsumeToken(ctx, tokenID, nodeID, nil, at, false)
 	if err != nil {
 		return nil, fmt.Errorf("consume enrollment token: %w", err)
 	}
-	if command.RowsAffected() != 1 {
+	if !consumed {
 		return nil, ErrInvalidToken
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -441,95 +458,88 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if !ok {
 		return nil, ErrInvalidToken
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return nil, fmt.Errorf("begin node bootstrap enrollment: %w", err)
 	}
 	defer rollback(tx)
-	var tokenID, workspaceID uuid.UUID
-	var environment string
-	var expectedName *string
-	var expiresAt time.Time
-	var boundEndpoint []byte
-	var consumedNodeID *uuid.UUID
-	var consumedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT id,workspace_id,expected_environment,expected_node_name,expires_at,
-		bound_endpoint_id,consumed_node_id,consumed_at FROM node_bootstrap_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
-		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expiresAt, &boundEndpoint, &consumedNodeID, &consumedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	token, err := store.TokenByHash(ctx, digest[:], true, true)
+	if errors.Is(err, database.ErrNotFound) {
 		return nil, ErrInvalidToken
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock node bootstrap token: %w", err)
 	}
-	if environment != request.GetEnvironment() {
+	tokenID, workspaceID, expectedName := token.ID, token.WorkspaceID, token.ExpectedName
+	if token.Environment != request.GetEnvironment() {
 		return nil, ErrInvalidToken
 	}
-	if consumedAt != nil {
-		if consumedNodeID == nil || len(boundEndpoint) != 32 || subtle.ConstantTimeCompare(boundEndpoint, request.GetEndpointId()) != 1 {
+	if token.ConsumedAt.Valid {
+		if token.ConsumedNode == nil || len(token.Endpoint) != 32 || subtle.ConstantTimeCompare(token.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrEndpointMismatch
 		}
-		var status, endpointState string
-		var persistedEndpoint []byte
-		err := tx.QueryRow(ctx, `SELECT n.status,k.state,k.endpoint_id FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1`, *consumedNodeID).
-			Scan(&status, &endpointState, &persistedEndpoint)
-		if err != nil || status != "pending" || endpointState != "pending" || subtle.ConstantTimeCompare(persistedEndpoint, request.GetEndpointId()) != 1 {
+		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.Unlocked)
+		if err != nil || node.Status != "pending" || node.EndpointState != "pending" || subtle.ConstantTimeCompare(node.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrInvalidToken
 		}
-		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
+		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*token.ConsumedNode)[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
-	if !expiresAt.After(s.now()) || len(boundEndpoint) != 0 || consumedNodeID != nil {
+	if !tokenUnexpired(token.ExpiresAt, s.now()) || len(token.Endpoint) != 0 || token.ConsumedNode != nil {
 		return nil, ErrInvalidToken
 	}
-	if err := audit.LockChain(ctx, tx, workspaceID); err != nil {
+	if err := audit.LockChainTx(ctx, tx, workspaceID); err != nil {
 		return nil, err
 	}
-	var endpointExists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1)`, request.GetEndpointId()).Scan(&endpointExists); err != nil {
+	endpointExists, err := store.EndpointExists(ctx, request.GetEndpointId())
+	if err != nil {
 		return nil, fmt.Errorf("check bootstrap endpoint binding: %w", err)
 	}
 	if endpointExists {
 		return nil, ErrEndpointMismatch
 	}
-	var pending int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspaceID).Scan(&pending); err != nil {
+	pending, err := store.PendingCount(ctx, workspaceID)
+	if err != nil {
 		return nil, fmt.Errorf("count pending nodes: %w", err)
 	}
 	if pending >= MaxPendingNodes {
 		return nil, ErrPendingLimit
 	}
 	now := s.now().UTC()
+	at, err := value.FromTime(now)
+	if err != nil {
+		return nil, err
+	}
 	nodeID := uuid.Must(uuid.NewV7())
 	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
 	if expectedName != nil {
 		name = *expectedName
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'pending',$4,$4)`, nodeID, workspaceID, name, now); err != nil {
+	if err := store.InsertNode(ctx, nodeID, workspaceID, name, at); err != nil {
 		return nil, fmt.Errorf("insert bootstrap pending node: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'pending',$3)`, nodeID, request.GetEndpointId(), now); err != nil {
+	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), at); err != nil {
 		return nil, fmt.Errorf("bind bootstrap endpoint: %w", err)
 	}
 	sealingKeys := slices.Clone(request.GetSealingKeys())
 	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
 	for _, key := range sealingKeys {
-		if _, err := tx.Exec(ctx, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6)`, nodeID, key.GetPurpose(), key.GetVersion(), key.GetKeyId(), key.GetPublicKeySha256(), now); err != nil {
+		if err := store.InsertSealingKey(ctx, nodeID, sealingKey(key), at); err != nil {
 			return nil, fmt.Errorf("record bootstrap password sealing key: %w", err)
 		}
 	}
 	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
-		if _, err := tx.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,false)`, nodeID, capability); err != nil {
+		if err := store.PutCapability(ctx, nodeID, capability, false); err != nil {
 			return nil, fmt.Errorf("record bootstrap requested capability: %w", err)
 		}
 	}
-	command, err := tx.Exec(ctx, `UPDATE node_bootstrap_tokens SET bound_endpoint_id=$1,consumed_node_id=$2,consumed_at=$3 WHERE id=$4 AND consumed_at IS NULL`, request.GetEndpointId(), nodeID, now, tokenID)
+	consumed, err := store.ConsumeToken(ctx, tokenID, nodeID, request.GetEndpointId(), at, true)
 	if err != nil {
 		return nil, fmt.Errorf("consume node bootstrap token: %w", err)
 	}
-	if command.RowsAffected() != 1 {
+	if !consumed {
 		return nil, ErrInvalidToken
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -554,22 +564,21 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	if len(capabilities) == 0 {
 		return NodeTrust{}, ErrInvalidRequest
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return NodeTrust{}, fmt.Errorf("begin approval: %w", err)
 	}
 	defer rollback(tx)
-	var workspaceID uuid.UUID
-	var endpointID []byte
-	var currentStatus string
-	var revision uint64
-	var nodeVersion int64
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.authorization_revision,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision, &nodeVersion)
-	if errors.Is(err, pgx.ErrNoRows) {
+	node, err := store.NodeByID(ctx, approval.NodeID, enrollmentstore.ForUpdate)
+	if errors.Is(err, database.ErrNotFound) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
 	if err != nil {
 		return NodeTrust{}, fmt.Errorf("lock pending node: %w", err)
+	}
+	workspaceID, endpointID, currentStatus, revision, nodeVersion := node.WorkspaceID, node.Endpoint, node.Status, node.AuthorizationRevision, node.Version
+	if currentStatus != "pending" && currentStatus != "active" && currentStatus != "offline" {
+		return NodeTrust{}, ErrInvalidTransition
 	}
 	if currentStatus == "active" || currentStatus == "offline" {
 		// Activation increments the node version once. Reconstruct the original
@@ -578,34 +587,36 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		if nodeVersion < 2 {
 			return NodeTrust{}, ErrInvalidTransition
 		}
-		requestHash, _, bindingErr := nodeApprovalBinding(ctx, tx, approval.NodeID, endpointID, nodeVersion-1, approval.Labels, approval.Policy, capabilities)
+		requestHash, _, bindingErr := nodeApprovalBinding(ctx, store, approval.NodeID, endpointID, nodeVersion-1, approval.Labels, approval.Policy, capabilities)
 		if bindingErr != nil {
 			return NodeTrust{}, bindingErr
 		}
-		if err := approvalstore.ValidateConsumedBound(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
+		if err := approvalstore.ValidateConsumedBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
 			return NodeTrust{}, err
 		}
 		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
-	requestHash, _, err := nodeApprovalBinding(ctx, tx, approval.NodeID, endpointID, nodeVersion, approval.Labels, approval.Policy, capabilities)
+	requestHash, _, err := nodeApprovalBinding(ctx, store, approval.NodeID, endpointID, nodeVersion, approval.Labels, approval.Policy, capabilities)
 	if err != nil {
 		return NodeTrust{}, err
 	}
-	if err := approvalstore.ConsumeBound(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
+	if err := approvalstore.ConsumeBoundTx(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
 		return NodeTrust{}, err
 	}
 	labels := mapToJSON(approval.Labels)
 	now := s.now().UTC()
-	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='active',labels=$2::jsonb,policy=$3,version=version+1,authorization_revision=authorization_revision+1,updated_at=$4 WHERE id=$1 RETURNING authorization_revision`, approval.NodeID, labels, approval.Policy, now).Scan(&revision); err != nil {
-		return NodeTrust{}, fmt.Errorf("activate node: %w", err)
+	at, err := value.FromTime(now)
+	if err != nil {
+		return NodeTrust{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='active' WHERE node_id=$1`, approval.NodeID); err != nil {
-		return NodeTrust{}, fmt.Errorf("activate endpoint: %w", err)
+	revision, err = store.Activate(ctx, approval.NodeID, labels, approval.Policy, at)
+	if err != nil {
+		return NodeTrust{}, fmt.Errorf("activate node and endpoint: %w", err)
 	}
 	if err := enqueueTrustConvergence(ctx, tx, approval.NodeID, endpointID, "active", revision, approval.Reason, now); err != nil {
 		return NodeTrust{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1`, approval.NodeID); err != nil {
+	if err := store.ResetCapabilities(ctx, approval.NodeID); err != nil {
 		return NodeTrust{}, err
 	}
 	for _, capability := range capabilities {
@@ -616,11 +627,11 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		if capability == ownersession.FencingCapability {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO node_capabilities (node_id,capability,approved) VALUES ($1,$2,true) ON CONFLICT (node_id,capability) DO UPDATE SET approved=true`, approval.NodeID, capability); err != nil {
+		if err := store.PutCapability(ctx, approval.NodeID, capability, true); err != nil {
 			return NodeTrust{}, fmt.Errorf("approve capability: %w", err)
 		}
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: approval.ActorID, SessionID: &approval.SessionID, ApprovalID: &approval.ApprovalID, NodeID: &approval.NodeID, Action: "node.approve", ResourceType: "node", ResourceID: approval.NodeID, RequestID: approval.RequestID, Reason: approval.Reason, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: approval.ActorID, SessionID: &approval.SessionID, ApprovalID: &approval.ApprovalID, NodeID: &approval.NodeID, Action: "node.approve", ResourceType: "node", ResourceID: approval.NodeID, RequestID: approval.RequestID, Reason: approval.Reason, At: now}); err != nil {
 		return NodeTrust{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -639,27 +650,29 @@ func (s *Service) ApprovalBinding(ctx context.Context, nodeID uuid.UUID, labels 
 			return uuid.Nil, nil, nil, ErrInvalidRequest
 		}
 	}
-	var workspaceID uuid.UUID
-	var endpointID []byte
-	var version int64
-	if err := s.pool.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status='pending' AND k.state='pending'`, nodeID).Scan(&workspaceID, &endpointID, &version); err != nil {
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
+	if err != nil {
 		return uuid.Nil, nil, nil, err
 	}
-	hash, summary, err := nodeApprovalBinding(ctx, s.pool, nodeID, endpointID, version, labels, policy, capabilities)
-	return workspaceID, hash, summary, err
+	defer rollback(tx)
+	node, err := store.NodeByID(ctx, nodeID, enrollmentstore.Unlocked)
+	if err != nil {
+		return uuid.Nil, nil, nil, err
+	}
+	if node.Status != "pending" || node.EndpointState != "pending" {
+		return uuid.Nil, nil, nil, database.ErrNotFound
+	}
+	hash, summary, err := nodeApprovalBinding(ctx, store, nodeID, node.Endpoint, node.Version, labels, policy, capabilities)
+	return node.WorkspaceID, hash, summary, err
 }
 
-type queryRower interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func nodeApprovalBinding(ctx context.Context, q queryRower, nodeID uuid.UUID, endpointID []byte, version int64, labels map[string]string, policy string, capabilities []string) ([]byte, json.RawMessage, error) {
+func nodeApprovalBinding(ctx context.Context, store enrollmentstore.EnrollmentStore, nodeID uuid.UUID, endpointID []byte, version int64, labels map[string]string, policy string, capabilities []string) ([]byte, json.RawMessage, error) {
+	supported, err := store.Capabilities(ctx, nodeID, false)
+	if err != nil {
+		return nil, nil, err
+	}
 	for _, capability := range capabilities {
-		var supported bool
-		if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability=$2)`, nodeID, capability).Scan(&supported); err != nil {
-			return nil, nil, err
-		}
-		if !supported {
+		if !slices.Contains(supported, capability) {
 			return nil, nil, ErrInvalidRequest
 		}
 	}
@@ -690,43 +703,42 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	if revocation.NodeID == uuid.Nil || revocation.ApprovalID == uuid.Nil || revocation.IdentityID == uuid.Nil || revocation.SessionID == uuid.Nil || !validActor(revocation.ActorID, revocation.RequestID, revocation.Reason) {
 		return NodeTrust{}, ErrInvalidRequest
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return NodeTrust{}, fmt.Errorf("begin revocation: %w", err)
 	}
 	defer rollback(tx)
-	var workspaceID uuid.UUID
-	var endpointID []byte
-	var currentStatus string
-	var revision uint64
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 FOR UPDATE OF n,k`, revocation.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
-	if errors.Is(err, pgx.ErrNoRows) {
+	node, err := store.NodeByID(ctx, revocation.NodeID, enrollmentstore.ForUpdate)
+	if errors.Is(err, database.ErrNotFound) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
 	if err != nil {
 		return NodeTrust{}, fmt.Errorf("lock node for revocation: %w", err)
 	}
+	workspaceID, endpointID, currentStatus, revision := node.WorkspaceID, node.Endpoint, node.Status, node.AuthorizationRevision
 	revokeHash, _ := approvalstore.GenericBinding("node.revoke", "node", revocation.NodeID)
 	if currentStatus == "revoked" {
-		if err := approvalstore.ValidateConsumedBound(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
+		if err := approvalstore.ValidateConsumedBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
 			return NodeTrust{}, err
 		}
 		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
-	if err := approvalstore.ConsumeBound(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
+	if err := approvalstore.ConsumeBoundTx(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
 		return NodeTrust{}, err
 	}
 	now := s.now().UTC()
-	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='revoked',version=version+1,authorization_revision=authorization_revision+1,updated_at=$2 WHERE id=$1 RETURNING authorization_revision`, revocation.NodeID, now).Scan(&revision); err != nil {
+	at, err := value.FromTime(now)
+	if err != nil {
 		return NodeTrust{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$2 WHERE node_id=$1`, revocation.NodeID, now); err != nil {
+	revision, err = store.Revoke(ctx, revocation.NodeID, at)
+	if err != nil {
 		return NodeTrust{}, err
 	}
 	if err := enqueueTrustConvergence(ctx, tx, revocation.NodeID, endpointID, "revoked", revision, revocation.Reason, now); err != nil {
 		return NodeTrust{}, err
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: revocation.ActorID, SessionID: &revocation.SessionID, ApprovalID: &revocation.ApprovalID, NodeID: &revocation.NodeID, Action: "node.revoke", ResourceType: "node", ResourceID: revocation.NodeID, RequestID: revocation.RequestID, Reason: revocation.Reason, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: revocation.ActorID, SessionID: &revocation.SessionID, ApprovalID: &revocation.ApprovalID, NodeID: &revocation.NodeID, Action: "node.revoke", ResourceType: "node", ResourceID: revocation.NodeID, RequestID: revocation.RequestID, Reason: revocation.Reason, At: now}); err != nil {
 		return NodeTrust{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -739,48 +751,35 @@ func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 	if len(request.GetEndpointId()) != 32 {
 		return false, nil
 	}
-	if request.GetAlpn() == "ocserv-platform/enroll/1" {
-		var permitted bool
-		err := s.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1 AND state='revoked')`, request.GetEndpointId()).Scan(&permitted)
-		return permitted, err
-	}
-	if request.GetAlpn() != "ocserv-platform/agent/1" {
+	enroll := request.GetAlpn() == "ocserv-platform/enroll/1"
+	if !enroll && request.GetAlpn() != "ocserv-platform/agent/1" {
 		return false, nil
 	}
-	var permitted bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE k.endpoint_id=$1 AND n.status IN ('active','offline') AND k.state='active')`, request.GetEndpointId()).Scan(&permitted)
-	return permitted, err
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
+	if err != nil {
+		return false, err
+	}
+	defer rollback(tx)
+	return store.EndpointPermitted(ctx, request.GetEndpointId(), enroll)
 }
 
 func (s *Service) ListNodeTrust(ctx context.Context) ([]*transportv1.NodeTrustBinding, error) {
-	rows, err := s.pool.Query(ctx, `SELECT n.id,k.endpoint_id,
-		CASE WHEN n.status='revoked' OR k.state='revoked' THEN 'revoked' ELSE 'active' END,
-		n.authorization_revision
-		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
-		WHERE (n.status IN ('active','offline') AND k.state='active')
-		   OR k.state='revoked'
-		ORDER BY n.id`)
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	nodes, err := store.TrustSnapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list node trust snapshot: %w", err)
 	}
-	defer rows.Close()
-	bindings := make([]*transportv1.NodeTrustBinding, 0)
-	for rows.Next() {
-		var nodeID uuid.UUID
-		var endpointID []byte
-		var state string
-		var revision uint64
-		if err := rows.Scan(&nodeID, &endpointID, &state, &revision); err != nil {
-			return nil, fmt.Errorf("scan node trust snapshot: %w", err)
-		}
+	bindings := make([]*transportv1.NodeTrustBinding, 0, len(nodes))
+	for _, node := range nodes {
 		trustState := transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE
-		if state == "revoked" {
+		if node.Status == "revoked" {
 			trustState = transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED
 		}
-		bindings = append(bindings, &transportv1.NodeTrustBinding{NodeId: nodeID[:], EndpointId: endpointID, State: trustState, Revision: revision})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate node trust snapshot: %w", err)
+		bindings = append(bindings, &transportv1.NodeTrustBinding{NodeId: node.ID[:], EndpointId: node.Endpoint, State: trustState, Revision: node.AuthorizationRevision})
 	}
 	return bindings, nil
 }
@@ -792,17 +791,15 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
-	var status string
-	var endpointState string
-	var nodeID uuid.UUID
-	err := s.pool.QueryRow(ctx, `SELECT n.id,n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE k.endpoint_id=$1`, request.GetRemoteEndpointId()).Scan(&nodeID, &status, &endpointState)
-	if errors.Is(err, pgx.ErrNoRows) {
+	node, err := s.nodeByEndpoint(ctx, request.GetRemoteEndpointId())
+	if errors.Is(err, database.ErrNotFound) {
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("authorize endpoint: %w", err)
 	}
+	nodeID, status, endpointState := node.ID, node.Status, node.EndpointState
 	if status == "pending" {
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
 		return response, nil
@@ -827,25 +824,26 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
 		return response, nil
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	tx, store, err := s.begin(ctx, database.RepeatableRead)
 	if err != nil {
 		return nil, fmt.Errorf("begin session authorization: %w", err)
 	}
 	defer rollback(tx)
-	var authorizationRevision uint64
-	err = tx.QueryRow(ctx, `SELECT n.id,n.status,k.state,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE k.endpoint_id=$1 FOR SHARE OF n,k`, request.GetRemoteEndpointId()).Scan(&nodeID, &status, &endpointState, &authorizationRevision)
-	if errors.Is(err, pgx.ErrNoRows) {
+	node, err = store.NodeByEndpoint(ctx, request.GetRemoteEndpointId(), uuid.Nil, enrollmentstore.ForShare)
+	if errors.Is(err, database.ErrNotFound) {
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock session authority: %w", err)
 	}
+	nodeID, status, endpointState = node.ID, node.Status, node.EndpointState
+	authorizationRevision := node.AuthorizationRevision
 	if (status != "active" && status != "offline") || endpointState != "active" || authorizationRevision == 0 || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
-	matchingSealingKeys, err := sealingKeysMatch(ctx, tx, nodeID, handshake.GetSealingKeys())
+	matchingSealingKeys, err := sealingKeysMatch(ctx, store, nodeID, handshake.GetSealingKeys())
 	if err != nil {
 		return nil, fmt.Errorf("verify session sealing keys: %w", err)
 	}
@@ -854,21 +852,13 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
 		return response, nil
 	}
-	rows, err := tx.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true ORDER BY capability`, nodeID)
+	capabilities, err := store.Capabilities(ctx, nodeID, true)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	approved := map[string]struct{}{}
-	for rows.Next() {
-		var capability string
-		if err := rows.Scan(&capability); err != nil {
-			return nil, err
-		}
+	for _, capability := range capabilities {
 		approved[capability] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	negotiated := make([]string, 0, len(handshake.GetCapabilities()))
 	for _, capability := range normalizedCapabilities(handshake.GetCapabilities()) {
@@ -983,63 +973,44 @@ func validateEnrollment(request *agentv1.EnrollRequest) error {
 	return nil
 }
 
-func sealingKeysMatch(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, advertised []*agentv1.SealingKeyDescriptorV1) (bool, error) {
+func sealingKeysMatch(ctx context.Context, store enrollmentstore.EnrollmentStore, nodeID uuid.UUID, advertised []*agentv1.SealingKeyDescriptorV1) (bool, error) {
 	keys := slices.Clone(advertised)
 	slices.SortFunc(keys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
 	if err := validateSealingKeys(keys); err != nil {
 		return false, nil
 	}
-	rows, err := tx.Query(ctx, `SELECT purpose,version,key_id,public_key_sha256 FROM node_sealing_keys WHERE node_id=$1 ORDER BY purpose`, nodeID)
+	stored, err := store.SealingKeys(ctx, nodeID)
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
-	index := 0
-	for rows.Next() {
-		if index >= len(keys) {
-			return false, nil
-		}
-		var purpose, version int32
-		var keyID string
-		var digest []byte
-		if err := rows.Scan(&purpose, &version, &keyID, &digest); err != nil {
-			return false, err
-		}
+	if len(stored) != len(keys) {
+		return false, nil
+	}
+	for index, actual := range stored {
 		key := keys[index]
-		if purpose != int32(key.GetPurpose()) || version != int32(key.GetVersion()) || keyID != key.GetKeyId() || subtle.ConstantTimeCompare(digest, key.GetPublicKeySha256()) != 1 {
+		if actual.Purpose != int32(key.GetPurpose()) || actual.Version != int32(key.GetVersion()) || actual.ID != key.GetKeyId() || subtle.ConstantTimeCompare(actual.Digest, key.GetPublicKeySha256()) != 1 {
 			return false, nil
 		}
-		index++
 	}
-	return index == len(keys), rows.Err()
+	return true, nil
 }
 
-func supportedCapabilitiesMatch(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, advertised []string) (bool, error) {
+func supportedCapabilitiesMatch(ctx context.Context, store enrollmentstore.EnrollmentStore, nodeID uuid.UUID, advertised []string) (bool, error) {
 	want := normalizedCapabilities(advertised)
-	rows, err := tx.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 ORDER BY capability`, nodeID)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	have := make([]string, 0, len(want))
-	for rows.Next() {
-		var capability string
-		if err := rows.Scan(&capability); err != nil {
-			return false, err
-		}
-		have = append(have, capability)
-	}
-	return slices.Equal(have, want), rows.Err()
+	have, err := store.Capabilities(ctx, nodeID, false)
+	return slices.Equal(have, want), err
 }
 
-func enqueueTrustConvergence(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, endpointID []byte, state string, revision uint64, reason string, now time.Time) error {
-	_, err := tx.Exec(ctx, `INSERT INTO node_trust_convergence
-		(node_id,endpoint_id,desired_state,revision,reason,close_required,available_at,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$3::text='revoked',$6,$6,$6)
-		ON CONFLICT(node_id) DO UPDATE SET endpoint_id=EXCLUDED.endpoint_id,desired_state=EXCLUDED.desired_state,
-		revision=EXCLUDED.revision,reason=EXCLUDED.reason,update_applied=false,close_required=EXCLUDED.close_required,
-		close_applied=false,available_at=EXCLUDED.available_at,locked_by=NULL,locked_until=NULL,last_error=NULL,updated_at=EXCLUDED.updated_at
-		WHERE node_trust_convergence.revision < EXCLUDED.revision`, nodeID, endpointID, state, revision, reason, now)
+func enqueueTrustConvergence(ctx context.Context, tx database.Tx, nodeID uuid.UUID, endpointID []byte, state string, revision uint64, reason string, now time.Time) error {
+	at, err := value.FromTime(now)
+	if err != nil {
+		return err
+	}
+	store, err := enrollmentstore.Trust(tx)
+	if err != nil {
+		return err
+	}
+	err = store.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: nodeID, EndpointID: endpointID, DesiredState: state, Revision: revision, Reason: reason}, at)
 	if err != nil {
 		return fmt.Errorf("enqueue node trust convergence: %w", err)
 	}
@@ -1087,14 +1058,14 @@ func validPolicy(value string) bool                { return validShort(value, 12
 func validActor(actor, request, reason string) bool {
 	return validShort(actor, 256) && validShort(request, 128) && validShort(reason, 1024)
 }
-func validateLockedToken(queryErr error, consumed bool, expiresAt, now time.Time) error {
-	if errors.Is(queryErr, pgx.ErrNoRows) {
+func validateLockedToken(queryErr error, consumed bool, expiresAt value.Timestamp, now time.Time) error {
+	if errors.Is(queryErr, database.ErrNotFound) {
 		return ErrInvalidToken
 	}
 	if queryErr != nil {
 		return fmt.Errorf("lock enrollment token: %w", queryErr)
 	}
-	if consumed || !now.Before(expiresAt) {
+	if consumed || !tokenUnexpired(expiresAt, now) {
 		return ErrInvalidToken
 	}
 	return nil
@@ -1106,8 +1077,39 @@ func mapToJSON(values map[string]string) string {
 	}
 	return string(data)
 }
-func rollback(tx pgx.Tx) {
+func rollback(tx database.Tx) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = tx.Rollback(ctx)
+}
+
+func tokenUnexpired(expires value.Timestamp, now time.Time) bool {
+	at, err := value.FromTime(now)
+	return err == nil && expires.Valid && expires.Micros > at.Micros
+}
+
+func sealingKey(key *agentv1.SealingKeyDescriptorV1) enrollmentstore.SealingKey {
+	return enrollmentstore.SealingKey{Purpose: int32(key.GetPurpose()), Version: int32(key.GetVersion()), ID: key.GetKeyId(), Digest: key.GetPublicKeySha256()}
+}
+
+func (s *Service) begin(ctx context.Context, isolation database.Isolation) (database.Tx, enrollmentstore.EnrollmentStore, error) {
+	tx, err := s.backend.Begin(ctx, isolation)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := enrollmentstore.Enrollment(tx)
+	if err != nil {
+		rollback(tx)
+		return nil, nil, err
+	}
+	return tx, store, nil
+}
+
+func (s *Service) nodeByEndpoint(ctx context.Context, endpoint []byte) (enrollmentstore.Node, error) {
+	tx, store, err := s.begin(ctx, database.ReadCommitted)
+	if err != nil {
+		return enrollmentstore.Node{}, err
+	}
+	defer rollback(tx)
+	return store.NodeByEndpoint(ctx, endpoint, uuid.Nil, enrollmentstore.Unlocked)
 }

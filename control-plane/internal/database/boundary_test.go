@@ -50,7 +50,12 @@ func TestNoNewBusinessDriverLeaks(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(rel, "control-plane/internal/database/postgres/") {
+		if strings.HasPrefix(rel, "control-plane/internal/database/postgres/") || strings.HasPrefix(rel, "control-plane/internal/database/mysql/") {
+			return nil
+		}
+		// The composition root selects drivers and owns migration connections;
+		// application wiring and business services still may not import them.
+		if rel == "control-plane/internal/database/connection/connection.go" {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -63,7 +68,7 @@ func TestNoNewBusinessDriverLeaks(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if !strings.HasPrefix(name, "github.com/jackc/") && !strings.HasPrefix(name, "database/sql") && !strings.Contains(name, "/database/postgres") && !strings.Contains(name, "go-sql-driver") {
+			if !strings.HasPrefix(name, "github.com/jackc/") && !strings.HasPrefix(name, "database/sql") && !strings.Contains(name, "/database/postgres") && !strings.Contains(name, "/database/mysql") && !strings.Contains(name, "go-sql-driver") {
 				continue
 			}
 			counts[rel+":"+strconv.Quote(name)]++

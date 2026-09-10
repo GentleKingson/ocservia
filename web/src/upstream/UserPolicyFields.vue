@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { UserPolicyForm } from "../adapters/user-policy";
+import { expiryInputType, type UserPolicyForm } from "../adapters/user-policy";
 
 const props = defineProps<{ modelValue: UserPolicyForm }>();
 const emit = defineEmits<{ "update:modelValue": [value: UserPolicyForm] }>();
@@ -83,7 +83,8 @@ function update<K extends keyof UserPolicyForm>(
     <label for="expires-at">{{ $t("expiresAtUtc") }}</label>
     <input
       id="expires-at"
-      type="datetime-local"
+      :type="expiryInputType(modelValue.expiresAtLocal)"
+      step="1"
       :value="modelValue.expiresAtLocal"
       @input="
         update('expiresAtLocal', ($event.target as HTMLInputElement).value)

@@ -1,6 +1,6 @@
 // Package ownersession implements the Controller side of the connection
 // owner fencing runtime: it takes the per-node ownership lease from the
-// PostgreSQL authority, signs the frozen ConnectionFenceV2 and
+// database authority, signs the frozen ConnectionFenceV2 and
 // FenceBindingV2 contracts, pushes fences to transportd, and renews leases
 // so a stale owner stops issuing proofs as soon as its term is taken over.
 package ownersession
@@ -21,6 +21,8 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -152,17 +154,17 @@ const (
 // Manager owns the per-node connection leases of one Controller process. It
 // runs inside the worker-role process that serves session authorization and
 // command dispatch; every ownership deadline it stores is the exact value
-// returned by the PostgreSQL authority, never a local reconstruction. The
+// returned by the database authority, never a local reconstruction. The
 // local publication grace only makes event-gap cleanup retryable and never
 // exceeds the authoritative owner lease lifetime.
 //
 // Locking: mu guards the session and ended maps; the per-node mutex returned
 // by lockNode serializes every lease, registration, and binding action of
-// one node, including all mutation of a nodeSession. PostgreSQL and
+// one node, including all mutation of a nodeSession. Database and
 // transportd RPCs run under the per-node lock only, so one slow node never
 // blocks another node's renewal or dispatch.
 type Manager struct {
-	pool              *pgxpool.Pool
+	backend           database.Backend
 	signer            *commandauth.Signer
 	registrar         FenceRegistrar
 	identity          connectionowner.Identity
@@ -186,8 +188,15 @@ type Manager struct {
 // management. The signer must be the production Controller signing key; the
 // registrar is the transport client of this deployment unit.
 func NewManager(pool *pgxpool.Pool, signer *commandauth.Signer, registrar FenceRegistrar, leaseTTL time.Duration, logger *slog.Logger) (*Manager, error) {
-	if signer == nil || registrar == nil || pool == nil {
+	if pool == nil {
 		return nil, errors.New("ownersession: pool, signer, and registrar are required")
+	}
+	return NewManagerBackend(postgres.WrapPool(pool), signer, registrar, leaseTTL, logger)
+}
+
+func NewManagerBackend(backend database.Backend, signer *commandauth.Signer, registrar FenceRegistrar, leaseTTL time.Duration, logger *slog.Logger) (*Manager, error) {
+	if signer == nil || registrar == nil || backend == nil {
+		return nil, errors.New("ownersession: backend, signer, and registrar are required")
 	}
 	if leaseTTL <= 0 {
 		return nil, errors.New("ownersession: lease TTL must be positive")
@@ -197,7 +206,7 @@ func NewManager(pool *pgxpool.Pool, signer *commandauth.Signer, registrar FenceR
 		return nil, err
 	}
 	return &Manager{
-		pool:              pool,
+		backend:           backend,
 		signer:            signer,
 		registrar:         registrar,
 		identity:          connectionowner.Identity{InstanceID: instanceID, Incarnation: time.Now().UnixNano()},
@@ -280,7 +289,7 @@ func (m *Manager) CloseSession(ctx context.Context, nodeID [16]byte, connectionI
 	m.ended[nodeID] = endedOwnershipLost
 	m.mu.Unlock()
 	m.logger.WarnContext(ctx, "connection owner session ended", "node_id", fmt.Sprintf("%x", nodeID), "epoch", epoch, "alert_kind", "connection_owner.ended")
-	if err := session.term.Release(ctx, m.pool); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
+	if err := session.term.ReleaseBackend(ctx, m.backend); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
 		return fmt.Errorf("ownersession: release node lease: %w", err)
 	}
 	return nil
@@ -494,7 +503,7 @@ func (m *Manager) OpenSession(ctx context.Context, nodeID [16]byte, endpointID [
 	}
 	unlock := m.lockNode(nodeID)
 	defer unlock()
-	term, err := connectionowner.Acquire(ctx, m.pool, nodeID, m.identity, connectionID, m.leaseTTL)
+	term, err := connectionowner.AcquireBackend(ctx, m.backend, nodeID, m.identity, connectionID, m.leaseTTL)
 	if errors.Is(err, connectionowner.ErrLeaseHeld) {
 		// Another owner holds an unexpired lease, so any previous local
 		// session of this node is expired by definition. End it instead of
@@ -551,7 +560,7 @@ func (m *Manager) OpenSession(ctx context.Context, nodeID [16]byte, endpointID [
 // releaseAcquiredTerm best-effort releases a lease whose session was never
 // registered, so a failed open does not hold the node for a full TTL.
 func (m *Manager) releaseAcquiredTerm(ctx context.Context, term *connectionowner.Term) {
-	if err := term.Release(ctx, m.pool); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
+	if err := term.ReleaseBackend(ctx, m.backend); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
 		m.logger.ErrorContext(ctx, "release unregistered node lease", "node_id", fmt.Sprintf("%x", term.NodeID()), "error", err)
 	}
 }
@@ -712,7 +721,7 @@ func (m *Manager) endSession(ctx context.Context, nodeID [16]byte, session *node
 	}
 	m.ended[nodeID] = reason
 	m.mu.Unlock()
-	if err := session.term.Release(ctx, m.pool); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
+	if err := session.term.ReleaseBackend(ctx, m.backend); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
 		m.logger.ErrorContext(ctx, "release ended node lease", "node_id", fmt.Sprintf("%x", nodeID), "error", err)
 	}
 }
@@ -725,7 +734,7 @@ func (m *Manager) refresh(ctx context.Context, session *nodeSession) error {
 	if now.Add(m.renewAhead).Before(session.leaseUntil) {
 		return nil
 	}
-	renewed, err := session.term.Renew(ctx, m.pool)
+	renewed, err := session.term.RenewBackend(ctx, m.backend)
 	if errors.Is(err, connectionowner.ErrNotOwner) {
 		session.lost = true
 		return ErrNotOwner
@@ -842,18 +851,18 @@ func fenceCapabilities(capabilities []string) []string {
 	return normalized
 }
 
-// fenceGuard acquires the PostgreSQL ownership guard for one observed term.
+// fenceGuard acquires the database ownership guard for one observed term.
 // It returns a release function; the term's fencing epoch cannot advance
 // between the guard call and that release.
 type fenceGuard interface {
 	Guard(ctx context.Context, nodeID [16]byte, instanceID [16]byte, incarnation int64, connectionID [16]byte, epoch int64) (release func() error, err error)
 }
 
-// poolFenceGuard adapts the process pool to the observer's ownership guard.
-type poolFenceGuard struct{ pool *pgxpool.Pool }
+// backendFenceGuard adapts the database authority to the observer's guard.
+type backendFenceGuard struct{ backend database.Backend }
 
-func (g poolFenceGuard) Guard(ctx context.Context, nodeID [16]byte, instanceID [16]byte, incarnation int64, connectionID [16]byte, epoch int64) (func() error, error) {
-	return connectionowner.GuardObservedTerm(ctx, g.pool, nodeID, uuid.UUID(instanceID), incarnation, connectionID, epoch)
+func (g backendFenceGuard) Guard(ctx context.Context, nodeID [16]byte, instanceID [16]byte, incarnation int64, connectionID [16]byte, epoch int64) (func() error, error) {
+	return connectionowner.GuardObservedTermBackend(ctx, g.backend, nodeID, uuid.UUID(instanceID), incarnation, connectionID, epoch)
 }
 
 // Observer runs fenced mutations for Controller processes that do not hold
@@ -862,7 +871,7 @@ func (g poolFenceGuard) Guard(ctx context.Context, nodeID [16]byte, instanceID [
 // alone: transportd keeps serving a fence until a strictly higher epoch
 // registers, which never happens when a takeover's registration failed.
 // Every mutation therefore runs inside a fencing interval backed by the
-// PostgreSQL ownership row: the guard asserts the row still names the
+// database ownership row: the guard asserts the row still names the
 // fence's exact owner instance, incarnation, connection, and epoch under an
 // unexpired lease, holds a share lock on the row, and is released only after
 // the action's mutation RPC returned. A concurrent Acquire that would
@@ -883,7 +892,14 @@ func NewObserver(pool *pgxpool.Pool, reader FenceReader, signer *commandauth.Sig
 	if pool == nil {
 		return nil, errors.New("ownersession: observer requires the ownership authority pool")
 	}
-	return newObserver(poolFenceGuard{pool: pool}, reader, signer)
+	return NewObserverBackend(postgres.WrapPool(pool), reader, signer)
+}
+
+func NewObserverBackend(backend database.Backend, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
+	if backend == nil {
+		return nil, errors.New("ownersession: observer requires the ownership authority backend")
+	}
+	return newObserver(backendFenceGuard{backend: backend}, reader, signer)
 }
 
 func newObserver(guard fenceGuard, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
@@ -894,7 +910,7 @@ func newObserver(guard fenceGuard, reader FenceReader, signer *commandauth.Signe
 }
 
 // ExecuteFenced runs one mutation for the fence transportd registered for
-// the node, inside a fencing interval on the PostgreSQL ownership authority.
+// the node, inside a fencing interval on the database ownership authority.
 // The action receives the fence and binding to carry on the wire and must
 // complete the transport RPC that presents them before returning, because
 // the ownership guard is released when it does. A node without a registered

@@ -19,6 +19,22 @@ const resumeError = ref("");
 const activeStates = new Set(["queued", "running", "paused"]);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
+const exclusions = computed(() =>
+  (rollout.value?.excluded ?? []).map((value: unknown) => {
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      "node_id" in value &&
+      typeof value.node_id === "string" &&
+      "reason" in value &&
+      typeof value.reason === "string"
+    ) {
+      return { nodeId: value.node_id, reason: value.reason, raw: "" };
+    }
+    return { nodeId: "", reason: "", raw: JSON.stringify(value) };
+  }),
+);
+
 const batches = computed(() => {
   const grouped = new Map<number, AgentRolloutNode[]>();
   for (const node of rollout.value?.nodes ?? []) {
@@ -230,9 +246,12 @@ onBeforeUnmount(() => {
       >
         <h2>{{ $t("excludedNodes") }}</h2>
         <ul>
-          <li v-for="exclusion in rollout.excluded" :key="exclusion.nodeId">
-            <code>{{ exclusion.nodeId.slice(0, 8) }}</code>
-            <span>{{ $t(`exclusion_${exclusion.reason}`) }}</span>
+          <li v-for="(exclusion, index) in exclusions" :key="index">
+            <template v-if="exclusion.nodeId">
+              <code>{{ exclusion.nodeId.slice(0, 8) }}</code>
+              <span>{{ $t(`exclusion_${exclusion.reason}`) }}</span>
+            </template>
+            <code v-else>{{ exclusion.raw }}</code>
           </li>
         </ul>
       </section>

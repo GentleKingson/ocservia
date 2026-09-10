@@ -50,11 +50,11 @@ export interface UserPolicy {
    */
   quotaBytes: number;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof UserPolicy
    */
-  expiresAt?: Date;
+  expiresAt?: string;
   /**
    *
    * @type {number}
@@ -62,11 +62,11 @@ export interface UserPolicy {
    */
   version: number;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof UserPolicy
    */
-  periodStart: Date;
+  periodStart: string;
   /**
    *
    * @type {number}
@@ -80,11 +80,11 @@ export interface UserPolicy {
    */
   observedTxBytes: number;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof UserPolicy
    */
-  observedAt?: Date;
+  observedAt?: string;
   /**
    *
    * @type {boolean}
@@ -218,14 +218,12 @@ export function UserPolicyFromJSONTyped(
     quotaPeriod: json["quota_period"],
     quotaDirection: json["quota_direction"],
     quotaBytes: json["quota_bytes"],
-    expiresAt:
-      json["expires_at"] == null ? undefined : new Date(json["expires_at"]),
+    expiresAt: json["expires_at"] == null ? undefined : json["expires_at"],
     version: json["version"],
-    periodStart: new Date(json["period_start"]),
+    periodStart: json["period_start"],
     observedRxBytes: json["observed_rx_bytes"],
     observedTxBytes: json["observed_tx_bytes"],
-    observedAt:
-      json["observed_at"] == null ? undefined : new Date(json["observed_at"]),
+    observedAt: json["observed_at"] == null ? undefined : json["observed_at"],
     exceeded: json["exceeded"],
     expired: json["expired"],
     convergence: json["convergence"],
@@ -250,18 +248,12 @@ export function UserPolicyToJSONTyped(
     quota_period: value["quotaPeriod"],
     quota_direction: value["quotaDirection"],
     quota_bytes: value["quotaBytes"],
-    expires_at:
-      value["expiresAt"] == null
-        ? value["expiresAt"]
-        : value["expiresAt"].toISOString(),
+    expires_at: value["expiresAt"],
     version: value["version"],
-    period_start: value["periodStart"].toISOString(),
+    period_start: value["periodStart"],
     observed_rx_bytes: value["observedRxBytes"],
     observed_tx_bytes: value["observedTxBytes"],
-    observed_at:
-      value["observedAt"] == null
-        ? value["observedAt"]
-        : value["observedAt"].toISOString(),
+    observed_at: value["observedAt"],
     exceeded: value["exceeded"],
     expired: value["expired"],
     convergence: value["convergence"],

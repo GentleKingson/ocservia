@@ -3,11 +3,11 @@ package api
 import (
 	"errors"
 	"net/http"
-	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +44,7 @@ func (s *Server) getNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node, err := s.telemetry.GetNode(r.Context(), id)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, database.ErrNotFound) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Node not found", "the requested node does not exist")
 		return
 	}
@@ -101,16 +101,16 @@ func (s *Server) listNodeTelemetry(w http.ResponseWriter, r *http.Request) {
 	if resolution == "" {
 		resolution = "5m"
 	}
-	since := time.Time{}
-	if value := r.URL.Query().Get("since"); value != "" {
+	since := value.Timestamp{}
+	if text := r.URL.Query().Get("since"); text != "" {
 		var err error
-		since, err = time.Parse(time.RFC3339, value)
+		since, err = value.ParseTimestamp(text)
 		if err != nil {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-query", "Invalid query", "since must be an RFC 3339 timestamp")
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-query", "Invalid query", "since must be an RFC 3339 timestamp, signed six-digit extended-year timestamp, infinity or -infinity")
 			return
 		}
 	}
-	items, err := s.telemetry.History(r.Context(), id, metric, resolution, since)
+	items, err := s.telemetry.HistoryFrom(r.Context(), id, metric, resolution, since)
 	if err != nil {
 		switch {
 		case errors.Is(err, telemetry.ErrInvalidMetric):

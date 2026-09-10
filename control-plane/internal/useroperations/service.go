@@ -16,11 +16,13 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,20 +44,20 @@ var (
 )
 
 type Policy struct {
-	NodeID          uuid.UUID  `json:"node_id"`
-	Username        string     `json:"username"`
-	QuotaPeriod     string     `json:"quota_period"`
-	QuotaDirection  string     `json:"quota_direction"`
-	QuotaBytes      int64      `json:"quota_bytes"`
-	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
-	Version         int64      `json:"version"`
-	PeriodStart     time.Time  `json:"period_start"`
-	ObservedRXBytes int64      `json:"observed_rx_bytes"`
-	ObservedTXBytes int64      `json:"observed_tx_bytes"`
-	ObservedAt      *time.Time `json:"observed_at,omitempty"`
-	Exceeded        bool       `json:"exceeded"`
-	Expired         bool       `json:"expired"`
-	Convergence     string     `json:"convergence"`
+	NodeID          uuid.UUID        `json:"node_id"`
+	Username        string           `json:"username"`
+	QuotaPeriod     string           `json:"quota_period"`
+	QuotaDirection  string           `json:"quota_direction"`
+	QuotaBytes      int64            `json:"quota_bytes"`
+	ExpiresAt       *value.Timestamp `json:"expires_at,omitempty"`
+	Version         int64            `json:"version"`
+	PeriodStart     value.Timestamp  `json:"period_start"`
+	ObservedRXBytes int64            `json:"observed_rx_bytes"`
+	ObservedTXBytes int64            `json:"observed_tx_bytes"`
+	ObservedAt      *value.Timestamp `json:"observed_at,omitempty"`
+	Exceeded        bool             `json:"exceeded"`
+	Expired         bool             `json:"expired"`
+	Convergence     string           `json:"convergence"`
 }
 
 type PolicyRequest struct {
@@ -94,26 +96,21 @@ type BatchItem struct {
 }
 
 type Batch struct {
-	ID              uuid.UUID   `json:"id"`
-	WorkspaceID     uuid.UUID   `json:"workspace_id"`
-	ActorIdentityID *uuid.UUID  `json:"-"`
-	State           string      `json:"state"`
-	Items           []BatchItem `json:"items"`
-	CreatedAt       time.Time   `json:"created_at"`
-	UpdatedAt       time.Time   `json:"updated_at"`
+	ID              uuid.UUID       `json:"id"`
+	WorkspaceID     uuid.UUID       `json:"workspace_id"`
+	ActorIdentityID *uuid.UUID      `json:"-"`
+	State           string          `json:"state"`
+	Items           []BatchItem     `json:"items"`
+	CreatedAt       value.Timestamp `json:"created_at"`
+	UpdatedAt       value.Timestamp `json:"updated_at"`
 }
 
 type UsageSample = userusage.Sample
 
-type Metrics struct {
-	PolicyPendingTotal    int64 `json:"policy_pending_total"`
-	ActiveBatchItemTotal  int64 `json:"active_batch_item_total"`
-	StaleBatchClaimTotal  int64 `json:"stale_batch_claim_total"`
-	UnknownBatchItemTotal int64 `json:"unknown_batch_item_total"`
-}
+type Metrics = userstore.Metrics
 
 type Service struct {
-	pool      *pgxpool.Pool
+	backend   database.Backend
 	users     *userstate.Service
 	now       func() time.Time
 	newID     func() uuid.UUID
@@ -121,11 +118,19 @@ type Service struct {
 }
 
 func New(pool *pgxpool.Pool, users *userstate.Service) *Service {
-	return &Service{pool: pool, users: users, now: func() time.Time { return time.Now().UTC() }, newID: func() uuid.UUID { return uuid.Must(uuid.NewV7()) }, batchSize: DefaultGlobalConcurrency}
+	return NewBackend(postgres.WrapPool(pool), users)
+}
+
+func NewBackend(backend database.Backend, users *userstate.Service) *Service {
+	return &Service{backend: backend, users: users, now: func() time.Time { return time.Now().UTC() }, newID: func() uuid.UUID { return uuid.Must(uuid.NewV7()) }, batchSize: DefaultGlobalConcurrency}
 }
 
 func NewWithConcurrency(pool *pgxpool.Pool, users *userstate.Service, concurrency int) *Service {
-	service := New(pool, users)
+	return NewWithConcurrencyBackend(postgres.WrapPool(pool), users, concurrency)
+}
+
+func NewWithConcurrencyBackend(backend database.Backend, users *userstate.Service, concurrency int) *Service {
+	service := NewBackend(backend, users)
 	if concurrency > 0 {
 		service.batchSize = concurrency
 	}
@@ -138,40 +143,41 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 	}
 	request.Username = strings.TrimSpace(request.Username)
 	hash := policyHash(request)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return Policy{}, false, err
 	}
 	defer rollback(tx)
-	var workspaceID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT n.workspace_id FROM desired_users u JOIN nodes n ON n.id=u.node_id WHERE u.node_id=$1 AND u.username=$2 AND n.status IN('active','offline') FOR UPDATE OF u`, request.NodeID, request.Username).Scan(&workspaceID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	store, err := userstore.From(tx)
+	if err != nil {
+		return Policy{}, false, err
+	}
+	workspaceID, err := store.LockUser(ctx, request.NodeID, request.Username)
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
 			return Policy{}, false, ErrNotFound
 		}
 		return Policy{}, false, err
 	}
-	var replayVersion int64
-	var replayHash []byte
-	err = tx.QueryRow(ctx, `SELECT policy_version,request_hash FROM user_policy_mutations WHERE workspace_id=$1 AND idempotency_key=$2`, workspaceID, request.IdempotencyKey).Scan(&replayVersion, &replayHash)
+	receipt, err := store.Mutation(ctx, workspaceID, request.IdempotencyKey)
 	if err == nil {
-		if !slices.Equal(replayHash, hash[:]) {
+		if !slices.Equal(receipt.Hash, hash[:]) {
 			return Policy{}, false, ErrIdempotencyConflict
 		}
-		policy, readErr := readPolicy(ctx, tx, request.NodeID, request.Username, s.now())
+		policy, readErr := readPolicy(ctx, store, request.NodeID, request.Username, s.now())
 		if readErr != nil {
 			return Policy{}, false, readErr
 		}
-		if policy.Version < replayVersion {
+		if policy.Version < receipt.Version {
 			return Policy{}, false, errors.New("replayed policy version is unavailable")
 		}
-		return policy, true, tx.Commit(ctx)
+		return policy, true, commit(ctx, tx)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, database.ErrNotFound) {
 		return Policy{}, false, err
 	}
-	var currentVersion int64
-	err = tx.QueryRow(ctx, `SELECT version FROM desired_user_policies WHERE node_id=$1 AND username=$2 FOR UPDATE`, request.NodeID, request.Username).Scan(&currentVersion)
-	if errors.Is(err, pgx.ErrNoRows) {
+	currentVersion, err := store.LockPolicy(ctx, request.NodeID, request.Username)
+	if errors.Is(err, database.ErrNotFound) {
 		currentVersion = 0
 	} else if err != nil {
 		return Policy{}, false, err
@@ -180,23 +186,31 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		return Policy{}, false, ErrVersionConflict
 	}
 	now := s.now()
+	at, err := value.FromTime(now)
+	if err != nil {
+		return Policy{}, false, err
+	}
+	var expires value.Timestamp
+	if request.ExpiresAt != nil {
+		expires, err = value.FromTime(*request.ExpiresAt)
+		if err != nil {
+			return Policy{}, false, ErrInvalidRequest
+		}
+	}
 	nextVersion := currentVersion + 1
-	_, err = tx.Exec(ctx, `INSERT INTO desired_user_policies(node_id,username,quota_period,quota_direction,quota_bytes,expires_at,version,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8)
-		ON CONFLICT(node_id,username) DO UPDATE SET quota_period=EXCLUDED.quota_period,quota_direction=EXCLUDED.quota_direction,quota_bytes=EXCLUDED.quota_bytes,expires_at=EXCLUDED.expires_at,version=EXCLUDED.version,updated_at=EXCLUDED.updated_at`,
-		request.NodeID, request.Username, request.QuotaPeriod, request.QuotaDirection, request.QuotaBytes, request.ExpiresAt, nextVersion, now)
+	err = store.PutPolicy(ctx, userstore.Policy{NodeID: request.NodeID, Username: request.Username, QuotaPeriod: request.QuotaPeriod, QuotaDirection: request.QuotaDirection, QuotaBytes: request.QuotaBytes, ExpiresAt: expires, Version: nextVersion, CreatedAt: at, UpdatedAt: at})
 	if err != nil {
 		return Policy{}, false, err
 	}
 	mutationID := s.newID()
-	if _, err := tx.Exec(ctx, `INSERT INTO user_policy_mutations(id,workspace_id,node_id,username,idempotency_key,request_hash,policy_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, mutationID, workspaceID, request.NodeID, request.Username, request.IdempotencyKey, hash[:], nextVersion, now); err != nil {
+	if err := store.InsertMutation(ctx, userstore.Mutation{ID: mutationID, WorkspaceID: workspaceID, NodeID: request.NodeID, Username: request.Username, IdempotencyKey: request.IdempotencyKey, Hash: hash[:], Version: nextVersion, At: at}); err != nil {
 		return Policy{}, false, err
 	}
 	after, _ := json.Marshal(map[string]any{"quota_period": request.QuotaPeriod, "quota_direction": request.QuotaDirection, "quota_bytes": request.QuotaBytes, "expires_at": request.ExpiresAt, "version": nextVersion})
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.policy.set", ResourceType: "user_policy", ResourceID: mutationID, NodeID: &request.NodeID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, AfterSummary: after, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.policy.set", ResourceType: "user_policy", ResourceID: mutationID, NodeID: &request.NodeID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, AfterSummary: after, At: now}); err != nil {
 		return Policy{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := commit(ctx, tx); err != nil {
 		return Policy{}, false, err
 	}
 	policy, err := s.GetPolicy(ctx, request.NodeID, request.Username)
@@ -204,47 +218,47 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 }
 
 func (s *Service) GetPolicy(ctx context.Context, nodeID uuid.UUID, username string) (Policy, error) {
-	return readPolicy(ctx, s.pool, nodeID, username, s.now())
+	var policy Policy
+	err := s.withStore(ctx, func(store userstore.Store) (err error) {
+		policy, err = readPolicy(ctx, store, nodeID, username, s.now())
+		return
+	})
+	return policy, err
 }
 
-type queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func readPolicy(ctx context.Context, q queryer, nodeID uuid.UUID, username string, now time.Time) (Policy, error) {
-	policy := Policy{NodeID: nodeID, Username: username}
-	month := monthStart(now)
-	var nodeStatus string
-	var desiredEnabled bool
-	var desiredRevision int64
-	var observedEnabled *bool
-	var observedRevision *int64
-	var operationState *string
-	err := q.QueryRow(ctx, `SELECT p.quota_period,p.quota_direction,p.quota_bytes,p.expires_at,p.version,
-		CASE WHEN p.quota_period='monthly' THEN $3::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END,
-		COALESCE(u.rx_bytes,0),COALESCE(u.tx_bytes,0),u.observed_at,
-		n.status,d.enabled,d.revision,o.enabled,o.revision,latest.state
-		FROM desired_user_policies p JOIN nodes n ON n.id=p.node_id JOIN desired_users d ON d.node_id=p.node_id AND d.username=p.username
-		LEFT JOIN observed_users o ON o.node_id=p.node_id AND o.username=p.username
-		LEFT JOIN observed_user_usage u ON u.node_id=p.node_id AND u.username=p.username AND u.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND u.period_start=CASE WHEN p.quota_period='monthly' THEN $3::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END
-		LEFT JOIN LATERAL (SELECT op.state FROM commands command JOIN operations op ON op.id=command.operation_id WHERE command.node_id=p.node_id AND command.resource_type='user' AND command.resource_key=p.username ORDER BY command.created_at DESC,command.id DESC LIMIT 1) latest ON true
-		WHERE p.node_id=$1 AND p.username=$2`, nodeID, username, month).Scan(&policy.QuotaPeriod, &policy.QuotaDirection, &policy.QuotaBytes, &policy.ExpiresAt, &policy.Version, &policy.PeriodStart, &policy.ObservedRXBytes, &policy.ObservedTXBytes, &policy.ObservedAt, &nodeStatus, &desiredEnabled, &desiredRevision, &observedEnabled, &observedRevision, &operationState)
-	if errors.Is(err, pgx.ErrNoRows) {
+func readPolicy(ctx context.Context, store userstore.Store, nodeID uuid.UUID, username string, now time.Time) (Policy, error) {
+	month, err := value.FromTime(monthStart(now))
+	if err != nil {
+		return Policy{}, err
+	}
+	at, err := value.FromTime(now)
+	if err != nil {
+		return Policy{}, err
+	}
+	v, err := store.Policy(ctx, nodeID, username, month)
+	if errors.Is(err, database.ErrNotFound) {
 		return Policy{}, ErrNotFound
 	}
 	if err != nil {
 		return Policy{}, err
 	}
+	policy := Policy{NodeID: nodeID, Username: username, QuotaPeriod: v.QuotaPeriod, QuotaDirection: v.QuotaDirection, QuotaBytes: v.QuotaBytes, Version: v.Version, PeriodStart: v.PeriodStart, ObservedRXBytes: v.ObservedRXBytes, ObservedTXBytes: v.ObservedTXBytes}
+	if v.ExpiresAt.Valid {
+		policy.ExpiresAt = &v.ExpiresAt
+	}
+	if v.ObservedAt.Valid {
+		policy.ObservedAt = &v.ObservedAt
+	}
 	policy.Exceeded = quotaValue(policy.QuotaDirection, policy.ObservedRXBytes, policy.ObservedTXBytes) >= policy.QuotaBytes && policy.QuotaPeriod != "none"
-	policy.Expired = policy.ExpiresAt != nil && !policy.ExpiresAt.After(now)
-	triggerPending := (policy.Exceeded || policy.Expired) && desiredEnabled
-	observedMatches := observedEnabled != nil && observedRevision != nil && *observedEnabled == desiredEnabled && *observedRevision == desiredRevision
+	policy.Expired = v.ExpiresAt.Valid && v.ExpiresAt.Micros <= at.Micros
+	triggerPending := (policy.Exceeded || policy.Expired) && v.DesiredEnabled
+	observedMatches := v.ObservedEnabled != nil && v.ObservedRevision != nil && *v.ObservedEnabled == v.DesiredEnabled && *v.ObservedRevision == v.DesiredRevision
 	switch {
 	case observedMatches && !triggerPending:
 		policy.Convergence = "converged"
-	case nodeStatus == "offline":
+	case v.NodeStatus == "offline":
 		policy.Convergence = "offline_pending"
-	case operationState != nil && slices.Contains([]string{"queued", "dispatched", "accepted", "running", "offline_pending"}, *operationState):
+	case v.OperationState != nil && slices.Contains([]string{"queued", "dispatched", "accepted", "running", "offline_pending"}, *v.OperationState):
 		policy.Convergence = "pending"
 	case triggerPending:
 		policy.Convergence = "pending"
@@ -262,70 +276,66 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 		return Batch{}, false, err
 	}
 	hash := BatchRequestHash(request.Items)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return Batch{}, false, err
 	}
 	defer rollback(tx)
+	store, err := userstore.From(tx)
+	if err != nil {
+		return Batch{}, false, err
+	}
 	if hasDisable(request.Items) {
-		var approvedID uuid.UUID
-		var approvedHash []byte
-		if err := tx.QueryRow(ctx, `SELECT resource_id,request_hash FROM approval_requests WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 AND action='user.batch.disable' AND resource_type='batch_operation'`, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID).Scan(&approvedID, &approvedHash); err != nil {
+		approvedID, approvedHash, err := store.BatchApproval(ctx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID)
+		if err != nil {
 			return Batch{}, false, approvals.ErrNotReady
 		}
 		if !slices.Equal(approvedHash, hash[:]) {
 			return Batch{}, false, approvals.ErrNotReady
 		}
-		rows, queryErr := tx.Query(ctx, `SELECT node_id,username,action,expected_version FROM approval_batch_items WHERE approval_id=$1 ORDER BY item_index`, request.ApprovalID)
+		items, queryErr := store.ApprovalItems(ctx, request.ApprovalID)
 		if queryErr != nil {
 			return Batch{}, false, queryErr
 		}
 		var persisted []BatchItemRequest
-		for rows.Next() {
-			var item BatchItemRequest
-			if err := rows.Scan(&item.NodeID, &item.Username, &item.Action, &item.ExpectedVersion); err != nil {
-				rows.Close()
-				return Batch{}, false, err
-			}
-			persisted = append(persisted, item)
-		}
-		rows.Close()
-		if rows.Err() != nil {
-			return Batch{}, false, rows.Err()
+		for _, item := range items {
+			persisted = append(persisted, BatchItemRequest{NodeID: item.NodeID, Username: item.Username, Action: item.Action, ExpectedVersion: item.ExpectedVersion})
 		}
 		if len(persisted) != len(request.Items) || BatchRequestHash(persisted) != hash {
 			return Batch{}, false, approvals.ErrNotReady
 		}
 		request.ID = approvedID
 	}
-	var existing uuid.UUID
-	var existingHash []byte
-	err = tx.QueryRow(ctx, `SELECT id,request_hash FROM batch_operations WHERE workspace_id=$1 AND idempotency_key=$2`, request.WorkspaceID, request.IdempotencyKey).Scan(&existing, &existingHash)
+	existing, existingHash, err := store.BatchByKey(ctx, request.WorkspaceID, request.IdempotencyKey)
 	if err == nil {
 		if (hasDisable(request.Items) && existing != request.ID) || !slices.Equal(existingHash, hash[:]) {
 			return Batch{}, false, ErrIdempotencyConflict
 		}
 		if hasDisable(request.Items) {
-			if err := approvals.ValidateConsumedBound(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", existing, hash[:]); err != nil {
+			if err := approvals.ValidateConsumedBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", existing, hash[:]); err != nil {
 				return Batch{}, false, err
 			}
 		}
-		if err := tx.Commit(ctx); err != nil {
+		if err := commit(ctx, tx); err != nil {
 			return Batch{}, false, err
 		}
 		batch, getErr := s.GetBatch(ctx, existing)
 		return batch, true, getErr
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, database.ErrNotFound) {
 		return Batch{}, false, err
 	}
 	id, now := request.ID, s.now()
+	at, err := value.FromTime(now)
+	if err != nil {
+		return Batch{}, false, err
+	}
 	if hasDisable(request.Items) {
-		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", id, hash[:]); err != nil {
+		if err := approvals.ConsumeBoundTx(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", id, hash[:]); err != nil {
 			return Batch{}, false, err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO batch_operations(id,workspace_id,state,actor_identity_id,actor_session_id,approval_id,actor_id,reason,request_id,traceparent,idempotency_key,request_hash,created_at,updated_at) VALUES($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)`, id, request.WorkspaceID, optionalUUID(request.ActorIdentityID), optionalUUID(request.ActorSessionID), optionalUUID(request.ApprovalID), request.ActorID, request.Reason, request.RequestID, request.Traceparent, request.IdempotencyKey, hash[:], now); err != nil {
+	if err := store.InsertBatch(ctx, userstore.Batch{ID: id, WorkspaceID: request.WorkspaceID, ActorIdentityID: optionalUUID(request.ActorIdentityID), ActorSessionID: optionalUUID(request.ActorSessionID), ApprovalID: optionalUUID(request.ApprovalID), ActorID: request.ActorID, Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, IdempotencyKey: request.IdempotencyKey, Hash: hash[:], CreatedAt: at, UpdatedAt: at}); err != nil {
 		return Batch{}, false, err
 	}
 	for index, item := range request.Items {
@@ -333,23 +343,23 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 		if !item.Authorized {
 			state, errorType = "forbidden", "forbidden"
 		} else {
-			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM desired_users u JOIN nodes n ON n.id=u.node_id WHERE u.node_id=$1 AND u.username=$2 AND n.workspace_id=$3)`, item.NodeID, item.Username, request.WorkspaceID).Scan(&exists); err != nil {
+			exists, err := store.UserExists(ctx, item.NodeID, item.Username, request.WorkspaceID)
+			if err != nil {
 				return Batch{}, false, err
 			}
 			if !exists {
 				state, errorType = "failed", "not_found"
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO batch_operation_items(batch_id,item_index,node_id,username,action,expected_version,state,error_type,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9)`, id, index, item.NodeID, item.Username, item.Action, item.ExpectedVersion, state, errorType, now); err != nil {
+		if err := store.InsertBatchItem(ctx, userstore.BatchItem{BatchID: id, Index: index, NodeID: item.NodeID, Username: item.Username, Action: item.Action, ExpectedVersion: item.ExpectedVersion, State: state, ErrorType: errorType, At: at}); err != nil {
 			return Batch{}, false, err
 		}
 	}
 	auditSummary, _ := json.Marshal(map[string]any{"request_hash": hex.EncodeToString(hash[:]), "items": request.Items})
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.batch.create", ResourceType: "batch_operation", ResourceID: id, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, AfterSummary: auditSummary, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.batch.create", ResourceType: "batch_operation", ResourceID: id, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Batch{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := commit(ctx, tx); err != nil {
 		return Batch{}, false, err
 	}
 	batch, err := s.GetBatch(ctx, id)
@@ -358,33 +368,28 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 
 func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (Batch, error) {
 	var batch Batch
-	batch.ID = id
-	if err := s.pool.QueryRow(ctx, `SELECT workspace_id,actor_identity_id,state,created_at,updated_at FROM batch_operations WHERE id=$1`, id).Scan(&batch.WorkspaceID, &batch.ActorIdentityID, &batch.State, &batch.CreatedAt, &batch.UpdatedAt); err != nil {
-		return Batch{}, err
-	}
-	rows, err := s.pool.Query(ctx, `SELECT item_index,node_id,username,action,expected_version,state,child_operation_id,COALESCE(error_type,'') FROM batch_operation_items WHERE batch_id=$1 ORDER BY item_index`, id)
-	if err != nil {
-		return Batch{}, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var item BatchItem
-		if err := rows.Scan(&item.Index, &item.NodeID, &item.Username, &item.Action, &item.ExpectedVersion, &item.State, &item.ChildOperationID, &item.ErrorType); err != nil {
-			return Batch{}, err
+	err := s.withStore(ctx, func(store userstore.Store) error {
+		v, err := store.Batch(ctx, id)
+		if err != nil {
+			return err
 		}
-		batch.Items = append(batch.Items, item)
-	}
-	return batch, rows.Err()
+		batch = Batch{ID: id, WorkspaceID: v.WorkspaceID, ActorIdentityID: v.ActorIdentityID, State: v.State, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
+		items, err := store.BatchItems(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			batch.Items = append(batch.Items, BatchItem{Index: item.Index, NodeID: item.NodeID, Username: item.Username, Action: item.Action, ExpectedVersion: item.ExpectedVersion, State: item.State, ChildOperationID: item.ChildOperationID, ErrorType: item.ErrorType})
+		}
+		return nil
+	})
+	return batch, err
 }
 
 func (s *Service) Metrics(ctx context.Context, workspaceID uuid.UUID) (Metrics, error) {
-	var value Metrics
-	err := s.pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM desired_user_policies policy JOIN nodes node ON node.id=policy.node_id JOIN desired_users desired USING(node_id,username) LEFT JOIN observed_users observed USING(node_id,username) LEFT JOIN observed_user_usage usage ON usage.node_id=policy.node_id AND usage.username=policy.username AND usage.period=CASE WHEN policy.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN policy.quota_period='monthly' THEN date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' ELSE '1970-01-01T00:00:00Z'::timestamptz END WHERE node.workspace_id=$1 AND ((desired.enabled=true AND ((policy.expires_at IS NOT NULL AND policy.expires_at<=now()) OR (policy.quota_period<>'none' AND CASE policy.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=policy.quota_bytes::numeric))) OR (EXISTS(SELECT 1 FROM user_policy_enforcements enforcement WHERE enforcement.node_id=policy.node_id AND enforcement.username=policy.username AND enforcement.policy_version=policy.version AND enforcement.operation_id IS NOT NULL) AND (observed.username IS NULL OR observed.enabled<>desired.enabled OR observed.revision<>desired.revision)))),
-		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state IN('queued','submitting','submitted','offline_pending','unknown')),
-		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='submitting' AND item.lease_until<=now()),
-		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='unknown')`, workspaceID).Scan(&value.PolicyPendingTotal, &value.ActiveBatchItemTotal, &value.StaleBatchClaimTotal, &value.UnknownBatchItemTotal)
-	return value, err
+	var result Metrics
+	err := s.withStore(ctx, func(store userstore.Store) (err error) { result, err = store.Metrics(ctx, workspaceID); return })
+	return result, err
 }
 
 // RunOnce obtains the database lease, compensates missed expiry/quota scans,
@@ -394,7 +399,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	if fence := coordination.FenceFromContext(ctx); fence != nil {
 		// Under fenced scheduling the leadership session replaces the
 		// per-tick lease; every write below is fenced transactionally.
-		if err := fence.AssertCurrent(ctx, s.pool); err != nil {
+		if err := s.withStore(ctx, func(userstore.Store) error { return nil }); err != nil {
 			return err
 		}
 	} else {
@@ -433,7 +438,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 
 func (s *Service) activeUserOperationCount(ctx context.Context) (int, error) {
 	var count int
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown')`).Scan(&count)
+	err := s.withStore(ctx, func(store userstore.Store) (err error) { count, err = store.ActiveOperations(ctx); return })
 	return count, err
 }
 
@@ -441,63 +446,53 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	if limit <= 0 {
 		return 0, nil
 	}
-	now, month := s.now(), monthStart(s.now())
-	rows, err := s.pool.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,u.enabled,prior.resulting_user_version
-		FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
-		LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period='monthly' AND usage.period_start=$1
-		JOIN LATERAL (SELECT resulting_user_version FROM user_policy_enforcements prior WHERE prior.node_id=p.node_id AND prior.username=p.username AND prior.policy_version=p.version AND prior.cause='quota' AND prior.period_start<$1 AND prior.operation_id IS NOT NULL ORDER BY prior.period_start DESC LIMIT 1) prior ON true
-		WHERE p.quota_period='monthly' AND (p.expires_at IS NULL OR p.expires_at>$2)
-		AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END<p.quota_bytes::numeric
-		AND ((u.enabled=false AND prior.resulting_user_version=u.version) OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause='quota_reset' AND pending.period_start=$1 AND pending.source_user_version=u.version AND pending.operation_id IS NULL))
-		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements reset WHERE reset.node_id=p.node_id AND reset.username=p.username AND reset.policy_version=p.version AND reset.cause='quota_reset' AND reset.period_start=$1 AND reset.operation_id IS NOT NULL)
-		ORDER BY p.node_id,p.username LIMIT $3`, month, now, limit)
+	now, err := value.FromTime(s.now())
 	if err != nil {
 		return 0, err
 	}
-	type resetCandidate struct {
-		nodeID                                      uuid.UUID
-		username                                    string
-		policyVersion, userVersion, enforcedVersion int64
-		enabled                                     bool
+	monthTime := monthStart(s.now())
+	month, err := value.FromTime(monthTime)
+	if err != nil {
+		return 0, err
 	}
-	var candidates []resetCandidate
-	for rows.Next() {
-		var item resetCandidate
-		if err := rows.Scan(&item.nodeID, &item.username, &item.policyVersion, &item.userVersion, &item.enabled, &item.enforcedVersion); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		candidates = append(candidates, item)
+	var candidates []userstore.Candidate
+	err = s.withStore(ctx, func(store userstore.Store) (err error) {
+		candidates, err = store.ResetCandidates(ctx, now, month, limit)
+		return
+	})
+	if err != nil {
+		return 0, err
 	}
-	rows.Close()
 	processed := 0
 	for _, item := range candidates {
-		key := stableKey("policy-reset", item.nodeID.String(), item.username, fmt.Sprint(item.policyVersion), month.Format(time.RFC3339))
-		if err := s.exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, item.userVersion, now); err != nil {
+		key := stableKey("policy-reset", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), monthTime.Format(time.RFC3339))
+		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
 			return 0, err
 		}
-		if item.enabled {
-			operationID, found, findErr := s.findUserOperation(ctx, item.nodeID, item.username, key, userstate.UserEnable)
+		if item.Enabled {
+			operationID, found, findErr := s.findUserOperation(ctx, item.NodeID, item.Username, key, userstate.UserEnable)
 			if findErr != nil {
 				return 0, findErr
 			}
 			if !found {
-				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month)
+				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, false) })
 				continue
 			}
-			if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion); err != nil {
+			if err := s.withStore(ctx, func(store userstore.Store) error {
+				return store.CompleteEnforcement(ctx, item, operationID, item.UserVersion)
+			}); err != nil {
 				return 0, err
 			}
 			processed++
 			continue
 		}
-		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: userstate.UserEnable, Name: item.username, ExpectedVersion: item.userVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
+		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
-				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND source_user_version=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, item.userVersion)
+				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, true) })
 				continue
 			}
 			return 0, mutateErr
@@ -506,91 +501,101 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 		if parseErr != nil {
 			return 0, parseErr
 		}
-		if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion+1); err != nil {
+		if err := s.withStore(ctx, func(store userstore.Store) error {
+			return store.CompleteEnforcement(ctx, item, operationID, item.UserVersion+1)
+		}); err != nil {
 			return 0, err
 		}
 		processed++
 	}
-	return processed, rows.Err()
+	return processed, nil
 }
 
-// exec runs one scheduler write. Under a leadership session the statement
-// commits only after the fencing assert succeeds.
-func (s *Service) exec(ctx context.Context, sql string, args ...any) error {
-	return coordination.FencedExec(ctx, s.pool, coordination.FenceFromContext(ctx), sql, args...)
+// A scheduler transaction commits only after checking its leadership term.
+func (s *Service) withStore(ctx context.Context, change func(userstore.Store) error) error {
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := userstore.From(tx)
+		if err != nil {
+			return err
+		}
+		if err := change(store); err != nil {
+			return err
+		}
+		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+	})
+}
+
+func commit(ctx context.Context, tx database.Tx) error {
+	if err := coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Service) acquireLease(ctx context.Context, owner uuid.UUID, duration time.Duration) (bool, error) {
-	result, err := s.pool.Exec(ctx, `INSERT INTO scheduler_leases(lease_name,owner_id,lease_until,updated_at) VALUES($1,$2,now()+$3::interval,now()) ON CONFLICT(lease_name) DO UPDATE SET owner_id=EXCLUDED.owner_id,lease_until=EXCLUDED.lease_until,updated_at=EXCLUDED.updated_at WHERE scheduler_leases.lease_until<=now() OR scheduler_leases.owner_id=EXCLUDED.owner_id`, leaseName, owner, duration.String())
-	return err == nil && result.RowsAffected() == 1, err
-}
-
-type enforcementCandidate struct {
-	nodeID      uuid.UUID
-	username    string
-	version     int64
-	userVersion int64
-	cause       string
-	periodStart time.Time
-	enabled     bool
+	var acquired bool
+	err := s.withStore(ctx, func(store userstore.Store) (err error) {
+		acquired, err = store.AcquireLease(ctx, leaseName, owner, duration)
+		return
+	})
+	return acquired, err
 }
 
 func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
-	now, month := s.now(), monthStart(s.now())
-	rows, err := s.pool.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,
-		CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END,
-		CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END,u.enabled
-		FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
-		LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END
-		WHERE ((p.expires_at IS NOT NULL AND p.expires_at<=$1) OR (p.quota_period<>'none' AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=p.quota_bytes::numeric))
-		AND (u.enabled=true OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND pending.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND pending.source_user_version=u.version AND pending.operation_id IS NULL))
-		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements e WHERE e.node_id=p.node_id AND e.username=p.username AND e.policy_version=p.version AND e.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND e.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND e.operation_id IS NOT NULL)
-		ORDER BY p.node_id,p.username LIMIT $3`, now, month, limit)
+	now, err := value.FromTime(s.now())
 	if err != nil {
 		return 0, err
 	}
-	var candidates []enforcementCandidate
-	for rows.Next() {
-		var item enforcementCandidate
-		if err := rows.Scan(&item.nodeID, &item.username, &item.version, &item.userVersion, &item.cause, &item.periodStart, &item.enabled); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		candidates = append(candidates, item)
+	month, err := value.FromTime(monthStart(s.now()))
+	if err != nil {
+		return 0, err
 	}
-	rows.Close()
+	var candidates []userstore.Candidate
+	err = s.withStore(ctx, func(store userstore.Store) (err error) {
+		candidates, err = store.EnforcementCandidates(ctx, now, month, limit)
+		return
+	})
+	if err != nil {
+		return 0, err
+	}
 	processed := 0
 	for _, item := range candidates {
-		key := stableKey("policy", item.nodeID.String(), item.username, fmt.Sprint(item.version), item.cause, item.periodStart.Format(time.RFC3339))
-		trace := stableTraceparent(key)
-		if err := s.exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion, now); err != nil {
+		period, err := item.PeriodStart.Time()
+		if err != nil {
 			return 0, err
 		}
-		if !item.enabled {
-			operationID, found, findErr := s.findUserOperation(ctx, item.nodeID, item.username, key, userstate.UserDisable)
+		key := stableKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, period.Format(time.RFC3339))
+		trace := stableTraceparent(key)
+		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
+			return 0, err
+		}
+		if !item.Enabled {
+			operationID, found, findErr := s.findUserOperation(ctx, item.NodeID, item.Username, key, userstate.UserDisable)
 			if findErr != nil {
 				return 0, findErr
 			}
 			if !found {
-				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart)
+				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, false) })
 				continue
 			}
-			if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion); err != nil {
+			if err := s.withStore(ctx, func(store userstore.Store) error {
+				return store.CompleteEnforcement(ctx, item, operationID, item.UserVersion)
+			}); err != nil {
 				return 0, err
 			}
 			processed++
 			continue
 		}
-		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: userstate.UserDisable, Name: item.username, ExpectedVersion: item.userVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: trace})
+		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserDisable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: trace})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
-				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND source_user_version=$6 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion)
+				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, true) })
 				continue
 			}
 			return 0, mutateErr
@@ -599,7 +604,9 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		if parseErr != nil {
 			return 0, parseErr
 		}
-		if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion+1); err != nil {
+		if err := s.withStore(ctx, func(store userstore.Store) error {
+			return store.CompleteEnforcement(ctx, item, operationID, item.UserVersion+1)
+		}); err != nil {
 			return 0, err
 		}
 		processed++
@@ -609,48 +616,22 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 
 func (s *Service) findUserOperation(ctx context.Context, nodeID uuid.UUID, username, key string, kind userstate.MutationKind) (uuid.UUID, bool, error) {
 	var operationID uuid.UUID
-	err := s.pool.QueryRow(ctx, `SELECT op.id FROM operations op JOIN commands command ON command.operation_id=op.id WHERE op.node_id=$1 AND op.idempotency_key=$2 AND command.resource_type='user' AND command.resource_key=$3 AND command.payload_type=$4`, nodeID, key, username, kind).Scan(&operationID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := s.withStore(ctx, func(store userstore.Store) (err error) {
+		operationID, err = store.FindUserOperation(ctx, nodeID, username, key, string(kind))
+		return
+	})
+	if errors.Is(err, database.ErrNotFound) {
 		return uuid.Nil, false, nil
 	}
 	return operationID, err == nil, err
 }
 
-type claimedBatchItem struct {
-	batchID         uuid.UUID
-	index           int
-	nodeID          uuid.UUID
-	username        string
-	action          string
-	expectedVersion int64
-}
-
 // claimBatchItems claims queued batch items for submission. The claim is a
 // write, so it commits only after the scheduler fencing assert succeeds.
-func (s *Service) claimBatchItems(ctx context.Context, owner uuid.UUID, limit int) ([]claimedBatchItem, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	rows, err := tx.Query(ctx, `WITH claim AS (SELECT batch_id,item_index FROM batch_operation_items WHERE (state='queued' AND lease_until IS NULL) OR (state='submitting' AND lease_until<=now()) ORDER BY updated_at,batch_id,item_index FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE batch_operation_items item SET state='submitting',lease_owner=$2,lease_until=now()+interval '20 seconds',updated_at=now() FROM claim WHERE item.batch_id=claim.batch_id AND item.item_index=claim.item_index RETURNING item.batch_id,item.item_index,item.node_id,item.username,item.action,item.expected_version`, limit, owner)
-	if err != nil {
-		return nil, err
-	}
-	var items []claimedBatchItem
-	for rows.Next() {
-		var item claimedBatchItem
-		if err := rows.Scan(&item.batchID, &item.index, &item.nodeID, &item.username, &item.action, &item.expectedVersion); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	rows.Close()
-	if err := coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
-		return nil, err
-	}
-	return items, nil
+func (s *Service) claimBatchItems(ctx context.Context, owner uuid.UUID, limit int) ([]userstore.BatchItem, error) {
+	var items []userstore.BatchItem
+	err := s.withStore(ctx, func(store userstore.Store) (err error) { items, err = store.ClaimBatchItems(ctx, owner, limit); return })
+	return items, err
 }
 
 func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit int) error {
@@ -659,23 +640,24 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 		return err
 	}
 	for _, item := range items {
-		var actorIdentity, actorSession *uuid.UUID
-		var actorID, reason, requestID, traceparent string
-		if err := s.pool.QueryRow(ctx, `SELECT actor_identity_id,actor_session_id,actor_id,reason,request_id,traceparent FROM batch_operations WHERE id=$1`, item.batchID).Scan(&actorIdentity, &actorSession, &actorID, &reason, &requestID, &traceparent); err != nil {
+		var batch userstore.Batch
+		if err := s.withStore(ctx, func(store userstore.Store) (err error) { batch, err = store.Batch(ctx, item.BatchID); return }); err != nil {
 			return err
 		}
 		kind := userstate.UserDisable
-		if item.action == "enable" {
+		if item.Action == "enable" {
 			kind = userstate.UserEnable
 		}
-		key := stableKey("batch", item.batchID.String(), fmt.Sprint(item.index))
-		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: kind, Name: item.username, ExpectedVersion: item.expectedVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: actorID, ActorIdentityID: derefUUID(actorIdentity), ActorSessionID: derefUUID(actorSession), Reason: reason, RequestID: requestID + ":" + fmt.Sprint(item.index), Traceparent: traceparent})
+		key := stableKey("batch", item.BatchID.String(), fmt.Sprint(item.Index))
+		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: kind, Name: item.Username, ExpectedVersion: item.ExpectedVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: batch.ActorID, ActorIdentityID: derefUUID(batch.ActorIdentityID), ActorSessionID: derefUUID(batch.ActorSessionID), Reason: batch.Reason, RequestID: batch.RequestID + ":" + fmt.Sprint(item.Index), Traceparent: batch.Traceparent})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
-				err = s.exec(ctx, `UPDATE batch_operation_items SET state='queued',lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE lease_owner=$1 AND state='submitting'`, owner)
+				err = s.withStore(ctx, func(store userstore.Store) error { return store.ReleaseBatchClaims(ctx, owner) })
 				return err
 			}
-			err = s.exec(ctx, `UPDATE batch_operation_items SET state='failed',error_type=$4,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE batch_id=$1 AND item_index=$2 AND lease_owner=$3`, item.batchID, item.index, owner, userstateErrorType(mutateErr))
+			err = s.withStore(ctx, func(store userstore.Store) error {
+				return store.FinishBatchItem(ctx, item, owner, nil, userstateErrorType(mutateErr))
+			})
 			if err != nil {
 				return err
 			}
@@ -685,7 +667,7 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 		if parseErr != nil {
 			return parseErr
 		}
-		if err := s.exec(ctx, `UPDATE batch_operation_items SET state='submitted',child_operation_id=$4,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE batch_id=$1 AND item_index=$2 AND lease_owner=$3`, item.batchID, item.index, owner, operationID); err != nil {
+		if err := s.withStore(ctx, func(store userstore.Store) error { return store.FinishBatchItem(ctx, item, owner, &operationID, "") }); err != nil {
 			return err
 		}
 	}
@@ -693,17 +675,16 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 }
 
 func (s *Service) refreshBatches(ctx context.Context) error {
-	if err := s.exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1) UPDATE batch_operation_items item SET state=CASE WHEN op.state='queued' AND node.status='offline' THEN 'offline_pending' WHEN op.state='succeeded' THEN 'succeeded' WHEN op.state IN('failed','expired','rolled_back') THEN 'failed' WHEN op.state='unknown' THEN 'unknown' WHEN op.state='offline_pending' THEN 'offline_pending' ELSE item.state END,error_type=CASE WHEN op.state IN('failed','expired','rolled_back') THEN op.state ELSE item.error_type END,updated_at=now() FROM operations op JOIN nodes node ON node.id=op.node_id,active WHERE item.batch_id=active.id AND item.child_operation_id=op.id AND item.state IN('submitted','unknown','offline_pending')`, MaxBatchRefresh); err != nil {
+	if err := s.withStore(ctx, func(store userstore.Store) error { return store.RefreshBatchItems(ctx, MaxBatchRefresh) }); err != nil {
 		return err
 	}
-	err := s.exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1),summary AS (SELECT item.batch_id,CASE WHEN bool_or(item.state IN('queued','submitting','submitted','unknown','offline_pending')) THEN CASE WHEN bool_or(item.state IN('failed','forbidden')) THEN 'partial_failed' ELSE 'running' END WHEN bool_and(item.state='succeeded') THEN 'succeeded' WHEN bool_or(item.state='succeeded') THEN 'partial_failed' ELSE 'failed' END state FROM batch_operation_items item JOIN active ON active.id=item.batch_id GROUP BY item.batch_id) UPDATE batch_operations batch SET state=summary.state,updated_at=now() FROM summary WHERE batch.id=summary.batch_id`, MaxBatchRefresh)
-	return err
+	return s.withStore(ctx, func(store userstore.Store) error { return store.RefreshBatches(ctx, MaxBatchRefresh) })
 }
 
 // RecordUsageTx converts monotonically increasing per-session counters into
 // durable monthly and lifetime UTC usage without double-counting replays.
-func RecordUsageTx(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, samples []UsageSample) error {
-	err := userusage.RecordTx(ctx, postgres.NewUsageStore(postgres.WrapTx(tx)), nodeID, samples)
+func RecordUsageTx(ctx context.Context, tx database.Tx, nodeID uuid.UUID, samples []UsageSample) error {
+	err := userusage.RecordTransaction(ctx, tx, nodeID, samples)
 	if errors.Is(err, userusage.ErrInvalidSample) {
 		return ErrInvalidRequest
 	}
@@ -845,7 +826,7 @@ func validTraceparent(value string) bool {
 	return parts[1] != strings.Repeat("0", 32) && parts[2] != strings.Repeat("0", 16)
 }
 
-func rollback(tx pgx.Tx) {
+func rollback(tx database.Tx) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = tx.Rollback(ctx)

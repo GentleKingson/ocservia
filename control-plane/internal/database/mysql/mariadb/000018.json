@@ -1,0 +1,243 @@
+{
+  "version": 18,
+  "previous_checksum": "79057ca8acf58fe57f38a7598d0ab7f85c53bbbc0ddf5e310ced68d174ae1460",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_node_trust_convergence_insert",
+          "object": "migrate_v4_time_node_trust_convergence_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_trust_convergence_insert` BEFORE INSERT ON `node_trust_convergence` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "19778ee497f58f9e4ab11d71bd9d480897363d3dda6526a7e08ff6ec143555e4",
+          "before": "",
+          "after": "72c5cf835e3da6b4440b09d0cf4d26848ff04e628da7801da74ad8a0309e1ecd"
+        },
+        {
+          "name": "migrate_v4_time_node_trust_convergence_update",
+          "object": "migrate_v4_time_node_trust_convergence_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_trust_convergence_update` BEFORE UPDATE ON `node_trust_convergence` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "6e82318a917d9ee8475737466ae0827cb621f4d1c02d862166c4c7849e5dd296",
+          "before": "",
+          "after": "949ca90bdea898aee73138cdf13e254f6a82f301a885d83934cf0e0506937647"
+        },
+        {
+          "name": "migrate_v4_time_node_trust_convergence_delete",
+          "object": "migrate_v4_time_node_trust_convergence_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_trust_convergence_delete` BEFORE DELETE ON `node_trust_convergence` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "badf730a991beb5d99ac8c3cf722ef437b9f484aaacb9f839fb50e1d76bbf051",
+          "before": "",
+          "after": "2cd4ad1f9130770c4f59379c8d55a7fc162b821e339024282aee67a018219ba5"
+        },
+        {
+          "name": "node_trust_convergence_available_at_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_available_at` BIGINT NULL",
+          "checksum": "c1758ba14a5362d46590d116ad72fde6ce4a68f2f33d63adad2e77b5f3a5539c",
+          "before": "28996a036b2ea42888a7cbb1d5713dfe89545f31b1b4fae718023403e2afcfab",
+          "after": "db4f4c4a74125b9b0d014f0b4a7ba8b010792a0604605ec8ccaf883672d8df33"
+        },
+        {
+          "name": "node_trust_convergence_locked_until_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_locked_until` BIGINT NULL",
+          "checksum": "47bacf03a844bcaca2c650d52dfa3994e91e342d47267817396a8e68ba84a417",
+          "before": "db4f4c4a74125b9b0d014f0b4a7ba8b010792a0604605ec8ccaf883672d8df33",
+          "after": "dee1ae64b61cf0f688b9a12df86458549ecb61ba115cbe375aae86626f4b3580"
+        },
+        {
+          "name": "node_trust_convergence_created_at_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "2d886f702136e091cb1f667a14c0ea982ef35bbb94d8d71b8edc64fea53970f3",
+          "before": "dee1ae64b61cf0f688b9a12df86458549ecb61ba115cbe375aae86626f4b3580",
+          "after": "8314df08a992c1829058f347e44088ad4b52de8360ccef9f0e9a5c40440389c8"
+        },
+        {
+          "name": "node_trust_convergence_updated_at_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "66dbeebe1570c7c978ba81a4e5b3afbf63d573df1138611bc62de1ce1adbb6f4",
+          "before": "8314df08a992c1829058f347e44088ad4b52de8360ccef9f0e9a5c40440389c8",
+          "after": "f0540e22709724dbb2b1fd5267e0d7e323c49c58202e801705c1ca7bc23c9912"
+        },
+        {
+          "name": "node_trust_convergence_times_backfill",
+          "object": "node_trust_convergence",
+          "kind": "data",
+          "sql": "UPDATE `node_trust_convergence` source SET `logical_available_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`available_at`),`logical_locked_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`locked_until`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "dc6868b87c995f56edf9c1e0a2fd815175e79afeadf3a530b5575347b887d01b",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_trust_convergence` source WHERE (source.`available_at` IS NOT NULL AND source.`logical_available_at` IS NULL) OR NOT(source.`logical_available_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`available_at`)) OR (source.`locked_until` IS NOT NULL AND source.`logical_locked_until` IS NULL) OR NOT(source.`logical_locked_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`locked_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_trust_convergence_times_switch",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` DROP INDEX node_trust_convergence_pending_idx,DROP CONSTRAINT node_trust_convergence_node_trust_convergence_check,DROP COLUMN `available_at`,CHANGE COLUMN `logical_available_at` `available_at` BIGINT NOT NULL,ADD CONSTRAINT `node_trust_convergence_available_at_range` CHECK (`available_at` IS NULL OR `available_at` IN (-9223372036854775808,9223372036854775807) OR (`available_at`\u003e=-211813488000000000 AND `available_at`\u003c9223371331200000000)),DROP COLUMN `locked_until`,CHANGE COLUMN `logical_locked_until` `locked_until` BIGINT NULL,ADD CONSTRAINT `node_trust_convergence_locked_until_range` CHECK (`locked_until` IS NULL OR `locked_until` IN (-9223372036854775808,9223372036854775807) OR (`locked_until`\u003e=-211813488000000000 AND `locked_until`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_trust_convergence_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `node_trust_convergence_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),ADD KEY node_trust_convergence_pending_idx(available_at,node_id),ADD CONSTRAINT node_trust_convergence_node_trust_convergence_check CHECK ((locked_by IS NULL)=(locked_until IS NULL))",
+          "checksum": "316a689a4b82e8c64df141f9a988b122905fe25173ee2c338010639b3552e8fa",
+          "before": "f0540e22709724dbb2b1fd5267e0d7e323c49c58202e801705c1ca7bc23c9912",
+          "after": "852cf841a464f4cafe193f9c9ff6e5cb1e797a1b1cb8a11e57ecc9d488da10d3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_trust_convergence` source WHERE (source.`available_at` IS NOT NULL AND source.`logical_available_at` IS NULL) OR NOT(source.`logical_available_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`available_at`)) OR (source.`locked_until` IS NOT NULL AND source.`logical_locked_until` IS NULL) OR NOT(source.`logical_locked_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`locked_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_trust_convergence_insert",
+          "object": "migrate_v4_time_node_trust_convergence_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_trust_convergence_insert`",
+          "checksum": "fcffdfca255d1e0c7d770031b3415e600d92040c958ff4fa364eaee30881ee96",
+          "before": "72c5cf835e3da6b4440b09d0cf4d26848ff04e628da7801da74ad8a0309e1ecd",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_trust_convergence_update",
+          "object": "migrate_v4_time_node_trust_convergence_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_trust_convergence_update`",
+          "checksum": "a5b918e971fb3c123e80d79b0b81958d4c182b287607cffd110a5c57559561a7",
+          "before": "949ca90bdea898aee73138cdf13e254f6a82f301a885d83934cf0e0506937647",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_trust_convergence_delete",
+          "object": "migrate_v4_time_node_trust_convergence_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_trust_convergence_delete`",
+          "checksum": "7ce4c9f08bd2783ec73727c779b06e43c2f9bb84f878f6e3c3d1420f9d836414",
+          "before": "2cd4ad1f9130770c4f59379c8d55a7fc162b821e339024282aee67a018219ba5",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_node_trust_convergence_insert",
+          "object": "migrate_v4_time_node_trust_convergence_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_trust_convergence_insert` BEFORE INSERT ON `node_trust_convergence` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "19778ee497f58f9e4ab11d71bd9d480897363d3dda6526a7e08ff6ec143555e4",
+          "before": "",
+          "after": "72c5cf835e3da6b4440b09d0cf4d26848ff04e628da7801da74ad8a0309e1ecd"
+        },
+        {
+          "name": "migrate_v4_time_node_trust_convergence_update",
+          "object": "migrate_v4_time_node_trust_convergence_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_trust_convergence_update` BEFORE UPDATE ON `node_trust_convergence` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "6e82318a917d9ee8475737466ae0827cb621f4d1c02d862166c4c7849e5dd296",
+          "before": "",
+          "after": "949ca90bdea898aee73138cdf13e254f6a82f301a885d83934cf0e0506937647"
+        },
+        {
+          "name": "migrate_v4_time_node_trust_convergence_delete",
+          "object": "migrate_v4_time_node_trust_convergence_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_node_trust_convergence_delete` BEFORE DELETE ON `node_trust_convergence` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "badf730a991beb5d99ac8c3cf722ef437b9f484aaacb9f839fb50e1d76bbf051",
+          "before": "",
+          "after": "2cd4ad1f9130770c4f59379c8d55a7fc162b821e339024282aee67a018219ba5"
+        },
+        {
+          "name": "node_trust_convergence_available_at_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_available_at` BIGINT NULL",
+          "checksum": "c1758ba14a5362d46590d116ad72fde6ce4a68f2f33d63adad2e77b5f3a5539c",
+          "before": "28996a036b2ea42888a7cbb1d5713dfe89545f31b1b4fae718023403e2afcfab",
+          "after": "db4f4c4a74125b9b0d014f0b4a7ba8b010792a0604605ec8ccaf883672d8df33"
+        },
+        {
+          "name": "node_trust_convergence_locked_until_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_locked_until` BIGINT NULL",
+          "checksum": "47bacf03a844bcaca2c650d52dfa3994e91e342d47267817396a8e68ba84a417",
+          "before": "db4f4c4a74125b9b0d014f0b4a7ba8b010792a0604605ec8ccaf883672d8df33",
+          "after": "dee1ae64b61cf0f688b9a12df86458549ecb61ba115cbe375aae86626f4b3580"
+        },
+        {
+          "name": "node_trust_convergence_created_at_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "2d886f702136e091cb1f667a14c0ea982ef35bbb94d8d71b8edc64fea53970f3",
+          "before": "dee1ae64b61cf0f688b9a12df86458549ecb61ba115cbe375aae86626f4b3580",
+          "after": "8314df08a992c1829058f347e44088ad4b52de8360ccef9f0e9a5c40440389c8"
+        },
+        {
+          "name": "node_trust_convergence_updated_at_column",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "66dbeebe1570c7c978ba81a4e5b3afbf63d573df1138611bc62de1ce1adbb6f4",
+          "before": "8314df08a992c1829058f347e44088ad4b52de8360ccef9f0e9a5c40440389c8",
+          "after": "f0540e22709724dbb2b1fd5267e0d7e323c49c58202e801705c1ca7bc23c9912"
+        },
+        {
+          "name": "node_trust_convergence_times_backfill",
+          "object": "node_trust_convergence",
+          "kind": "data",
+          "sql": "UPDATE `node_trust_convergence` source SET `logical_available_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`available_at`),`logical_locked_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`locked_until`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "dc6868b87c995f56edf9c1e0a2fd815175e79afeadf3a530b5575347b887d01b",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_trust_convergence` source WHERE (source.`available_at` IS NOT NULL AND source.`logical_available_at` IS NULL) OR NOT(source.`logical_available_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`available_at`)) OR (source.`locked_until` IS NOT NULL AND source.`logical_locked_until` IS NULL) OR NOT(source.`logical_locked_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`locked_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_trust_convergence_times_switch",
+          "object": "node_trust_convergence",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_trust_convergence` DROP INDEX node_trust_convergence_pending_idx,DROP CONSTRAINT node_trust_convergence_node_trust_convergence_check,DROP COLUMN `available_at`,CHANGE COLUMN `logical_available_at` `available_at` BIGINT NOT NULL,ADD CONSTRAINT `node_trust_convergence_available_at_range` CHECK (`available_at` IS NULL OR `available_at` IN (-9223372036854775808,9223372036854775807) OR (`available_at`\u003e=-211813488000000000 AND `available_at`\u003c9223371331200000000)),DROP COLUMN `locked_until`,CHANGE COLUMN `logical_locked_until` `locked_until` BIGINT NULL,ADD CONSTRAINT `node_trust_convergence_locked_until_range` CHECK (`locked_until` IS NULL OR `locked_until` IN (-9223372036854775808,9223372036854775807) OR (`locked_until`\u003e=-211813488000000000 AND `locked_until`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_trust_convergence_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `node_trust_convergence_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000)),ADD KEY node_trust_convergence_pending_idx(available_at,node_id),ADD CONSTRAINT node_trust_convergence_node_trust_convergence_check CHECK ((locked_by IS NULL)=(locked_until IS NULL))",
+          "checksum": "316a689a4b82e8c64df141f9a988b122905fe25173ee2c338010639b3552e8fa",
+          "before": "f0540e22709724dbb2b1fd5267e0d7e323c49c58202e801705c1ca7bc23c9912",
+          "after": "852cf841a464f4cafe193f9c9ff6e5cb1e797a1b1cb8a11e57ecc9d488da10d3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_trust_convergence` source WHERE (source.`available_at` IS NOT NULL AND source.`logical_available_at` IS NULL) OR NOT(source.`logical_available_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`available_at`)) OR (source.`locked_until` IS NOT NULL AND source.`logical_locked_until` IS NULL) OR NOT(source.`logical_locked_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`locked_until`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_node_trust_convergence_insert",
+          "object": "migrate_v4_time_node_trust_convergence_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_trust_convergence_insert`",
+          "checksum": "fcffdfca255d1e0c7d770031b3415e600d92040c958ff4fa364eaee30881ee96",
+          "before": "72c5cf835e3da6b4440b09d0cf4d26848ff04e628da7801da74ad8a0309e1ecd",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_trust_convergence_update",
+          "object": "migrate_v4_time_node_trust_convergence_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_trust_convergence_update`",
+          "checksum": "a5b918e971fb3c123e80d79b0b81958d4c182b287607cffd110a5c57559561a7",
+          "before": "949ca90bdea898aee73138cdf13e254f6a82f301a885d83934cf0e0506937647",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_node_trust_convergence_delete",
+          "object": "migrate_v4_time_node_trust_convergence_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_node_trust_convergence_delete`",
+          "checksum": "7ce4c9f08bd2783ec73727c779b06e43c2f9bb84f878f6e3c3d1420f9d836414",
+          "before": "2cd4ad1f9130770c4f59379c8d55a7fc162b821e339024282aee67a018219ba5",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

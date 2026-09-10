@@ -1259,7 +1259,7 @@ scheduler_observation_fixture="$(mktemp -d)"
 )
 rm -rf -- "${scheduler_observation_fixture}"
 checkpoint_line="$(grep -nF 'auditManager.CheckpointAll(sessionCtx)' "${CONTROL_APP}" | cut -d: -f1)"
-maintenance_record_line="$(grep -nF 'coordination.RecordMaintenanceCompletion(sessionCtx, pool, session)' "${CONTROL_APP}" | cut -d: -f1)"
+maintenance_record_line="$(grep -nF 'coordination.RecordMaintenanceCompletion(sessionCtx, backend, session)' "${CONTROL_APP}" | cut -d: -f1)"
 [[ -n "${checkpoint_line}" && -n "${maintenance_record_line}" \
   && "${checkpoint_line}" -lt "${maintenance_record_line}" ]] || {
   echo "the scheduler must record maintenance only after the real maintenance body completes" >&2
@@ -1275,14 +1275,19 @@ for token in \
   }
 done
 for token in \
-  'SELECT public.g6_record_scheduler_maintenance($1,$2,$3)' \
-  'identity.InstanceID, identity.Incarnation, session.Epoch()' \
-  'CommitFenced(ctx, tx, session)'; do
+  'database.Within(ctx, backend, database.ReadCommitted' \
+  'store.RecordMaintenanceCompletion(ctx, schedulerlease.Owner(identity), session.Epoch())' \
+  'AssertFenceTx(ctx, tx, session)'; do
   grep -qF "${token}" "${COORDINATION_MAINTENANCE}" || {
     echo "the scheduler completion recorder is not exact-term fenced: ${token}" >&2
     exit 1
   }
 done
+grep -qF 'SELECT public.g6_record_scheduler_maintenance($1,$2,$3)' \
+  "${ROOT}/control-plane/internal/database/postgres/schedulerlease.go" || {
+  echo "the PostgreSQL scheduler store must retain the exact-term evidence function" >&2
+  exit 1
+}
 grep -q 'g6rd_install_controller_key' <<<"${promote_phase}" || {
   echo "fd-b must install the handed-over controller key before promotion" >&2
   exit 1

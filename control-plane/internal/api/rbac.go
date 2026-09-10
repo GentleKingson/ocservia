@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/google/uuid"
 )
 
@@ -16,6 +18,15 @@ type roleBindingRequest struct {
 	ResourceID   string `json:"resource_id,omitempty"`
 	Reason       string `json:"reason"`
 	ApprovalID   string `json:"approval_id,omitempty"`
+}
+
+func (s *Server) upgradeNode(ctx context.Context, nodeID uuid.UUID) (workspaceID uuid.UUID, architecture, version string, err error) {
+	store, err := rbacstore.From(s.backend)
+	if err != nil {
+		return workspaceID, "", "", err
+	}
+	err = store.UpgradeNode(ctx, nodeID).Scan(&workspaceID, &architecture, &version)
+	return
 }
 
 func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
@@ -31,13 +42,12 @@ func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	query := `SELECT id,name,slug,version FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY name,id`
-	args := []any{ids}
-	if actor.Issuer == "development" {
-		query = `SELECT id,name,slug,version FROM workspaces ORDER BY name,id`
-		args = nil
+	store, err := rbacstore.From(s.backend)
+	if err != nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
+		return
 	}
-	rows, err := s.pool.Query(r.Context(), query, args...)
+	rows, err := store.Workspaces(r.Context(), ids, actor.Issuer == "development")
 	if err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
 		return
@@ -53,6 +63,10 @@ func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"id": id, "name": name, "slug": slug, "version": version})
+	}
+	if err := rows.Err(); err != nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

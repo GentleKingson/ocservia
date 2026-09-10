@@ -71,17 +71,17 @@ export interface NodeObservedState {
    */
   freshness: NodeObservedStateFreshnessEnum;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof NodeObservedState
    */
-  observedAt?: Date;
+  observedAt?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof NodeObservedState
    */
-  lastHeartbeatAt?: Date;
+  lastHeartbeatAt?: string;
   /**
    *
    * @type {string}
@@ -278,12 +278,9 @@ export function NodeObservedStateFromJSONTyped(
     trustStatus: json["trust_status"],
     connectionState: json["connection_state"],
     freshness: json["freshness"],
-    observedAt:
-      json["observed_at"] == null ? undefined : new Date(json["observed_at"]),
+    observedAt: json["observed_at"] == null ? undefined : json["observed_at"],
     lastHeartbeatAt:
-      json["last_heartbeat_at"] == null
-        ? undefined
-        : new Date(json["last_heartbeat_at"]),
+      json["last_heartbeat_at"] == null ? undefined : json["last_heartbeat_at"],
     bootId: json["boot_id"] == null ? undefined : json["boot_id"],
     agentInstanceId:
       json["agent_instance_id"] == null ? undefined : json["agent_instance_id"],
@@ -336,14 +333,8 @@ export function NodeObservedStateToJSONTyped(
     trust_status: value["trustStatus"],
     connection_state: value["connectionState"],
     freshness: value["freshness"],
-    observed_at:
-      value["observedAt"] == null
-        ? value["observedAt"]
-        : value["observedAt"].toISOString(),
-    last_heartbeat_at:
-      value["lastHeartbeatAt"] == null
-        ? value["lastHeartbeatAt"]
-        : value["lastHeartbeatAt"].toISOString(),
+    observed_at: value["observedAt"],
+    last_heartbeat_at: value["lastHeartbeatAt"],
     boot_id: value["bootId"],
     agent_instance_id: value["agentInstanceId"],
     agent_version: value["agentVersion"],

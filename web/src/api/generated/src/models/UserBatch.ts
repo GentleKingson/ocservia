@@ -52,17 +52,17 @@ export interface UserBatch {
    */
   items: Array<UserBatchItem>;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof UserBatch
    */
-  createdAt: Date;
+  createdAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof UserBatch
    */
-  updatedAt: Date;
+  updatedAt: string;
 }
 
 /**
@@ -125,8 +125,8 @@ export function UserBatchFromJSONTyped(
     workspaceId: json["workspace_id"],
     state: json["state"],
     items: (json["items"] as Array<any>).map(UserBatchItemFromJSON),
-    createdAt: new Date(json["created_at"]),
-    updatedAt: new Date(json["updated_at"]),
+    createdAt: json["created_at"],
+    updatedAt: json["updated_at"],
   };
 }
 
@@ -147,7 +147,7 @@ export function UserBatchToJSONTyped(
     workspace_id: value["workspaceId"],
     state: value["state"],
     items: (value["items"] as Array<any>).map(UserBatchItemToJSON),
-    created_at: value["createdAt"].toISOString(),
-    updated_at: value["updatedAt"].toISOString(),
+    created_at: value["createdAt"],
+    updated_at: value["updatedAt"],
   };
 }

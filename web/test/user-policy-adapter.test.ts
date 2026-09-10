@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { formToRequest, policyToForm } from "../src/adapters/user-policy";
+import {
+  expiryInputType,
+  formToRequest,
+  policyToForm,
+} from "../src/adapters/user-policy";
 
 describe("upstream user policy adapter", () => {
   it("maps display units to integer bytes and UTC expiry", () => {
@@ -44,7 +48,7 @@ describe("upstream user policy adapter", () => {
       quotaDirection: "tx",
       quotaBytes: 3 * 1024 * 1024,
       version: 1,
-      periodStart: new Date("1970-01-01T00:00:00Z"),
+      periodStart: "1970-01-01T00:00:00Z",
       observedRxBytes: 0,
       observedTxBytes: 0,
       exceeded: false,
@@ -62,9 +66,9 @@ describe("upstream user policy adapter", () => {
       quotaPeriod: "none",
       quotaDirection: "rxtx",
       quotaBytes: 0,
-      expiresAt: new Date("2026-12-31T23:59:00Z"),
+      expiresAt: "2026-12-31T23:59:00Z",
       version: 1,
-      periodStart: new Date("2026-12-01T00:00:00Z"),
+      periodStart: "2026-12-01T00:00:00Z",
       observedRxBytes: 0,
       observedTxBytes: 0,
       exceeded: false,
@@ -72,5 +76,39 @@ describe("upstream user policy adapter", () => {
       convergence: "converged",
     });
     expect(form.expiresAtLocal).toBe("2026-12-31T23:59");
+  });
+
+  it("never clears or truncates an expiry that the mutation API cannot accept", () => {
+    for (const expiry of [
+      "infinity",
+      "-infinity",
+      "+294276-12-31T23:59:59.999999Z",
+      "2026-12-31T23:59:59.123456Z",
+    ]) {
+      const form = policyToForm({
+        nodeId: "019fdc5b-b939-72a1-ae67-8efd197e5688",
+        username: "alice",
+        quotaPeriod: "none",
+        quotaDirection: "rxtx",
+        quotaBytes: 0,
+        expiresAt: expiry,
+        version: 1,
+        periodStart: "1970-01-01T00:00:00Z",
+        observedRxBytes: 0,
+        observedTxBytes: 0,
+        exceeded: false,
+        expired: false,
+        convergence: "converged",
+      });
+      expect(form.expiresAtLocal).toBe(expiry.replace(/Z$/, ""));
+      expect(expiryInputType(form.expiresAtLocal)).toBe("text");
+      expect(() => formToRequest(form, "ticket")).toThrow("whole seconds");
+      form.expiresAtLocal = "2026-12-31T23:59:59";
+      expect(formToRequest(form, "ticket").expiresAt?.toISOString()).toBe(
+        "2026-12-31T23:59:59.000Z",
+      );
+      form.expiresAtLocal = "";
+      expect(formToRequest(form, "ticket").expiresAt).toBeUndefined();
+    }
   });
 });

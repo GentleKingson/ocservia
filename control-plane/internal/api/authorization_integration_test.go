@@ -22,10 +22,12 @@ import (
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	configplanstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -53,7 +55,7 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{pool: pool, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.New(pool, "", "test", signer)}
+	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.New(pool, "", "test", signer)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test"}`, workspaceID.String())))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()))
@@ -153,6 +155,8 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	workspaceID, managerID, securityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeA, nodeB, operationID, certificateID, artifactID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	managerBinding, securityBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	// Only fixture batches use simple protocol; service queries retain the
+	// production pool's extended-protocol default.
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'certificate auth',$2,now(),now());
 		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now()),($5,'integration',$6,now(),now());
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'cert-node-a','active',1,now(),now()),($8,$1,'cert-node-b','active',1,now(),now());
@@ -160,11 +164,11 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at) VALUES($10,$1,$7,$9,'node-a.example.test','[]',2048,'csr_pending',now(),now());
 		INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,consumed_at,created_at,authority_snapshot_at) VALUES($14,$1,$3,'certificate.private_key.export','certificate',$10,'fixture export','consumed',$5,'independent fixture review',now()+interval '10 minutes',now(),now(),now()-interval '1 minute',now()-interval '1 minute');
 		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now(),$14);
-		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($12,$3,$1,'ConfigManager','node',$7,$3,now()),($13,$5,$1,'SecurityAdmin','node',$8,$5,now())`, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), securityID, securityID.String(), nodeA, nodeB, operationID, certificateID, artifactID, managerBinding, securityBinding, approvalID); err != nil {
+		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($12,$3,$1,'ConfigManager','node',$7,$3,now()),($13,$5,$1,'SecurityAdmin','node',$8,$5,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), securityID, securityID.String(), nodeA, nodeB, operationID, certificateID, artifactID, managerBinding, securityBinding, approvalID); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id IN($1,$2); DELETE FROM artifact_operations WHERE id=$3; DELETE FROM approval_requests WHERE id=$9; DELETE FROM certificates WHERE id=$4; DELETE FROM operations WHERE id=$5; DELETE FROM nodes WHERE workspace_id=$6; DELETE FROM identities WHERE id IN($7,$8); DELETE FROM workspaces WHERE id=$6`, managerBinding, securityBinding, artifactID, certificateID, operationID, workspaceID, managerID, securityID, approvalID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id IN($1,$2); DELETE FROM artifact_operations WHERE id=$3; DELETE FROM approval_requests WHERE id=$9; DELETE FROM certificates WHERE id=$4; DELETE FROM operations WHERE id=$5; DELETE FROM nodes WHERE workspace_id=$6; DELETE FROM identities WHERE id IN($7,$8); DELETE FROM workspaces WHERE id=$6`, pgx.QueryExecModeSimpleProtocol, managerBinding, securityBinding, artifactID, certificateID, operationID, workspaceID, managerID, securityID, approvalID)
 	}()
 	artifactData := []byte("encrypted artifact response")
 	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
@@ -200,7 +204,9 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	}
 	token := strings.Repeat("a", 43)
 	tokenHash, artifactHash := sha256.Sum256([]byte(token)), sha256.Sum256(artifactData)
-	if _, err := pool.Exec(ctx, `UPDATE certificates SET state='issued',certificate_chain_pem=decode(repeat('41',64),'hex'),serial_number='1',not_before=now()-interval '1 minute',not_after=now()+interval '1 hour' WHERE id=$1; UPDATE artifact_operations SET state='ready',token_sha256=$3,content_sha256=$4,content_size=$5 WHERE id=$2`, certificateID, artifactID, tokenHash[:], artifactHash[:], len(artifactData)); err != nil {
+	// Download authorization also covers certificates issued before root CSR
+	// receipts existed. This fixture does not simulate current CSR issuance.
+	if _, err := pool.Exec(ctx, `UPDATE certificates SET state='issued',csr_receipt_legacy=true,certificate_chain_pem=decode(repeat('41',64),'hex'),serial_number='1',not_before=now()-interval '1 minute',not_after=now()+interval '1 hour' WHERE id=$1; UPDATE artifact_operations SET state='ready',token_sha256=$3,content_sha256=$4,content_size=$5 WHERE id=$2`, pgx.QueryExecModeSimpleProtocol, certificateID, artifactID, tokenHash[:], artifactHash[:], len(artifactData)); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
@@ -329,11 +335,11 @@ func TestConfigPlanApprovalResolvesNodeScopedApprover(t *testing.T) {
 		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($8,$1,$7,'succeeded',1,'config-approval','config-approval',decode(repeat('00',32),'hex'),now(),now());
 		INSERT INTO config_plans(id,workspace_id,node_id,operation_id,template_name,expected_revision,candidate_hash,candidate_redacted,warnings,expires_at,created_by,created_at) VALUES($8,$1,$7,$8,'approval',0,decode(repeat('01',32),'hex'),'tcp-port = 443','[]',now()+interval '1 hour',$3,now());
 		INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary) VALUES($9,$1,$3,'config.apply','config_plan',$8,'review','pending',now()+interval '1 hour',now(),decode(repeat('01',32),'hex'),'{}');
-		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($10,$5,$1,'SecurityAdmin','node',$7,$5,now())`, workspaceID, "config-approval-"+workspaceID.String(), requesterID, requesterID.String(), approverID, approverID.String(), nodeID, operationID, approvalID, bindingID); err != nil {
+		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($10,$5,$1,'SecurityAdmin','node',$7,$5,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "config-approval-"+workspaceID.String(), requesterID, requesterID.String(), approverID, approverID.String(), nodeID, operationID, approvalID, bindingID); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM approval_requests WHERE id=$2; DELETE FROM config_plans WHERE id=$3; DELETE FROM operations WHERE id=$3; DELETE FROM nodes WHERE id=$4; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$7`, bindingID, approvalID, operationID, nodeID, requesterID, approverID, workspaceID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM approval_requests WHERE id=$2; DELETE FROM config_plans WHERE id=$3; DELETE FROM operations WHERE id=$3; DELETE FROM nodes WHERE id=$4; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$7`, pgx.QueryExecModeSimpleProtocol, bindingID, approvalID, operationID, nodeID, requesterID, approverID, workspaceID)
 	}()
 	operationService := apiOperationService(pool)
 	server := &Server{rbac: rbac.New(pool), approvals: approvalstore.New(pool), configplans: configplanstore.New(pool, operationService)}

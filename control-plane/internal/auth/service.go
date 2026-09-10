@@ -18,9 +18,13 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/identityprofile"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
@@ -51,6 +55,7 @@ type Config struct {
 
 type Service struct {
 	pool                *pgxpool.Pool
+	backend             database.Backend
 	localEnabled        bool
 	oidcEnabled         bool
 	issuer              string
@@ -94,7 +99,20 @@ type claims struct {
 }
 
 func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
-	if pool == nil || len(cfg.SessionKey) != 32 || cfg.SessionTTL < time.Minute || cfg.SessionTTL > 24*time.Hour {
+	if pool == nil {
+		return nil, errors.New("invalid authentication configuration")
+	}
+	s, err := NewBackend(postgres.WrapPool(pool), cfg)
+	if err == nil {
+		s.pool = pool
+	}
+	return s, err
+}
+
+// NewBackend uses the same session and credential workflows with backend-owned
+// storage. Controller engine eligibility is enforced by application startup.
+func NewBackend(backend database.Backend, cfg Config) (*Service, error) {
+	if backend == nil || len(cfg.SessionKey) != 32 || cfg.SessionTTL < time.Minute || cfg.SessionTTL > 24*time.Hour {
 		return nil, errors.New("invalid authentication configuration")
 	}
 	oidcEnabled := cfg.Issuer != "" || cfg.ClientID != "" || cfg.ClientSecret != "" || cfg.RedirectURL != ""
@@ -119,7 +137,7 @@ func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
 	return &Service{
 		localEnabled: cfg.LocalEnabled, oidcEnabled: oidcEnabled,
 		accountLogKey: deriveAccountLogKey(cfg.SessionKey),
-		pool:          pool, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
+		backend:       backend, issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, redirectURL: cfg.RedirectURL, aead: aead, sessionTTL: cfg.SessionTTL,
 		breakGlassEnabled: cfg.BreakGlassEnabled, breakGlassTokenHash: cfg.BreakGlassTokenHash,
 		now: func() time.Time { return time.Now().UTC() }, random: rand.Reader,
 	}, nil
@@ -218,7 +236,27 @@ func (s *Service) Authenticate(ctx context.Context, cookie *http.Cookie) (Princi
 		return Principal{}, ErrUnauthenticated
 	}
 	principal := Principal{SessionID: sessionID, IdentityID: identityID}
-	err = s.pool.QueryRow(ctx, `SELECT i.issuer,i.subject,s.break_glass,s.expires_at FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE s.id=$1 AND s.identity_id=$2 AND s.revoked_at IS NULL AND s.expires_at>now() AND i.disabled_at IS NULL`, sessionID, identityID).Scan(&principal.Issuer, &principal.Subject, &principal.BreakGlass, &principal.ExpiresAt)
+	err = s.withAuthentication(ctx, func(_ database.Tx, store authstore.Store) error {
+		session, err := store.Session(ctx, sessionID, identityID)
+		if err != nil {
+			return err
+		}
+		principal.Issuer, principal.Subject, principal.BreakGlass = session.Issuer, session.Subject, session.BreakGlass
+		principal.ExpiresAt = envelope.ExpiresAt
+		if !session.ExpiresAt.Valid {
+			return ErrUnauthenticated
+		}
+		if session.ExpiresAt.Micros != value.PositiveInfinity {
+			expires, err := session.ExpiresAt.Time()
+			if err != nil {
+				return err
+			}
+			if expires.Before(principal.ExpiresAt) {
+				principal.ExpiresAt = expires
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -229,8 +267,9 @@ func (s *Service) Authenticate(ctx context.Context, cookie *http.Cookie) (Princi
 }
 
 func (s *Service) Logout(ctx context.Context, principal Principal) error {
-	_, err := s.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at=now() WHERE id=$1 AND identity_id=$2 AND revoked_at IS NULL`, principal.SessionID, principal.IdentityID)
-	return err
+	return s.withAuthentication(ctx, func(_ database.Tx, store authstore.Store) error {
+		return store.RevokeSession(ctx, principal.SessionID, principal.IdentityID)
+	})
 }
 
 // ValidBreakGlassToken is only an admission hint, not session authorization.
@@ -251,58 +290,42 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 		return nil, Principal{}, ErrUnauthenticated
 	}
 	fingerprint := sha256.Sum256(s.breakGlassTokenHash)
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, Principal{}, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	var used bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM break_glass_uses WHERE credential_fingerprint=$1 AND rotation_required=true)`, fingerprint[:]).Scan(&used); err != nil {
-		return nil, Principal{}, err
-	}
-	if used {
-		return nil, Principal{}, ErrBreakGlassRotationDue
-	}
-	now := s.now()
 	identityID := uuid.Must(uuid.NewV7())
-	if err := tx.QueryRow(ctx, `INSERT INTO identities(id,issuer,subject,display_name,created_at,updated_at) VALUES($1,'break-glass','offline','Break-glass',$2,$2) ON CONFLICT(issuer,subject) DO UPDATE SET updated_at=EXCLUDED.updated_at RETURNING id`, identityID, now).Scan(&identityID); err != nil {
-		return nil, Principal{}, err
-	}
 	sessionID := uuid.Must(uuid.NewV7())
-	expires := now.Add(15 * time.Minute)
-	if _, err := tx.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,break_glass,created_at) VALUES($1,$2,$3,true,$4)`, sessionID, identityID, expires, now); err != nil {
-		return nil, Principal{}, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO break_glass_uses(credential_fingerprint,identity_id,used_at,source_session_id,rotation_required) VALUES($1,$2,$3,$4,true)`, fingerprint[:], identityID, now, sessionID); err != nil {
-		return nil, Principal{}, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO security_alerts(id,severity,kind,source_session_id,created_at) VALUES($1,'critical','break_glass.used',$2,$3)`, uuid.Must(uuid.NewV7()), sessionID, now); err != nil {
-		return nil, Principal{}, err
-	}
-	// Break-glass is platform-scoped and must be visible in every workspace chain.
-	rows, err := tx.Query(ctx, `SELECT id FROM workspaces ORDER BY id`)
+	var expires time.Time
+	err := s.withAuthentication(ctx, func(tx database.Tx, store authstore.Store) error {
+		used, err := store.BreakGlassUsed(ctx, fingerprint[:])
+		if err != nil {
+			return err
+		}
+		if used {
+			return ErrBreakGlassRotationDue
+		}
+		now := s.now()
+		expires = now.Add(15 * time.Minute)
+		identityID, err = store.BreakGlassIdentity(ctx, identityID, now)
+		if err != nil {
+			return err
+		}
+		if err = store.InsertSession(ctx, sessionID, identityID, expires, true, now); err != nil {
+			return err
+		}
+		if err = store.RecordBreakGlass(ctx, fingerprint[:], identityID, sessionID, uuid.Must(uuid.NewV7()), now); err != nil {
+			return err
+		}
+		// Break-glass is platform-scoped and must be visible in every workspace chain.
+		workspaces, err := store.Workspaces(ctx)
+		if err != nil {
+			return err
+		}
+		for _, workspaceID := range workspaces {
+			if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "break_glass", ActorID: identityID.String(), SessionID: &sessionID, Action: "break_glass.use", ResourceType: "platform", RequestID: requestID, Result: "succeeded", Reason: "emergency offline access", At: now}); err != nil {
+				return fmt.Errorf("append break-glass audit: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, Principal{}, err
-	}
-	var workspaces []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, Principal{}, err
-		}
-		workspaces = append(workspaces, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, Principal{}, err
-	}
-	for _, workspaceID := range workspaces {
-		if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "break_glass", ActorID: identityID.String(), SessionID: &sessionID, Action: "break_glass.use", ResourceType: "platform", RequestID: requestID, Result: "succeeded", Reason: "emergency offline access", At: now}); err != nil {
-			return nil, Principal{}, fmt.Errorf("append break-glass audit: %w", err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, Principal{}, err
 	}
 	value, err := s.seal(sessionEnvelope{SessionID: sessionID.String(), IdentityID: identityID.String(), ExpiresAt: expires})
@@ -313,41 +336,42 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 }
 
 func (s *Service) createSession(ctx context.Context, issuer, subject, email, name string, breakGlass bool, local *localCredential) (*http.Cookie, Principal, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, Principal{}, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	now := s.now()
 	identityID := uuid.Must(uuid.NewV7())
-	if local != nil {
-		// Recheck the verified credential under lock; never upsert a local identity.
-		err = tx.QueryRow(ctx, `SELECT i.id FROM identities i JOIN local_credentials c ON c.identity_id=i.id WHERE i.id=$1 AND i.issuer=$2 AND i.subject=$3 AND c.username=i.subject AND c.password_hash=$4 AND i.disabled_at IS NULL FOR UPDATE OF i,c`, local.identityID, issuer, subject, local.passwordHash).Scan(&identityID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, Principal{}, ErrUnauthenticated
-		}
-		if err != nil {
-			return nil, Principal{}, err
-		}
-		if err := clearLocalAttempt(ctx, tx, subject, local.attemptLease); err != nil {
-			return nil, Principal{}, err
-		}
-	} else {
-		// The conflict row stays locked through session insertion and commit.
-		err := tx.QueryRow(ctx, `INSERT INTO identities(id,issuer,subject,email,display_name,created_at,updated_at) VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$6) ON CONFLICT(issuer,subject) DO UPDATE SET email=EXCLUDED.email,display_name=EXCLUDED.display_name,updated_at=EXCLUDED.updated_at WHERE identities.disabled_at IS NULL RETURNING id`, identityID, issuer, subject, email, name, now).Scan(&identityID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, Principal{}, ErrUnauthenticated
-		}
-		if err != nil {
-			return nil, Principal{}, err
-		}
-	}
 	sessionID := uuid.Must(uuid.NewV7())
-	expires := now.Add(s.sessionTTL)
-	if _, err := tx.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,break_glass,created_at) VALUES($1,$2,$3,$4,$5)`, sessionID, identityID, expires, breakGlass, now); err != nil {
-		return nil, Principal{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	var expires time.Time
+	err := s.withAuthentication(ctx, func(tx database.Tx, store authstore.Store) error {
+		now := s.now()
+		expires = now.Add(s.sessionTTL)
+		var err error
+		if local != nil {
+			// Recheck the verified credential under lock; never upsert a local identity.
+			identityID, err = store.LockCredential(ctx, local.identityID, issuer, subject, local.passwordHash)
+			if errors.Is(err, database.ErrNotFound) {
+				return ErrUnauthenticated
+			}
+			if err != nil {
+				return err
+			}
+			cleared, err := store.ClearAttempt(ctx, subject, local.attemptLease)
+			if err != nil {
+				return err
+			}
+			if !cleared {
+				return ErrUnauthenticated
+			}
+		} else {
+			// The conflict row stays locked through session insertion and commit.
+			identityID, err = identityprofile.Upsert(ctx, tx, identityID, issuer, subject, email, name, now)
+			if errors.Is(err, database.ErrNotFound) {
+				return ErrUnauthenticated
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return store.InsertSession(ctx, sessionID, identityID, expires, breakGlass, now)
+	})
+	if err != nil {
 		return nil, Principal{}, err
 	}
 	value, err := s.seal(sessionEnvelope{SessionID: sessionID.String(), IdentityID: identityID.String(), ExpiresAt: expires})
@@ -355,6 +379,16 @@ func (s *Service) createSession(ctx context.Context, issuer, subject, email, nam
 		return nil, Principal{}, err
 	}
 	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: subject, Issuer: issuer, BreakGlass: breakGlass, ExpiresAt: expires}, nil
+}
+
+func (s *Service) withAuthentication(ctx context.Context, change func(database.Tx, authstore.Store) error) error {
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := authstore.From(tx)
+		if err != nil {
+			return err
+		}
+		return change(tx, store)
+	})
 }
 
 func (s *Service) seal(value any) (string, error) {

@@ -13,6 +13,13 @@
  */
 
 import { mapValues } from "../runtime";
+import type { ResourceMemberDimensionsInner } from "./ResourceMemberDimensionsInner";
+import {
+  ResourceMemberDimensionsInnerFromJSON,
+  ResourceMemberDimensionsInnerFromJSONTyped,
+  ResourceMemberDimensionsInnerToJSON,
+  ResourceMemberDimensionsInnerToJSONTyped,
+} from "./ResourceMemberDimensionsInner";
 import type { OperationState } from "./OperationState";
 import {
   OperationStateFromJSON,
@@ -53,16 +60,28 @@ export interface UserGroupResourceState {
   observedEnabled?: boolean;
   /**
    *
-   * @type {Array<string>}
+   * @type {Array<string | null>}
    * @memberof UserGroupResourceState
    */
-  desiredMembers?: Array<string>;
+  desiredMembers?: Array<string | null>;
   /**
    *
-   * @type {Array<string>}
+   * @type {Array<string | null>}
    * @memberof UserGroupResourceState
    */
-  observedMembers?: Array<string>;
+  observedMembers?: Array<string | null>;
+  /**
+   * Present only for multidimensional or non-one-based arrays. Members are in row-major order; absence means an ordinary one-based list or empty array.
+   * @type {Array<ResourceMemberDimensionsInner>}
+   * @memberof UserGroupResourceState
+   */
+  desiredMemberDimensions?: Array<ResourceMemberDimensionsInner>;
+  /**
+   * Present only for multidimensional or non-one-based arrays. Members are in row-major order; absence means an ordinary one-based list or empty array.
+   * @type {Array<ResourceMemberDimensionsInner>}
+   * @memberof UserGroupResourceState
+   */
+  observedMemberDimensions?: Array<ResourceMemberDimensionsInner>;
   /**
    *
    * @type {number}
@@ -124,11 +143,11 @@ export interface UserGroupResourceState {
    */
   recoveryMutationKind?: UserGroupResourceStateRecoveryMutationKindEnum;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof UserGroupResourceState
    */
-  observedAt?: Date;
+  observedAt?: string;
 }
 
 /**
@@ -210,6 +229,18 @@ export function UserGroupResourceStateFromJSONTyped(
       json["desired_members"] == null ? undefined : json["desired_members"],
     observedMembers:
       json["observed_members"] == null ? undefined : json["observed_members"],
+    desiredMemberDimensions:
+      json["desired_member_dimensions"] == null
+        ? undefined
+        : (json["desired_member_dimensions"] as Array<any>).map(
+            ResourceMemberDimensionsInnerFromJSON,
+          ),
+    observedMemberDimensions:
+      json["observed_member_dimensions"] == null
+        ? undefined
+        : (json["observed_member_dimensions"] as Array<any>).map(
+            ResourceMemberDimensionsInnerFromJSON,
+          ),
     desiredVersion:
       json["desired_version"] == null ? undefined : json["desired_version"],
     desiredRevision:
@@ -236,8 +267,7 @@ export function UserGroupResourceStateFromJSONTyped(
       json["recovery_mutation_kind"] == null
         ? undefined
         : json["recovery_mutation_kind"],
-    observedAt:
-      json["observed_at"] == null ? undefined : new Date(json["observed_at"]),
+    observedAt: json["observed_at"] == null ? undefined : json["observed_at"],
   };
 }
 
@@ -262,6 +292,18 @@ export function UserGroupResourceStateToJSONTyped(
     observed_enabled: value["observedEnabled"],
     desired_members: value["desiredMembers"],
     observed_members: value["observedMembers"],
+    desired_member_dimensions:
+      value["desiredMemberDimensions"] == null
+        ? undefined
+        : (value["desiredMemberDimensions"] as Array<any>).map(
+            ResourceMemberDimensionsInnerToJSON,
+          ),
+    observed_member_dimensions:
+      value["observedMemberDimensions"] == null
+        ? undefined
+        : (value["observedMemberDimensions"] as Array<any>).map(
+            ResourceMemberDimensionsInnerToJSON,
+          ),
     desired_version: value["desiredVersion"],
     desired_revision: value["desiredRevision"],
     observed_revision: value["observedRevision"],
@@ -272,9 +314,6 @@ export function UserGroupResourceStateToJSONTyped(
     operation_state: OperationStateToJSON(value["operationState"]),
     recovery_required: value["recoveryRequired"],
     recovery_mutation_kind: value["recoveryMutationKind"],
-    observed_at:
-      value["observedAt"] == null
-        ? value["observedAt"]
-        : value["observedAt"].toISOString(),
+    observed_at: value["observedAt"],
   };
 }

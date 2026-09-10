@@ -7,6 +7,7 @@ import { useRouter } from "vue-router";
 
 import { createAgentRollout } from "../api/client";
 import { useFleetStore } from "../shared/fleet";
+import { formatTimestamp } from "../shared/timestamp";
 
 const fleet = useFleetStore();
 const router = useRouter();
@@ -200,10 +201,9 @@ async function submitRollout(): Promise<void> {
                 >
               </td>
               <td>
-                <time
-                  v-if="node.lastHeartbeatAt"
-                  :datetime="node.lastHeartbeatAt.toISOString()"
-                  >{{ node.lastHeartbeatAt.toLocaleString() }}</time
+                <span v-if="node.lastHeartbeatAt">{{
+                  formatTimestamp(node.lastHeartbeatAt)
+                }}</span
                 ><span v-else>{{ $t("notObserved") }}</span>
               </td>
               <td>

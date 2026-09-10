@@ -38,11 +38,11 @@ export interface NodeSession {
    */
   clientIp: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof NodeSession
    */
-  connectedAt: Date;
+  connectedAt: string;
   /**
    *
    * @type {number}
@@ -109,7 +109,7 @@ export function NodeSessionFromJSONTyped(
     id: json["id"],
     username: json["username"],
     clientIp: json["client_ip"],
-    connectedAt: new Date(json["connected_at"]),
+    connectedAt: json["connected_at"],
     bytesIn: json["bytes_in"],
     bytesOut: json["bytes_out"],
   };
@@ -131,7 +131,7 @@ export function NodeSessionToJSONTyped(
     id: value["id"],
     username: value["username"],
     client_ip: value["clientIp"],
-    connected_at: value["connectedAt"].toISOString(),
+    connected_at: value["connectedAt"],
     bytes_in: value["bytesIn"],
     bytes_out: value["bytesOut"],
   };

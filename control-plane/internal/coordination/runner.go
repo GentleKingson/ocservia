@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -37,7 +38,7 @@ type sessionSnapshot struct {
 // deadline and advances it only while the session it belongs to is still
 // current.
 type Runner struct {
-	pool          *pgxpool.Pool
+	backend       database.Backend
 	identity      Identity
 	leaseTTL      time.Duration
 	renewInterval time.Duration
@@ -61,8 +62,12 @@ type Runner struct {
 // NewRunner creates a leadership runner. The lease TTL must comfortably
 // exceed the renew interval and the renewal round trip.
 func NewRunner(pool *pgxpool.Pool, identity Identity, leaseTTL, renewInterval time.Duration, logger *slog.Logger) *Runner {
+	return NewRunnerBackend(schedulerBackend(pool), identity, leaseTTL, renewInterval, logger)
+}
+
+func NewRunnerBackend(backend database.Backend, identity Identity, leaseTTL, renewInterval time.Duration, logger *slog.Logger) *Runner {
 	return &Runner{
-		pool:          pool,
+		backend:       backend,
 		identity:      identity,
 		leaseTTL:      leaseTTL,
 		renewInterval: renewInterval,
@@ -138,7 +143,7 @@ func (r *Runner) renewLoop(session *Session, sessionCtx context.Context, stop <-
 			// PostgreSQL granted.
 			started := r.now()
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(sessionCtx), r.renewTimeout)
-			err := session.Renew(ctx, r.pool)
+			err := session.RenewBackend(ctx, r.backend)
 			cancel()
 			if err != nil {
 				r.lost(err, session)
@@ -160,7 +165,7 @@ func (r *Runner) renewLoop(session *Session, sessionCtx context.Context, stop <-
 func (r *Runner) acquire(ctx context.Context) (*Session, time.Time, error) {
 	for {
 		started := r.now()
-		session, err := Acquire(ctx, r.pool, r.identity, r.leaseTTL)
+		session, err := AcquireBackend(ctx, r.backend, r.identity, r.leaseTTL)
 		if err == nil {
 			return session, started.Add(r.leaseTTL), nil
 		}

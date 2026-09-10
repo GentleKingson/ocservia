@@ -20,6 +20,7 @@ import {
   type OperationDetailState,
 } from "../shared/operation-detail";
 import { operationStatusKey } from "../shared/operation-status";
+import { formatTimestamp } from "../shared/timestamp";
 
 const operations = ref<Operation[]>([]);
 const { t } = useI18n();
@@ -42,8 +43,8 @@ let detailController: AbortController | undefined;
 let requestSequence = 0;
 let detailSequence = 0;
 
-function dateLabel(value: Date): string {
-  return value.toLocaleString();
+function dateLabel(value: string): string {
+  return formatTimestamp(value);
 }
 
 function cancelRequests(): void {
@@ -275,14 +276,10 @@ onBeforeUnmount(() => {
                 ><span v-else>{{ $t("notAvailable") }}</span>
               </td>
               <td>
-                <time :datetime="operation.createdAt.toISOString()">{{
-                  dateLabel(operation.createdAt)
-                }}</time>
+                <span>{{ dateLabel(operation.createdAt) }}</span>
               </td>
               <td>
-                <time :datetime="operation.updatedAt.toISOString()">{{
-                  dateLabel(operation.updatedAt)
-                }}</time>
+                <span>{{ dateLabel(operation.updatedAt) }}</span>
               </td>
             </tr>
           </tbody>
