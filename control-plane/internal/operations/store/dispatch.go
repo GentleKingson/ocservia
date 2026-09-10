@@ -17,6 +17,7 @@ type Dispatch struct {
 type DispatchStatus struct {
 	LeaseValid, AttemptValid, OwnsOutboxLock, ResultAfterAttempt bool
 	CommandState                                                 string
+	Envelope                                                     []byte
 }
 
 type DispatchAuthority struct {

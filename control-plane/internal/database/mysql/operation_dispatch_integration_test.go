@@ -230,7 +230,12 @@ func TestRealOperationDispatch(t *testing.T) {
 	if err != nil || v.State != "queued" {
 		t.Fatal("stale owner changed projection", v, err)
 	}
-	run(`UPDATE connection_owner_fencing SET owner_epoch=1 WHERE node_id=?`, UUIDBytes(node))
+	envelope.ConnectionFence.OwnerEpoch = 2
+	envelope.FenceBinding.OwnerEpoch = 2
+	encoded, err = proto.Marshal(&envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Simulate the durable projection committed by result ingestion before a
 	// delayed MarkSent. This is not a substitute for transport verification.
 	resultEvent := uuid.Must(uuid.NewV7())

@@ -449,6 +449,8 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # fixture below intact for historical rollback and compatibility assertions.
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-audit-postgres -p 1 ./internal/database/...)
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -p 1 ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend)Integration$')
 
   # Scheduler leadership tests need an idle lease, so they run before any
   # long-lived control-plane process acquires leadership on this database.

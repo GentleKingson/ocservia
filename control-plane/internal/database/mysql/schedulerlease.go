@@ -28,7 +28,16 @@ func (s *SchedulerLeaseStore) Lock(ctx context.Context) (schedulerlease.State, e
 	return v, err
 }
 func (s *SchedulerLeaseStore) Put(ctx context.Context, v schedulerlease.State, now value.Timestamp) error {
-	_, err := s.tx.Exec(ctx, `UPDATE scheduler_leadership SET instance_id=?,incarnation=?,epoch=?,lease_until=?,updated_at=? WHERE id=1`, UUIDBytes(v.Owner.InstanceID), v.Owner.Incarnation, v.Epoch, v.Until, now)
+	n, err := s.tx.Exec(ctx, `UPDATE scheduler_leadership SET instance_id=?,incarnation=?,epoch=?,lease_until=?,updated_at=? WHERE id=1`, UUIDBytes(v.Owner.InstanceID), v.Owner.Incarnation, v.Epoch, v.Until, now)
+	if err == nil && n == 0 {
+		stored, readErr := s.Lock(ctx)
+		if readErr != nil {
+			return readErr
+		}
+		if stored != v {
+			return database.ErrNotFound
+		}
+	}
 	return err
 }
 func (s *SchedulerLeaseStore) Assert(ctx context.Context, owner schedulerlease.Owner, epoch int64) error {

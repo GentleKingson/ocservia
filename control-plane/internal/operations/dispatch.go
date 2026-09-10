@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,7 +21,8 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		return nil, ErrInvalidRequest
 	}
 	var claimed []Dispatch
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	err := database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		claimed = nil
 		available, err := commandlimit.Available(ctx, tx, s.commandLimit)
 		if err != nil {
 			return fmt.Errorf("reserve global dispatch capacity: %w", err)
@@ -29,7 +31,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		if err != nil {
 			return err
 		}
-		at, err := database.TransactionTime(ctx, tx)
+		at, err := database.WallTime(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -57,6 +59,36 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		}
 		return nil
 	})
+	if errors.Is(err, database.ErrCommitUnknown) && len(claimed) != 0 {
+		// Read back this exact attempt/lease batch, not a new claim. If any
+		// evidence is missing or expired, send nothing and let reaping resolve it.
+		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if confirmed := database.Within(check, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			if err := commandlimit.Lock(check, tx); err != nil {
+				return err
+			}
+			store, err := operationstore.FromTransaction(tx)
+			if err != nil {
+				return err
+			}
+			for _, d := range claimed {
+				if err := store.LockDispatchOutbox(check, d); err != nil {
+					return err
+				}
+				status, err := store.DispatchStatus(check, d)
+				if err != nil {
+					return err
+				}
+				if !status.LeaseValid || !status.AttemptValid || !status.OwnsOutboxLock || status.ResultAfterAttempt || (status.CommandState != "queued" && status.CommandState != "unknown") {
+					return database.ErrNotFound
+				}
+			}
+			return nil
+		}); confirmed == nil {
+			err = nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +126,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 			return fmt.Errorf("decode sent command delivery mode: %w", err)
 		}
 	}
-	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	err := database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		if err := commandlimit.Lock(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch completion: %w", err)
 		}
@@ -102,11 +134,21 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if err != nil {
 			return err
 		}
-		at, err := database.TransactionTime(ctx, tx)
-		if err != nil {
-			return err
-		}
 		if !sent {
+			if err := store.LockDispatchOutbox(ctx, d); err != nil {
+				return err
+			}
+			status, err := store.DispatchStatus(ctx, d)
+			if err != nil {
+				return err
+			}
+			if !status.LeaseValid || !status.AttemptValid || !status.OwnsOutboxLock || status.ResultAfterAttempt {
+				return database.ErrNotFound
+			}
+			at, err := database.WallTime(ctx, tx)
+			if err != nil {
+				return err
+			}
 			return store.FailDispatch(ctx, d, message, at)
 		}
 		// Hold the exact owner term through commit, before locking any outbox.
@@ -125,6 +167,9 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 				return fmt.Errorf("confirm result-completed dispatch: %w", err)
 			}
 			if !status.ResultAfterAttempt {
+				if bytes.Equal(status.Envelope, sentEnvelope) {
+					return nil
+				}
 				return errors.New("dispatch lease is no longer valid")
 			}
 			return preserveResultEnvelope(ctx, store, d, status.CommandState, sentEnvelope)
@@ -137,6 +182,10 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		}
 		if !status.OwnsOutboxLock && !status.ResultAfterAttempt {
 			return errors.New("dispatch outbox lock is no longer valid")
+		}
+		at, err := database.WallTime(ctx, tx)
+		if err != nil {
+			return err
 		}
 		if status.ResultAfterAttempt {
 			if err := preserveResultEnvelope(ctx, store, d, status.CommandState, sentEnvelope); err != nil {
@@ -159,6 +208,27 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		}
 		return store.CloseDispatch(ctx, d, at)
 	})
+	if sent && errors.Is(err, database.ErrCommitUnknown) {
+		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if confirmed := database.Within(check, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			store, err := operationstore.FromTransaction(tx)
+			if err != nil {
+				return err
+			}
+			status, err := store.CompletedDispatch(check, d)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(status.Envelope, sentEnvelope) {
+				return database.ErrNotFound
+			}
+			return nil
+		}); confirmed == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 func preserveResultEnvelope(ctx context.Context, store operationstore.Store, d Dispatch, state string, encoded []byte) error {

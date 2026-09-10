@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner/ownerstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
@@ -52,7 +53,7 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 
 func (s operationStore) ClaimDispatch(ctx context.Context, d operationstore.Dispatch, worker uuid.UUID, until, at value.Timestamp) (bool, error) {
 	n, err := s.Exec(ctx, `INSERT INTO node_command_leases(node_id,command_id,lease_token,worker_id,leased_until,created_at)
-		VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, d.NodeID, d.CommandID, d.LeaseToken, worker, until, at)
+		VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(node_id) DO NOTHING`, d.NodeID, d.CommandID, d.LeaseToken, worker, until, at)
 	if err != nil || n == 0 {
 		return false, err
 	}
@@ -66,9 +67,10 @@ func (s operationStore) ClaimDispatch(ctx context.Context, d operationstore.Disp
 }
 
 func (s operationStore) GuardDispatchAuthority(ctx context.Context, a operationstore.DispatchAuthority) error {
-	var one int
-	return s.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3
-		AND connection_id=$4 AND owner_epoch=$5 AND lease_until>clock_timestamp() FOR SHARE OF connection_owner_fencing`, a.NodeID[:], a.OwnerID, a.Incarnation, a.ConnectionID[:], a.Epoch).Scan(&one)
+	return (connectionOwnerStore{s.Tx}).Assert(ctx, ownerstore.Term{
+		Identity: ownerstore.Identity{InstanceID: a.OwnerID, Incarnation: a.Incarnation},
+		NodeID:   a.NodeID, ConnectionID: a.ConnectionID, Epoch: a.Epoch,
+	})
 }
 
 func (s operationStore) LockDispatchOutbox(ctx context.Context, d operationstore.Dispatch) error {
@@ -92,7 +94,7 @@ func (s operationStore) DispatchStatus(ctx context.Context, d operationstore.Dis
 }
 
 func (s operationStore) CompletedDispatch(ctx context.Context, d operationstore.Dispatch) (v operationstore.DispatchStatus, err error) {
-	err = s.QueryRow(ctx, `SELECT command.state,
+	err = s.QueryRow(ctx, `SELECT command.state,command.envelope,
 		EXISTS(SELECT 1 FROM agent_command_results AS result WHERE result.command_id=command.id AND result.created_at>=attempt.started_at)
 		FROM outbox_events AS outbox JOIN commands AS command ON command.id=outbox.command_id
 		JOIN operations AS operation ON operation.id=command.operation_id
@@ -100,7 +102,7 @@ func (s operationStore) CompletedDispatch(ctx context.Context, d operationstore.
 		WHERE outbox.id=$1 AND command.id=$2 AND operation.id=$3 AND command.node_id=$4
 		AND attempt.state='sent' AND attempt.finished_at IS NOT NULL
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.node_id=command.node_id AND lease.command_id=command.id AND lease.lease_token=$6)`,
-		d.OutboxID, d.CommandID, d.OperationID, d.NodeID, d.AttemptID, d.LeaseToken).Scan(&v.CommandState, &v.ResultAfterAttempt)
+		d.OutboxID, d.CommandID, d.OperationID, d.NodeID, d.AttemptID, d.LeaseToken).Scan(&v.CommandState, &v.Envelope, &v.ResultAfterAttempt)
 	return
 }
 
