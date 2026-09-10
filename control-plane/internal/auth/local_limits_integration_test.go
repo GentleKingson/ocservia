@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -265,6 +266,7 @@ func TestLocalAccountCancellationAndErrorsIntegration(t *testing.T) {
 		}
 		other := *s
 		other.pool = pool
+		other.backend = postgres.WrapPool(pool)
 		_, _, err = other.AuthenticateLocal(requestCtx, name, "wrong")
 		cancel()
 		pool.Close()

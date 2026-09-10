@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -30,17 +31,25 @@ func TestValidShortRejectsWhitespaceOutsideContractLimit(t *testing.T) {
 
 func TestValidateLockedTokenPreservesQueryErrors(t *testing.T) {
 	queryErr := errors.New("database unavailable")
-	err := validateLockedToken(queryErr, false, time.Time{}, time.Now())
+	err := validateLockedToken(queryErr, false, value.Timestamp{}, time.Now())
 	if !errors.Is(err, queryErr) || errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected query error, got %v", err)
 	}
 }
 
 func TestConsumedAndExpiredTokensAreRejected(t *testing.T) {
-	if err := validateLockedToken(nil, true, time.Now().Add(time.Minute), time.Now()); !errors.Is(err, ErrInvalidToken) {
+	future, err := value.FromTime(time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	past, err := value.FromTime(time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLockedToken(nil, true, future, time.Now()); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("consumed token replay error = %v", err)
 	}
-	if err := validateLockedToken(nil, false, time.Now().Add(-time.Minute), time.Now()); !errors.Is(err, ErrInvalidToken) {
+	if err := validateLockedToken(nil, false, past, time.Now()); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("unconsumed expired token error = %v", err)
 	}
 }

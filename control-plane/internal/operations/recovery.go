@@ -12,6 +12,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
@@ -32,8 +36,8 @@ const (
 )
 
 // OwnerReconnect identifies the fenced connection that has become usable for
-// one node. RecoverAmbiguousDispatchedTx independently checks this term against
-// PostgreSQL while holding the caller's transaction open.
+// one node. Recovery independently checks this term against the database while
+// holding the caller's transaction open.
 type OwnerReconnect struct {
 	NodeID       uuid.UUID
 	ConnectionID [16]byte
@@ -49,16 +53,14 @@ type recoveryAuthority struct {
 	epoch       uint64
 }
 
-type recoveryCandidate struct {
-	commandID uuid.UUID
+// RecoverAmbiguousDispatchedTx is the temporary PostgreSQL transport bridge.
+func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, reconnect OwnerReconnect) (int, error) {
+	return s.RecoverAmbiguousDispatched(ctx, postgres.WrapTx(tx), reconnect)
 }
 
-// RecoverAmbiguousDispatchedTx converts previously published commands whose
-// result never reached Controller into reconcile-only work. The authority row
-// is held FOR SHARE through every state and outbox update, so a concurrent
-// takeover cannot make a stale connected event authoritative midway through
-// the sweep.
-func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, reconnect OwnerReconnect) (int, error) {
+// RecoverAmbiguousDispatched joins the caller's transaction. The authority
+// row stays share-locked through all projections and the outbox update.
+func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx, reconnect OwnerReconnect) (int, error) {
 	if s.signer == nil {
 		return 0, errors.New("operations: reconciliation signer is unavailable")
 	}
@@ -69,108 +71,53 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 	if err != nil || connectionID.Version() != 7 {
 		return 0, ErrInvalidRequest
 	}
-	// Match dispatch completion and lease reaping before taking authority or
-	// row locks. Result ingestion does not take this advisory lock, but it uses
-	// the same outbox-before-command row-lock order below.
 	if err := commandlimit.Lock(ctx, tx); err != nil {
 		return 0, fmt.Errorf("serialize reconnect recovery: %w", err)
 	}
-
-	authority := recoveryAuthority{connection: reconnect.ConnectionID, epoch: reconnect.OwnerEpoch}
-	err = tx.QueryRow(ctx, `SELECT owner_instance_id,owner_incarnation
-		FROM connection_owner_fencing
-		WHERE node_id=$1 AND connection_id=$2 AND owner_epoch=$3 AND lease_until>clock_timestamp()
-		FOR SHARE OF connection_owner_fencing`, reconnect.NodeID[:], reconnect.ConnectionID[:], int64(reconnect.OwnerEpoch)).
-		Scan(&authority.instanceID, &authority.incarnation)
-	if errors.Is(err, pgx.ErrNoRows) {
+	store, err := operationstore.FromTransaction(tx)
+	if err != nil {
+		return 0, err
+	}
+	owner, err := store.ReconnectAuthority(ctx, reconnect.NodeID, connectionID, int64(reconnect.OwnerEpoch))
+	if errors.Is(err, database.ErrNotFound) {
 		return 0, connectionowner.ErrNotOwner
 	}
 	if err != nil {
 		return 0, fmt.Errorf("guard reconnect recovery authority: %w", err)
 	}
-
-	scanLimit := maxReconnectRecoveryCandidates
-	rows, err := tx.Query(ctx, `SELECT command.id
-		FROM commands AS command
-		JOIN operations AS operation ON operation.id=command.operation_id
-		JOIN outbox_events AS outbox ON outbox.command_id=command.id
-		WHERE command.node_id=$1
-		  AND command.state IN ('dispatched','accepted','running','unknown')
-		  AND operation.state IN ('dispatched','accepted','running','unknown')
-		  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
-			SELECT 1 FROM agent_command_results AS result
-			WHERE result.command_id=command.id AND result.state='succeeded'
-			  AND result.receipt_verification_status='verified'))
-		  AND outbox.published_at IS NOT NULL
-		  AND outbox.locked_by IS NULL
-		  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
-		ORDER BY command.created_at,command.id
-		LIMIT $2
-		FOR UPDATE OF outbox SKIP LOCKED`, reconnect.NodeID, scanLimit)
+	authority := recoveryAuthority{instanceID: owner.OwnerID, incarnation: owner.Incarnation, connection: reconnect.ConnectionID, epoch: reconnect.OwnerEpoch}
+	candidates, err := store.AmbiguousDispatches(ctx, reconnect.NodeID, maxReconnectRecoveryCandidates)
 	if err != nil {
 		return 0, fmt.Errorf("select ambiguous dispatched commands: %w", err)
 	}
-	candidates := make([]recoveryCandidate, 0, scanLimit)
-	for rows.Next() {
-		var candidate recoveryCandidate
-		if err := rows.Scan(&candidate.commandID); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("scan ambiguous dispatched command: %w", err)
-		}
-		candidates = append(candidates, candidate)
+	at, err := value.FromTime(reconnect.ObservedAt)
+	if err != nil {
+		return 0, err
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, fmt.Errorf("iterate ambiguous dispatched commands: %w", err)
-	}
-	rows.Close()
-
 	recovered := 0
-	for _, candidate := range candidates {
+	for _, commandID := range candidates {
 		if recovered == reconnect.Limit {
 			break
 		}
-		// The outbox row is already locked. Re-read command and operation in a
-		// fresh READ COMMITTED statement after any result transaction we waited
-		// for, then lock both projections in outbox-to-command order.
-		var operationID uuid.UUID
-		var encoded []byte
-		err := tx.QueryRow(ctx, `SELECT command.operation_id,command.envelope
-			FROM commands AS command
-			JOIN operations AS operation ON operation.id=command.operation_id
-			JOIN outbox_events AS outbox ON outbox.command_id=command.id
-			WHERE command.id=$1 AND command.node_id=$2
-			  AND command.state IN ('dispatched','accepted','running','unknown')
-			  AND operation.state IN ('dispatched','accepted','running','unknown')
-			  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
-				SELECT 1 FROM agent_command_results AS result
-				WHERE result.command_id=command.id AND result.state='succeeded'
-				  AND result.receipt_verification_status='verified'))
-			  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
-			  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
-			FOR UPDATE OF command,operation`, candidate.commandID, reconnect.NodeID).
-			Scan(&operationID, &encoded)
-		if errors.Is(err, pgx.ErrNoRows) {
+		candidate, err := store.LockAmbiguousDispatch(ctx, commandID, reconnect.NodeID)
+		if errors.Is(err, database.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return 0, fmt.Errorf("recheck ambiguous dispatched command %s: %w", candidate.commandID, err)
+			return 0, fmt.Errorf("recheck ambiguous dispatched command: %w", err)
 		}
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(encoded, &envelope); err != nil {
-			return 0, fmt.Errorf("decode ambiguous dispatched command %s: %w", candidate.commandID, err)
+		if err := proto.Unmarshal(candidate.Envelope, &envelope); err != nil {
+			return 0, fmt.Errorf("decode ambiguous dispatched command: %w", err)
 		}
-		if !bytes.Equal(envelope.GetCommandId(), candidate.commandID[:]) || !bytes.Equal(envelope.GetOperationId(), operationID[:]) || !bytes.Equal(envelope.GetNodeId(), reconnect.NodeID[:]) {
-			return 0, fmt.Errorf("ambiguous dispatched command %s has inconsistent identity", candidate.commandID)
+		if !bytes.Equal(envelope.GetCommandId(), commandID[:]) || !bytes.Equal(envelope.GetOperationId(), candidate.OperationID[:]) || !bytes.Equal(envelope.GetNodeId(), reconnect.NodeID[:]) {
+			return 0, fmt.Errorf("ambiguous dispatched command %s has inconsistent identity", commandID)
 		}
-		// MarkSentWithEnvelope persists the exact fence actually carried by a
-		// successful dispatch. A command already sent on this term is not an
-		// outage ambiguity, even when its result is still in flight.
-		if dispatchedOnAuthority(&envelope, candidate.commandID, reconnect.NodeID, authority) {
+		if dispatchedOnAuthority(&envelope, commandID, reconnect.NodeID, authority) {
 			continue
 		}
 		if envelope.GetAgentUpgrade() != nil {
-			acked, err := agentUpgradeSchedulingAcked(ctx, tx, operationID)
+			acked, err := store.UpgradeSchedulingAcked(ctx, candidate.OperationID)
 			if err != nil {
 				return 0, err
 			}
@@ -178,49 +125,19 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 				continue
 			}
 		}
-
 		payload, expiresAt, err := PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, reconnect.ObservedAt, s.signer)
 		if err != nil {
-			return 0, fmt.Errorf("prepare reconnect reconciliation for command %s: %w", candidate.commandID, err)
+			return 0, fmt.Errorf("prepare reconnect reconciliation for command %s: %w", commandID, err)
 		}
-		commandTag, err := tx.Exec(ctx, `UPDATE commands
-			SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4
-			WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, candidate.commandID, payload, expiresAt, reconnect.ObservedAt)
+		expires, err := value.FromTime(expiresAt)
 		if err != nil {
-			return 0, fmt.Errorf("mark reconnect command unknown: %w", err)
-		}
-		if commandTag.RowsAffected() != 1 {
-			continue
-		}
-		operationTag, err := tx.Exec(ctx, `UPDATE operations
-			SET state='unknown',version=version+1,expires_at=$2,updated_at=$3,completed_at=NULL
-			WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, operationID, expiresAt, reconnect.ObservedAt)
-		if err != nil {
-			return 0, fmt.Errorf("mark reconnect operation unknown: %w", err)
-		}
-		if operationTag.RowsAffected() != 1 {
-			return 0, fmt.Errorf("reconnect command %s has no mutable operation", candidate.commandID)
-		}
-		if err := markRecoveryProjectionUnknown(ctx, tx, operationID, &envelope, reconnect.ObservedAt); err != nil {
 			return 0, err
 		}
-		outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events
-			SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,
-				last_error='owner connection changed; reconciliation required'
-			WHERE command_id=$1 AND published_at IS NOT NULL AND locked_by IS NULL`, candidate.commandID, payload, reconnect.ObservedAt)
-		if err != nil {
-			return 0, fmt.Errorf("schedule reconnect reconciliation: %w", err)
+		if err := store.ScheduleReconnectRecovery(ctx, commandID, candidate.OperationID, payload, expires, at); err != nil {
+			return 0, err
 		}
-		if outboxTag.RowsAffected() != 1 {
-			return 0, fmt.Errorf("reconnect command %s lost its published outbox", candidate.commandID)
-		}
-		eventID, err := uuid.NewV7()
-		if err != nil {
-			return 0, fmt.Errorf("generate reconnect reconciliation event: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)
-			VALUES($1,$2,'unknown',$3)`, eventID, operationID, reconnect.ObservedAt); err != nil {
-			return 0, fmt.Errorf("record reconnect reconciliation event: %w", err)
+		if err := markRecoveryProjection(ctx, store, candidate.OperationID, &envelope, at); err != nil {
+			return 0, err
 		}
 		recovered++
 	}
@@ -313,41 +230,6 @@ func validateSentEnvelope(dispatch Dispatch, encoded []byte) error {
 	return nil
 }
 
-// guardSentEnvelopeAuthority serializes a fenced dispatch commit against a
-// concurrent takeover. An unfenced compatibility dispatch has no owner term
-// to guard and retains its established behavior.
-func guardSentEnvelopeAuthority(ctx context.Context, tx pgx.Tx, dispatch Dispatch, encoded []byte) error {
-	var envelope agentv1.CommandEnvelope
-	if err := proto.Unmarshal(encoded, &envelope); err != nil {
-		return fmt.Errorf("decode sent command envelope for authority guard: %w", err)
-	}
-	fence := envelope.GetConnectionFence()
-	if fence == nil {
-		return nil
-	}
-	ownerID, err := uuid.FromBytes(fence.GetOwnerInstanceId())
-	if err != nil || ownerID.Version() != 7 {
-		return errors.New("operations: sent command owner instance is not UUIDv7")
-	}
-	connectionID, err := uuid.FromBytes(fence.GetConnectionId())
-	if err != nil || connectionID.Version() != 7 {
-		return errors.New("operations: sent command connection is not UUIDv7")
-	}
-	var one int
-	err = tx.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing
-		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3
-		  AND connection_id=$4 AND owner_epoch=$5 AND lease_until>clock_timestamp()
-		FOR SHARE OF connection_owner_fencing`,
-		dispatch.NodeID[:], ownerID, int64(fence.GetOwnerIncarnation()), fence.GetConnectionId(), int64(fence.GetOwnerEpoch())).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return connectionowner.ErrNotOwner
-	}
-	if err != nil {
-		return fmt.Errorf("guard sent command owner authority: %w", err)
-	}
-	return nil
-}
-
 func dispatchedOnAuthority(envelope *agentv1.CommandEnvelope, commandID, nodeID uuid.UUID, authority recoveryAuthority) bool {
 	fence, binding := envelope.GetConnectionFence(), envelope.GetFenceBinding()
 	if fence == nil || binding == nil || binding.GetOperationKind() != agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND {
@@ -366,9 +248,9 @@ func dispatchedOnAuthority(envelope *agentv1.CommandEnvelope, commandID, nodeID 
 		bytes.Equal(binding.GetConnectionId(), authority.connection[:])
 }
 
-func markRecoveryProjectionUnknown(ctx context.Context, tx pgx.Tx, operationID uuid.UUID, envelope *agentv1.CommandEnvelope, observedAt time.Time) error {
+func markRecoveryProjection(ctx context.Context, store operationstore.Store, operationID uuid.UUID, envelope *agentv1.CommandEnvelope, at value.Timestamp) error {
 	if envelope.GetAgentUpgrade() != nil {
-		acked, err := agentUpgradeSchedulingAcked(ctx, tx, operationID)
+		acked, err := store.UpgradeSchedulingAcked(ctx, operationID)
 		if err != nil {
 			return err
 		}
@@ -376,12 +258,7 @@ func markRecoveryProjectionUnknown(ctx context.Context, tx pgx.Tx, operationID u
 			return nil
 		}
 	}
-	if envelope.GetConfigApply() != nil {
-		if _, err := tx.Exec(ctx, `UPDATE config_apply_operations SET state='unknown',updated_at=$2
-			WHERE operation_id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, operationID, observedAt); err != nil {
-			return fmt.Errorf("mark reconnect configuration apply unknown: %w", err)
-		}
-	}
+	projection := operationstore.RecoveryProjection{OperationID: operationID, ConfigApply: envelope.GetConfigApply() != nil, Artifact: envelope.GetCertificateP12() != nil, At: at}
 	var certificateID []byte
 	if csr := envelope.GetCertificateCsr(); csr != nil {
 		certificateID = csr.GetCertificateId()
@@ -393,30 +270,7 @@ func markRecoveryProjectionUnknown(ctx context.Context, tx pgx.Tx, operationID u
 		if err != nil || id.Version() != 7 {
 			return errors.New("operations: reconnect certificate command has invalid identity")
 		}
-		if _, err := tx.Exec(ctx, `UPDATE certificates SET state='unknown',version=version+1,updated_at=$2
-			WHERE id=$1 AND state NOT IN ('issued','expired','revoked','failed')`, id, observedAt); err != nil {
-			return fmt.Errorf("mark reconnect certificate operation unknown: %w", err)
-		}
+		projection.CertificateID = id
 	}
-	if envelope.GetCertificateP12() != nil {
-		if _, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='pending',updated_at=$2
-			WHERE operation_id=$1 AND state IN ('pending','leased')`, operationID, observedAt); err != nil {
-			return fmt.Errorf("mark reconnect certificate artifact pending: %w", err)
-		}
-	}
-	return nil
-}
-
-func agentUpgradeSchedulingAcked(ctx context.Context, tx pgx.Tx, operationID uuid.UUID) (bool, error) {
-	var acked bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1
-		FROM commands AS command
-		JOIN agent_command_results AS result ON result.command_id=command.id
-		WHERE command.operation_id=$1 AND command.payload_type='agent_upgrade'
-		  AND result.state='succeeded' AND result.receipt_verification_status='verified'
-	)`, operationID).Scan(&acked); err != nil {
-		return false, fmt.Errorf("check agent upgrade scheduling acknowledgement: %w", err)
-	}
-	return acked, nil
+	return store.MarkRecoveryProjection(ctx, projection)
 }

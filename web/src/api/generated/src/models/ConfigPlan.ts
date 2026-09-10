@@ -88,11 +88,11 @@ export interface ConfigPlan {
    */
   diffRedacted: string;
   /**
-   *
-   * @type {Array<string>}
+   * Stored JSONB warning array plus verified validation warning strings.
+   * @type {Array<any>}
    * @memberof ConfigPlan
    */
-  warnings: Array<string>;
+  warnings: Array<any>;
   /**
    *
    * @type {boolean}
@@ -124,17 +124,17 @@ export interface ConfigPlan {
    */
   approvalStatus?: ConfigPlanApprovalStatusEnum;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof ConfigPlan
    */
-  expiresAt: Date;
+  expiresAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof ConfigPlan
    */
-  createdAt: Date;
+  createdAt: string;
 }
 
 /**
@@ -283,8 +283,8 @@ export function ConfigPlanFromJSONTyped(
     approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
     approvalStatus:
       json["approval_status"] == null ? undefined : json["approval_status"],
-    expiresAt: new Date(json["expires_at"]),
-    createdAt: new Date(json["created_at"]),
+    expiresAt: json["expires_at"],
+    createdAt: json["created_at"],
   };
 }
 
@@ -317,7 +317,7 @@ export function ConfigPlanToJSONTyped(
     current_hash: value["currentHash"],
     approval_id: value["approvalId"],
     approval_status: value["approvalStatus"],
-    expires_at: value["expiresAt"].toISOString(),
-    created_at: value["createdAt"].toISOString(),
+    expires_at: value["expiresAt"],
+    created_at: value["createdAt"],
   };
 }

@@ -8,10 +8,10 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 type createConfigPlanRequest struct {
@@ -142,7 +142,7 @@ func writeConfigPlanError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the idempotency key was used for different configuration content")
 	case errors.Is(err, operationstore.ErrConfigApplyActive):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-apply-active", "Configuration apply already active", "wait for the active apply or its reconciliation to reach a terminal state")
-	case errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the configuration plan or node does not exist")
 	default:
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/config-plan-unavailable", "Configuration planning unavailable", "configuration planning is temporarily unavailable")

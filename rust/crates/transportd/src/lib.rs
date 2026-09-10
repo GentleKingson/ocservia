@@ -3036,6 +3036,17 @@ async fn relay_artifact_stream(
             }
             expected_offset = expected_offset.saturating_add(chunk.data.len() as u64);
             let eof = chunk.eof;
+            if eof {
+                // Consume QUIC FIN before forwarding the terminal chunk. Dropping
+                // an unread stream sends STOP_SENDING and invalidates the Agent's
+                // delivery acknowledgement even when every payload byte arrived.
+                tokio::time::timeout(Duration::from_secs(30), recv.read_to_end(0))
+                    .await
+                    .map_err(|_| {
+                        Status::deadline_exceeded("artifact stream termination timed out")
+                    })?
+                    .map_err(|_| Status::data_loss("artifact stream has invalid trailing data"))?;
+            }
             sender
                 .send(Ok(chunk))
                 .await
@@ -5679,6 +5690,14 @@ mod tests {
             .expect("write artifact chunk");
         fetch_send.finish().expect("finish artifact fetch response");
         assert!(fetched.next().await.expect("artifact stream item").is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), fetch_send.stopped())
+                .await
+                .expect("artifact transport acknowledgement arrives")
+                .expect("artifact transport acknowledgement succeeds")
+                .is_none(),
+            "the terminal artifact chunk must not cancel the Agent send stream"
+        );
 
         let grant_id: [u8; 16] = grant.grant_id.as_slice().try_into().expect("grant id");
         let consume_binding = signed_fence_binding(

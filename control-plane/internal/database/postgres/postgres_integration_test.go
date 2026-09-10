@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -105,7 +106,11 @@ func TestUsageCrossStoreTransactionIntegration(t *testing.T) {
 			if err := userusage.RecordTx(ctx, a, node, []userusage.Sample{sample}); err != nil {
 				return err
 			}
-			prior, err := other.LockCursor(ctx, node, sample)
+			at, err := value.FromTime(now)
+			if err != nil {
+				return err
+			}
+			prior, err := other.LockCursor(ctx, node, userusage.Cursor{SessionID: sample.SessionID, Connected: at})
 			if err != nil || prior.RXBytes != 10 {
 				t.Fatalf("second store cannot see uncommitted cursor: %+v %v", prior, err)
 			}

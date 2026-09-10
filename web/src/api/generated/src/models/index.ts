@@ -2,7 +2,6 @@
 /* eslint-disable */
 export * from "./AgentRollout";
 export * from "./AgentRolloutCreateRequest";
-export * from "./AgentRolloutExclusion";
 export * from "./AgentRolloutNode";
 export * from "./AgentRolloutPage";
 export * from "./AgentUpgradeRequest";
@@ -80,6 +79,7 @@ export * from "./Problem";
 export * from "./QueueMetrics";
 export * from "./Readiness";
 export * from "./ResetLocalUserPasswordRequest";
+export * from "./ResourceMemberDimensionsInner";
 export * from "./RoleBinding";
 export * from "./RoleBindingRequest";
 export * from "./SecretProviderRef";

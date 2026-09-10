@@ -1,0 +1,465 @@
+{
+  "version": 6,
+  "previous_checksum": "3483d0f381fd4b1b18235eef1e21a681c96b39c227f91487da09d696c281da77",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "migrate_v6_attest_credential_insert",
+          "object": "migrate_v6_attest_credential_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_credential_insert` BEFORE INSERT ON `privd_attestation_enrollment_credentials` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "bffc897be2d844011bfc1130151fd6e4e0270645243420a70780d432c959e150",
+          "before": "",
+          "after": "79edeabd5ac8c7078d897144251fc4369e52548ce575ce4214204499e4fd9752"
+        },
+        {
+          "name": "migrate_v6_attest_credential_update",
+          "object": "migrate_v6_attest_credential_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_credential_update` BEFORE UPDATE ON `privd_attestation_enrollment_credentials` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "90eb8932b9644754dea951adf7796e5995cd456ca2ad5f9f9bb1cb3fe540abcd",
+          "before": "",
+          "after": "13011e2afe811a2541f555a3683f74be8db52fb1a28e0686d03f4497decfd67d"
+        },
+        {
+          "name": "migrate_v6_attest_credential_delete",
+          "object": "migrate_v6_attest_credential_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_credential_delete` BEFORE DELETE ON `privd_attestation_enrollment_credentials` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "667d75f931ebd95f57e4c78a8205cb4a457dcf167a75caa5feaebb9cda0ed944",
+          "before": "",
+          "after": "b1dd42b54ea707c6cf133665b2cebc7d2a24f016e82959373f32d6c2f7977172"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_expires_at_column",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "79d24a958c125a2a09f07108b350aff76896bbc750b2ee0a832c8ea1e55e5ad4",
+          "before": "8472cceaa595d07d9c50c119ae6a954711d3ba5ca82faab99d6f27de1df1ec30",
+          "after": "9c7a55b072074415f0157578b39e91ad756c8728da2f8e83fee19afd995655b3"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_consumed_at_column",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "c2472410c9bb407561647e355dcb40f7ee37032ba79cf179a1bc7d1e32c43bcc",
+          "before": "9c7a55b072074415f0157578b39e91ad756c8728da2f8e83fee19afd995655b3",
+          "after": "561d06bce687c4af229767f663ee3581e55bcead53ca2e8236c382dd75753baf"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_created_at_column",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "7c03359705b82c116377f4addc78f25d6fa2305ef58fa5984c4f0528f0c89cbd",
+          "before": "561d06bce687c4af229767f663ee3581e55bcead53ca2e8236c382dd75753baf",
+          "after": "0d67f2e718a692b91c28ecaef8971e018bcc2b3920cc35eeda84d6509f740d88"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_times_backfill",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "data",
+          "sql": "UPDATE `privd_attestation_enrollment_credentials` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "a6f50a059a226cacbdd14192d963751a11ff1690ce7b35d214e1e854e0ebd331",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `privd_attestation_enrollment_credentials` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_times_switch",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` DROP CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_96cebf9d41c4,DROP CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_4f7a46e8df72,DROP INDEX privd_attestation_credentials_node_active_idx,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `privd_attestation_enrollment_credentials_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `privd_attestation_enrollment_credentials_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL DEFAULT (TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',CURRENT_TIMESTAMP(6))),ADD CONSTRAINT `privd_attestation_enrollment_credentials_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_96cebf9d41c4 CHECK (expires_at\u003ecreated_at),ADD CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_4f7a46e8df72 CHECK (consumed_at IS NULL OR consumed_at\u003e=created_at),ADD KEY privd_attestation_credentials_node_active_idx(node_id,expires_at)",
+          "checksum": "6e2b8030b04ed4fd3f6b6195f6c5114ee72a1065fee0c096aff9e40f30c037b8",
+          "before": "0d67f2e718a692b91c28ecaef8971e018bcc2b3920cc35eeda84d6509f740d88",
+          "after": "d7b98575f47ac99996ae27743ffbc73b4767a2ba5d1a08829e42027021332fe2",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `privd_attestation_enrollment_credentials` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v6_attest_credential_insert",
+          "object": "migrate_v6_attest_credential_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_credential_insert`",
+          "checksum": "0d1536018d64f359a5584e26d0fe099d93c51d0db24483769563697736be0989",
+          "before": "79edeabd5ac8c7078d897144251fc4369e52548ce575ce4214204499e4fd9752",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_credential_update",
+          "object": "migrate_v6_attest_credential_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_credential_update`",
+          "checksum": "aec99f47bec7e40928d773fc48df79af31700b0604d7c0ffdeeb8eb4c47ce5f8",
+          "before": "13011e2afe811a2541f555a3683f74be8db52fb1a28e0686d03f4497decfd67d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_credential_delete",
+          "object": "migrate_v6_attest_credential_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_credential_delete`",
+          "checksum": "1d3bf9f1a8beaa980c45463dc741a725ecead0cce6efa2e0803f4e83d73cb7e4",
+          "before": "b1dd42b54ea707c6cf133665b2cebc7d2a24f016e82959373f32d6c2f7977172",
+          "after": ""
+        },
+        {
+          "name": "migrate_v6_attest_key_insert",
+          "object": "migrate_v6_attest_key_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_key_insert` BEFORE INSERT ON `node_privd_attestation_keys` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "91bd7ccc2d492be20941766f2e9fe26d0f9e91ea52534e16977acbe3a679510e",
+          "before": "",
+          "after": "95e890fe45cf67215f104acf96bafab109bd4c305fac4853ae23814e4b02813d"
+        },
+        {
+          "name": "migrate_v6_attest_key_update",
+          "object": "migrate_v6_attest_key_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_key_update` BEFORE UPDATE ON `node_privd_attestation_keys` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "12ffb4a6580d3640f2343f066e3e042b8605b60b1fec52e18ddf2a8fea6a91f2",
+          "before": "",
+          "after": "5572f4787550ebf0d1174ead54d3c59be9c50ade718b38c501f9b2bfc4af20fb"
+        },
+        {
+          "name": "migrate_v6_attest_key_delete",
+          "object": "migrate_v6_attest_key_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_key_delete` BEFORE DELETE ON `node_privd_attestation_keys` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b320f3d17a31a45be7a827e8e092a8aac0997e57af15b490989d8fc91493550d",
+          "before": "",
+          "after": "d9c2cfb066b3794e144bf4ccec40938284fc6d54a873c6820836dbefcf38d390"
+        },
+        {
+          "name": "node_privd_attestation_keys_created_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "18b77c3d9c55373dc8ca99a0fc3a0d80933d303351ab435c881ed64324ff292c",
+          "before": "e48e26ea8f3f0a01ce67844a2247be18e37f6b8c94246d94b636ec16d240a6ea",
+          "after": "a6e77cadcdbe342faba75941938c80fe28b7982e120a44ce20e37a1394139d64"
+        },
+        {
+          "name": "node_privd_attestation_keys_approved_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_approved_at` BIGINT NULL",
+          "checksum": "bf4e30cc8f4be03f9ceb5ea53aed40bb4fee682fc88e8f0fb173f56e4976ef77",
+          "before": "a6e77cadcdbe342faba75941938c80fe28b7982e120a44ce20e37a1394139d64",
+          "after": "c8f477f7d09fd8f7e1564eb115ca59936038dfe3b900ae658f27638c27d7f877"
+        },
+        {
+          "name": "node_privd_attestation_keys_activated_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_activated_at` BIGINT NULL",
+          "checksum": "af18b77af9bb10fb4189af1b333c3d78dc9bad8e7228c1170cbcc315591c45b3",
+          "before": "c8f477f7d09fd8f7e1564eb115ca59936038dfe3b900ae658f27638c27d7f877",
+          "after": "fb280698b4e0b95a9e19557bf94842f198b07177241e076aab66c1e599c8a97a"
+        },
+        {
+          "name": "node_privd_attestation_keys_valid_until_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_valid_until` BIGINT NULL",
+          "checksum": "90250dbd4a24f5b1db7dc3b0b5dcf5b065df53e4ff5e9787b6af807c3a7f15f9",
+          "before": "fb280698b4e0b95a9e19557bf94842f198b07177241e076aab66c1e599c8a97a",
+          "after": "92546dbdc0df5cf55d8ea2b3ddecf024f9e9a57857989dea0f2a1a9bbbb3d458"
+        },
+        {
+          "name": "node_privd_attestation_keys_revoked_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_revoked_at` BIGINT NULL",
+          "checksum": "881306bc301ea5b3ea1308a55c31a0a382dcc94f6540559ac216703103435dae",
+          "before": "92546dbdc0df5cf55d8ea2b3ddecf024f9e9a57857989dea0f2a1a9bbbb3d458",
+          "after": "c0ee5aac2670b0f8c0837784e731f6a8fef472075c35c0ce4378b3d70504e021"
+        },
+        {
+          "name": "node_privd_attestation_keys_times_backfill",
+          "object": "node_privd_attestation_keys",
+          "kind": "data",
+          "sql": "UPDATE `node_privd_attestation_keys` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_approved_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`approved_at`),`logical_activated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`activated_at`),`logical_valid_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`valid_until`),`logical_revoked_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`)",
+          "checksum": "9716b882728c7680651080bfb782dd35f0c0cb0d81249efb8ffd982f11033f92",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_privd_attestation_keys` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`approved_at` IS NOT NULL AND source.`logical_approved_at` IS NULL) OR NOT(source.`logical_approved_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`approved_at`)) OR (source.`activated_at` IS NOT NULL AND source.`logical_activated_at` IS NULL) OR NOT(source.`logical_activated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`activated_at`)) OR (source.`valid_until` IS NOT NULL AND source.`logical_valid_until` IS NULL) OR NOT(source.`logical_valid_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`valid_until`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_privd_attestation_keys_times_switch",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` DROP CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check,DROP CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check1,DROP INDEX node_privd_attestation_keys_active_idx,DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_privd_attestation_keys_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `approved_at`,CHANGE COLUMN `logical_approved_at` `approved_at` BIGINT NOT NULL,ADD CONSTRAINT `node_privd_attestation_keys_approved_at_range` CHECK (`approved_at` IS NULL OR `approved_at` IN (-9223372036854775808,9223372036854775807) OR (`approved_at`\u003e=-211813488000000000 AND `approved_at`\u003c9223371331200000000)),DROP COLUMN `activated_at`,CHANGE COLUMN `logical_activated_at` `activated_at` BIGINT NOT NULL,ADD CONSTRAINT `node_privd_attestation_keys_activated_at_range` CHECK (`activated_at` IS NULL OR `activated_at` IN (-9223372036854775808,9223372036854775807) OR (`activated_at`\u003e=-211813488000000000 AND `activated_at`\u003c9223371331200000000)),DROP COLUMN `valid_until`,CHANGE COLUMN `logical_valid_until` `valid_until` BIGINT NULL,ADD CONSTRAINT `node_privd_attestation_keys_valid_until_range` CHECK (`valid_until` IS NULL OR `valid_until` IN (-9223372036854775808,9223372036854775807) OR (`valid_until`\u003e=-211813488000000000 AND `valid_until`\u003c9223371331200000000)),DROP COLUMN `revoked_at`,CHANGE COLUMN `logical_revoked_at` `revoked_at` BIGINT NULL,ADD CONSTRAINT `node_privd_attestation_keys_revoked_at_range` CHECK (`revoked_at` IS NULL OR `revoked_at` IN (-9223372036854775808,9223372036854775807) OR (`revoked_at`\u003e=-211813488000000000 AND `revoked_at`\u003c9223371331200000000)),ADD CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check CHECK (valid_until IS NULL OR valid_until\u003e=activated_at),ADD CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check1 CHECK ((state='revoked')=(revoked_at IS NOT NULL)),ADD KEY node_privd_attestation_keys_active_idx(node_id,state,activated_at)",
+          "checksum": "b9d80a6e31a897deaba678a94c73e601e76b38f6308a51dba31531139dacf7a1",
+          "before": "c0ee5aac2670b0f8c0837784e731f6a8fef472075c35c0ce4378b3d70504e021",
+          "after": "997370f4a27613d4b35215d1828899ab098f4c30fcef1bda82ff90a73a89c804",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_privd_attestation_keys` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`approved_at` IS NOT NULL AND source.`logical_approved_at` IS NULL) OR NOT(source.`logical_approved_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`approved_at`)) OR (source.`activated_at` IS NOT NULL AND source.`logical_activated_at` IS NULL) OR NOT(source.`logical_activated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`activated_at`)) OR (source.`valid_until` IS NOT NULL AND source.`logical_valid_until` IS NULL) OR NOT(source.`logical_valid_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`valid_until`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v6_attest_key_insert",
+          "object": "migrate_v6_attest_key_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_key_insert`",
+          "checksum": "1f2815d24e6e22acac0635762f6366bbbdfba3af02ef2157f9321386edc03c4d",
+          "before": "95e890fe45cf67215f104acf96bafab109bd4c305fac4853ae23814e4b02813d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_key_update",
+          "object": "migrate_v6_attest_key_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_key_update`",
+          "checksum": "c56b0ab8ded0da380a294dc0b86c6427faf2239d418948109d3eab194ea957e3",
+          "before": "5572f4787550ebf0d1174ead54d3c59be9c50ade718b38c501f9b2bfc4af20fb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_key_delete",
+          "object": "migrate_v6_attest_key_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_key_delete`",
+          "checksum": "dae919a6dee1bcbfb6a8c918fac4eafdd8701454abeddde74e2b83210d8bb2b0",
+          "before": "d9c2cfb066b3794e144bf4ccec40938284fc6d54a873c6820836dbefcf38d390",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "migrate_v6_attest_credential_insert",
+          "object": "migrate_v6_attest_credential_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_credential_insert` BEFORE INSERT ON `privd_attestation_enrollment_credentials` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "bffc897be2d844011bfc1130151fd6e4e0270645243420a70780d432c959e150",
+          "before": "",
+          "after": "79edeabd5ac8c7078d897144251fc4369e52548ce575ce4214204499e4fd9752"
+        },
+        {
+          "name": "migrate_v6_attest_credential_update",
+          "object": "migrate_v6_attest_credential_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_credential_update` BEFORE UPDATE ON `privd_attestation_enrollment_credentials` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "90eb8932b9644754dea951adf7796e5995cd456ca2ad5f9f9bb1cb3fe540abcd",
+          "before": "",
+          "after": "13011e2afe811a2541f555a3683f74be8db52fb1a28e0686d03f4497decfd67d"
+        },
+        {
+          "name": "migrate_v6_attest_credential_delete",
+          "object": "migrate_v6_attest_credential_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_credential_delete` BEFORE DELETE ON `privd_attestation_enrollment_credentials` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "667d75f931ebd95f57e4c78a8205cb4a457dcf167a75caa5feaebb9cda0ed944",
+          "before": "",
+          "after": "b1dd42b54ea707c6cf133665b2cebc7d2a24f016e82959373f32d6c2f7977172"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_expires_at_column",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "79d24a958c125a2a09f07108b350aff76896bbc750b2ee0a832c8ea1e55e5ad4",
+          "before": "8472cceaa595d07d9c50c119ae6a954711d3ba5ca82faab99d6f27de1df1ec30",
+          "after": "9c7a55b072074415f0157578b39e91ad756c8728da2f8e83fee19afd995655b3"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_consumed_at_column",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "c2472410c9bb407561647e355dcb40f7ee37032ba79cf179a1bc7d1e32c43bcc",
+          "before": "9c7a55b072074415f0157578b39e91ad756c8728da2f8e83fee19afd995655b3",
+          "after": "561d06bce687c4af229767f663ee3581e55bcead53ca2e8236c382dd75753baf"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_created_at_column",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "7c03359705b82c116377f4addc78f25d6fa2305ef58fa5984c4f0528f0c89cbd",
+          "before": "561d06bce687c4af229767f663ee3581e55bcead53ca2e8236c382dd75753baf",
+          "after": "0d67f2e718a692b91c28ecaef8971e018bcc2b3920cc35eeda84d6509f740d88"
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_times_backfill",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "data",
+          "sql": "UPDATE `privd_attestation_enrollment_credentials` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "a6f50a059a226cacbdd14192d963751a11ff1690ce7b35d214e1e854e0ebd331",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `privd_attestation_enrollment_credentials` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "privd_attestation_enrollment_credentials_times_switch",
+          "object": "privd_attestation_enrollment_credentials",
+          "kind": "table",
+          "sql": "ALTER TABLE `privd_attestation_enrollment_credentials` DROP CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_96cebf9d41c4,DROP CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_4f7a46e8df72,DROP INDEX privd_attestation_credentials_node_active_idx,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `privd_attestation_enrollment_credentials_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `privd_attestation_enrollment_credentials_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL DEFAULT (TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',CURRENT_TIMESTAMP(6))),ADD CONSTRAINT `privd_attestation_enrollment_credentials_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),ADD CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_96cebf9d41c4 CHECK (expires_at\u003ecreated_at),ADD CONSTRAINT privd_attestation_enrollment_credentials_privd_atte_4f7a46e8df72 CHECK (consumed_at IS NULL OR consumed_at\u003e=created_at),ADD KEY privd_attestation_credentials_node_active_idx(node_id,expires_at)",
+          "checksum": "6e2b8030b04ed4fd3f6b6195f6c5114ee72a1065fee0c096aff9e40f30c037b8",
+          "before": "0d67f2e718a692b91c28ecaef8971e018bcc2b3920cc35eeda84d6509f740d88",
+          "after": "d7b98575f47ac99996ae27743ffbc73b4767a2ba5d1a08829e42027021332fe2",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `privd_attestation_enrollment_credentials` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v6_attest_credential_insert",
+          "object": "migrate_v6_attest_credential_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_credential_insert`",
+          "checksum": "0d1536018d64f359a5584e26d0fe099d93c51d0db24483769563697736be0989",
+          "before": "79edeabd5ac8c7078d897144251fc4369e52548ce575ce4214204499e4fd9752",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_credential_update",
+          "object": "migrate_v6_attest_credential_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_credential_update`",
+          "checksum": "aec99f47bec7e40928d773fc48df79af31700b0604d7c0ffdeeb8eb4c47ce5f8",
+          "before": "13011e2afe811a2541f555a3683f74be8db52fb1a28e0686d03f4497decfd67d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_credential_delete",
+          "object": "migrate_v6_attest_credential_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_credential_delete`",
+          "checksum": "1d3bf9f1a8beaa980c45463dc741a725ecead0cce6efa2e0803f4e83d73cb7e4",
+          "before": "b1dd42b54ea707c6cf133665b2cebc7d2a24f016e82959373f32d6c2f7977172",
+          "after": ""
+        },
+        {
+          "name": "migrate_v6_attest_key_insert",
+          "object": "migrate_v6_attest_key_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_key_insert` BEFORE INSERT ON `node_privd_attestation_keys` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "91bd7ccc2d492be20941766f2e9fe26d0f9e91ea52534e16977acbe3a679510e",
+          "before": "",
+          "after": "95e890fe45cf67215f104acf96bafab109bd4c305fac4853ae23814e4b02813d"
+        },
+        {
+          "name": "migrate_v6_attest_key_update",
+          "object": "migrate_v6_attest_key_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_key_update` BEFORE UPDATE ON `node_privd_attestation_keys` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "12ffb4a6580d3640f2343f066e3e042b8605b60b1fec52e18ddf2a8fea6a91f2",
+          "before": "",
+          "after": "5572f4787550ebf0d1174ead54d3c59be9c50ade718b38c501f9b2bfc4af20fb"
+        },
+        {
+          "name": "migrate_v6_attest_key_delete",
+          "object": "migrate_v6_attest_key_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v6_attest_key_delete` BEFORE DELETE ON `node_privd_attestation_keys` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b320f3d17a31a45be7a827e8e092a8aac0997e57af15b490989d8fc91493550d",
+          "before": "",
+          "after": "d9c2cfb066b3794e144bf4ccec40938284fc6d54a873c6820836dbefcf38d390"
+        },
+        {
+          "name": "node_privd_attestation_keys_created_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "18b77c3d9c55373dc8ca99a0fc3a0d80933d303351ab435c881ed64324ff292c",
+          "before": "539071c58bc2651c4dca1ceac0daabe5caea409346f5cbb22d1b5ae67ed802bb",
+          "after": "a9e3fe6bcd84c12052cf25d9669f58ff6d09787710aeba2e75ab214fbfcba7a9"
+        },
+        {
+          "name": "node_privd_attestation_keys_approved_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_approved_at` BIGINT NULL",
+          "checksum": "bf4e30cc8f4be03f9ceb5ea53aed40bb4fee682fc88e8f0fb173f56e4976ef77",
+          "before": "a9e3fe6bcd84c12052cf25d9669f58ff6d09787710aeba2e75ab214fbfcba7a9",
+          "after": "4238ac832dda5ec242d49e659e396e8674d051a359add01353e75193c68fdc9a"
+        },
+        {
+          "name": "node_privd_attestation_keys_activated_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_activated_at` BIGINT NULL",
+          "checksum": "af18b77af9bb10fb4189af1b333c3d78dc9bad8e7228c1170cbcc315591c45b3",
+          "before": "4238ac832dda5ec242d49e659e396e8674d051a359add01353e75193c68fdc9a",
+          "after": "290a9112f22d1ca10938086967342dafb53339fca8d4a938c0fda21b5f4328b4"
+        },
+        {
+          "name": "node_privd_attestation_keys_valid_until_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_valid_until` BIGINT NULL",
+          "checksum": "90250dbd4a24f5b1db7dc3b0b5dcf5b065df53e4ff5e9787b6af807c3a7f15f9",
+          "before": "290a9112f22d1ca10938086967342dafb53339fca8d4a938c0fda21b5f4328b4",
+          "after": "b1e3f6c27cc07d4c15fe4af1a825b3841e6654280915b46a4973fad40c5b6512"
+        },
+        {
+          "name": "node_privd_attestation_keys_revoked_at_column",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` ADD COLUMN `logical_revoked_at` BIGINT NULL",
+          "checksum": "881306bc301ea5b3ea1308a55c31a0a382dcc94f6540559ac216703103435dae",
+          "before": "b1e3f6c27cc07d4c15fe4af1a825b3841e6654280915b46a4973fad40c5b6512",
+          "after": "51046573fb8f4434c51a55d7796c8386d275552ce167d50c496c8046ba9ff4ed"
+        },
+        {
+          "name": "node_privd_attestation_keys_times_backfill",
+          "object": "node_privd_attestation_keys",
+          "kind": "data",
+          "sql": "UPDATE `node_privd_attestation_keys` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_approved_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`approved_at`),`logical_activated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`activated_at`),`logical_valid_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`valid_until`),`logical_revoked_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`)",
+          "checksum": "9716b882728c7680651080bfb782dd35f0c0cb0d81249efb8ffd982f11033f92",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_privd_attestation_keys` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`approved_at` IS NOT NULL AND source.`logical_approved_at` IS NULL) OR NOT(source.`logical_approved_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`approved_at`)) OR (source.`activated_at` IS NOT NULL AND source.`logical_activated_at` IS NULL) OR NOT(source.`logical_activated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`activated_at`)) OR (source.`valid_until` IS NOT NULL AND source.`logical_valid_until` IS NULL) OR NOT(source.`logical_valid_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`valid_until`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "node_privd_attestation_keys_times_switch",
+          "object": "node_privd_attestation_keys",
+          "kind": "table",
+          "sql": "ALTER TABLE `node_privd_attestation_keys` DROP CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check,DROP CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check1,DROP INDEX node_privd_attestation_keys_active_idx,DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `node_privd_attestation_keys_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `approved_at`,CHANGE COLUMN `logical_approved_at` `approved_at` BIGINT NOT NULL,ADD CONSTRAINT `node_privd_attestation_keys_approved_at_range` CHECK (`approved_at` IS NULL OR `approved_at` IN (-9223372036854775808,9223372036854775807) OR (`approved_at`\u003e=-211813488000000000 AND `approved_at`\u003c9223371331200000000)),DROP COLUMN `activated_at`,CHANGE COLUMN `logical_activated_at` `activated_at` BIGINT NOT NULL,ADD CONSTRAINT `node_privd_attestation_keys_activated_at_range` CHECK (`activated_at` IS NULL OR `activated_at` IN (-9223372036854775808,9223372036854775807) OR (`activated_at`\u003e=-211813488000000000 AND `activated_at`\u003c9223371331200000000)),DROP COLUMN `valid_until`,CHANGE COLUMN `logical_valid_until` `valid_until` BIGINT NULL,ADD CONSTRAINT `node_privd_attestation_keys_valid_until_range` CHECK (`valid_until` IS NULL OR `valid_until` IN (-9223372036854775808,9223372036854775807) OR (`valid_until`\u003e=-211813488000000000 AND `valid_until`\u003c9223371331200000000)),DROP COLUMN `revoked_at`,CHANGE COLUMN `logical_revoked_at` `revoked_at` BIGINT NULL,ADD CONSTRAINT `node_privd_attestation_keys_revoked_at_range` CHECK (`revoked_at` IS NULL OR `revoked_at` IN (-9223372036854775808,9223372036854775807) OR (`revoked_at`\u003e=-211813488000000000 AND `revoked_at`\u003c9223371331200000000)),ADD CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check CHECK (valid_until IS NULL OR valid_until\u003e=activated_at),ADD CONSTRAINT node_privd_attestation_keys_node_privd_attestation_keys_check1 CHECK ((state='revoked')=(revoked_at IS NOT NULL)),ADD KEY node_privd_attestation_keys_active_idx(node_id,state,activated_at)",
+          "checksum": "b9d80a6e31a897deaba678a94c73e601e76b38f6308a51dba31531139dacf7a1",
+          "before": "51046573fb8f4434c51a55d7796c8386d275552ce167d50c496c8046ba9ff4ed",
+          "after": "e1d3b2df92ffe95205120116fab0930268c0cd7d98525f5e0a9ff6c366dfb051",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `node_privd_attestation_keys` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`approved_at` IS NOT NULL AND source.`logical_approved_at` IS NULL) OR NOT(source.`logical_approved_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`approved_at`)) OR (source.`activated_at` IS NOT NULL AND source.`logical_activated_at` IS NULL) OR NOT(source.`logical_activated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`activated_at`)) OR (source.`valid_until` IS NOT NULL AND source.`logical_valid_until` IS NULL) OR NOT(source.`logical_valid_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`valid_until`)) OR (source.`revoked_at` IS NOT NULL AND source.`logical_revoked_at` IS NULL) OR NOT(source.`logical_revoked_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`revoked_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v6_attest_key_insert",
+          "object": "migrate_v6_attest_key_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_key_insert`",
+          "checksum": "1f2815d24e6e22acac0635762f6366bbbdfba3af02ef2157f9321386edc03c4d",
+          "before": "95e890fe45cf67215f104acf96bafab109bd4c305fac4853ae23814e4b02813d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_key_update",
+          "object": "migrate_v6_attest_key_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_key_update`",
+          "checksum": "c56b0ab8ded0da380a294dc0b86c6427faf2239d418948109d3eab194ea957e3",
+          "before": "5572f4787550ebf0d1174ead54d3c59be9c50ade718b38c501f9b2bfc4af20fb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v6_attest_key_delete",
+          "object": "migrate_v6_attest_key_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v6_attest_key_delete`",
+          "checksum": "dae919a6dee1bcbfb6a8c918fac4eafdd8701454abeddde74e2b83210d8bb2b0",
+          "before": "d9c2cfb066b3794e144bf4ccec40938284fc6d54a873c6820836dbefcf38d390",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

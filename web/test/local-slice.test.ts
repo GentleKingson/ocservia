@@ -31,8 +31,8 @@ const operation = (
   id,
   state,
   version: 1,
-  createdAt: new Date(0),
-  updatedAt: new Date(0),
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString(),
 });
 
 const operationPage = (...items: Operation[]): OperationPage => ({
@@ -60,7 +60,7 @@ const event = (id: string, nodeId: string): PlatformEvent => ({
   nodeId,
   type: "connected",
   traceparent: "00-00000000000000000000000000000000-0000000000000000-01",
-  occurredAt: new Date(0),
+  occurredAt: new Date(0).toISOString(),
 });
 
 describe("local slice operation reconciliation", () => {

@@ -1,0 +1,393 @@
+{
+  "version": 22,
+  "previous_checksum": "4dee90d40568df0fb32d40d9aece8861458cb8f36091c4622b863b22dc0b57eb",
+  "engine": "mariadb",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_user_usage_cursors_insert",
+          "object": "migrate_v4_time_user_usage_cursors_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_user_usage_cursors_insert` BEFORE INSERT ON `user_usage_cursors` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1a95bc0bbf6119d5def83c7ed3a21321e89548bbe2cb689e63cec82074dafb41",
+          "before": "",
+          "after": "c6251d4b5ac5983a9685e65dfa05ffd6cecf7e10ebb9996046abe6310d6e00cb"
+        },
+        {
+          "name": "migrate_v4_time_user_usage_cursors_update",
+          "object": "migrate_v4_time_user_usage_cursors_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_user_usage_cursors_update` BEFORE UPDATE ON `user_usage_cursors` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c733bb679d44abd681d6d6b04ffd61c2ad88019b4cb833049ceefa201126219c",
+          "before": "",
+          "after": "600b283a16965e94cde78ed70eeced5f67040f68ec971347d507556b592842fb"
+        },
+        {
+          "name": "migrate_v4_time_user_usage_cursors_delete",
+          "object": "migrate_v4_time_user_usage_cursors_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_user_usage_cursors_delete` BEFORE DELETE ON `user_usage_cursors` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c6e25bbc92705b89a07020d7df319a32cd53f2c29714001d9b6f13c67bca948b",
+          "before": "",
+          "after": "e18dd135eaee5625ebaafb7122bdc99df37d153e89556e443da1f3bd916f2b94"
+        },
+        {
+          "name": "user_usage_cursors_connected_at_column",
+          "object": "user_usage_cursors",
+          "kind": "table",
+          "sql": "ALTER TABLE `user_usage_cursors` ADD COLUMN `logical_connected_at` BIGINT NULL",
+          "checksum": "50b6c15fed784bd7f2d6c9c47bacd6a6dfb491106aaaee0bb1102ac9b52b5609",
+          "before": "3c2d9418e2cf00918aa36f41c65cc729399f9f203b85396420e695cde0a86cc5",
+          "after": "fa3198463c464f839ee98e9579fe4b8c114a6f9b5b8956e8f8cb91701ab2c4e7"
+        },
+        {
+          "name": "user_usage_cursors_observed_at_column",
+          "object": "user_usage_cursors",
+          "kind": "table",
+          "sql": "ALTER TABLE `user_usage_cursors` ADD COLUMN `logical_observed_at` BIGINT NULL",
+          "checksum": "3c9755c413ef3fb2cb107b2a11e38a1683a60a5248cc3c960d866a0c87df3718",
+          "before": "fa3198463c464f839ee98e9579fe4b8c114a6f9b5b8956e8f8cb91701ab2c4e7",
+          "after": "b4a75c6565ee6ba10487f3c8fc0b3585d532eeab65d10535c91f30876c98677f"
+        },
+        {
+          "name": "user_usage_cursors_times_backfill",
+          "object": "user_usage_cursors",
+          "kind": "data",
+          "sql": "UPDATE `user_usage_cursors` source SET `logical_connected_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`connected_at`),`logical_observed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`)",
+          "checksum": "1db3eeedd0e4eac0f1debf96ab7b7357793f345f590dd98c2f4ba462249cc345",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `user_usage_cursors` source WHERE (source.`connected_at` IS NOT NULL AND source.`logical_connected_at` IS NULL) OR NOT(source.`logical_connected_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`connected_at`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "user_usage_cursors_times_switch",
+          "object": "user_usage_cursors",
+          "kind": "table",
+          "sql": "ALTER TABLE `user_usage_cursors` DROP PRIMARY KEY,DROP COLUMN `connected_at`,CHANGE COLUMN `logical_connected_at` `connected_at` BIGINT NOT NULL,ADD CONSTRAINT `user_usage_cursors_connected_at_range` CHECK (`connected_at` IS NULL OR `connected_at` IN (-9223372036854775808,9223372036854775807) OR (`connected_at`\u003e=-211813488000000000 AND `connected_at`\u003c9223371331200000000)),DROP COLUMN `observed_at`,CHANGE COLUMN `logical_observed_at` `observed_at` BIGINT NOT NULL,ADD CONSTRAINT `user_usage_cursors_observed_at_range` CHECK (`observed_at` IS NULL OR `observed_at` IN (-9223372036854775808,9223372036854775807) OR (`observed_at`\u003e=-211813488000000000 AND `observed_at`\u003c9223371331200000000)),ADD PRIMARY KEY(node_id,session_id,connected_at)",
+          "checksum": "41e67aff2f712e2468ceb9999330d8b358a721c1a3e229dbbcee19177164b067",
+          "before": "b4a75c6565ee6ba10487f3c8fc0b3585d532eeab65d10535c91f30876c98677f",
+          "after": "b005f415ee479cc491bf1f78ed3b3dd11650593a7c5ea0a4561f896b790e9c64",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `user_usage_cursors` source WHERE (source.`connected_at` IS NOT NULL AND source.`logical_connected_at` IS NULL) OR NOT(source.`logical_connected_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`connected_at`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_user_usage_cursors_insert",
+          "object": "migrate_v4_time_user_usage_cursors_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_user_usage_cursors_insert`",
+          "checksum": "7f59ea59bae83b68cc8fb20fa849e53f7dfd35464cd5a3be38e8442671ad0054",
+          "before": "c6251d4b5ac5983a9685e65dfa05ffd6cecf7e10ebb9996046abe6310d6e00cb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_user_usage_cursors_update",
+          "object": "migrate_v4_time_user_usage_cursors_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_user_usage_cursors_update`",
+          "checksum": "904372975416717172aa33bef3355c73df402d35513c7ef9f0628c6029a06b99",
+          "before": "600b283a16965e94cde78ed70eeced5f67040f68ec971347d507556b592842fb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_user_usage_cursors_delete",
+          "object": "migrate_v4_time_user_usage_cursors_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_user_usage_cursors_delete`",
+          "checksum": "e2a4512b93da7a336619d1e2cdee59ad1ecf53cd2d903046ab1a5639fc0488bb",
+          "before": "e18dd135eaee5625ebaafb7122bdc99df37d153e89556e443da1f3bd916f2b94",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_observed_user_usage_insert",
+          "object": "migrate_v4_time_observed_user_usage_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_observed_user_usage_insert` BEFORE INSERT ON `observed_user_usage` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "47e44c61af2f8457f292daf3ed225ac45f5221f9c2466fc0a9b0064d73c58f7d",
+          "before": "",
+          "after": "b9c9f0ee3f4e993580955798401c5ed09b6edfd78b0aefe6cff30ed5b107a31a"
+        },
+        {
+          "name": "migrate_v4_time_observed_user_usage_update",
+          "object": "migrate_v4_time_observed_user_usage_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_observed_user_usage_update` BEFORE UPDATE ON `observed_user_usage` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "8720f0e2e99e5529295cdccbd7996f032b8c16668cfd2cd1c3ac4dc3990befa9",
+          "before": "",
+          "after": "08ad53eba6d183f82673aa715948f20379f6cd2d8f4ea69cc0248744ecec0b60"
+        },
+        {
+          "name": "migrate_v4_time_observed_user_usage_delete",
+          "object": "migrate_v4_time_observed_user_usage_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_observed_user_usage_delete` BEFORE DELETE ON `observed_user_usage` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d38a22a993ef4243856c3649f274689b34bc3945b322ad8b4deccc21b9ff7817",
+          "before": "",
+          "after": "f00f92f7139c5a072af7a9550c327a2394c495bd559777a12004585c262cec8e"
+        },
+        {
+          "name": "observed_user_usage_period_start_column",
+          "object": "observed_user_usage",
+          "kind": "table",
+          "sql": "ALTER TABLE `observed_user_usage` ADD COLUMN `logical_period_start` BIGINT NULL",
+          "checksum": "4587f327cac6e812e6b09e49ba9f84642db933e22ef28ac83c7814c4778e33ae",
+          "before": "2cd07d173d903e12e96b390be12289fc41503d6715d6718c2a3bfc119d87580c",
+          "after": "ec98c1add38b38fd1b7d1ea9029b522ba9001a9482fb414276d1b0d1450a2ff6"
+        },
+        {
+          "name": "observed_user_usage_observed_at_column",
+          "object": "observed_user_usage",
+          "kind": "table",
+          "sql": "ALTER TABLE `observed_user_usage` ADD COLUMN `logical_observed_at` BIGINT NULL",
+          "checksum": "e525ae3405f1b1e3c955000fafff8495c087b7c54f2939e33f4619aa3dfc35f7",
+          "before": "ec98c1add38b38fd1b7d1ea9029b522ba9001a9482fb414276d1b0d1450a2ff6",
+          "after": "0f4d318d8970e28bbdbe6bf162e66efded71aca19a0aaea3f25ba74db24cf0ce"
+        },
+        {
+          "name": "observed_user_usage_times_backfill",
+          "object": "observed_user_usage",
+          "kind": "data",
+          "sql": "UPDATE `observed_user_usage` source SET `logical_period_start`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`period_start`),`logical_observed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`)",
+          "checksum": "9119ca7085d301a0b3dd0698f90c4c336a46fcb9c6b938130037174590081a26",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `observed_user_usage` source WHERE (source.`period_start` IS NOT NULL AND source.`logical_period_start` IS NULL) OR NOT(source.`logical_period_start` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`period_start`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "observed_user_usage_times_switch",
+          "object": "observed_user_usage",
+          "kind": "table",
+          "sql": "ALTER TABLE `observed_user_usage` DROP PRIMARY KEY,DROP COLUMN `period_start`,CHANGE COLUMN `logical_period_start` `period_start` BIGINT NOT NULL,ADD CONSTRAINT `observed_user_usage_period_start_range` CHECK (`period_start` IS NULL OR `period_start` IN (-9223372036854775808,9223372036854775807) OR (`period_start`\u003e=-211813488000000000 AND `period_start`\u003c9223371331200000000)),DROP COLUMN `observed_at`,CHANGE COLUMN `logical_observed_at` `observed_at` BIGINT NOT NULL,ADD CONSTRAINT `observed_user_usage_observed_at_range` CHECK (`observed_at` IS NULL OR `observed_at` IN (-9223372036854775808,9223372036854775807) OR (`observed_at`\u003e=-211813488000000000 AND `observed_at`\u003c9223371331200000000)),ADD PRIMARY KEY(node_id,username,period,period_start)",
+          "checksum": "35a76b7f67a89bfd9b1ee69e12e4c653c34a8599c8467d9c2a701b7ec4531f9f",
+          "before": "0f4d318d8970e28bbdbe6bf162e66efded71aca19a0aaea3f25ba74db24cf0ce",
+          "after": "5842f8132658b6f6eb6bc8a092c5d6edcb4762da8d134ce4dc9af36f3b3901bb",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `observed_user_usage` source WHERE (source.`period_start` IS NOT NULL AND source.`logical_period_start` IS NULL) OR NOT(source.`logical_period_start` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`period_start`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_observed_user_usage_insert",
+          "object": "migrate_v4_time_observed_user_usage_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_observed_user_usage_insert`",
+          "checksum": "348021938de5ae3906caf9a19b122a645fee6c903ec55a04619f2c2f42ca5178",
+          "before": "b9c9f0ee3f4e993580955798401c5ed09b6edfd78b0aefe6cff30ed5b107a31a",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_observed_user_usage_update",
+          "object": "migrate_v4_time_observed_user_usage_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_observed_user_usage_update`",
+          "checksum": "15051880dfb1c2a00705325a49774f96945ca14437cfc8c6f267f016787e9789",
+          "before": "08ad53eba6d183f82673aa715948f20379f6cd2d8f4ea69cc0248744ecec0b60",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_observed_user_usage_delete",
+          "object": "migrate_v4_time_observed_user_usage_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_observed_user_usage_delete`",
+          "checksum": "e10866b5bc7dd3382b979685e98f5a32e0418436ce699db4be9f64fd62df86c1",
+          "before": "f00f92f7139c5a072af7a9550c327a2394c495bd559777a12004585c262cec8e",
+          "after": ""
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_user_usage_cursors_insert",
+          "object": "migrate_v4_time_user_usage_cursors_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_user_usage_cursors_insert` BEFORE INSERT ON `user_usage_cursors` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1a95bc0bbf6119d5def83c7ed3a21321e89548bbe2cb689e63cec82074dafb41",
+          "before": "",
+          "after": "c6251d4b5ac5983a9685e65dfa05ffd6cecf7e10ebb9996046abe6310d6e00cb"
+        },
+        {
+          "name": "migrate_v4_time_user_usage_cursors_update",
+          "object": "migrate_v4_time_user_usage_cursors_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_user_usage_cursors_update` BEFORE UPDATE ON `user_usage_cursors` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c733bb679d44abd681d6d6b04ffd61c2ad88019b4cb833049ceefa201126219c",
+          "before": "",
+          "after": "600b283a16965e94cde78ed70eeced5f67040f68ec971347d507556b592842fb"
+        },
+        {
+          "name": "migrate_v4_time_user_usage_cursors_delete",
+          "object": "migrate_v4_time_user_usage_cursors_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_user_usage_cursors_delete` BEFORE DELETE ON `user_usage_cursors` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c6e25bbc92705b89a07020d7df319a32cd53f2c29714001d9b6f13c67bca948b",
+          "before": "",
+          "after": "e18dd135eaee5625ebaafb7122bdc99df37d153e89556e443da1f3bd916f2b94"
+        },
+        {
+          "name": "user_usage_cursors_connected_at_column",
+          "object": "user_usage_cursors",
+          "kind": "table",
+          "sql": "ALTER TABLE `user_usage_cursors` ADD COLUMN `logical_connected_at` BIGINT NULL",
+          "checksum": "50b6c15fed784bd7f2d6c9c47bacd6a6dfb491106aaaee0bb1102ac9b52b5609",
+          "before": "3c2d9418e2cf00918aa36f41c65cc729399f9f203b85396420e695cde0a86cc5",
+          "after": "fa3198463c464f839ee98e9579fe4b8c114a6f9b5b8956e8f8cb91701ab2c4e7"
+        },
+        {
+          "name": "user_usage_cursors_observed_at_column",
+          "object": "user_usage_cursors",
+          "kind": "table",
+          "sql": "ALTER TABLE `user_usage_cursors` ADD COLUMN `logical_observed_at` BIGINT NULL",
+          "checksum": "3c9755c413ef3fb2cb107b2a11e38a1683a60a5248cc3c960d866a0c87df3718",
+          "before": "fa3198463c464f839ee98e9579fe4b8c114a6f9b5b8956e8f8cb91701ab2c4e7",
+          "after": "b4a75c6565ee6ba10487f3c8fc0b3585d532eeab65d10535c91f30876c98677f"
+        },
+        {
+          "name": "user_usage_cursors_times_backfill",
+          "object": "user_usage_cursors",
+          "kind": "data",
+          "sql": "UPDATE `user_usage_cursors` source SET `logical_connected_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`connected_at`),`logical_observed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`)",
+          "checksum": "1db3eeedd0e4eac0f1debf96ab7b7357793f345f590dd98c2f4ba462249cc345",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `user_usage_cursors` source WHERE (source.`connected_at` IS NOT NULL AND source.`logical_connected_at` IS NULL) OR NOT(source.`logical_connected_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`connected_at`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "user_usage_cursors_times_switch",
+          "object": "user_usage_cursors",
+          "kind": "table",
+          "sql": "ALTER TABLE `user_usage_cursors` DROP PRIMARY KEY,DROP COLUMN `connected_at`,CHANGE COLUMN `logical_connected_at` `connected_at` BIGINT NOT NULL,ADD CONSTRAINT `user_usage_cursors_connected_at_range` CHECK (`connected_at` IS NULL OR `connected_at` IN (-9223372036854775808,9223372036854775807) OR (`connected_at`\u003e=-211813488000000000 AND `connected_at`\u003c9223371331200000000)),DROP COLUMN `observed_at`,CHANGE COLUMN `logical_observed_at` `observed_at` BIGINT NOT NULL,ADD CONSTRAINT `user_usage_cursors_observed_at_range` CHECK (`observed_at` IS NULL OR `observed_at` IN (-9223372036854775808,9223372036854775807) OR (`observed_at`\u003e=-211813488000000000 AND `observed_at`\u003c9223371331200000000)),ADD PRIMARY KEY(node_id,session_id,connected_at)",
+          "checksum": "41e67aff2f712e2468ceb9999330d8b358a721c1a3e229dbbcee19177164b067",
+          "before": "b4a75c6565ee6ba10487f3c8fc0b3585d532eeab65d10535c91f30876c98677f",
+          "after": "b005f415ee479cc491bf1f78ed3b3dd11650593a7c5ea0a4561f896b790e9c64",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `user_usage_cursors` source WHERE (source.`connected_at` IS NOT NULL AND source.`logical_connected_at` IS NULL) OR NOT(source.`logical_connected_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`connected_at`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_user_usage_cursors_insert",
+          "object": "migrate_v4_time_user_usage_cursors_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_user_usage_cursors_insert`",
+          "checksum": "7f59ea59bae83b68cc8fb20fa849e53f7dfd35464cd5a3be38e8442671ad0054",
+          "before": "c6251d4b5ac5983a9685e65dfa05ffd6cecf7e10ebb9996046abe6310d6e00cb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_user_usage_cursors_update",
+          "object": "migrate_v4_time_user_usage_cursors_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_user_usage_cursors_update`",
+          "checksum": "904372975416717172aa33bef3355c73df402d35513c7ef9f0628c6029a06b99",
+          "before": "600b283a16965e94cde78ed70eeced5f67040f68ec971347d507556b592842fb",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_user_usage_cursors_delete",
+          "object": "migrate_v4_time_user_usage_cursors_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_user_usage_cursors_delete`",
+          "checksum": "e2a4512b93da7a336619d1e2cdee59ad1ecf53cd2d903046ab1a5639fc0488bb",
+          "before": "e18dd135eaee5625ebaafb7122bdc99df37d153e89556e443da1f3bd916f2b94",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_observed_user_usage_insert",
+          "object": "migrate_v4_time_observed_user_usage_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_observed_user_usage_insert` BEFORE INSERT ON `observed_user_usage` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "47e44c61af2f8457f292daf3ed225ac45f5221f9c2466fc0a9b0064d73c58f7d",
+          "before": "",
+          "after": "b9c9f0ee3f4e993580955798401c5ed09b6edfd78b0aefe6cff30ed5b107a31a"
+        },
+        {
+          "name": "migrate_v4_time_observed_user_usage_update",
+          "object": "migrate_v4_time_observed_user_usage_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_observed_user_usage_update` BEFORE UPDATE ON `observed_user_usage` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "8720f0e2e99e5529295cdccbd7996f032b8c16668cfd2cd1c3ac4dc3990befa9",
+          "before": "",
+          "after": "08ad53eba6d183f82673aa715948f20379f6cd2d8f4ea69cc0248744ecec0b60"
+        },
+        {
+          "name": "migrate_v4_time_observed_user_usage_delete",
+          "object": "migrate_v4_time_observed_user_usage_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_observed_user_usage_delete` BEFORE DELETE ON `observed_user_usage` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d38a22a993ef4243856c3649f274689b34bc3945b322ad8b4deccc21b9ff7817",
+          "before": "",
+          "after": "f00f92f7139c5a072af7a9550c327a2394c495bd559777a12004585c262cec8e"
+        },
+        {
+          "name": "observed_user_usage_period_start_column",
+          "object": "observed_user_usage",
+          "kind": "table",
+          "sql": "ALTER TABLE `observed_user_usage` ADD COLUMN `logical_period_start` BIGINT NULL",
+          "checksum": "4587f327cac6e812e6b09e49ba9f84642db933e22ef28ac83c7814c4778e33ae",
+          "before": "2cd07d173d903e12e96b390be12289fc41503d6715d6718c2a3bfc119d87580c",
+          "after": "ec98c1add38b38fd1b7d1ea9029b522ba9001a9482fb414276d1b0d1450a2ff6"
+        },
+        {
+          "name": "observed_user_usage_observed_at_column",
+          "object": "observed_user_usage",
+          "kind": "table",
+          "sql": "ALTER TABLE `observed_user_usage` ADD COLUMN `logical_observed_at` BIGINT NULL",
+          "checksum": "e525ae3405f1b1e3c955000fafff8495c087b7c54f2939e33f4619aa3dfc35f7",
+          "before": "ec98c1add38b38fd1b7d1ea9029b522ba9001a9482fb414276d1b0d1450a2ff6",
+          "after": "0f4d318d8970e28bbdbe6bf162e66efded71aca19a0aaea3f25ba74db24cf0ce"
+        },
+        {
+          "name": "observed_user_usage_times_backfill",
+          "object": "observed_user_usage",
+          "kind": "data",
+          "sql": "UPDATE `observed_user_usage` source SET `logical_period_start`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`period_start`),`logical_observed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`)",
+          "checksum": "9119ca7085d301a0b3dd0698f90c4c336a46fcb9c6b938130037174590081a26",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `observed_user_usage` source WHERE (source.`period_start` IS NOT NULL AND source.`logical_period_start` IS NULL) OR NOT(source.`logical_period_start` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`period_start`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "observed_user_usage_times_switch",
+          "object": "observed_user_usage",
+          "kind": "table",
+          "sql": "ALTER TABLE `observed_user_usage` DROP PRIMARY KEY,DROP COLUMN `period_start`,CHANGE COLUMN `logical_period_start` `period_start` BIGINT NOT NULL,ADD CONSTRAINT `observed_user_usage_period_start_range` CHECK (`period_start` IS NULL OR `period_start` IN (-9223372036854775808,9223372036854775807) OR (`period_start`\u003e=-211813488000000000 AND `period_start`\u003c9223371331200000000)),DROP COLUMN `observed_at`,CHANGE COLUMN `logical_observed_at` `observed_at` BIGINT NOT NULL,ADD CONSTRAINT `observed_user_usage_observed_at_range` CHECK (`observed_at` IS NULL OR `observed_at` IN (-9223372036854775808,9223372036854775807) OR (`observed_at`\u003e=-211813488000000000 AND `observed_at`\u003c9223371331200000000)),ADD PRIMARY KEY(node_id,username,period,period_start)",
+          "checksum": "35a76b7f67a89bfd9b1ee69e12e4c653c34a8599c8467d9c2a701b7ec4531f9f",
+          "before": "0f4d318d8970e28bbdbe6bf162e66efded71aca19a0aaea3f25ba74db24cf0ce",
+          "after": "5842f8132658b6f6eb6bc8a092c5d6edcb4762da8d134ce4dc9af36f3b3901bb",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `observed_user_usage` source WHERE (source.`period_start` IS NOT NULL AND source.`logical_period_start` IS NULL) OR NOT(source.`logical_period_start` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`period_start`)) OR (source.`observed_at` IS NOT NULL AND source.`logical_observed_at` IS NULL) OR NOT(source.`logical_observed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`observed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_observed_user_usage_insert",
+          "object": "migrate_v4_time_observed_user_usage_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_observed_user_usage_insert`",
+          "checksum": "348021938de5ae3906caf9a19b122a645fee6c903ec55a04619f2c2f42ca5178",
+          "before": "b9c9f0ee3f4e993580955798401c5ed09b6edfd78b0aefe6cff30ed5b107a31a",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_observed_user_usage_update",
+          "object": "migrate_v4_time_observed_user_usage_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_observed_user_usage_update`",
+          "checksum": "15051880dfb1c2a00705325a49774f96945ca14437cfc8c6f267f016787e9789",
+          "before": "08ad53eba6d183f82673aa715948f20379f6cd2d8f4ea69cc0248744ecec0b60",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_observed_user_usage_delete",
+          "object": "migrate_v4_time_observed_user_usage_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_observed_user_usage_delete`",
+          "checksum": "e10866b5bc7dd3382b979685e98f5a32e0418436ce699db4be9f64fd62df86c1",
+          "before": "f00f92f7139c5a072af7a9550c327a2394c495bd559777a12004585c262cec8e",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

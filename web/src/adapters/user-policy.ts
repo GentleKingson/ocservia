@@ -26,11 +26,17 @@ export function policyToForm(policy?: UserPolicy): UserPolicyForm {
     direction: policy?.quotaDirection ?? "rxtx",
     quotaValue: policy ? policy.quotaBytes / unitBytes[unit] : 0,
     quotaUnit: unit,
-    expiresAtLocal: policy?.expiresAt
-      ? policy.expiresAt.toISOString().slice(0, 16)
-      : "",
+    expiresAtLocal:
+      policy?.expiresAt?.replace(/:00Z$/, "").replace(/Z$/, "") ?? "",
     version: policy?.version ?? 0,
   };
+}
+
+export function expiryInputType(expiry: string): "datetime-local" | "text" {
+  return !expiry ||
+    /^(?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(expiry)
+    ? "datetime-local"
+    : "text";
 }
 
 export function formToRequest(
@@ -43,10 +49,18 @@ export function formToRequest(
       : Math.round(form.quotaValue * unitBytes[form.quotaUnit]);
   if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0)
     throw new Error("Quota is outside the supported byte range");
-  const expiresAt = form.expiresAtLocal
-    ? new Date(`${form.expiresAtLocal}:00Z`)
-    : undefined;
-  if (expiresAt && Number.isNaN(expiresAt.valueOf()))
+  if (expiryInputType(form.expiresAtLocal) === "text")
+    throw new Error("Expiry must be a finite UTC date with whole seconds");
+  const expiry =
+    form.expiresAtLocal.length === 16
+      ? `${form.expiresAtLocal}:00`
+      : form.expiresAtLocal;
+  const expiresAt = expiry ? new Date(`${expiry}Z`) : undefined;
+  if (
+    expiresAt &&
+    (Number.isNaN(expiresAt.valueOf()) ||
+      expiresAt.toISOString() !== `${expiry}.000Z`)
+  )
     throw new Error("Expiry is invalid");
   return {
     quotaPeriod: form.period,

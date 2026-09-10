@@ -1,0 +1,1685 @@
+{
+  "version": 4,
+  "previous_checksum": "ef17a7cb819042e989c2aec17283607ab44ae4138b7301d7af863944f4165c29",
+  "engine": "mysql",
+  "controller_schema": 34,
+  "minimum_controller_schema": 34,
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "time_migration_decisions",
+          "object": "time_migration_decisions",
+          "kind": "table",
+          "sql": "CREATE TABLE time_migration_decisions (\n table_name VARBINARY(64) NOT NULL,\n column_name VARBINARY(64) NOT NULL,\n row_key VARBINARY(128) NOT NULL,\n source_value DATETIME(6) NOT NULL,\n decision VARBINARY(24) NOT NULL,\n PRIMARY KEY(table_name,column_name,row_key),\n CHECK(decision IN ('finite','negative_infinity'))\n) ENGINE=InnoDB",
+          "checksum": "96947a25f324829752145f39a00db490b9530300062e2d23714ff52011dc4d58",
+          "before": "",
+          "after": "663062e47754eb195a4c88593c442fb820bd65dba72d834eb11c7e2e42e54c9a"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_attempts_insert",
+          "object": "migrate_v4_time_local_auth_attempts_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_attempts_insert` BEFORE INSERT ON `local_auth_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "2d1d7a9caac1b1a7421fd364c46242115bac0c59e1ff6b08e22ca757f10feb49",
+          "before": "",
+          "after": "698ee027cf42e273f224c33df2d1d23d8cd4f29ef6d1f256055cd46ae0e392dc"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_attempts_update",
+          "object": "migrate_v4_time_local_auth_attempts_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_attempts_update` BEFORE UPDATE ON `local_auth_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1a19a78cda88bd620de9036d6fabc2685eec94455af1b1ab3dd2181e362aeaf1",
+          "before": "",
+          "after": "6b25b4ff055c28ce4dcb2356d0675e0327f72ddd08f9851ccc725446bb7aea4c"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_attempts_delete",
+          "object": "migrate_v4_time_local_auth_attempts_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_attempts_delete` BEFORE DELETE ON `local_auth_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "02b8a3a0b9e2a00bbc739a50b4f501b36121a2d19cdd245431af8e8f23c7369c",
+          "before": "",
+          "after": "1b656d22f768bf996d7a4b31a1ccea40f0a4b0edd61690c3c4c6f5fa731af3d3"
+        },
+        {
+          "name": "local_auth_attempts_window_until_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_window_until` BIGINT NULL",
+          "checksum": "f59200e2334372bec414d190978e7dbd9d45ef5f9ab34adb8c4554284c0e4218",
+          "before": "df1d9f6e13dc1f2f8e46d49b6c879585a2a3f1ab665c182cd11f0ed5d0d3a81b",
+          "after": "472f33066ab0efb9f6616cf9355da0f96a1201b414196cd33c74c01a31dd148f"
+        },
+        {
+          "name": "local_auth_attempts_blocked_until_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_blocked_until` BIGINT NULL",
+          "checksum": "8f9796e8df48a67fc13a5841da3572242d77da1d620135757cf9a1adfa82cc96",
+          "before": "472f33066ab0efb9f6616cf9355da0f96a1201b414196cd33c74c01a31dd148f",
+          "after": "0f0257a4d53952a5a3e4e5d4e6b6fa39e312bc4b1b66755277a977e7f544a068"
+        },
+        {
+          "name": "local_auth_attempts_lease_until_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_lease_until` BIGINT NULL",
+          "checksum": "21089ecae1b0ae8ba62da1587ee0ca6f751d543cfc25e1f72df86271c455b8e5",
+          "before": "0f0257a4d53952a5a3e4e5d4e6b6fa39e312bc4b1b66755277a977e7f544a068",
+          "after": "a747ecc4130716c5f739bb8f182fd85bebe83cdfcf0e8ff1eddd9aeb3960d32c"
+        },
+        {
+          "name": "local_auth_attempts_expires_at_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "2d34117164af94573807a8e4af79f4c237ff3fad3e4ebb93dee9913657eb6898",
+          "before": "a747ecc4130716c5f739bb8f182fd85bebe83cdfcf0e8ff1eddd9aeb3960d32c",
+          "after": "7a9d2d223489941d1e23fe729511853a209ac943e0ec43d641028370bb7e5976"
+        },
+        {
+          "name": "local_auth_attempts_times_backfill",
+          "object": "local_auth_attempts",
+          "kind": "data",
+          "sql": "UPDATE `local_auth_attempts` source SET `logical_window_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`window_until`),`logical_blocked_until`=CASE WHEN source.`blocked_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='blocked_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`blocked_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) END,`logical_lease_until`=CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='lease_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END,`logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)",
+          "checksum": "ef5e4f8810d696c349ab0f63e5f8392ab1bc23f40ee3aabeba76f0e8912a1062",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_attempts` source WHERE (source.`window_until` IS NOT NULL AND source.`logical_window_until` IS NULL) OR NOT(source.`logical_window_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`window_until`)) OR (source.`blocked_until` IS NOT NULL AND source.`logical_blocked_until` IS NULL) OR NOT(source.`logical_blocked_until` \u003c=\u003e CASE WHEN source.`blocked_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='blocked_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`blocked_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) END) OR (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='lease_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "local_auth_attempts_times_switch",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` DROP INDEX local_auth_attempts_expiry,DROP COLUMN `window_until`,CHANGE COLUMN `logical_window_until` `window_until` BIGINT NOT NULL,ADD CONSTRAINT `local_auth_attempts_window_until_range` CHECK (`window_until` IS NULL OR `window_until` IN (-9223372036854775808,9223372036854775807) OR (`window_until`\u003e=-211813488000000000 AND `window_until`\u003c9223371331200000000)),DROP COLUMN `blocked_until`,CHANGE COLUMN `logical_blocked_until` `blocked_until` BIGINT NOT NULL DEFAULT -9223372036854775808,ADD CONSTRAINT `local_auth_attempts_blocked_until_range` CHECK (`blocked_until` IS NULL OR `blocked_until` IN (-9223372036854775808,9223372036854775807) OR (`blocked_until`\u003e=-211813488000000000 AND `blocked_until`\u003c9223371331200000000)),DROP COLUMN `lease_until`,CHANGE COLUMN `logical_lease_until` `lease_until` BIGINT NOT NULL DEFAULT -9223372036854775808,ADD CONSTRAINT `local_auth_attempts_lease_until_range` CHECK (`lease_until` IS NULL OR `lease_until` IN (-9223372036854775808,9223372036854775807) OR (`lease_until`\u003e=-211813488000000000 AND `lease_until`\u003c9223371331200000000)),DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `local_auth_attempts_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),ADD KEY local_auth_attempts_expiry(expires_at)",
+          "checksum": "171e5621b72a08a1863cc7890e9f45aa2da527837944abd1cef544797d31ee95",
+          "before": "7a9d2d223489941d1e23fe729511853a209ac943e0ec43d641028370bb7e5976",
+          "after": "58101b0338e9d64c7bf1284b3a69470062d7dbec434dd8b434d5d07049fd9e79",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_attempts` source WHERE (source.`window_until` IS NOT NULL AND source.`logical_window_until` IS NULL) OR NOT(source.`logical_window_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`window_until`)) OR (source.`blocked_until` IS NOT NULL AND source.`logical_blocked_until` IS NULL) OR NOT(source.`logical_blocked_until` \u003c=\u003e CASE WHEN source.`blocked_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='blocked_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`blocked_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) END) OR (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='lease_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_attempts_insert",
+          "object": "migrate_v4_time_local_auth_attempts_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_attempts_insert`",
+          "checksum": "c47f7ef61c3efad6374bb45ed8d1ab576bc22784da1456861925e6bd48f3b10a",
+          "before": "698ee027cf42e273f224c33df2d1d23d8cd4f29ef6d1f256055cd46ae0e392dc",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_attempts_update",
+          "object": "migrate_v4_time_local_auth_attempts_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_attempts_update`",
+          "checksum": "bac12bbdb143ec7462a36e2438d227da7a7327c5766dc79477a875b8888c54ce",
+          "before": "6b25b4ff055c28ce4dcb2356d0675e0327f72ddd08f9851ccc725446bb7aea4c",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_attempts_delete",
+          "object": "migrate_v4_time_local_auth_attempts_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_attempts_delete`",
+          "checksum": "ea811c9590218bba9b72b109f79532ca6a61f1639d0e6201d9de93caf85f08ae",
+          "before": "1b656d22f768bf996d7a4b31a1ccea40f0a4b0edd61690c3c4c6f5fa731af3d3",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_scheduler_leadership_insert",
+          "object": "migrate_v4_time_scheduler_leadership_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_scheduler_leadership_insert` BEFORE INSERT ON `scheduler_leadership` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "712ee9cfb6fc04be3cbb213142a75bb4b5c6ec4b158d890a0dd2cba811375198",
+          "before": "",
+          "after": "f2bce20d53e48584cf7760bade5d048cc95b5227a31eed3d3b5c8d40dac22424"
+        },
+        {
+          "name": "migrate_v4_time_scheduler_leadership_update",
+          "object": "migrate_v4_time_scheduler_leadership_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_scheduler_leadership_update` BEFORE UPDATE ON `scheduler_leadership` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "ae2ff699471855bbdaf9e43bebfe53f2db69744c009a3626f62cf7a195b79969",
+          "before": "",
+          "after": "cd34f963061efdcab8ab9b2feee745d3344bf69b6da9e7efcf0f19ad502ab719"
+        },
+        {
+          "name": "migrate_v4_time_scheduler_leadership_delete",
+          "object": "migrate_v4_time_scheduler_leadership_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_scheduler_leadership_delete` BEFORE DELETE ON `scheduler_leadership` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "07c64e8312bb3de0ffe4aaa1bb968a3195bd7f5701073241a5a1e0eae641b140",
+          "before": "",
+          "after": "4db7ed0444d44aaf0bdc426e023a50d5b2b19a43c2d93ae012ecaeeff5360aa2"
+        },
+        {
+          "name": "scheduler_seed_time_decision",
+          "object": "time_migration_decisions",
+          "kind": "data",
+          "sql": "INSERT INTO time_migration_decisions(table_name,column_name,row_key,source_value,decision) SELECT 'scheduler_leadership','lease_until',CAST(source.id AS BINARY),source.lease_until,'negative_infinity' FROM scheduler_leadership source WHERE id=1 AND instance_id=UNHEX('00000000000000000000000000000000') AND incarnation=0 AND epoch=0 AND lease_until='1000-01-01 00:00:00.000000' AND NOT EXISTS(SELECT 1 FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY))",
+          "checksum": "49922dbbfd4bf29b49898a7e77e98bf071e90dc7e60784e59e5820f122985172",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM scheduler_leadership source WHERE id=1 AND instance_id=UNHEX('00000000000000000000000000000000') AND incarnation=0 AND epoch=0 AND lease_until='1000-01-01 00:00:00.000000' AND NOT EXISTS(SELECT 1 FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.lease_until)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "scheduler_leadership_lease_until_column",
+          "object": "scheduler_leadership",
+          "kind": "table",
+          "sql": "ALTER TABLE `scheduler_leadership` ADD COLUMN `logical_lease_until` BIGINT NULL",
+          "checksum": "775d7e924d87eb25dea81a4dc32fb3773cda57b1041185b77b5d67824a0b5ba2",
+          "before": "9204491e3411b9bbec0f2f50c38d4728b2ddca679f03d64bd3d094fbcf4ff103",
+          "after": "0d4ca051c5d3581ecc0f3638e0c7c18d6d56a7f8c64f5c8abd8d15f41a4bb7d1"
+        },
+        {
+          "name": "scheduler_leadership_updated_at_column",
+          "object": "scheduler_leadership",
+          "kind": "table",
+          "sql": "ALTER TABLE `scheduler_leadership` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "2b1e942fbf67554fd6618b114331f1aef70bf5436c8758d6afcde3fb149c819c",
+          "before": "0d4ca051c5d3581ecc0f3638e0c7c18d6d56a7f8c64f5c8abd8d15f41a4bb7d1",
+          "after": "16bfa1083749bdadbc87c9f513e1c90552e5f3dfae2e39b50fd6ec9b042f84a6"
+        },
+        {
+          "name": "scheduler_leadership_times_backfill",
+          "object": "scheduler_leadership",
+          "kind": "data",
+          "sql": "UPDATE `scheduler_leadership` source SET `logical_lease_until`=CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END,`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "5e86068adf559b89687e8c53436eee5822572b97ac7a496a68cabd75228d2263",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `scheduler_leadership` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "scheduler_leadership_times_switch",
+          "object": "scheduler_leadership",
+          "kind": "table",
+          "sql": "ALTER TABLE `scheduler_leadership` DROP COLUMN `lease_until`,CHANGE COLUMN `logical_lease_until` `lease_until` BIGINT NOT NULL,ADD CONSTRAINT `scheduler_leadership_lease_until_range` CHECK (`lease_until` IS NULL OR `lease_until` IN (-9223372036854775808,9223372036854775807) OR (`lease_until`\u003e=-211813488000000000 AND `lease_until`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `scheduler_leadership_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "3619e0246c5007248e32680831b634420e15891843c753640eb02e976664407d",
+          "before": "16bfa1083749bdadbc87c9f513e1c90552e5f3dfae2e39b50fd6ec9b042f84a6",
+          "after": "9d9ee2ddc71be858788aa5b2f05ade840f69b35fd947514cf3513654201d12e3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `scheduler_leadership` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_scheduler_leadership_insert",
+          "object": "migrate_v4_time_scheduler_leadership_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_scheduler_leadership_insert`",
+          "checksum": "f8a6cf538d4ae626b0bfc1ce98ae0461dfa3e0f8bc4e8757c81efbe46d6027d2",
+          "before": "f2bce20d53e48584cf7760bade5d048cc95b5227a31eed3d3b5c8d40dac22424",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_scheduler_leadership_update",
+          "object": "migrate_v4_time_scheduler_leadership_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_scheduler_leadership_update`",
+          "checksum": "cb8b06cb4b0b0e76ccfd449b148f04d578e1ff2705e0e4c5eb088caa84e076b6",
+          "before": "cd34f963061efdcab8ab9b2feee745d3344bf69b6da9e7efcf0f19ad502ab719",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_scheduler_leadership_delete",
+          "object": "migrate_v4_time_scheduler_leadership_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_scheduler_leadership_delete`",
+          "checksum": "60f1add9385fe628a0df20b83c0f2f041149be188c6704adb9e7120c9059a562",
+          "before": "4db7ed0444d44aaf0bdc426e023a50d5b2b19a43c2d93ae012ecaeeff5360aa2",
+          "after": ""
+        },
+        {
+          "name": "jsonb_value_validator",
+          "object": "ocserv_jsonb_value_valid",
+          "kind": "function",
+          "sql": "CREATE FUNCTION ocserv_jsonb_value_valid(doc LONGBLOB) RETURNS BOOLEAN DETERMINISTIC NO SQL SQL SECURITY DEFINER\nBEGIN\n DECLARE source LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE masked LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '';\n DECLARE token LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE digits LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE c CHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE posn BIGINT DEFAULT 1;\n DECLARE startn BIGINT;\n DECLARE n BIGINT;\n DECLARE dotn BIGINT;\n DECLARE en BIGINT;\n DECLARE expo BIGINT;\n DECLARE scale_n BIGINT;\n DECLARE integer_n BIGINT;\n DECLARE leading_n BIGINT;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION RETURN FALSE;\n IF doc IS NULL THEN RETURN FALSE; END IF;\n SET source=CONVERT(doc USING utf8mb4);\n IF CAST(source AS BINARY)\u003c\u003edoc THEN RETURN FALSE; END IF;\n SET n=CHAR_LENGTH(source);\n WHILE posn\u003c=n DO\n  SET c=SUBSTRING(source,posn,1);\n  IF c='\"' THEN\n   SET startn=posn;\n   SET posn=posn+1;\n   WHILE posn\u003c=n AND SUBSTRING(source,posn,1)\u003c\u003e'\"' DO\n    IF ASCII(SUBSTRING(source,posn,1))=92 THEN SET posn=posn+1; END IF;\n    SET posn=posn+1;\n   END WHILE;\n   IF posn\u003en THEN RETURN FALSE; END IF;\n   SET token=SUBSTRING(source,startn,posn-startn+1);\n   IF NOT JSON_VALID(token) OR LOCATE(0x00,CAST(JSON_UNQUOTE(token) AS BINARY))\u003c\u003e0 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,token);\n   SET posn=posn+1;\n  ELSEIF c='-' OR (ASCII(c)\u003e=48 AND ASCII(c)\u003c=57) THEN\n   SET startn=posn;\n   WHILE posn\u003c=n AND LOCATE(SUBSTRING(source,posn,1),'0123456789.eE+-')\u003e0 DO SET posn=posn+1; END WHILE;\n   SET token=SUBSTRING(source,startn,posn-startn);\n   IF NOT (token REGEXP '(?-i)\\\\A-?(0|[1-9][0-9]*)(\\\\.[0-9]+)?([eE][+-]?[0-9]+)?\\\\z') THEN RETURN FALSE; END IF;\n   IF LEFT(token,1)='-' THEN SET token=SUBSTRING(token,2); END IF;\n   SET en=LOCATE('e',LOWER(token)); SET expo=0;\n   IF en\u003e0 THEN\n    SET digits=SUBSTRING(token,en+1);\n    IF LEFT(digits,1) IN ('-','+') THEN SET digits=SUBSTRING(digits,2); END IF;\n    SET digits=TRIM(LEADING '0' FROM digits);\n    IF CHAR_LENGTH(digits)\u003e10 THEN RETURN FALSE; END IF;\n    IF digits\u003c\u003e'' AND CAST(digits AS UNSIGNED)\u003e1073741823 THEN RETURN FALSE; END IF;\n    SET expo=CAST(SUBSTRING(token,en+1) AS SIGNED);\n    SET token=LEFT(token,en-1);\n   END IF;\n   SET dotn=LOCATE('.',token);\n   SET scale_n=IF(dotn=0,0,CHAR_LENGTH(token)-dotn)-expo;\n   IF scale_n\u003e16383 THEN RETURN FALSE; END IF;\n   SET digits=REPLACE(token,'.','');\n   SET leading_n=CHAR_LENGTH(digits)-CHAR_LENGTH(TRIM(LEADING '0' FROM digits));\n   SET integer_n=IF(dotn=0,CHAR_LENGTH(token),dotn-1)+expo-leading_n;\n   IF leading_n\u003c\u003eCHAR_LENGTH(digits) AND integer_n\u003e131072 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,'0');\n  ELSE\n   SET masked=CONCAT(masked,c); SET posn=posn+1;\n  END IF;\n END WHILE;\n IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;\n RETURN TRUE;\nEND",
+          "checksum": "cc03f81ee057f7406da350fd1c315a98cd78f0a329bdca774aa4602026d95db6",
+          "before": "",
+          "after": "4aacb7b9f59e94989a011dbc355c05f13f15100af9ee4ac5d0ddda98ce8f4d01"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_insert` BEFORE INSERT ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4773c63246e106dcefc690e13e13e9831aab421b2b22f595a7f708af25d57169",
+          "before": "",
+          "after": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_update` BEFORE UPDATE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "ae10115d4246c6aaca3ca221e5c13c8507a9d5bb6c3dcec15367da3b4bb600a9",
+          "before": "",
+          "after": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_delete` BEFORE DELETE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "340f8817ef6ae2143435cb58a4b50b7c2f997a3ef9d4cd9e36c7aeaaad9cf117",
+          "before": "",
+          "after": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e"
+        },
+        {
+          "name": "migrate_v4_time_audit_checkpoints_insert",
+          "object": "migrate_v4_time_audit_checkpoints_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_checkpoints_insert` BEFORE INSERT ON `audit_checkpoints` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f98d85b2f105b02d156d2df67d8527c74d97d5289f9e1fdb7075ac70ad8bf7a0",
+          "before": "",
+          "after": "bb3c804974cf47a5786a207181866958022444228a0a63fedcf84d79e1fb556d"
+        },
+        {
+          "name": "migrate_v4_time_audit_checkpoints_update",
+          "object": "migrate_v4_time_audit_checkpoints_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_checkpoints_update` BEFORE UPDATE ON `audit_checkpoints` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b81f828fc9b5204a984e6d7dd5b82307f27cd88db1a174ffb9d431d6bc2f649e",
+          "before": "",
+          "after": "0b93847d11ff9a27f0997666b502ea87de3252c18dd82224c6a58a71c1a778ac"
+        },
+        {
+          "name": "migrate_v4_time_audit_checkpoints_delete",
+          "object": "migrate_v4_time_audit_checkpoints_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_checkpoints_delete` BEFORE DELETE ON `audit_checkpoints` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c979713e1aa506d13b5a0f8f5f1e288e210e83fa512f03fcd1058fbe57530bb2",
+          "before": "",
+          "after": "9ad69aa255f608df2f8006534b9fd8dac4a53d954c35af5aebd0d00b59fdb4ed"
+        },
+        {
+          "name": "audit_drop_audit_events_reject_update",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER audit_events_reject_update",
+          "checksum": "81603e6cf5dca7a2e76ca0682eb6a3bd6785f7cdc93d4e1a68b2f9b964cdfb90",
+          "before": "afd5324f7ffcc1b1805b6e40e1ec9a4f4f6ef2b61161ca2e43c4867af4cb14ef",
+          "after": ""
+        },
+        {
+          "name": "audit_events_occurred_at_column",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_events` ADD COLUMN `logical_occurred_at` BIGINT NULL",
+          "checksum": "5863bad9faa14011956f3e0518c454d880874a20909a4dee01d6b5f4d6954194",
+          "before": "6b317f7037a1a2b149bab64d54c8899d9938acbe6e1063232d6f4244beca8423",
+          "after": "ba7d2fbe213d19aba224d3d981c47d5c98695aab810aa8a7077b1ed47f7f83a5"
+        },
+        {
+          "name": "audit_events_times_backfill",
+          "object": "audit_events",
+          "kind": "data",
+          "sql": "UPDATE `audit_events` source SET `logical_occurred_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`occurred_at`)",
+          "checksum": "c1db67c37f1c4b736cd65dfb7667487c7cca110e3a40379a43d4855eaf92db3f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_events` source WHERE (source.`occurred_at` IS NOT NULL AND source.`logical_occurred_at` IS NULL) OR NOT(source.`logical_occurred_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`occurred_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_events_times_switch",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_events` DROP INDEX audit_events_workspace_time_idx,DROP COLUMN `occurred_at`,CHANGE COLUMN `logical_occurred_at` `occurred_at` BIGINT NOT NULL,ADD CONSTRAINT `audit_events_occurred_at_range` CHECK (`occurred_at` IS NULL OR `occurred_at` IN (-9223372036854775808,9223372036854775807) OR (`occurred_at`\u003e=-211813488000000000 AND `occurred_at`\u003c9223371331200000000)),ADD KEY audit_events_workspace_time_idx(workspace_id,occurred_at DESC,id DESC)",
+          "checksum": "1dda2fed99ade143a900d034a1069385cabb76827bb4177284fd2b1ab24df01f",
+          "before": "ba7d2fbe213d19aba224d3d981c47d5c98695aab810aa8a7077b1ed47f7f83a5",
+          "after": "a3bc073cd53440e2f3ac9c3efd6cdf3db1349affb21a228312a059362c3a0b56",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_events` source WHERE (source.`occurred_at` IS NOT NULL AND source.`logical_occurred_at` IS NULL) OR NOT(source.`logical_occurred_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`occurred_at`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_drop_audit_checkpoints_reject_update",
+          "object": "audit_checkpoints_reject_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER audit_checkpoints_reject_update",
+          "checksum": "31937e21151eb8b018dd3c4cdfe52bf18fc1517561028bd2ab5983949585ed92",
+          "before": "fa482fd81b40e17cd98fb23c88a3c0fe93400cd99555a6dbe22182ab25f7d923",
+          "after": ""
+        },
+        {
+          "name": "audit_checkpoints_created_at_column",
+          "object": "audit_checkpoints",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_checkpoints` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "bc33f3396c5d18b297909160a5259292d9c29671129d5fcb3b4c894e08dfdcd3",
+          "before": "2e44cafd53fbea1ed78d7c5d0fbe024f37fd9271e82071ff71814453c78c3942",
+          "after": "23e363cf7814b55fbdd16f8c401711122c9224458aa0a65d09b0e6c75a35f362"
+        },
+        {
+          "name": "audit_checkpoints_times_backfill",
+          "object": "audit_checkpoints",
+          "kind": "data",
+          "sql": "UPDATE `audit_checkpoints` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "af4f127e87fcacb4a0521bd39129481f5b1784210fd594eb8d2134a9233bc219",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_checkpoints` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_checkpoints_times_switch",
+          "object": "audit_checkpoints",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_checkpoints` DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `audit_checkpoints_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000))",
+          "checksum": "b95391b0bb0f614e3b51299e2b9f9ab7109cee6df7ccdc08ab008188c5755c2b",
+          "before": "23e363cf7814b55fbdd16f8c401711122c9224458aa0a65d09b0e6c75a35f362",
+          "after": "fa13bb11bfde738c82cf23be49b0774e1da838cfacff7e66824efbcac3939074",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_checkpoints` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_before_summary_column",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events ADD COLUMN `logical_before_summary` LONGBLOB NULL",
+          "checksum": "f9f2053b2e1dacd0c062a03f6a51b25737b2e58fecfe0ebfadb305ec1e5cc05d",
+          "before": "a3bc073cd53440e2f3ac9c3efd6cdf3db1349affb21a228312a059362c3a0b56",
+          "after": "bd1681e6c61d1fe9a19bcb5779d1d3c8fc89caf343975738b7ead583911ed905"
+        },
+        {
+          "name": "audit_before_summary_backfill",
+          "object": "audit_events",
+          "kind": "data",
+          "sql": "UPDATE audit_events SET `logical_before_summary`=CAST(`before_summary` AS BINARY)",
+          "checksum": "cbadf7755fc0192f58cc5f05d894ce2bdac383aa3ab45208816088960ec505d2",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_before_summary` \u003c=\u003e CAST(`before_summary` AS BINARY)) OR (`logical_before_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_before_summary`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_before_summary_switch",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events DROP COLUMN `before_summary`,CHANGE COLUMN `logical_before_summary` `before_summary` LONGBLOB NULL",
+          "checksum": "2d03ec3b8e0739d01d9882d095cf7b3603347b69186b082e1815c25481f5753d",
+          "before": "bd1681e6c61d1fe9a19bcb5779d1d3c8fc89caf343975738b7ead583911ed905",
+          "after": "1fec195d3676d32901c5fe24cb9f2266abf801d9f585d56c6896d366bbbb4091",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_before_summary` \u003c=\u003e CAST(`before_summary` AS BINARY)) OR (`logical_before_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_before_summary`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_after_summary_column",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events ADD COLUMN `logical_after_summary` LONGBLOB NULL",
+          "checksum": "3ca19fe7ea95b0ac36f8512cac266342d0a96df2abd5f7a0014a55b74065cb2c",
+          "before": "1fec195d3676d32901c5fe24cb9f2266abf801d9f585d56c6896d366bbbb4091",
+          "after": "35223ced96b36ac86f944be0a2a5dd3217508db070cfb3eceba9a478695ec6fb"
+        },
+        {
+          "name": "audit_after_summary_backfill",
+          "object": "audit_events",
+          "kind": "data",
+          "sql": "UPDATE audit_events SET `logical_after_summary`=CAST(`after_summary` AS BINARY)",
+          "checksum": "32288d07c1200deeeee39f46923012b14047ca16702510d6437c30e57c2e5f78",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_after_summary` \u003c=\u003e CAST(`after_summary` AS BINARY)) OR (`logical_after_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_after_summary`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_after_summary_switch",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events DROP COLUMN `after_summary`,CHANGE COLUMN `logical_after_summary` `after_summary` LONGBLOB NULL",
+          "checksum": "63fcb1b36a829e2143976a638095579fba1d2c1d520c103171314eb5ad00a749",
+          "before": "35223ced96b36ac86f944be0a2a5dd3217508db070cfb3eceba9a478695ec6fb",
+          "after": "0e826d5483283a796f49742b484de06ae7239a6d3751fd27912a8571bb26d539",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_after_summary` \u003c=\u003e CAST(`after_summary` AS BINARY)) OR (`logical_after_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_after_summary`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_restore_audit_events_reject_update",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_events_reject_update BEFORE UPDATE ON audit_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record'",
+          "checksum": "b27da8cfc55069cfd79a0c5403aeee7e335cf193561772fd076f82f99e60d994",
+          "before": "",
+          "after": "afd5324f7ffcc1b1805b6e40e1ec9a4f4f6ef2b61161ca2e43c4867af4cb14ef"
+        },
+        {
+          "name": "audit_restore_audit_checkpoints_reject_update",
+          "object": "audit_checkpoints_reject_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_checkpoints_reject_update BEFORE UPDATE ON audit_checkpoints FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record'",
+          "checksum": "729ad719a2e540cee9199cb442a1877f1e39887dcc212c7bc978ef1b6564bb4e",
+          "before": "",
+          "after": "fa482fd81b40e17cd98fb23c88a3c0fe93400cd99555a6dbe22182ab25f7d923"
+        },
+        {
+          "name": "audit_jsonb_insert",
+          "object": "audit_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_jsonb_insert BEFORE INSERT ON audit_events FOR EACH ROW BEGIN IF (NEW.before_summary IS NOT NULL AND NOT ocserv_jsonb_value_valid(NEW.before_summary)) OR (NEW.after_summary IS NOT NULL AND NOT ocserv_jsonb_value_valid(NEW.after_summary)) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid audit JSON'; END IF; END",
+          "checksum": "e1a1ade863c456c383ca5a76027613ada1478e9667b4fada0f6ba30fb702cc70",
+          "before": "",
+          "after": "3d191970aeedfe1e2205b810384ad18611cfc845590bc24f382abed26027fb9e"
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_insert`",
+          "checksum": "a6beecda06254ecb621268b02420cb9f4be7981d1b484561aae356aff310b458",
+          "before": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_update`",
+          "checksum": "d681747b01fdccb13a8620c4163128badd6284ec63918d651f3f0d5edddd4149",
+          "before": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_delete`",
+          "checksum": "0c4c4d00c5a42063ecc98d3da4cc115be920638a199fb4354879a231a35b015d",
+          "before": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_checkpoints_insert",
+          "object": "migrate_v4_time_audit_checkpoints_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_checkpoints_insert`",
+          "checksum": "639b658c56ac53e5fd8810261ad3244874254797c76c1309e42303462b25b28f",
+          "before": "bb3c804974cf47a5786a207181866958022444228a0a63fedcf84d79e1fb556d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_checkpoints_update",
+          "object": "migrate_v4_time_audit_checkpoints_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_checkpoints_update`",
+          "checksum": "9088455fd3cf8079c51896b902bcdd6b40bf2d4250bf9f1d2e78241dd8a289dd",
+          "before": "0b93847d11ff9a27f0997666b502ea87de3252c18dd82224c6a58a71c1a778ac",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_checkpoints_delete",
+          "object": "migrate_v4_time_audit_checkpoints_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_checkpoints_delete`",
+          "checksum": "cfaac9b9c95fa3e2643a9ab5c20670fdbfd04ebed6ed3ae0277b886200574732",
+          "before": "9ad69aa255f608df2f8006534b9fd8dac4a53d954c35af5aebd0d00b59fdb4ed",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_role_bindings_insert",
+          "object": "migrate_v4_time_role_bindings_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_role_bindings_insert` BEFORE INSERT ON `role_bindings` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "5362bfa94c5afb4595b56fe628a0a698c966f27744a8e7f9c6012c0439cb5033",
+          "before": "",
+          "after": "ec47ee0a6e838f15674427ca838a4a0375e0bdc26fb81c9e2d284e16759ad4d5"
+        },
+        {
+          "name": "migrate_v4_time_role_bindings_update",
+          "object": "migrate_v4_time_role_bindings_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_role_bindings_update` BEFORE UPDATE ON `role_bindings` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f5adb30696fa92adad37841bf21cdc86457e49012d7e419cd335c6759d4f283d",
+          "before": "",
+          "after": "1d27e6716abfc7e111045344b197783c3aa5d6c30452d260e39ac49e3d8f77a1"
+        },
+        {
+          "name": "migrate_v4_time_role_bindings_delete",
+          "object": "migrate_v4_time_role_bindings_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_role_bindings_delete` BEFORE DELETE ON `role_bindings` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b87860131390a12d163f532a6ed465a5454fcb0f355b855cef9ce4897d961965",
+          "before": "",
+          "after": "bea53af6adf954dc27f5b4aba6b60768e8a28bf5f9a7880af03db93a4c2562b3"
+        },
+        {
+          "name": "role_bindings_created_at_column",
+          "object": "role_bindings",
+          "kind": "table",
+          "sql": "ALTER TABLE `role_bindings` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "98c6d29b8914a321752a33d67fe81c63cd41512f5ca5ebfc0a8e841752299d78",
+          "before": "3569eb26ae10d80255496d0a2d8f0bc34b21668cf3925be9879f31aabd83d7f0",
+          "after": "a54bba7370707d557d036cc8c784170ccf8a6db8bec0dfa3ea73bf841fc0bc7b"
+        },
+        {
+          "name": "role_bindings_times_backfill",
+          "object": "role_bindings",
+          "kind": "data",
+          "sql": "UPDATE `role_bindings` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "60ae47c44c602750cc2bfc5a110840f55e0123631ca4abb8716dfcbc5b784437",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `role_bindings` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "role_bindings_times_switch",
+          "object": "role_bindings",
+          "kind": "table",
+          "sql": "ALTER TABLE `role_bindings` DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `role_bindings_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000))",
+          "checksum": "651a0eb8d53f37f425fc36a70f26753ca4be2c436260934d746133fb965433d3",
+          "before": "a54bba7370707d557d036cc8c784170ccf8a6db8bec0dfa3ea73bf841fc0bc7b",
+          "after": "5b6e28e30545deb80973ac1718625e3d0737620ed7a3e3d1d53a400a9b82f774",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `role_bindings` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_role_bindings_insert",
+          "object": "migrate_v4_time_role_bindings_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_role_bindings_insert`",
+          "checksum": "139756516faa8da1b00477c688d628379e4a18e7552b5aa550d426c409e8cd2b",
+          "before": "ec47ee0a6e838f15674427ca838a4a0375e0bdc26fb81c9e2d284e16759ad4d5",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_role_bindings_update",
+          "object": "migrate_v4_time_role_bindings_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_role_bindings_update`",
+          "checksum": "9526ebd57459125ee3a88489c7501a712c2b763728ebd946669d0241fbeeb814",
+          "before": "1d27e6716abfc7e111045344b197783c3aa5d6c30452d260e39ac49e3d8f77a1",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_role_bindings_delete",
+          "object": "migrate_v4_time_role_bindings_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_role_bindings_delete`",
+          "checksum": "4ba269975601bf725677bccef71b58e3687944efdb8cdf64e12fa46700f828e4",
+          "before": "bea53af6adf954dc27f5b4aba6b60768e8a28bf5f9a7880af03db93a4c2562b3",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_local_auth_bootstrap_insert",
+          "object": "migrate_v4_time_local_auth_bootstrap_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_bootstrap_insert` BEFORE INSERT ON `local_auth_bootstrap` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d09e7d8d0cb2c85be7c0c75f99e09a9eefcda176eb749313cbd62ea0a4c7ef8c",
+          "before": "",
+          "after": "167f17c1e1cdda4cd014faab7bc819c4fd1bc9450d50ebe962b2250037777734"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_bootstrap_update",
+          "object": "migrate_v4_time_local_auth_bootstrap_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_bootstrap_update` BEFORE UPDATE ON `local_auth_bootstrap` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1f13f6cc403465067cf929236513e3ebc8d2cbce28cab977b80d67f4986d68dc",
+          "before": "",
+          "after": "0abc0267a95f129684ab989f60e851a9d1eb9d7779c45cff5668f0c6c3c8c4f6"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_bootstrap_delete",
+          "object": "migrate_v4_time_local_auth_bootstrap_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_bootstrap_delete` BEFORE DELETE ON `local_auth_bootstrap` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f2b901e6650751ae480fa84bfa378228a05d056e10bd1b04645b605ffa043cb3",
+          "before": "",
+          "after": "271b6f53ce5f7e043b62fe0d6be02bd31486a0844c7d6309d44715bfffba5cdc"
+        },
+        {
+          "name": "local_auth_bootstrap_completed_at_column",
+          "object": "local_auth_bootstrap",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_bootstrap` ADD COLUMN `logical_completed_at` BIGINT NULL",
+          "checksum": "5804aca17df2def7cb260920511f8c11ec9621fd39d6821e4013fd2a5473d3fd",
+          "before": "59bd0c85a218230ee63c6374660d9a4b6a9e2942727f01a807023c32c86bc1a2",
+          "after": "bfb19f5d8a9b168f01b1361c3b52f2651d5b0e48c06949930a93926c88aee5e7"
+        },
+        {
+          "name": "local_auth_bootstrap_times_backfill",
+          "object": "local_auth_bootstrap",
+          "kind": "data",
+          "sql": "UPDATE `local_auth_bootstrap` source SET `logical_completed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)",
+          "checksum": "44356e892ae33093370bd0eff1e003bfefa939ca0d75f007a30488e44fb14bb8",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_bootstrap` source WHERE (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "local_auth_bootstrap_times_switch",
+          "object": "local_auth_bootstrap",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_bootstrap` DROP CHECK local_auth_bootstrap_local_initialization_state,DROP COLUMN `completed_at`,CHANGE COLUMN `logical_completed_at` `completed_at` BIGINT NULL,ADD CONSTRAINT `local_auth_bootstrap_completed_at_range` CHECK (`completed_at` IS NULL OR `completed_at` IN (-9223372036854775808,9223372036854775807) OR (`completed_at`\u003e=-211813488000000000 AND `completed_at`\u003c9223371331200000000)),ADD CONSTRAINT local_auth_bootstrap_local_initialization_state CHECK ((completion_pending AND completed_at IS NULL AND approver_identity_id IS NULL) OR (NOT completion_pending AND completed_at IS NOT NULL))",
+          "checksum": "15fb8ddeb266ef9396696d82ca34e7063e0d81e3dc1bcb49e1538d88aa41c77b",
+          "before": "bfb19f5d8a9b168f01b1361c3b52f2651d5b0e48c06949930a93926c88aee5e7",
+          "after": "ff3a64de22a3ffe50c7c31971cc9396bc907b1103e07f17817cc0fb31f7ca6bb",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_bootstrap` source WHERE (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_bootstrap_insert",
+          "object": "migrate_v4_time_local_auth_bootstrap_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_bootstrap_insert`",
+          "checksum": "e9730148e8a19f10e99cef1146a7bd43b946f0437ead9b3c5d4f1a10b76a27e1",
+          "before": "167f17c1e1cdda4cd014faab7bc819c4fd1bc9450d50ebe962b2250037777734",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_bootstrap_update",
+          "object": "migrate_v4_time_local_auth_bootstrap_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_bootstrap_update`",
+          "checksum": "c4826586c372c6391050003d39e509fe096cdb451dd9a52b27dcff9c317b3490",
+          "before": "0abc0267a95f129684ab989f60e851a9d1eb9d7779c45cff5668f0c6c3c8c4f6",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_bootstrap_delete",
+          "object": "migrate_v4_time_local_auth_bootstrap_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_bootstrap_delete`",
+          "checksum": "18c565b2fbd460951ba80184ed40d335781f9e5ac879927e985e5b1a47db52af",
+          "before": "271b6f53ce5f7e043b62fe0d6be02bd31486a0844c7d6309d44715bfffba5cdc",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_approval_requests_insert",
+          "object": "migrate_v4_time_approval_requests_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_approval_requests_insert` BEFORE INSERT ON `approval_requests` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "48f2c28e8c4edd997b7d4927b812caf91b4b2e910f120b5827a9f0ab2868b1bb",
+          "before": "",
+          "after": "982642e21b1c2103c6b479f53d315f294ec52342cf6cb032a2fbff69868c8e24"
+        },
+        {
+          "name": "migrate_v4_time_approval_requests_update",
+          "object": "migrate_v4_time_approval_requests_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_approval_requests_update` BEFORE UPDATE ON `approval_requests` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "28b080b3f635544199bc2a24be4262aeabcfe78b6d0f36df8fb1a43350c6b92a",
+          "before": "",
+          "after": "db0eb66a00ad9230542c2c75b8ee5c02a8ac934a5de310799bd42df923359548"
+        },
+        {
+          "name": "migrate_v4_time_approval_requests_delete",
+          "object": "migrate_v4_time_approval_requests_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_approval_requests_delete` BEFORE DELETE ON `approval_requests` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "54d8e0979631e3ef0f6d957476acd55a33ee8d32949b39b4a5e04d836fabb6d2",
+          "before": "",
+          "after": "b9ce2585299f68c7d260e5946d8f37026619e06c3e5ed8390f272858c0541426"
+        },
+        {
+          "name": "approval_requests_expires_at_column",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "10c37fef1ad54c757c062fafd2dc5b30457a31f02a7449ec480f234c18b657ff",
+          "before": "397860fb7480251c179f5a088ae54ff7f75e50f43c9e1173ca6fd9396eb8e61e",
+          "after": "71a5fc8ff667550579b445ef13784077655eae41b804f123d6f0fde67575d368"
+        },
+        {
+          "name": "approval_requests_created_at_column",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "c19402aa09892ad2923622b58a4f6f46dc0ceb64f56dc78c48a7f55c5c326150",
+          "before": "71a5fc8ff667550579b445ef13784077655eae41b804f123d6f0fde67575d368",
+          "after": "f6548c1ca96b53ac44579503c3187762b0702a1ca169af1096833114667b78b1"
+        },
+        {
+          "name": "approval_requests_consumed_at_column",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "259a2ab68a90e303258552c38e9e65a7a2df4170ec7766f1bc5129cd92257a5e",
+          "before": "f6548c1ca96b53ac44579503c3187762b0702a1ca169af1096833114667b78b1",
+          "after": "049b6a4d4ab80de1b818ddb3b400406624a4efd938ef75ab24fc63ac3626af1f"
+        },
+        {
+          "name": "approval_requests_times_backfill",
+          "object": "approval_requests",
+          "kind": "data",
+          "sql": "UPDATE `approval_requests` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)",
+          "checksum": "89a089fe75665cf87b67948d8d88532c4f7b55e9185e1d08a71175f338a39be5",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `approval_requests` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "approval_requests_times_switch",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` DROP INDEX approval_requests_scope_idx,DROP CHECK approval_requests_approval_requests_check2,DROP CHECK approval_requests_approval_requests_check3,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `approval_requests_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `approval_requests_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `approval_requests_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),ADD KEY approval_requests_scope_idx(workspace_id,resource_type,resource_id,action,status,expires_at),ADD CONSTRAINT approval_requests_approval_requests_check2 CHECK ((status='consumed')=(consumed_at IS NOT NULL)),ADD CONSTRAINT approval_requests_approval_requests_check3 CHECK (expires_at\u003ecreated_at)",
+          "checksum": "a275330e3338ed54b8b6440fda007b4c135caaca378ed43315ef93eec2c55f79",
+          "before": "049b6a4d4ab80de1b818ddb3b400406624a4efd938ef75ab24fc63ac3626af1f",
+          "after": "2d27cdce1b1c4fab6bb8a27b6a6df43a15860dd53ab5a94172bd33de490c3650",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `approval_requests` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_approval_requests_insert",
+          "object": "migrate_v4_time_approval_requests_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_approval_requests_insert`",
+          "checksum": "f73d57465659894801c9787d83ef45b52f77adb0ce89b7ccaaeb3a85f1d3098c",
+          "before": "982642e21b1c2103c6b479f53d315f294ec52342cf6cb032a2fbff69868c8e24",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_approval_requests_update",
+          "object": "migrate_v4_time_approval_requests_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_approval_requests_update`",
+          "checksum": "75ebfa4ce420d144930a18e2f178f074f7560d2fb85337d39fb32199d37172f8",
+          "before": "db0eb66a00ad9230542c2c75b8ee5c02a8ac934a5de310799bd42df923359548",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_approval_requests_delete",
+          "object": "migrate_v4_time_approval_requests_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_approval_requests_delete`",
+          "checksum": "7f829b3c9ec384f2b8e93663f097d2794475d7500d44c86dbb3eb778093bde1d",
+          "before": "b9ce2585299f68c7d260e5946d8f37026619e06c3e5ed8390f272858c0541426",
+          "after": ""
+        },
+        {
+          "name": "telemetry_legacy_migration",
+          "object": "telemetry_legacy_migration",
+          "kind": "table",
+          "sql": "CREATE TABLE telemetry_legacy_migration (\n singleton TINYINT NOT NULL PRIMARY KEY CHECK(singleton=1),\n state VARBINARY(16) NOT NULL CHECK(state IN ('pending','running','complete')),\n completed_at DATETIME(6) NULL,\n CHECK((state='complete')=(completed_at IS NOT NULL))\n) ENGINE=InnoDB",
+          "checksum": "9df725dfc04a186cc01ee378186dbdb0493d5790ca272d0d003dcc8a954d6629",
+          "before": "",
+          "after": "48334549b788aca11bea0d68a8e9cc26ee4745168593f8f41f0cf5cc581d2f44"
+        },
+        {
+          "name": "telemetry_legacy_pending",
+          "object": "telemetry_legacy_migration",
+          "kind": "data",
+          "sql": "INSERT INTO telemetry_legacy_migration(singleton,state,completed_at) SELECT 1,'pending',NULL WHERE NOT EXISTS(SELECT 1 FROM telemetry_legacy_migration WHERE singleton=1)",
+          "checksum": "137cb7f077d49e45038a0b8fae166306c4797c19bcee328b211456bdfab3fd65",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(COUNT(*)=1,'valid','invalid') FROM telemetry_legacy_migration WHERE singleton=1",
+          "repairable": true
+        },
+        {
+          "name": "telemetry_legacy_insert_guard",
+          "object": "telemetry_legacy_insert_guard",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER telemetry_legacy_insert_guard BEFORE INSERT ON telemetry_samples FOR EACH ROW\nBEGIN\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry legacy migration metadata is unavailable';\n END IF;\n IF migration_state='complete' AND NEW.sampled_at NOT IN (-9223372036854775808,9223372036854775807) THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='finite telemetry must use its monthly shard';\n END IF;\nEND",
+          "checksum": "55ff388d58172b245041c7db7461893c17be980949ce9bb11cb13e3522196517",
+          "before": "",
+          "after": "1ac292bbd2da5520287071b9c24011d5ab055d3fb540671033ac23ccf84223f1"
+        },
+        {
+          "name": "telemetry_legacy_update_guard",
+          "object": "telemetry_legacy_update_guard",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER telemetry_legacy_update_guard BEFORE UPDATE ON telemetry_samples FOR EACH ROW\nBEGIN\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry legacy migration metadata is unavailable';\n END IF;\n IF migration_state='complete' AND NEW.sampled_at NOT IN (-9223372036854775808,9223372036854775807) THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='finite telemetry must use its monthly shard';\n END IF;\nEND",
+          "checksum": "4830ca03e032e35468e2252e803238b1cf72c029b71b454ef55bf55b75d2a414",
+          "before": "",
+          "after": "6774adaa77d2955a5b139cf07bee40a8d09a2aadc5a0bf725fd146bf21d83ccf"
+        },
+        {
+          "name": "telemetry_retire_before_v4",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "DROP PROCEDURE telemetry_retire_shards",
+          "checksum": "670a8b46146e65b61ebf998095746a56fa065158e568bf74de022ee14cfc9bbd",
+          "before": "d5d48f701b96cedf7a6be807c21fa4f441abf2a93cdf30c64459fd90ea1f7d55",
+          "after": ""
+        },
+        {
+          "name": "telemetry_retire_ready_v4",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_retire_shards(IN cutoff BIGINT)\nSQL SECURITY DEFINER\nBEGIN\n DECLARE clock_at BIGINT;\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SET clock_at = TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',UTC_TIMESTAMP(6));\n IF cutoff IS NULL OR cutoff \u003c clock_at-7776000000000 OR cutoff \u003e clock_at THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry retention cutoff outside permitted window';\n END IF;\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n IF guard_key IS NULL THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry catalog guard is unavailable';\n END IF;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF migration_state IS NULL OR migration_state\u003c\u003e'complete' THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry history migration is incomplete';\n END IF;\n UPDATE telemetry_sample_shards SET state='retired' WHERE state='active' AND end_at\u003c=cutoff;\nEND",
+          "checksum": "93bd842ada565052eec9c993cd5ae1fae74e0f85e0104dfc1f77d9cf712dc7a4",
+          "before": "",
+          "after": "8c33f0d49006fc9c481f0efedab8c4c05f0f7007f3e3b90c192ef18724e617ab"
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": [
+        {
+          "name": "time_migration_decisions",
+          "object": "time_migration_decisions",
+          "kind": "table",
+          "sql": "CREATE TABLE time_migration_decisions (\n table_name VARBINARY(64) NOT NULL,\n column_name VARBINARY(64) NOT NULL,\n row_key VARBINARY(128) NOT NULL,\n source_value DATETIME(6) NOT NULL,\n decision VARBINARY(24) NOT NULL,\n PRIMARY KEY(table_name,column_name,row_key),\n CHECK(decision IN ('finite','negative_infinity'))\n) ENGINE=InnoDB",
+          "checksum": "96947a25f324829752145f39a00db490b9530300062e2d23714ff52011dc4d58",
+          "before": "",
+          "after": "663062e47754eb195a4c88593c442fb820bd65dba72d834eb11c7e2e42e54c9a"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_attempts_insert",
+          "object": "migrate_v4_time_local_auth_attempts_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_attempts_insert` BEFORE INSERT ON `local_auth_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "2d1d7a9caac1b1a7421fd364c46242115bac0c59e1ff6b08e22ca757f10feb49",
+          "before": "",
+          "after": "698ee027cf42e273f224c33df2d1d23d8cd4f29ef6d1f256055cd46ae0e392dc"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_attempts_update",
+          "object": "migrate_v4_time_local_auth_attempts_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_attempts_update` BEFORE UPDATE ON `local_auth_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1a19a78cda88bd620de9036d6fabc2685eec94455af1b1ab3dd2181e362aeaf1",
+          "before": "",
+          "after": "6b25b4ff055c28ce4dcb2356d0675e0327f72ddd08f9851ccc725446bb7aea4c"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_attempts_delete",
+          "object": "migrate_v4_time_local_auth_attempts_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_attempts_delete` BEFORE DELETE ON `local_auth_attempts` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "02b8a3a0b9e2a00bbc739a50b4f501b36121a2d19cdd245431af8e8f23c7369c",
+          "before": "",
+          "after": "1b656d22f768bf996d7a4b31a1ccea40f0a4b0edd61690c3c4c6f5fa731af3d3"
+        },
+        {
+          "name": "local_auth_attempts_window_until_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_window_until` BIGINT NULL",
+          "checksum": "f59200e2334372bec414d190978e7dbd9d45ef5f9ab34adb8c4554284c0e4218",
+          "before": "df1d9f6e13dc1f2f8e46d49b6c879585a2a3f1ab665c182cd11f0ed5d0d3a81b",
+          "after": "472f33066ab0efb9f6616cf9355da0f96a1201b414196cd33c74c01a31dd148f"
+        },
+        {
+          "name": "local_auth_attempts_blocked_until_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_blocked_until` BIGINT NULL",
+          "checksum": "8f9796e8df48a67fc13a5841da3572242d77da1d620135757cf9a1adfa82cc96",
+          "before": "472f33066ab0efb9f6616cf9355da0f96a1201b414196cd33c74c01a31dd148f",
+          "after": "0f0257a4d53952a5a3e4e5d4e6b6fa39e312bc4b1b66755277a977e7f544a068"
+        },
+        {
+          "name": "local_auth_attempts_lease_until_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_lease_until` BIGINT NULL",
+          "checksum": "21089ecae1b0ae8ba62da1587ee0ca6f751d543cfc25e1f72df86271c455b8e5",
+          "before": "0f0257a4d53952a5a3e4e5d4e6b6fa39e312bc4b1b66755277a977e7f544a068",
+          "after": "a747ecc4130716c5f739bb8f182fd85bebe83cdfcf0e8ff1eddd9aeb3960d32c"
+        },
+        {
+          "name": "local_auth_attempts_expires_at_column",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "2d34117164af94573807a8e4af79f4c237ff3fad3e4ebb93dee9913657eb6898",
+          "before": "a747ecc4130716c5f739bb8f182fd85bebe83cdfcf0e8ff1eddd9aeb3960d32c",
+          "after": "7a9d2d223489941d1e23fe729511853a209ac943e0ec43d641028370bb7e5976"
+        },
+        {
+          "name": "local_auth_attempts_times_backfill",
+          "object": "local_auth_attempts",
+          "kind": "data",
+          "sql": "UPDATE `local_auth_attempts` source SET `logical_window_until`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`window_until`),`logical_blocked_until`=CASE WHEN source.`blocked_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='blocked_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`blocked_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) END,`logical_lease_until`=CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='lease_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END,`logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)",
+          "checksum": "ef5e4f8810d696c349ab0f63e5f8392ab1bc23f40ee3aabeba76f0e8912a1062",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_attempts` source WHERE (source.`window_until` IS NOT NULL AND source.`logical_window_until` IS NULL) OR NOT(source.`logical_window_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`window_until`)) OR (source.`blocked_until` IS NOT NULL AND source.`logical_blocked_until` IS NULL) OR NOT(source.`logical_blocked_until` \u003c=\u003e CASE WHEN source.`blocked_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='blocked_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`blocked_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) END) OR (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='lease_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "local_auth_attempts_times_switch",
+          "object": "local_auth_attempts",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_attempts` DROP INDEX local_auth_attempts_expiry,DROP COLUMN `window_until`,CHANGE COLUMN `logical_window_until` `window_until` BIGINT NOT NULL,ADD CONSTRAINT `local_auth_attempts_window_until_range` CHECK (`window_until` IS NULL OR `window_until` IN (-9223372036854775808,9223372036854775807) OR (`window_until`\u003e=-211813488000000000 AND `window_until`\u003c9223371331200000000)),DROP COLUMN `blocked_until`,CHANGE COLUMN `logical_blocked_until` `blocked_until` BIGINT NOT NULL DEFAULT -9223372036854775808,ADD CONSTRAINT `local_auth_attempts_blocked_until_range` CHECK (`blocked_until` IS NULL OR `blocked_until` IN (-9223372036854775808,9223372036854775807) OR (`blocked_until`\u003e=-211813488000000000 AND `blocked_until`\u003c9223371331200000000)),DROP COLUMN `lease_until`,CHANGE COLUMN `logical_lease_until` `lease_until` BIGINT NOT NULL DEFAULT -9223372036854775808,ADD CONSTRAINT `local_auth_attempts_lease_until_range` CHECK (`lease_until` IS NULL OR `lease_until` IN (-9223372036854775808,9223372036854775807) OR (`lease_until`\u003e=-211813488000000000 AND `lease_until`\u003c9223371331200000000)),DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `local_auth_attempts_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),ADD KEY local_auth_attempts_expiry(expires_at)",
+          "checksum": "171e5621b72a08a1863cc7890e9f45aa2da527837944abd1cef544797d31ee95",
+          "before": "7a9d2d223489941d1e23fe729511853a209ac943e0ec43d641028370bb7e5976",
+          "after": "58101b0338e9d64c7bf1284b3a69470062d7dbec434dd8b434d5d07049fd9e79",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_attempts` source WHERE (source.`window_until` IS NOT NULL AND source.`logical_window_until` IS NULL) OR NOT(source.`logical_window_until` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`window_until`)) OR (source.`blocked_until` IS NOT NULL AND source.`logical_blocked_until` IS NULL) OR NOT(source.`logical_blocked_until` \u003c=\u003e CASE WHEN source.`blocked_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='blocked_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`blocked_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`blocked_until`) END) OR (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='local_auth_attempts' AND d.column_name='lease_until' AND d.row_key=CAST(source.username AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_attempts_insert",
+          "object": "migrate_v4_time_local_auth_attempts_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_attempts_insert`",
+          "checksum": "c47f7ef61c3efad6374bb45ed8d1ab576bc22784da1456861925e6bd48f3b10a",
+          "before": "698ee027cf42e273f224c33df2d1d23d8cd4f29ef6d1f256055cd46ae0e392dc",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_attempts_update",
+          "object": "migrate_v4_time_local_auth_attempts_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_attempts_update`",
+          "checksum": "bac12bbdb143ec7462a36e2438d227da7a7327c5766dc79477a875b8888c54ce",
+          "before": "6b25b4ff055c28ce4dcb2356d0675e0327f72ddd08f9851ccc725446bb7aea4c",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_attempts_delete",
+          "object": "migrate_v4_time_local_auth_attempts_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_attempts_delete`",
+          "checksum": "ea811c9590218bba9b72b109f79532ca6a61f1639d0e6201d9de93caf85f08ae",
+          "before": "1b656d22f768bf996d7a4b31a1ccea40f0a4b0edd61690c3c4c6f5fa731af3d3",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_scheduler_leadership_insert",
+          "object": "migrate_v4_time_scheduler_leadership_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_scheduler_leadership_insert` BEFORE INSERT ON `scheduler_leadership` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "712ee9cfb6fc04be3cbb213142a75bb4b5c6ec4b158d890a0dd2cba811375198",
+          "before": "",
+          "after": "f2bce20d53e48584cf7760bade5d048cc95b5227a31eed3d3b5c8d40dac22424"
+        },
+        {
+          "name": "migrate_v4_time_scheduler_leadership_update",
+          "object": "migrate_v4_time_scheduler_leadership_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_scheduler_leadership_update` BEFORE UPDATE ON `scheduler_leadership` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "ae2ff699471855bbdaf9e43bebfe53f2db69744c009a3626f62cf7a195b79969",
+          "before": "",
+          "after": "cd34f963061efdcab8ab9b2feee745d3344bf69b6da9e7efcf0f19ad502ab719"
+        },
+        {
+          "name": "migrate_v4_time_scheduler_leadership_delete",
+          "object": "migrate_v4_time_scheduler_leadership_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_scheduler_leadership_delete` BEFORE DELETE ON `scheduler_leadership` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "07c64e8312bb3de0ffe4aaa1bb968a3195bd7f5701073241a5a1e0eae641b140",
+          "before": "",
+          "after": "4db7ed0444d44aaf0bdc426e023a50d5b2b19a43c2d93ae012ecaeeff5360aa2"
+        },
+        {
+          "name": "scheduler_seed_time_decision",
+          "object": "time_migration_decisions",
+          "kind": "data",
+          "sql": "INSERT INTO time_migration_decisions(table_name,column_name,row_key,source_value,decision) SELECT 'scheduler_leadership','lease_until',CAST(source.id AS BINARY),source.lease_until,'negative_infinity' FROM scheduler_leadership source WHERE id=1 AND instance_id=UNHEX('00000000000000000000000000000000') AND incarnation=0 AND epoch=0 AND lease_until='1000-01-01 00:00:00.000000' AND NOT EXISTS(SELECT 1 FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY))",
+          "checksum": "49922dbbfd4bf29b49898a7e77e98bf071e90dc7e60784e59e5820f122985172",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM scheduler_leadership source WHERE id=1 AND instance_id=UNHEX('00000000000000000000000000000000') AND incarnation=0 AND epoch=0 AND lease_until='1000-01-01 00:00:00.000000' AND NOT EXISTS(SELECT 1 FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.lease_until)),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "scheduler_leadership_lease_until_column",
+          "object": "scheduler_leadership",
+          "kind": "table",
+          "sql": "ALTER TABLE `scheduler_leadership` ADD COLUMN `logical_lease_until` BIGINT NULL",
+          "checksum": "775d7e924d87eb25dea81a4dc32fb3773cda57b1041185b77b5d67824a0b5ba2",
+          "before": "9204491e3411b9bbec0f2f50c38d4728b2ddca679f03d64bd3d094fbcf4ff103",
+          "after": "0d4ca051c5d3581ecc0f3638e0c7c18d6d56a7f8c64f5c8abd8d15f41a4bb7d1"
+        },
+        {
+          "name": "scheduler_leadership_updated_at_column",
+          "object": "scheduler_leadership",
+          "kind": "table",
+          "sql": "ALTER TABLE `scheduler_leadership` ADD COLUMN `logical_updated_at` BIGINT NULL",
+          "checksum": "2b1e942fbf67554fd6618b114331f1aef70bf5436c8758d6afcde3fb149c819c",
+          "before": "0d4ca051c5d3581ecc0f3638e0c7c18d6d56a7f8c64f5c8abd8d15f41a4bb7d1",
+          "after": "16bfa1083749bdadbc87c9f513e1c90552e5f3dfae2e39b50fd6ec9b042f84a6"
+        },
+        {
+          "name": "scheduler_leadership_times_backfill",
+          "object": "scheduler_leadership",
+          "kind": "data",
+          "sql": "UPDATE `scheduler_leadership` source SET `logical_lease_until`=CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END,`logical_updated_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`)",
+          "checksum": "5e86068adf559b89687e8c53436eee5822572b97ac7a496a68cabd75228d2263",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `scheduler_leadership` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "scheduler_leadership_times_switch",
+          "object": "scheduler_leadership",
+          "kind": "table",
+          "sql": "ALTER TABLE `scheduler_leadership` DROP COLUMN `lease_until`,CHANGE COLUMN `logical_lease_until` `lease_until` BIGINT NOT NULL,ADD CONSTRAINT `scheduler_leadership_lease_until_range` CHECK (`lease_until` IS NULL OR `lease_until` IN (-9223372036854775808,9223372036854775807) OR (`lease_until`\u003e=-211813488000000000 AND `lease_until`\u003c9223371331200000000)),DROP COLUMN `updated_at`,CHANGE COLUMN `logical_updated_at` `updated_at` BIGINT NOT NULL,ADD CONSTRAINT `scheduler_leadership_updated_at_range` CHECK (`updated_at` IS NULL OR `updated_at` IN (-9223372036854775808,9223372036854775807) OR (`updated_at`\u003e=-211813488000000000 AND `updated_at`\u003c9223371331200000000))",
+          "checksum": "3619e0246c5007248e32680831b634420e15891843c753640eb02e976664407d",
+          "before": "16bfa1083749bdadbc87c9f513e1c90552e5f3dfae2e39b50fd6ec9b042f84a6",
+          "after": "9d9ee2ddc71be858788aa5b2f05ade840f69b35fd947514cf3513654201d12e3",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `scheduler_leadership` source WHERE (source.`lease_until` IS NOT NULL AND source.`logical_lease_until` IS NULL) OR NOT(source.`logical_lease_until` \u003c=\u003e CASE WHEN source.`lease_until`='1000-01-01 00:00:00.000000' THEN CASE (SELECT d.decision FROM time_migration_decisions d WHERE d.table_name='scheduler_leadership' AND d.column_name='lease_until' AND d.row_key=CAST(source.id AS BINARY) AND d.source_value=source.`lease_until`) WHEN 'finite' THEN TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) WHEN 'negative_infinity' THEN -9223372036854775808 ELSE NULL END ELSE TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`lease_until`) END) OR (source.`updated_at` IS NOT NULL AND source.`logical_updated_at` IS NULL) OR NOT(source.`logical_updated_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`updated_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_scheduler_leadership_insert",
+          "object": "migrate_v4_time_scheduler_leadership_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_scheduler_leadership_insert`",
+          "checksum": "f8a6cf538d4ae626b0bfc1ce98ae0461dfa3e0f8bc4e8757c81efbe46d6027d2",
+          "before": "f2bce20d53e48584cf7760bade5d048cc95b5227a31eed3d3b5c8d40dac22424",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_scheduler_leadership_update",
+          "object": "migrate_v4_time_scheduler_leadership_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_scheduler_leadership_update`",
+          "checksum": "cb8b06cb4b0b0e76ccfd449b148f04d578e1ff2705e0e4c5eb088caa84e076b6",
+          "before": "cd34f963061efdcab8ab9b2feee745d3344bf69b6da9e7efcf0f19ad502ab719",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_scheduler_leadership_delete",
+          "object": "migrate_v4_time_scheduler_leadership_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_scheduler_leadership_delete`",
+          "checksum": "60f1add9385fe628a0df20b83c0f2f041149be188c6704adb9e7120c9059a562",
+          "before": "4db7ed0444d44aaf0bdc426e023a50d5b2b19a43c2d93ae012ecaeeff5360aa2",
+          "after": ""
+        },
+        {
+          "name": "jsonb_value_validator",
+          "object": "ocserv_jsonb_value_valid",
+          "kind": "function",
+          "sql": "CREATE FUNCTION ocserv_jsonb_value_valid(doc LONGBLOB) RETURNS BOOLEAN DETERMINISTIC NO SQL SQL SECURITY DEFINER\nBEGIN\n DECLARE source LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE masked LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '';\n DECLARE token LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE digits LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE c CHAR(1) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;\n DECLARE posn BIGINT DEFAULT 1;\n DECLARE startn BIGINT;\n DECLARE n BIGINT;\n DECLARE dotn BIGINT;\n DECLARE en BIGINT;\n DECLARE expo BIGINT;\n DECLARE scale_n BIGINT;\n DECLARE integer_n BIGINT;\n DECLARE leading_n BIGINT;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION RETURN FALSE;\n IF doc IS NULL THEN RETURN FALSE; END IF;\n SET source=CONVERT(doc USING utf8mb4);\n IF CAST(source AS BINARY)\u003c\u003edoc THEN RETURN FALSE; END IF;\n SET n=CHAR_LENGTH(source);\n WHILE posn\u003c=n DO\n  SET c=SUBSTRING(source,posn,1);\n  IF c='\"' THEN\n   SET startn=posn;\n   SET posn=posn+1;\n   WHILE posn\u003c=n AND SUBSTRING(source,posn,1)\u003c\u003e'\"' DO\n    IF ASCII(SUBSTRING(source,posn,1))=92 THEN SET posn=posn+1; END IF;\n    SET posn=posn+1;\n   END WHILE;\n   IF posn\u003en THEN RETURN FALSE; END IF;\n   SET token=SUBSTRING(source,startn,posn-startn+1);\n   IF NOT JSON_VALID(token) OR LOCATE(0x00,CAST(JSON_UNQUOTE(token) AS BINARY))\u003c\u003e0 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,token);\n   SET posn=posn+1;\n  ELSEIF c='-' OR (ASCII(c)\u003e=48 AND ASCII(c)\u003c=57) THEN\n   SET startn=posn;\n   WHILE posn\u003c=n AND LOCATE(SUBSTRING(source,posn,1),'0123456789.eE+-')\u003e0 DO SET posn=posn+1; END WHILE;\n   SET token=SUBSTRING(source,startn,posn-startn);\n   IF NOT (token REGEXP '(?-i)\\\\A-?(0|[1-9][0-9]*)(\\\\.[0-9]+)?([eE][+-]?[0-9]+)?\\\\z') THEN RETURN FALSE; END IF;\n   IF LEFT(token,1)='-' THEN SET token=SUBSTRING(token,2); END IF;\n   SET en=LOCATE('e',LOWER(token)); SET expo=0;\n   IF en\u003e0 THEN\n    SET digits=SUBSTRING(token,en+1);\n    IF LEFT(digits,1) IN ('-','+') THEN SET digits=SUBSTRING(digits,2); END IF;\n    SET digits=TRIM(LEADING '0' FROM digits);\n    IF CHAR_LENGTH(digits)\u003e10 THEN RETURN FALSE; END IF;\n    IF digits\u003c\u003e'' AND CAST(digits AS UNSIGNED)\u003e1073741823 THEN RETURN FALSE; END IF;\n    SET expo=CAST(SUBSTRING(token,en+1) AS SIGNED);\n    SET token=LEFT(token,en-1);\n   END IF;\n   SET dotn=LOCATE('.',token);\n   SET scale_n=IF(dotn=0,0,CHAR_LENGTH(token)-dotn)-expo;\n   IF scale_n\u003e16383 THEN RETURN FALSE; END IF;\n   SET digits=REPLACE(token,'.','');\n   SET leading_n=CHAR_LENGTH(digits)-CHAR_LENGTH(TRIM(LEADING '0' FROM digits));\n   SET integer_n=IF(dotn=0,CHAR_LENGTH(token),dotn-1)+expo-leading_n;\n   IF leading_n\u003c\u003eCHAR_LENGTH(digits) AND integer_n\u003e131072 THEN RETURN FALSE; END IF;\n   SET masked=CONCAT(masked,'0');\n  ELSE\n   SET masked=CONCAT(masked,c); SET posn=posn+1;\n  END IF;\n END WHILE;\n IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;\n RETURN TRUE;\nEND",
+          "checksum": "cc03f81ee057f7406da350fd1c315a98cd78f0a329bdca774aa4602026d95db6",
+          "before": "",
+          "after": "4aacb7b9f59e94989a011dbc355c05f13f15100af9ee4ac5d0ddda98ce8f4d01"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_insert` BEFORE INSERT ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4773c63246e106dcefc690e13e13e9831aab421b2b22f595a7f708af25d57169",
+          "before": "",
+          "after": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_update` BEFORE UPDATE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "ae10115d4246c6aaca3ca221e5c13c8507a9d5bb6c3dcec15367da3b4bb600a9",
+          "before": "",
+          "after": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_delete` BEFORE DELETE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "340f8817ef6ae2143435cb58a4b50b7c2f997a3ef9d4cd9e36c7aeaaad9cf117",
+          "before": "",
+          "after": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e"
+        },
+        {
+          "name": "migrate_v4_time_audit_checkpoints_insert",
+          "object": "migrate_v4_time_audit_checkpoints_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_checkpoints_insert` BEFORE INSERT ON `audit_checkpoints` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f98d85b2f105b02d156d2df67d8527c74d97d5289f9e1fdb7075ac70ad8bf7a0",
+          "before": "",
+          "after": "bb3c804974cf47a5786a207181866958022444228a0a63fedcf84d79e1fb556d"
+        },
+        {
+          "name": "migrate_v4_time_audit_checkpoints_update",
+          "object": "migrate_v4_time_audit_checkpoints_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_checkpoints_update` BEFORE UPDATE ON `audit_checkpoints` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b81f828fc9b5204a984e6d7dd5b82307f27cd88db1a174ffb9d431d6bc2f649e",
+          "before": "",
+          "after": "0b93847d11ff9a27f0997666b502ea87de3252c18dd82224c6a58a71c1a778ac"
+        },
+        {
+          "name": "migrate_v4_time_audit_checkpoints_delete",
+          "object": "migrate_v4_time_audit_checkpoints_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_checkpoints_delete` BEFORE DELETE ON `audit_checkpoints` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "c979713e1aa506d13b5a0f8f5f1e288e210e83fa512f03fcd1058fbe57530bb2",
+          "before": "",
+          "after": "9ad69aa255f608df2f8006534b9fd8dac4a53d954c35af5aebd0d00b59fdb4ed"
+        },
+        {
+          "name": "audit_drop_audit_events_reject_update",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER audit_events_reject_update",
+          "checksum": "81603e6cf5dca7a2e76ca0682eb6a3bd6785f7cdc93d4e1a68b2f9b964cdfb90",
+          "before": "afd5324f7ffcc1b1805b6e40e1ec9a4f4f6ef2b61161ca2e43c4867af4cb14ef",
+          "after": ""
+        },
+        {
+          "name": "audit_events_occurred_at_column",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_events` ADD COLUMN `logical_occurred_at` BIGINT NULL",
+          "checksum": "5863bad9faa14011956f3e0518c454d880874a20909a4dee01d6b5f4d6954194",
+          "before": "6b317f7037a1a2b149bab64d54c8899d9938acbe6e1063232d6f4244beca8423",
+          "after": "ba7d2fbe213d19aba224d3d981c47d5c98695aab810aa8a7077b1ed47f7f83a5"
+        },
+        {
+          "name": "audit_events_times_backfill",
+          "object": "audit_events",
+          "kind": "data",
+          "sql": "UPDATE `audit_events` source SET `logical_occurred_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`occurred_at`)",
+          "checksum": "c1db67c37f1c4b736cd65dfb7667487c7cca110e3a40379a43d4855eaf92db3f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_events` source WHERE (source.`occurred_at` IS NOT NULL AND source.`logical_occurred_at` IS NULL) OR NOT(source.`logical_occurred_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`occurred_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_events_times_switch",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_events` DROP INDEX audit_events_workspace_time_idx,DROP COLUMN `occurred_at`,CHANGE COLUMN `logical_occurred_at` `occurred_at` BIGINT NOT NULL,ADD CONSTRAINT `audit_events_occurred_at_range` CHECK (`occurred_at` IS NULL OR `occurred_at` IN (-9223372036854775808,9223372036854775807) OR (`occurred_at`\u003e=-211813488000000000 AND `occurred_at`\u003c9223371331200000000)),ADD KEY audit_events_workspace_time_idx(workspace_id,occurred_at DESC,id DESC)",
+          "checksum": "1dda2fed99ade143a900d034a1069385cabb76827bb4177284fd2b1ab24df01f",
+          "before": "ba7d2fbe213d19aba224d3d981c47d5c98695aab810aa8a7077b1ed47f7f83a5",
+          "after": "a3bc073cd53440e2f3ac9c3efd6cdf3db1349affb21a228312a059362c3a0b56",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_events` source WHERE (source.`occurred_at` IS NOT NULL AND source.`logical_occurred_at` IS NULL) OR NOT(source.`logical_occurred_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`occurred_at`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_drop_audit_checkpoints_reject_update",
+          "object": "audit_checkpoints_reject_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER audit_checkpoints_reject_update",
+          "checksum": "31937e21151eb8b018dd3c4cdfe52bf18fc1517561028bd2ab5983949585ed92",
+          "before": "fa482fd81b40e17cd98fb23c88a3c0fe93400cd99555a6dbe22182ab25f7d923",
+          "after": ""
+        },
+        {
+          "name": "audit_checkpoints_created_at_column",
+          "object": "audit_checkpoints",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_checkpoints` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "bc33f3396c5d18b297909160a5259292d9c29671129d5fcb3b4c894e08dfdcd3",
+          "before": "2e44cafd53fbea1ed78d7c5d0fbe024f37fd9271e82071ff71814453c78c3942",
+          "after": "23e363cf7814b55fbdd16f8c401711122c9224458aa0a65d09b0e6c75a35f362"
+        },
+        {
+          "name": "audit_checkpoints_times_backfill",
+          "object": "audit_checkpoints",
+          "kind": "data",
+          "sql": "UPDATE `audit_checkpoints` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "af4f127e87fcacb4a0521bd39129481f5b1784210fd594eb8d2134a9233bc219",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_checkpoints` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_checkpoints_times_switch",
+          "object": "audit_checkpoints",
+          "kind": "table",
+          "sql": "ALTER TABLE `audit_checkpoints` DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `audit_checkpoints_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000))",
+          "checksum": "b95391b0bb0f614e3b51299e2b9f9ab7109cee6df7ccdc08ab008188c5755c2b",
+          "before": "23e363cf7814b55fbdd16f8c401711122c9224458aa0a65d09b0e6c75a35f362",
+          "after": "fa13bb11bfde738c82cf23be49b0774e1da838cfacff7e66824efbcac3939074",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `audit_checkpoints` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_before_summary_column",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events ADD COLUMN `logical_before_summary` LONGBLOB NULL",
+          "checksum": "f9f2053b2e1dacd0c062a03f6a51b25737b2e58fecfe0ebfadb305ec1e5cc05d",
+          "before": "a3bc073cd53440e2f3ac9c3efd6cdf3db1349affb21a228312a059362c3a0b56",
+          "after": "bd1681e6c61d1fe9a19bcb5779d1d3c8fc89caf343975738b7ead583911ed905"
+        },
+        {
+          "name": "audit_before_summary_backfill",
+          "object": "audit_events",
+          "kind": "data",
+          "sql": "UPDATE audit_events SET `logical_before_summary`=CAST(`before_summary` AS BINARY)",
+          "checksum": "cbadf7755fc0192f58cc5f05d894ce2bdac383aa3ab45208816088960ec505d2",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_before_summary` \u003c=\u003e CAST(`before_summary` AS BINARY)) OR (`logical_before_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_before_summary`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_before_summary_switch",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events DROP COLUMN `before_summary`,CHANGE COLUMN `logical_before_summary` `before_summary` LONGBLOB NULL",
+          "checksum": "2d03ec3b8e0739d01d9882d095cf7b3603347b69186b082e1815c25481f5753d",
+          "before": "bd1681e6c61d1fe9a19bcb5779d1d3c8fc89caf343975738b7ead583911ed905",
+          "after": "1fec195d3676d32901c5fe24cb9f2266abf801d9f585d56c6896d366bbbb4091",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_before_summary` \u003c=\u003e CAST(`before_summary` AS BINARY)) OR (`logical_before_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_before_summary`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_after_summary_column",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events ADD COLUMN `logical_after_summary` LONGBLOB NULL",
+          "checksum": "3ca19fe7ea95b0ac36f8512cac266342d0a96df2abd5f7a0014a55b74065cb2c",
+          "before": "1fec195d3676d32901c5fe24cb9f2266abf801d9f585d56c6896d366bbbb4091",
+          "after": "35223ced96b36ac86f944be0a2a5dd3217508db070cfb3eceba9a478695ec6fb"
+        },
+        {
+          "name": "audit_after_summary_backfill",
+          "object": "audit_events",
+          "kind": "data",
+          "sql": "UPDATE audit_events SET `logical_after_summary`=CAST(`after_summary` AS BINARY)",
+          "checksum": "32288d07c1200deeeee39f46923012b14047ca16702510d6437c30e57c2e5f78",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_after_summary` \u003c=\u003e CAST(`after_summary` AS BINARY)) OR (`logical_after_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_after_summary`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "audit_after_summary_switch",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events DROP COLUMN `after_summary`,CHANGE COLUMN `logical_after_summary` `after_summary` LONGBLOB NULL",
+          "checksum": "63fcb1b36a829e2143976a638095579fba1d2c1d520c103171314eb5ad00a749",
+          "before": "35223ced96b36ac86f944be0a2a5dd3217508db070cfb3eceba9a478695ec6fb",
+          "after": "0e826d5483283a796f49742b484de06ae7239a6d3751fd27912a8571bb26d539",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM audit_events WHERE NOT (`logical_after_summary` \u003c=\u003e CAST(`after_summary` AS BINARY)) OR (`logical_after_summary` IS NOT NULL AND NOT ocserv_jsonb_value_valid(`logical_after_summary`))),'valid','invalid')"
+        },
+        {
+          "name": "audit_restore_audit_events_reject_update",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_events_reject_update BEFORE UPDATE ON audit_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record'",
+          "checksum": "b27da8cfc55069cfd79a0c5403aeee7e335cf193561772fd076f82f99e60d994",
+          "before": "",
+          "after": "afd5324f7ffcc1b1805b6e40e1ec9a4f4f6ef2b61161ca2e43c4867af4cb14ef"
+        },
+        {
+          "name": "audit_restore_audit_checkpoints_reject_update",
+          "object": "audit_checkpoints_reject_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_checkpoints_reject_update BEFORE UPDATE ON audit_checkpoints FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record'",
+          "checksum": "729ad719a2e540cee9199cb442a1877f1e39887dcc212c7bc978ef1b6564bb4e",
+          "before": "",
+          "after": "fa482fd81b40e17cd98fb23c88a3c0fe93400cd99555a6dbe22182ab25f7d923"
+        },
+        {
+          "name": "audit_jsonb_insert",
+          "object": "audit_jsonb_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_jsonb_insert BEFORE INSERT ON audit_events FOR EACH ROW BEGIN IF (NEW.before_summary IS NOT NULL AND NOT ocserv_jsonb_value_valid(NEW.before_summary)) OR (NEW.after_summary IS NOT NULL AND NOT ocserv_jsonb_value_valid(NEW.after_summary)) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid audit JSON'; END IF; END",
+          "checksum": "e1a1ade863c456c383ca5a76027613ada1478e9667b4fada0f6ba30fb702cc70",
+          "before": "",
+          "after": "3d191970aeedfe1e2205b810384ad18611cfc845590bc24f382abed26027fb9e"
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_insert`",
+          "checksum": "a6beecda06254ecb621268b02420cb9f4be7981d1b484561aae356aff310b458",
+          "before": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_update`",
+          "checksum": "d681747b01fdccb13a8620c4163128badd6284ec63918d651f3f0d5edddd4149",
+          "before": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_delete`",
+          "checksum": "0c4c4d00c5a42063ecc98d3da4cc115be920638a199fb4354879a231a35b015d",
+          "before": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_checkpoints_insert",
+          "object": "migrate_v4_time_audit_checkpoints_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_checkpoints_insert`",
+          "checksum": "639b658c56ac53e5fd8810261ad3244874254797c76c1309e42303462b25b28f",
+          "before": "bb3c804974cf47a5786a207181866958022444228a0a63fedcf84d79e1fb556d",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_checkpoints_update",
+          "object": "migrate_v4_time_audit_checkpoints_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_checkpoints_update`",
+          "checksum": "9088455fd3cf8079c51896b902bcdd6b40bf2d4250bf9f1d2e78241dd8a289dd",
+          "before": "0b93847d11ff9a27f0997666b502ea87de3252c18dd82224c6a58a71c1a778ac",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_checkpoints_delete",
+          "object": "migrate_v4_time_audit_checkpoints_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_checkpoints_delete`",
+          "checksum": "cfaac9b9c95fa3e2643a9ab5c20670fdbfd04ebed6ed3ae0277b886200574732",
+          "before": "9ad69aa255f608df2f8006534b9fd8dac4a53d954c35af5aebd0d00b59fdb4ed",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_role_bindings_insert",
+          "object": "migrate_v4_time_role_bindings_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_role_bindings_insert` BEFORE INSERT ON `role_bindings` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "5362bfa94c5afb4595b56fe628a0a698c966f27744a8e7f9c6012c0439cb5033",
+          "before": "",
+          "after": "ec47ee0a6e838f15674427ca838a4a0375e0bdc26fb81c9e2d284e16759ad4d5"
+        },
+        {
+          "name": "migrate_v4_time_role_bindings_update",
+          "object": "migrate_v4_time_role_bindings_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_role_bindings_update` BEFORE UPDATE ON `role_bindings` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f5adb30696fa92adad37841bf21cdc86457e49012d7e419cd335c6759d4f283d",
+          "before": "",
+          "after": "1d27e6716abfc7e111045344b197783c3aa5d6c30452d260e39ac49e3d8f77a1"
+        },
+        {
+          "name": "migrate_v4_time_role_bindings_delete",
+          "object": "migrate_v4_time_role_bindings_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_role_bindings_delete` BEFORE DELETE ON `role_bindings` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "b87860131390a12d163f532a6ed465a5454fcb0f355b855cef9ce4897d961965",
+          "before": "",
+          "after": "bea53af6adf954dc27f5b4aba6b60768e8a28bf5f9a7880af03db93a4c2562b3"
+        },
+        {
+          "name": "role_bindings_created_at_column",
+          "object": "role_bindings",
+          "kind": "table",
+          "sql": "ALTER TABLE `role_bindings` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "98c6d29b8914a321752a33d67fe81c63cd41512f5ca5ebfc0a8e841752299d78",
+          "before": "3569eb26ae10d80255496d0a2d8f0bc34b21668cf3925be9879f31aabd83d7f0",
+          "after": "a54bba7370707d557d036cc8c784170ccf8a6db8bec0dfa3ea73bf841fc0bc7b"
+        },
+        {
+          "name": "role_bindings_times_backfill",
+          "object": "role_bindings",
+          "kind": "data",
+          "sql": "UPDATE `role_bindings` source SET `logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)",
+          "checksum": "60ae47c44c602750cc2bfc5a110840f55e0123631ca4abb8716dfcbc5b784437",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `role_bindings` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "role_bindings_times_switch",
+          "object": "role_bindings",
+          "kind": "table",
+          "sql": "ALTER TABLE `role_bindings` DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `role_bindings_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000))",
+          "checksum": "651a0eb8d53f37f425fc36a70f26753ca4be2c436260934d746133fb965433d3",
+          "before": "a54bba7370707d557d036cc8c784170ccf8a6db8bec0dfa3ea73bf841fc0bc7b",
+          "after": "5b6e28e30545deb80973ac1718625e3d0737620ed7a3e3d1d53a400a9b82f774",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `role_bindings` source WHERE (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_role_bindings_insert",
+          "object": "migrate_v4_time_role_bindings_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_role_bindings_insert`",
+          "checksum": "139756516faa8da1b00477c688d628379e4a18e7552b5aa550d426c409e8cd2b",
+          "before": "ec47ee0a6e838f15674427ca838a4a0375e0bdc26fb81c9e2d284e16759ad4d5",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_role_bindings_update",
+          "object": "migrate_v4_time_role_bindings_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_role_bindings_update`",
+          "checksum": "9526ebd57459125ee3a88489c7501a712c2b763728ebd946669d0241fbeeb814",
+          "before": "1d27e6716abfc7e111045344b197783c3aa5d6c30452d260e39ac49e3d8f77a1",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_role_bindings_delete",
+          "object": "migrate_v4_time_role_bindings_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_role_bindings_delete`",
+          "checksum": "4ba269975601bf725677bccef71b58e3687944efdb8cdf64e12fa46700f828e4",
+          "before": "bea53af6adf954dc27f5b4aba6b60768e8a28bf5f9a7880af03db93a4c2562b3",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_local_auth_bootstrap_insert",
+          "object": "migrate_v4_time_local_auth_bootstrap_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_bootstrap_insert` BEFORE INSERT ON `local_auth_bootstrap` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "d09e7d8d0cb2c85be7c0c75f99e09a9eefcda176eb749313cbd62ea0a4c7ef8c",
+          "before": "",
+          "after": "167f17c1e1cdda4cd014faab7bc819c4fd1bc9450d50ebe962b2250037777734"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_bootstrap_update",
+          "object": "migrate_v4_time_local_auth_bootstrap_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_bootstrap_update` BEFORE UPDATE ON `local_auth_bootstrap` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "1f13f6cc403465067cf929236513e3ebc8d2cbce28cab977b80d67f4986d68dc",
+          "before": "",
+          "after": "0abc0267a95f129684ab989f60e851a9d1eb9d7779c45cff5668f0c6c3c8c4f6"
+        },
+        {
+          "name": "migrate_v4_time_local_auth_bootstrap_delete",
+          "object": "migrate_v4_time_local_auth_bootstrap_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_local_auth_bootstrap_delete` BEFORE DELETE ON `local_auth_bootstrap` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "f2b901e6650751ae480fa84bfa378228a05d056e10bd1b04645b605ffa043cb3",
+          "before": "",
+          "after": "271b6f53ce5f7e043b62fe0d6be02bd31486a0844c7d6309d44715bfffba5cdc"
+        },
+        {
+          "name": "local_auth_bootstrap_completed_at_column",
+          "object": "local_auth_bootstrap",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_bootstrap` ADD COLUMN `logical_completed_at` BIGINT NULL",
+          "checksum": "5804aca17df2def7cb260920511f8c11ec9621fd39d6821e4013fd2a5473d3fd",
+          "before": "59bd0c85a218230ee63c6374660d9a4b6a9e2942727f01a807023c32c86bc1a2",
+          "after": "bfb19f5d8a9b168f01b1361c3b52f2651d5b0e48c06949930a93926c88aee5e7"
+        },
+        {
+          "name": "local_auth_bootstrap_times_backfill",
+          "object": "local_auth_bootstrap",
+          "kind": "data",
+          "sql": "UPDATE `local_auth_bootstrap` source SET `logical_completed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`)",
+          "checksum": "44356e892ae33093370bd0eff1e003bfefa939ca0d75f007a30488e44fb14bb8",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_bootstrap` source WHERE (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "local_auth_bootstrap_times_switch",
+          "object": "local_auth_bootstrap",
+          "kind": "table",
+          "sql": "ALTER TABLE `local_auth_bootstrap` DROP CHECK local_auth_bootstrap_local_initialization_state,DROP COLUMN `completed_at`,CHANGE COLUMN `logical_completed_at` `completed_at` BIGINT NULL,ADD CONSTRAINT `local_auth_bootstrap_completed_at_range` CHECK (`completed_at` IS NULL OR `completed_at` IN (-9223372036854775808,9223372036854775807) OR (`completed_at`\u003e=-211813488000000000 AND `completed_at`\u003c9223371331200000000)),ADD CONSTRAINT local_auth_bootstrap_local_initialization_state CHECK ((completion_pending AND completed_at IS NULL AND approver_identity_id IS NULL) OR (NOT completion_pending AND completed_at IS NOT NULL))",
+          "checksum": "15fb8ddeb266ef9396696d82ca34e7063e0d81e3dc1bcb49e1538d88aa41c77b",
+          "before": "bfb19f5d8a9b168f01b1361c3b52f2651d5b0e48c06949930a93926c88aee5e7",
+          "after": "ff3a64de22a3ffe50c7c31971cc9396bc907b1103e07f17817cc0fb31f7ca6bb",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `local_auth_bootstrap` source WHERE (source.`completed_at` IS NOT NULL AND source.`logical_completed_at` IS NULL) OR NOT(source.`logical_completed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`completed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_bootstrap_insert",
+          "object": "migrate_v4_time_local_auth_bootstrap_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_bootstrap_insert`",
+          "checksum": "e9730148e8a19f10e99cef1146a7bd43b946f0437ead9b3c5d4f1a10b76a27e1",
+          "before": "167f17c1e1cdda4cd014faab7bc819c4fd1bc9450d50ebe962b2250037777734",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_bootstrap_update",
+          "object": "migrate_v4_time_local_auth_bootstrap_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_bootstrap_update`",
+          "checksum": "c4826586c372c6391050003d39e509fe096cdb451dd9a52b27dcff9c317b3490",
+          "before": "0abc0267a95f129684ab989f60e851a9d1eb9d7779c45cff5668f0c6c3c8c4f6",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_local_auth_bootstrap_delete",
+          "object": "migrate_v4_time_local_auth_bootstrap_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_local_auth_bootstrap_delete`",
+          "checksum": "18c565b2fbd460951ba80184ed40d335781f9e5ac879927e985e5b1a47db52af",
+          "before": "271b6f53ce5f7e043b62fe0d6be02bd31486a0844c7d6309d44715bfffba5cdc",
+          "after": ""
+        },
+        {
+          "name": "migrate_v4_time_approval_requests_insert",
+          "object": "migrate_v4_time_approval_requests_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_approval_requests_insert` BEFORE INSERT ON `approval_requests` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "48f2c28e8c4edd997b7d4927b812caf91b4b2e910f120b5827a9f0ab2868b1bb",
+          "before": "",
+          "after": "982642e21b1c2103c6b479f53d315f294ec52342cf6cb032a2fbff69868c8e24"
+        },
+        {
+          "name": "migrate_v4_time_approval_requests_update",
+          "object": "migrate_v4_time_approval_requests_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_approval_requests_update` BEFORE UPDATE ON `approval_requests` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "28b080b3f635544199bc2a24be4262aeabcfe78b6d0f36df8fb1a43350c6b92a",
+          "before": "",
+          "after": "db0eb66a00ad9230542c2c75b8ee5c02a8ac934a5de310799bd42df923359548"
+        },
+        {
+          "name": "migrate_v4_time_approval_requests_delete",
+          "object": "migrate_v4_time_approval_requests_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_approval_requests_delete` BEFORE DELETE ON `approval_requests` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "54d8e0979631e3ef0f6d957476acd55a33ee8d32949b39b4a5e04d836fabb6d2",
+          "before": "",
+          "after": "b9ce2585299f68c7d260e5946d8f37026619e06c3e5ed8390f272858c0541426"
+        },
+        {
+          "name": "approval_requests_expires_at_column",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` ADD COLUMN `logical_expires_at` BIGINT NULL",
+          "checksum": "10c37fef1ad54c757c062fafd2dc5b30457a31f02a7449ec480f234c18b657ff",
+          "before": "397860fb7480251c179f5a088ae54ff7f75e50f43c9e1173ca6fd9396eb8e61e",
+          "after": "71a5fc8ff667550579b445ef13784077655eae41b804f123d6f0fde67575d368"
+        },
+        {
+          "name": "approval_requests_created_at_column",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` ADD COLUMN `logical_created_at` BIGINT NULL",
+          "checksum": "c19402aa09892ad2923622b58a4f6f46dc0ceb64f56dc78c48a7f55c5c326150",
+          "before": "71a5fc8ff667550579b445ef13784077655eae41b804f123d6f0fde67575d368",
+          "after": "f6548c1ca96b53ac44579503c3187762b0702a1ca169af1096833114667b78b1"
+        },
+        {
+          "name": "approval_requests_consumed_at_column",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` ADD COLUMN `logical_consumed_at` BIGINT NULL",
+          "checksum": "259a2ab68a90e303258552c38e9e65a7a2df4170ec7766f1bc5129cd92257a5e",
+          "before": "f6548c1ca96b53ac44579503c3187762b0702a1ca169af1096833114667b78b1",
+          "after": "049b6a4d4ab80de1b818ddb3b400406624a4efd938ef75ab24fc63ac3626af1f"
+        },
+        {
+          "name": "approval_requests_times_backfill",
+          "object": "approval_requests",
+          "kind": "data",
+          "sql": "UPDATE `approval_requests` source SET `logical_expires_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`),`logical_created_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`),`logical_consumed_at`=TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`)",
+          "checksum": "89a089fe75665cf87b67948d8d88532c4f7b55e9185e1d08a71175f338a39be5",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `approval_requests` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`))),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "approval_requests_times_switch",
+          "object": "approval_requests",
+          "kind": "table",
+          "sql": "ALTER TABLE `approval_requests` DROP INDEX approval_requests_scope_idx,DROP CHECK approval_requests_approval_requests_check2,DROP CHECK approval_requests_approval_requests_check3,DROP COLUMN `expires_at`,CHANGE COLUMN `logical_expires_at` `expires_at` BIGINT NOT NULL,ADD CONSTRAINT `approval_requests_expires_at_range` CHECK (`expires_at` IS NULL OR `expires_at` IN (-9223372036854775808,9223372036854775807) OR (`expires_at`\u003e=-211813488000000000 AND `expires_at`\u003c9223371331200000000)),DROP COLUMN `created_at`,CHANGE COLUMN `logical_created_at` `created_at` BIGINT NOT NULL,ADD CONSTRAINT `approval_requests_created_at_range` CHECK (`created_at` IS NULL OR `created_at` IN (-9223372036854775808,9223372036854775807) OR (`created_at`\u003e=-211813488000000000 AND `created_at`\u003c9223371331200000000)),DROP COLUMN `consumed_at`,CHANGE COLUMN `logical_consumed_at` `consumed_at` BIGINT NULL,ADD CONSTRAINT `approval_requests_consumed_at_range` CHECK (`consumed_at` IS NULL OR `consumed_at` IN (-9223372036854775808,9223372036854775807) OR (`consumed_at`\u003e=-211813488000000000 AND `consumed_at`\u003c9223371331200000000)),ADD KEY approval_requests_scope_idx(workspace_id,resource_type,resource_id,action,status,expires_at),ADD CONSTRAINT approval_requests_approval_requests_check2 CHECK ((status='consumed')=(consumed_at IS NOT NULL)),ADD CONSTRAINT approval_requests_approval_requests_check3 CHECK (expires_at\u003ecreated_at)",
+          "checksum": "a275330e3338ed54b8b6440fda007b4c135caaca378ed43315ef93eec2c55f79",
+          "before": "049b6a4d4ab80de1b818ddb3b400406624a4efd938ef75ab24fc63ac3626af1f",
+          "after": "2d27cdce1b1c4fab6bb8a27b6a6df43a15860dd53ab5a94172bd33de490c3650",
+          "check_before_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM `approval_requests` source WHERE (source.`expires_at` IS NOT NULL AND source.`logical_expires_at` IS NULL) OR NOT(source.`logical_expires_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`expires_at`)) OR (source.`created_at` IS NOT NULL AND source.`logical_created_at` IS NULL) OR NOT(source.`logical_created_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`created_at`)) OR (source.`consumed_at` IS NOT NULL AND source.`logical_consumed_at` IS NULL) OR NOT(source.`logical_consumed_at` \u003c=\u003e TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',source.`consumed_at`))),'valid','invalid')"
+        },
+        {
+          "name": "drop_migrate_v4_time_approval_requests_insert",
+          "object": "migrate_v4_time_approval_requests_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_approval_requests_insert`",
+          "checksum": "f73d57465659894801c9787d83ef45b52f77adb0ce89b7ccaaeb3a85f1d3098c",
+          "before": "982642e21b1c2103c6b479f53d315f294ec52342cf6cb032a2fbff69868c8e24",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_approval_requests_update",
+          "object": "migrate_v4_time_approval_requests_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_approval_requests_update`",
+          "checksum": "75ebfa4ce420d144930a18e2f178f074f7560d2fb85337d39fb32199d37172f8",
+          "before": "db0eb66a00ad9230542c2c75b8ee5c02a8ac934a5de310799bd42df923359548",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_approval_requests_delete",
+          "object": "migrate_v4_time_approval_requests_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_approval_requests_delete`",
+          "checksum": "7f829b3c9ec384f2b8e93663f097d2794475d7500d44c86dbb3eb778093bde1d",
+          "before": "b9ce2585299f68c7d260e5946d8f37026619e06c3e5ed8390f272858c0541426",
+          "after": ""
+        },
+        {
+          "name": "telemetry_legacy_migration",
+          "object": "telemetry_legacy_migration",
+          "kind": "table",
+          "sql": "CREATE TABLE telemetry_legacy_migration (\n singleton TINYINT NOT NULL PRIMARY KEY CHECK(singleton=1),\n state VARBINARY(16) NOT NULL CHECK(state IN ('pending','running','complete')),\n completed_at DATETIME(6) NULL,\n CHECK((state='complete')=(completed_at IS NOT NULL))\n) ENGINE=InnoDB",
+          "checksum": "9df725dfc04a186cc01ee378186dbdb0493d5790ca272d0d003dcc8a954d6629",
+          "before": "",
+          "after": "48334549b788aca11bea0d68a8e9cc26ee4745168593f8f41f0cf5cc581d2f44"
+        },
+        {
+          "name": "telemetry_legacy_pending",
+          "object": "telemetry_legacy_migration",
+          "kind": "data",
+          "sql": "INSERT INTO telemetry_legacy_migration(singleton,state,completed_at) SELECT 1,'pending',NULL WHERE NOT EXISTS(SELECT 1 FROM telemetry_legacy_migration WHERE singleton=1)",
+          "checksum": "137cb7f077d49e45038a0b8fae166306c4797c19bcee328b211456bdfab3fd65",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(COUNT(*)=1,'valid','invalid') FROM telemetry_legacy_migration WHERE singleton=1",
+          "repairable": true
+        },
+        {
+          "name": "telemetry_legacy_insert_guard",
+          "object": "telemetry_legacy_insert_guard",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER telemetry_legacy_insert_guard BEFORE INSERT ON telemetry_samples FOR EACH ROW\nBEGIN\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry legacy migration metadata is unavailable';\n END IF;\n IF migration_state='complete' AND NEW.sampled_at NOT IN (-9223372036854775808,9223372036854775807) THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='finite telemetry must use its monthly shard';\n END IF;\nEND",
+          "checksum": "55ff388d58172b245041c7db7461893c17be980949ce9bb11cb13e3522196517",
+          "before": "",
+          "after": "1ac292bbd2da5520287071b9c24011d5ab055d3fb540671033ac23ccf84223f1"
+        },
+        {
+          "name": "telemetry_legacy_update_guard",
+          "object": "telemetry_legacy_update_guard",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER telemetry_legacy_update_guard BEFORE UPDATE ON telemetry_samples FOR EACH ROW\nBEGIN\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry legacy migration metadata is unavailable';\n END IF;\n IF migration_state='complete' AND NEW.sampled_at NOT IN (-9223372036854775808,9223372036854775807) THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='finite telemetry must use its monthly shard';\n END IF;\nEND",
+          "checksum": "4830ca03e032e35468e2252e803238b1cf72c029b71b454ef55bf55b75d2a414",
+          "before": "",
+          "after": "6774adaa77d2955a5b139cf07bee40a8d09a2aadc5a0bf725fd146bf21d83ccf"
+        },
+        {
+          "name": "telemetry_retire_before_v4",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "DROP PROCEDURE telemetry_retire_shards",
+          "checksum": "670a8b46146e65b61ebf998095746a56fa065158e568bf74de022ee14cfc9bbd",
+          "before": "d5d48f701b96cedf7a6be807c21fa4f441abf2a93cdf30c64459fd90ea1f7d55",
+          "after": ""
+        },
+        {
+          "name": "telemetry_retire_ready_v4",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_retire_shards(IN cutoff BIGINT)\nSQL SECURITY DEFINER\nBEGIN\n DECLARE clock_at BIGINT;\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SET clock_at = TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',UTC_TIMESTAMP(6));\n IF cutoff IS NULL OR cutoff \u003c clock_at-7776000000000 OR cutoff \u003e clock_at THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry retention cutoff outside permitted window';\n END IF;\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n IF guard_key IS NULL THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry catalog guard is unavailable';\n END IF;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF migration_state IS NULL OR migration_state\u003c\u003e'complete' THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry history migration is incomplete';\n END IF;\n UPDATE telemetry_sample_shards SET state='retired' WHERE state='active' AND end_at\u003c=cutoff;\nEND",
+          "checksum": "93bd842ada565052eec9c993cd5ae1fae74e0f85e0104dfc1f77d9cf712dc7a4",
+          "before": "",
+          "after": "8c33f0d49006fc9c481f0efedab8c4c05f0f7007f3e3b90c192ef18724e617ab"
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

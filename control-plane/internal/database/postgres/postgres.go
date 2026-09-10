@@ -62,23 +62,23 @@ func (b *Backend) Begin(ctx context.Context, isolation database.Isolation) (data
 	return WrapTx(tx), nil
 }
 func (s store) Exec(ctx context.Context, sql string, args ...any) (int64, error) {
-	tag, err := s.executor.Exec(ctx, sql, args...)
+	tag, err := s.executor.Exec(ctx, sql, logicalArguments(args)...)
 	return tag.RowsAffected(), classify(err)
 }
 
 type row struct{ pgx.Row }
 
-func (r row) Scan(dest ...any) error { return classify(r.Row.Scan(dest...)) }
+func (r row) Scan(dest ...any) error { return classify(scanLogical(r.Row.Scan, dest)) }
 func (s store) QueryRow(ctx context.Context, sql string, args ...any) database.Row {
-	return row{s.executor.QueryRow(ctx, sql, args...)}
+	return row{s.executor.QueryRow(ctx, sql, logicalArguments(args)...)}
 }
 
 type rows struct{ pgx.Rows }
 
-func (r rows) Scan(dest ...any) error { return classify(r.Rows.Scan(dest...)) }
+func (r rows) Scan(dest ...any) error { return classify(scanLogical(r.Rows.Scan, dest)) }
 func (r rows) Err() error             { return classify(r.Rows.Err()) }
 func (s store) Query(ctx context.Context, sql string, args ...any) (database.Rows, error) {
-	r, err := s.executor.Query(ctx, sql, args...)
+	r, err := s.executor.Query(ctx, sql, logicalArguments(args)...)
 	if err != nil {
 		return nil, classify(err)
 	}

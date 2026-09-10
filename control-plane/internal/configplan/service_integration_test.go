@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -291,6 +293,26 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	request.IdempotencyKey = "stale-plan"
 	if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("stale revision error=%v", err)
+	}
+	warnings := `["safe",null,[1.234567890123456789],{"value":true}]`
+	if _, err := ownerPool.Exec(ctx, `UPDATE config_plans SET warnings=$2::jsonb,created_at='-infinity',expires_at='infinity' WHERE id=$1`, plan.ID, warnings); err != nil {
+		t.Fatal(err)
+	}
+	extended, err := service.Get(ctx, plan.ID)
+	if err != nil || extended.CreatedAt.Micros != value.NegativeInfinity || extended.ExpiresAt.Micros != value.PositiveInfinity || len(extended.Warnings) < 4 {
+		t.Fatal("extended configuration read", extended, err)
+	}
+	encoded, err := json.Marshal(extended.Warnings[:4])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := value.ParseJSONB(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := value.ParseJSONB([]byte(warnings))
+	if err != nil || !bytes.Equal(got.Bytes(), want.Bytes()) {
+		t.Fatal("stored warnings narrowed", string(encoded), err)
 	}
 }
 

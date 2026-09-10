@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 type userPolicyRequest struct {
@@ -172,7 +172,7 @@ func (s *Server) writeUserOperationsError(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Resource revision is stale", "the user policy changed after this request was prepared")
 	case errors.Is(err, useroperations.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the Idempotency-Key was already used with different input")
-	case errors.Is(err, useroperations.ErrNotFound), errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, useroperations.ErrNotFound), errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested user policy or batch does not exist")
 	case errors.Is(err, rbac.ErrForbidden):
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the principal is not authorized for this operation")

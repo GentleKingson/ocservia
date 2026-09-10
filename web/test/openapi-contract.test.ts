@@ -372,7 +372,7 @@ describe("OpenAPI invariants", () => {
     });
   });
 
-  it("publishes the transport-safe user and group capacity", async () => {
+  it("keeps group mutations transport-safe and reads complete stored memberships", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
       "utf8",
@@ -382,10 +382,10 @@ describe("OpenAPI invariants", () => {
     expect(schemas?.GroupApplyRequest?.properties?.members?.maxItems).toBe(384);
     expect(
       schemas?.UserGroupResourceState?.properties?.desired_members?.maxItems,
-    ).toBe(384);
+    ).toBe(4096);
     expect(
       schemas?.UserGroupResourceState?.properties?.observed_members?.maxItems,
-    ).toBe(384);
+    ).toBe(4096);
     expect(schemas?.UserGroupStatePage?.properties?.items?.maxItems).toBe(1536);
     expect(schemas?.UserGroupResourceState?.required).toContain(
       "recovery_required",

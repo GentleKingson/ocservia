@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 type syntheticCommandRequest struct {
@@ -107,9 +107,7 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version, approval_id, and reason are required and ttl_seconds must be between 60 and 3600")
 		return
 	}
-	var workspaceID uuid.UUID
-	var architecture, observedVersion string
-	err = s.pool.QueryRow(r.Context(), `SELECT n.workspace_id,COALESCE(o.architecture,''),COALESCE(o.agent_version,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, nodeID).Scan(&workspaceID, &architecture, &observedVersion)
+	workspaceID, architecture, observedVersion, err := s.upgradeNode(r.Context(), nodeID)
 	if err != nil || workspaceID != workspace(r) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node does not exist")
 		return
@@ -327,7 +325,7 @@ func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/upgrade-already-active", "Upgrade is already active", "another agent upgrade is already active for this node")
 	case errors.Is(err, approvals.ErrNotReady):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
-	case errors.Is(err, operationstore.ErrNodeUnavailable), errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, operationstore.ErrNodeUnavailable), errors.Is(err, database.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node or operation does not exist")
 	default:
 		s.logger.ErrorContext(r.Context(), "operation request failed", "error", err)

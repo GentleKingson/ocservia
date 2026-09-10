@@ -82,23 +82,23 @@ export interface Operation {
    */
   version: number;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Operation
    */
-  createdAt: Date;
+  createdAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Operation
    */
-  updatedAt: Date;
+  updatedAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Operation
    */
-  expiresAt?: Date;
+  expiresAt?: string;
 }
 
 /**
@@ -191,10 +191,9 @@ export function OperationFromJSONTyped(
         ? undefined
         : json["agent_upgrade_target_version"],
     version: json["version"],
-    createdAt: new Date(json["created_at"]),
-    updatedAt: new Date(json["updated_at"]),
-    expiresAt:
-      json["expires_at"] == null ? undefined : new Date(json["expires_at"]),
+    createdAt: json["created_at"],
+    updatedAt: json["updated_at"],
+    expiresAt: json["expires_at"] == null ? undefined : json["expires_at"],
   };
 }
 
@@ -220,11 +219,8 @@ export function OperationToJSONTyped(
     agent_upgrade_state: value["agentUpgradeState"],
     agent_upgrade_target_version: value["agentUpgradeTargetVersion"],
     version: value["version"],
-    created_at: value["createdAt"].toISOString(),
-    updated_at: value["updatedAt"].toISOString(),
-    expires_at:
-      value["expiresAt"] == null
-        ? value["expiresAt"]
-        : value["expiresAt"].toISOString(),
+    created_at: value["createdAt"],
+    updated_at: value["updatedAt"],
+    expires_at: value["expiresAt"],
   };
 }

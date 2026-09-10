@@ -12,6 +12,8 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -302,58 +304,16 @@ func (w *Worker) waitAtCommandBarrier(ctx context.Context, commandID uuid.UUID, 
 }
 
 func (w *Worker) extendPreSendClaim(ctx context.Context, dispatch Dispatch) error {
-	tx, err := w.service.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin pre-send claim extension: %w", err)
-	}
-	defer rollback(tx)
-	if err := commandlimit.Lock(ctx, tx); err != nil {
-		return fmt.Errorf("serialize pre-send claim extension: %w", err)
-	}
-	var workerID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT lease.worker_id
-		FROM outbox_events AS outbox
-		JOIN node_command_leases AS lease
-		  ON lease.command_id=$2 AND lease.node_id=$3
-		JOIN command_attempts AS attempt
-		  ON attempt.id=$4 AND attempt.command_id=$2 AND attempt.outbox_event_id=$1
-		WHERE outbox.id=$1 AND outbox.command_id=$2 AND outbox.published_at IS NULL
-		  AND lease.lease_token=$5 AND lease.leased_until>clock_timestamp()
-		  AND outbox.locked_by=lease.worker_id AND outbox.locked_until>clock_timestamp()
-		  AND attempt.worker_id=lease.worker_id AND attempt.state='sending'
-		  AND attempt.finished_at IS NULL
-		FOR UPDATE OF outbox,lease,attempt`, dispatch.OutboxID, dispatch.CommandID,
-		dispatch.NodeID, dispatch.AttemptID, dispatch.LeaseToken).Scan(&workerID)
-	if err != nil {
-		return fmt.Errorf("lock exact pre-send claim: %w", err)
-	}
-	if workerID != w.id {
-		return errors.New("pre-send claim belongs to another worker")
-	}
-	var extendedUntil time.Time
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()+$1::bigint*interval '1 microsecond'`, w.testClaimLease.Microseconds()).Scan(&extendedUntil); err != nil {
-		return fmt.Errorf("compute pre-send claim extension: %w", err)
-	}
-	leaseTag, err := tx.Exec(ctx, `UPDATE node_command_leases SET leased_until=$2
-		WHERE lease_token=$1 AND worker_id=$3`, dispatch.LeaseToken, extendedUntil, w.id)
-	if err != nil {
-		return fmt.Errorf("extend exact pre-send node lease: %w", err)
-	}
-	if leaseTag.RowsAffected() != 1 {
-		return errors.New("extend exact pre-send node lease affected no row")
-	}
-	outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events SET locked_until=$2
-		WHERE id=$1 AND command_id=$3 AND locked_by=$4`, dispatch.OutboxID, extendedUntil, dispatch.CommandID, w.id)
-	if err != nil {
-		return fmt.Errorf("extend exact pre-send outbox lock: %w", err)
-	}
-	if outboxTag.RowsAffected() != 1 {
-		return errors.New("extend exact pre-send outbox lock affected no row")
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit pre-send claim extension: %w", err)
-	}
-	return nil
+	return database.Within(ctx, w.service.backend, database.ReadCommitted, func(tx database.Tx) error {
+		if err := commandlimit.Lock(ctx, tx); err != nil {
+			return fmt.Errorf("serialize pre-send claim extension: %w", err)
+		}
+		store, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return store.ExtendDispatch(ctx, dispatch, w.id, w.testClaimLease)
+	})
 }
 
 func writeCommandBarrierSignal(directory, name string, contents []byte) error {

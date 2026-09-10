@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -165,6 +167,22 @@ func TestRolloutDispatchRechecksEligibilityAfterClaimIntegration(t *testing.T) {
 	}
 	if rolloutState != "paused" || pauseCode != "node_skipped" || nodeState != "skipped" || failureCode != "node_unavailable" || operationCount != 0 {
 		t.Fatalf("late-ineligible result=%s/%s node=%s/%s operations=%d", rolloutState, pauseCode, nodeState, failureCode, operationCount)
+	}
+	// Read models must not narrow PostgreSQL's time or JSONB array domains.
+	if _, err := pool.Exec(ctx, `UPDATE agent_rollouts SET created_at='-infinity',updated_at='infinity',exclusions='[null,[1.25],{"extra":9007199254740993}]' WHERE id=$1`, rolloutID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.GetAgentRollout(ctx, rolloutID)
+	if err != nil || got.CreatedAt.Micros != value.NegativeInfinity || got.UpdatedAt.Micros != value.PositiveInfinity || len(got.Excluded) != 3 || !strings.Contains(string(got.Excluded[2]), "9007199254740993") {
+		t.Fatalf("extended rollout=%+v err=%v", got, err)
+	}
+	listed, err := service.ListAgentRollouts(ctx, workspaceID, 10)
+	if err != nil || len(listed) != 1 || listed[0].CreatedAt != got.CreatedAt || len(listed[0].Excluded) != 3 {
+		t.Fatalf("extended rollout list=%+v err=%v", listed, err)
+	}
+	workspace, err := service.RolloutWorkspace(ctx, rolloutID)
+	if err != nil || workspace != workspaceID {
+		t.Fatalf("rollout workspace=%s err=%v", workspace, err)
 	}
 }
 

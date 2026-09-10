@@ -22,9 +22,11 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -296,6 +298,88 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	digest := sha256.Sum256(artifactBytes)
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, grant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
+		t.Fatal(err)
+	}
+	var originalCertificateExpiry, originalArtifactExpiry pgtype.Timestamptz
+	if err := pool.QueryRow(ctx, `SELECT c.not_after,a.expires_at FROM certificates c JOIN artifact_operations a ON a.certificate_id=c.id WHERE a.id=$1`, grant.ArtifactID).Scan(&originalCertificateExpiry, &originalArtifactExpiry); err != nil {
+		t.Fatal(err)
+	}
+	minimum, _ := (value.Timestamp{Valid: true, Micros: value.MinTimestamp}).Time()
+	maximum, _ := (value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}).Time()
+	for _, tc := range []struct {
+		name     string
+		deadline pgtype.Timestamptz
+		allowed  bool
+	}{
+		{"null", pgtype.Timestamptz{}, false},
+		{"negative_infinity", pgtype.Timestamptz{Valid: true, InfinityModifier: pgtype.NegativeInfinity}, false},
+		{"minimum_finite", pgtype.Timestamptz{Valid: true, Time: minimum}, false},
+		{"positive_infinity", pgtype.Timestamptz{Valid: true, InfinityModifier: pgtype.Infinity}, true},
+		{"maximum_finite", pgtype.Timestamptz{Valid: true, Time: maximum}, true},
+	} {
+		t.Run("download_"+tc.name, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, `UPDATE certificates SET not_after=$2 WHERE id=$1`, certificate.ID, tc.deadline); err != nil {
+				t.Fatal(err)
+			}
+			got, err := service.Get(ctx, certificate.ID)
+			if err != nil {
+				t.Fatal("extended certificate read", err)
+			}
+			if !tc.deadline.Valid {
+				if got.NotAfter != nil {
+					t.Fatal("NULL deadline became finite", got.NotAfter)
+				}
+			} else {
+				want := value.Timestamp{Valid: true}
+				switch tc.deadline.InfinityModifier {
+				case pgtype.Infinity:
+					want.Micros = value.PositiveInfinity
+				case pgtype.NegativeInfinity:
+					want.Micros = value.NegativeInfinity
+				default:
+					want, err = value.FromTime(tc.deadline.Time)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if got.NotAfter == nil || *got.NotAfter != want {
+					t.Fatal("certificate deadline changed", got.NotAfter, want)
+				}
+			}
+			artifactDeadline := tc.deadline
+			if !artifactDeadline.Valid {
+				artifactDeadline = originalArtifactExpiry
+			}
+			if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET expires_at=$2 WHERE id=$1`, grant.ArtifactID, artifactDeadline); err != nil {
+				t.Fatal(err)
+			}
+			download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
+			if !tc.allowed {
+				if !errors.Is(err, ErrArtifactDenied) {
+					t.Fatal("expired or NULL certificate accepted", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			download.Reader.Close()
+			var lease, granted pgtype.Timestamptz
+			if err := pool.QueryRow(ctx, `SELECT lease_until,active_grant_expires_at FROM artifact_operations WHERE id=$1`, grant.ArtifactID).Scan(&lease, &granted); err != nil {
+				t.Fatal(err)
+			}
+			if lease != granted || !lease.Valid || lease.InfinityModifier != pgtype.Finite || !lease.Time.After(time.Now()) || lease.Time.After(time.Now().Add(2*time.Minute)) {
+				t.Fatal("unbounded grant deadline", lease, granted)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL WHERE id=$1`, grant.ArtifactID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if _, err := pool.Exec(ctx, `UPDATE certificates SET not_after=$2 WHERE id=$1`, certificate.ID, originalCertificateExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET expires_at=$2 WHERE id=$1`, grant.ArtifactID, originalArtifactExpiry); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, strings.Repeat("x", 43), requesterID); !errors.Is(err, ErrArtifactDenied) {

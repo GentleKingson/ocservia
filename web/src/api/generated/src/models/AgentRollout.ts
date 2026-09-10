@@ -13,13 +13,6 @@
  */
 
 import { mapValues } from "../runtime";
-import type { AgentRolloutExclusion } from "./AgentRolloutExclusion";
-import {
-  AgentRolloutExclusionFromJSON,
-  AgentRolloutExclusionFromJSONTyped,
-  AgentRolloutExclusionToJSON,
-  AgentRolloutExclusionToJSONTyped,
-} from "./AgentRolloutExclusion";
 import type { AgentRolloutNode } from "./AgentRolloutNode";
 import {
   AgentRolloutNodeFromJSON,
@@ -101,17 +94,17 @@ export interface AgentRollout {
    */
   pauseCode?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof AgentRollout
    */
-  createdAt: Date;
+  createdAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof AgentRollout
    */
-  updatedAt: Date;
+  updatedAt: string;
   /**
    *
    * @type {Array<AgentRolloutNode>}
@@ -120,10 +113,10 @@ export interface AgentRollout {
   nodes?: Array<AgentRolloutNode>;
   /**
    *
-   * @type {Array<AgentRolloutExclusion>}
+   * @type {Array<any>}
    * @memberof AgentRollout
    */
-  excluded?: Array<AgentRolloutExclusion>;
+  excluded?: Array<any>;
 }
 
 /**
@@ -236,16 +229,13 @@ export function AgentRolloutFromJSONTyped(
     createdBy: json["created_by"],
     currentBatch: json["current_batch"],
     pauseCode: json["pause_code"] == null ? undefined : json["pause_code"],
-    createdAt: new Date(json["created_at"]),
-    updatedAt: new Date(json["updated_at"]),
+    createdAt: json["created_at"],
+    updatedAt: json["updated_at"],
     nodes:
       json["nodes"] == null
         ? undefined
         : (json["nodes"] as Array<any>).map(AgentRolloutNodeFromJSON),
-    excluded:
-      json["excluded"] == null
-        ? undefined
-        : (json["excluded"] as Array<any>).map(AgentRolloutExclusionFromJSON),
+    excluded: json["excluded"] == null ? undefined : json["excluded"],
   };
 }
 
@@ -273,15 +263,12 @@ export function AgentRolloutToJSONTyped(
     created_by: value["createdBy"],
     current_batch: value["currentBatch"],
     pause_code: value["pauseCode"],
-    created_at: value["createdAt"].toISOString(),
-    updated_at: value["updatedAt"].toISOString(),
+    created_at: value["createdAt"],
+    updated_at: value["updatedAt"],
     nodes:
       value["nodes"] == null
         ? undefined
         : (value["nodes"] as Array<any>).map(AgentRolloutNodeToJSON),
-    excluded:
-      value["excluded"] == null
-        ? undefined
-        : (value["excluded"] as Array<any>).map(AgentRolloutExclusionToJSON),
+    excluded: value["excluded"],
   };
 }

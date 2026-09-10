@@ -28,11 +28,11 @@ import {
  */
 export interface TelemetryPoint {
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof TelemetryPoint
    */
-  at: Date;
+  at: string;
   /**
    *
    * @type {TelemetryMetric}
@@ -92,7 +92,7 @@ export function TelemetryPointFromJSONTyped(
     return json;
   }
   return {
-    at: new Date(json["at"]),
+    at: json["at"],
     metric: TelemetryMetricFromJSON(json["metric"]),
     count: json["count"],
     minimum: json["minimum"],
@@ -114,7 +114,7 @@ export function TelemetryPointToJSONTyped(
   }
 
   return {
-    at: value["at"].toISOString(),
+    at: value["at"],
     metric: TelemetryMetricToJSON(value["metric"]),
     count: value["count"],
     minimum: value["minimum"],

@@ -58,7 +58,7 @@ const session: NodeSession = {
   id: "42",
   username: "alice",
   clientIp: "192.0.2.10",
-  connectedAt: new Date(0),
+  connectedAt: new Date(0).toISOString(),
   bytesIn: 0,
   bytesOut: 0,
 };
@@ -66,8 +66,8 @@ const operation = (state: Operation["state"]): Operation => ({
   id: "019fc0a4-6d92-765c-a8a1-4af556614cc5",
   state,
   version: 1,
-  createdAt: new Date(0),
-  updatedAt: new Date(0),
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString(),
 });
 
 function deferred<T>(): {

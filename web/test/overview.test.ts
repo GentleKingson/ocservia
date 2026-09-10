@@ -39,15 +39,15 @@ const operation = (id: string, state: Operation["state"]): Operation => ({
   id,
   state,
   version: 1,
-  createdAt: new Date(0),
-  updatedAt: new Date(0),
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString(),
 });
 const platformEvent = (id: string, suffix: number): PlatformEvent => ({
   id,
   nodeId: "019fc0a4-6d92-765c-a8a1-4af556614cc3",
   type: "heartbeat",
   traceparent: "00-trace-span-01",
-  occurredAt: new Date(suffix),
+  occurredAt: new Date(suffix).toISOString(),
 });
 const operationPage = (items: Operation[], hasMore = false): OperationPage => {
   const last = items.at(-1);

@@ -38,6 +38,9 @@ func TestTelemetryHistoryErrors(t *testing.T) {
 		{"metric", "metric=invalid", "metric is invalid", http.StatusBadRequest},
 		{"resolution", "metric=cpu_usage_ratio&resolution=invalid", "resolution is invalid", http.StatusBadRequest},
 		{"since", "metric=cpu_usage_ratio&since=invalid", "since must be an RFC 3339 timestamp", http.StatusBadRequest},
+		{"positive infinity", "metric=cpu_usage_ratio&since=infinity", "telemetry history could not be read", http.StatusServiceUnavailable},
+		{"negative infinity", "metric=cpu_usage_ratio&since=-infinity", "telemetry history could not be read", http.StatusServiceUnavailable},
+		{"extended year", "metric=cpu_usage_ratio&since=%2B010000-01-01T00:00:00Z", "telemetry history could not be read", http.StatusServiceUnavailable},
 		{"internal", "metric=cpu_usage_ratio", "telemetry history could not be read", http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

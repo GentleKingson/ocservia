@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -87,12 +88,20 @@ func TestRolloutNodeEligibility(t *testing.T) {
 	service := &Service{releaseCatalog: rolloutTestCatalog(t)}
 	now := time.Now().UTC()
 	nodeID := uuid.Must(uuid.NewV7())
+	stamp := func(at time.Time) value.Timestamp {
+		t.Helper()
+		v, err := value.FromTime(at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
 	base := rolloutNodeObservation{
 		NodeID:          nodeID,
 		Status:          "active",
 		Architecture:    "amd64",
 		AgentVersion:    "1.2.0",
-		LastHeartbeatAt: now.Add(-10 * time.Second),
+		LastHeartbeatAt: stamp(now.Add(-10 * time.Second)),
 		CapabilityOK:    true,
 	}
 	cases := []struct {
@@ -106,8 +115,15 @@ func TestRolloutNodeEligibility(t *testing.T) {
 		{"not trusted", func(node *rolloutNodeObservation) { node.Status = "revoked" }, "2.0.0", "not_trusted", false},
 		{"offline", func(node *rolloutNodeObservation) { node.Status = "offline" }, "2.0.0", "offline", false},
 		{"stale", func(node *rolloutNodeObservation) {
-			node.LastHeartbeatAt = now.Add(-telemetry.OfflineAfter - time.Minute)
+			node.LastHeartbeatAt = stamp(now.Add(-telemetry.OfflineAfter - time.Minute))
 		}, "2.0.0", "stale", false},
+		{"missing heartbeat", func(node *rolloutNodeObservation) { node.LastHeartbeatAt = value.Timestamp{} }, "2.0.0", "stale", false},
+		{"negative infinity", func(node *rolloutNodeObservation) {
+			node.LastHeartbeatAt = value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
+		}, "2.0.0", "stale", false},
+		{"positive infinity", func(node *rolloutNodeObservation) {
+			node.LastHeartbeatAt = value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
+		}, "2.0.0", "", true},
 		{"missing release metadata", func(node *rolloutNodeObservation) { node.Architecture = "" }, "2.0.0", "missing_release_metadata", false},
 		{"unknown version", func(node *rolloutNodeObservation) { node.AgentVersion = "" }, "2.0.0", "unknown_version", false},
 		{"already current", func(node *rolloutNodeObservation) { node.AgentVersion = "2.0.0" }, "2.0.0", "already_current", false},

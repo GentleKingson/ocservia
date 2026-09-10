@@ -15,7 +15,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,28 +69,36 @@ type Verification struct {
 }
 
 type Manager struct {
-	pool          *pgxpool.Pool
+	backend       database.Backend
 	checkpointKey []byte
 	eventKeys     map[string][sha256.Size]byte
 	current       eventAuthenticator
 }
 
 func NewManager(pool *pgxpool.Pool, checkpointKey []byte) *Manager {
+	return NewBackendManager(postgres.WrapPool(pool), checkpointKey)
+}
+
+func NewBackendManager(backend database.Backend, checkpointKey []byte) *Manager {
 	auth := currentEventAuthenticator()
-	return newManager(pool, checkpointKey, auth)
+	return newManager(backend, checkpointKey, auth)
 }
 
 func NewManagerWithEventKey(pool *pgxpool.Pool, checkpointKey []byte, keyID string, key []byte) (*Manager, error) {
+	return NewBackendManagerWithEventKey(postgres.WrapPool(pool), checkpointKey, keyID, key)
+}
+
+func NewBackendManagerWithEventKey(backend database.Backend, checkpointKey []byte, keyID string, key []byte) (*Manager, error) {
 	auth, err := configureEventAuthenticator(keyID, key)
 	if err != nil {
 		return nil, err
 	}
-	return newManager(pool, checkpointKey, auth), nil
+	return newManager(backend, checkpointKey, auth), nil
 }
 
-func newManager(pool *pgxpool.Pool, checkpointKey []byte, auth eventAuthenticator) *Manager {
+func newManager(backend database.Backend, checkpointKey []byte, auth eventAuthenticator) *Manager {
 	return &Manager{
-		pool: pool, checkpointKey: append([]byte(nil), checkpointKey...), current: auth,
+		backend: backend, checkpointKey: append([]byte(nil), checkpointKey...), current: auth,
 		eventKeys: map[string][sha256.Size]byte{auth.keyID: auth.key},
 	}
 }
@@ -151,13 +163,29 @@ func signEvent(key [sha256.Size]byte, eventHash []byte) []byte {
 }
 
 func LockChain(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, workspaceID.String()); err != nil {
+	return LockChainTx(ctx, postgres.WrapTx(tx), workspaceID)
+}
+
+func LockChainTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) error {
+	s, err := auditstore.From(tx)
+	if err != nil {
+		return err
+	}
+	if err := s.Lock(ctx, workspaceID); err != nil {
 		return fmt.Errorf("lock audit chain: %w", err)
 	}
 	return nil
 }
 
 func AppendChain(ctx context.Context, tx pgx.Tx, record ChainRecord) error {
+	return AppendChainTx(ctx, postgres.WrapTx(tx), record)
+}
+
+func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) error {
+	s, err := auditstore.From(tx)
+	if err != nil {
+		return err
+	}
 	auth := currentEventAuthenticator()
 	if record.Result == "" {
 		record.Result = chainResultIntent
@@ -165,15 +193,15 @@ func AppendChain(ctx context.Context, tx pgx.Tx, record ChainRecord) error {
 	if record.Result != "intent" && record.Result != "succeeded" && record.Result != "failed" {
 		return errors.New("invalid audit result")
 	}
-	if err := LockChain(ctx, tx, record.WorkspaceID); err != nil {
+	if err := LockChainTx(ctx, tx, record.WorkspaceID); err != nil {
 		return err
 	}
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&record.At); err != nil {
+	record.At, err = s.Clock(ctx)
+	if err != nil {
 		return fmt.Errorf("assign audit order: %w", err)
 	}
-	var previous []byte
-	err := tx.QueryRow(ctx, `SELECT event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, record.WorkspaceID).Scan(&previous)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	previous, err := s.Previous(ctx, record.WorkspaceID)
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return fmt.Errorf("read audit chain: %w", err)
 	}
 	if record.EventID == uuid.Nil {
@@ -188,7 +216,19 @@ func AppendChain(ctx context.Context, tx pgx.Tx, record ChainRecord) error {
 	if record.TraceID != "" {
 		traceID = record.TraceID
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,source_session_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,approval_id,result,reason,before_summary,after_summary,error_type,previous_event_hash,event_hash,auth_version,event_key_id,event_mac) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`, record.EventID, record.WorkspaceID, record.At, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), nullableJSON(record.BeforeSummary), nullableJSON(record.AfterSummary), nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:]))
+	before, err := summaryValue(record.BeforeSummary)
+	if err != nil {
+		return err
+	}
+	after, err := summaryValue(record.AfterSummary)
+	if err != nil {
+		return err
+	}
+	at, err := value.FromTime(record.At)
+	if err != nil {
+		return err
+	}
+	err = s.Append(ctx, []any{record.EventID, record.WorkspaceID, at, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), before, after, nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:])})
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
 	}
@@ -231,12 +271,17 @@ func encodeChainPayload(previous []byte, record ChainRecord) ([]byte, error) {
 	})
 }
 
-func canonicalJSON(value json.RawMessage) (json.RawMessage, error) {
-	if len(value) == 0 || string(value) == "null" {
+func canonicalJSON(input json.RawMessage) (json.RawMessage, error) {
+	if len(input) == 0 || string(input) == "null" {
 		return nil, nil
 	}
 	var decoded any
-	if err := json.Unmarshal(value, &decoded); err != nil {
+	if err := json.Unmarshal(input, &decoded); err != nil {
+		// Preserve every previously signable v1 payload byte. Only extend the
+		// formerly rejected domain for valid JSONB numbers outside float64.
+		if logical, parseErr := value.ParseJSONB(input); parseErr == nil {
+			return json.RawMessage(logical.Bytes()), nil
+		}
 		return nil, err
 	}
 	encoded, err := json.Marshal(decoded)
@@ -257,21 +302,25 @@ type chainVerification struct {
 }
 
 func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verification, error) {
-	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return Verification{}, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	verified, err := m.verifyTx(ctx, tx, workspaceID, false)
+	var verified chainVerification
+	err := database.Within(ctx, m.backend, database.RepeatableRead, func(tx database.Tx) error {
+		var err error
+		verified, err = m.verifyTx(ctx, tx, workspaceID, false)
+		return err
+	})
 	return verified.Verification, err
 }
 
-func (m *Manager) verifyTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, allowLegacyOnly bool) (chainVerification, error) {
+func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, allowLegacyOnly bool) (chainVerification, error) {
 	checkpoints, latest, err := m.readCheckpoints(ctx, tx, workspaceID)
 	if err != nil {
 		return chainVerification{}, err
 	}
-	rows, err := tx.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspaceID)
+	s, err := auditstore.From(tx)
+	if err != nil {
+		return chainVerification{}, err
+	}
+	rows, err := s.Events(ctx, workspaceID)
 	if err != nil {
 		return chainVerification{}, err
 	}
@@ -287,9 +336,16 @@ func (m *Manager) verifyTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 		var storedPrevious, storedHash, eventMAC []byte
 		var authVersion int16
 		var eventKeyID *string
-		if err := rows.Scan(&record.EventID, &record.At, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &record.BeforeSummary, &record.AfterSummary, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC); err != nil {
+		var at value.Timestamp
+		var before, after value.JSONB
+		if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC); err != nil {
 			return chainVerification{}, err
 		}
+		record.At, err = at.Time()
+		if err != nil {
+			return chainVerification{}, err
+		}
+		record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
 		if resourceID != nil {
 			record.ResourceID = *resourceID
 		}
@@ -349,8 +405,12 @@ func (m *Manager) verifyTx(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 	return verified, nil
 }
 
-func (m *Manager) readCheckpoints(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID) (map[uuid.UUID]checkpointRecord, *checkpointRecord, error) {
-	rows, err := tx.Query(ctx, `SELECT through_event_id,through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=$1 ORDER BY created_at,id`, workspaceID)
+func (m *Manager) readCheckpoints(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) (map[uuid.UUID]checkpointRecord, *checkpointRecord, error) {
+	s, err := auditstore.From(tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := s.Checkpoints(ctx, workspaceID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -381,33 +441,38 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 	if len(m.checkpointKey) < sha256.Size {
 		return errors.New("audit checkpoint key is unavailable")
 	}
-	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := LockChain(ctx, tx, workspaceID); err != nil {
-		return err
-	}
-	verified, err := m.verifyTx(ctx, tx, workspaceID, false)
-	if err != nil {
-		return err
-	}
-	if !verified.Valid || verified.Events == 0 {
-		return errors.New("audit chain is not authenticated")
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO audit_checkpoints(id,workspace_id,through_event_id,through_event_hash,signature,created_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(workspace_id,through_event_id) DO NOTHING`, uuid.Must(uuid.NewV7()), workspaceID, verified.lastID, verified.lastHash, signCheckpoint(m.checkpointKey, workspaceID, verified.lastID, verified.lastHash))
-	if err != nil {
-		return err
-	}
-	return coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx))
+	return database.Within(ctx, m.backend, database.RepeatableRead, func(tx database.Tx) error {
+		if err := LockChainTx(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		verified, err := m.verifyTx(ctx, tx, workspaceID, false)
+		if err != nil {
+			return err
+		}
+		if !verified.Valid || verified.Events == 0 {
+			return errors.New("audit chain is not authenticated")
+		}
+		s, err := auditstore.From(tx)
+		if err != nil {
+			return err
+		}
+		err = s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, verified.lastID, verified.lastHash, signCheckpoint(m.checkpointKey, workspaceID, verified.lastID, verified.lastHash))
+		if err != nil {
+			return err
+		}
+		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+	})
 }
 
 func (m *Manager) CheckpointAll(ctx context.Context) error {
 	if len(m.checkpointKey) == 0 {
 		return nil
 	}
-	rows, err := m.pool.Query(ctx, `SELECT DISTINCT workspace_id FROM audit_events`)
+	s, err := auditstore.From(m.backend)
+	if err != nil {
+		return err
+	}
+	rows, err := s.Workspaces(ctx)
 	if err != nil {
 		return err
 	}
@@ -433,7 +498,11 @@ func (m *Manager) CheckpointAll(ctx context.Context) error {
 }
 
 func (m *Manager) EnsureAuthenticity(ctx context.Context) error {
-	rows, err := m.pool.Query(ctx, `SELECT DISTINCT workspace_id FROM audit_events ORDER BY workspace_id`)
+	s, err := auditstore.From(m.backend)
+	if err != nil {
+		return err
+	}
+	rows, err := s.Workspaces(ctx)
 	if err != nil {
 		return fmt.Errorf("list audit workspaces: %w", err)
 	}
@@ -491,7 +560,7 @@ func (m *Manager) PreflightAuthenticityMigration(ctx context.Context, tx pgx.Tx,
 }
 
 func (m *Manager) preflightLegacyWorkspace(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID) error {
-	checkpoints, _, err := m.readCheckpoints(ctx, tx, workspaceID)
+	checkpoints, _, err := m.readCheckpoints(ctx, postgres.WrapTx(tx), workspaceID)
 	if err != nil {
 		return err
 	}
@@ -540,42 +609,43 @@ func (m *Manager) preflightLegacyWorkspace(ctx context.Context, tx pgx.Tx, works
 }
 
 func (m *Manager) ensureWorkspaceAuthenticity(ctx context.Context, workspaceID uuid.UUID) error {
-	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := LockChain(ctx, tx, workspaceID); err != nil {
-		return err
-	}
-	verified, err := m.verifyTx(ctx, tx, workspaceID, true)
-	if err != nil {
-		return err
-	}
-	if !verified.Valid {
-		return errors.New("audit chain integrity or origin authentication is invalid")
-	}
-	if !verified.legacyOnly {
-		return tx.Commit(ctx)
-	}
-	if !verified.Checkpoint {
-		return errors.New("legacy audit tail is not checkpointed")
-	}
-	var checkpointHash []byte
-	if err := tx.QueryRow(ctx, `SELECT through_event_hash FROM audit_checkpoints WHERE workspace_id=$1 AND through_event_id=$2`, workspaceID, verified.lastID).Scan(&checkpointHash); err != nil {
-		return errors.New("legacy audit checkpoint does not cover the tail")
-	}
-	if subtle.ConstantTimeCompare(checkpointHash, verified.lastHash) != 1 {
-		return errors.New("legacy audit checkpoint hash does not match the tail")
-	}
-	if err := AppendChain(ctx, tx, ChainRecord{
-		WorkspaceID: workspaceID, ActorType: transitionActorTypeV1, ActorID: transitionActorIDV1,
-		Action: transitionActionV1, ResourceType: transitionResourceTypeV1, ResourceID: workspaceID,
-		RequestID: "audit-auth-transition-v1", Result: "succeeded", Reason: "checkpoint-anchored audit event authentication transition",
-	}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return database.Within(ctx, m.backend, database.RepeatableRead, func(tx database.Tx) error {
+		if err := LockChainTx(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		verified, err := m.verifyTx(ctx, tx, workspaceID, true)
+		if err != nil {
+			return err
+		}
+		if !verified.Valid {
+			return errors.New("audit chain integrity or origin authentication is invalid")
+		}
+		if !verified.legacyOnly {
+			return nil
+		}
+		if !verified.Checkpoint {
+			return errors.New("legacy audit tail is not checkpointed")
+		}
+		s, err := auditstore.From(tx)
+		if err != nil {
+			return err
+		}
+		checkpointHash, err := s.CheckpointHash(ctx, workspaceID, verified.lastID)
+		if err != nil {
+			return errors.New("legacy audit checkpoint does not cover the tail")
+		}
+		if subtle.ConstantTimeCompare(checkpointHash, verified.lastHash) != 1 {
+			return errors.New("legacy audit checkpoint hash does not match the tail")
+		}
+		if err := AppendChainTx(ctx, tx, ChainRecord{
+			WorkspaceID: workspaceID, ActorType: transitionActorTypeV1, ActorID: transitionActorIDV1,
+			Action: transitionActionV1, ResourceType: transitionResourceTypeV1, ResourceID: workspaceID,
+			RequestID: "audit-auth-transition-v1", Result: "succeeded", Reason: "checkpoint-anchored audit event authentication transition",
+		}); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func signCheckpoint(key []byte, workspaceID, eventID uuid.UUID, hash []byte) []byte {
@@ -598,9 +668,9 @@ func nullableString(value string) any {
 	}
 	return value
 }
-func nullableJSON(value json.RawMessage) any {
-	if len(value) == 0 {
-		return nil
+func summaryValue(raw json.RawMessage) (value.JSONB, error) {
+	if len(raw) == 0 {
+		return value.JSONB{}, nil
 	}
-	return value
+	return value.ParseJSONB(raw)
 }

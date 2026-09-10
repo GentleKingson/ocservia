@@ -7,10 +7,12 @@ package coordination
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,10 +21,10 @@ import (
 // ErrNotLeader is returned when the session no longer holds the fencing
 // epoch, either because another instance took over or because the lease
 // expired. Callers must abort the transaction and stop scheduling.
-var ErrNotLeader = errors.New("coordination: scheduler leadership lost")
+var ErrNotLeader = schedulerlease.ErrLost
 
 // ErrLeaseHeld reports that another unexpired leader currently owns the lease.
-var ErrLeaseHeld = errors.New("coordination: scheduler lease held by another leader")
+var ErrLeaseHeld = schedulerlease.ErrHeld
 
 // Identity binds a leadership term to exactly one process incarnation. The
 // incarnation is derived from process start, so a restarted process on the
@@ -71,20 +73,16 @@ type Session struct {
 }
 
 // Acquire takes the scheduler leadership lease. A takeover succeeds only
-// after the previous lease expired by PostgreSQL time; every term, including
+// after the previous lease expired by database time; every term, including
 // a same-identity reacquire, receives a strictly higher fencing epoch.
 func Acquire(ctx context.Context, pool *pgxpool.Pool, identity Identity, leaseTTL time.Duration) (*Session, error) {
-	if leaseTTL <= 0 {
-		return nil, errors.New("coordination: lease TTL must be positive")
-	}
-	var epoch int64
-	err := pool.QueryRow(ctx, `UPDATE scheduler_leadership
-		SET instance_id=$1, incarnation=$2, epoch=epoch+1, lease_until=now()+$3::interval, updated_at=now()
-		WHERE id=1 AND (lease_until<=now() OR (instance_id=$1 AND incarnation=$2))
-		RETURNING epoch`, identity.InstanceID, identity.Incarnation, leaseTTL.String()).Scan(&epoch)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrLeaseHeld
-	}
+	return AcquireBackend(ctx, schedulerBackend(pool), identity, leaseTTL)
+}
+
+func schedulerBackend(pool *pgxpool.Pool) database.Backend { return postgres.WrapPool(pool) }
+
+func AcquireBackend(ctx context.Context, backend database.Backend, identity Identity, leaseTTL time.Duration) (*Session, error) {
+	epoch, err := schedulerlease.Acquire(ctx, backend, schedulerlease.Owner{InstanceID: identity.InstanceID, Incarnation: identity.Incarnation}, leaseTTL)
 	if err != nil {
 		return nil, fmt.Errorf("coordination: acquire scheduler leadership: %w", err)
 	}
@@ -103,17 +101,11 @@ func (s *Session) Identity() Identity { return s.identity }
 // Renew never mutates the immutable session; the local deadline is advanced
 // by the owning Runner, anchored before this call started.
 func (s *Session) Renew(ctx context.Context, pool *pgxpool.Pool) error {
-	tag, err := pool.Exec(ctx, `UPDATE scheduler_leadership
-		SET lease_until=now()+$4::interval, updated_at=now()
-		WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>now()`,
-		s.identity.InstanceID, s.identity.Incarnation, s.epoch, s.leaseTTL.String())
-	if err != nil {
-		return fmt.Errorf("coordination: renew scheduler leadership: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return ErrNotLeader
-	}
-	return nil
+	return s.RenewBackend(ctx, schedulerBackend(pool))
+}
+
+func (s *Session) RenewBackend(ctx context.Context, backend database.Backend) error {
+	return schedulerlease.Renew(ctx, backend, schedulerlease.Owner{InstanceID: s.identity.InstanceID, Incarnation: s.identity.Incarnation}, s.epoch, s.leaseTTL)
 }
 
 // AssertLeader verifies inside the caller's transaction, immediately before
@@ -123,34 +115,23 @@ func (s *Session) Renew(ctx context.Context, pool *pgxpool.Pool) error {
 // expired while a long fenced transaction was open would still pass an
 // now()-based assert. The row share lock serializes the commit against a
 // concurrent takeover update, so an assert that succeeds cannot be
-// superseded before the fenced transaction commits. A rejected assert takes
-// no row lock, so it never blocks a legitimate takeover.
+// superseded before the fenced transaction commits. A rejected assert must
+// abort its transaction, releasing any lock acquired before the clock recheck.
 func (s *Session) AssertLeader(ctx context.Context, tx pgx.Tx) error {
-	var one int
-	err := tx.QueryRow(ctx, `SELECT 1 FROM scheduler_leadership
-		WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp()
-		FOR SHARE OF scheduler_leadership`,
-		s.identity.InstanceID, s.identity.Incarnation, s.epoch).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotLeader
-	}
-	if err != nil {
-		return fmt.Errorf("coordination: assert scheduler leadership: %w", err)
-	}
-	return nil
+	return s.AssertTransaction(ctx, postgres.WrapTx(tx))
+}
+
+func (s *Session) AssertTransaction(ctx context.Context, tx database.Tx) error {
+	return schedulerlease.Assert(ctx, tx, schedulerlease.Owner{InstanceID: s.identity.InstanceID, Incarnation: s.identity.Incarnation}, s.epoch)
 }
 
 // AssertCurrent runs a dedicated transaction whose only purpose is to prove
 // current leadership. It does not fence any other statement and must not be
 // used to guard writes; use AssertLeader inside the writing transaction.
 func (s *Session) AssertCurrent(ctx context.Context, pool *pgxpool.Pool) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if err := s.AssertLeader(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return s.AssertCurrentBackend(ctx, schedulerBackend(pool))
+}
+
+func (s *Session) AssertCurrentBackend(ctx context.Context, backend database.Backend) error {
+	return database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error { return s.AssertTransaction(ctx, tx) })
 }

@@ -52,11 +52,11 @@ export interface ArtifactGrant {
    */
   password?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof ArtifactGrant
    */
-  expiresAt: Date;
+  expiresAt: string;
 }
 
 /**
@@ -98,7 +98,7 @@ export function ArtifactGrantFromJSONTyped(
     downloadToken:
       json["download_token"] == null ? undefined : json["download_token"],
     password: json["password"] == null ? undefined : json["password"],
-    expiresAt: new Date(json["expires_at"]),
+    expiresAt: json["expires_at"],
   };
 }
 
@@ -119,6 +119,6 @@ export function ArtifactGrantToJSONTyped(
     operation: OperationToJSON(value["operation"]),
     download_token: value["downloadToken"],
     password: value["password"],
-    expires_at: value["expiresAt"].toISOString(),
+    expires_at: value["expiresAt"],
   };
 }

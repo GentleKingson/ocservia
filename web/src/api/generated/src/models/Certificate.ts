@@ -51,10 +51,10 @@ export interface Certificate {
   commonName: string;
   /**
    *
-   * @type {Array<string>}
+   * @type {Array<any>}
    * @memberof Certificate
    */
-  dnsNames: Array<string>;
+  dnsNames: Array<any>;
   /**
    *
    * @type {CertificateKeyBitsEnum}
@@ -86,35 +86,35 @@ export interface Certificate {
    */
   serialNumber?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Certificate
    */
-  notBefore?: Date;
+  notBefore?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Certificate
    */
-  notAfter?: Date;
+  notAfter?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Certificate
    */
-  revokedAt?: Date;
+  revokedAt?: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Certificate
    */
-  createdAt: Date;
+  createdAt: string;
   /**
-   * RFC 3339 timestamp normalized to UTC.
-   * @type {Date}
+   * Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339; years outside 0000..9999 use an ISO 8601 signed six-digit year. Infinite values are the strings infinity and -infinity. Responses are normalized to UTC with microsecond precision. Keep this as text, not a JavaScript Date, which cannot represent the complete domain.
+   * @type {string}
    * @memberof Certificate
    */
-  updatedAt: Date;
+  updatedAt: string;
 }
 
 /**
@@ -239,14 +239,11 @@ export function CertificateFromJSONTyped(
       json["public_key_sha256"] == null ? undefined : json["public_key_sha256"],
     serialNumber:
       json["serial_number"] == null ? undefined : json["serial_number"],
-    notBefore:
-      json["not_before"] == null ? undefined : new Date(json["not_before"]),
-    notAfter:
-      json["not_after"] == null ? undefined : new Date(json["not_after"]),
-    revokedAt:
-      json["revoked_at"] == null ? undefined : new Date(json["revoked_at"]),
-    createdAt: new Date(json["created_at"]),
-    updatedAt: new Date(json["updated_at"]),
+    notBefore: json["not_before"] == null ? undefined : json["not_before"],
+    notAfter: json["not_after"] == null ? undefined : json["not_after"],
+    revokedAt: json["revoked_at"] == null ? undefined : json["revoked_at"],
+    createdAt: json["created_at"],
+    updatedAt: json["updated_at"],
   };
 }
 
@@ -274,19 +271,10 @@ export function CertificateToJSONTyped(
     version: value["version"],
     public_key_sha256: value["publicKeySha256"],
     serial_number: value["serialNumber"],
-    not_before:
-      value["notBefore"] == null
-        ? value["notBefore"]
-        : value["notBefore"].toISOString(),
-    not_after:
-      value["notAfter"] == null
-        ? value["notAfter"]
-        : value["notAfter"].toISOString(),
-    revoked_at:
-      value["revokedAt"] == null
-        ? value["revokedAt"]
-        : value["revokedAt"].toISOString(),
-    created_at: value["createdAt"].toISOString(),
-    updated_at: value["updatedAt"].toISOString(),
+    not_before: value["notBefore"],
+    not_after: value["notAfter"],
+    revoked_at: value["revokedAt"],
+    created_at: value["createdAt"],
+    updated_at: value["updatedAt"],
   };
 }

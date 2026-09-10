@@ -12,6 +12,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -54,6 +55,25 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 	stale.ExpectedVersion = 2
 	if _, _, err := service.CreateSynthetic(context.Background(), stale); !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("stale revision error = %v", err)
+	}
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `UPDATE operations SET created_at='-infinity',updated_at='infinity',expires_at='infinity' WHERE id=$1::uuid`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operation_events SET occurred_at='-infinity' WHERE operation_id=$1::uuid`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	read, err := service.Get(ctx, uuid.MustParse(first.ID))
+	if err != nil || read.CreatedAt.Micros != value.NegativeInfinity || read.UpdatedAt.Micros != value.PositiveInfinity || read.ExpiresAt == nil || read.ExpiresAt.Micros != value.PositiveInfinity {
+		t.Fatal("extended operation read", read, err)
+	}
+	read, replayed, err = service.CreateSynthetic(ctx, request)
+	if err != nil || !replayed || read.CreatedAt.Micros != value.NegativeInfinity {
+		t.Fatal("extended idempotent read", read, replayed, err)
+	}
+	events, err := service.ListEvents(ctx, uuid.MustParse(first.ID), uuid.Nil, 10)
+	if err != nil || len(events) != 1 || events[0].OccurredAt.Micros != value.NegativeInfinity {
+		t.Fatal("extended event read", events, err)
 	}
 }
 

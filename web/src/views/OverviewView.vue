@@ -52,8 +52,11 @@ function eventLabel(type: string): string {
   return labels[type] ?? type;
 }
 
-function timeLabel(value: Date): string {
-  return value.toLocaleTimeString();
+function timeLabel(value: Date | string): string {
+  if (typeof value !== "string") return value.toLocaleTimeString();
+  if (!/^\d{4}-/.test(value)) return value;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : value;
 }
 
 onMounted(async () => {
@@ -227,9 +230,7 @@ onBeforeUnmount(() => {
                 ? nodeReference(operation.nodeId)
                 : $t("notAvailable")
             }}</code>
-            <time :datetime="operation.updatedAt.toISOString()">{{
-              timeLabel(operation.updatedAt)
-            }}</time>
+            <span>{{ timeLabel(operation.updatedAt) }}</span>
           </li>
         </ol>
       </section>
@@ -257,7 +258,7 @@ onBeforeUnmount(() => {
           <li v-for="event in overview.recentEvents" :key="event.id">
             <span class="event-type">{{ $t(eventLabel(event.type)) }}</span>
             <code>{{ nodeReference(event.nodeId) }}</code>
-            <time :datetime="event.occurredAt.toISOString()">{{
+            <time :datetime="event.occurredAt">{{
               timeLabel(event.occurredAt)
             }}</time>
           </li>

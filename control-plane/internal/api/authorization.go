@@ -8,10 +8,9 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 type principalKey struct{}
@@ -99,21 +98,21 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	if nodeText := r.PathValue("node_id"); nodeText != "" {
 		nodeID, parseErr := uuid.Parse(nodeText)
 		if parseErr != nil || nodeID.Version() != 7 {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
 		resource, err = s.rbac.Node(r.Context(), nodeID)
 	} else if operationText := r.PathValue("operation_id"); operationText != "" {
 		operationID, parseErr := uuid.Parse(operationText)
 		if parseErr != nil || operationID.Version() != 7 {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
 		resource, err = s.rbac.Operation(r.Context(), operationID)
 	} else if rolloutText := r.PathValue("rollout_id"); rolloutText != "" {
 		rolloutID, parseErr := uuid.Parse(rolloutText)
 		if parseErr != nil || rolloutID.Version() != 7 || s.operations == nil {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
-		rolloutWorkspace, rolloutErr := operationstore.RolloutWorkspace(r.Context(), s.pool, rolloutID)
+		rolloutWorkspace, rolloutErr := s.operations.RolloutWorkspace(r.Context(), rolloutID)
 		if rolloutErr != nil {
 			return nil, rolloutErr
 		}
@@ -121,7 +120,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	} else if approvalText := r.PathValue("approval_id"); approvalText != "" {
 		approvalID, parseErr := uuid.Parse(strings.TrimSuffix(approvalText, ":approve"))
 		if parseErr != nil || approvalID.Version() != 7 || s.approvals == nil {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
 		approval, getErr := s.approvals.Get(r.Context(), approvalID)
 		if getErr != nil {
@@ -146,7 +145,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		}
 		if approval.ResourceType == "config_plan" {
 			if s.configplans == nil {
-				return nil, pgx.ErrNoRows
+				return nil, database.ErrNotFound
 			}
 			workspaceID, nodeID, resourceErr := s.configplans.Resource(r.Context(), approval.ResourceID)
 			if resourceErr != nil {
@@ -158,7 +157,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
 		} else if approval.ResourceType == "certificate" {
 			if s.certificates == nil {
-				return nil, pgx.ErrNoRows
+				return nil, database.ErrNotFound
 			}
 			workspaceID, nodeID, resourceErr := s.certificates.Resource(r.Context(), approval.ResourceID)
 			if resourceErr != nil || workspaceID != approval.WorkspaceID {
@@ -171,7 +170,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	} else if planText := r.PathValue("plan_id"); planText != "" {
 		planID, parseErr := uuid.Parse(planText)
 		if parseErr != nil || planID.Version() != 7 || s.configplans == nil {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
 		workspaceID, nodeID, resourceErr := s.configplans.Resource(r.Context(), planID)
 		if resourceErr != nil {
@@ -181,7 +180,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	} else if certificateText := firstNonempty(r.PathValue("certificate_id"), r.PathValue("certificate_action")); certificateText != "" {
 		certificateID, parseErr := uuid.Parse(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(certificateText, ":revoke"), ":issue"), ":p12"))
 		if parseErr != nil || certificateID.Version() != 7 || s.certificates == nil {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
 		workspaceID, nodeID, resourceErr := s.certificates.Resource(r.Context(), certificateID)
 		if resourceErr != nil {
@@ -191,7 +190,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	} else if artifactText := r.PathValue("artifact_id"); artifactText != "" {
 		artifactID, parseErr := uuid.Parse(artifactText)
 		if parseErr != nil || artifactID.Version() != 7 || s.certificates == nil {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
 		workspaceID, nodeID, resourceErr := s.certificates.ArtifactResource(r.Context(), artifactID)
 		if resourceErr != nil {
@@ -201,7 +200,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	} else if secretText := firstNonempty(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action")); secretText != "" {
 		secretID, parseErr := uuid.Parse(strings.TrimSuffix(secretText, ":rotate"))
 		if parseErr != nil || secretID.Version() != 7 || s.certificates == nil {
-			return nil, pgx.ErrNoRows
+			return nil, database.ErrNotFound
 		}
 		workspaceID, resourceErr := s.certificates.SecretRefResource(r.Context(), secretID)
 		if resourceErr != nil {
@@ -375,7 +374,7 @@ func workspace(r *http.Request) uuid.UUID {
 }
 
 func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, database.ErrNotFound) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}

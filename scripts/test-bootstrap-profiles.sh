@@ -61,7 +61,7 @@ expected_commands = {
   "go" => ["scripts/bootstrap.sh go-test", "scripts/go-check.sh standard"],
   "rust" => ["scripts/bootstrap.sh rust-basic", "scripts/rust-check.sh"],
   "web" => ["scripts/bootstrap.sh web", "source scripts/env.sh\ncd web\nnpx playwright install --with-deps chromium\n", "scripts/web-check.sh"],
-  "database-smoke" => ["scripts/bootstrap.sh go-test", "scripts/database-integration.sh"]
+  "database-smoke" => ["scripts/bootstrap.sh go-test", "scripts/database-integration.sh", "bash scripts/database-foundation-integration.sh"]
 }
 expected_commands.each do |id, commands|
   actual = jobs.fetch(id).fetch("steps").filter_map { |step| step["run"] }
@@ -81,9 +81,21 @@ reject("Web npm installs must disable audit and funding") unless jobs.fetch("web
 rust_check = File.read(File.join(root, "scripts/rust-check.sh"))
 reject("basic Rust checks must not run audit or license checks") if rust_check.match?(/cargo (audit|deny)/)
 database = jobs.fetch("database-smoke")
-reject("database smoke must cover PostgreSQL 17 and 18 independently") unless
-  database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}"} &&
-  database.fetch("strategy") == {"fail-fast" => false, "matrix" => {"postgres" => ["17", "18"]}}
+reject("database smoke must cover PostgreSQL 17/18, MySQL and MariaDB independently") unless
+  database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}", "ENGINE" => "${{ matrix.engine }}"} &&
+  database.fetch("strategy") == {"fail-fast" => false, "matrix" => {"include" => [
+    {"engine" => "postgres", "postgres" => "17"},
+    {"engine" => "postgres", "postgres" => "18"},
+    {"engine" => "mysql"},
+    {"engine" => "mariadb"}
+  ]}}
+database_commands = database.fetch("steps").select { |step| step.key?("run") }
+reject("database jobs must route only to their own backend test script") unless
+  database_commands == [
+    {"run" => "scripts/bootstrap.sh go-test"},
+    {"if" => "matrix.engine == 'postgres'", "run" => "scripts/database-integration.sh"},
+    {"if" => "matrix.engine != 'postgres'", "run" => "bash scripts/database-foundation-integration.sh"}
+  ]
 reject("database smoke must let the script build its own control binary") unless
   database_script.include?('go build -trimpath -o "${BIN}" ./cmd/ocserv-control')
 reject("PostgreSQL 17 must skip the legacy upgrade fixture") unless

@@ -1,0 +1,18 @@
+#!/bin/sh
+# This container has no systemd PID 1. Translate only the adapter's fixed
+# service probes/reload into checks and signals against the real Ocserv PID.
+set -eu
+pid="$(cat /run/ocserv.pid)"
+case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
+test "$pid" -gt 1
+kill -0 "$pid"
+/usr/bin/occtl --json show status >/dev/null
+case "$*" in
+  'show ocserv.service --property=LoadState --property=ActiveState --property=SubState --no-pager')
+    printf 'LoadState=loaded\nActiveState=active\nSubState=running\n'
+    ;;
+  'reload ocserv.service --no-ask-password')
+    kill -HUP "$pid"
+    ;;
+  *) echo 'unsupported container service operation' >&2; exit 1 ;;
+esac

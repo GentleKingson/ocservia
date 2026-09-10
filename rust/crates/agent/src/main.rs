@@ -219,7 +219,10 @@ async fn enroll_agent(
     .bind()
     .await?;
     let connection = endpoint
-        .connect(EndpointAddr::new(controller), ENROLL_ALPN)
+        .connect(
+            controller_dial_target(controller, &config.relay_mode, &endpoint),
+            ENROLL_ALPN,
+        )
         .await?;
     let mut request = EnrollRequest {
         token,

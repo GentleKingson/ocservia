@@ -1,0 +1,1249 @@
+{
+  "schema_version": 1,
+  "source": "Published MySQL v1 manifest minus v3 lossless replacements; MariaDB has the same logical columns.",
+  "remaining_time_columns": 143,
+  "remaining_jsonb_columns": 11,
+  "remaining_array_columns": 1,
+  "columns": [
+    {
+      "table": "connection_owner_fencing",
+      "column": "lease_until",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "connection_owner_fencing",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "identities",
+      "column": "disabled_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "identities",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "identities",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "auth_sessions",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "auth_sessions",
+      "column": "revoked_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "auth_sessions",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "break_glass_uses",
+      "column": "used_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_auth_attempts",
+      "column": "window_until",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_auth_attempts",
+      "column": "blocked_until",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT '1000-01-01 00:00:00.000000'",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_auth_attempts",
+      "column": "lease_until",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT '1000-01-01 00:00:00.000000'",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_auth_attempts",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_credentials",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_credentials",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_credentials",
+      "column": "password_changed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_agent_upgrade_results",
+      "column": "completed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_agent_upgrade_results",
+      "column": "reported_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "scheduler_leadership",
+      "column": "lease_until",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "scheduler_leadership",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "scheduler_leases",
+      "column": "lease_until",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "scheduler_leases",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "transport_event_cursor",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "transport_event_quarantine",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "upstream_sync_records",
+      "column": "classification",
+      "physical": "JSON",
+      "definition": "NOT NULL",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "upstream_sync_records",
+      "column": "synced_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "workspaces",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "workspaces",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "workspaces",
+      "column": "archived_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "approval_requests",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "approval_requests",
+      "column": "approved_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "approval_requests",
+      "column": "consumed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "approval_requests",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "approval_requests",
+      "column": "request_summary",
+      "physical": "JSON",
+      "definition": "NULL",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "approval_requests",
+      "column": "authority_snapshot_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_rollouts",
+      "column": "exclusions",
+      "physical": "JSON",
+      "definition": "NOT NULL DEFAULT ('[]')",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_rollouts",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_rollouts",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_rollout_nodes",
+      "column": "dispatch_lease_until",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_rollout_nodes",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "batch_operations",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "batch_operations",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_auth_bootstrap",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_auth_bootstrap",
+      "column": "completed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "nodes",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "nodes",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "nodes",
+      "column": "labels",
+      "physical": "JSON",
+      "definition": "NOT NULL DEFAULT ('{}')",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "audit_events",
+      "column": "occurred_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "audit_events",
+      "column": "before_summary",
+      "physical": "JSON",
+      "definition": "NULL",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "audit_events",
+      "column": "after_summary",
+      "physical": "JSON",
+      "definition": "NULL",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "audit_checkpoints",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_groups",
+      "column": "members",
+      "physical": "JSON",
+      "definition": "NOT NULL",
+      "logical": "text[]",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_groups",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_groups",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_users",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_users",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_user_policies",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_user_policies",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "desired_user_policies",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "enrollment_tokens",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "enrollment_tokens",
+      "column": "consumed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "enrollment_tokens",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_bootstrap_tokens",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_bootstrap_tokens",
+      "column": "consumed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_bootstrap_tokens",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_endpoint_keys",
+      "column": "bound_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_endpoint_keys",
+      "column": "revoked_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_ip_bans",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_observed_snapshots",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_observed_snapshots",
+      "column": "received_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_observed_snapshots",
+      "column": "ocserv",
+      "physical": "JSON",
+      "definition": "NOT NULL",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_observed_snapshots",
+      "column": "system",
+      "physical": "JSON",
+      "definition": "NOT NULL",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_observed_snapshots",
+      "column": "path",
+      "physical": "JSON",
+      "definition": "NOT NULL",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_observed_snapshots",
+      "column": "last_heartbeat_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_sealing_keys",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_sessions",
+      "column": "connected_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_sessions",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_trust_convergence",
+      "column": "available_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_trust_convergence",
+      "column": "locked_until",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_trust_convergence",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_trust_convergence",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "observed_user_usage",
+      "column": "period_start",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "observed_user_usage",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "observed_users",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "operations",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "operations",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "operations",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "operations",
+      "column": "completed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_upgrade_operations",
+      "column": "scheduled_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_upgrade_operations",
+      "column": "completed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_upgrade_operations",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_upgrade_operations",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "batch_operation_items",
+      "column": "lease_until",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "batch_operation_items",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "commands",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "commands",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "commands",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "config_plans",
+      "column": "warnings",
+      "physical": "JSON",
+      "definition": "NOT NULL DEFAULT ('[]')",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "config_plans",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "config_plans",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "config_apply_operations",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "config_apply_operations",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_slice_jobs",
+      "column": "available_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_slice_jobs",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_slice_jobs",
+      "column": "dispatched_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "local_slice_jobs",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_command_leases",
+      "column": "leased_until",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_command_leases",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_config_state",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "operation_events",
+      "column": "occurred_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "outbox_events",
+      "column": "available_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "outbox_events",
+      "column": "locked_until",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "outbox_events",
+      "column": "published_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "outbox_events",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "command_attempts",
+      "column": "started_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "command_attempts",
+      "column": "finished_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "privd_attestation_enrollment_credentials",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "privd_attestation_enrollment_credentials",
+      "column": "consumed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "privd_attestation_enrollment_credentials",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_privd_attestation_keys",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_privd_attestation_keys",
+      "column": "approved_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_privd_attestation_keys",
+      "column": "activated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_privd_attestation_keys",
+      "column": "valid_until",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "node_privd_attestation_keys",
+      "column": "revoked_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "certificates",
+      "column": "dns_names",
+      "physical": "JSON",
+      "definition": "NOT NULL DEFAULT ('[]')",
+      "logical": "jsonb",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "certificates",
+      "column": "not_before",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "certificates",
+      "column": "not_after",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "certificates",
+      "column": "revoked_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "certificates",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "certificates",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "certificates",
+      "column": "csr_receipt_verified_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "artifact_operations",
+      "column": "expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "artifact_operations",
+      "column": "lease_until",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "artifact_operations",
+      "column": "consumed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "artifact_operations",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "artifact_operations",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "artifact_operations",
+      "column": "active_grant_expires_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "role_bindings",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "secret_provider_refs",
+      "column": "rotated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "secret_provider_refs",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "secret_provider_refs",
+      "column": "updated_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "security_alerts",
+      "column": "acknowledged_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "security_alerts",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "telemetry_ingest_batches",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "telemetry_ingest_batches",
+      "column": "received_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "transport_events",
+      "column": "occurred_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "transport_events",
+      "column": "received_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_command_results",
+      "column": "accepted_at",
+      "physical": "DATETIME(6)",
+      "definition": "NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_command_results",
+      "column": "completed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "agent_command_results",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "user_policy_enforcements",
+      "column": "period_start",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "user_policy_enforcements",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "user_policy_mutations",
+      "column": "created_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "user_usage_cursors",
+      "column": "connected_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    },
+    {
+      "table": "user_usage_cursors",
+      "column": "observed_at",
+      "physical": "DATETIME(6)",
+      "definition": "NOT NULL",
+      "logical": "timestamptz",
+      "state": "pending_v4_domain_and_storage_adaptation"
+    }
+  ]
+}

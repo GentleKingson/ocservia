@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"
@@ -46,6 +47,7 @@ type Config struct {
 	AuthTrustedProxyCIDRs    []netip.Prefix
 	DatabaseURL              string
 	DatabaseBackend          string
+	DatabaseTLSCAFile        string
 	OTLPEndpoint             string
 	DevAuth                  bool
 	DevAuthToken             string
@@ -124,11 +126,12 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if backend, ok := lookup("OCSERV_DATABASE_BACKEND"); ok {
-		if backend != "postgres" {
-			return Config{}, errors.New("OCSERV_DATABASE_BACKEND must be postgres; other backends are not supported")
+		if backend != "postgres" && backend != "mysql" && backend != "mariadb" {
+			return Config{}, errors.New("OCSERV_DATABASE_BACKEND must be postgres, mysql or mariadb")
 		}
 		cfg.DatabaseBackend = backend
 	}
+	setString(lookup, "OCSERV_DATABASE_TLS_CA_FILE", &cfg.DatabaseTLSCAFile)
 	setString(lookup, "OCSERV_RUNTIME_DATABASE_ROLE", &cfg.RuntimeDBRole)
 	setString(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT", &cfg.OTLPEndpoint)
 	setString(lookup, "OCSERV_LOG_LEVEL", &cfg.LogLevelName)
@@ -362,8 +365,11 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 
 func (c Config) Validate() error {
 	// Empty retains the pre-backend-selector PostgreSQL configuration contract.
-	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" {
-		return errors.New("OCSERV_DATABASE_BACKEND must be postgres")
+	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" && c.DatabaseBackend != "mysql" && c.DatabaseBackend != "mariadb" {
+		return errors.New("OCSERV_DATABASE_BACKEND must be postgres, mysql or mariadb")
+	}
+	if (c.DatabaseBackend == "mysql" || c.DatabaseBackend == "mariadb") && c.Environment == "production" {
+		return errors.New("MySQL/MariaDB Controller startup is restricted to test/development pending PR-02 acceptance")
 	}
 	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "" || c.LocalBootstrapApproverUsername == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
@@ -388,9 +394,8 @@ func (c Config) Validate() error {
 	if c.MigrateOnly && c.SchemaCompatibilityCheck > 0 {
 		return errors.New("--migrate-only and --schema-compatibility-check are mutually exclusive")
 	}
-	u, err := url.Parse(c.DatabaseURL)
-	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" {
-		return errors.New("OCSERV_DATABASE_URL must be a PostgreSQL URL")
+	if err := connection.ValidateOptions(connection.Options{Backend: c.DatabaseBackend, Environment: c.Environment, URL: c.DatabaseURL, CAFile: c.DatabaseTLSCAFile}); err != nil {
+		return err
 	}
 	if c.DevAuth {
 		host, _, err := net.SplitHostPort(c.HTTPAddress)

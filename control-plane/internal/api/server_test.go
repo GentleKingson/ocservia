@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -20,6 +21,24 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestCommonStoreNotFoundProblems(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for name, write := range map[string]func(http.ResponseWriter, *http.Request, error){
+		"configuration": writeConfigPlanError,
+		"rollout":       server.writeRolloutError,
+		"operation":     server.writeOperationError,
+		"certificate":   writeCertificateError,
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			write(response, httptest.NewRequest(http.MethodGet, "/api/v1/operations/missing", nil), errors.Join(errors.New("store context"), database.ErrNotFound))
+			if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), "https://ocservia.dev/problems/not-found") {
+				t.Fatalf("not-found classification: %d %s", response.Code, response.Body)
+			}
+		})
+	}
+}
 
 func TestLiveAndRequestID(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
@@ -278,6 +297,7 @@ func TestRoutingErrorsUseProblemDetails(t *testing.T) {
 		status int
 	}{
 		{method: http.MethodPost, path: "/api/v1/livez", status: http.StatusMethodNotAllowed},
+		{method: http.MethodPost, path: "/api/v1/auth/methods", status: http.StatusMethodNotAllowed},
 		{method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
 	}
 	for _, test := range tests {
