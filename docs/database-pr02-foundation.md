@@ -6,8 +6,9 @@ The requested PR-02 business-store migration and three-backend Controller
 process acceptance are complete. **The PR remains Draft; this is not production
 release approval.** Controller test/development startup selects the common
 business stores for all three backends. MySQL/MariaDB production startup remains
-rejected. See the [final acceptance record](database-pr02-validation.md#final-pr-02-acceptance)
-for the real-process matrix, regression evidence and explicit test boundaries.
+rejected. The [PostgreSQL review follow-up](database-pr02-validation.md#postgresql-isolation-follow-up)
+tracks the current full-regression blocker; the earlier real-process matrix is
+not a substitute for passing the complete regression suite and GitHub CI.
 The separate `ocserv-db-foundation` owner tool also permits only explicit `test`
 or `development` environments. No production migration, release, deployment, or
 merge is part of this PR.

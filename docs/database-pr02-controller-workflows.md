@@ -4,8 +4,9 @@ The requested business-store migrations and real three-backend Controller
 certificate/operation process acceptance are complete. Controller test/development
 startup selects all three backends through one business-service wiring path.
 The PR remains Draft and MySQL/MariaDB production startup remains rejected.
-See [final acceptance](database-pr02-validation.md#final-pr-02-acceptance) for
-evidence and boundaries; earlier domain/HTTP milestones below are historical.
+See the [PostgreSQL review follow-up](database-pr02-validation.md#postgresql-isolation-follow-up)
+for current full-regression acceptance status; the process matrix does not
+override the subsequently reported CI failures. Earlier milestones are historical.
 
 ## Recorded Migration
 

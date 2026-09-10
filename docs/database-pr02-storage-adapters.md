@@ -2,7 +2,9 @@
 
 This is the historical version-3 record, not the current acceptance status.
 The subsequent business-store migrations and real three-backend Controller
-workflows have passed [final PR-02 acceptance](database-pr02-validation.md#final-pr-02-acceptance).
+workflows are recorded in the validation history. See the
+[PostgreSQL regression follow-up](database-pr02-validation.md#postgresql-isolation-follow-up)
+for the current acceptance status.
 The PR remains Draft and MySQL/MariaDB production startup remains rejected;
 version-3 domain tests alone were not authenticated workflow acceptance.
 

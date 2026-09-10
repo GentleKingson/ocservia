@@ -83,6 +83,18 @@ func userStateBackend(t *testing.T) database.Backend {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	// PostgreSQL packages share a database. Preserve the fencing epoch, but
+	// leave the singleton expired both before and after this fixture.
+	expireLeadership := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(ctx, `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`); err != nil {
+			t.Fatalf("expire fixture scheduler leadership: %v", err)
+		}
+	}
+	t.Cleanup(expireLeadership)
+	expireLeadership()
 	return postgres.WrapPool(pool)
 }
 

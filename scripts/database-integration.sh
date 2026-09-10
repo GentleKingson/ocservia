@@ -607,7 +607,19 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   stop_process "${pid}"
   rollback_database="ocservia_rollback_${major}"
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/privdattestation -run Integration -count=1)
+    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry -run Integration -count=1)
+  # User workflows retain revision-zero commands and singleton lease state.
+  # Keep their fixtures out of other packages and the historical down chain.
+  for package in userstate useroperations; do
+    fixture_database="ocservia_${package}_${major}"
+    clone_database "${container}" ocservia "${fixture_database}"
+    (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/${fixture_database}?sslmode=disable" \
+      OCSERV_TEST_OWNER_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/${fixture_database}?sslmode=disable" \
+      go test -p 1 "./internal/${package}" -run Integration -count=1)
+    docker exec "${container}" dropdb -U ocservia_owner "${fixture_database}"
+  done
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
+    go test -p 1 ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/privdattestation -run Integration -count=1)
   # R4 Local/RBAC tests exercise the real latest schema, not the historical
   # rollback fixture. Their runtime role retains the production privileges.
   # Clone before any auth fixture writes. Lifecycle bootstrap requires no prior

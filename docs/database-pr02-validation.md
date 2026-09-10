@@ -2,10 +2,12 @@
 
 ## Current Result
 
-The requested PR-02 migration and real three-backend Controller acceptance
-have passed. The [final acceptance record](#final-pr-02-acceptance) is current;
-earlier sections retain their original milestone scope and unsuccessful runs.
-The PR remains Draft, with MySQL/MariaDB production startup still rejected.
+The v23 migration and real three-backend Controller workflow matrix have passed,
+but those checks did not cover the complete PostgreSQL regression script at
+`99cf5a9`. Review `5166373626` identified two shared-fixture leadership failures
+in GitHub CI. The [PostgreSQL isolation follow-up](#postgresql-isolation-follow-up)
+records the current acceptance status; the earlier final-acceptance claim is
+superseded. The PR remains Draft, with production admission still rejected.
 
 ## Scope
 
@@ -1589,3 +1591,48 @@ static checks remain distinct. No real two-failure-domain G6, systemd installati
 production database migration, deployment, merge or ready-for-review transition
 was performed. MySQL/MariaDB production admission remains rejected and PR #193
 remains Draft.
+
+## PostgreSQL Isolation Follow-Up
+
+Review `5166373626` found deterministic failures on head `99cf5a9` in Basic CI
+run `34469366490`: PostgreSQL 17 failed `TestUserOperationsBackendIntegration`,
+and PostgreSQL 18 failed `TestUserStateBackendIntegration`, both because the
+singleton scheduler lease was still owned by another leader. The full script
+runs these packages sequentially against a shared database, unlike the earlier
+isolated service checks. The real-process E2E passes do not override these failures.
+
+Both PostgreSQL fixtures now expire `scheduler_leadership.lease_until` before
+setup and through `t.Cleanup` before the pool closes, using an independent
+bounded context. Cleanup leaves the lease expired even after a fencing test
+advances its epoch. It does not reset the epoch, change `ErrLeaseHeld`, retry
+business operations, or change the separately isolated MySQL/MariaDB fixtures.
+
+The first full rerun passed both affected packages on PostgreSQL 17, then exposed
+another consequence of shared fixtures: retained revision-zero user commands
+failed migration 12's historical `expected_version > 0` down constraint. The
+script now runs `userstate` and `useroperations`, in the original package order,
+on separate database clones and drops each clone after its complete Integration
+package run. Their data no longer enters the historical rollback fixture. No
+test filter, migration checksum, runtime privilege or down constraint was relaxed.
+
+Unsuccessful runs remain in `artifacts/review-5166373626-postgres.log` (the
+historical down failure) and `artifacts/review-5166373626-postgres-isolated.log`
+(an initial clone-DSN construction error, corrected to explicit loopback URLs).
+Neither is counted as a passing full script.
+
+The required `PG_MAJOR=all bash scripts/database-integration.sh` rerun completed
+with exit 0 on BuildServer, using head `99cf5a9` plus this fixture-isolation fix.
+Both PostgreSQL 17 and 18 printed their full integration completion markers;
+the script also completed its final upgrade/rollback tail and cleanup. All
+original package tests and required-test guards ran without narrowing filters.
+
+| Check | Result | Evidence under `/root/ocservia-telemetry-time.gXtIZO` |
+| --- | --- | --- |
+| Full PG17 + PG18 database integration script | PASS, exit 0 | `artifacts/review-5166373626-postgres-final.log` |
+| Retained per-engine migration/runtime/database logs | Collected | `artifacts/review-5166373626-postgres-final/` |
+| Go formatting, script syntax and documentation checks | PASS | `artifacts/review-5166373626-static.log` |
+
+This fixes the local full-script failures, but is not a green GitHub CI claim:
+the updated PR head must also pass GitHub CI. Final
+acceptance remains blocked until current-head CI passes and the final review
+is completed. Keep Draft; do not mark Ready, merge or deploy.
