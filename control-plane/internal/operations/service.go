@@ -591,6 +591,23 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		return Operation{}, false, fmt.Errorf("notify outbox worker: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
+		// The commit acknowledgement may have been lost. Resolve only this
+		// operation's immutable idempotency record; never create another intent.
+		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		var existing Operation
+		confirmed := database.Within(check, s.backend, database.ReadCommitted, func(read database.Tx) error {
+			var same bool
+			var err error
+			existing, same, err = findIdempotent(check, read, workspaceID, request.IdempotencyKey, hash[:])
+			if err == nil && (!same || existing.ID != operationID.String()) {
+				return database.ErrNotFound
+			}
+			return err
+		})
+		if confirmed == nil {
+			return existing, false, nil
+		}
 		return Operation{}, false, fmt.Errorf("commit operation transaction: %w", err)
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()

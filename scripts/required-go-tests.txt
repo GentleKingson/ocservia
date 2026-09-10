@@ -1,4 +1,5 @@
 # group package (relative to control-plane) exact test/subtest name
+unit internal/database TestCoordinationRetryBoundaries
 unit internal/audit TestAppendHashesPersistedTime
 unit internal/audit TestAppendHashesPersistedJSON
 unit internal/audit TestLegacyNumericPayloadRemainsIdentical
@@ -79,3 +80,26 @@ backend-auth internal/api TestAuthenticationBackendSafetyIntegration/absent-sing
 backend-auth internal/api TestAuthenticationBackendLegacyIntegration
 backend-audit-postgres internal/database/postgres TestAuditRBACControllerIntegration
 backend-audit-mysql internal/database/mysql TestRealAuditRBACController
+backend-coordination internal/operations TestOutboxBackendIntegration
+backend-coordination internal/operations TestOutboxBackendIntegration/atomic-intent-and-ambiguous-commit
+backend-coordination internal/operations TestOutboxBackendIntegration/two-workers-and-commit-readback
+backend-coordination internal/operations TestOutboxBackendIntegration/crash-after-claim
+backend-coordination internal/operations TestOutboxBackendIntegration/crash-after-transport-acceptance
+backend-coordination internal/operations TestOutboxBackendIntegration/early-and-duplicate-result
+backend-coordination internal/operations TestCoordinationDeadlockBackendIntegration
+backend-coordination internal/operations TestFencingBackendIntegration
+backend-coordination internal/operations TestFencingBackendIntegration/scheduler-noop-rows-affected
+backend-coordination internal/operations TestFencingBackendIntegration/owner-expired-during-renew-wait
+backend-coordination internal/operations TestFencingBackendIntegration/owner-expired-during-assert-wait
+backend-coordination internal/operations TestFencingBackendIntegration/owner-expired-during-release-wait
+backend-coordination internal/operations TestFencingBackendIntegration/owner-acquire-clock-after-lock
+backend-coordination internal/operations TestFencingBackendIntegration/two-controllers-and-epoch-retention
+backend-coordination internal/operations TestFencingBackendIntegration/scheduler-renew-and-assert-after-wait
+backend-coordination internal/operations TestFencingBackendIntegration/scheduler-contenders-and-ambiguous-commit
+backend-coordination internal/operations TestFencingBackendIntegration/owner-readback-and-stale-dispatch
+backend-coordination internal/operations TestFencingBackendIntegration/disconnect-rejects-observer
+backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect
+backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/claim-request-lost
+backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/claim-response-lost
+backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/sent-request-lost
+backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/sent-response-lost

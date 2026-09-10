@@ -50,11 +50,8 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 	}
 	var result []operationstore.Dispatch
 	for _, c := range candidates {
-		if c.state == "queued" {
-			if available == 0 {
-				continue
-			}
-			available--
+		if c.state == "queued" && available == 0 {
+			continue
 		}
 		var d operationstore.Dispatch
 		err := s.QueryRow(ctx, `SELECT id,command_id,payload FROM outbox_events
@@ -80,6 +77,9 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 		if err != nil {
 			return nil, err
 		}
+		if c.state == "queued" {
+			available--
+		}
 		result = append(result, d)
 	}
 	return result, nil
@@ -89,7 +89,15 @@ func (s operationStore) ClaimDispatch(ctx context.Context, d operationstore.Disp
 	_, err := s.Exec(ctx, `INSERT INTO node_command_leases(node_id,command_id,lease_token,worker_id,leased_until,created_at) VALUES(?,?,?,?,?,?)`,
 		UUIDBytes(d.NodeID), UUIDBytes(d.CommandID), UUIDBytes(d.LeaseToken), UUIDBytes(worker), until, at)
 	if errors.Is(err, database.ErrUnique) {
-		return false, nil
+		// Only an existing node reservation is an expected contention outcome.
+		// Other unique-key collisions must abort rather than disappear.
+		var exists bool
+		if check := s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=?)`, UUIDBytes(d.NodeID)).Scan(&exists); check != nil {
+			return false, check
+		}
+		if exists {
+			return false, nil
+		}
 	}
 	if err != nil {
 		return false, err
@@ -133,13 +141,13 @@ func (s operationStore) DispatchStatus(ctx context.Context, d operationstore.Dis
 }
 
 func (s operationStore) CompletedDispatch(ctx context.Context, d operationstore.Dispatch) (v operationstore.DispatchStatus, err error) {
-	err = s.QueryRow(ctx, `SELECT c.state,
+	err = s.QueryRow(ctx, `SELECT c.state,c.envelope,
 		EXISTS(SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id AND r.created_at>=a.started_at)
 		FROM outbox_events o JOIN commands c ON c.id=o.command_id JOIN operations p ON p.id=c.operation_id
 		JOIN command_attempts a ON a.id=? AND a.command_id=c.id AND a.outbox_event_id=o.id
 		WHERE o.id=? AND c.id=? AND p.id=? AND c.node_id=? AND a.state='sent' AND a.finished_at IS NOT NULL
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.node_id=c.node_id AND l.command_id=c.id AND l.lease_token=?)`,
-		UUIDBytes(d.AttemptID), UUIDBytes(d.OutboxID), UUIDBytes(d.CommandID), UUIDBytes(d.OperationID), UUIDBytes(d.NodeID), UUIDBytes(d.LeaseToken)).Scan(&v.CommandState, &v.ResultAfterAttempt)
+		UUIDBytes(d.AttemptID), UUIDBytes(d.OutboxID), UUIDBytes(d.CommandID), UUIDBytes(d.OperationID), UUIDBytes(d.NodeID), UUIDBytes(d.LeaseToken)).Scan(&v.CommandState, &v.Envelope, &v.ResultAfterAttempt)
 	return
 }
 
