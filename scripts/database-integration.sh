@@ -239,9 +239,11 @@ seed_verified_receipt() {
 for major in "${POSTGRES_MAJORS[@]}"; do
   container="${PREFIX}-pg${major}"
   CONTAINERS+=("${container}")
+  # Keep the selected loopback port stable across the lifecycle restart test.
+  port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
   docker run -d --name "${container}" \
     -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-    -p "127.0.0.1::5432" "postgres:${major}-bookworm" >/dev/null
+    -p "127.0.0.1:${port}:5432" "postgres:${major}-bookworm" >/dev/null
   wait_for_postgres "${container}"
   port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
@@ -634,7 +636,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   stop_process "${pid}"
   rollback_database="ocservia_rollback_${major}"
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry -run Integration -count=1)
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry -run Integration)
+  OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
+    bash "${ROOT}/scripts/test-enrollment-restart.sh" "${container}"
   # User workflows retain revision-zero commands and singleton lease state.
   # Keep their fixtures out of other packages and the historical down chain.
   for package in userstate useroperations; do

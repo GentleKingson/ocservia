@@ -342,6 +342,10 @@ the production admission gate remains in place.
 
 ### Enrollment Trust Convergence
 
+PR-05 strengthens the claim lifetime and adds explicit renewal without changing
+this storage layout. See the current
+[node lifecycle checklist](database-pr05-enrollment-trust-node-lifecycle.md).
+
 The trust queue producer and worker use a shared transaction-scoped store.
 PostgreSQL constructors remain as compatibility adapters. Enqueue replaces only older authorization
 revisions and commits with its caller's transaction. MySQL/MariaDB serialize

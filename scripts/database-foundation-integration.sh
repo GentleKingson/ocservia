@@ -63,8 +63,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=ocservia-pr02-test'
 chmod 755 "${TLS_DIR}"
 chmod 644 "${TLS_DIR}"/*.pem
 # Ephemeral test credentials only, never deployment defaults. Loopback binding
-# is required even in CI; the port is allocated by Docker to avoid collisions.
-docker run -d --name "${NAME}" -p 127.0.0.1::3306 \
+# is required even in CI. An explicit ephemeral port survives Docker restart.
+PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+docker run -d --name "${NAME}" -p "127.0.0.1:${PORT}:3306" \
   -v "${TLS_DIR}:/tls:ro" \
   -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia \
   -e MARIADB_ROOT_PASSWORD=pr02-isolated-test-root -e MARIADB_DATABASE=ocservia \
@@ -109,6 +110,8 @@ if [[ "${part}" != current ]]; then
 fi
 if [[ "${part}" == history ]]; then exit 0; fi
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend)Integration$')
+(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment --select -race -timeout=10m)
+bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-auth -race -timeout=10m ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$')
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/telemetry -run '^TestTelemetryBackendWorkflowIntegration$')
 fi
