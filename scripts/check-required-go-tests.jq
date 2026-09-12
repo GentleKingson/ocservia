@@ -2,7 +2,7 @@
 ($manifest | split("\n") | map(select(length > 0 and (startswith("#") | not)) | split(" "))
  | map(select(length < 4 or .[3] == env.PR02_ENGINE)
    | select(.[0] == $group or
-     ($group == "backend-mysql-full" and
+     (($group == "backend-mysql-full" or $group == "backend-mysql-current-full") and
        (.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql")) or
      ($group == "backend-mysql-full" and .[0] == "backend-mysql-history"))
    | {package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), test: .[2]})) as $required

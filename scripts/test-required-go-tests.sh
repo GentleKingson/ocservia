@@ -63,6 +63,35 @@ if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
   echo 'full database guard accepted missing history' >&2; exit 1
 fi
 echo 'MySQL/MariaDB regression and history guards passed'
+for engine in mysql mariadb; do
+  for group in backend-mysql-current-full backend-mysql-history backend-mysql-full; do
+    check "${tmp}/mysql.json" "${group}" "${engine}" >"${tmp}/${group}.summary"
+  done
+  jq -se '.[0].required + .[1].required == .[2].required' \
+    "${tmp}/backend-mysql-current-full.summary" "${tmp}/backend-mysql-history.summary" \
+    "${tmp}/backend-mysql-full.summary" >/dev/null
+  for group in backend-mysql-current-full backend-mysql-history; do
+    selection="$(PR02_ENGINE="${engine}" jq -nr --arg group "${group}" --arg mode select \
+      --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" -f "${ROOT}/scripts/check-required-go-tests.jq")"
+    IFS=$'\t' read -r package pattern <<<"${selection}"
+    jq -c --arg pattern "${pattern}" 'select(.Test | split("/")[0] | test($pattern))' "${tmp}/mysql.json" >"${tmp}/${group}.json"
+    check "${tmp}/${group}.json" "${group}" "${engine}" >/dev/null
+    other=backend-mysql-history
+    [[ "${group}" == backend-mysql-history ]] && other=backend-mysql-current-full
+    if check "${tmp}/${group}.json" "${other}" "${engine}" >/dev/null 2>&1; then
+      echo 'shards incorrectly share required inventory' >&2; exit 1
+    fi
+  done
+done
+for pair in 'full invalid' 'full EMPTY' 'regression all' 'regression current' 'regression history'; do
+  read -r scope part <<<"${pair}"
+  [[ "${part}" == EMPTY ]] && part=''
+  if DATABASE_TEST_SCOPE="${scope}" DATABASE_FULL_PART="${part}" ENGINE=mysql \
+    bash "${ROOT}/scripts/database-foundation-integration.sh" >"${tmp}/part.log" 2>&1; then
+    echo 'invalid full part accepted' >&2; exit 1
+  fi
+  grep -Fq DATABASE_FULL_PART "${tmp}/part.log"
+done
 # Exercise every explicit critical inventory, not just a successful go exit.
 for engine in mysql mariadb; do
   while read -r group; do
@@ -139,3 +168,110 @@ for missing in OCSERV_TEST_DATABASE_URL OCSERV_TEST_OWNER_DATABASE_URL; do
   grep -Fq "${missing}" "${tmp}/error.log"
 done
 echo 'Required Go test guard checks passed'
+
+# Exercise the real wrapper, without a database or a second test inventory.
+mkdir -p "${tmp}/wrapper/scripts" "${tmp}/wrapper/bin"
+cp "${ROOT}/scripts/required-go-tests.sh" "${ROOT}/scripts/check-required-go-tests.jq" "${tmp}/wrapper/scripts/"
+printf 'fixture internal/fixture TestRequired\n' >"${tmp}/wrapper/scripts/required-go-tests.txt"
+cat >"${tmp}/wrapper/bin/go" <<'SH'
+#!/usr/bin/env bash
+set -eu
+echo '{"Package":"github.com/GentleKingson/ocservia/control-plane/internal/fixture","Test":"TestRequired","Action":"run"}'
+case "${FIXTURE_MODE}" in
+  missing) exit 0 ;;
+  fail) exit 7 ;;
+  hang)
+    trap 'echo stopped >"${FIXTURE_STOPPED}"; exit 143' TERM
+    while :; do sleep 0.1; done ;;
+esac
+printf '{"Package":"github.com/GentleKingson/ocservia/control-plane/internal/fixture","Test":"TestRequired","Action":"%s"}\n' "${FIXTURE_MODE}"
+SH
+chmod +x "${tmp}/wrapper/bin/go"
+ruby - "${tmp}/wrapper" <<'RUBY'
+root = ARGV.fetch(0)
+env = {"PATH" => "#{root}/bin:#{ENV.fetch('PATH')}", "FIXTURE_STOPPED" => "#{root}/stopped"}
+%w[pass fail missing skip INT TERM].each do |mode|
+  log = "#{root}/#{mode}.log"
+  signal = %w[INT TERM].include?(mode)
+  pid = Process.spawn(env.merge("FIXTURE_MODE" => signal ? "hang" : mode),
+    "bash", "#{root}/scripts/required-go-tests.sh", "fixture", out: log, err: log)
+  if signal
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
+    until File.read(log).include?('"Action":"run"')
+      raise "JSON was not streamed" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      sleep 0.05
+    end
+    Process.kill(mode, pid)
+  end
+  _, status = Process.wait2(pid)
+  expected = {"pass" => 0, "fail" => 7, "INT" => 130, "TERM" => 143}[mode]
+  raise "incorrect wrapper status #{mode}: #{status}" if expected ? status.exitstatus != expected : status.success?
+  raise "child process was not terminated" if signal && !File.exist?("#{root}/stopped")
+  File.delete("#{root}/stopped") if signal
+end
+RUBY
+echo 'Streaming, exit status and process-group signal cleanup passed'
+mkdir "${tmp}/timeout"
+printf 'module github.com/GentleKingson/ocservia/control-plane/internal/fixture\n\ngo 1.26.6\n' >"${tmp}/timeout/go.mod"
+cat >"${tmp}/timeout/timeout_test.go" <<'GO'
+package fixture
+import (
+  "os/exec"
+  "testing"
+  "time"
+)
+func TestRequired(t *testing.T) {
+  child := exec.Command("bash", "-c", `trap 'touch "$FIXTURE_STOPPED"; exit 0' TERM; while :; do sleep 0.1; done`)
+  if err := child.Start(); err != nil { t.Fatal(err) }
+  time.Sleep(time.Minute)
+}
+GO
+if (cd "${tmp}/timeout" && GOWORK=off FIXTURE_STOPPED="${tmp}/timeout-stopped" \
+  bash "${tmp}/wrapper/scripts/required-go-tests.sh" fixture -timeout=1s .) >"${tmp}/timeout.log" 2>&1; then
+  echo 'Go timeout incorrectly passed' >&2; exit 1
+fi
+grep -q 'test timed out after 1s' "${tmp}/timeout.log"
+test -f "${tmp}/timeout-stopped"
+
+# Run the actual foundation routing with disposable command stubs, not databases.
+cp "${ROOT}/scripts/database-foundation-integration.sh" "${ROOT}/scripts/env.sh" "${tmp}/wrapper/scripts/"
+cp "${ROOT}/scripts/required-go-tests.txt" "${tmp}/wrapper/scripts/"
+mkdir "${tmp}/wrapper/control-plane"
+cat >"${tmp}/wrapper/scripts/required-go-tests.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${ROUTE_LOG}"
+SH
+cat >"${tmp}/wrapper/bin/docker" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == port ]]; then echo '127.0.0.1:12345'; fi
+if [[ "$1" == exec && "$2" == -i ]]; then cat >/dev/null; fi
+exit 0
+SH
+cat >"${tmp}/wrapper/bin/openssl" <<'SH'
+#!/usr/bin/env bash
+while (($#)); do
+  case "$1" in -keyout|-out) shift; touch "$1" ;; esac
+  shift
+done
+SH
+cat >"${tmp}/wrapper/bin/go" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${ROUTE_LOG}"
+SH
+chmod +x "${tmp}/wrapper/bin/"*
+for part in unset all current history; do
+  export ROUTE_LOG="${tmp}/${part}.route"
+  (export PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=full ENGINE=mysql
+   unset DATABASE_FULL_PART
+   [[ "${part}" == unset ]] || export DATABASE_FULL_PART="${part}"
+   bash "${tmp}/wrapper/scripts/database-foundation-integration.sh") >/dev/null
+done
+cmp "${tmp}/unset.route" "${tmp}/all.route"
+test "$(wc -l <"${tmp}/history.route")" -eq 1
+grep -q '^backend-mysql-history --select -race -timeout=60m$' "${tmp}/history.route"
+test "$(wc -l <"${tmp}/current.route")" -eq 5
+test "$(wc -l <"${tmp}/all.route")" -eq 6
+sed '/^backend-mysql-history /d' "${tmp}/all.route" >"${tmp}/without-history.route"
+cmp "${tmp}/current.route" "${tmp}/without-history.route"
+grep -q '^backend-mysql-current-full .* -skip ' "${tmp}/current.route"
+echo 'Full all/current/history routing passed'

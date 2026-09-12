@@ -19,6 +19,7 @@ if [[ "${group}" == database-* ]]; then
 fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/required-go-tests-XXXXXX")"
 result="${tmp}/results.json"
+export RESULT_FILE="${result}"
 # Include testing.T.TempDir fixtures (notably bootstrap Secret files) in cleanup
 # even when Go's timeout/panic prevents their own Cleanup callbacks from running.
 export TMPDIR="${tmp}"
@@ -40,11 +41,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # A private process group also stops compiler/test children on interruption.
-setsid go test -json -count=1 -timeout=10m "$@" >"${result}" &
+setsid bash -o pipefail -c 'go test -json -count=1 -timeout=10m "$@" | tee "$RESULT_FILE"' \
+  required-go-tests "$@" &
 pid=$!
 status=0
 wait "${pid}" || status=$?
-cat "${result}"
 if ((status != 0)); then exit "${status}"; fi
 jq -se --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
   -f "${ROOT}/scripts/check-required-go-tests.jq" "${result}"
