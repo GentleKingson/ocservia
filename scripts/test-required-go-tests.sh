@@ -83,7 +83,7 @@ for engine in mysql mariadb; do
     fi
   done
 done
-for pair in 'full invalid' 'full EMPTY' 'regression all' 'regression current' 'regression history'; do
+for pair in 'full invalid' 'full EMPTY' 'regression EMPTY' 'regression all' 'regression current' 'regression history'; do
   read -r scope part <<<"${pair}"
   [[ "${part}" == EMPTY ]] && part=''
   if DATABASE_TEST_SCOPE="${scope}" DATABASE_FULL_PART="${part}" ENGINE=mysql \
@@ -129,10 +129,12 @@ for mode in check select; do
   fi
 done
 for script in database-integration.sh database-foundation-integration.sh; do
-  if DATABASE_TEST_SCOPE=invalid bash "${ROOT}/scripts/${script}" >"${tmp}/scope.log" 2>&1; then
+  for scope in invalid ''; do
+  if DATABASE_TEST_SCOPE="${scope}" bash "${ROOT}/scripts/${script}" >"${tmp}/scope.log" 2>&1; then
     echo 'invalid scope accepted' >&2; exit 1
   fi
   grep -Fq 'DATABASE_TEST_SCOPE must be full or regression' "${tmp}/scope.log"
+  done
 done
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.

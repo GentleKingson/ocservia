@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
-scope="${DATABASE_TEST_SCOPE:-full}"
+scope="${DATABASE_TEST_SCOPE-full}"
 case "${scope}" in
   full|regression) ;;
   *) echo 'DATABASE_TEST_SCOPE must be full or regression' >&2; exit 2 ;;

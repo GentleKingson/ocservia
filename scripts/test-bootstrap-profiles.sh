@@ -42,6 +42,11 @@ reject("workflow name must be Basic CI") unless workflow.fetch("name") == "Basic
 trigger = workflow.fetch(true)
 reject("Basic CI triggers drifted") unless trigger.keys.sort == %w[pull_request push workflow_dispatch]
 reject("pushes must target main only") unless trigger.fetch("push") == {"branches" => ["main"]}
+reject("manual profile must default to full with only quick/full choices") unless
+  trigger.fetch("workflow_dispatch").fetch("inputs").fetch("profile") == {
+    "description" => "Basic CI coverage", "type" => "choice", "options" => %w[quick full],
+    "default" => "full", "required" => true
+  }
 reject("Basic CI permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read"}
 reject("only newer commits to the same PR may cancel a run") unless workflow.fetch("concurrency") == {
   "group" => "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
@@ -53,15 +58,20 @@ worker_flags.each do |id, flag|
   reject("#{id} must use its basic flag") unless job.fetch("if") == "needs.ci-relevance.outputs.#{flag} == 'true'"
 end
 router = jobs.fetch("ci-relevance")
-reject("router must expose five domains") unless router.fetch("outputs").keys.sort == worker_flags.values.sort
+reject("router must expose five domains and the resolved mode") unless
+  router.fetch("outputs").keys.sort == (worker_flags.values + %w[profile database_scope]).sort
 reject("router requires full history") unless router.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
+relevance = router.fetch("steps").find { |step| step["id"] == "relevance" }
+reject("router must receive the unmodified manual input") unless
+  relevance.fetch("env").fetch("CI_PROFILE") == "${{ inputs.profile }}" &&
+  relevance.fetch("run") == 'scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}" "${CI_PROFILE}"'
 
 expected_commands = {
   "docs" => ["scripts/docs-check.sh"],
   "go" => ["scripts/bootstrap.sh go-test", "scripts/go-check.sh standard"],
   "rust" => ["scripts/bootstrap.sh rust-basic", "scripts/rust-check.sh"],
   "web" => ["scripts/bootstrap.sh web", "source scripts/env.sh\ncd web\nnpx playwright install --with-deps chromium\n", "scripts/web-check.sh"],
-  "database-history-full" => ["scripts/bootstrap.sh go-test", "bash scripts/database-foundation-integration.sh"]
+  "database-history-full" => ["scripts/bootstrap.sh go-test", "bash scripts/database-foundation-integration.sh", 'echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"']
 }
 expected_commands.each do |id, commands|
   actual = jobs.fetch(id).fetch("steps").filter_map { |step| step["run"] }
@@ -83,7 +93,7 @@ reject("basic Rust checks must not run audit or license checks") if rust_check.m
 database = jobs.fetch("database-smoke")
 reject("database smoke must cover PostgreSQL 17/18, MySQL and MariaDB independently") unless
   database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}", "ENGINE" => "${{ matrix.engine }}",
-    "DATABASE_TEST_SCOPE" => "${{ github.event_name == 'workflow_dispatch' && 'full' || 'regression' }}"} &&
+    "DATABASE_TEST_SCOPE" => "${{ needs.ci-relevance.outputs.database_scope }}"} &&
   database.fetch("strategy") == {"fail-fast" => false, "matrix" => {"include" => [
     {"engine" => "postgres", "postgres" => "17"},
     {"engine" => "postgres", "postgres" => "18"},
@@ -96,21 +106,26 @@ reject("database jobs must route only to their own backend test script") unless
     {"run" => "scripts/bootstrap.sh go-test"},
     {"if" => "matrix.engine == 'postgres'", "run" => "scripts/database-integration.sh"},
     {"if" => "matrix.engine != 'postgres'",
-     "env" => {"DATABASE_FULL_PART" => "${{ github.event_name == 'workflow_dispatch' && 'current' || '' }}"},
-     "run" => "if [[ \"${DATABASE_TEST_SCOPE}\" == regression ]]; then unset DATABASE_FULL_PART; fi\nbash scripts/database-foundation-integration.sh\n"}
+     "run" => "unset DATABASE_FULL_PART\nif [[ \"${DATABASE_TEST_SCOPE}\" == full ]]; then export DATABASE_FULL_PART=current; fi\nbash scripts/database-foundation-integration.sh\n"},
+    {"id" => "completed", "run" => 'echo "${ENGINE}${PG_MAJOR}=success" >> "${GITHUB_OUTPUT}"'}
   ]
 history = jobs.fetch("database-history-full")
-reject("history must run only on dispatch with two independent engines") unless
-  history.fetch("if") == "github.event_name == 'workflow_dispatch'" &&
+reject("history must consume routing with two independent full engines") unless
+  history.fetch("needs") == "ci-relevance" &&
+  history.fetch("if") == "needs.ci-relevance.outputs.profile == 'full'" &&
   history.fetch("strategy") == {"fail-fast" => false, "matrix" => {"engine" => %w[mysql mariadb]}} &&
-  history.fetch("env") == {"ENGINE" => "${{ matrix.engine }}", "DATABASE_TEST_SCOPE" => "full", "DATABASE_FULL_PART" => "history"}
+  history.fetch("env") == {"ENGINE" => "${{ matrix.engine }}", "DATABASE_TEST_SCOPE" => "${{ needs.ci-relevance.outputs.database_scope }}", "DATABASE_FULL_PART" => "history"}
+{"database-smoke" => %w[postgres17 postgres18 mysql mariadb], "database-history-full" => %w[mysql mariadb]}.each do |id, parts|
+  reject("#{id} must expose every completed shard") unless jobs.fetch(id).fetch("outputs") ==
+    parts.to_h { |part| [part, "${{ steps.completed.outputs.#{part} }}"] }
+end
 reject("database timeout budgets changed") unless [database, history].all? { |job| job.fetch("timeout-minutes") == 75 }
 reject("database smoke must let the script build its own control binary") unless
   database_script.include?('go build -trimpath -o "${BIN}" ./cmd/ocserv-control')
 foundation_script = File.read(File.join(root, "scripts/database-foundation-integration.sh"))
 [database_script, foundation_script].each do |script|
   reject("manual scripts must default to full and reject invalid scope") unless
-    script.include?('scope="${DATABASE_TEST_SCOPE:-full}"') &&
+    script.include?('scope="${DATABASE_TEST_SCOPE-full}"') &&
     script.include?("full|regression) ;;") &&
     script.include?("DATABASE_TEST_SCOPE must be full or regression")
   reject("regression must explicitly select required groups") unless script.include?('--select')
@@ -149,13 +164,17 @@ require "json"
 require "open3"
 summary = result.fetch("steps").first.fetch("run")
 # Exercise the actual summary command, including unexpected skips and missing flags.
-%w[pull_request push workflow_dispatch].each do |event|
-ENV["GITHUB_EVENT_NAME"] = event
+%w[quick full].each do |profile|
 [false, true].each do |selected|
-  next if event == "workflow_dispatch" && !selected
+  next if profile == "full" && !selected
   needs = {"ci-relevance" => {"result" => "success", "outputs" => worker_flags.values.to_h { |flag| [flag, selected.to_s] }}}
+  needs["ci-relevance"]["outputs"].merge!("profile" => profile, "database_scope" => profile == "full" ? "full" : "regression")
   worker_flags.each_key { |id| needs[id] = {"result" => selected ? "success" : "skipped"} }
-  needs["database-history-full"] = {"result" => event == "workflow_dispatch" ? "success" : "skipped"}
+  needs["database-history-full"] = {"result" => profile == "full" ? "success" : "skipped"}
+  {"database-smoke" => %w[postgres17 postgres18 mysql mariadb], "database-history-full" => %w[mysql mariadb]}.each do |id, parts|
+    next unless needs[id]["result"] == "success"
+    needs[id]["outputs"] = parts.to_h { |part| [part, "success"] }
+  end
   _, _, status = Open3.capture3({"RESULTS" => JSON.generate(needs)}, "bash", "-eo", "pipefail", "-c", summary)
   reject("summary rejected valid selected/skipped results") unless status.success?
   %w[success failure cancelled skipped missing].each do |state|
@@ -164,13 +183,33 @@ ENV["GITHUB_EVENT_NAME"] = event
     if state == "missing" then broken.delete("database-history-full")
     else broken["database-history-full"]["result"] = state end
     _, _, status = Open3.capture3({"RESULTS" => JSON.generate(broken)}, "bash", "-eo", "pipefail", "-c", summary)
-    reject("summary accepted unexpected history: #{event}/#{state}") if status.success?
+    reject("summary accepted unexpected history: #{profile}/#{state}") if status.success?
+  end
+  needs.each do |id, job|
+    next unless id.start_with?("database-") && job["result"] == "success"
+    job.fetch("outputs").each_key do |part|
+      [nil, "", "failure", "cancelled", "skipped"].each do |value|
+        broken = Marshal.load(Marshal.dump(needs))
+        broken[id]["outputs"][part] = value
+        _, _, status = Open3.capture3({"RESULTS" => JSON.generate(broken)}, "bash", "-eo", "pipefail", "-c", summary)
+        reject("summary accepted incomplete shard: #{id}/#{part}") if status.success?
+      end
+    end
+  end
+  {"profile" => [nil, "", "invalid"], "database_scope" => [nil, "", "invalid", profile == "full" ? "regression" : "full"]}.each do |key, values|
+    values.each do |value|
+      broken = Marshal.load(Marshal.dump(needs))
+      broken["ci-relevance"]["outputs"][key] = value
+      _, _, status = Open3.capture3({"RESULTS" => JSON.generate(broken)}, "bash", "-eo", "pipefail", "-c", summary)
+      reject("summary accepted invalid #{key}") if status.success?
+    end
   end
   (worker_flags.keys + ["ci-relevance"]).each do |id|
-    %w[failure cancelled skipped].each do |state|
+    %w[failure cancelled skipped missing].each do |state|
       next if !selected && id != "ci-relevance" && state == "skipped"
       broken = Marshal.load(Marshal.dump(needs))
-      broken[id]["result"] = state
+      if state == "missing" then broken.delete(id)
+      else broken[id]["result"] = state end
       _, _, status = Open3.capture3({"RESULTS" => JSON.generate(broken)}, "bash", "-eo", "pipefail", "-c", summary)
       reject("summary accepted unexpected #{id}: #{state}") if status.success?
     end
