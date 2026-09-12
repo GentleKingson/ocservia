@@ -647,13 +647,13 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     group="backend-policy-${package}"
     (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/${fixture_database}?sslmode=disable" \
       OCSERV_TEST_OWNER_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/${fixture_database}?sslmode=disable" \
-      bash "${ROOT}/scripts/required-go-tests.sh" "${group}" --select -p 1)
+      bash "${ROOT}/scripts/required-go-tests.sh" "${group}" -p 1 "./internal/${package}" -run Integration)
     docker exec "${container}" dropdb -U ocservia_owner "${fixture_database}"
   done
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-config --select -p 1)
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-config -p 1 ./internal/configplan -run Integration)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates --select -p 1)
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/approvals ./internal/audit ./internal/privdattestation -run Integration -count=1)
   # R4 Local/RBAC tests exercise the real latest schema, not the historical

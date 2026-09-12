@@ -39,8 +39,10 @@ configuration, certificate and upgrade/rollout workflows. Both full database
 entry points execute the applicable groups and fail if a required top-level
 test is absent, skipped or renamed. PostgreSQL keeps isolated user-state and
 user-operation database clones because those fixtures deliberately retain
-revision-zero commands and singleton lease state. The previous approval,
-audit, attestation and browser-boundary checks remain in their original runs.
+revision-zero commands and singleton lease state. Its full path still runs each
+package's complete `Integration` suite; the manifest is an additional guard,
+not a narrower selector. The previous approval, audit, attestation and
+browser-boundary checks remain in their original runs.
 
 ## Validation
 

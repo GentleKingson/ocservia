@@ -136,6 +136,14 @@ for script in database-integration.sh database-foundation-integration.sh; do
   grep -Fq 'DATABASE_TEST_SCOPE must be full or regression' "${tmp}/scope.log"
   done
 done
+# PostgreSQL full acceptance keeps each package's complete Integration suite;
+# the manifest is an additional guard, not the test selector.
+grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" "${group}" -p 1 "./internal/${package}" -run Integration)' \
+  "${ROOT}/scripts/database-integration.sh"
+grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-config -p 1 ./internal/configplan -run Integration)' \
+  "${ROOT}/scripts/database-integration.sh"
+grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)' \
+  "${ROOT}/scripts/database-integration.sh"
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.
 mkdir "${tmp}/selection"
