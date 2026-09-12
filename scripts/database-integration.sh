@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
+scope="${DATABASE_TEST_SCOPE:-full}"
+case "${scope}" in
+  full|regression) ;;
+  *) echo 'DATABASE_TEST_SCOPE must be full or regression' >&2; exit 2 ;;
+esac
 bash "${ROOT}/scripts/test-required-go-tests.sh"
 (cd "${ROOT}" && sha256sum -c docs/database-migrations.sha256)
 
@@ -77,6 +82,7 @@ fi
 # the forward-only migration. Build a test-only controller/source fixture with
 # the unchanged migrations 1..33 and their original runtime grant contract.
 LATEST_BIN="${BIN}"
+if [[ "${scope}" == full ]]; then
 # Socket tests require trusted ancestry and short Unix-domain socket paths.
 PRE34_ROOT="$(mktemp -d "${ROOT}/.p34-XXXXXX")"
 cp -R "${ROOT}/control-plane" "${PRE34_ROOT}/control-plane"
@@ -87,6 +93,7 @@ sed '/"GRANT UPDATE (completion_pending,completed_at,approver_identity_id) ON lo
   "${ROOT}/control-plane/migrations/runner.go" >"${PRE34_ROOT}/control-plane/migrations/runner.go"
 PRE34_BIN="${TMP_ROOT}/pre34-control"
 (cd "${PRE34_ROOT}/control-plane" && go build -trimpath -o "${PRE34_BIN}" ./cmd/ocserv-control)
+fi
 TEST_CONTROL_PLANE="${ROOT}/control-plane"
 SCHEMA_VERSION=34
 
@@ -199,7 +206,7 @@ clone_database() {
 checked_go_tests() {
   local group=$1
   shift
-  (cd "${ROOT}/control-plane" && exec bash "${ROOT}/scripts/required-go-tests.sh" "${group}" -timeout=3m "$@") &
+  (cd "${ROOT}/control-plane" && exec bash "${ROOT}/scripts/required-go-tests.sh" "${group}" "$@" -timeout=3m) &
   local test_pid=$! index=${#PIDS[@]}
   PIDS+=("${test_pid}")
   wait "${test_pid}"
@@ -265,6 +272,24 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   grep -Fq 'schema compatibility does not allow Controller schema 33' \
     "${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log"
 
+  if [[ "${scope}" == regression ]]; then
+    OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
+      "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-migrate-repeat.log" 2>&1
+    assert_local_bootstrap_schema "${container}" ocservia
+    for group in regression-postgres regression-outbox regression-fencing regression-auth regression-oidc regression-telemetry; do
+      OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
+        checked_go_tests "${group}" --select -race -p 1 -parallel 1
+    done
+    # Deliberate corruption is last, after all current-schema business checks.
+    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+      "UPDATE schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=1" >/dev/null
+    if OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
+      "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-checksum-rejected.log" 2>&1; then
+      echo 'migration accepted a checksum mismatch' >&2; exit 1
+    fi
+    grep -Fq 'migration 1 checksum does not match the applied schema' "${TMP_ROOT}/pg${major}-checksum-rejected.log"
+    echo "PostgreSQL ${major} regression: current migration, repeat migration, permissions, compatibility and checksum guards passed"
+  else
   # Preserve the latest database. Historical down chains use a separately
   # initialized schema-33 fixture, never a bypass of migration 34.
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
@@ -1035,8 +1060,10 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "DELETE FROM schema_migrations WHERE version = 25" >/dev/null
   echo "PostgreSQL ${major} database integration complete"
+  fi
 done
 
+if [[ "${scope}" == full ]]; then
 if [[ "${PG_MAJOR}" == "17" ]]; then
   exit 0
 fi
@@ -1319,3 +1346,4 @@ test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELE
 # survived the full downgrade is never re-seeded or reused.
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=decode(repeat('aa',16),'hex')")" = "${owner_upgrade_epoch_before}"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
+fi

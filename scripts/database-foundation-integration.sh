@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
+scope="${DATABASE_TEST_SCOPE:-full}"
+case "${scope}" in
+  full|regression) ;;
+  *) echo 'DATABASE_TEST_SCOPE must be full or regression' >&2; exit 2 ;;
+esac
 ENGINE="${ENGINE:?ENGINE must be mysql or mariadb}"
 case "${ENGINE}" in
   mysql) IMAGE='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'; CLIENT=mysql ;;
@@ -49,9 +54,16 @@ PORT="$(docker port "${NAME}" 3306/tcp | sed 's/127.0.0.1://')"
 export PR02_ENGINE="${ENGINE}"
 export PR02_TLS_CA_FILE="${TLS_DIR}/server-cert.pem"
 export PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tls=false"
-(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-audit-mysql -race -timeout=60m ./internal/database/mysql)
+if [[ "${scope}" == regression ]]; then
+  (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" regression-mysql --select -race -timeout=60m)
+  for group in regression-disconnect regression-outbox regression-fencing regression-auth regression-telemetry; do
+    (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" "${group}" --select -race -timeout=10m)
+  done
+else
+(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql)
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend)Integration$')
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-auth -race -timeout=10m ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$')
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/telemetry -run '^TestTelemetryBackendWorkflowIntegration$')
+fi
 # Controller test/development selection must not unlock production startup.
 (cd "${ROOT}/control-plane" && go test -count=1 ./internal/platform/config ./cmd/ocserv-db-foundation)
