@@ -175,6 +175,27 @@ out="${fixture}/zero-before.output"; (cd "${fixture}" && "${SCRIPT}" push 000000
 expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason all_zero_before_sha
 out="${fixture}/dispatch.output"; (cd "${fixture}" && "${SCRIPT}" workflow_dispatch invalid invalid "${out}")
 expect_only "${out}" "${flags[@]}"; expect_flag "${out}" reason workflow_dispatch_basic_checks
+expect_flag "${out}" profile full
+expect_flag "${out}" database_scope full
+for profile in quick full; do
+  out="${fixture}/dispatch-${profile}.output"
+  (cd "${fixture}" && "${SCRIPT}" workflow_dispatch invalid invalid "${out}" "${profile}")
+  expect_only "${out}" "${flags[@]}"
+  expect_flag "${out}" profile "${profile}"
+  scope=regression; [[ "${profile}" != full ]] || scope=full
+  expect_flag "${out}" database_scope "${scope}"
+done
+for event in pull_request push; do
+  out="${fixture}/${event}-fixed-quick.output"
+  (cd "${fixture}" && "${SCRIPT}" "${event}" invalid invalid "${out}" full)
+  expect_flag "${out}" profile quick
+  expect_flag "${out}" database_scope regression
+done
+for profile in invalid ''; do
+  if "${SCRIPT}" workflow_dispatch invalid invalid "${fixture}/bad-profile.output" "${profile}"; then
+    echo 'invalid CI profile accepted' >&2; exit 1
+  fi
+done
 
 # Push uses before..head. PR uses base-tip...head, excluding a base-only change
 # added after the PR branch point.

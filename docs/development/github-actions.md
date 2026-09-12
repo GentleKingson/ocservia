@@ -9,6 +9,13 @@ and no production secrets. A new commit cancels an older run of the same PR.
 Main pushes and manual dispatches have run-specific concurrency groups and
 do not cancel earlier runs.
 
+PR/main pushes always use the path-selected **Quick CI** profile. Manual
+dispatch accepts `profile=quick|full` (default `full`); either manual profile
+runs all five basic components. Quick targets 10 minutes and Full targets
+30 minutes from workflow creation through Basic CI Result, including queues
+and cleanup. These are performance goals, not job kill deadlines or guarantees.
+Full means the existing manual Basic CI coverage, not every acceptance command.
+
 ## Retained workflows
 
 | File | Workflow | Trigger |
@@ -31,8 +38,8 @@ dependency between workers.
 | `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
 | `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
 | `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
-| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Four-backend critical regression automatically; PostgreSQL full and MySQL/MariaDB current on dispatch |
-| `database-history-full` | `scripts/database-foundation-integration.sh` | `go-test` | MySQL/MariaDB complementary full history, dispatch only |
+| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Four-backend critical regression in Quick; PostgreSQL full and MySQL/MariaDB current in Full |
+| `database-history-full` | `scripts/database-foundation-integration.sh` | `go-test` | MySQL/MariaDB complementary history, Full only |
 
 Go checks retain both existing Go modules, including unit tests for the G6
 harness; they do not run G6 acceptance. Rust checks do not run cargo audit,
@@ -55,7 +62,7 @@ dependencies after Web bootstrap and before `scripts/web-check.sh`.
 The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. The PostgreSQL
 script builds `ocserv-control` itself; only full scope builds its historical
 Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
-The automatic matrix needs only the router; manual history starts independently.
+Both database matrices need only the router and run alongside language checks.
 Neither needs a Rust build or a shared binary artifact.
 
 ## Independent security checks
@@ -75,7 +82,8 @@ not every possible vulnerability or the state of a deployed service.
 
 `scripts/ci-relevance.sh` emits five execution flags:
 `run_docs`, `run_go`, `run_rust`, `run_web`, and `run_database`.
-The workflow event alone selects database scope, independently of these flags.
+The same router resolves `profile` and `database_scope` once. Workers and the
+summary consume these outputs, not independent dispatch/full predicates.
 Reason and changed-file count are diagnostic metadata.
 
 | Changed paths | Selected checks |
@@ -108,7 +116,8 @@ Unknown automatic changes run all basic checks, still with database regression.
 Database implementations, migrations, dependencies, tests and CI scripts do not
 upgrade scope. Such changes also need focused validation of their direct impact.
 
-`workflow_dispatch` selects `full`. Both database scripts default to `full`
+Manual `profile=full` selects database `full`; manual `profile=quick` selects
+`regression` for all four backends. Both database scripts default to `full`
 when `DATABASE_TEST_SCOPE` is unset; invalid values fail. Regression is an
 explicit selection from the `regression-*` groups in
 `scripts/required-go-tests.txt`, not a whole package minus a history blacklist.
@@ -140,15 +149,20 @@ and PostgreSQL pre-34 rollback/upgrade fixtures. PostgreSQL 17 still omits the
 additional PostgreSQL 18 upgrade leg. Full coverage has not become an alias for
 regression. Critical CI success is not full acceptance or release readiness.
 
-Manual dispatch runs MySQL/MariaDB full as complementary `current` and `history`
+Manual Full runs MySQL/MariaDB as complementary `current` and `history`
 jobs on independent runners. The existing four-backend `database-smoke` matrix
-runs PostgreSQL 17/18 unchanged and MySQL/MariaDB current; the dispatch-only
+runs PostgreSQL 17/18 unchanged and MySQL/MariaDB current; the Full-only
 `database-history-full` matrix runs MySQL/MariaDB history. Automatic PR/main
 regression selection and runner counts are unchanged. `Basic CI Result` requires
-both matrices to succeed on dispatch, and history to be skipped automatically.
+both matrices to succeed in Full, and history to be skipped in Quick.
+Every selected database unit must also emit its own completion output after
+its script succeeds. Missing outputs fail even if a matrix result says success.
+Unknown/missing profiles, inconsistent scope, missing routing flags and
+unexpected job failure/cancellation/skip all fail the always-running summary.
 
 `DATABASE_FULL_PART=all|current|history` is an internal full-only control for
-`database-foundation-integration.sh`; setting it with regression is rejected.
+`database-foundation-integration.sh`; setting it with regression is rejected,
+including an empty value. Quick explicitly unsets it; Full sets current/history.
 Unset means `all`: current complement, history, coordination, authentication,
 telemetry and final configuration checks, in that order. History runs only the
 existing `backend-mysql-history` manifest selection. Current runs the whole
@@ -167,7 +181,8 @@ Before release, run both scripts with `DATABASE_TEST_SCOPE=full` for all four
 backends on BuildServer, or manually dispatch the existing Basic CI workflow.
 GitHub requires that workflow to exist on the default branch before dispatch;
 then select the candidate branch using the UI or
-`gh workflow run ci.yml --ref <candidate-branch>`. A branch-only workflow is not
+`gh workflow run ci.yml --ref <candidate-branch> -f profile=full` (or
+`-f profile=quick`). A branch-only workflow is not
 a workaround for this prerequisite. See [GitHub manual workflow documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
 
 ## Required check migration
