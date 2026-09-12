@@ -276,11 +276,14 @@ done
 cmp "${tmp}/unset.route" "${tmp}/all.route"
 test "$(wc -l <"${tmp}/history.route")" -eq 1
 grep -q '^backend-mysql-history --select -race -timeout=60m$' "${tmp}/history.route"
-test "$(wc -l <"${tmp}/current.route")" -eq 7
-test "$(wc -l <"${tmp}/all.route")" -eq 8
+test "$(wc -l <"${tmp}/current.route")" -eq 10
+test "$(wc -l <"${tmp}/all.route")" -eq 11
 sed '/^backend-mysql-history /d' "${tmp}/all.route" >"${tmp}/without-history.route"
 cmp "${tmp}/current.route" "${tmp}/without-history.route"
 grep -q '^backend-mysql-current-full .* -skip ' "${tmp}/current.route"
 grep -q '^backend-enrollment --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-enrollment-restart$' "${tmp}/current.route"
+grep -q '^backend-policy-userstate --select -race -timeout=10m$' "${tmp}/current.route"
+grep -q '^backend-policy-useroperations --select -race -timeout=10m$' "${tmp}/current.route"
+grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route"
 echo 'Full all/current/history routing passed'
