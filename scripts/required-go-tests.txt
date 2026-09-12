@@ -1,4 +1,12 @@
 # group package (relative to control-plane) exact test/subtest name [PR02_ENGINE]
+# PR-06 policy, configuration, certificate and upgrade acceptance.
+backend-policy-userstate internal/userstate TestUserStateBackendIntegration
+backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration
+backend-policy-api internal/api TestControllerReadsBackendHTTPIntegration
+backend-policy-config internal/configplan TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration
+backend-policy-certificates internal/certificates TestCertificateIssueArtifactAndRevokeIntegration
+backend-policy-upgrades internal/api TestAgentUpgradeRouteResolvesTrustedReleasesIntegration
+backend-policy-upgrades internal/api TestAgentRolloutFleetLifecycleIntegration
 # PR-05 lifecycle acceptance in the full database entry points.
 backend-enrollment internal/enrollment TestEnrollmentBackendIntegration
 backend-enrollment-restart internal/enrollment TestNodeLifecycleRestartBackendIntegration
