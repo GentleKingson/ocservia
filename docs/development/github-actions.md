@@ -22,7 +22,7 @@ do not cancel earlier runs.
 ## Basic checks
 
 One small routing job selects up to five independent checks. There is no
-runtime-artifact dependency, PostgreSQL matrix, or acceptance worker graph.
+runtime-artifact dependency or separate acceptance worker graph.
 
 | Job | Command | Bootstrap profile | Coverage |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ runtime-artifact dependency, PostgreSQL matrix, or acceptance worker graph.
 | `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
 | `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
 | `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
-| `database-smoke` | `scripts/database-integration.sh` | `go-test` | PostgreSQL 17/18 migrations and database integration |
+| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Four-backend critical regression automatically; full database acceptance on manual dispatch |
 
 Go checks retain both existing Go modules, including unit tests for the G6
 harness; they do not run G6 acceptance. Rust checks do not run cargo audit,
@@ -50,9 +50,10 @@ or G6 smoke. The Web job does run the required authentication browser subset:
 `web/e2e/auth-workspace.spec.ts`. It installs Playwright Chromium and its system
 dependencies after Web bootstrap and before `scripts/web-check.sh`.
 
-The database job uses a PostgreSQL 17/18 matrix and lets the integration script
-build `ocserv-control` itself. The PostgreSQL 18 job also runs the legacy upgrade
-fixture. It needs only the router, not a Rust build or a shared binary artifact.
+The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. The PostgreSQL
+script builds `ocserv-control` itself; only full scope builds its historical
+Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
+Each job needs only the router, not a Rust build or a shared binary artifact.
 
 ## Independent security checks
 
@@ -71,7 +72,7 @@ not every possible vulnerability or the state of a deployed service.
 
 `scripts/ci-relevance.sh` emits five execution flags:
 `run_docs`, `run_go`, `run_rust`, `run_web`, and `run_database`.
-`run_database_full` selects the database acceptance scope.
+The workflow event alone selects database scope, independently of these flags.
 Reason and changed-file count are diagnostic metadata.
 
 | Changed paths | Selected checks |
@@ -97,22 +98,51 @@ retain their path impact. Manual dispatch, empty diffs, invalid/all-zero or
 unresolvable SHAs, and diff failures select all basic checks.
 
 Database jobs retain PostgreSQL 17/18, MySQL, MariaDB, and their existing race,
-TLS and permission checks. Main pushes always select full database acceptance;
-manual dispatch also runs full acceptance. Only PR changes confined to the
-API, auth, audit, RBAC, domain, operations and approvals implementation paths
-qualify for MySQL/MariaDB regression scope. Tests/testdata, other controller
-paths, database backends, migrations, shared transaction/value code, dependencies
-and infrastructure select full scope. Mixed changes retain the broader scope.
+TLS and permission checks. PR and main pushes use the same path routing and
+always select `regression` when database checks are needed. Recognized pure
+docs/Web/Rust changes do not start database jobs; mixed changes take the union.
+Unknown automatic changes run all basic checks, still with database regression.
+Database implementations, migrations, dependencies, tests and CI scripts do not
+upgrade scope. Such changes also need focused validation of their direct impact.
 
-Regression excludes only the exact historical tests listed in the
-`backend-mysql-history` group of `scripts/required-go-tests.txt`. New tests run
-by default. Current initialization, runtime telemetry legacy handling and all
-business regressions remain selected; the required-test guard checks every
-listed regression, including the existing outbox subtests. Full scope adds all
-historical checks. PostgreSQL retains its complete existing script in both
-scopes because its upgrade fixtures and business checks are interleaved.
-Direct script invocations default to full; `DATABASE_TEST_SCOPE=regression`
-selects the lighter MySQL/MariaDB path explicitly.
+`workflow_dispatch` selects `full`. Both database scripts default to `full`
+when `DATABASE_TEST_SCOPE` is unset; invalid values fail. Regression is an
+explicit selection from the `regression-*` groups in
+`scripts/required-go-tests.txt`, not a whole package minus a history blacklist.
+
+| Critical group | Coverage and initialization |
+| --- | --- |
+| `regression-mysql` | Empty/current migration, repeat migration and checksum refusal; trusted/untrusted TLS; runtime/maintenance permissions; transaction cancellation, rollback and panic cleanup; logical values, identity profiles and audit/RBAC. Each test keeps its own fixture; logical values/transaction probes need only small tables. The snapshot-abort test is MariaDB-only. |
+| `regression-postgres` | Transaction cancellation and recovery, cross-store commit/rollback, logical values, identity profiles and audit/RBAC on current structure. The script separately checks current migration, idempotence, privileges, incompatible Controller rejection and checksum corruption. |
+| `regression-auth` | Local HTTP login/logout, password changes, session revocation, denied management/self-approval, OIDC identity-store boundaries, and audit/business rollback. Both top-level tests run intact because Safety has assertions outside its children. |
+| `regression-oidc` | PostgreSQL authorization-code/PKCE, issuer identity boundaries, invalid-token rejection and session behavior. MySQL/MariaDB retain their backend identity-store coverage, not this PostgreSQL-specific protocol fixture. |
+| `regression-outbox` | Atomic intent and ambiguous commit, two workers with durable claim/readback, early and duplicate results. Each selected child owns a disposable current-schema database. |
+| `regression-fencing` | Owner expiry while waiting to assert; competing controllers, retained epochs and rejected stale owners. Parent initialization is retained; these children create independent nodes. |
+| `regression-disconnect` | MySQL/MariaDB real COMMIT request/response loss during claim, readback and connection discard. Both selected children initialize independently. |
+| `regression-telemetry` | Current ingestion, duplicate rejection, rollback, queries, rollups and fenced maintenance; current telemetry tables/months are prepared by the existing fixture. |
+
+The existing required-test guard checks exact run/final-pass events, including
+selected children; missing, renamed, failed or skipped required cases fail.
+New critical regressions must be added to this manifest. Selection escapes
+regex literals and supports either top-level sets or children of one parent,
+avoiding cross-product matches between unrelated parents.
+See [Go subtest matching](https://go.dev/blog/subtests) for the slash-separated
+matching rules. Child-only groups use separate invocations; top-level sets are
+batched by package.
+
+Full retains whole-package MySQL/MariaDB tests, the original required inventory
+(`backend-mysql-current`, `backend-mysql-history` and audit groups), complete
+coordination/authentication combinations, historical upgrades/data conversions
+and PostgreSQL pre-34 rollback/upgrade fixtures. PostgreSQL 17 still omits the
+additional PostgreSQL 18 upgrade leg. Full coverage has not become an alias for
+regression. Critical CI success is not full acceptance or release readiness.
+
+Before release, run both scripts with `DATABASE_TEST_SCOPE=full` for all four
+backends on BuildServer, or manually dispatch the existing Basic CI workflow.
+GitHub requires that workflow to exist on the default branch before dispatch;
+then select the candidate branch using the UI or
+`gh workflow run ci.yml --ref <candidate-branch>`. A branch-only workflow is not
+a workaround for this prerequisite. See [GitHub manual workflow documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
 
 ## Required check migration
 
@@ -175,7 +205,7 @@ does not read workflow files or run live acceptance, and Basic CI does not call 
 
 ## Reproduction
 
-Use the same commit and run these commands on `LocalServer`:
+Use the same commit and run these commands on `BuildServer`:
 
 ```bash
 scripts/test-ci-relevance.sh
@@ -192,7 +222,9 @@ npm_config_audit=false npm_config_fund=false scripts/bootstrap.sh web
   npx playwright install --with-deps chromium
 )
 npm_config_audit=false npm_config_fund=false scripts/web-check.sh
-PG_MAJOR=all scripts/database-integration.sh
+DATABASE_TEST_SCOPE=regression PG_MAJOR=all scripts/database-integration.sh
+DATABASE_TEST_SCOPE=regression ENGINE=mysql bash scripts/database-foundation-integration.sh
+DATABASE_TEST_SCOPE=regression ENGINE=mariadb bash scripts/database-foundation-integration.sh
 ```
 
 Job logs contain diagnostics; Basic CI has no artifact upload/download graph.

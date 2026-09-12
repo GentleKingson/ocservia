@@ -4,14 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 scope="${DATABASE_TEST_SCOPE:-full}"
-test_args=()
 case "${scope}" in
-  full) ;;
-  regression)
-    # Exclude only reviewed historical cases; new tests still run by default.
-    history="$(awk '$1 == "backend-mysql-history" {print $3}' "${ROOT}/scripts/required-go-tests.txt" | paste -sd '|' -)"
-    [[ -n "${history}" ]] || { echo 'empty database history selection' >&2; exit 1; }
-    test_args=(-skip "^(${history})$") ;;
+  full|regression) ;;
   *) echo 'DATABASE_TEST_SCOPE must be full or regression' >&2; exit 2 ;;
 esac
 ENGINE="${ENGINE:?ENGINE must be mysql or mariadb}"
@@ -60,9 +54,16 @@ PORT="$(docker port "${NAME}" 3306/tcp | sed 's/127.0.0.1://')"
 export PR02_ENGINE="${ENGINE}"
 export PR02_TLS_CA_FILE="${TLS_DIR}/server-cert.pem"
 export PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tls=false"
-(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" "backend-mysql-${scope}" -race -timeout=60m ./internal/database/mysql "${test_args[@]}")
+if [[ "${scope}" == regression ]]; then
+  (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" regression-mysql --select -race -timeout=60m)
+  for group in regression-disconnect regression-outbox regression-fencing regression-auth regression-telemetry; do
+    (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" "${group}" --select -race -timeout=10m)
+  done
+else
+(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql)
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend)Integration$')
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-auth -race -timeout=10m ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$')
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/telemetry -run '^TestTelemetryBackendWorkflowIntegration$')
+fi
 # Controller test/development selection must not unlock production startup.
 (cd "${ROOT}/control-plane" && go test -count=1 ./internal/platform/config ./cmd/ocserv-db-foundation)

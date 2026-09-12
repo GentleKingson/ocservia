@@ -6,7 +6,7 @@ SCRIPT="${ROOT}/scripts/ci-relevance.sh"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
-flags=(run_docs run_go run_rust run_web run_database run_database_full)
+flags=(run_docs run_go run_rust run_web run_database)
 
 git -C "${fixture}" init -q
 git -C "${fixture}" config user.name test
@@ -75,7 +75,7 @@ case_commit() {
 }
 
 
-# Five basic domains and the database acceptance scope can be selected.
+# Five basic domains can be selected.
 out="$(case_commit readme README.md)"
 expect_only "${out}" run_docs
 out="$(case_commit docs docs/development/guide.md docs/acceptance/g6-slo.yaml scripts/README.md web/README.md)"
@@ -87,13 +87,19 @@ done
 for path in control-plane/internal/domain/helper.go control-plane/internal/auth/store.go control-plane/internal/api/login.go control-plane/internal/operations/dispatch.go; do
   out="$(case_commit "go_$(basename "${path}")" "${path}")"
   expect_only "${out}" run_go run_database
+  push_out="${out}.push.output"
+  (cd "${fixture}" && "${SCRIPT}" push "${base}" "$(git rev-parse HEAD)" "${push_out}")
+  expect_only "${push_out}" run_go run_database
 done
 for path in control-plane/migrations/000001.up.sql control-plane/go.mod go.work \
   control-plane/internal/database/mysql/backend.go control-plane/internal/database/value/json.go \
   control-plane/internal/coordination/retry.go control-plane/internal/telemetry/history.go \
   control-plane/internal/auth/store_test.go control-plane/internal/auth/testdata/fixture.sql; do
-  out="$(case_commit "full_$(basename "${path}")" "${path}")"
-  expect_only "${out}" run_go run_database run_database_full
+  out="$(case_commit "database_$(basename "${path}")" "${path}")"
+  expect_only "${out}" run_go run_database
+  push_out="${out}.push.output"
+  (cd "${fixture}" && "${SCRIPT}" push "${base}" "$(git rev-parse HEAD)" "${push_out}")
+  expect_only "${push_out}" run_go run_database
 done
 for path in rust/crates/agent/src/lib.rs rust/Cargo.lock rust/rust-toolchain.toml; do
   out="$(case_commit "rust_$(basename "${path}")" "${path}")"
@@ -131,9 +137,9 @@ expect_only "${out}" run_docs run_go run_database
 out="$(case_commit web_rust web/src/App.vue rust/crates/agent/src/lib.rs)"
 expect_only "${out}" run_docs run_web run_rust
 out="$(case_commit migration_web control-plane/migrations/000001.up.sql web/src/App.vue)"
-expect_only "${out}" run_docs run_go run_database run_web run_database_full
+expect_only "${out}" run_docs run_go run_database run_web
 out="$(case_commit api_database control-plane/internal/api/login.go control-plane/internal/database/mysql/backend.go)"
-expect_only "${out}" run_go run_database run_database_full
+expect_only "${out}" run_go run_database
 
 # Deletions retain the old path's impact. With rename detection off, both
 # sides of a cross-domain rename contribute to the union.
@@ -186,13 +192,31 @@ expect_only "${out}" run_docs run_web
 expect_flag "${out}" changed_count 1
 out="${fixture}/push.output"
 (cd "${fixture}" && "${SCRIPT}" push "${base}" "${base_tip}" "${out}")
-expect_only "${out}" run_go run_database run_database_full
+expect_only "${out}" run_go run_database
 expect_flag "${out}" changed_count 1
 
 out="${fixture}/docs-push.output"
 case_commit docs_push README.md >/dev/null
 head="$(git -C "${fixture}" rev-parse HEAD)"
 (cd "${fixture}" && "${SCRIPT}" push "${base}" "${head}" "${out}")
-expect_only "${out}" run_docs run_database run_database_full
+expect_only "${out}" run_docs
+
+out="${fixture}/web-push.output"
+case_commit web_push web/src/App.vue >/dev/null
+head="$(git -C "${fixture}" rev-parse HEAD)"
+(cd "${fixture}" && "${SCRIPT}" push "${base}" "${head}" "${out}")
+expect_only "${out}" run_docs run_web
+
+out="${fixture}/rust-push.output"
+case_commit rust_push rust/crates/agent/src/lib.rs >/dev/null
+head="$(git -C "${fixture}" rev-parse HEAD)"
+(cd "${fixture}" && "${SCRIPT}" push "${base}" "${head}" "${out}")
+expect_only "${out}" run_rust
+
+out="${fixture}/mixed-push.output"
+case_commit mixed_push web/src/App.vue control-plane/internal/api/login.go >/dev/null
+head="$(git -C "${fixture}" rev-parse HEAD)"
+(cd "${fixture}" && "${SCRIPT}" push "${base}" "${head}" "${out}")
+expect_only "${out}" run_docs run_web run_go run_database
 
 echo "CI relevance classifier tests passed"

@@ -3,6 +3,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 group="${1:?required test group}"
 shift
+if [[ "${1:-}" == --select ]]; then
+  shift
+  selection="$(jq -nr --arg group "${group}" --arg mode select \
+    --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
+    -f "${ROOT}/scripts/check-required-go-tests.jq")"
+  IFS=$'\t' read -r package pattern <<<"${selection}"
+  [[ -n "${package}" && -n "${pattern}" ]] || { echo 'empty test selection' >&2; exit 1; }
+  echo "Selected ${group}: ${package} -run ${pattern}"
+  set -- "$@" "${package}" -run "${pattern}"
+fi
 if [[ "${group}" == database-* ]]; then
   : "${OCSERV_TEST_DATABASE_URL:?database acceptance requires a runtime connection}"
   : "${OCSERV_TEST_OWNER_DATABASE_URL:?database acceptance requires an owner connection}"

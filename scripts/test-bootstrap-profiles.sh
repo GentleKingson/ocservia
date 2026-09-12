@@ -53,7 +53,7 @@ worker_flags.each do |id, flag|
   reject("#{id} must use its basic flag") unless job.fetch("if") == "needs.ci-relevance.outputs.#{flag} == 'true'"
 end
 router = jobs.fetch("ci-relevance")
-reject("router must expose five domains and database scope") unless router.fetch("outputs").keys.sort == (worker_flags.values + ["run_database_full"]).sort
+reject("router must expose five domains") unless router.fetch("outputs").keys.sort == worker_flags.values.sort
 reject("router requires full history") unless router.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
 
 expected_commands = {
@@ -83,7 +83,7 @@ reject("basic Rust checks must not run audit or license checks") if rust_check.m
 database = jobs.fetch("database-smoke")
 reject("database smoke must cover PostgreSQL 17/18, MySQL and MariaDB independently") unless
   database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}", "ENGINE" => "${{ matrix.engine }}",
-    "DATABASE_TEST_SCOPE" => "${{ needs.ci-relevance.outputs.run_database_full == 'false' && 'regression' || 'full' }}"} &&
+    "DATABASE_TEST_SCOPE" => "${{ github.event_name == 'workflow_dispatch' && 'full' || 'regression' }}"} &&
   database.fetch("strategy") == {"fail-fast" => false, "matrix" => {"include" => [
     {"engine" => "postgres", "postgres" => "17"},
     {"engine" => "postgres", "postgres" => "18"},
@@ -99,6 +99,24 @@ reject("database jobs must route only to their own backend test script") unless
   ]
 reject("database smoke must let the script build its own control binary") unless
   database_script.include?('go build -trimpath -o "${BIN}" ./cmd/ocserv-control')
+foundation_script = File.read(File.join(root, "scripts/database-foundation-integration.sh"))
+[database_script, foundation_script].each do |script|
+  reject("manual scripts must default to full and reject invalid scope") unless
+    script.include?('scope="${DATABASE_TEST_SCOPE:-full}"') &&
+    script.include?("full|regression) ;;") &&
+    script.include?("DATABASE_TEST_SCOPE must be full or regression")
+  reject("regression must explicitly select required groups") unless script.include?('--select')
+  reject("regression must not use a history blacklist") if script.include?('-skip')
+end
+reject("pre-34 build must be full-only") unless
+  database_script.index('if [[ "${scope}" == full ]]; then') < database_script.index('PRE34_ROOT="$(mktemp')
+critical_pg = database_script.split('if [[ "${scope}" == regression ]]; then', 2).last.split("\n  else\n", 2).first
+reject("PostgreSQL critical path must retain all business groups without an early exit") unless
+  %w[regression-postgres regression-outbox regression-fencing regression-auth regression-oidc regression-telemetry].all? { |group| critical_pg.include?(group) } &&
+  !critical_pg.include?('exit 0') && !critical_pg.include?('./internal/database/...') && !critical_pg.include?('PRE34')
+reject("full MySQL package and business acceptance must remain unfiltered") unless
+  foundation_script.include?('backend-mysql-full -race -timeout=60m ./internal/database/mysql)') &&
+  foundation_script.include?("backend-coordination -race") && foundation_script.include?("backend-auth -race")
 reject("PostgreSQL 17 must skip the legacy upgrade fixture") unless
   database_script.index('if [[ "${PG_MAJOR}" == "17" ]]; then') < database_script.index('container="${PREFIX}-upgrade"')
 jobs.each do |id, job|
