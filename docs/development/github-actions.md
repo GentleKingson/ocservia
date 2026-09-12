@@ -137,6 +137,27 @@ and PostgreSQL pre-34 rollback/upgrade fixtures. PostgreSQL 17 still omits the
 additional PostgreSQL 18 upgrade leg. Full coverage has not become an alias for
 regression. Critical CI success is not full acceptance or release readiness.
 
+Manual dispatch runs MySQL/MariaDB full as complementary `current` and `history`
+jobs on independent runners. The existing four-backend `database-smoke` matrix
+runs PostgreSQL 17/18 unchanged and MySQL/MariaDB current; the dispatch-only
+`database-history-full` matrix runs MySQL/MariaDB history. Automatic PR/main
+regression selection and runner counts are unchanged. `Basic CI Result` requires
+both matrices to succeed on dispatch, and history to be skipped automatically.
+
+`DATABASE_FULL_PART=all|current|history` is an internal full-only control for
+`database-foundation-integration.sh`; setting it with regression is rejected.
+Unset means `all`: current complement, history, coordination, authentication,
+telemetry and final configuration checks, in that order. History runs only the
+existing `backend-mysql-history` manifest selection. Current runs the whole
+package with exactly those top-level tests excluded, not a positive inventory;
+new unregistered tests therefore remain in full. The current guard combines
+current and audit requirements; the unchanged full guard remains their union
+with history. Business acceptance runs only in current/all, never history.
+Each package shard retains race detection, count 1 and its 60-minute timeout;
+each Actions database job retains 75 minutes. JSON streams live through the
+required-test guard. Failed full shards print bounded database diagnostics.
+Parallelization can reduce wall time without reducing total runner minutes.
+
 Before release, run both scripts with `DATABASE_TEST_SCOPE=full` for all four
 backends on BuildServer, or manually dispatch the existing Basic CI workflow.
 GitHub requires that workflow to exist on the default branch before dispatch;

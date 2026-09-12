@@ -118,12 +118,35 @@ jobs:
       - if: matrix.engine == 'postgres'
         run: scripts/database-integration.sh
       - if: matrix.engine != 'postgres'
-        run: bash scripts/database-foundation-integration.sh
+        env:
+          DATABASE_FULL_PART: ${{ github.event_name == 'workflow_dispatch' && 'current' || '' }}
+        run: |
+          if [[ "${DATABASE_TEST_SCOPE}" == regression ]]; then unset DATABASE_FULL_PART; fi
+          bash scripts/database-foundation-integration.sh
+
+  database-history-full:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    env:
+      ENGINE: ${{ matrix.engine }}
+      DATABASE_TEST_SCOPE: full
+      DATABASE_FULL_PART: history
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: scripts/bootstrap.sh go-test
+      - run: bash scripts/database-foundation-integration.sh
 
   basic-ci-result:
     name: Basic CI Result
     if: always()
-    needs: [ci-relevance, docs, go, rust, web, database-smoke]
+    needs: [ci-relevance, docs, go, rust, web, database-smoke, database-history-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -131,8 +154,11 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          echo "${RESULTS}" | jq -e '
+          echo "${RESULTS}" | jq -e --arg event "${GITHUB_EVENT_NAME}" '
             .["ci-relevance"].result == "success" and
+            (if $event == "workflow_dispatch" then
+              .["database-smoke"].result == "success" and .["database-history-full"].result == "success"
+            else .["database-history-full"].result == "skipped" end) and
             (.["ci-relevance"].outputs as $flags |
               [{job: "docs", flag: "run_docs"},
                {job: "go", flag: "run_go"},
