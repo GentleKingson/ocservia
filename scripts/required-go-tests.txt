@@ -1,4 +1,23 @@
 # group package (relative to control-plane) exact test/subtest name [PR02_ENGINE]
+# PR-05 lifecycle acceptance in the full database entry points.
+backend-enrollment internal/enrollment TestEnrollmentBackendIntegration
+backend-enrollment-restart internal/enrollment TestNodeLifecycleRestartBackendIntegration
+backend-enrollment internal/enrollment TestEnrollmentSharedStorageBackendIntegration
+backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration
+backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration/expired-unclaimed
+backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration/same-worker-new-attempt
+backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration/expiry-during-lock-wait
+backend-enrollment internal/enrollment TestTrustLeaseBackendIntegration/new-revision
+backend-enrollment internal/enrollment TestTrustWorkerRenewalBackendIntegration
+backend-enrollment internal/enrollment TestEnrollmentSafetyBackendIntegration
+backend-enrollment internal/enrollment TestEnrollmentSafetyBackendIntegration/expiry-before-consumption-rolls-back
+backend-enrollment internal/enrollment TestEnrollmentSafetyBackendIntegration/bootstrap-concurrent-endpoint-and-revoked-replay
+backend-enrollment internal/enrollment TestEnrollmentSafetyBackendIntegration/cross-workspace-endpoint-conflict
+backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration
+backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration/concurrent-consumption
+backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration/rotation-rollback-and-duplicate-key
+backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration/node-binding-and-revocation
+backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration/expiry-during-node-lock-wait
 # Explicit automatic gate; the current/history inventories below remain full-only.
 regression-mysql internal/database/mysql TestRealInitializationAndHistory
 regression-mysql internal/database/mysql TestRealTLS

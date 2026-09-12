@@ -203,7 +203,6 @@ func (s *Service) Register(ctx context.Context, request RegistrationRequest) (st
 		return "", ErrCredential
 	}
 	secretDigest := sha256.Sum256(secret)
-	now := s.now()
 	keyID := ""
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := attestationstore.From(tx)
@@ -214,7 +213,7 @@ func (s *Service) Register(ctx context.Context, request RegistrationRequest) (st
 		if err != nil {
 			return ErrCredential
 		}
-		if credential.NodeID != request.NodeID || credential.ConsumedAt != nil || !credential.ExpiresAt.After(now) ||
+		if credential.NodeID != request.NodeID || credential.ConsumedAt != nil ||
 			subtle.ConstantTimeCompare(credential.SecretSHA256, secretDigest[:]) != 1 ||
 			subtle.ConstantTimeCompare(credential.ControllerNonce, request.Registration.GetControllerNonce()) != 1 ||
 			subtle.ConstantTimeCompare(credential.ContextSHA256, request.Registration.GetCredentialContextSha256()) != 1 {
@@ -222,6 +221,11 @@ func (s *Service) Register(ctx context.Context, request RegistrationRequest) (st
 		}
 		workspaceID, err := store.LockActiveNode(ctx, request.NodeID)
 		if err != nil {
+			return ErrCredential
+		}
+		// Both credential and node locks may wait beyond the credential TTL.
+		now := s.now()
+		if !credential.ExpiresAt.After(now) {
 			return ErrCredential
 		}
 		active, err := store.ActiveKeys(ctx, request.NodeID, now)
