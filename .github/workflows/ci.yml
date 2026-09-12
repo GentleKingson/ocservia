@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Basic CI coverage
+        type: choice
+        options: [quick, full]
+        default: full
+        required: true
 
 permissions:
   contents: read
@@ -19,6 +26,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      profile: ${{ steps.relevance.outputs.profile }}
+      database_scope: ${{ steps.relevance.outputs.database_scope }}
       run_docs: ${{ steps.relevance.outputs.run_docs }}
       run_go: ${{ steps.relevance.outputs.run_go }}
       run_rust: ${{ steps.relevance.outputs.run_rust }}
@@ -34,7 +43,8 @@ jobs:
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || github.sha }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}"
+          CI_PROFILE: ${{ inputs.profile }}
+        run: scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}" "${CI_PROFILE}"
 
   docs:
     needs: ci-relevance
@@ -96,6 +106,11 @@ jobs:
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    outputs:
+      postgres17: ${{ steps.completed.outputs.postgres17 }}
+      postgres18: ${{ steps.completed.outputs.postgres18 }}
+      mysql: ${{ steps.completed.outputs.mysql }}
+      mariadb: ${{ steps.completed.outputs.mariadb }}
     strategy:
       fail-fast: false
       matrix:
@@ -109,7 +124,7 @@ jobs:
     env:
       PG_MAJOR: ${{ matrix.postgres }}
       ENGINE: ${{ matrix.engine }}
-      DATABASE_TEST_SCOPE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'regression' }}
+      DATABASE_TEST_SCOPE: ${{ needs.ci-relevance.outputs.database_scope }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -118,23 +133,28 @@ jobs:
       - if: matrix.engine == 'postgres'
         run: scripts/database-integration.sh
       - if: matrix.engine != 'postgres'
-        env:
-          DATABASE_FULL_PART: ${{ github.event_name == 'workflow_dispatch' && 'current' || '' }}
         run: |
-          if [[ "${DATABASE_TEST_SCOPE}" == regression ]]; then unset DATABASE_FULL_PART; fi
+          unset DATABASE_FULL_PART
+          if [[ "${DATABASE_TEST_SCOPE}" == full ]]; then export DATABASE_FULL_PART=current; fi
           bash scripts/database-foundation-integration.sh
+      - id: completed
+        run: echo "${ENGINE}${PG_MAJOR}=success" >> "${GITHUB_OUTPUT}"
 
   database-history-full:
-    if: github.event_name == 'workflow_dispatch'
+    needs: ci-relevance
+    if: needs.ci-relevance.outputs.profile == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    outputs:
+      mysql: ${{ steps.completed.outputs.mysql }}
+      mariadb: ${{ steps.completed.outputs.mariadb }}
     strategy:
       fail-fast: false
       matrix:
         engine: [mysql, mariadb]
     env:
       ENGINE: ${{ matrix.engine }}
-      DATABASE_TEST_SCOPE: full
+      DATABASE_TEST_SCOPE: ${{ needs.ci-relevance.outputs.database_scope }}
       DATABASE_FULL_PART: history
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -142,6 +162,8 @@ jobs:
           persist-credentials: false
       - run: scripts/bootstrap.sh go-test
       - run: bash scripts/database-foundation-integration.sh
+      - id: completed
+        run: echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"
 
   basic-ci-result:
     name: Basic CI Result
@@ -154,11 +176,22 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          echo "${RESULTS}" | jq -e --arg event "${GITHUB_EVENT_NAME}" '
+          echo "${RESULTS}" | jq -e '
+            def completed($job; $parts):
+              .[$job] as $result | $result.result == "success" and
+              all($parts[]; $result.outputs[.] == "success");
+            .["ci-relevance"].outputs as $routing |
             .["ci-relevance"].result == "success" and
-            (if $event == "workflow_dispatch" then
-              .["database-smoke"].result == "success" and .["database-history-full"].result == "success"
-            else .["database-history-full"].result == "skipped" end) and
+            (if $routing.profile == "full" then
+              $routing.database_scope == "full" and
+              all(["run_docs", "run_go", "run_rust", "run_web", "run_database"][]; $routing[.] == "true") and
+              completed("database-history-full"; ["mysql", "mariadb"])
+            elif $routing.profile == "quick" then
+              $routing.database_scope == "regression" and .["database-history-full"].result == "skipped"
+            else false end) and
+            (if $routing.run_database == "true" then
+              completed("database-smoke"; ["postgres17", "postgres18", "mysql", "mariadb"])
+            else true end) and
             (.["ci-relevance"].outputs as $flags |
               [{job: "docs", flag: "run_docs"},
                {job: "go", flag: "run_go"},

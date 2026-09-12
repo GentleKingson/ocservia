@@ -2,12 +2,20 @@
 # Path routing for Basic CI only.
 set -euo pipefail
 
-if (($# != 4)); then
-  echo "usage: $0 <event-name> <base-sha> <head-sha> <github-output>" >&2
+if (($# < 4 || $# > 5)); then
+  echo "usage: $0 <event-name> <base-sha> <head-sha> <github-output> [quick|full]" >&2
   exit 2
 fi
 
 event="$1"; base_sha="$2"; head_sha="$3"; output="$4"
+profile="${5-full}"
+if [[ "${event}" != workflow_dispatch ]]; then profile=quick; fi
+case "${profile}" in
+  quick|full) ;;
+  *) echo 'CI profile must be quick or full' >&2; exit 2 ;;
+esac
+database_scope=regression
+if [[ "${profile}" == full ]]; then database_scope=full; fi
 flags=(run_docs run_go run_rust run_web run_database)
 for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
@@ -79,6 +87,8 @@ else
 fi
 
 {
+  printf 'profile=%s\n' "${profile}"
+  printf 'database_scope=%s\n' "${database_scope}"
   printf 'reason=%s\n' "${reason}"
   printf 'changed_count=%s\n' "${#changed[@]}"
   for flag in "${flags[@]}"; do printf '%s=%s\n' "${flag}" "${!flag}"; done
