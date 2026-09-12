@@ -287,7 +287,11 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 		return ErrInvalidToken
 	}
 	if bootstrap && token.ConsumedAt.Valid {
-		if !slices.Equal(token.Endpoint, request.GetEndpointId()) {
+		if token.ConsumedNode == nil || !slices.Equal(token.Endpoint, request.GetEndpointId()) {
+			return ErrInvalidToken
+		}
+		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.ForShare)
+		if err != nil || node.WorkspaceID != token.WorkspaceID || node.Status != "pending" || node.EndpointState != "pending" || !slices.Equal(node.Endpoint, token.Endpoint) {
 			return ErrInvalidToken
 		}
 		return nil
@@ -322,7 +326,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	if err := validateLockedToken(err, token.ConsumedAt.Valid, token.ExpiresAt, s.now()); err != nil {
 		return nil, err
 	}
-	tokenID, workspaceID, expectedName := token.ID, token.WorkspaceID, token.ExpectedName
+	workspaceID, expectedName := token.WorkspaceID, token.ExpectedName
 	if token.Environment != request.GetEnvironment() {
 		return nil, ErrInvalidToken
 	}
@@ -360,7 +364,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 				return nil, fmt.Errorf("bind existing node password sealing key: %w", err)
 			}
 		}
-		consumed, err := store.ConsumeToken(ctx, tokenID, existingNodeID, nil, at, false)
+		consumed, err := s.consumeToken(ctx, store, token, existingNodeID, nil, false)
 		if err != nil {
 			return nil, fmt.Errorf("consume sealing key enrollment token: %w", err)
 		}
@@ -425,7 +429,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 			return nil, fmt.Errorf("record requested capability: %w", err)
 		}
 	}
-	consumed, err := store.ConsumeToken(ctx, tokenID, nodeID, nil, at, false)
+	consumed, err := s.consumeToken(ctx, store, token, nodeID, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("consume enrollment token: %w", err)
 	}
@@ -439,6 +443,20 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		return nil, fmt.Errorf("commit enrollment: %w", err)
 	}
 	return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
+}
+
+// Recheck expiry after all admission and node/key lock waits. Returning false
+// rolls back the node, key and capability writes in the caller's transaction.
+func (s *Service) consumeToken(ctx context.Context, store enrollmentstore.EnrollmentStore, token enrollmentstore.Token, node uuid.UUID, endpoint []byte, bootstrap bool) (bool, error) {
+	now := s.now()
+	if !tokenUnexpired(token.ExpiresAt, now) {
+		return false, nil
+	}
+	at, err := value.FromTime(now)
+	if err != nil {
+		return false, err
+	}
+	return store.ConsumeToken(ctx, token.ID, node, endpoint, at, bootstrap)
 }
 
 func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
@@ -470,7 +488,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if err != nil {
 		return nil, fmt.Errorf("lock node bootstrap token: %w", err)
 	}
-	tokenID, workspaceID, expectedName := token.ID, token.WorkspaceID, token.ExpectedName
+	workspaceID, expectedName := token.WorkspaceID, token.ExpectedName
 	if token.Environment != request.GetEnvironment() {
 		return nil, ErrInvalidToken
 	}
@@ -478,8 +496,8 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 		if token.ConsumedNode == nil || len(token.Endpoint) != 32 || subtle.ConstantTimeCompare(token.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrEndpointMismatch
 		}
-		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.Unlocked)
-		if err != nil || node.Status != "pending" || node.EndpointState != "pending" || subtle.ConstantTimeCompare(node.Endpoint, request.GetEndpointId()) != 1 {
+		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.ForShare)
+		if err != nil || node.WorkspaceID != workspaceID || node.Status != "pending" || node.EndpointState != "pending" || subtle.ConstantTimeCompare(node.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrInvalidToken
 		}
 		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*token.ConsumedNode)[:], ControllerEndpointId: s.controllerEndpointID}, nil
@@ -532,7 +550,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 			return nil, fmt.Errorf("record bootstrap requested capability: %w", err)
 		}
 	}
-	consumed, err := store.ConsumeToken(ctx, tokenID, nodeID, request.GetEndpointId(), at, true)
+	consumed, err := s.consumeToken(ctx, store, token, nodeID, request.GetEndpointId(), true)
 	if err != nil {
 		return nil, fmt.Errorf("consume node bootstrap token: %w", err)
 	}

@@ -243,6 +243,11 @@ cat >"${tmp}/wrapper/scripts/required-go-tests.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${ROUTE_LOG}"
 SH
+cat >"${tmp}/wrapper/scripts/test-enrollment-restart.sh" <<'SH'
+#!/usr/bin/env bash
+[[ "$1" == ocservia-pr02-mysql-* ]] || exit 1
+printf 'backend-enrollment-restart\n' >>"${ROUTE_LOG}"
+SH
 cat >"${tmp}/wrapper/bin/docker" <<'SH'
 #!/usr/bin/env bash
 if [[ "$1" == port ]]; then echo '127.0.0.1:12345'; fi
@@ -271,9 +276,11 @@ done
 cmp "${tmp}/unset.route" "${tmp}/all.route"
 test "$(wc -l <"${tmp}/history.route")" -eq 1
 grep -q '^backend-mysql-history --select -race -timeout=60m$' "${tmp}/history.route"
-test "$(wc -l <"${tmp}/current.route")" -eq 5
-test "$(wc -l <"${tmp}/all.route")" -eq 6
+test "$(wc -l <"${tmp}/current.route")" -eq 7
+test "$(wc -l <"${tmp}/all.route")" -eq 8
 sed '/^backend-mysql-history /d' "${tmp}/all.route" >"${tmp}/without-history.route"
 cmp "${tmp}/current.route" "${tmp}/without-history.route"
 grep -q '^backend-mysql-current-full .* -skip ' "${tmp}/current.route"
+grep -q '^backend-enrollment --select -race -timeout=10m$' "${tmp}/current.route"
+grep -q '^backend-enrollment-restart$' "${tmp}/current.route"
 echo 'Full all/current/history routing passed'
