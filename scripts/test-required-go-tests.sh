@@ -136,6 +136,14 @@ for script in database-integration.sh database-foundation-integration.sh; do
   grep -Fq 'DATABASE_TEST_SCOPE must be full or regression' "${tmp}/scope.log"
   done
 done
+# PostgreSQL full acceptance keeps each package's complete Integration suite;
+# the manifest is an additional guard, not the test selector.
+grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" "${group}" -p 1 "./internal/${package}" -run Integration)' \
+  "${ROOT}/scripts/database-integration.sh"
+grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-config -p 1 ./internal/configplan -run Integration)' \
+  "${ROOT}/scripts/database-integration.sh"
+grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)' \
+  "${ROOT}/scripts/database-integration.sh"
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.
 mkdir "${tmp}/selection"
@@ -276,11 +284,14 @@ done
 cmp "${tmp}/unset.route" "${tmp}/all.route"
 test "$(wc -l <"${tmp}/history.route")" -eq 1
 grep -q '^backend-mysql-history --select -race -timeout=60m$' "${tmp}/history.route"
-test "$(wc -l <"${tmp}/current.route")" -eq 7
-test "$(wc -l <"${tmp}/all.route")" -eq 8
+test "$(wc -l <"${tmp}/current.route")" -eq 10
+test "$(wc -l <"${tmp}/all.route")" -eq 11
 sed '/^backend-mysql-history /d' "${tmp}/all.route" >"${tmp}/without-history.route"
 cmp "${tmp}/current.route" "${tmp}/without-history.route"
 grep -q '^backend-mysql-current-full .* -skip ' "${tmp}/current.route"
 grep -q '^backend-enrollment --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-enrollment-restart$' "${tmp}/current.route"
+grep -q '^backend-policy-userstate --select -race -timeout=10m$' "${tmp}/current.route"
+grep -q '^backend-policy-useroperations --select -race -timeout=10m$' "${tmp}/current.route"
+grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route"
 echo 'Full all/current/history routing passed'
