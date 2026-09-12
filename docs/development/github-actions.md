@@ -21,8 +21,9 @@ do not cancel earlier runs.
 
 ## Basic checks
 
-One small routing job selects up to five independent checks. There is no
-runtime-artifact dependency or separate acceptance worker graph.
+One small routing job selects up to five independent checks. Manual full also
+starts the complementary database history matrix. There is no runtime-artifact
+dependency between workers.
 
 | Job | Command | Bootstrap profile | Coverage |
 | --- | --- | --- | --- |
@@ -30,7 +31,8 @@ runtime-artifact dependency or separate acceptance worker graph.
 | `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
 | `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
 | `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
-| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Four-backend critical regression automatically; full database acceptance on manual dispatch |
+| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Four-backend critical regression automatically; PostgreSQL full and MySQL/MariaDB current on dispatch |
+| `database-history-full` | `scripts/database-foundation-integration.sh` | `go-test` | MySQL/MariaDB complementary full history, dispatch only |
 
 Go checks retain both existing Go modules, including unit tests for the G6
 harness; they do not run G6 acceptance. Rust checks do not run cargo audit,
@@ -53,7 +55,8 @@ dependencies after Web bootstrap and before `scripts/web-check.sh`.
 The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. The PostgreSQL
 script builds `ocserv-control` itself; only full scope builds its historical
 Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
-Each job needs only the router, not a Rust build or a shared binary artifact.
+The automatic matrix needs only the router; manual history starts independently.
+Neither needs a Rust build or a shared binary artifact.
 
 ## Independent security checks
 
@@ -157,6 +160,8 @@ Each package shard retains race detection, count 1 and its 60-minute timeout;
 each Actions database job retains 75 minutes. JSON streams live through the
 required-test guard. Failed full shards print bounded database diagnostics.
 Parallelization can reduce wall time without reducing total runner minutes.
+See the [full sharding measurement](database-ci-sharding-measurement-2026-09-12.md)
+for coverage evidence, retained failure records and measured runner time.
 
 Before release, run both scripts with `DATABASE_TEST_SCOPE=full` for all four
 backends on BuildServer, or manually dispatch the existing Basic CI workflow.
