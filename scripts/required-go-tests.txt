@@ -48,6 +48,8 @@ regression-auth internal/api TestAuthenticationBackendHTTPIntegration
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration/capacity
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration/absent-singleton-lock
+regression-auth internal/api TestSyntheticCommandAuditUsesAuthenticatedOperator
+regression-auth internal/api TestBatchRouteAllowsNodeScopedPerItemAuthorization
 regression-outbox internal/operations TestOutboxBackendIntegration/atomic-intent-and-ambiguous-commit
 regression-outbox internal/operations TestOutboxBackendIntegration/two-workers-and-commit-readback
 regression-outbox internal/operations TestOutboxBackendIntegration/early-and-duplicate-result
