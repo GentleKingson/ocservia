@@ -1,0 +1,100 @@
+name: ocservia-dev
+
+services:
+  database:
+    image: ${OCSERV_DATABASE_IMAGE:?set by compose.sh}
+    command: ["--log-bin-trust-function-creators=1"]
+    environment:
+      MYSQL_DATABASE: ocservia
+      MYSQL_ROOT_PASSWORD: development-root-only
+      MYSQL_USER: ocservia_owner
+      MYSQL_PASSWORD: development-owner-only
+    volumes:
+      - database-data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v mariadb >/dev/null; then mariadb --user=ocservia_owner --password=development-owner-only --database=ocservia --execute='SELECT 1' >/dev/null; else mysql --user=ocservia_owner --password=development-owner-only --database=ocservia --execute='SELECT 1' >/dev/null; fi"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  transport-runtime-init:
+    extends:
+      file: compose.yaml
+      service: transport-runtime-init
+
+  otel-collector:
+    extends:
+      file: compose.yaml
+      service: otel-collector
+
+  transportd-stub:
+    extends:
+      file: compose.yaml
+      service: transportd-stub
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: control-plane/Dockerfile
+      args: {VERSION: "${OCSERV_VERSION:-dev}", COMMIT: "${OCSERV_COMMIT:-unknown}"}
+    command: ["--migrate-only"]
+    environment:
+      OCSERV_ENVIRONMENT: development
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_URL: ocservia_owner:development-owner-only@tcp(database:3306)/ocservia?tls=false
+      OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app@%
+      OCSERV_AUDIT_EVENT_KEY_ID: development-audit-event-v1
+      OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "3333333333333333333333333333333333333333333333333333333333333333"
+    depends_on:
+      database: {condition: service_healthy}
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: control-plane/Dockerfile
+      args: {VERSION: "${OCSERV_VERSION:-dev}", COMMIT: "${OCSERV_COMMIT:-unknown}"}
+    command: ["--role=all"]
+    environment:
+      OCSERV_ENVIRONMENT: development
+      OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_URL: ocservia_app:development-runtime-only@tcp(database:3306)/ocservia?tls=false
+      OCSERV_AUDIT_EVENT_KEY_ID: development-audit-event-v1
+      OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "3333333333333333333333333333333333333333333333333333333333333333"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OCSERV_LOCAL_SIMULATOR: "true"
+      OCSERV_RECOMMENDED_AGENT_VERSION: "0.2.0"
+      OCSERV_DEV_AUTH_TOKEN: local-development-token-32-characters
+      OCSERV_TRANSPORT_SOCKET: /run/ocserv-platform/transportd.sock
+      OCSERV_TRANSPORT_UID: "65533"
+      OCSERV_TRANSPORT_GID: "65532"
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume: {nocopy: true}
+    ports: ["127.0.0.1:${OCSERV_HTTP_PORT:-8080}:8080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      otel-collector: {condition: service_started}
+      transportd-stub: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web:
+    extends:
+      file: compose.yaml
+      service: web
+
+  e2e:
+    extends:
+      file: compose.yaml
+      service: e2e
+
+volumes:
+  database-data: {}
+  transport-runtime: {}

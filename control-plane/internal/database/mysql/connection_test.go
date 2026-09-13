@@ -48,6 +48,12 @@ func TestConnectionPolicy(t *testing.T) {
 	if _, err := configuration(o); err == nil {
 		t.Fatal("remote plaintext")
 	}
+	o.Environment = "development"
+	o.DSN = "user:secret@tcp(database:3306)/ocservia?tls=false"
+	if _, err := configuration(o); err != nil {
+		t.Fatal("fixed development Compose database rejected")
+	}
+	o.Environment = "test"
 	o.DSN = "user:secret@tcp(db.internal:3306)/ocservia?tls=true"
 	c, err = configuration(o)
 	if err != nil || c.TLS == nil || c.TLS.InsecureSkipVerify || c.TLS.ServerName != "db.internal" {

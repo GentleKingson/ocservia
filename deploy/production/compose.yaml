@@ -63,41 +63,6 @@ services:
           memory: 256M
           pids: 256
 
-  postgres:
-    <<: *service-defaults
-    user: "999:999"
-    image: ${OCSERV_POSTGRES_IMAGE:?set OCSERV_POSTGRES_IMAGE to a digest-pinned PostgreSQL 17 image}
-    environment:
-      POSTGRES_DB: ocservia
-      POSTGRES_USER: ocservia_owner
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password
-      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
-    secrets:
-      - postgres_owner_password
-      - postgres_app_password
-      - postgres_backup_password
-    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ${OCSERV_BACKUP_DIR:?set OCSERV_BACKUP_DIR to a separately protected backup mount}:/var/lib/ocservia-backup
-      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
-      - ./postgres-init:/docker-entrypoint-initdb.d:ro
-    tmpfs:
-      - /run/postgresql:size=16m,uid=999,gid=999,mode=0770
-      - /tmp:size=16m,uid=999,gid=999,mode=0700
-    networks: [database]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2G
-          pids: 256
-
   migrate:
     <<: *service-defaults
     restart: "no"
@@ -126,9 +91,6 @@ services:
     tmpfs:
       - /tmp:size=8m,mode=0700
     networks: [database]
-    depends_on:
-      postgres:
-        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -316,40 +278,6 @@ services:
           memory: 512M
           pids: 256
 
-  backup:
-    <<: *service-defaults
-    image: ${OCSERV_BACKUP_IMAGE:?set OCSERV_BACKUP_IMAGE to the repository backup image}
-    environment:
-      PGHOST: postgres
-      PGPORT: "5432"
-      PGDATABASE: ocservia
-      PGUSER: ocservia_backup
-      PGPASS_SOURCE: /run/secrets/postgres_pgpass
-      BACKUP_ROOT: /var/lib/ocservia-backup
-      BACKUP_INTERVAL_SECONDS: ${OCSERV_BACKUP_INTERVAL_SECONDS:-900}
-      BACKUP_RETENTION_COUNT: ${OCSERV_BACKUP_RETENTION_COUNT:-8}
-    secrets:
-      - postgres_pgpass
-    volumes:
-      - ${OCSERV_BACKUP_DIR}:/var/lib/ocservia-backup
-    tmpfs:
-      - /tmp:size=32m,uid=999,gid=999,mode=0700
-    networks: [database]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "find /var/lib/ocservia-backup/LATEST -mmin \"-$$((BACKUP_INTERVAL_SECONDS / 60 + 11))\" -type f | grep -q ."]
-      interval: 5m
-      timeout: 5s
-      retries: 2
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 512M
-          pids: 256
-
 networks:
   frontend: {}
   application:
@@ -365,7 +293,6 @@ networks:
     internal: true
 
 volumes:
-  postgres-data: {}
   transport-runtime: {}
   trust-runtime: {}
 
@@ -374,14 +301,6 @@ secrets:
     file: ${OCSERV_SECRET_DIR:?set OCSERV_SECRET_DIR}/tls.crt
   tls_private_key:
     file: ${OCSERV_SECRET_DIR}/tls.key
-  postgres_owner_password:
-    file: ${OCSERV_SECRET_DIR}/postgres-owner-password
-  postgres_app_password:
-    file: ${OCSERV_SECRET_DIR}/postgres-app-password
-  postgres_backup_password:
-    file: ${OCSERV_SECRET_DIR}/postgres-backup-password
-  postgres_pgpass:
-    file: ${OCSERV_SECRET_DIR}/postgres.pgpass
   database_owner_url:
     file: ${OCSERV_SECRET_DIR}/database-owner-url
   database_app_url:

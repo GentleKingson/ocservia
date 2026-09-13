@@ -18,6 +18,22 @@ if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
   otel_enabled=true
 fi
 
+database_backend="${OCSERV_DATABASE_BACKEND:-postgres}"
+database_deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
+case "${database_backend}:${database_deployment}" in
+  postgres:bundled) database_overlay="compose.postgres.yaml" ;;
+  postgres:external) database_overlay="compose.external-postgres.yaml" ;;
+  mysql:external|mariadb:external) database_overlay="compose.external-mysql.yaml" ;;
+  mysql:bundled|mariadb:bundled)
+    echo "bundled ${database_backend} is not implemented; use an externally managed database" >&2
+    exit 2
+    ;;
+  *)
+    echo "OCSERV_DATABASE_BACKEND must be postgres, mysql or mariadb and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
+    exit 2
+    ;;
+esac
+
 for variable in OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE \
   OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE; do
   value="${!variable:-}"
@@ -26,6 +42,12 @@ for variable in OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE
     exit 2
   fi
 done
+if [[ "${database_backend}" == mysql || "${database_backend}" == mariadb ]]; then
+  if [[ ! "${OCSERV_DATABASE_BACKUP_IMAGE:-}" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "OCSERV_DATABASE_BACKUP_IMAGE must contain a full sha256 image digest" >&2
+    exit 2
+  fi
+fi
 
 secret_dir="${OCSERV_SECRET_DIR:-}"
 if [[ -z "${secret_dir}" || ! -d "${secret_dir}" || -L "${secret_dir}" \
@@ -48,9 +70,15 @@ while true; do
   [[ "${ancestor}" == "/" ]] && break
   ancestor="$(dirname -- "${ancestor}")"
 done
-general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
-  postgres.pgpass database-owner-url database-app-url session-key \
+general_secrets=(tls.crt tls.key database-owner-url database-app-url session-key \
   audit-checkpoint-key certificate-signer-token)
+if [[ "${database_backend}:${database_deployment}" == postgres:bundled ]]; then
+  general_secrets+=(postgres-owner-password postgres-app-password postgres-backup-password postgres.pgpass)
+elif [[ "${database_backend}" == postgres ]]; then
+  general_secrets+=(postgres.pgpass)
+else
+  general_secrets+=(database-backup.cnf database-ca.pem)
+fi
 if [[ "${oidc_enabled}" == true ]]; then
   general_secrets+=(oidc-client-secret)
 fi
@@ -106,7 +134,9 @@ for argument in "$@"; do
   esac
 done
 
-compose=(docker compose --env-file /dev/null -p ocservia-production -f "${ROOT}/deploy/production/compose.yaml")
+compose=(docker compose --env-file /dev/null -p ocservia-production
+  -f "${ROOT}/deploy/production/compose.yaml"
+  -f "${ROOT}/deploy/production/${database_overlay}")
 if [[ "${oidc_enabled}" == true ]]; then
   compose+=(-f "${ROOT}/deploy/production/compose.oidc.yaml")
 fi

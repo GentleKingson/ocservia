@@ -540,6 +540,7 @@ test ! -e "${not_older_state}/compose.log"
 
 different_schema_previous="${fixture}/release/controller-release-schema-different.json"
 cross_schema_current="${fixture}/release/controller-release-schema-current.json"
+rollback_schema="$(jq -er '.database_migration' "${release_file}")"
 jq '.database_migration += 1' "${next_release_file}" >"${cross_schema_current}"
 cp -- "${release_file}" "${different_schema_previous}"
 refresh_bundle_dir "${fixture}/release"
@@ -556,7 +557,7 @@ grep -Fq 'database compatibility preflight failed for rollback target' "${schema
 cmp -s "${cross_schema_current}" "${schema_state}/current-release.json"
 cmp -s "${different_schema_previous}" "${schema_state}/previous-release.json"
 test "$(sed -n '1p' "${schema_state}/compose.log")" = "ps --format json postgres backup"
-test "$(sed -n '2p' "${schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=30"
+test "$(sed -n '2p' "${schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=${rollback_schema}"
 test "$(wc -l <"${schema_state}/compose.log")" -eq 2
 
 compatible_cross_schema_state="${fixture}/rollback-compatible-cross-schema"
@@ -564,10 +565,12 @@ seed_upgrade_state "${compatible_cross_schema_state}"
 cp -- "${cross_schema_current}" "${compatible_cross_schema_state}/current-release.json"
 cp -- "${different_schema_previous}" "${compatible_cross_schema_state}/previous-release.json"
 chmod 600 "${compatible_cross_schema_state}/current-release.json" "${compatible_cross_schema_state}/previous-release.json"
-run_controller_rollback "${compatible_cross_schema_state}" env MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1
+run_controller_rollback "${compatible_cross_schema_state}" env \
+  MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 \
+  MOCK_SCHEMA_CURRENT="${rollback_schema}" MOCK_SCHEMA_MINIMUM="${rollback_schema}"
 cmp -s "${different_schema_previous}" "${compatible_cross_schema_state}/current-release.json"
 cmp -s "${cross_schema_current}" "${compatible_cross_schema_state}/previous-release.json"
-test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=30"
+test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=${rollback_schema}"
 test "$(sed -n '3p' "${compatible_cross_schema_state}/compose.log")" = "config --quiet"
 test "$(sed -n '4p' "${compatible_cross_schema_state}/compose.log")" = "pull"
 test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup transportd control-plane gateway"
@@ -580,6 +583,7 @@ cp -- "${cross_schema_current}" "${otel_cross_schema_state}/current-release.json
 cp -- "${different_schema_previous}" "${otel_cross_schema_state}/previous-release.json"
 chmod 600 "${otel_cross_schema_state}/current-release.json" "${otel_cross_schema_state}/previous-release.json"
 run_controller_rollback "${otel_cross_schema_state}" env MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 \
+  MOCK_SCHEMA_CURRENT="${rollback_schema}" MOCK_SCHEMA_MINIMUM="${rollback_schema}" \
   OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
 test "$(sed -n '5p' "${otel_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
 
@@ -739,6 +743,7 @@ cp -- "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_stat
 chmod 600 "${rollback_cross_schema_smoke_failure_state}/current-release.json" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
 if run_controller_rollback "${rollback_cross_schema_smoke_failure_state}" env \
   MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 MOCK_SMOKE_EXIT=1 \
+  MOCK_SCHEMA_CURRENT="${rollback_schema}" MOCK_SCHEMA_MINIMUM="${rollback_schema}" \
   >"${rollback_cross_schema_smoke_failure_state}/output.log" 2>&1; then
   echo "cross-schema rollback smoke failure was accepted" >&2
   exit 1

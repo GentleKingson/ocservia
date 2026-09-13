@@ -25,7 +25,32 @@ the durable release checkout.
 Until that hosting has operational ownership and byte-verification evidence,
 the public Quick Start obtains Stage-1 from a clean exact-release checkout.
 
-The production example in `deploy/production/compose.yaml` runs the HTTPS gateway, control plane, transport service, PostgreSQL, and backup worker by default. It publishes only TCP 443. Database, application, and observability traffic remain on internal networks.
+The production launcher combines `deploy/production/compose.yaml` with one
+database descriptor. Bundled PostgreSQL remains the default and runs the HTTPS
+gateway, control plane, transport service, PostgreSQL, and backup worker. An
+external PostgreSQL descriptor is also implemented. The external MySQL and
+MariaDB descriptors are available for pre-support deployment validation, but
+their Controller production startup gate deliberately remains closed until the
+independent PR-09 acceptance matrix passes. Bundled MySQL/MariaDB is rejected.
+The project publishes only TCP 443; database, application, and observability
+traffic remain on internal networks.
+
+Select a non-default descriptor explicitly:
+
+```dotenv
+OCSERV_DATABASE_BACKEND=postgres
+OCSERV_DATABASE_DEPLOYMENT=external
+OCSERV_DATABASE_BACKUP_HOST=postgres.example.com
+```
+
+For MySQL/MariaDB, use `external`, provide separate owner and runtime DSNs in
+`database-owner-url` and `database-app-url`, and provision `database-ca.pem`
+plus `database-backup.cnf` in the protected secret directory. Only `migrate`
+receives the owner DSN. The runtime receives the application DSN and CA, never
+the owner credential. The backend-specific backup image must be digest-pinned
+through `OCSERV_DATABASE_BACKUP_IMAGE`. Snapshot restore, PITR, failover, and
+cross-engine movement are separate procedures; no PostgreSQL G6, HA, or PITR
+claim applies to either MySQL-compatible backend.
 
 For Local only, OIDC only, or Local + OIDC configuration, login behavior and
 one-shot first-admin creation, follow [Production authentication](authentication.md).
@@ -325,8 +350,9 @@ deploy/production/controller.sh uninstall
 
 Uninstall takes the lifecycle lock, validates the confirmed release state, and
 calls the protected Compose launcher with `down`. This removes the Controller
-containers and project networks while retaining the `postgres-data`,
-`transport-runtime`, and `trust-runtime` named volumes. It also retains
+containers and project networks while retaining the selected bundled database,
+`transport-runtime`, and `trust-runtime` named volumes. It also retains every
+external database,
 `current-release.json`, `previous-release.json` when present, the configured
 backup bind mount, and `OCSERV_SECRET_DIR` including PKI, signing keys, and
 Iroh identities. The command does not require `--release-file`; it reads the
@@ -362,7 +388,8 @@ deploy/production/controller.sh uninstall --purge-data
 After `down --volumes` succeeds for the fixed `ocservia-production` Compose
 project, this removes the project named volumes, including PostgreSQL data and
 the transport/trust runtime volumes, and removes the local Controller release
-state. It does not remove `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, protected
+state. It does not remove `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, any external
+database, protected
 off-host backups, operator-created TLS/PKI/key material, the repository
 checkout, Docker images, or unrelated Docker volumes. The lifecycle lock is
 retained so a later invocation cannot create an unprotected replacement state
