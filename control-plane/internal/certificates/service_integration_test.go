@@ -22,6 +22,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -195,7 +196,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	commandSeed[0] = 5
 	commandSigner := commandauth.NewSignerFromSeed(commandSeed)
 	artifactTransport := &fixtureArtifacts{data: artifactBytes}
-	service := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandSigner), pki, pki, artifactTransport, commandSigner)
+	service := NewBackend(postgres.WrapPool(pool), operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner), pki, pki, artifactTransport, commandSigner)
 	certificate, replayed, err := service.Create(ctx, CreateRequest{NodeID: nodeID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-csr", CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048, ActorID: requesterID.String(), Reason: "issue node certificate", RequestID: "i17-csr-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("create certificate replay=%v err=%v", replayed, err)
@@ -247,7 +248,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := uuid.Must(uuid.NewV7())
-	if err := localslice.NewWithSigner(pool, commandSigner).Ingest(ctx, &transportv1.TransportEvent{
+	if err := localslice.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 		OccurredAt: timestamppb.New(completed), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: encodedCSRResult,
 	}); err != nil {
@@ -264,7 +265,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvalService := approvals.New(pool)
+	approvalService := approvals.NewBackend(postgres.WrapPool(pool))
 	approval, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: certificate.ID, Action: "certificate.issue", ResourceType: "certificate", Reason: "approve certificate", TTL: time.Hour, SessionID: requesterSession, RequestID: "approval-request", RequestHash: bindingHash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspaceID, Type: "node", ID: nodeID}}})
 	if err != nil {
 		t.Fatal(err)
@@ -536,7 +537,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-released-window' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, releasedGrant.ArtifactID, releasedDownload.GrantID, releasedGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
 		t.Fatal(err)
 	}
-	releasedRecovery := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandSigner), pki, pki, artifactTransport, commandSigner)
+	releasedRecovery := NewBackend(postgres.WrapPool(pool), operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner), pki, pki, artifactTransport, commandSigner)
 	releasedRecovery.now = func() time.Time { return releasedDownload.Grant.GetExpiresAt().AsTime().Add(time.Second) }
 	if err = releasedRecovery.Maintain(ctx); err != nil {
 		t.Fatalf("recover released root lease: %v", err)
@@ -629,7 +630,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	consumeCountAfterRoot := artifactTransport.consumeCount
-	restartedService := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandSigner), pki, pki, artifactTransport, commandSigner)
+	restartedService := NewBackend(postgres.WrapPool(pool), operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner), pki, pki, artifactTransport, commandSigner)
 	restartedService.now = func() time.Time { return crashDownload.Grant.GetExpiresAt().AsTime().Add(time.Second) }
 	if err = restartedService.Maintain(ctx); err != nil {
 		t.Fatalf("reconcile consumed root record after grant expiry: %v", err)
@@ -737,7 +738,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=created_at+interval '1 microsecond' WHERE operation_id=$1::uuid`, op.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := operations.New(pool).Expire(ctx); err != nil {
+	if err := operations.NewBackend(postgres.WrapPool(pool), 50, nil).Expire(ctx); err != nil {
 		t.Fatal(err)
 	}
 	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: revokeApprovalID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})

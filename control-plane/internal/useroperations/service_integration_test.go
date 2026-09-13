@@ -64,7 +64,7 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	var commandSeed [32]byte
 	commandSeed[0] = 3
-	service := New(pool, userstate.NewWithSigner(pool, commandauth.NewSignerFromSeed(commandSeed)))
+	service := NewBackend(postgres.WrapPool(pool), userstate.NewWithSignerBackend(postgres.WrapPool(pool), commandauth.NewSignerFromSeed(commandSeed)))
 	service.now = func() time.Time { return now }
 	request := PolicyRequest{NodeID: nodeID, Username: "alice", QuotaPeriod: "monthly", QuotaDirection: "rxtx", QuotaBytes: 300, ExpectedVersion: 0, IdempotencyKey: "alice-policy", ActorID: "operator", Reason: "ticket", RequestID: "request-policy", Traceparent: testTraceparent}
 	policy, replayed, err := service.SetPolicy(ctx, request)

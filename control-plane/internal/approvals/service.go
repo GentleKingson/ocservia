@@ -14,11 +14,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals/approvalstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -79,10 +76,6 @@ type Approval struct {
 type Service struct {
 	backend database.Backend
 	now     func() time.Time
-}
-
-func New(pool *pgxpool.Pool) *Service {
-	return NewBackend(postgres.WrapPool(pool))
 }
 
 func NewBackend(backend database.Backend) *Service {
@@ -240,10 +233,6 @@ func (s *Service) Approve(ctx context.Context, decision Decision) (Approval, err
 	return approval, nil
 }
 
-func ConsumeBound(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
-	return ConsumeBoundTx(ctx, postgres.WrapTx(tx), approvalID, workspaceID, requesterID, action, resourceType, resourceID, requestHash)
-}
-
 func ConsumeBoundTx(ctx context.Context, tx database.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
 	if len(requestHash) != sha256.Size || approvalID == uuid.Nil {
 		return ErrNotReady
@@ -278,10 +267,6 @@ func (s *Service) ValidateApprovedBound(ctx context.Context, approvalID, workspa
 		return ErrNotReady
 	}
 	return nil
-}
-
-func ValidateConsumedBound(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
-	return ValidateConsumedBoundTx(ctx, postgres.WrapTx(tx), approvalID, workspaceID, requesterID, action, resourceType, resourceID, requestHash)
 }
 
 func ValidateConsumedBoundTx(ctx context.Context, tx database.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {

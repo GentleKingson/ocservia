@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,7 +25,7 @@ func TestLocalAuthenticationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	s, err := New(ctx, pool, Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	s, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

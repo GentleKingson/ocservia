@@ -55,7 +55,7 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.New(pool, "", "test", signer)}
+	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test"}`, workspaceID.String())))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()))
@@ -172,7 +172,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	}()
 	artifactData := []byte("encrypted artifact response")
 	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
-	server := &Server{rbac: rbac.New(pool), certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
+	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), certificates: certificatestore.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
 	manager := auth.Principal{IdentityID: managerID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
 	security := auth.Principal{IdentityID: securityID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
 	tests := []struct {
@@ -222,7 +222,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
 		t.Fatal(err)
 	}
-	failureServer := &Server{certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData}, grantSigner)}
+	failureServer := &Server{certificates: certificatestore.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData}, grantSigner)}
 	failureRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
 	failureRequest.SetPathValue("artifact_id", artifactID.String())
 	failureRequest.Header.Set("X-Artifact-Token", token)
@@ -237,7 +237,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 			if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
 				t.Fatal(err)
 			}
-			terminalServer := &Server{certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, terminalArtifactFixture{pool: pool, artifactID: artifactID, state: terminalState, data: artifactData}, grantSigner)}
+			terminalServer := &Server{certificates: certificatestore.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, terminalArtifactFixture{pool: pool, artifactID: artifactID, state: terminalState, data: artifactData}, grantSigner)}
 			terminalRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
 			terminalRequest.SetPathValue("artifact_id", artifactID.String())
 			terminalRequest.Header.Set("X-Artifact-Token", token)
@@ -289,7 +289,7 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 		}
 	}()
 
-	server := &Server{rbac: rbac.New(pool), operations: apiOperationService(pool)}
+	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	request.SetPathValue("node_id", nodeID.String())
 	request.Header.Set("Content-Type", "application/json")
@@ -342,7 +342,7 @@ func TestConfigPlanApprovalResolvesNodeScopedApprover(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM approval_requests WHERE id=$2; DELETE FROM config_plans WHERE id=$3; DELETE FROM operations WHERE id=$3; DELETE FROM nodes WHERE id=$4; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$7`, pgx.QueryExecModeSimpleProtocol, bindingID, approvalID, operationID, nodeID, requesterID, approverID, workspaceID)
 	}()
 	operationService := apiOperationService(pool)
-	server := &Server{rbac: rbac.New(pool), approvals: approvalstore.New(pool), configplans: configplanstore.New(pool, operationService)}
+	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), approvals: approvalstore.NewBackend(postgres.WrapPool(pool)), configplans: configplanstore.NewBackend(postgres.WrapPool(pool), operationService)}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/approval-requests/"+approvalID.String(), nil)
 	request.SetPathValue("approval_id", approvalID.String())
 	if _, err := server.authorizeRoute(request, auth.Principal{IdentityID: approverID, Issuer: "integration"}); err != nil {
@@ -426,7 +426,7 @@ func TestApprovalDetailRequiresEveryAuthorityScopeIntegration(t *testing.T) {
 		}
 	}()
 
-	server := &Server{rbac: rbac.New(pool), approvals: approvalstore.New(pool)}
+	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), approvals: approvalstore.NewBackend(postgres.WrapPool(pool))}
 	readApproval := func(identityID uuid.UUID) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodGet, "/api/v1/approval-requests/"+approvalID.String(), nil)
 		request.SetPathValue("approval_id", approvalID.String())
@@ -461,7 +461,7 @@ func TestApprovalDetailRequiresEveryAuthorityScopeIntegration(t *testing.T) {
 func apiOperationService(pool *pgxpool.Pool) *operationstore.Service {
 	var seed [32]byte
 	seed[0] = 7
-	return operationstore.NewWithSigner(pool, 50, commandauth.NewSignerFromSeed(seed))
+	return operationstore.NewBackend(postgres.WrapPool(pool), 50, commandauth.NewSignerFromSeed(seed))
 }
 
 // TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations drives the full
@@ -516,7 +516,7 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	}()
 
 	breakGlassToken := strings.Repeat("break-glass-boundary-token-", 2)
-	authService, err := auth.New(ctx, pool, auth.Config{
+	authService, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{
 		Issuer: "https://id.example.test", ClientID: "client", ClientSecret: "secret",
 		RedirectURL: "https://admin.example.test/api/v1/auth/callback",
 		SessionKey:  make([]byte, 32), SessionTTL: time.Hour,
@@ -525,9 +525,9 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, 15*time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, 15*time.Second, false, "", 1)
 	server.EnableBrowserOrigin("https://admin.example.test")
-	server.EnableAuthorization(authService, rbac.New(pool), approvalstore.New(pool), nil)
+	server.EnableAuthorization(authService, rbac.NewBackend(postgres.WrapPool(pool)), approvalstore.NewBackend(postgres.WrapPool(pool)), nil)
 	server.EnableOperations(apiOperationService(pool))
 
 	do := func(method, path, origin, fetchSite, contentType, cookie, idempotencyKey, body string) *httptest.ResponseRecorder {
@@ -645,7 +645,7 @@ func TestBatchRouteAllowsNodeScopedPerItemAuthorization(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM nodes WHERE workspace_id=$2; DELETE FROM identities WHERE id=$3; DELETE FROM workspaces WHERE id=$2`, bindingID, workspaceID, identityID)
 	}()
 
-	server := &Server{rbac: rbac.New(pool)}
+	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool))}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.test/api/v1/user-batches", nil)
 	if err != nil {
 		t.Fatal(err)

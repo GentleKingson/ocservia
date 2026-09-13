@@ -20,12 +20,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/identityprofile"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
 
@@ -54,7 +52,6 @@ type Config struct {
 }
 
 type Service struct {
-	pool                *pgxpool.Pool
 	backend             database.Backend
 	localEnabled        bool
 	oidcEnabled         bool
@@ -96,17 +93,6 @@ type claims struct {
 	Email   string `json:"email"`
 	Name    string `json:"name"`
 	Nonce   string `json:"nonce"`
-}
-
-func New(_ context.Context, pool *pgxpool.Pool, cfg Config) (*Service, error) {
-	if pool == nil {
-		return nil, errors.New("invalid authentication configuration")
-	}
-	s, err := NewBackend(postgres.WrapPool(pool), cfg)
-	if err == nil {
-		s.pool = pool
-	}
-	return s, err
 }
 
 // NewBackend uses the same session and credential workflows with backend-owned

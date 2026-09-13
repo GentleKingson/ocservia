@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,7 +79,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
 	registrar := &recordingRegistrar{}
-	manager, err := NewManager(pool, signer, registrar, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, registrar, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 
 	// A different owner cannot take the node while the lease is unexpired.
 	rivalRegistrar := &recordingRegistrar{}
-	rival, err := NewManager(pool, signer, rivalRegistrar, 30*time.Second, testLogger())
+	rival, err := NewManagerBackend(postgres.WrapPool(pool), signer, rivalRegistrar, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new rival manager: %v", err)
 	}
@@ -162,7 +163,7 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
 	ownerRegistrar := &recordingRegistrar{}
-	owner, err := NewManager(pool, signer, ownerRegistrar, time.Second, testLogger())
+	owner, err := NewManagerBackend(postgres.WrapPool(pool), signer, ownerRegistrar, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new owner manager: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 	// Wait past the lease deadline, then take over with a higher epoch.
 	time.Sleep(1200 * time.Millisecond)
 	successorRegistrar := &recordingRegistrar{}
-	successor, err := NewManager(pool, signer, successorRegistrar, 30*time.Second, testLogger())
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, successorRegistrar, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -225,7 +226,7 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 func TestManagerRegistrationFailureFailsClosedIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{failtures: true}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{failtures: true}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -238,7 +239,7 @@ func TestManagerRegistrationFailureFailsClosedIntegration(t *testing.T) {
 	}
 	// The failed open released its lease, so a healthy owner takes over
 	// immediately without waiting out the TTL.
-	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -262,7 +263,7 @@ func TestManagerRenewalRefreshesFenceIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
 	registrar := &recordingRegistrar{}
-	manager, err := NewManager(pool, signer, registrar, 4*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, registrar, 4*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -317,7 +318,7 @@ func fenceClaimsMatchCapabilities(fence *agentv1.ConnectionFenceV2, want []strin
 func TestManagerDisconnectEndsTermWhileRunIsActiveIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	owner, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	owner, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new owner manager: %v", err)
 	}
@@ -350,7 +351,7 @@ func TestManagerDisconnectEndsTermWhileRunIsActiveIntegration(t *testing.T) {
 		t.Fatalf("ended owner bind error = %v, want ErrNotOwner", err)
 	}
 
-	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -387,7 +388,7 @@ func TestManagerDisconnectEndsTermWhileRunIsActiveIntegration(t *testing.T) {
 func TestManagerCloseSessionMatchesTheExactTermIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -416,7 +417,7 @@ func TestManagerCloseSessionMatchesTheExactTermIntegration(t *testing.T) {
 	// The exact term closes on demand, expires the lease immediately, and
 	// lets a rival take over through a real Acquire. The closed manager
 	// itself must fail closed forever after, never legacy.
-	rival, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	rival, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new rival manager: %v", err)
 	}
@@ -442,7 +443,7 @@ func TestManagerCloseSessionMatchesTheExactTermIntegration(t *testing.T) {
 func TestManagerTransportEventGapReconcilesConnectionInventoryIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -537,7 +538,7 @@ func TestManagerTransportEventGapReconcilesConnectionInventoryIntegration(t *tes
 	if _, _, err := manager.BindOperation(context.Background(), deadNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), FencingCapability); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("disconnected owner bind = %v, want ErrNotOwner", err)
 	}
-	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -567,7 +568,7 @@ func TestManagerTransportEventGapReconcilesConnectionInventoryIntegration(t *tes
 func TestManagerTransportEventGapRejectsNonAuthoritativeInventoryTermsIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -641,7 +642,7 @@ func TestManagerTransportEventGapRejectsNonAuthoritativeInventoryTermsIntegratio
 func TestManagerTransportEventGapDoesNotCloseConcurrentReplacementIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -728,7 +729,7 @@ func TestManagerTransportEventGapDoesNotCloseConcurrentReplacementIntegration(t 
 func TestManagerTransportEventGapWaitsForBoundedConnectionPublicationIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -838,7 +839,7 @@ func TestManagerTransportEventGapWaitsForBoundedConnectionPublicationIntegration
 func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 2*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 2*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -903,7 +904,7 @@ func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 func TestManagerReopenRegistrationFailureRetiresTheOldTermIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -923,7 +924,7 @@ func TestManagerReopenRegistrationFailureRetiresTheOldTermIntegration(t *testing
 	}
 	// The failed reopen released its own term, so a successor takes the node
 	// over through a real Acquire with a strictly higher epoch.
-	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -946,7 +947,7 @@ func TestManagerReopenRegistrationFailureRetiresTheOldTermIntegration(t *testing
 func TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -985,7 +986,7 @@ func TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration(t *testing.
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -1038,7 +1039,7 @@ func TestObserverFailsClosedOnAStaleRegisteredFenceIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
 	registry := &registryFence{}
-	manager, err := NewManager(pool, signer, registry, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, registry, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -1048,7 +1049,7 @@ func TestObserverFailsClosedOnAStaleRegisteredFenceIntegration(t *testing.T) {
 		t.Fatalf("open session: %v", err)
 	}
 
-	observer, err := NewObserver(pool, registry, signer)
+	observer, err := NewObserverBackend(postgres.WrapPool(pool), registry, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -1108,7 +1109,7 @@ func TestObserverFailsClosedOnAStaleRegisteredFenceIntegration(t *testing.T) {
 	// the failed reopen's epoch and registers again, which reopens the
 	// observer path on exactly the successor's term.
 	registry.failures = false
-	successor, err := NewManager(pool, signer, registry, 30*time.Second, testLogger())
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, registry, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -1148,7 +1149,7 @@ func TestObserverGuardSpansTheMutationAgainstTheReopenAdvanceIntegration(t *test
 	pool := testPool(t)
 	signer, _ := testSigner(t)
 	registry := &registryFence{}
-	manager, err := NewManager(pool, signer, registry, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, registry, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -1157,7 +1158,7 @@ func TestObserverGuardSpansTheMutationAgainstTheReopenAdvanceIntegration(t *test
 	if err != nil {
 		t.Fatalf("open session: %v", err)
 	}
-	observer, err := NewObserver(pool, registry, signer)
+	observer, err := NewObserverBackend(postgres.WrapPool(pool), registry, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -1230,7 +1231,7 @@ func TestObserverGuardSpansTheMutationAgainstTheReopenAdvanceIntegration(t *test
 func TestManagerExecuteFencedRunsTheActionUnderTheNodeLockIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}

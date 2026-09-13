@@ -29,8 +29,9 @@ type transaction struct {
 
 func WrapPool(pool *pgxpool.Pool) *Backend { return &Backend{store{pool}, pool} }
 
-// WrapTx is the temporary legacy bridge. It borrows the exact pgx transaction,
-// not its pool, so migrated stores cannot accidentally commit separately.
+// WrapTx adapts owner migration transactions and explicit test fixtures. It
+// borrows the exact pgx transaction, not its pool, so domain stores cannot
+// accidentally commit separately.
 func WrapTx(tx pgx.Tx) database.Tx { return &transaction{store{tx}, tx} }
 
 func (b *Backend) Supports(c database.Capability) bool {

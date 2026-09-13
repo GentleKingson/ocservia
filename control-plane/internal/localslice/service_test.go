@@ -138,7 +138,7 @@ func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
 		State:                      agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: encoded,
 		AcceptedAt: timestamppb.New(accepted), CompletedAt: timestamppb.New(accepted.Add(time.Second)),
 	}
-	verification := privdattestation.VerifyResult(context.Background(), nil, nodeID, envelope, result)
+	verification := privdattestation.VerifyResultTransaction(context.Background(), nil, nodeID, envelope, result)
 	if verification.Status != "missing" || verification.FailureReason != "receipt_missing" {
 		t.Fatalf("missing root receipt verification = %+v", verification)
 	}

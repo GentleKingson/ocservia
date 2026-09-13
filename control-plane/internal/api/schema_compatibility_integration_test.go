@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,7 +40,7 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", expected)
+	server := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", expected)
 	defer server.closeEventStreams()
 	var originalCurrent, originalMinimum int64
 	if err := pool.QueryRow(ctx, `SELECT "current_schema", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton`).Scan(&originalCurrent, &originalMinimum); err != nil {
@@ -94,7 +95,7 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 	if body["schema_version"] != float64(future) {
 		t.Fatalf("compatible newer schema_version = %v, want %d", body["schema_version"], future)
 	}
-	oldServer := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", expected-1)
+	oldServer := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", expected-1)
 	defer oldServer.closeEventStreams()
 	readyStatus("Controller below declared minimum", oldServer, http.StatusServiceUnavailable)
 
@@ -104,7 +105,7 @@ func TestReadinessHonorsSchemaCompatibilityContractIntegration(t *testing.T) {
 	readyStatus("newer schema without declaration", server, http.StatusServiceUnavailable)
 
 	reset()
-	newServer := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", future)
+	newServer := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", future)
 	defer newServer.closeEventStreams()
 	readyStatus("database older than Controller", newServer, http.StatusServiceUnavailable)
 }

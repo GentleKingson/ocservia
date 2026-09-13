@@ -21,6 +21,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -499,7 +500,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 		t.Fatalf("revoked node retry error = %v", err)
 	}
 	transport := &failingTrustTransport{updateFailures: 1, closeFailures: 1}
-	worker, err := NewTrustConvergenceWorker(pool, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker, err := NewTrustConvergenceWorkerBackend(postgres.WrapPool(pool), transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +739,7 @@ func newTestService(t *testing.T, pool *pgxpool.Pool, controllerEndpointID, cont
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(pool, controllerEndpointID, controllerVersion, signer)
+	return NewBackend(postgres.WrapPool(pool), controllerEndpointID, controllerVersion, signer)
 }
 
 func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {
@@ -956,7 +957,7 @@ func TestAuthorizeSessionOwnerContentionForcesRetryIntegration(t *testing.T) {
 	copy(fixedNode[:], nodeID[:])
 	copy(fixedEndpoint[:], endpoint)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	oldOwner, err := ownersession.NewManager(pool, service.signer, &recordingRegistrar{}, 2*time.Second, logger)
+	oldOwner, err := ownersession.NewManagerBackend(postgres.WrapPool(pool), service.signer, &recordingRegistrar{}, 2*time.Second, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -964,7 +965,7 @@ func TestAuthorizeSessionOwnerContentionForcesRetryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open old owner session: %v", err)
 	}
-	successor, err := ownersession.NewManager(pool, service.signer, &recordingRegistrar{}, 30*time.Second, logger)
+	successor, err := ownersession.NewManagerBackend(postgres.WrapPool(pool), service.signer, &recordingRegistrar{}, 30*time.Second, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,11 +1052,11 @@ func TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration(t *testing.
 	}
 	requestCtx, cancelRequest := context.WithCancel(ctx)
 	registrar := &cancellingRegistrar{cancelled: cancelRequest}
-	manager, err := ownersession.NewManager(pool, signer, registrar, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manager, err := ownersession.NewManagerBackend(postgres.WrapPool(pool), signer, registrar, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
-	service := NewWithOwnerSessions(pool, string(endpointFixture(3)), "test", signer, manager)
+	service := NewWithOwnerSessionsBackend(postgres.WrapPool(pool), string(endpointFixture(3)), "test", signer, manager)
 	// Dedicated endpoint seed, see TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration.
 	endpoint := endpointFixture(21)
 	token := createToken(t, service, workspaceID, endpoint)
@@ -1088,7 +1089,7 @@ func TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration(t *testing.
 
 	// The lease was released with the term, so a healthy owner takes over
 	// immediately instead of waiting out the TTL.
-	successor, err := ownersession.NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	successor, err := ownersession.NewManagerBackend(postgres.WrapPool(pool), signer, &recordingRegistrar{}, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}

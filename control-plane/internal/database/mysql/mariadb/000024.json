@@ -1,0 +1,111 @@
+{
+  "version": 24,
+  "previous_checksum": "1498bc98fe7699fc70ad564c67bca1e189dd44413bff2c47ddfbee53eb151c5d",
+  "engine": "mariadb",
+  "controller_schema": 35,
+  "minimum_controller_schema": 35,
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "telemetry_5m_retention_index",
+          "object": "telemetry_rollups_5m",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_5m ADD INDEX telemetry_5m_retention_idx(bucket_at,exact_row_id)",
+          "checksum": "89a21dff2b289e02efb40cebbaa98c87a58d3ad5c125974702410d546e639851",
+          "before": "c54fa6942bc37a6a3db91620f129160fd251be6b5ce041bc44fe2c42a50641f8",
+          "after": "6ddecc8b02cab18a8c779a41e2fb8b78a80bd4e35731e028699bd72b59658509"
+        },
+        {
+          "name": "telemetry_1h_retention_index",
+          "object": "telemetry_rollups_1h",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_1h ADD INDEX telemetry_1h_retention_idx(bucket_at,exact_row_id)",
+          "checksum": "26adfe95e795c1d71efbd6425a93e67dd872851414e566a39df7fd35abca7b92",
+          "before": "8b2f3a8cb8a8709df6136e29456e1ab7d9cacef077c616722db6cf7ea2cded16",
+          "after": "aa58b759deafb7be1780902da3d6bbdb1cdc08b97e0b5788f97584d21293d9e9"
+        },
+        {
+          "name": "telemetry_prune_rollups",
+          "object": "telemetry_prune_rollups",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_prune_rollups(IN maintenance_time BIGINT)\nSQL SECURITY DEFINER\nBEGIN\n DECLARE clock_at BIGINT;\n DECLARE cut_hour BIGINT;\n SET clock_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6));\n IF maintenance_time IS NULL OR maintenance_time\u003cclock_at-300000000 OR maintenance_time\u003eclock_at+300000000 THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry maintenance clock outside permitted window';\n END IF;\n SET maintenance_time=LEAST(maintenance_time,clock_at);\n SET cut_hour=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',DATE_SUB(TIMESTAMPADD(MICROSECOND,maintenance_time,'2000-01-01'),INTERVAL 13 MONTH));\n DELETE FROM telemetry_rollups_5m WHERE bucket_at\u003cmaintenance_time-7776000000000 ORDER BY bucket_at,exact_row_id LIMIT 1000;\n DELETE FROM telemetry_rollups_1h WHERE bucket_at\u003ccut_hour ORDER BY bucket_at,exact_row_id LIMIT 1000;\nEND",
+          "checksum": "048427a97fda0638a51cd74c93721f9806cf13029b27e3b25178b81173ef3a64",
+          "before": "",
+          "after": "add95b6f96840ffe76497e0cbf2a61e25b3d0a1526b64e57387a144a9b5415a6"
+        },
+        {
+          "name": "telemetry_retire_before_v24",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "DROP PROCEDURE telemetry_retire_shards",
+          "checksum": "670a8b46146e65b61ebf998095746a56fa065158e568bf74de022ee14cfc9bbd",
+          "before": "0353647161914c4e6f8d0277168ffd2dfb8a0cb8331caf8b4da37541895ac7b4",
+          "after": ""
+        },
+        {
+          "name": "telemetry_retire_bounded_v24",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_retire_shards(IN cutoff BIGINT)\nSQL SECURITY DEFINER\nBEGIN\n DECLARE clock_at BIGINT;\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SET clock_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6));\n IF cutoff IS NULL OR cutoff\u003eclock_at-1209600000000+300000000 THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry retention cutoff outside permitted window';\n END IF;\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL OR migration_state\u003c\u003e'complete' THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry history migration is incomplete';\n END IF;\n UPDATE telemetry_sample_shards SET state='retired' WHERE state='active' AND end_at\u003c=LEAST(cutoff,clock_at-1209600000000) ORDER BY start_at LIMIT 1;\nEND",
+          "checksum": "5faf97a2d7c3b3d3dbeb9367fec1b1db627a2533a1eb5fd9eb3d674e7c6df92e",
+          "before": "",
+          "after": "a5f7cd399022229c6d201d64e75a4aebbcdc98d47e2819fdf32720838658df6a"
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "telemetry_5m_retention_index",
+          "object": "telemetry_rollups_5m",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_5m ADD INDEX telemetry_5m_retention_idx(bucket_at,exact_row_id)",
+          "checksum": "89a21dff2b289e02efb40cebbaa98c87a58d3ad5c125974702410d546e639851",
+          "before": "c54fa6942bc37a6a3db91620f129160fd251be6b5ce041bc44fe2c42a50641f8",
+          "after": "6ddecc8b02cab18a8c779a41e2fb8b78a80bd4e35731e028699bd72b59658509"
+        },
+        {
+          "name": "telemetry_1h_retention_index",
+          "object": "telemetry_rollups_1h",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_1h ADD INDEX telemetry_1h_retention_idx(bucket_at,exact_row_id)",
+          "checksum": "26adfe95e795c1d71efbd6425a93e67dd872851414e566a39df7fd35abca7b92",
+          "before": "8b2f3a8cb8a8709df6136e29456e1ab7d9cacef077c616722db6cf7ea2cded16",
+          "after": "aa58b759deafb7be1780902da3d6bbdb1cdc08b97e0b5788f97584d21293d9e9"
+        },
+        {
+          "name": "telemetry_prune_rollups",
+          "object": "telemetry_prune_rollups",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_prune_rollups(IN maintenance_time BIGINT)\nSQL SECURITY DEFINER\nBEGIN\n DECLARE clock_at BIGINT;\n DECLARE cut_hour BIGINT;\n SET clock_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6));\n IF maintenance_time IS NULL OR maintenance_time\u003cclock_at-300000000 OR maintenance_time\u003eclock_at+300000000 THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry maintenance clock outside permitted window';\n END IF;\n SET maintenance_time=LEAST(maintenance_time,clock_at);\n SET cut_hour=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',DATE_SUB(TIMESTAMPADD(MICROSECOND,maintenance_time,'2000-01-01'),INTERVAL 13 MONTH));\n DELETE FROM telemetry_rollups_5m WHERE bucket_at\u003cmaintenance_time-7776000000000 ORDER BY bucket_at,exact_row_id LIMIT 1000;\n DELETE FROM telemetry_rollups_1h WHERE bucket_at\u003ccut_hour ORDER BY bucket_at,exact_row_id LIMIT 1000;\nEND",
+          "checksum": "048427a97fda0638a51cd74c93721f9806cf13029b27e3b25178b81173ef3a64",
+          "before": "",
+          "after": "add95b6f96840ffe76497e0cbf2a61e25b3d0a1526b64e57387a144a9b5415a6"
+        },
+        {
+          "name": "telemetry_retire_before_v24",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "DROP PROCEDURE telemetry_retire_shards",
+          "checksum": "670a8b46146e65b61ebf998095746a56fa065158e568bf74de022ee14cfc9bbd",
+          "before": "0353647161914c4e6f8d0277168ffd2dfb8a0cb8331caf8b4da37541895ac7b4",
+          "after": ""
+        },
+        {
+          "name": "telemetry_retire_bounded_v24",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_retire_shards(IN cutoff BIGINT)\nSQL SECURITY DEFINER\nBEGIN\n DECLARE clock_at BIGINT;\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n SET clock_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6));\n IF cutoff IS NULL OR cutoff\u003eclock_at-1209600000000+300000000 THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry retention cutoff outside permitted window';\n END IF;\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL OR migration_state\u003c\u003e'complete' THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry history migration is incomplete';\n END IF;\n UPDATE telemetry_sample_shards SET state='retired' WHERE state='active' AND end_at\u003c=LEAST(cutoff,clock_at-1209600000000) ORDER BY start_at LIMIT 1;\nEND",
+          "checksum": "5faf97a2d7c3b3d3dbeb9367fec1b1db627a2533a1eb5fd9eb3d674e7c6df92e",
+          "before": "",
+          "after": "a5f7cd399022229c6d201d64e75a4aebbcdc98d47e2819fdf32720838658df6a"
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

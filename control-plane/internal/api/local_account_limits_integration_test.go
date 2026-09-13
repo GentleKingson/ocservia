@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -85,7 +86,7 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 	}
 	// Account saturation must not enter OIDC or the emergency credential path.
 	token := uuid.NewString()
-	servers[0].auth, err = auth.New(ctx, pool, auth.Config{LocalEnabled: true, Issuer: "https://idp.example.test", ClientID: "client", RedirectURL: authTestOrigin + "/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
+	servers[0].auth, err = auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, Issuer: "https://idp.example.test", ClientID: "client", RedirectURL: authTestOrigin + "/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
 	if err != nil {
 		t.Fatal(err)
 	}

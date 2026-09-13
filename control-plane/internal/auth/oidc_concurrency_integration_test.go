@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -69,7 +70,7 @@ func TestOIDCDisableCommitOrdersIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer loginPool.Close()
-			service, err := New(ctx, loginPool, Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+			service, err := NewBackend(postgres.WrapPool(loginPool), Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 			if err != nil {
 				t.Fatal(err)
 			}

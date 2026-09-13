@@ -22,10 +22,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // FencingCapability is the session capability an agent advertises to accept
@@ -182,16 +180,6 @@ type Manager struct {
 	sessions  map[[16]byte]*nodeSession
 	ended     map[[16]byte]endedReason
 	nodeLocks map[[16]byte]*sync.Mutex
-}
-
-// NewManager mints the process owner identity and prepares per-node lease
-// management. The signer must be the production Controller signing key; the
-// registrar is the transport client of this deployment unit.
-func NewManager(pool *pgxpool.Pool, signer *commandauth.Signer, registrar FenceRegistrar, leaseTTL time.Duration, logger *slog.Logger) (*Manager, error) {
-	if pool == nil {
-		return nil, errors.New("ownersession: pool, signer, and registrar are required")
-	}
-	return NewManagerBackend(postgres.WrapPool(pool), signer, registrar, leaseTTL, logger)
 }
 
 func NewManagerBackend(backend database.Backend, signer *commandauth.Signer, registrar FenceRegistrar, leaseTTL time.Duration, logger *slog.Logger) (*Manager, error) {
@@ -883,16 +871,6 @@ type Observer struct {
 	signer     *commandauth.Signer
 	bindingTTL time.Duration
 	now        func() time.Time
-}
-
-// NewObserver prepares the executor used by API and scheduler role processes
-// for artifact, close, and state-update fencing. The pool is the PostgreSQL
-// ownership authority that guards every mutation.
-func NewObserver(pool *pgxpool.Pool, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
-	if pool == nil {
-		return nil, errors.New("ownersession: observer requires the ownership authority pool")
-	}
-	return NewObserverBackend(postgres.WrapPool(pool), reader, signer)
 }
 
 func NewObserverBackend(backend database.Backend, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {

@@ -10,11 +10,9 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type TrustTransport interface {
@@ -35,25 +33,12 @@ type trustConvergenceJob struct {
 	State transportv1.NodeTrustState
 }
 
-func NewTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTransport, logger *slog.Logger) (*TrustConvergenceWorker, error) {
-	return NewTrustConvergenceWorkerBackend(postgres.WrapPool(pool), transport, logger)
-}
-
 func NewTrustConvergenceWorkerBackend(backend database.Backend, transport TrustTransport, logger *slog.Logger) (*TrustConvergenceWorker, error) {
 	workerID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
 	}
 	return &TrustConvergenceWorker{backend: backend, transport: transport, logger: logger, workerID: workerID}, nil
-}
-
-// NewFencedTrustConvergenceWorker runs trust updates and connection closes
-// inside the connection owner's fencing interval, so a stale owner cannot
-// drive connection state and no binding outlives the term the ownership
-// authority backed at mutation time. Nodes without a registered fence keep
-// the unfenced compatibility path.
-func NewFencedTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTransport, fences ownersession.FencedExecutor, logger *slog.Logger) (*TrustConvergenceWorker, error) {
-	return NewFencedTrustConvergenceWorkerBackend(postgres.WrapPool(pool), transport, fences, logger)
 }
 
 func NewFencedTrustConvergenceWorkerBackend(backend database.Backend, transport TrustTransport, fences ownersession.FencedExecutor, logger *slog.Logger) (*TrustConvergenceWorker, error) {

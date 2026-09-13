@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -42,7 +43,7 @@ func TestListEventsDescendingReadsNewestFirstIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := NewWithSigner(pool, integrationCommandSigner())
+	service := NewBackend(postgres.WrapPool(pool), integrationCommandSigner())
 	eventIDs := make([]uuid.UUID, 0, 3)
 	for range 3 {
 		eventID := uuid.Must(uuid.NewV7())
@@ -61,7 +62,7 @@ func TestListEventsDescendingReadsNewestFirstIntegration(t *testing.T) {
 		eventIDs = append(eventIDs, eventID)
 	}
 
-	service = New(pool)
+	service = NewBackend(postgres.WrapPool(pool), nil)
 	ascending, hasMore, err := service.ListEventsInWorkspace(ctx, workspaceID, uuid.Nil, 50, ListEventsAscending)
 	if err != nil {
 		t.Fatal(err)

@@ -11,11 +11,8 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ErrNotLeader is returned when the session no longer holds the fencing
@@ -57,10 +54,7 @@ func NewIdentity() (Identity, error) {
 
 // Fence asserts leadership inside a caller-owned transaction before commit.
 type Fence interface {
-	AssertLeader(ctx context.Context, tx pgx.Tx) error
-	// AssertCurrent proves leadership in a dedicated transaction. It does not
-	// fence any other statement.
-	AssertCurrent(ctx context.Context, pool *pgxpool.Pool) error
+	AssertTransaction(ctx context.Context, tx database.Tx) error
 }
 
 // Session is one acquired leadership term. It is immutable after Acquire, so
@@ -71,15 +65,6 @@ type Session struct {
 	epoch    int64
 	leaseTTL time.Duration
 }
-
-// Acquire takes the scheduler leadership lease. A takeover succeeds only
-// after the previous lease expired by database time; every term, including
-// a same-identity reacquire, receives a strictly higher fencing epoch.
-func Acquire(ctx context.Context, pool *pgxpool.Pool, identity Identity, leaseTTL time.Duration) (*Session, error) {
-	return AcquireBackend(ctx, schedulerBackend(pool), identity, leaseTTL)
-}
-
-func schedulerBackend(pool *pgxpool.Pool) database.Backend { return postgres.WrapPool(pool) }
 
 func AcquireBackend(ctx context.Context, backend database.Backend, identity Identity, leaseTTL time.Duration) (*Session, error) {
 	epoch, err := schedulerlease.Acquire(ctx, backend, schedulerlease.Owner{InstanceID: identity.InstanceID, Incarnation: identity.Incarnation}, leaseTTL)
@@ -96,40 +81,12 @@ func (s *Session) Epoch() int64 { return s.epoch }
 // Identity returns the owner identity bound to this term.
 func (s *Session) Identity() Identity { return s.identity }
 
-// Renew extends the lease for the current term. It fails when leadership was
-// taken over or the lease expired; the caller must cancel its leader context.
-// Renew never mutates the immutable session; the local deadline is advanced
-// by the owning Runner, anchored before this call started.
-func (s *Session) Renew(ctx context.Context, pool *pgxpool.Pool) error {
-	return s.RenewBackend(ctx, schedulerBackend(pool))
-}
-
 func (s *Session) RenewBackend(ctx context.Context, backend database.Backend) error {
 	return schedulerlease.Renew(ctx, backend, schedulerlease.Owner{InstanceID: s.identity.InstanceID, Incarnation: s.identity.Incarnation}, s.epoch, s.leaseTTL)
 }
 
-// AssertLeader verifies inside the caller's transaction, immediately before
-// commit, that this session still owns an unexpired lease with the exact
-// identity and fencing epoch. The expiry check must use clock_timestamp(),
-// the real wall clock: now() freezes at transaction start, so a lease that
-// expired while a long fenced transaction was open would still pass an
-// now()-based assert. The row share lock serializes the commit against a
-// concurrent takeover update, so an assert that succeeds cannot be
-// superseded before the fenced transaction commits. A rejected assert must
-// abort its transaction, releasing any lock acquired before the clock recheck.
-func (s *Session) AssertLeader(ctx context.Context, tx pgx.Tx) error {
-	return s.AssertTransaction(ctx, postgres.WrapTx(tx))
-}
-
 func (s *Session) AssertTransaction(ctx context.Context, tx database.Tx) error {
 	return schedulerlease.Assert(ctx, tx, schedulerlease.Owner{InstanceID: s.identity.InstanceID, Incarnation: s.identity.Incarnation}, s.epoch)
-}
-
-// AssertCurrent runs a dedicated transaction whose only purpose is to prove
-// current leadership. It does not fence any other statement and must not be
-// used to guard writes; use AssertLeader inside the writing transaction.
-func (s *Session) AssertCurrent(ctx context.Context, pool *pgxpool.Pool) error {
-	return s.AssertCurrentBackend(ctx, schedulerBackend(pool))
 }
 
 func (s *Session) AssertCurrentBackend(ctx context.Context, backend database.Backend) error {

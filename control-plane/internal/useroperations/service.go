@@ -17,13 +17,11 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -117,16 +115,8 @@ type Service struct {
 	batchSize int
 }
 
-func New(pool *pgxpool.Pool, users *userstate.Service) *Service {
-	return NewBackend(postgres.WrapPool(pool), users)
-}
-
 func NewBackend(backend database.Backend, users *userstate.Service) *Service {
 	return &Service{backend: backend, users: users, now: func() time.Time { return time.Now().UTC() }, newID: func() uuid.UUID { return uuid.Must(uuid.NewV7()) }, batchSize: DefaultGlobalConcurrency}
-}
-
-func NewWithConcurrency(pool *pgxpool.Pool, users *userstate.Service, concurrency int) *Service {
-	return NewWithConcurrencyBackend(postgres.WrapPool(pool), users, concurrency)
 }
 
 func NewWithConcurrencyBackend(backend database.Backend, users *userstate.Service, concurrency int) *Service {

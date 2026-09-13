@@ -2,13 +2,18 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/semantictest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
+	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,7 +27,13 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 		t.Fatal("OCSERV_TEST_OWNER_DATABASE_URL is required for fixture cleanup and the foreign-key cascade assertion")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fractional-hour offset exposes accidental session-local rollup origins.
+	config.ConnConfig.RuntimeParams["timezone"] = "Asia/Kathmandu"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +45,55 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 	}
 	defer ownerPool.Close()
 	owner := WrapPool(ownerPool)
+	if err := b.ValidateTelemetryRuntime(ctx); err != nil {
+		t.Fatalf("runtime capabilities after owner migration: %v", err)
+	}
+	t.Run("telemetry-privilege-upgrade", func(t *testing.T) {
+		var role string
+		if err := b.QueryRow(ctx, `SELECT current_user`).Scan(&role); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := owner.Exec(ctx, `GRANT DELETE,TRUNCATE ON telemetry_rollups_5m,telemetry_rollups_1h TO `+pgx.Identifier{role}.Sanitize()); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ValidateTelemetryRuntime(ctx); !errors.Is(err, database.ErrPermission) {
+			t.Fatalf("legacy unrestricted cleanup accepted: %v", err)
+		}
+		if err := migrations.GrantRuntimePrivileges(ctx, ownerPool, role); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ValidateTelemetryRuntime(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.Exec(ctx, `SELECT telemetry_ensure_month_partition(now())`); !errors.Is(err, database.ErrPermission) {
+			t.Fatalf("runtime partition DDL capability remains: %v", err)
+		}
+		if _, err := owner.Exec(ctx, `GRANT EXECUTE ON FUNCTION telemetry_ensure_month_partition(timestamptz) TO `+pgx.Identifier{role}.Sanitize()); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ValidateTelemetryRuntime(ctx); !errors.Is(err, database.ErrPermission) {
+			t.Fatalf("indirect DDL capability accepted: %v", err)
+		}
+		if err := migrations.GrantRuntimePrivileges(ctx, ownerPool, role); err != nil {
+			t.Fatal(err)
+		}
+	})
 	now := time.Now().UTC()
+	t.Run("startup-requires-attached-month", func(t *testing.T) {
+		month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		name := pgx.Identifier{"telemetry_samples_" + month.Format("200601")}.Sanitize()
+		if _, err := owner.Exec(ctx, `ALTER TABLE telemetry_samples DETACH PARTITION `+name); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := owner.Exec(ctx, `ALTER TABLE telemetry_samples ATTACH PARTITION `+name+` FOR VALUES FROM ('`+month.Format(time.RFC3339)+`') TO ('`+month.AddDate(0, 1, 0).Format(time.RFC3339)+`')`); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := b.ValidateTelemetryRuntime(ctx); !errors.Is(err, database.ErrConstraint) {
+			t.Fatalf("missing attached month accepted at startup: %v", err)
+		}
+	})
 	workspace, node, batch := uuid.New(), uuid.New(), uuid.New()
 	if _, err = b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'history',$2,now(),now())`, workspace, workspace.String()); err != nil {
 		t.Fatal(err)
@@ -55,14 +114,31 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	t.Run("unprovisioned-month-fails-closed", func(t *testing.T) {
+		at := now.AddDate(0, 6, 0)
+		err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			return NewTelemetryHistoryStore(tx).Insert(ctx, node, batch, []telemetryhistory.Sample{{SampledAt: at, Metric: "cpu_usage_ratio", Value: 1}})
+		})
+		if !errors.Is(err, database.ErrConstraint) {
+			t.Fatalf("missing month did not fail closed: %v", err)
+		}
+		var count int
+		if err := owner.QueryRow(ctx, `SELECT count(*) FROM ONLY telemetry_samples_default WHERE batch_id=$1 AND sampled_at=$2`, batch, at).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("sample leaked into default partition: %d %v", count, err)
+		}
+	})
 	semantictest.TelemetryHistoryWorkflow(t, semantictest.TelemetryHistoryHarness{
 		Backend: b, Now: now, Node: node, Batch: batch,
+		Prune: func(ctx context.Context, tx database.Tx, now time.Time) error {
+			_, err := tx.Exec(ctx, `SELECT telemetry_prune_rollups($1)`, now)
+			return err
+		},
 		SeedInfinity: func(at value.Timestamp) error {
-			_, err := b.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',7)`, node, batch, at)
+			_, err := owner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',7)`, node, batch, at)
 			return err
 		},
 		SeedOldRaw: func(at time.Time) error {
-			_, err := b.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',1)`, node, batch, at)
+			_, err := owner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',1)`, node, batch, at)
 			return err
 		},
 		SeedExpiredRollups: func(five, hour time.Time) error {
@@ -80,5 +156,70 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 			_, err := owner.Exec(ctx, `DELETE FROM telemetry_ingest_batches WHERE batch_id=$1`, batch)
 			return err
 		},
+	})
+	t.Run("partition-recovery-and-bounded-drop", func(t *testing.T) {
+		batch := uuid.New()
+		if _, err := b.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES($1,$2,2,'raw_history',$3,1)`, batch, node, now); err != nil {
+			t.Fatal(err)
+		}
+		month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -3, 0)
+		var names []string
+		for i := range 2 {
+			at := month.AddDate(0, i, 0).Add(time.Hour)
+			start := month.AddDate(0, i, 0)
+			name := "telemetry_samples_" + start.Format("200601")
+			if _, err := owner.Exec(ctx, `CREATE TABLE `+pgx.Identifier{name}.Sanitize()+` PARTITION OF telemetry_samples FOR VALUES FROM ('`+start.Format(time.RFC3339)+`') TO ('`+start.AddDate(0, 1, 0).Format(time.RFC3339)+`')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',12)`, node, batch, at); err != nil {
+				t.Fatal(err)
+			}
+			names = append(names, "telemetry_samples_"+at.Format("200601"))
+		}
+		exists := func(name string) bool {
+			t.Helper()
+			var found bool
+			if err := owner.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, name).Scan(&found); err != nil {
+				t.Fatal(err)
+			}
+			return found
+		}
+		drop := func(rollback bool) error {
+			return database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+				var dropped int
+				if err := tx.QueryRow(ctx, `SELECT telemetry_drop_expired_partitions($1)`, now.Add(-14*24*time.Hour)).Scan(&dropped); err != nil {
+					return err
+				}
+				if dropped != 1 {
+					t.Fatalf("expected one dropped partition: %d", dropped)
+				}
+				if rollback {
+					return context.Canceled
+				}
+				return nil
+			})
+		}
+		if err := drop(true); !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		if !exists(names[0]) || !exists(names[1]) {
+			t.Fatal("partition drop escaped rollback")
+		}
+		if err := drop(false); err != nil {
+			t.Fatal(err)
+		}
+		if exists(names[0]) || !exists(names[1]) {
+			t.Fatal("drop did not stop after one month")
+		}
+		if err := drop(false); err != nil {
+			t.Fatal(err)
+		}
+		if exists(names[1]) {
+			t.Fatal("drop did not resume")
+		}
+		var count int
+		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_1h WHERE node_id=$1 AND metric='connection_rtt_ms' AND sample_count=1 AND avg_value=12`, node).Scan(&count); err != nil || count != 2 {
+			t.Fatalf("outage rollups missing: count=%d err=%v", count, err)
+		}
 	})
 }

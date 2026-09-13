@@ -12,10 +12,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -36,7 +34,6 @@ type BindingRequest struct {
 	Role, ResourceType, RequestID, Reason                               string
 }
 
-func New(pool *pgxpool.Pool) *Service              { return NewBackend(postgres.WrapPool(pool)) }
 func NewBackend(backend database.Backend) *Service { return &Service{backend: backend} }
 
 var roleActions = map[string][]string{

@@ -20,13 +20,11 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	localstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -99,31 +97,12 @@ func invalidEvent(reasonCode, detail string) error {
 	return &permanentInvalidEvent{reasonCode: reasonCode, detail: detail}
 }
 
-func New(pool *pgxpool.Pool) *Service {
-	return NewBackend(postgres.WrapPool(pool), nil)
-}
-
 func NewBackend(backend database.Backend, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, signer: signer, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func NewBackendWithCommandRecovery(backend database.Backend, signer *commandauth.Signer, recovery CommandRecoverer, authority RecoveryAuthority) *Service {
 	service := NewBackend(backend, signer)
-	service.commandRecovery, service.recoveryAuthority = recovery, authority
-	return service
-}
-
-// NewWithSigner configures recovery redispatches with a Controller signer.
-func NewWithSigner(pool *pgxpool.Pool, signer *commandauth.Signer) *Service {
-	service := New(pool)
-	service.signer = signer
-	return service
-}
-
-// NewWithCommandRecovery enables authoritative reconnect reconciliation while
-// leaving ownership acquisition and renewal inside ownersession.
-func NewWithCommandRecovery(pool *pgxpool.Pool, signer *commandauth.Signer, recovery CommandRecoverer, authority RecoveryAuthority) *Service {
-	service := NewWithSigner(pool, signer)
 	service.commandRecovery, service.recoveryAuthority = recovery, authority
 	return service
 }

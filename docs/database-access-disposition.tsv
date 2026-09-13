@@ -1,0 +1,253 @@
+path	disposition	boundary
+control-plane/internal/api/agent_upgrade_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/approvals.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, database, database/value, rbac, semanticpayload, useroperations
+control-plane/internal/api/audit.go	common-boundary	No driver/raw SQL; internal dependencies: audit/auditstore, database/value
+control-plane/internal/api/auth_handlers_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/auth_limits.go	non-database	No internal persistence dependency, driver or raw SQL
+control-plane/internal/api/auth_limits_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/auth_logging_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/authorization.go	common-boundary	No driver/raw SQL; internal dependencies: auth, database, rbac
+control-plane/internal/api/authorization_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/certificates.go	common-boundary	No driver/raw SQL; internal dependencies: certificates, database, operations
+control-plane/internal/api/configplans.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, configplan, database, operations, rbac
+control-plane/internal/api/enrollment.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, enrollment, ownersession
+control-plane/internal/api/event_streams.go	common-boundary	No driver/raw SQL; internal dependencies: auth, eventstream, localslice
+control-plane/internal/api/local_account_limits_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/local_slice.go	common-boundary	No driver/raw SQL; internal dependencies: database, localslice
+control-plane/internal/api/local_users.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, auth, database
+control-plane/internal/api/local_users_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/operations.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, database, operations, semanticpayload, telemetry
+control-plane/internal/api/privd_attestation.go	common-boundary	No driver/raw SQL; internal dependencies: privdattestation
+control-plane/internal/api/rbac.go	common-boundary	No driver/raw SQL; internal dependencies: rbac, rbac/rbacstore
+control-plane/internal/api/read_timeout_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/rollouts.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, database, operations
+control-plane/internal/api/schema_compatibility_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/server.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, auth, browserorigin, certificates, configplan, database, enrollment, eventstream, localslice, operations, ownersession, privdattestation, rbac, releasecatalog, telemetry, transportclient, useroperations, userstate
+control-plane/internal/api/server_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/telemetry.go	common-boundary	No driver/raw SQL; internal dependencies: database, database/value, telemetry
+control-plane/internal/api/telemetry_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/api/useroperations.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, database, rbac, useroperations
+control-plane/internal/approvals/service.go	common-boundary	No driver/raw SQL; internal dependencies: approvals/approvalstore, audit, database, database/value
+control-plane/internal/approvals/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/attestationtest/helper.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/audit/chain.go	common-boundary	No driver/raw SQL; internal dependencies: audit/auditstore, coordination, database, database/value
+control-plane/internal/audit/chain_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/auth/local.go	common-boundary	No driver/raw SQL; internal dependencies: authstore, database
+control-plane/internal/auth/local_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/auth/local_lifecycle.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, authstore, database
+control-plane/internal/auth/local_limits.go	common-boundary	No driver/raw SQL; internal dependencies: authstore, database
+control-plane/internal/auth/local_limits_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/auth/local_password.go	common-boundary	No driver/raw SQL; internal dependencies: audit, authstore, database
+control-plane/internal/auth/local_r4_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/auth/oidc_concurrency_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/auth/password_blocklist/README.md	non-database	Password dictionary/documentation keyword match; no executable database access
+control-plane/internal/auth/password_blocklist/common-passwords.txt	non-database	Password dictionary/documentation keyword match; no executable database access
+control-plane/internal/auth/service.go	common-boundary	No driver/raw SQL; internal dependencies: audit, authstore, database, database/value, identityprofile
+control-plane/internal/auth/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/auth/service_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/certificates/approval_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/certificates/http_signer.go	non-database	No internal persistence dependency, driver or raw SQL
+control-plane/internal/certificates/http_signer_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/certificates/secrets.go	common-boundary	No driver/raw SQL; internal dependencies: audit, certificates/store, database, database/value
+control-plane/internal/certificates/service.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, certificates/artifactstore, certificates/store, commandauth, coordination, database, database/value, operations, ownersession, privdattestation
+control-plane/internal/certificates/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/commandauth/authorization.go	non-database	No internal persistence dependency, driver or raw SQL
+control-plane/internal/commandauth/authorization_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/commandauth/fence_v2_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/commandlimit/limit.go	common-boundary	No driver/raw SQL; internal dependencies: database
+control-plane/internal/configplan/service.go	common-boundary	No driver/raw SQL; internal dependencies: certificates/store, configplan/store, database, database/value, operations
+control-plane/internal/configplan/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/connectionowner/owner.go	common-boundary	No driver/raw SQL; internal dependencies: connectionowner/ownerstore
+control-plane/internal/connectionowner/owner_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/coordination/exec.go	common-boundary	No driver/raw SQL; internal dependencies: database
+control-plane/internal/coordination/leadership.go	common-boundary	No driver/raw SQL; internal dependencies: database, schedulerlease
+control-plane/internal/coordination/leadership_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/coordination/maintenance.go	common-boundary	No driver/raw SQL; internal dependencies: database, schedulerlease
+control-plane/internal/coordination/runner.go	common-boundary	No driver/raw SQL; internal dependencies: database
+control-plane/internal/database/boundary_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/database/postgres/postgres.go	postgres-adapter	PostgreSQL driver and SQL stay inside the database adapter
+control-plane/internal/database/postgres/postgres_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/database/postgres/postgres_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/database/postgres/usage.go	postgres-adapter	PostgreSQL driver and SQL stay inside the database adapter
+control-plane/internal/enrollment/convergence.go	common-boundary	No driver/raw SQL; internal dependencies: database, enrollment/store, ownersession
+control-plane/internal/enrollment/service.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, commandauth, database, database/value, enrollment/store, ownersession
+control-plane/internal/enrollment/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/enrollment/validation_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/eventstream/hub.go	non-database	No internal persistence dependency, driver or raw SQL
+control-plane/internal/eventstream/hub_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/agent_upgrade_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/events_list_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/operations_summary_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/recovery_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/service.go	common-boundary	No driver/raw SQL; internal dependencies: commandauth, database, database/value, localslice/store, operations, telemetry
+control-plane/internal/localslice/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/service_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/watch_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/localslice/worker.go	common-boundary	No driver/raw SQL; internal dependencies: transportclient
+control-plane/internal/operations/agentupgrade.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, database, database/value, operations/store, semanticpayload, telemetry
+control-plane/internal/operations/agentupgrade_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/operations/recovery.go	common-boundary	No driver/raw SQL; internal dependencies: commandauth, commandlimit, connectionowner, database, database/value, operations/store
+control-plane/internal/operations/recovery_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/operations/service.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, certificates/store, commandauth, commandlimit, configplan/store, database, database/value, operations/store, releasecatalog, semanticpayload, telemetry
+control-plane/internal/operations/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/operations/worker.go	common-boundary	No driver/raw SQL; internal dependencies: commandlimit, database, operations/store, ownersession
+control-plane/internal/operations/worker_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/ownersession/artifact_acceptance_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/ownersession/owner.go	common-boundary	No driver/raw SQL; internal dependencies: commandauth, connectionowner, database, transportclient
+control-plane/internal/ownersession/owner_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/ownersession/owner_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/platform/app/app.go	common-boundary	No driver/raw SQL; internal dependencies: api, approvals, audit, auth, certificates, commandauth, configplan, coordination, database, database/connection, enrollment, localslice, operations, ownersession, platform/config, platform/telemetry, privdattestation, rbac, releasecatalog, telemetry, transportclient, trustserver, useroperations, userstate
+control-plane/internal/platform/config/auth_config_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/platform/config/config.go	common-boundary	No driver/raw SQL; internal dependencies: browserorigin, database/connection, eventstream
+control-plane/internal/platform/config/config_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/platform/config/database_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/platform/config/local_bootstrap_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/privdattestation/receipt.go	common-boundary	No driver/raw SQL; internal dependencies: database, privdattestation/attestationstore, semanticpayload
+control-plane/internal/privdattestation/receipt_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/privdattestation/service.go	common-boundary	No driver/raw SQL; internal dependencies: audit, database, privdattestation/attestationstore
+control-plane/internal/privdattestation/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/rbac/service.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, database, rbac/rbacstore
+control-plane/internal/rbac/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/rbac/service_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/semanticpayload/hash.go	non-database	No internal persistence dependency, driver or raw SQL
+control-plane/internal/telemetry/agentupgrade_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/telemetry/agentversion_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/telemetry/service.go	common-boundary	No driver/raw SQL; internal dependencies: coordination, database, database/value, postgresinput, privdattestation, releasecatalog, semanticpayload, telemetryhistory, telemetryread, telemetrywrite, userusage
+control-plane/internal/telemetry/service_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/transportclient/client.go	common-boundary	No driver/raw SQL; internal dependencies: udssecurity
+control-plane/internal/transportclient/fetch_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/transportclient/gap_watch_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/trustserver/server.go	common-boundary	No driver/raw SQL; internal dependencies: enrollment, udssecurity
+control-plane/internal/useroperations/service.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, coordination, database, database/value, useroperations/store, userstate, userusage
+control-plane/internal/useroperations/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/internal/userstate/service.go	common-boundary	No driver/raw SQL; internal dependencies: audit, commandauth, commandlimit, coordination, database, database/value, operations, operations/store, semanticpayload, userstate/store
+control-plane/internal/userstate/service_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/migrations/000001_foundation.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000002_local_slice.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000003_transport_path_changed.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000003_transport_path_changed.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000004_enrollment_trust.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000004_enrollment_trust.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000005_telemetry_observed.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000005_telemetry_observed.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000006_operations_outbox.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000006_operations_outbox.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000007_agent_command_results.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000007_agent_command_results.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000008_semantic_payload_hash_version.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000008_semantic_payload_hash_version.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000009_restrict_semantic_payload_hash_versions.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000009_restrict_semantic_payload_hash_versions.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000010_controlled_session_operations.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000010_controlled_session_operations.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000011_oidc_rbac_approvals_audit.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000011_oidc_rbac_approvals_audit.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000012_user_group_desired_observed.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000012_user_group_desired_observed.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000013_quota_expiry_batch_backport.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000013_quota_expiry_batch_backport.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000014_config_plan.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000014_config_plan.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000015_config_apply_rollback.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000015_config_apply_rollback.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000016_certificate_secret_lifecycle.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000016_certificate_secret_lifecycle.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000017_capability_session_config_fence.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000017_capability_session_config_fence.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000018_enrollment_revocation_trust.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000019_content_bound_approval.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000019_content_bound_approval.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000020_p12_artifact_grants.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000020_p12_artifact_grants.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000021_audit_event_authenticity.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000021_audit_event_authenticity.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000022_transport_event_quarantine.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000022_transport_event_quarantine.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000023_privd_result_attestation.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000023_privd_result_attestation.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000024_scheduler_leadership_fencing.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000024_scheduler_leadership_fencing.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000025_connection_owner_fencing.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000025_connection_owner_fencing.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000026_agent_upgrade.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000026_agent_upgrade.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000027_agent_upgrade_reconcile.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000027_agent_upgrade_reconcile.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000028_agent_rollouts.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000029_controller_schema_compatibility.down.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000029_controller_schema_compatibility.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000030_node_bootstrap_tokens.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000031_local_credentials.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000032_local_bootstrap.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000033_local_auth_attempts.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/000034_local_initialization.up.sql	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+control-plane/migrations/compatibility_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
+control-plane/migrations/runner.go	postgres-owner	PostgreSQL migration SQL and owner-only runner; historical bytes retained
+deploy/compose/compose.yaml	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/g6-ha-pitr/compose.yaml	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/g6-ha-pitr/postgres-init/001-g6-ha.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/g6-readiness/compose.yaml	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/g6-readiness/postgres-init/001-g6-readiness.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/backup-entrypoint.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/backup.Dockerfile	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/bootstrap-host.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/compose.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/compose.yaml	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/controller-bootstrap.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/controller-release-smoke.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/controller.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/install.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/postgres-init/001-runtime-role.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/production/rotate-postgres-credentials.sh	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+deploy/real-e2e/controller.compose.yaml	postgres-tooling	Existing PostgreSQL deployment/backup/restore harness; not generic runtime or MySQL production support
+scripts/agent-boundary-check.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/build-g6-evidence.mjs	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/check-breaking.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/check-required-go-tests.jq	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/database-integration.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/e2e.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-authority-history.sql	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-contract-lib.mjs	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-ha-pitr-fd-a.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-ha-pitr-fd-b.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-ha-pitr-lib.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-install-release.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-readiness-fd-a.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-readiness-fd-b.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-readiness-lib.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/g6-relay-diagnostics.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/generate-controller-release-manifest.mjs	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/generate-g6-test-fixtures.mjs	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/i18-backup-restore-smoke.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/i18-postgres-credential-rotation.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/i18-production-relays.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/local-slice-integration.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/p1-resilience-capacity-lib.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/p1-resilience-capacity.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/postgres-backup.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/real-e2e-artifact.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/real-e2e-controller.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/relay-recovery-experiment.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/release-controller-image-smoke.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-bootstrap-profiles.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-ci-relevance.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-controller-install.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-controller-lifecycle.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-controller-network-upgrade.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-controller-release-manifest.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-controller-release-smoke.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-evidence-builder.mjs	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-evidence-verifier.mjs	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-formal-authority.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-ha-pitr-workflow.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-install-release.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-readiness-hang-guards.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-runtime-adapters.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-timing.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-g6-workflow-contract.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-managed-node-install.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-p1-resilience-capacity.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-production-auth-config.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-required-go-tests.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/test-stage0-installers.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge
+scripts/transport-boundary-check.sh	test-or-operations-tooling	Repository validation/release orchestration or explicit PostgreSQL operations; no business runtime driver bridge

@@ -13,11 +13,9 @@ import (
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -79,10 +77,6 @@ type Service struct {
 	backend    database.Backend
 	operations *operations.Service
 	now        func() time.Time
-}
-
-func New(pool *pgxpool.Pool, operationService *operations.Service) *Service {
-	return NewBackend(postgres.WrapPool(pool), operationService)
 }
 
 func NewBackend(backend database.Backend, operationService *operations.Service) *Service {

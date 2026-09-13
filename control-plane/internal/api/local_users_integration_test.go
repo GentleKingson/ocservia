@@ -16,6 +16,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,7 +60,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer owner.Close()
-	svc, err := auth.New(ctx, pool, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	svc, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,8 +120,8 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	server := New("", pool, BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), 1<<20, time.Second*15, false, "", 32)
-	server.EnableAuthorization(svc, rbac.New(pool), approvals.New(pool), nil)
+	server := NewBackend("", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), 1<<20, time.Second*15, false, "", 32)
+	server.EnableAuthorization(svc, rbac.NewBackend(postgres.WrapPool(pool)), approvals.NewBackend(postgres.WrapPool(pool)), nil)
 	server.EnableBrowserOrigin("https://console.example")
 	call := func(path, body string, cookie *http.Cookie, origin, approval string) *httptest.ResponseRecorder {
 		t.Helper()

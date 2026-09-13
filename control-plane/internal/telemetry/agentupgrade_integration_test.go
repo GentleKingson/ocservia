@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,7 +72,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	batch := testBatch(nodeID, 1, now)
 	batch.Snapshot.AgentVersion = "0.1.1"
 	batch.Snapshot.Architecture = "amd64"
-	service := NewWithRecommendedAgentVersion(pool, "2.0.0")
+	service := NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), "2.0.0")
 	service.EnableAgentUpgradeEligibility(catalog)
 	service.now = func() time.Time { return now }
 	if inserted, err := service.Ingest(ctx, batch); err != nil || !inserted {
@@ -177,7 +178,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	}
 
 	// Without the trusted catalog the gate fails closed.
-	uncataloged := NewWithRecommendedAgentVersion(pool, "2.0.0")
+	uncataloged := NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), "2.0.0")
 	uncataloged.now = func() time.Time { return now }
 	node, err = uncataloged.GetNode(ctx, nodeID)
 	if err != nil {
@@ -228,7 +229,7 @@ func TestAgentUpgradeResultSurvivesKeyRotationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	service := NewWithRecommendedAgentVersion(pool, "2.0.0")
+	service := NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), "2.0.0")
 
 	// The upgrade effect completed an hour ago; the successor key activates
 	// half an hour later and attests the durable record right now.

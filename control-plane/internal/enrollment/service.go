@@ -21,12 +21,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -112,19 +110,8 @@ type Service struct {
 	ownerSessions        ownersession.SessionOpener
 }
 
-func New(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
-	return NewBackend(postgres.WrapPool(pool), controllerEndpointID, controllerVersion, signer)
-}
-
 func NewBackend(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion, signer: signer}
-}
-
-// NewWithOwnerSessions additionally binds the per-node connection owner
-// authority: mutation-capable sessions of fence-capable agents receive a
-// Controller-signed owner fence bound to the current ownership term.
-func NewWithOwnerSessions(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {
-	return NewWithOwnerSessionsBackend(postgres.WrapPool(pool), controllerEndpointID, controllerVersion, signer, ownerSessions)
 }
 
 func NewWithOwnerSessionsBackend(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {

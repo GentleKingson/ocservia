@@ -13,11 +13,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -51,11 +49,6 @@ type recoveryAuthority struct {
 	incarnation int64
 	connection  [16]byte
 	epoch       uint64
-}
-
-// RecoverAmbiguousDispatchedTx is the temporary PostgreSQL transport bridge.
-func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, reconnect OwnerReconnect) (int, error) {
-	return s.RecoverAmbiguousDispatched(ctx, postgres.WrapTx(tx), reconnect)
 }
 
 // RecoverAmbiguousDispatched joins the caller's transaction. The authority

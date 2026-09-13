@@ -14,6 +14,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -77,11 +78,11 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 	})
 
 	signer := integrationCommandSigner()
-	operations := operationstore.NewWithSigner(pool, 200, signer)
+	operations := operationstore.NewBackend(postgres.WrapPool(pool), 200, signer)
 	term := acquireRecoveryTerm(t, ctx, pool, nodeID, 606)
-	t.Cleanup(func() { _ = term.Release(context.Background(), pool) })
+	t.Cleanup(func() { _ = term.ReleaseBackend(context.Background(), postgres.WrapPool(pool)) })
 	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: term.ConnectionID(), epoch: term.Epoch()}
-	service := NewWithCommandRecovery(pool, signer, operations, authority)
+	service := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operations, authority)
 	held, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "unclaimed-result", ExpectedVersion: 1,
 		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
@@ -137,7 +138,7 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 		t.Fatalf("ingest early success: %v", err)
 	}
 	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "succeeded", true)
-	if err := term.Release(ctx, pool); err != nil {
+	if err := term.ReleaseBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("release result-observed owner: %v", err)
 	}
 	term = acquireRecoveryTerm(t, ctx, pool, nodeID, 707)
@@ -290,7 +291,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	})
 
 	signer := integrationCommandSigner()
-	operations := operationstore.NewWithSigner(pool, 200, signer)
+	operations := operationstore.NewBackend(postgres.WrapPool(pool), 200, signer)
 	operation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "lost-result", ExpectedVersion: 1,
 		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
@@ -317,14 +318,14 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	}
 	assertRecoveryState(t, pool, commandID, "dispatched", "dispatched", true)
 
-	if err := oldTerm.Release(ctx, pool); err != nil {
+	if err := oldTerm.ReleaseBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("release old owner: %v", err)
 	}
 	successor := acquireRecoveryTerm(t, ctx, pool, nodeID, 202)
 	staleAuthority := &recoveryTestAuthority{nodeID: nodeID, connectionID: oldTerm.ConnectionID(), epoch: oldTerm.Epoch()}
-	staleService := NewWithCommandRecovery(pool, signer, operations, staleAuthority)
+	staleService := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operations, staleAuthority)
 	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: successor.ConnectionID(), epoch: successor.Epoch()}
-	service := NewWithCommandRecovery(pool, signer, operations, authority)
+	service := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operations, authority)
 
 	// A late connected event from the old owner is durable ingress evidence,
 	// but it has no authority to enqueue reconciliation work.
@@ -440,7 +441,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 		t.Fatalf("mark second successor reconciliation sent: %v", err)
 	}
 	assertRecoveryState(t, pool, commandID, "unknown", "unknown", true)
-	if err := successor.Release(ctx, pool); err != nil {
+	if err := successor.ReleaseBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("release successor owner: %v", err)
 	}
 	third := acquireRecoveryTerm(t, ctx, pool, nodeID, 303)
@@ -465,12 +466,12 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	}
 
 	// Terminal commands remain terminal across later takeovers.
-	if err := third.Release(ctx, pool); err != nil {
+	if err := third.ReleaseBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("release third owner: %v", err)
 	}
 	fourth := acquireRecoveryTerm(t, ctx, pool, nodeID, 404)
 	authority.connectionID, authority.epoch = fourth.ConnectionID(), fourth.Epoch()
-	t.Cleanup(func() { _ = fourth.Release(context.Background(), pool) })
+	t.Cleanup(func() { _ = fourth.ReleaseBackend(context.Background(), postgres.WrapPool(pool)) })
 	unknownEvents := recoveryEventCount(t, pool, operationID)
 	if err := service.Ingest(ctx, recoveryConnectedEvent(t, nodeID, endpointID, fourth)); err != nil {
 		t.Fatalf("ingest post-terminal owner event: %v", err)
@@ -506,11 +507,11 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	}
 	lateOriginal := decodeRecoveryEnvelope(t, lateJobs[0].Envelope)
 	lateOldFrame := fenceRecoveryDispatch(t, signer, endpointID, fourth, lateJobs[0])
-	if err := fourth.Release(ctx, pool); err != nil {
+	if err := fourth.ReleaseBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("release fourth owner before late sent commit: %v", err)
 	}
 	fifth := acquireRecoveryTerm(t, ctx, pool, nodeID, 505)
-	t.Cleanup(func() { _ = fifth.Release(context.Background(), pool) })
+	t.Cleanup(func() { _ = fifth.ReleaseBackend(context.Background(), postgres.WrapPool(pool)) })
 	if err := operations.MarkSentWithEnvelope(ctx, lateJobs[0], lateOldFrame); !errors.Is(err, connectionowner.ErrNotOwner) {
 		t.Fatalf("late old-owner sent commit error = %v, want ErrNotOwner", err)
 	}
@@ -581,11 +582,11 @@ func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T
 	})
 
 	signer := integrationCommandSigner()
-	operations := operationstore.NewWithSigner(pool, 200, signer)
+	operations := operationstore.NewBackend(postgres.WrapPool(pool), 200, signer)
 	crashTerm := acquireRecoveryTerm(t, ctx, pool, nodeID, 606)
-	t.Cleanup(func() { _ = crashTerm.Release(context.Background(), pool) })
+	t.Cleanup(func() { _ = crashTerm.ReleaseBackend(context.Background(), postgres.WrapPool(pool)) })
 	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: crashTerm.ConnectionID(), epoch: crashTerm.Epoch()}
-	service := NewWithCommandRecovery(pool, signer, operations, authority)
+	service := NewBackendWithCommandRecovery(postgres.WrapPool(pool), signer, operations, authority)
 
 	crashOperation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: "crash-window-pre-send", ExpectedVersion: 1,
@@ -645,11 +646,11 @@ func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T
 	}
 
 	// The Agent reconnects with a newer valid fence and session.
-	if err := crashTerm.Release(ctx, pool); err != nil {
+	if err := crashTerm.ReleaseBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("release crashed owner: %v", err)
 	}
 	reconnected := acquireRecoveryTerm(t, ctx, pool, nodeID, 707)
-	t.Cleanup(func() { _ = reconnected.Release(context.Background(), pool) })
+	t.Cleanup(func() { _ = reconnected.ReleaseBackend(context.Background(), postgres.WrapPool(pool)) })
 	authority.connectionID, authority.epoch = reconnected.ConnectionID(), reconnected.Epoch()
 	if err := service.Ingest(ctx, recoveryConnectedEvent(t, nodeID, endpointID, reconnected)); err != nil {
 		t.Fatalf("ingest reconnected owner event: %v", err)
@@ -713,7 +714,7 @@ func (a *recoveryTestAuthority) OwnsTerm(nodeID, connectionID [16]byte, epoch in
 func acquireRecoveryTerm(t *testing.T, ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID, incarnation int64) *connectionowner.Term {
 	t.Helper()
 	connectionID := uuid.Must(uuid.NewV7())
-	term, err := connectionowner.Acquire(ctx, pool, [16]byte(nodeID), connectionowner.Identity{
+	term, err := connectionowner.AcquireBackend(ctx, postgres.WrapPool(pool), [16]byte(nodeID), connectionowner.Identity{
 		InstanceID: uuid.Must(uuid.NewV7()), Incarnation: incarnation,
 	}, [16]byte(connectionID), 2*time.Minute)
 	if err != nil {

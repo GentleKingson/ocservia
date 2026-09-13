@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -125,7 +126,7 @@ func testOIDCAuthorizationCodePKCE(t *testing.T, suffix string) {
 		t.Fatal(err)
 	}
 
-	service, err := New(ctx, pool, Config{Issuer: issuer, ClientID: "client", ClientSecret: "secret", RedirectURL: redirectURL, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	service, err := NewBackend(postgres.WrapPool(pool), Config{Issuer: issuer, ClientID: "client", ClientSecret: "secret", RedirectURL: redirectURL, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +253,7 @@ func TestBreakGlassAlertsAuditsAndRequiresRotationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := "offline-emergency-credential-with-high-entropy"
-	service, err := New(ctx, pool, Config{LocalEnabled: true, Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: TokenHash(token)})
+	service, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: TokenHash(token)})
 	if err != nil {
 		t.Fatal(err)
 	}

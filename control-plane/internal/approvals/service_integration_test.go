@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,7 +40,7 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'SecurityAdmin','node',$4,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID, nodeID); err != nil {
 		t.Fatal(err)
 	}
-	service := New(pool)
+	service := NewBackend(postgres.WrapPool(pool))
 	summary := []byte(`{"action":"service.reload","resource_type":"node"}`)
 	digest := sha256.Sum256(summary)
 	approval, err := service.Create(ctx, Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: nodeID, Action: "service.reload", ResourceType: "node", Reason: "planned maintenance", TTL: time.Hour, SessionID: requesterSession, RequestID: "request-create", RequestHash: digest[:], RequestSummary: summary, AuthorityResources: []AuthorityResource{{WorkspaceID: workspaceID, Type: "node", ID: nodeID}}})
@@ -63,7 +64,7 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ConsumeBound(ctx, tx, approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID, digest[:]); err != nil {
+	if err := ConsumeBoundTx(ctx, postgres.WrapTx(tx), approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID, digest[:]); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -74,7 +75,7 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if err := ConsumeBound(ctx, tx, approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID, digest[:]); !errors.Is(err, ErrNotReady) {
+	if err := ConsumeBoundTx(ctx, postgres.WrapTx(tx), approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID, digest[:]); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("reused approval error = %v", err)
 	}
 	boundHash := make([]byte, 32)

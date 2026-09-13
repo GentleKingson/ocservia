@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -54,21 +56,21 @@ func TestLeadershipAcquireRenewAssertIntegration(t *testing.T) {
 	resetLeadership(t, pool)
 	ctx := context.Background()
 
-	first, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second)
+	first, err := AcquireBackend(ctx, postgres.WrapPool(pool), mustIdentity(t), 10*time.Second)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	if first.Epoch() < 1 {
 		t.Fatalf("epoch must start at one or higher, got %d", first.Epoch())
 	}
-	if err := first.Renew(ctx, pool); err != nil {
+	if err := first.RenewBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := first.AssertLeader(ctx, tx); err != nil {
+	if err := first.AssertTransaction(ctx, postgres.WrapTx(tx)); err != nil {
 		t.Fatalf("assert: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -76,11 +78,11 @@ func TestLeadershipAcquireRenewAssertIntegration(t *testing.T) {
 	}
 
 	// A second identity cannot take over while the lease is unexpired.
-	if _, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second); !errors.Is(err, ErrLeaseHeld) {
+	if _, err := AcquireBackend(ctx, postgres.WrapPool(pool), mustIdentity(t), 10*time.Second); !errors.Is(err, ErrLeaseHeld) {
 		t.Fatalf("expected ErrLeaseHeld, got %v", err)
 	}
 	forceExpire(t, pool)
-	second, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second)
+	second, err := AcquireBackend(ctx, postgres.WrapPool(pool), mustIdentity(t), 10*time.Second)
 	if err != nil {
 		t.Fatalf("takeover acquire: %v", err)
 	}
@@ -89,7 +91,7 @@ func TestLeadershipAcquireRenewAssertIntegration(t *testing.T) {
 	}
 
 	// The old leader cannot renew or commit after the takeover.
-	if err := first.Renew(ctx, pool); !errors.Is(err, ErrNotLeader) {
+	if err := first.RenewBackend(ctx, postgres.WrapPool(pool)); !errors.Is(err, ErrNotLeader) {
 		t.Fatalf("old leader renew must fail with ErrNotLeader, got %v", err)
 	}
 	tx, err = pool.Begin(ctx)
@@ -97,7 +99,7 @@ func TestLeadershipAcquireRenewAssertIntegration(t *testing.T) {
 		t.Fatalf("begin old leader tx: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := first.AssertLeader(ctx, tx); !errors.Is(err, ErrNotLeader) {
+	if err := first.AssertTransaction(ctx, postgres.WrapTx(tx)); !errors.Is(err, ErrNotLeader) {
 		t.Fatalf("old leader assert must fail with ErrNotLeader, got %v", err)
 	}
 
@@ -107,7 +109,7 @@ func TestLeadershipAcquireRenewAssertIntegration(t *testing.T) {
 		t.Fatalf("begin new leader tx: %v", err)
 	}
 	defer tx2.Rollback(ctx)
-	if err := second.AssertLeader(ctx, tx2); err != nil {
+	if err := second.AssertTransaction(ctx, postgres.WrapTx(tx2)); err != nil {
 		t.Fatalf("new leader assert: %v", err)
 	}
 }
@@ -123,7 +125,7 @@ func TestLeadershipAssertBlocksTakeoverIntegration(t *testing.T) {
 	// A short lease lets the deadline lapse naturally while the fenced
 	// transaction stays open; forcing an expiry would itself block on the
 	// row lock the assert holds.
-	leader, err := Acquire(ctx, pool, mustIdentity(t), 1500*time.Millisecond)
+	leader, err := AcquireBackend(ctx, postgres.WrapPool(pool), mustIdentity(t), 1500*time.Millisecond)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -132,14 +134,14 @@ func TestLeadershipAssertBlocksTakeoverIntegration(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := leader.AssertLeader(ctx, tx); err != nil {
+	if err := leader.AssertTransaction(ctx, postgres.WrapTx(tx)); err != nil {
 		t.Fatalf("assert: %v", err)
 	}
 	time.Sleep(2 * time.Second)
 
 	takeoverDone := make(chan error, 1)
 	go func() {
-		_, err := Acquire(context.Background(), pool, mustIdentity(t), 10*time.Second)
+		_, err := AcquireBackend(context.Background(), postgres.WrapPool(pool), mustIdentity(t), 10*time.Second)
 		takeoverDone <- err
 	}()
 	select {
@@ -166,7 +168,7 @@ func TestRunnerRenewalLossCancelsSessionIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	runner := NewRunner(pool, mustIdentity(t), 2*time.Second, 500*time.Millisecond, nil)
+	runner := NewRunnerBackend(postgres.WrapPool(pool), mustIdentity(t), 2*time.Second, 500*time.Millisecond, nil)
 	defer runner.Stop()
 
 	var firstEpoch int64
@@ -174,7 +176,7 @@ func TestRunnerRenewalLossCancelsSessionIntegration(t *testing.T) {
 		firstEpoch = session.Epoch()
 		// Simulate a takeover: expire the lease so renewal fails.
 		forceExpire(t, pool)
-		_, err := Acquire(context.Background(), pool, mustIdentity(t), 10*time.Second)
+		_, err := AcquireBackend(context.Background(), postgres.WrapPool(pool), mustIdentity(t), 10*time.Second)
 		if err != nil {
 			return err
 		}
@@ -200,11 +202,20 @@ func TestRunnerRenewalLossCancelsSessionIntegration(t *testing.T) {
 		if session.Epoch() <= firstEpoch {
 			t.Fatalf("reacquired epoch %d must exceed previous %d", session.Epoch(), firstEpoch)
 		}
-		return session.AssertCurrent(ctx, pool)
+		return session.AssertCurrentBackend(ctx, postgres.WrapPool(pool))
 	})
 	if err != nil {
 		t.Fatalf("reacquire: %v", err)
 	}
+}
+
+func FencedExec(ctx context.Context, pool *pgxpool.Pool, fence Fence, sql string, args ...any) error {
+	return database.Within(ctx, postgres.WrapPool(pool), database.ReadCommitted, func(tx database.Tx) error {
+		if _, err := tx.Exec(ctx, sql, args...); err != nil {
+			return err
+		}
+		return AssertFenceTx(ctx, tx, fence)
+	})
 }
 
 func TestFencedExecRejectsStaleLeaderIntegration(t *testing.T) {
@@ -212,7 +223,7 @@ func TestFencedExecRejectsStaleLeaderIntegration(t *testing.T) {
 	resetLeadership(t, pool)
 	ctx := context.Background()
 
-	leader, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second)
+	leader, err := AcquireBackend(ctx, postgres.WrapPool(pool), mustIdentity(t), 10*time.Second)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -225,7 +236,7 @@ func TestFencedExecRejectsStaleLeaderIntegration(t *testing.T) {
 	}
 
 	forceExpire(t, pool)
-	if _, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second); err != nil {
+	if _, err := AcquireBackend(ctx, postgres.WrapPool(pool), mustIdentity(t), 10*time.Second); err != nil {
 		t.Fatalf("takeover: %v", err)
 	}
 	err = FencedExec(fenced, pool, FenceFromContext(fenced), `UPDATE scheduler_leadership SET updated_at=now()`)
@@ -243,7 +254,7 @@ func TestLeadershipAssertRejectsMidTransactionExpiryIntegration(t *testing.T) {
 	resetLeadership(t, pool)
 	ctx := context.Background()
 
-	leader, err := Acquire(ctx, pool, mustIdentity(t), 1200*time.Millisecond)
+	leader, err := AcquireBackend(ctx, postgres.WrapPool(pool), mustIdentity(t), 1200*time.Millisecond)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -259,7 +270,7 @@ func TestLeadershipAssertRejectsMidTransactionExpiryIntegration(t *testing.T) {
 	// Keep the transaction open until the lease lapses naturally; forcing an
 	// expiry would not reproduce the frozen-transaction-clock hazard.
 	time.Sleep(1600 * time.Millisecond)
-	if err := leader.AssertLeader(ctx, tx); !errors.Is(err, ErrNotLeader) {
+	if err := leader.AssertTransaction(ctx, postgres.WrapTx(tx)); !errors.Is(err, ErrNotLeader) {
 		t.Fatalf("assert after natural mid-transaction expiry must fail with ErrNotLeader, got %v", err)
 	}
 
@@ -268,7 +279,7 @@ func TestLeadershipAssertRejectsMidTransactionExpiryIntegration(t *testing.T) {
 	// of queueing behind an erroneous FOR SHARE until rollback.
 	takeoverDone := make(chan error, 1)
 	go func() {
-		_, err := Acquire(context.Background(), pool, mustIdentity(t), 10*time.Second)
+		_, err := AcquireBackend(context.Background(), postgres.WrapPool(pool), mustIdentity(t), 10*time.Second)
 		takeoverDone <- err
 	}()
 	select {
@@ -292,7 +303,7 @@ func TestRunnerConcurrentWithSessionAndLossIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	runner := NewRunner(pool, mustIdentity(t), 2*time.Second, 250*time.Millisecond, nil)
+	runner := NewRunnerBackend(postgres.WrapPool(pool), mustIdentity(t), 2*time.Second, 250*time.Millisecond, nil)
 	defer runner.Stop()
 
 	rivalIDs := []Identity{mustIdentity(t), mustIdentity(t), mustIdentity(t)}
@@ -305,7 +316,7 @@ func TestRunnerConcurrentWithSessionAndLossIntegration(t *testing.T) {
 			}
 			// Losing the race against the runner under test is fine; the
 			// point is to keep leadership changing underneath it.
-			if _, err := Acquire(context.Background(), pool, rival, 600*time.Millisecond); err == nil {
+			if _, err := AcquireBackend(context.Background(), postgres.WrapPool(pool), rival, 600*time.Millisecond); err == nil {
 				time.Sleep(700 * time.Millisecond)
 			}
 		}
@@ -333,7 +344,7 @@ func TestRunnerConcurrentWithSessionAndLossIntegration(t *testing.T) {
 	<-rivalDone
 
 	err := runner.WithSession(ctx, func(sessionCtx context.Context, session *Session) error {
-		return session.AssertCurrent(sessionCtx, pool)
+		return session.AssertCurrentBackend(sessionCtx, postgres.WrapPool(pool))
 	})
 	if err != nil {
 		t.Fatalf("reacquire after churn: %v", err)
