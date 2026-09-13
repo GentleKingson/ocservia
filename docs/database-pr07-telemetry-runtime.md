@@ -315,3 +315,23 @@ in `.cache/pr201-review-fixes/`, outside the commit. Diagnostic failures
 fixture assertion) were corrected before the final passing runs. Performance
 thresholds, contention/storage-duration validation and formal PR-07 acceptance
 remain open; the PR stays Draft and is not authorized for merge or release.
+
+### Basic CI 907 Fixture Correction
+
+Basic CI 907 on `ca58f49` exposed a separate PostgreSQL service fixture still
+seeding infinite raw timestamps through runtime. Only that historical seed in
+`TestTelemetryBackendWorkflowIntegration` now uses the explicit owner URL and
+the PostgreSQL value adapter. The service, ordinary ingestion, duplicate and
+rollback checks remain on the runtime account. Migration 36, its DEFAULT
+trigger and runtime permissions are unchanged; missing owner credentials fail
+the test rather than skipping it.
+
+BuildServer passed the actual CI entry point
+`PG_MAJOR=17 DATABASE_TEST_SCOPE=regression bash scripts/database-integration.sh`
+and the corresponding PostgreSQL 18 command, including required-test inventory
+checks and the formerly failing telemetry workflow. Go formatting also ran on
+BuildServer. Raw results are retained in `.cache/pr201-fixture-fix/`. Initial
+harness attempts lacked Ruby and the Docker CLI; those dependencies were
+provided in a disposable runner container, not by relaxing repository checks.
+The PR was restored from Ready to Draft. These functional results do not close
+the performance Gate or replace fresh complete Basic CI results for this fix.

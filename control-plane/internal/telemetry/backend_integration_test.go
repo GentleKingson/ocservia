@@ -315,8 +315,29 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	}
 	negative := value.Timestamp{Micros: value.NegativeInfinity, Valid: true}
 	positive := value.Timestamp{Micros: value.PositiveInfinity, Valid: true}
+	var historyOwner *postgres.Backend
+	if !mysqlEngine {
+		// Infinite historical timestamps belong to owner-seeded DEFAULT data,
+		// not the runtime ingestion window. Keep the service on its runtime account.
+		ownerDSN := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+		if ownerDSN == "" {
+			t.Fatal("owner connection required to seed historical telemetry")
+		}
+		ownerPool, err := pgxpool.New(ctx, ownerDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(ownerPool.Close)
+		historyOwner = postgres.WrapPool(ownerPool)
+	}
 	for _, at := range []value.Timestamp{negative, positive} {
-		exec(`INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',7)`, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'connection_rtt_ms',7)`, node, batch.ID, at)
+		if historyOwner != nil {
+			if _, err := historyOwner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',7)`, node, batch.ID, at); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			exec("", `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'connection_rtt_ms',7)`, node, batch.ID, at)
+		}
 	}
 	points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", "raw", negative)
 	if err != nil || len(points) < 2 || points[0].At != negative || points[len(points)-1].At != positive {
