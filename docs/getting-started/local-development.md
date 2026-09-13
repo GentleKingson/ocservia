@@ -13,17 +13,21 @@ Use the local stack to explore the Web console without connecting to a real VPN 
 ```bash
 git clone https://github.com/GentleKingson/ocservia.git
 cd ocservia
-docker compose -f deploy/compose/compose.yaml up --build -d
+deploy/compose/compose.sh up --build -d
 ```
+
+PostgreSQL is the default. To exercise a pinned MySQL-compatible development
+database, set `OCSERV_DATABASE_BACKEND=mysql` or `mariadb` before invoking the
+same launcher. The launcher selects the matching Compose descriptor explicitly.
 
 Open `http://127.0.0.1:4173` in a browser. The Controller exposes `/livez`, `/readyz`, and `/version` on `http://127.0.0.1:8080`.
 
 ## Stop the stack
 
-For a disposable local stack, including its database volume:
+For a disposable local stack, including the selected database volume:
 
 ```bash
-docker compose -f deploy/compose/compose.yaml down --volumes
+deploy/compose/compose.sh down --volumes
 ```
 
 For logs, simulator behavior, persistent data, and browser tests, see [Control-plane development](../development/control-plane.md).

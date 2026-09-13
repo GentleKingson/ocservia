@@ -96,8 +96,9 @@ func configuration(o Options) (*driver.Config, error) {
 		}
 	case "false":
 		ip := net.ParseIP(host)
-		if ip == nil || !ip.IsLoopback() || o.CAFile != "" {
-			return nil, errors.New("experimental database: plaintext requires a literal loopback address and no CA")
+		developmentCompose := o.Environment == "development" && host == "database"
+		if ((ip == nil || !ip.IsLoopback()) && !developmentCompose) || o.CAFile != "" {
+			return nil, errors.New("experimental database: plaintext requires loopback or the fixed development Compose service and no CA")
 		}
 	default:
 		return nil, errors.New("experimental database: explicitly set tls=true (or tls=false for loopback tests)")

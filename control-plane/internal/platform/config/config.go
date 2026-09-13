@@ -369,7 +369,7 @@ func (c Config) Validate() error {
 		return errors.New("OCSERV_DATABASE_BACKEND must be postgres, mysql or mariadb")
 	}
 	if (c.DatabaseBackend == "mysql" || c.DatabaseBackend == "mariadb") && c.Environment == "production" {
-		return errors.New("MySQL/MariaDB Controller startup is restricted to test/development pending PR-02 acceptance")
+		return errors.New("MySQL/MariaDB Controller production startup remains disabled pending PR-09 acceptance")
 	}
 	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "" || c.LocalBootstrapApproverUsername == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")

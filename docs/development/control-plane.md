@@ -1,6 +1,6 @@
 # Control-plane development
 
-The control plane is a modular Go binary backed by PostgreSQL. The development
+The control plane is a modular Go binary backed by PostgreSQL by default. The development
 stack includes a Rust gRPC stub over a `0660` Unix domain socket and a bounded,
 multi-node agent simulator. It does not use Iroh, Ocserv, TCP transport
 fallbacks, privileged execution, or any remote side effect.
@@ -8,8 +8,12 @@ fallbacks, privileged execution, or any remote side effect.
 Start the public development stack:
 
 ```bash
-docker compose -f deploy/compose/compose.yaml up --build
+deploy/compose/compose.sh up --build
 ```
+
+Set `OCSERV_DATABASE_BACKEND=mysql` or `mariadb` to select the corresponding
+pinned development database. An unsupported value is rejected rather than
+falling back to PostgreSQL.
 
 The Web shell is available at `http://127.0.0.1:4173`. The control-plane live,
 readiness, and version endpoints are `http://127.0.0.1:8080/livez`, `/readyz`,
@@ -121,7 +125,7 @@ For a disposable development stack with no data to preserve, recreate the
 database from the current schema with:
 
 ```bash
-docker compose -f deploy/compose/compose.yaml down --volumes
+deploy/compose/compose.sh down --volumes
 ```
 
 For persisted or shipped schema changes, do not rely on historical manual

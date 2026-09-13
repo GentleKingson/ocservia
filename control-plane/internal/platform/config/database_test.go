@@ -54,7 +54,7 @@ func TestExperimentalControllerProductionGate(t *testing.T) {
 			v, ok := values[key]
 			return v, ok
 		})
-		if err == nil || !strings.Contains(err.Error(), "pending PR-02 acceptance") {
+		if err == nil || !strings.Contains(err.Error(), "pending PR-09 acceptance") {
 			t.Fatalf("%s production gate: %v", backend, err)
 		}
 	}

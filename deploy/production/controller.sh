@@ -516,21 +516,26 @@ compare_semver() {
 }
 
 check_current_database_and_backup_health() {
-  local health_json
-  if ! health_json="$("${COMPOSE_LAUNCHER}" ps --format json postgres backup)"; then
-    fail "cannot inspect current PostgreSQL and backup health; current release remains unchanged"
+  local health_json required_json health_label="database backup" backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
+  local services=(backup)
+  if [[ "${backend}:${deployment}" == postgres:bundled ]]; then
+    services=(postgres backup)
+    health_label="PostgreSQL and backup"
   fi
-  if ! jq -s -e '
+  if ! health_json="$("${COMPOSE_LAUNCHER}" ps --format json "${services[@]}")"; then
+    fail "cannot inspect current ${health_label} health; current release remains unchanged"
+  fi
+  required_json="$(printf '%s\n' "${services[@]}" | jq -R . | jq -s .)"
+  if ! jq -s -e --argjson required "${required_json}" '
     if type != "array" then false
     else
       . as $services |
-      ["postgres", "backup"] |
-      all(.[];
+      $required | all(.[];
         . as $service |
         any($services[]; .Service == $service and .State == "running" and .Health == "healthy"))
     end
   ' <<<"${health_json}" >/dev/null; then
-    fail "current PostgreSQL and backup services are not healthy; current release remains unchanged"
+    fail "current ${health_label} services are not healthy; current release remains unchanged"
   fi
 }
 
@@ -627,6 +632,9 @@ production_descriptor_paths() {
   printf '%s\n' \
     "deploy/production/compose.sh" \
     "deploy/production/compose.oidc.yaml" \
+    "deploy/production/compose.external-mysql.yaml" \
+    "deploy/production/compose.external-postgres.yaml" \
+    "deploy/production/compose.postgres.yaml" \
     "deploy/production/compose.yaml"
   grep -Eo '\./[^[:space:]:]+' "${compose_file}" | sort -u | while IFS= read -r source; do
     printf 'deploy/production/%s\n' "${source#./}"
@@ -864,7 +872,10 @@ rollback_controller() {
     # The compatibility preflight already validated the database. Do not let
     # the previous Controller image run the normal migration service against
     # a newer schema during this activation.
-    local rollback_services=(postgres backup)
+    local rollback_services=(backup)
+    if [[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]]; then
+      rollback_services=(postgres backup)
+    fi
     if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
       rollback_services+=(otel-collector)
     fi

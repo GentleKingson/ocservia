@@ -4,6 +4,7 @@ set -euo pipefail
 BACKUP_ROOT="${BACKUP_ROOT:-/var/lib/ocservia-backup}"
 BACKUP_INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-900}"
 BACKUP_RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-8}"
+POSTGRES_SERVER_MAJOR="${POSTGRES_SERVER_MAJOR:-}"
 RUN_ID="${RUN_ID:-backup-$$}"
 
 if [[ "${BACKUP_ROOT}" != /* || "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
@@ -18,6 +19,10 @@ if ! [[ "${BACKUP_RETENTION_COUNT}" =~ ^[0-9]+$ ]] || (( BACKUP_RETENTION_COUNT 
   echo "BACKUP_RETENTION_COUNT must be 1..128" >&2
   exit 2
 fi
+if [[ -n "${POSTGRES_SERVER_MAJOR}" && "${POSTGRES_SERVER_MAJOR}" != 17 ]]; then
+  echo "POSTGRES_SERVER_MAJOR must be 17 when set" >&2
+  exit 2
+fi
 
 umask 077
 mkdir -p "${BACKUP_ROOT}/base" "${BACKUP_ROOT}/wal"
@@ -30,7 +35,7 @@ done
 
 run_backup() {
   local lock="${BACKUP_ROOT}/.backup.lock"
-  local timestamp staging final latest_tmp oldest_wal
+  local timestamp staging final latest_tmp oldest_wal server_version
   if [[ -d "${lock}" ]] && ! rmdir "${lock}" 2>/dev/null; then
     echo "legacy backup lock directory is not empty" >&2
     return 1
@@ -51,6 +56,14 @@ run_backup() {
     exec 9>&-
   }
   trap cleanup_backup RETURN
+
+  if [[ -n "${POSTGRES_SERVER_MAJOR}" ]]; then
+    server_version="$(psql --no-password --tuples-only --no-align --command 'SHOW server_version_num')"
+    if [[ ! "${server_version}" =~ ^[0-9]+$ ]] || (( server_version / 10000 != POSTGRES_SERVER_MAJOR )); then
+      echo "external PostgreSQL server must be major version ${POSTGRES_SERVER_MAJOR}" >&2
+      return 1
+    fi
+  fi
 
   if [[ -e "${final}" ]]; then
     echo "backup destination already exists: ${final}" >&2

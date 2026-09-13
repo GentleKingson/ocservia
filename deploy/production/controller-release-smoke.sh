@@ -67,14 +67,18 @@ PUBLIC_URL="${PUBLIC_URL%/}"
 [[ "${PUBLIC_URL}" =~ ^https://[^[:space:]]+$ ]] ||
   fail "public Controller URL must use HTTPS"
 
-health_json="$("${COMPOSE_LAUNCHER}" ps --format json postgres control-plane transportd backup)" ||
+services=(control-plane transportd backup)
+if [[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]]; then
+  services=(postgres control-plane transportd backup)
+fi
+health_json="$("${COMPOSE_LAUNCHER}" ps --format json "${services[@]}")" ||
   fail "cannot inspect Compose health"
-jq -s -e '
+required_json="$(printf '%s\n' "${services[@]}" | jq -R . | jq -s .)"
+jq -s -e --argjson required "${required_json}" '
   if type != "array" then false
   else
     . as $services |
-    ["postgres", "control-plane", "transportd", "backup"] |
-    all(.[];
+    $required | all(.[];
       . as $service |
       any($services[]; .Service == $service and .State == "running" and .Health == "healthy"))
   end

@@ -20,6 +20,7 @@ Use these documents to deploy, operate, and understand ocservia. Start with the 
 - [Roll back the Agent](how-to/agent-rollback.md)
 - [Configure dedicated relays](how-to/dedicated-relays.md)
 - [Back up and restore PostgreSQL](operations/postgres-backup.md)
+- [Validate MySQL/MariaDB backup and restore](operations/mysql-backup.md)
 - [Fail over PostgreSQL](operations/postgres-failover.md)
 - [Recover PostgreSQL to a point in time](operations/postgres-pitr-restore.md)
 - [Recover from an incident](operations/incident-recovery.md)
