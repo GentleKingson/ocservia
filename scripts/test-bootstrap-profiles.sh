@@ -151,6 +151,10 @@ reject("MySQL-compatible acceptance images must pin exact patch tags and digests
 end
 reject("pre-34 build must be full-only") unless
   database_script.index('if [[ "${scope}" == full ]]; then') < database_script.index('PRE34_ROOT="$(mktemp')
+reject("pre-34 fixture must exclude every later migration") unless
+  %w[000034_local_initialization 000035_bounded_telemetry_retention 000036_telemetry_owner_partitions].all? do |migration|
+    database_script.include?("#{migration}.up.sql")
+  end
 critical_pg = database_script.split('if [[ "${scope}" == regression ]]; then', 2).last.split("\n  else\n", 2).first
 reject("PostgreSQL critical path must retain all business groups without an early exit") unless
   %w[regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-oidc regression-telemetry].all? { |group| critical_pg.include?(group) } &&

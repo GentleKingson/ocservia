@@ -19,7 +19,7 @@ owner=(); ((EUID == 0)) || owner=(sudo)
 "${owner[@]}" chown 65534:65532 "${work}/secrets/audit-event-key" "${work}/secrets/controller-command-signing-key.pem"
 "${owner[@]}" chown 65532:65532 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key"
 "${owner[@]}" chown 999:999 "${work}/backups"
-chmod 0700 "${work}/backups"
+"${owner[@]}" chmod 0700 "${work}/backups"
 
 image="example.invalid/test@sha256:$(printf '%064d' 0)"
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backups"

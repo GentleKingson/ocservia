@@ -89,8 +89,9 @@ PRE34_ROOT="$(mktemp -d "${ROOT}/.p34-XXXXXX")"
 cp -R "${ROOT}/control-plane" "${PRE34_ROOT}/control-plane"
 # Do not inherit the repository workspace, which excludes this fixture module.
 (cd "${PRE34_ROOT}" && GOWORK=off go work init ./control-plane)
-rm "${PRE34_ROOT}/control-plane/migrations/000034_local_initialization.up.sql"
-rm "${PRE34_ROOT}/control-plane/migrations/000035_bounded_telemetry_retention.up.sql"
+rm "${PRE34_ROOT}/control-plane/migrations/000034_local_initialization.up.sql" \
+  "${PRE34_ROOT}/control-plane/migrations/000035_bounded_telemetry_retention.up.sql" \
+  "${PRE34_ROOT}/control-plane/migrations/000036_telemetry_owner_partitions.up.sql"
 sed '/"GRANT UPDATE (completion_pending,completed_at,approver_identity_id) ON local_auth_bootstrap TO " + identifier,/d' \
   "${ROOT}/control-plane/migrations/runner.go" >"${PRE34_ROOT}/control-plane/migrations/runner.go"
 # Restore only the historical runtime contract in this disposable fixture;
@@ -648,7 +649,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   stop_process "${pid}"
   rollback_database="ocservia_rollback_${major}"
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry -run Integration)
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment -p 1 ./internal/operations ./internal/enrollment ./internal/localslice -run Integration)
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
+    go test -p 1 ./internal/telemetry -run Integration -count=1)
   OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/test-enrollment-restart.sh" "${container}"
   # User workflows retain revision-zero commands and singleton lease state.

@@ -144,6 +144,8 @@ grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-config -p 1
   "${ROOT}/scripts/database-integration.sh"
 grep -Fq 'bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)' \
   "${ROOT}/scripts/database-integration.sh"
+grep -Fq 'go test -p 1 ./internal/telemetry -run Integration -count=1)' \
+  "${ROOT}/scripts/database-integration.sh"
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.
 mkdir "${tmp}/selection"
