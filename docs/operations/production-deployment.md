@@ -34,8 +34,10 @@ owner, runtime, and backup connections. The external MySQL and
 MariaDB descriptors are available for pre-support deployment validation, but
 their Controller production startup gate deliberately remains closed until the
 independent PR-09 acceptance matrix passes. Bundled MySQL/MariaDB is rejected.
-The project publishes only TCP 443; database, application, and observability
-traffic remain on internal networks.
+The project publishes only TCP 443. Bundled database, application, and
+observability traffic remain on internal networks. External database
+deployments additionally attach database clients to the dedicated non-internal
+`database-egress` network; no database port is published by ocservia.
 
 Select a non-default descriptor explicitly:
 
