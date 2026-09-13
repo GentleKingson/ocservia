@@ -47,5 +47,9 @@ pid=$!
 status=0
 wait "${pid}" || status=$?
 if ((status != 0)); then exit "${status}"; fi
-jq -se --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
-  -f "${ROOT}/scripts/check-required-go-tests.jq" "${result}"
+summary="$(jq -cse --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
+  -f "${ROOT}/scripts/check-required-go-tests.jq" "${result}")"
+printf '%s\n' "${summary}"
+if [[ -n "${DATABASE_CASE_RESULTS:-}" ]]; then
+  printf '%s\n' "${summary}" >>"${DATABASE_CASE_RESULTS}"
+fi

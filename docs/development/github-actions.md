@@ -38,8 +38,9 @@ dependency between workers.
 | `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
 | `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
 | `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
-| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Four-backend critical regression in Quick; PostgreSQL full and MySQL/MariaDB current in Full |
+| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Pinned PostgreSQL 17.10/18.6, MySQL 8.4.10 and MariaDB 12.3.2 critical regression in Quick; PostgreSQL full and MySQL/MariaDB current in Full |
 | `database-history-full` | `scripts/database-foundation-integration.sh` | `go-test` | MySQL/MariaDB complementary history, Full only |
+| `database-recovery-full` | `scripts/test-database-deployment-config.sh` / `scripts/i18-mysql-backup-restore-smoke.sh` | none | External descriptor and isolated logical backup/restore acceptance for candidate MySQL 8.4.10 and MariaDB 12.3.2, Full only |
 
 Go checks retain both existing Go modules, including unit tests for the G6
 harness; they do not run G6 acceptance. Rust checks do not run cargo audit,
@@ -62,7 +63,7 @@ dependencies after Web bootstrap and before `scripts/web-check.sh`.
 The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. The PostgreSQL
 script builds `ocserv-control` itself; only full scope builds its historical
 Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
-Both database matrices need only the router and run alongside language checks.
+All database matrices need only the router and run alongside language checks.
 Neither needs a Rust build or a shared binary artifact.
 
 ## Independent security checks
@@ -152,9 +153,12 @@ regression. Critical CI success is not full acceptance or release readiness.
 Manual Full runs MySQL/MariaDB as complementary `current` and `history`
 jobs on independent runners. The existing four-backend `database-smoke` matrix
 runs PostgreSQL 17/18 unchanged and MySQL/MariaDB current; the Full-only
-`database-history-full` matrix runs MySQL/MariaDB history. Automatic PR/main
+`database-history-full` matrix runs MySQL/MariaDB history, while
+`database-recovery-full` independently exercises each candidate MySQL-compatible
+backup and restore path. Automatic PR/main
 regression selection and runner counts are unchanged. `Basic CI Result` requires
-both matrices to succeed in Full, and history to be skipped in Quick.
+all three matrices to succeed in Full, and both Full-only matrices to be skipped
+in Quick.
 Every selected database unit must also emit its own completion output after
 its script succeeds. Missing outputs fail even if a matrix result says success.
 Unknown/missing profiles, inconsistent scope, missing routing flags and
