@@ -1,0 +1,65 @@
+services:
+  migrate:
+    environment:
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_TLS_CA_FILE: /run/secrets/database_ca
+      OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app@%
+    secrets:
+      - source: database_ca
+        target: database_ca
+        uid: "65534"
+        gid: "65532"
+        mode: 0444
+    networks: [database-egress]
+
+  control-plane:
+    environment:
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_TLS_CA_FILE: /run/secrets/database_ca
+    secrets:
+      - source: database_ca
+        target: database_ca
+        uid: "65534"
+        gid: "65532"
+        mode: 0444
+    networks: [database-egress]
+
+  backup:
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    image: ${OCSERV_DATABASE_BACKUP_IMAGE:?set a digest-pinned backend-specific backup image}
+    environment:
+      DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      MYSQL_DATABASE: ${OCSERV_DATABASE_BACKUP_NAME:-ocservia}
+      MYSQL_CONFIG_SOURCE: /run/secrets/database_backup_config
+      BACKUP_ROOT: /var/lib/ocservia-backup
+      BACKUP_INTERVAL_SECONDS: ${OCSERV_BACKUP_INTERVAL_SECONDS:-900}
+      BACKUP_RETENTION_COUNT: ${OCSERV_BACKUP_RETENTION_COUNT:-8}
+    secrets: [database_backup_config, database_ca]
+    volumes:
+      - ${OCSERV_BACKUP_DIR:?set OCSERV_BACKUP_DIR to a separately protected backup mount}:/var/lib/ocservia-backup
+    tmpfs: [/tmp:size=32m,uid=999,gid=999,mode=0700]
+    networks: [database-egress]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "find /var/lib/ocservia-backup/LATEST -mmin \"-$$((BACKUP_INTERVAL_SECONDS / 60 + 11))\" -type f | grep -q ."]
+      interval: 5m
+      timeout: 5s
+      retries: 2
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M, pids: 256}
+
+secrets:
+  database_backup_config:
+    file: ${OCSERV_SECRET_DIR}/database-backup.cnf
+  database_ca:
+    file: ${OCSERV_SECRET_DIR}/database-ca.pem
+
+networks:
+  database-egress:
+    internal: false

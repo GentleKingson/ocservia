@@ -55,7 +55,7 @@ Prerequisites: Git, Docker Engine with the Compose v2 plugin or Docker Desktop, 
 git clone https://github.com/GentleKingson/ocservia.git
 cd ocservia
 
-docker compose -f deploy/compose/compose.yaml up --build -d
+deploy/compose/compose.sh up --build -d
 ```
 
 Open the Web console at `http://127.0.0.1:4173`. The Controller exposes `http://127.0.0.1:8080/livez`, `/readyz`, and `/version`.
