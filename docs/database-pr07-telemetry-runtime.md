@@ -12,6 +12,20 @@ The sections below retain the chronological implementation and failed-attempt
 record. Earlier statements that thresholds were unspecified or performance
 was open describe their recorded candidate, not the latest measurements.
 
+### Post-merge API fixture closure
+
+The two pgx `42601` failures recorded below were present when PR #201 merged.
+A fixture-only follow-up now runs their parameterized multi-statement setup SQL
+with the simple protocol; production queries retain the pool's default extended
+protocol. The same follow-up reports cleanup failures for the affected batch
+authorization and bootstrap-token fixtures and adds both previously failing
+tests to Basic CI's PostgreSQL-only `regression-auth-postgres` profile. On
+2026-09-13, BuildServer passed
+the two targeted tests and the expanded `internal/api` package on both
+PostgreSQL 17 and 18, with no `42601` or cleanup error. The selected
+`regression-auth-postgres` profile also passed both required tests with `-race`
+on both versions. The historical PR #201 results below remain unchanged.
+
 ## Storage Decision
 
 The user confirmed keeping the existing monthly ordinary InnoDB tables for
