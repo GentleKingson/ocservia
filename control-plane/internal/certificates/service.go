@@ -27,13 +27,11 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -153,10 +151,6 @@ type ArtifactDownload struct {
 	Grant          *agentv1.ArtifactGrantV1
 }
 
-func New(pool *pgxpool.Pool, operations *operationstore.Service) *Service {
-	return NewBackend(postgres.WrapPool(pool), operations, nil, nil, nil, nil)
-}
-
 // NewBackend uses common certificate transactions. CSR/P12/revocation also
 // require an operations service configured for the same backend.
 func NewBackend(backend database.Backend, operations *operationstore.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
@@ -167,18 +161,6 @@ func NewBackend(backend database.Backend, operations *operationstore.Service, si
 // expiry maintenance, and certificate reads without issuance dependencies.
 func NewArtifactDownloads(backend database.Backend, artifacts ArtifactFetcher, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, artifacts: artifacts, grantSigner: signer, now: func() time.Time { return time.Now().UTC() }}
-}
-
-func NewWithSigner(pool *pgxpool.Pool, operations *operationstore.Service, signer Signer) *Service {
-	service := New(pool, operations)
-	service.signer = signer
-	return service
-}
-
-func NewWithDependencies(pool *pgxpool.Pool, operations *operationstore.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
-	service := NewWithSigner(pool, operations, signer)
-	service.sealer, service.artifacts, service.grantSigner = sealer, artifacts, grantSigner
-	return service
 }
 
 // EnableOwnerFencing runs artifact mutations inside the connection owner's

@@ -106,7 +106,7 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{backend: postgres.WrapPool(pool), rbac: rbac.New(pool), operations: apiOperationService(pool)}
+	server := &Server{backend: postgres.WrapPool(pool), rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool)}
 	server.EnableReleaseCatalog(catalog)
 
 	post := func(t *testing.T, principal auth.Principal, key, ifMatch, body string) *httptest.ResponseRecorder {
@@ -306,7 +306,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{backend: postgres.WrapPool(pool), rbac: rbac.New(pool), operations: apiOperationService(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	server := &Server{backend: postgres.WrapPool(pool), rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	server.EnableReleaseCatalog(catalog)
 	server.operations.EnableReleaseCatalog(catalog)
 

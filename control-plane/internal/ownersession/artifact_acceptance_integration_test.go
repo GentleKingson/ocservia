@@ -15,6 +15,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"google.golang.org/grpc"
 )
@@ -52,7 +53,7 @@ func TestObserverGuardSpansArtifactStreamAcceptanceIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
 	registry := &registryFence{}
-	manager, err := NewManager(pool, signer, registry, 30*time.Second, testLogger())
+	manager, err := NewManagerBackend(postgres.WrapPool(pool), signer, registry, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestObserverGuardSpansArtifactStreamAcceptanceIntegration(t *testing.T) {
 		t.Fatalf("new transport client: %v", err)
 	}
 
-	observer, err := NewObserver(pool, registry, signer)
+	observer, err := NewObserverBackend(postgres.WrapPool(pool), registry, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -179,7 +180,7 @@ func TestObserverGuardSpansArtifactStreamAcceptanceIntegration(t *testing.T) {
 	// A successor's real Acquire with a successfully registered higher epoch
 	// reopens the observer path on exactly the successor's term.
 	registry.failures = false
-	successor, err := NewManager(pool, signer, registry, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	successor, err := NewManagerBackend(postgres.WrapPool(pool), signer, registry, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}

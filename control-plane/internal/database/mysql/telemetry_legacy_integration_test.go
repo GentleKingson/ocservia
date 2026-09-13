@@ -56,7 +56,10 @@ func TestRealTelemetryAutomaticLegacyMigration(t *testing.T) {
 		t.Fatal("pending history accepted", err)
 	}
 	cutoff, _ := telemetryMicros(time.Now().UTC().Add(-14 * 24 * time.Hour))
-	if _, err := b.Exec(ctx, `CALL telemetry_retire_shards(?)`, cutoff); err == nil {
+	if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+		_, err := tx.Exec(ctx, `CALL telemetry_retire_shards(?)`, cutoff)
+		return err
+	}); err == nil {
 		t.Fatal("retention bypassed pending history migration")
 	}
 	if err := b.MigrateTelemetryHistory(ctx); err != nil {

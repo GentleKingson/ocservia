@@ -138,7 +138,7 @@ func Open(ctx context.Context, o Options) (*Backend, error) {
 	}
 	db := sql.OpenDB(&connector{config: c})
 	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(2)
+	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(time.Hour)
 	db.SetConnMaxIdleTime(5 * time.Minute)
 	var version string

@@ -14,6 +14,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -41,7 +42,7 @@ func TestCommonStoreNotFoundProblems(t *testing.T) {
 }
 
 func TestLiveAndRequestID(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	request := httptest.NewRequest(http.MethodGet, "/livez", nil)
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, request)
@@ -57,7 +58,7 @@ func TestLiveAndRequestID(t *testing.T) {
 }
 
 func TestDevAuthMarker(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true, "", 1)
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
 	if response.Header().Get("X-Ocservia-Dev-Subject") != "developer" {
@@ -66,7 +67,7 @@ func TestDevAuthMarker(t *testing.T) {
 }
 
 func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	for _, path := range []string{"/api/v1/operations", "/api/v1/operations/019fc0a4-6d92-765c-a8a1-4af556614cc3"} {
 		response := httptest.NewRecorder()
 		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
@@ -145,7 +146,7 @@ func TestUserStateRevisionSlotErrorsUseConflictProblems(t *testing.T) {
 }
 
 func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	for _, path := range []string{
 		"/api/v1/enrollment-tokens",
 		"/api/v1/node-bootstrap-tokens",
@@ -168,7 +169,7 @@ func TestNodeBootstrapTokenRouteUsesSeparatePermission(t *testing.T) {
 }
 
 func TestEnrollmentErrorsDistinguishInvalidRequestsFromBackendFailures(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", nil)
 
 	response := httptest.NewRecorder()
@@ -204,7 +205,7 @@ func TestCreateEnrollmentTokenRejectsUnboundEndpoint(t *testing.T) {
 }
 
 func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters", 1)
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/operations", nil)
 	request.Header.Set("Authorization", "Bearer wrong")
@@ -223,8 +224,8 @@ func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
 }
 
 func TestCreateSimulationRejectsNullBody(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
-	server.EnableLocalSlice(localslice.New(nil))
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server.EnableLocalSlice(localslice.NewBackend(nil, nil))
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/development/simulations", strings.NewReader("null"))
 	request.Header.Set("Content-Type", "application/json")
@@ -235,7 +236,7 @@ func TestCreateSimulationRejectsNullBody(t *testing.T) {
 }
 
 func TestDevelopmentRuntimeIsHiddenWhenSimulatorIsDisabled(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/development/runtime", nil)
 	response := httptest.NewRecorder()
 
@@ -252,7 +253,7 @@ func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testi
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	server := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	server.SetLocalSimulatorEnabled(true)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/development/runtime", nil)
 	response := httptest.NewRecorder()
@@ -277,7 +278,7 @@ func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testi
 }
 
 func TestVersionUsesContractFieldNames(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/version", nil))
 	var body map[string]string
@@ -290,7 +291,7 @@ func TestVersionUsesContractFieldNames(t *testing.T) {
 }
 
 func TestRoutingErrorsUseProblemDetails(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	tests := []struct {
 		method string
 		path   string
@@ -355,7 +356,7 @@ func TestExpectedRevisionRequiresMatchingHeaderOrBody(t *testing.T) {
 }
 
 func TestSyntheticCommandRequiresAuthentication(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	server.http.Handler.ServeHTTP(response, request)
@@ -365,7 +366,7 @@ func TestSyntheticCommandRequiresAuthentication(t *testing.T) {
 }
 
 func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	for _, path := range []string{
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/sessions/42:disconnect",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/sessions/42:terminate",
@@ -382,7 +383,7 @@ func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
 }
 
 func TestI14RoutesRequireAuthentication(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	tests := []struct {
 		method string
 		path   string
@@ -465,7 +466,7 @@ func TestBrowserMutationFailsClosedWithoutConfiguredOrigin(t *testing.T) {
 }
 
 func TestEnableBrowserOriginRejectsMalformedOrigins(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	for _, origin := range []string{"not a url", "https://admin.example.com/callback", "https://user:pass@admin.example.com", "https://admin.example.com?x=1"} {
 		server.EnableBrowserOrigin(origin)
 		if server.browserOrigin != "" {
@@ -479,7 +480,7 @@ func TestEnableBrowserOriginRejectsMalformedOrigins(t *testing.T) {
 }
 
 func TestRequireOperationAuthPassesDevelopmentBearerWithoutOrigin(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters", 1)
 	server.EnableBrowserOrigin("https://admin.example.com")
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", strings.NewReader("{}"))
 	request.Header.Set("Authorization", "Bearer local-development-token-32-characters")

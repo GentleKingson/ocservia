@@ -140,6 +140,9 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		return nil
 	}
 
+	if err := conn.ValidateRuntime(databaseCtx); err != nil {
+		return fmt.Errorf("validate required runtime database capabilities: %w", err)
+	}
 	logger.Info("control plane starting", "role", cfg.Role)
 	if cfg.PprofAddress != "" {
 		pprofServer := &http.Server{Addr: cfg.PprofAddress, Handler: http.DefaultServeMux, ReadHeaderTimeout: 5 * time.Second}

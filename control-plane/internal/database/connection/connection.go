@@ -12,6 +12,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -80,7 +81,9 @@ func (c *Connection) Close() {
 
 func (c *Connection) Migrate(ctx context.Context, manager *audit.Manager) error {
 	if c.pg != nil {
-		return migrations.Migrate(ctx, c.pg, manager.PreflightAuthenticityMigration)
+		return migrations.Migrate(ctx, c.pg, func(ctx context.Context, tx pgx.Tx, version int64) error {
+			return manager.PreflightAuthenticityMigration(ctx, postgres.WrapTx(tx), version)
+		})
 	}
 	// MySQL's immutable chain includes its own guarded audit-copy validation.
 	// Normal startup never repairs an interrupted revision implicitly.
@@ -95,4 +98,16 @@ func (c *Connection) GrantRuntimePrivileges(ctx context.Context, account string)
 		return migrations.GrantRuntimePrivileges(ctx, c.pg, account)
 	}
 	return c.mysql.GrantRuntimePrivileges(ctx, account)
+}
+
+// ValidateRuntime runs before starting any role's listeners or background work.
+// A valid schema receipt alone does not prove telemetry history is usable.
+func (c *Connection) ValidateRuntime(ctx context.Context) error {
+	if err := database.Require(c.Store, database.Transactions, database.RowLocks); err != nil {
+		return err
+	}
+	if c.mysql != nil {
+		return c.mysql.ValidateTelemetryRuntime(ctx)
+	}
+	return postgres.WrapPool(c.pg).ValidateTelemetryRuntime(ctx)
 }

@@ -16,11 +16,9 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -110,14 +108,6 @@ func recordVerificationMetric(verification Verification) {
 	}
 }
 
-func VerifyResult(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) Verification {
-	var common database.Tx
-	if tx != nil {
-		common = postgres.WrapTx(tx)
-	}
-	return VerifyResultTransaction(ctx, common, nodeID, envelope, result)
-}
-
 // VerifyResultTransaction reads the key inside the caller-owned result transaction.
 func VerifyResultTransaction(ctx context.Context, tx database.Tx, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) Verification {
 	return verifyResult(ctx, transactionKeyLookup(tx), nodeID, envelope, result)
@@ -192,18 +182,6 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 	}
 	verification.Status, verification.FailureReason = "verified", ""
 	return verification
-}
-
-// VerifyUpgradeResult verifies the root-signed durable outcome and checks
-// that its claims match the surrounding telemetry report. Database key
-// lookup errors are returned separately; an invalid proof is represented in
-// the result and must not be persisted by the caller.
-func VerifyUpgradeResult(ctx context.Context, tx pgx.Tx, nodeID, operationID uuid.UUID, state agentv1.AgentUpgradeOutcomeState, targetVersion string, completedAt time.Time, proof *agentv1.AgentUpgradeResultProof) (verification UpgradeResultVerification, err error) {
-	var common database.Tx
-	if tx != nil {
-		common = postgres.WrapTx(tx)
-	}
-	return VerifyUpgradeResultTransaction(ctx, common, nodeID, operationID, state, targetVersion, completedAt, proof)
 }
 
 func VerifyUpgradeResultTransaction(ctx context.Context, tx database.Tx, nodeID, operationID uuid.UUID, state agentv1.AgentUpgradeOutcomeState, targetVersion string, completedAt time.Time, proof *agentv1.AgentUpgradeResultProof) (UpgradeResultVerification, error) {

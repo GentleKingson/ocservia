@@ -4,7 +4,9 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="${1:-postgres}"
 case "${ENGINE}" in mysql|mariadb|postgres) ;; *) echo 'expected postgres, mysql or mariadb' >&2; exit 2 ;; esac
-NAME="pr02-controller-${ENGINE}-$(date +%s)-$$"
+ROLE_MODE="${2:-all}"
+case "${ROLE_MODE}" in all|split) ;; *) echo 'expected all or split role mode' >&2; exit 2 ;; esac
+NAME="pr07-controller-${ENGINE}-${ROLE_MODE}-$(date +%s)-$$"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${ROOT}/artifacts/${NAME}}"
 mkdir -p "${ARTIFACT_DIR}" "${ROOT}/.cache/go-build" "${ROOT}/.cache/go-mod"
 ARTIFACT_DIR="$(cd "${ARTIFACT_DIR}" && pwd)"
@@ -40,7 +42,7 @@ docker image inspect ocservia-pr02-agent:e2e ocservia-pr02-transport:e2e ocservi
 # Nothing is published on the host, and runtime processes cannot use public
 # discovery as an accidental substitute for the two dedicated TLS relays.
 docker network create --internal "${NAME}" >/dev/null
-ENVIRONMENT=(-e PR02_CONTROLLER_E2E=1 -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
+ENVIRONMENT=(-e PR02_CONTROLLER_E2E=1 -e "PR07_CONTROLLER_ROLE_MODE=${ROLE_MODE}" -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
 if [[ "${ENGINE}" == postgres ]]; then
   docker run -d --name "${NAME}" --network "${NAME}" \
     -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only -e POSTGRES_DB=ocservia \

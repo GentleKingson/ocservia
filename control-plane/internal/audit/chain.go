@@ -18,11 +18,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -75,17 +72,9 @@ type Manager struct {
 	current       eventAuthenticator
 }
 
-func NewManager(pool *pgxpool.Pool, checkpointKey []byte) *Manager {
-	return NewBackendManager(postgres.WrapPool(pool), checkpointKey)
-}
-
 func NewBackendManager(backend database.Backend, checkpointKey []byte) *Manager {
 	auth := currentEventAuthenticator()
 	return newManager(backend, checkpointKey, auth)
-}
-
-func NewManagerWithEventKey(pool *pgxpool.Pool, checkpointKey []byte, keyID string, key []byte) (*Manager, error) {
-	return NewBackendManagerWithEventKey(postgres.WrapPool(pool), checkpointKey, keyID, key)
 }
 
 func NewBackendManagerWithEventKey(backend database.Backend, checkpointKey []byte, keyID string, key []byte) (*Manager, error) {
@@ -162,10 +151,6 @@ func signEvent(key [sha256.Size]byte, eventHash []byte) []byte {
 	return mac.Sum(nil)
 }
 
-func LockChain(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID) error {
-	return LockChainTx(ctx, postgres.WrapTx(tx), workspaceID)
-}
-
 func LockChainTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) error {
 	s, err := auditstore.From(tx)
 	if err != nil {
@@ -175,10 +160,6 @@ func LockChainTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) err
 		return fmt.Errorf("lock audit chain: %w", err)
 	}
 	return nil
-}
-
-func AppendChain(ctx context.Context, tx pgx.Tx, record ChainRecord) error {
-	return AppendChainTx(ctx, postgres.WrapTx(tx), record)
 }
 
 func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) error {
@@ -535,14 +516,22 @@ func (m *Manager) EnsureAuthenticity(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) PreflightAuthenticityMigration(ctx context.Context, tx pgx.Tx, version int64) error {
+func (m *Manager) PreflightAuthenticityMigration(ctx context.Context, tx database.Tx, version int64) error {
 	if version != authenticityMigrationV1 {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `LOCK TABLE audit_events, audit_checkpoints IN SHARE MODE`); err != nil {
+	store, err := auditstore.From(tx)
+	if err != nil {
+		return err
+	}
+	legacy, ok := store.(auditstore.LegacyPreflight)
+	if !ok {
+		return database.ErrUnsupported
+	}
+	if err := legacy.LockLegacy(ctx); err != nil {
 		return fmt.Errorf("lock legacy audit history: %w", err)
 	}
-	rows, err := tx.Query(ctx, `SELECT DISTINCT workspace_id FROM audit_events ORDER BY workspace_id`)
+	rows, err := store.Workspaces(ctx)
 	if err != nil {
 		return fmt.Errorf("list legacy audit workspaces: %w", err)
 	}
@@ -560,19 +549,19 @@ func (m *Manager) PreflightAuthenticityMigration(ctx context.Context, tx pgx.Tx,
 		return err
 	}
 	for _, workspaceID := range workspaces {
-		if err := m.preflightLegacyWorkspace(ctx, tx, workspaceID); err != nil {
+		if err := m.preflightLegacyWorkspace(ctx, tx, legacy, workspaceID); err != nil {
 			return fmt.Errorf("preflight audit authenticity for workspace %s: %w", workspaceID, err)
 		}
 	}
 	return nil
 }
 
-func (m *Manager) preflightLegacyWorkspace(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID) error {
-	checkpoints, _, err := m.readCheckpoints(ctx, postgres.WrapTx(tx), workspaceID)
+func (m *Manager) preflightLegacyWorkspace(ctx context.Context, tx database.Tx, legacy auditstore.LegacyPreflight, workspaceID uuid.UUID) error {
+	checkpoints, _, err := m.readCheckpoints(ctx, tx, workspaceID)
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspaceID)
+	rows, err := legacy.LegacyEvents(ctx, workspaceID)
 	if err != nil {
 		return err
 	}

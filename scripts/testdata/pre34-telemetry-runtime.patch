@@ -1,0 +1,22 @@
+--- a/control-plane/internal/platform/app/app.go
++++ b/control-plane/internal/platform/app/app.go
+@@ -143,6 +143,3 @@
+-	if err := conn.ValidateRuntime(databaseCtx); err != nil {
+-		return fmt.Errorf("validate required runtime database capabilities: %w", err)
+-	}
+ 	logger.Info("control plane starting", "role", cfg.Role)
+ 	if cfg.PprofAddress != "" {
+ 		pprofServer := &http.Server{Addr: cfg.PprofAddress, Handler: http.DefaultServeMux, ReadHeaderTimeout: 5 * time.Second}
+--- a/control-plane/internal/database/postgres/telemetry_history.go
++++ b/control-plane/internal/database/postgres/telemetry_history.go
+@@ -79,6 +79,9 @@
+-	if _, err := s.tx.Exec(ctx, `SELECT telemetry_prune_rollups($1)`, now); err != nil {
++	if _, err := s.tx.Exec(ctx, `DELETE FROM telemetry_rollups_5m WHERE bucket_at < $1`, now.Add(-90*24*time.Hour)); err != nil {
++		return err
++	}
++	if _, err := s.tx.Exec(ctx, `DELETE FROM telemetry_rollups_1h WHERE bucket_at < $1`, now.AddDate(0, -13, 0)); err != nil {
+ 		return err
+ 	}
+ 	_, err := s.tx.Exec(ctx, `SELECT telemetry_drop_expired_partitions($1)`, now.Add(-14*24*time.Hour))
+ 	return err
+ }

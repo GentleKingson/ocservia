@@ -15,6 +15,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -227,7 +228,7 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 		finalCursorSeen: make(chan struct{}),
 	}
 	client := newRetainedEventClient(t, serverImpl)
-	service := NewWithSigner(pool, integrationCommandSigner())
+	service := NewBackend(postgres.WrapPool(pool), integrationCommandSigner())
 	watchCtx, watchCancel := context.WithCancel(testCtx)
 	watchResult := make(chan error, 1)
 	go func() { watchResult <- client.RunWatch(watchCtx, service, service) }()

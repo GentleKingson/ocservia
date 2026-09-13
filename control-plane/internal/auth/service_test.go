@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
@@ -17,7 +18,7 @@ import (
 func TestOptionalAuthenticationProviders(t *testing.T) {
 	ctx := context.Background()
 	for _, local := range []bool{false, true} {
-		s, err := New(ctx, &pgxpool.Pool{}, Config{LocalEnabled: local, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+		s, err := NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{LocalEnabled: local, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -34,7 +35,7 @@ func TestOptionalAuthenticationProviders(t *testing.T) {
 		}
 	}
 	for _, issuer := range []string{"local", "break-glass"} {
-		if _, err := New(ctx, &pgxpool.Pool{}, Config{Issuer: issuer, ClientID: "client", RedirectURL: "https://console.example/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour}); err == nil {
+		if _, err := NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{Issuer: issuer, ClientID: "client", RedirectURL: "https://console.example/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour}); err == nil {
 			t.Fatalf("reserved identity source accepted as OIDC: %s", issuer)
 		}
 	}
@@ -43,7 +44,7 @@ func TestOptionalAuthenticationProviders(t *testing.T) {
 func TestOIDCTLSAndIssuerOutagesFailClosed(t *testing.T) {
 	tlsIssuer := httptest.NewTLSServer(http.NotFoundHandler())
 	defer tlsIssuer.Close()
-	service, err := New(context.Background(), &pgxpool.Pool{}, Config{Issuer: tlsIssuer.URL, ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	service, err := NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{Issuer: tlsIssuer.URL, ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestOIDCTLSAndIssuerOutagesFailClosed(t *testing.T) {
 	unavailable := httptest.NewTLSServer(http.NotFoundHandler())
 	issuer := unavailable.URL
 	unavailable.Close()
-	service, err = New(context.Background(), &pgxpool.Pool{}, Config{Issuer: issuer, ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	service, err = NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{Issuer: issuer, ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func TestOIDCTLSAndIssuerOutagesFailClosed(t *testing.T) {
 }
 
 func TestBeginLoginUsesPKCES256StateNonceAndSecureCookie(t *testing.T) {
-	service, err := New(context.Background(), &pgxpool.Pool{}, Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	service, err := NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +105,7 @@ func TestBeginLoginUsesPKCES256StateNonceAndSecureCookie(t *testing.T) {
 }
 
 func TestNewRejectsNonHTTPSRedirectAndWeakSessionKey(t *testing.T) {
-	_, err := New(context.Background(), &pgxpool.Pool{}, Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "http://console.example/callback", SessionKey: make([]byte, 31), SessionTTL: time.Hour})
+	_, err := NewBackend(postgres.WrapPool(&pgxpool.Pool{}), Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "http://console.example/callback", SessionKey: make([]byte, 31), SessionTTL: time.Hour})
 	if err == nil {
 		t.Fatal("unsafe OIDC configuration accepted")
 	}

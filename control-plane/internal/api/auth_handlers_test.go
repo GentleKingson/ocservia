@@ -20,6 +20,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
@@ -39,11 +40,11 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, issuer stri
 	if pool == nil {
 		pool = &pgxpool.Pool{}
 	}
-	service, err := auth.New(context.Background(), pool, cfg)
+	service, err := auth.NewBackend(postgres.WrapPool(pool), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 1)
+	s := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 1)
 	s.auth = service
 	s.EnableBrowserOrigin(authTestOrigin)
 	return s
@@ -458,7 +459,7 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	if err != nil || actor.BreakGlass {
 		t.Fatalf("ordinary principal: %+v %v", actor, err)
 	}
-	s.EnableAuthorization(s.auth, rbac.New(pool), approvals.New(pool), nil)
+	s.EnableAuthorization(s.auth, rbac.NewBackend(postgres.WrapPool(pool)), approvals.NewBackend(postgres.WrapPool(pool)), nil)
 	workspaceID, targetID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'P6 parity',$2,now(),now())`, workspaceID, "parity-"+workspaceID.String()); err != nil {
 		t.Fatal(err)

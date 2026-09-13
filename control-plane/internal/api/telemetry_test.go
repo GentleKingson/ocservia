@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -45,7 +46,7 @@ func TestTelemetryHistoryErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			server := &Server{telemetry: telemetry.New(pool), logger: slog.New(slog.NewTextHandler(&logs, nil))}
+			server := &Server{telemetry: telemetry.NewBackend(postgres.WrapPool(pool)), logger: slog.New(slog.NewTextHandler(&logs, nil))}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			request := httptest.NewRequest(http.MethodGet, "/?"+tc.query, nil).WithContext(ctx)

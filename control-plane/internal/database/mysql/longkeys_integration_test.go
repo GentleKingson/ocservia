@@ -69,8 +69,36 @@ func TestRealLongKeyWrites(t *testing.T) {
 		q := "INSERT INTO " + table + "(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) VALUES(?,?,?,1,1,1,1)"
 		exec(q, node, large, stamp)
 		exec(q, node, large+" ", stamp)
+		// Equal-length keys share the lookup prefix but remain distinct in full.
+		exec(q, node, large+"a", stamp)
+		exec(q, node, large+"b", stamp)
 		if _, err := b.Exec(ctx, q, node, large, stamp); !errors.Is(err, database.ErrUnique) {
 			t.Fatal(table, "duplicate accepted", err)
+		}
+		exec(q, node, "short", stamp)
+		for _, size := range []int{255, 256} {
+			metric := strings.Repeat("b", size)
+			exec(q, node, metric, stamp)
+			var fallback bool
+			if err := b.QueryRow(ctx, "SELECT short_metric IS NULL FROM "+table+" WHERE node_id=? AND BINARY metric=BINARY ?", node, metric).Scan(&fallback); err != nil || fallback != (size > 255) {
+				t.Fatalf("%s short-key boundary %d: %t %v", table, size, fallback, err)
+			}
+			if _, err := b.Exec(ctx, q, node, metric, stamp); !errors.Is(err, database.ErrUnique) {
+				t.Fatal(table, "boundary duplicate accepted", err)
+			}
+		}
+		if _, err := b.Exec(ctx, q, node, "short", stamp); !errors.Is(err, database.ErrUnique) {
+			t.Fatal(table, "short duplicate accepted", err)
+		}
+		if _, err := b.Exec(ctx, "UPDATE "+table+" SET metric=? WHERE node_id=? AND BINARY metric=BINARY 'short'", large, node); !errors.Is(err, database.ErrUnique) {
+			t.Fatal(table, "short-to-long duplicate accepted", err)
+		}
+		if _, err := b.Exec(ctx, "UPDATE "+table+" SET metric='short' WHERE node_id=? AND BINARY metric=BINARY ?", node, large); !errors.Is(err, database.ErrUnique) {
+			t.Fatal(table, "long-to-short duplicate accepted", err)
+		}
+		exec("UPDATE "+table+" SET min_value=2,max_value=2,avg_value=2 WHERE node_id=? AND BINARY metric=BINARY 'short'", node)
+		if _, err := b.Exec(ctx, q, node, "short", stamp); !errors.Is(err, database.ErrUnique) {
+			t.Fatal(table, "aggregate update lost its exact key", err)
 		}
 	}
 	exec(`INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES(?,?,1,'quota',?,1,?)`, node, large, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
@@ -88,8 +116,8 @@ func TestRealLongKeyWrites(t *testing.T) {
 		}
 	}
 	for _, query := range []string{
-		`SELECT metric FROM telemetry_rollups_5m WHERE node_id=? ORDER BY OCTET_LENGTH(metric) LIMIT 1`,
-		`SELECT metric FROM telemetry_rollups_1h WHERE node_id=? ORDER BY OCTET_LENGTH(metric) LIMIT 1`,
+		`SELECT metric FROM telemetry_rollups_5m WHERE node_id=? AND OCTET_LENGTH(metric)>=4096 ORDER BY OCTET_LENGTH(metric) LIMIT 1`,
+		`SELECT metric FROM telemetry_rollups_1h WHERE node_id=? AND OCTET_LENGTH(metric)>=4096 ORDER BY OCTET_LENGTH(metric) LIMIT 1`,
 		`SELECT username FROM user_policy_enforcements WHERE node_id=?`,
 	} {
 		if err := b.QueryRow(ctx, query, node).Scan(&got); err != nil || got != large {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -36,7 +37,7 @@ func TestObjectAndFunctionAuthorizationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at)VALUES($1,$2,$3,'Viewer','workspace',now())`, bindingID, identityID, workspaceOne); err != nil {
 		t.Fatal(err)
 	}
-	service := New(pool)
+	service := NewBackend(postgres.WrapPool(pool))
 	if err := service.Authorize(ctx, identityID, "node.read", Resource{WorkspaceID: workspaceOne, Type: "node", ID: nodeOne}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestRoleGrantCannotExceedActorPermissionsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := New(pool)
+	service := NewBackend(postgres.WrapPool(pool))
 	base := BindingRequest{IdentityID: securityID, WorkspaceID: workspaceID, ActorID: securityID, SessionID: securitySession, ResourceType: "workspace", RequestID: uuid.Must(uuid.NewV7()).String(), Reason: "grant ceiling test"}
 	base.Role = "PlatformAdmin"
 	if _, err := service.CreateBinding(ctx, base); !errors.Is(err, ErrGrantForbidden) {
@@ -100,7 +101,7 @@ func TestRoleGrantCannotExceedActorPermissionsIntegration(t *testing.T) {
 		t.Fatalf("unapproved PlatformAdmin grant error = %v", err)
 	}
 	hash, summary := BindingApprovalContent(targetID, workspaceID, "PlatformAdmin", "workspace", uuid.Nil)
-	approvalService := approvals.New(pool)
+	approvalService := approvals.NewBackend(postgres.WrapPool(pool))
 	approval, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: workspaceID, RequesterID: platformID, ResourceID: targetID, Action: "role_binding.elevate", ResourceType: "role_binding", Reason: "independent role elevation", TTL: time.Hour, SessionID: platformSession, RequestID: uuid.Must(uuid.NewV7()).String(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspaceID, Type: "workspace", ID: uuid.Nil}}})
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +145,7 @@ func TestResourceTypePreventsUUIDScopeAliasIntegration(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM identities WHERE id=$1`, identityID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id=$1`, workspaceID)
 	}()
-	service := New(pool)
+	service := NewBackend(postgres.WrapPool(pool))
 	if err := service.Authorize(ctx, identityID, "secret.use", Resource{WorkspaceID: workspaceID, Type: "secret_ref", ID: sharedID}, false); err != nil {
 		t.Fatal(err)
 	}

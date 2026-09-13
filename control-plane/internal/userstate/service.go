@@ -19,14 +19,12 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationdata "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/userstate/store"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -103,15 +101,8 @@ type Service struct {
 	signer  *commandauth.Signer
 }
 
-func New(pool *pgxpool.Pool) *Service { return NewBackend(postgres.WrapPool(pool)) }
-
 func NewBackend(backend database.Backend) *Service {
 	return &Service{backend: backend, now: func() time.Time { return time.Now().UTC() }}
-}
-
-// NewWithSigner configures desired-state mutations with a Controller signer.
-func NewWithSigner(pool *pgxpool.Pool, signer *commandauth.Signer) *Service {
-	return NewWithSignerBackend(postgres.WrapPool(pool), signer)
 }
 
 func NewWithSignerBackend(backend database.Backend, signer *commandauth.Signer) *Service {

@@ -16,7 +16,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func localLimitService(t *testing.T) *Service {
+type localLimitFixture struct {
+	*Service
+	pool *pgxpool.Pool
+}
+
+func localLimitService(t *testing.T) *localLimitFixture {
 	t.Helper()
 	url := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if url == "" {
@@ -27,21 +32,21 @@ func localLimitService(t *testing.T) *Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	s, err := New(context.Background(), pool, Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	s, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s
+	return &localLimitFixture{Service: s, pool: pool}
 }
 
-func localLimitExec(t *testing.T, s *Service, sql string, args ...any) {
+func localLimitExec(t *testing.T, s *localLimitFixture, sql string, args ...any) {
 	t.Helper()
 	if _, err := s.pool.Exec(context.Background(), sql, args...); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func localLimitState(t *testing.T, s *Service, name string) (int, bool) {
+func localLimitState(t *testing.T, s *localLimitFixture, name string) (int, bool) {
 	t.Helper()
 	var failures int
 	var active bool
@@ -165,7 +170,7 @@ func TestLocalAccountConcurrentLeaseAndFencingIntegration(t *testing.T) {
 			} else if !errors.Is(err, ErrUnauthenticated) {
 				errs <- err
 			}
-		}([]*Service{s, other}[i%2])
+		}([]*Service{s.Service, other.Service}[i%2])
 	}
 	close(start)
 	wg.Wait()
@@ -264,8 +269,7 @@ func TestLocalAccountCancellationAndErrorsIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		other := *s
-		other.pool = pool
+		other := *s.Service
 		other.backend = postgres.WrapPool(pool)
 		_, _, err = other.AuthenticateLocal(requestCtx, name, "wrong")
 		cancel()
@@ -338,7 +342,7 @@ func TestLocalAccountCapacityAndCleanupIntegration(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := []*Service{s, other}[i%2].reserveLocalAttempt(ctx, prefix+uuid.NewString())
+			_, err := []*Service{s.Service, other.Service}[i%2].reserveLocalAttempt(ctx, prefix+uuid.NewString())
 			errs <- err
 		}(i)
 	}
