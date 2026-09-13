@@ -10,6 +10,7 @@ services:
         uid: "65534"
         gid: "65532"
         mode: 0444
+    networks: [database-egress]
 
   control-plane:
     environment:
@@ -21,6 +22,7 @@ services:
         uid: "65534"
         gid: "65532"
         mode: 0444
+    networks: [database-egress]
 
   backup:
     restart: unless-stopped
@@ -40,7 +42,7 @@ services:
     volumes:
       - ${OCSERV_BACKUP_DIR:?set OCSERV_BACKUP_DIR to a separately protected backup mount}:/var/lib/ocservia-backup
     tmpfs: [/tmp:size=32m,uid=999,gid=999,mode=0700]
-    networks: [database]
+    networks: [database-egress]
     depends_on:
       migrate: {condition: service_completed_successfully}
     healthcheck:
@@ -48,9 +50,16 @@ services:
       interval: 5m
       timeout: 5s
       retries: 2
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M, pids: 256}
 
 secrets:
   database_backup_config:
     file: ${OCSERV_SECRET_DIR}/database-backup.cnf
   database_ca:
     file: ${OCSERV_SECRET_DIR}/database-ca.pem
+
+networks:
+  database-egress:
+    internal: false

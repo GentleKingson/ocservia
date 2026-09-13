@@ -48,10 +48,28 @@ jq -e '
   (.services | has("postgres") | not) and
   .services.backup.depends_on.migrate.condition == "service_completed_successfully" and
   .services.backup.environment.PGHOST == "postgres.example.test" and
+  .services.backup.environment.PGSSLMODE == "verify-full" and
+  .services.backup.environment.POSTGRES_SERVER_MAJOR == "17" and
+  .services.migrate.environment.OCSERV_DATABASE_TLS_CA_FILE == "/run/secrets/database_ca" and
+  .services["control-plane"].environment.OCSERV_DATABASE_TLS_CA_FILE == "/run/secrets/database_ca" and
   (.services.backup.healthcheck.test | length > 0) and
   ([.services.backup.secrets[].source] | index("postgres_pgpass") != null) and
-  ([.services.backup.volumes[].target] | index("/var/lib/ocservia-backup") != null)
+  ([.services.backup.secrets[].source] | index("database_ca") != null) and
+  (.services.migrate.networks | has("database-egress")) and
+  (.services["control-plane"].networks | has("database-egress")) and
+  (.services.backup.networks | has("database-egress")) and
+  ((.networks["database-egress"].internal // false) == false) and
+  ([.services.backup.volumes[].target] | index("/var/lib/ocservia-backup") != null) and
+  .services.backup.deploy.resources.limits.memory == "536870912"
 ' "${work}/external-postgres.json" >/dev/null
+
+mv "${work}/secrets/database-ca.pem" "${work}/database-ca.pem"
+if OCSERV_DATABASE_DEPLOYMENT=external OCSERV_DATABASE_BACKUP_HOST=postgres.example.test \
+  "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/missing-postgres-ca.log" 2>&1; then
+  echo "external PostgreSQL without a CA unexpectedly accepted" >&2
+  exit 1
+fi
+mv "${work}/database-ca.pem" "${work}/secrets/database-ca.pem"
 
 for backend in mysql mariadb; do
   OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT=external \
@@ -67,7 +85,12 @@ for backend in mysql mariadb; do
     ([.services.migrate.secrets[].source] | index("database_owner_url") != null) and
     ([.services.backup.secrets[].source] | index("database_backup_config") != null) and
     ([.services.backup.secrets[].source] | index("database_ca") != null) and
-    ([.services.backup.volumes[].target] | index("/var/lib/ocservia-backup") != null)
+    (.services.migrate.networks | has("database-egress")) and
+    (.services["control-plane"].networks | has("database-egress")) and
+    (.services.backup.networks | has("database-egress")) and
+    ((.networks["database-egress"].internal // false) == false) and
+    ([.services.backup.volumes[].target] | index("/var/lib/ocservia-backup") != null) and
+    .services.backup.deploy.resources.limits.memory == "536870912"
   ' "${work}/external-${backend}.json" >/dev/null
 done
 

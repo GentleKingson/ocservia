@@ -5,7 +5,9 @@ package connection
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
+	"path/filepath"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
@@ -26,22 +28,38 @@ type Store interface {
 }
 
 type Connection struct {
-	Store Store
-	pg    *pgxpool.Pool
-	mysql *mysql.Backend
+	Store              Store
+	pg                 *pgxpool.Pool
+	mysql              *mysql.Backend
+	externalPostgreSQL bool
+}
+
+func postgresURL(options Options) (string, error) {
+	u, err := url.Parse(options.URL)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" {
+		return "", errors.New("OCSERV_DATABASE_URL must be a PostgreSQL URL")
+	}
+	if options.CAFile == "" {
+		return options.URL, nil
+	}
+	if !filepath.IsAbs(options.CAFile) {
+		return "", errors.New("external PostgreSQL CA file must use an absolute path")
+	}
+	query := u.Query()
+	mode := query["sslmode"]
+	if len(mode) != 1 || mode[0] != "verify-full" {
+		return "", errors.New("external PostgreSQL requires sslmode=verify-full")
+	}
+	query.Set("sslrootcert", options.CAFile)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }
 
 func ValidateOptions(options Options) error {
 	switch options.Backend {
 	case "", "postgres":
-		u, err := url.Parse(options.URL)
-		if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" {
-			return errors.New("OCSERV_DATABASE_URL must be a PostgreSQL URL")
-		}
-		if options.CAFile != "" {
-			return errors.New("PostgreSQL TLS roots must be configured in OCSERV_DATABASE_URL")
-		}
-		return nil
+		_, err := postgresURL(options)
+		return err
 	case "mysql", "mariadb":
 		return mysql.ValidateOptions(mysql.Options{Engine: mysql.Engine(options.Backend), Environment: options.Environment, DSN: options.URL, CAFile: options.CAFile})
 	default:
@@ -55,11 +73,15 @@ func Open(ctx context.Context, options Options) (*Connection, error) {
 	}
 	switch options.Backend {
 	case "", "postgres":
-		pool, err := migrations.Open(ctx, options.URL)
+		databaseURL, err := postgresURL(options)
 		if err != nil {
 			return nil, err
 		}
-		return &Connection{Store: postgres.WrapPool(pool), pg: pool}, nil
+		pool, err := migrations.Open(ctx, databaseURL)
+		if err != nil {
+			return nil, err
+		}
+		return &Connection{Store: postgres.WrapPool(pool), pg: pool, externalPostgreSQL: options.CAFile != ""}, nil
 	case "mysql", "mariadb":
 		backend, err := mysql.Open(ctx, mysql.Options{Engine: mysql.Engine(options.Backend), Environment: options.Environment, DSN: options.URL, CAFile: options.CAFile})
 		if err != nil {
@@ -69,6 +91,25 @@ func Open(ctx context.Context, options Options) (*Connection, error) {
 	default:
 		return nil, errors.New("unsupported Controller database backend")
 	}
+}
+
+func validateExternalPostgreSQLVersion(version int) error {
+	if version/10000 != 17 {
+		return fmt.Errorf("external PostgreSQL requires server major version 17, got %d", version/10000)
+	}
+	return nil
+}
+
+// ValidateDeployment runs connection-level deployment gates before migrations.
+func (c *Connection) ValidateDeployment(ctx context.Context) error {
+	if !c.externalPostgreSQL {
+		return nil
+	}
+	var version int
+	if err := c.pg.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
+		return fmt.Errorf("inspect external PostgreSQL server version: %w", err)
+	}
+	return validateExternalPostgreSQLVersion(version)
 }
 
 func (c *Connection) Close() {

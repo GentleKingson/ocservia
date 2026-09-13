@@ -75,7 +75,7 @@ general_secrets=(tls.crt tls.key database-owner-url database-app-url session-key
 if [[ "${database_backend}:${database_deployment}" == postgres:bundled ]]; then
   general_secrets+=(postgres-owner-password postgres-app-password postgres-backup-password postgres.pgpass)
 elif [[ "${database_backend}" == postgres ]]; then
-  general_secrets+=(postgres.pgpass)
+  general_secrets+=(postgres.pgpass database-ca.pem)
 else
   general_secrets+=(database-backup.cnf database-ca.pem)
 fi

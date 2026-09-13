@@ -26,9 +26,11 @@ Until that hosting has operational ownership and byte-verification evidence,
 the public Quick Start obtains Stage-1 from a clean exact-release checkout.
 
 The production launcher combines `deploy/production/compose.yaml` with one
-database descriptor. Bundled PostgreSQL remains the default and runs the HTTPS
+database descriptor. Bundled PostgreSQL 17 remains the default and runs the HTTPS
 gateway, control plane, transport service, PostgreSQL, and backup worker. An
-external PostgreSQL descriptor is also implemented. The external MySQL and
+external PostgreSQL 17 descriptor is also implemented; it uses a dedicated
+egress network and requires `sslmode=verify-full` plus `database-ca.pem` for
+owner, runtime, and backup connections. The external MySQL and
 MariaDB descriptors are available for pre-support deployment validation, but
 their Controller production startup gate deliberately remains closed until the
 independent PR-09 acceptance matrix passes. Bundled MySQL/MariaDB is rejected.
@@ -428,9 +430,26 @@ compatibility from the `controller_schema_compatibility` contract; and
 disaster recovery from verified PostgreSQL backup/PITR. Passing one boundary
 does not establish the others.
 
-Backups retain the configured number of verified base backups. WAL cleanup is anchored to the oldest retained base backup, so point-in-time recovery remains possible across the retained window without allowing the local archive to grow forever. Monitor backup-worker health and the `LATEST` timestamp, copy each completed base backup plus its required WAL range to protected off-host storage, and confirm the off-host copy before reducing local retention.
+For bundled PostgreSQL, backups retain the configured number of verified base
+backups. WAL cleanup is anchored to the oldest retained base backup, so
+point-in-time recovery remains possible across the retained window without
+allowing the local archive to grow forever. Monitor backup-worker health and
+the `LATEST` timestamp, copy each completed base backup plus its required WAL
+range to protected off-host storage, and confirm the off-host copy before
+reducing local retention.
 
-Set `postgres.pgpass` to `postgres:5432:replication:ocservia_backup:<password>` using the same protected backup-role password supplied during first database initialization. The `replication` database field is required for `pg_basebackup` replication-protocol authentication. The backup entrypoint copies the read-only Compose secret into a private mode-0600 passfile before invoking libpq tools.
+For bundled PostgreSQL, set `postgres.pgpass` to
+`postgres:5432:replication:ocservia_backup:<password>` using the protected
+backup-role password supplied during initialization. For external PostgreSQL,
+use its actual hostname and port and include entries for both `ocservia` (the
+server-major preflight) and `replication` (`pg_basebackup`). The backup
+entrypoint copies the read-only Compose secret into a private mode-0600 passfile
+before invoking libpq tools.
+
+External PostgreSQL receives only verified base backup coverage from this
+deployment. Its operator must configure, retain, and test continuous WAL
+archiving independently before claiming PITR. The bundled WAL cleanup and PITR
+contract does not apply to an external server.
 
 Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:
 

@@ -77,6 +77,9 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	databaseCtx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()
+	if err := conn.ValidateDeployment(databaseCtx); err != nil {
+		return fmt.Errorf("validate database deployment: %w", err)
+	}
 	if cfg.SchemaCompatibilityCheck > 0 {
 		if _, err := backend.ControllerSchema(databaseCtx, cfg.SchemaCompatibilityCheck); err != nil {
 			return fmt.Errorf("validate schema compatibility: %w", err)
