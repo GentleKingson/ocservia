@@ -150,26 +150,8 @@ func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) err
 	if err != nil {
 		return err
 	}
-	// Finalize the one retirement candidate even after a long maintenance
-	// outage. Its catalog lock holds through rollups, retirement and fencing.
-	var candidate string
-	var start value.Timestamp
-	err = s.tx.QueryRow(ctx, `SELECT table_name,start_at FROM telemetry_sample_shards WHERE state='active' AND end_at<=LEAST(?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))-1209600000000) ORDER BY start_at LIMIT 1 LOCK IN SHARE MODE`, cutRaw).Scan(&candidate, &start)
-	if err != nil && !errors.Is(err, database.ErrNotFound) {
-		return err
-	}
-	if err == nil {
-		if !telemetryShardName.MatchString(candidate) {
-			return ErrSchema
-		}
-		begin, err := start.Time()
-		if err != nil {
-			return err
-		}
-		if err := s.rollup(ctx, []string{candidate}, begin); err != nil {
-			return err
-		}
-	}
+	// The database capability finalizes the retained windows itself before
+	// retirement; callers cannot bypass backfill by invoking it directly.
 	at, err := telemetryMicros(now)
 	if err != nil {
 		return err
@@ -207,45 +189,28 @@ func (s *TelemetryHistoryStore) rollup(ctx context.Context, tables []string, beg
 		}
 		// PostgreSQL date_bin preserves infinities. They are ordered values,
 		// not finite microseconds to round (which would corrupt the sentinel).
-		query := fmt.Sprintf(`SELECT node_id,metric,CASE WHEN sampled_at IN (%d,%d) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/%d)*%d END AS bucket_at,COUNT(*),MIN(value),MAX(value),AVG(value) FROM (%s) AS samples GROUP BY node_id,metric,bucket_at`, value.NegativeInfinity, value.PositiveInfinity, rollup.width, rollup.width, strings.Join(parts, ` UNION ALL `))
-		rows, err := s.tx.Query(ctx, query, args...)
-		if err != nil {
-			return err
-		}
-		type aggregate struct {
-			node          []byte
-			metric        string
-			bucket, count int64
-			min, max, avg float64
-		}
-		var aggregates []aggregate
-		for rows.Next() {
-			var a aggregate
-			if err := rows.Scan(&a.node, &a.metric, &a.bucket, &a.count, &a.min, &a.max, &a.avg); err != nil {
-				rows.Close()
-				return err
-			}
-			aggregates = append(aggregates, a)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		for _, a := range aggregates {
-			var id uint64
-			err = s.tx.QueryRow(ctx, `SELECT exact_row_id FROM `+name+` WHERE node_id=? AND BINARY metric=BINARY ? AND bucket_at=? FOR UPDATE`, a.node, a.metric, a.bucket).Scan(&id)
-			if errors.Is(err, database.ErrNotFound) {
-				_, err = s.tx.Exec(ctx, `INSERT INTO `+name+`(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) VALUES(?,?,?,?,?,?,?)`, a.node, a.metric, a.bucket, a.count, a.min, a.max, a.avg)
-			} else if err == nil {
-				_, err = s.tx.Exec(ctx, `UPDATE `+name+` SET sample_count=?,min_value=?,max_value=?,avg_value=? WHERE exact_row_id=?`, a.count, a.min, a.max, a.avg, id)
-			}
-			if err != nil {
+		query := telemetryAggregateSQL(strings.Join(parts, ` UNION ALL `), rollup.width)
+		// Aggregate inside the server, without Go materialization or per-row
+		// round trips. The exact-key guard serializes the two-statement upsert.
+		for _, statement := range telemetryMergeSQL(name, query) {
+			if _, err := s.tx.Exec(ctx, statement, args...); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func telemetryAggregateSQL(source string, width int64) string {
+	return fmt.Sprintf(`SELECT node_id,metric,CASE WHEN sampled_at IN (%d,%d) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/%d)*%d END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (%s) AS samples GROUP BY node_id,metric,bucket_at`, value.NegativeInfinity, value.PositiveInfinity, width, width, source)
+}
+
+func telemetryMergeSQL(table, aggregate string) []string {
+	match := `r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at`
+	return []string{
+		`UPDATE ` + table + ` r JOIN (` + aggregate + `) a ON ` + match + ` SET r.sample_count=a.sample_count,r.min_value=a.min_value,r.max_value=a.max_value,r.avg_value=a.avg_value`,
+		`INSERT INTO ` + table + `(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT a.node_id,a.metric,a.bucket_at,a.sample_count,a.min_value,a.max_value,a.avg_value FROM (` + aggregate + `) a LEFT JOIN ` + table + ` r ON ` + match + ` WHERE r.exact_row_id IS NULL`,
+	}
 }
 
 var _ telemetryhistory.Store = (*TelemetryHistoryStore)(nil)

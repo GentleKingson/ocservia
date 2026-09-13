@@ -113,6 +113,18 @@ func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if b.engine == MariaDB {
+		for _, table := range []string{"exact_telemetry_rollups_5m", "exact_telemetry_rollups_1h"} {
+			rows, err := b.Query(ctx, `SELECT owner_id,key_value FROM `+table+` LIMIT 0`)
+			if err != nil {
+				return err
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+		}
+	}
 	for _, table := range []string{"telemetry_rollups_5m", "telemetry_rollups_1h"} {
 		// A false predicate checks effective privileges, including inherited
 		// global/schema grants, without deleting a row or relying on grant text.

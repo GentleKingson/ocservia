@@ -117,6 +117,10 @@ func TestAuthorRevisionTwentyFour(t *testing.T) {
 	authorRevision(t, 24, TelemetryRetentionSteps())
 }
 
+func TestAuthorRevisionTwentyFive(t *testing.T) {
+	authorRevision(t, 25, TelemetryFinalizationSteps())
+}
+
 func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	output := os.Getenv("PR02_AUTHOR_DIRECTORY")
 	if output == "" {
@@ -132,6 +136,9 @@ func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	next := revision{Version: version, PreviousChecksum: previous.sum, Engine: engine, ControllerSchema: 34, MinimumControllerSchema: 34, Parents: map[string]revisionPlan{}, MetadataHashes: previous.MetadataHashes}
 	if version == 24 {
 		next.ControllerSchema, next.MinimumControllerSchema = 35, 35
+	}
+	if version == 25 {
+		next.ControllerSchema, next.MinimumControllerSchema = 36, 36
 	}
 	for _, old := range []bool{true, false} {
 		b, _ := historicalFixture(t, old)

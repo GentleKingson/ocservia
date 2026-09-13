@@ -120,6 +120,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, preflights ...Preflight) e
 			return fmt.Errorf("validate schema compatibility: %w", err)
 		}
 	}
+	if len(migrations) > 0 && migrations[len(migrations)-1].Version >= 36 {
+		// Owner-only, repeated by --migrate-only to advance the provisioned horizon.
+		if _, err := conn.Exec(ctx, `SELECT telemetry_ensure_month_partition(month AT TIME ZONE 'UTC') FROM generate_series(date_trunc('month',now() AT TIME ZONE 'UTC')-interval '1 month',date_trunc('month',now() AT TIME ZONE 'UTC')+interval '2 months',interval '1 month') AS month`); err != nil {
+			return fmt.Errorf("provision telemetry partitions: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -232,12 +238,20 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT ON upstream_sync_records TO " + identifier,
 		"GRANT SELECT, INSERT ON telemetry_security_events, telemetry_samples TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON telemetry_rollups_5m, telemetry_rollups_1h TO " + identifier,
-		"GRANT EXECUTE ON FUNCTION telemetry_ensure_month_partition(timestamptz) TO " + identifier,
 		"GRANT EXECUTE ON FUNCTION telemetry_drop_expired_partitions(timestamptz) TO " + identifier,
 	}
 	var bounded bool
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(max(version),0)>=35 FROM schema_migrations`).Scan(&bounded); err != nil {
 		return err
+	}
+	var ownerPartitions bool
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(max(version),0)>=36 FROM schema_migrations`).Scan(&ownerPartitions); err != nil {
+		return err
+	}
+	if ownerPartitions {
+		statements = append(statements, "REVOKE ALL ON FUNCTION telemetry_ensure_month_partition(timestamptz) FROM "+identifier)
+	} else {
+		statements = append(statements, "GRANT EXECUTE ON FUNCTION telemetry_ensure_month_partition(timestamptz) TO "+identifier)
 	}
 	if bounded {
 		statements = append(statements,
@@ -260,6 +274,15 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		}
 		if unsafe {
 			return errors.New("runtime inherits unrestricted telemetry cleanup privileges; remove the inherited grant")
+		}
+	}
+	if ownerPartitions {
+		var unsafe bool
+		if err := pool.QueryRow(ctx, `SELECT has_function_privilege($1,'telemetry_ensure_month_partition(timestamptz)','EXECUTE')`, role).Scan(&unsafe); err != nil {
+			return err
+		}
+		if unsafe {
+			return errors.New("runtime inherits telemetry partition DDL capability")
 		}
 	}
 	return nil

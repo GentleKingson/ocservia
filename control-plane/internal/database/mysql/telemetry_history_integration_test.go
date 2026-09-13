@@ -10,7 +10,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/semantictest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +29,11 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
+	for _, table := range []string{"exact_telemetry_rollups_5m", "exact_telemetry_rollups_1h"} {
+		if _, err := b.Exec(ctx, `DELETE FROM `+table+` WHERE 1=0`); !errors.Is(err, database.ErrPermission) {
+			t.Fatalf("runtime gained exact-key mutation privilege: %v", err)
+		}
+	}
 	t.Run("runtime-requires-active-month", func(t *testing.T) {
 		if err := b.ValidateTelemetryRuntime(ctx); err != nil {
 			t.Fatal(err)
@@ -117,7 +121,7 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		if _, err := owner.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES(?,?,2,'raw_history',?,1)`, UUIDBytes(batch), UUIDBytes(node), fixtureTimestamp(t, now)); err != nil {
 			t.Fatal(err)
 		}
-		month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -3, 0)
+		month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -4, 0)
 		var names []string
 		for i := range 2 {
 			at := month.AddDate(0, i, 0).Add(time.Hour)
@@ -146,11 +150,8 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		}
 		maintain := func(rollback bool) error {
 			return database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-				s, err := telemetryhistory.FromTransaction(tx)
-				if err != nil {
-					return err
-				}
-				if err := s.Maintain(ctx, now); err != nil {
+				// Invoke the capability directly, bypassing Go maintenance.
+				if _, err := tx.Exec(ctx, `CALL telemetry_retire_shards(?)`, fixtureTimestamp(t, now.Add(-14*24*time.Hour))); err != nil {
 					return err
 				}
 				if rollback {
@@ -164,6 +165,10 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		}
 		if state(names[0]) != "active" || state(names[1]) != "active" {
 			t.Fatal("retirement escaped rollback")
+		}
+		var rolledBack int
+		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_1h WHERE node_id=? AND metric='connection_rtt_ms'`, UUIDBytes(node)).Scan(&rolledBack); err != nil || rolledBack != 0 {
+			t.Fatalf("finalization escaped rollback: %d %v", rolledBack, err)
 		}
 		if err := maintain(false); err != nil {
 			t.Fatal(err)
@@ -180,6 +185,9 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		var count int
 		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_1h WHERE node_id=? AND metric='connection_rtt_ms' AND sample_count=1 AND avg_value=12`, UUIDBytes(node)).Scan(&count); err != nil || count != 2 {
 			t.Fatalf("outage rollups missing: count=%d err=%v", count, err)
+		}
+		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_5m WHERE node_id=? AND metric='connection_rtt_ms'`, UUIDBytes(node)).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("expired 5m aggregates recreated: count=%d err=%v", count, err)
 		}
 		// The earlier shared history fixture also retired its 1969 month.
 		for attempts := 0; attempts < 3 && state(names[0]) != "dropped"; attempts++ {
@@ -208,6 +216,40 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 			if err := owner.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?`, name).Scan(&count); err != nil || count != 0 {
 				t.Fatalf("physical month remains: %s count=%d err=%v", name, count, err)
 			}
+		}
+		ancient := month.AddDate(-2, 0, 0)
+		if err := owner.ProvisionTelemetryMonth(ctx, ancient); err != nil {
+			t.Fatal(err)
+		}
+		ancientName, _, _, err := telemetryMonth(ancient)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := owner.Exec(ctx, `INSERT INTO `+ancientName+`(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,'network_rx_bytes',99)`, UUIDBytes(node), UUIDBytes(batch), fixtureTimestamp(t, ancient)); err != nil {
+			t.Fatal(err)
+		}
+		if err := maintain(false); err != nil {
+			t.Fatal(err)
+		}
+		if state(ancientName) != "retired" {
+			t.Fatal("ancient month was not retired")
+		}
+		for _, resolution := range []string{"5m", "1h"} {
+			if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_`+resolution+` WHERE node_id=? AND metric='network_rx_bytes' AND bucket_at<?`, UUIDBytes(node), fixtureTimestamp(t, ancient.AddDate(0, 1, 0))).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("expired %s aggregates recreated: count=%d err=%v", resolution, count, err)
+			}
+		}
+		if _, err := owner.Exec(ctx, TelemetryFinalizationSteps()[1].SQL); err != nil {
+			t.Fatal(err)
+		}
+		if state(ancientName) != "active" || state(names[0]) != "dropped" {
+			t.Fatal("upgrade did not requeue surviving unverified retirement only")
+		}
+		if err := maintain(false); err != nil {
+			t.Fatal(err)
+		}
+		if state(ancientName) != "retired" {
+			t.Fatal("requeued retirement did not finalize")
 		}
 	})
 }

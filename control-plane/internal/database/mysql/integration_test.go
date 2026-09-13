@@ -74,7 +74,7 @@ func TestRealInitializationAndHistory(t *testing.T) {
 	if err := b.Migrate(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 35); err != nil {
+	if err := b.ValidateSchema(ctx, 36); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.ValidateSchema(ctx, 33); !errors.Is(err, ErrSchema) {
@@ -215,7 +215,7 @@ func TestRealCrashAndRepair(t *testing.T) {
 	if err := b.Migrate(ctx, sum); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 35); err != nil {
+	if err := b.ValidateSchema(ctx, 36); err != nil {
 		t.Fatal(err)
 	}
 }

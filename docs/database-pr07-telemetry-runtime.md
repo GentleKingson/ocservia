@@ -219,3 +219,99 @@ Docker images/caches were retained. Two SSH clients remained open after their
 remote harnesses had exited and were closed only after checking process,
 container and log completion. No performance run was performed. Commit, push
 and Draft PR creation were authorized separately after this validation.
+
+## PR #201 Review Corrections
+
+The preceding validation record describes head `1954efe`, not acceptance of
+the review corrections below. Performance acceptance remains open. The user
+specified a single node and low data volume; explicit latency, lock-wait and
+storage-growth thresholds have not been supplied.
+
+- Append PostgreSQL migration 36 and MySQL/MariaDB revision 25 rather than
+  changing any previously applied migration bytes. The current Controller
+  compatibility contract advances to 36; immutable MySQL root metadata stays
+  at 34.
+- PostgreSQL ingestion no longer calls the partition-creation function.
+  Owner migration preprovisions the previous/current/two future months on
+  every `--migrate-only` run. Migration 36 revokes existing non-owner grants
+  on the creation function, and runtime grant repair/startup also reject
+  inherited EXECUTE capability. A DEFAULT-partition trigger rejects runtime
+  insertion/update, while preserving owner access to historical default rows.
+  Missing months therefore fail closed. Startup requires the accepted months
+  to be attached, not merely present as standalone tables. Owners must rerun
+  migration before the provisioning horizon expires; conflicting historical
+  default rows cause provisioning to fail rather than being discarded.
+- MySQL/MariaDB retirement performs final backfill inside its definer
+  procedure before changing the catalog state. Direct EXECUTE cannot skip
+  finalization. Both changes remain in the caller's fenced transaction, and
+  owner collection still consumes committed retirement only. Backfill scans
+  only complete retained buckets (90 days for 5m, 13 months for 1h), not an
+  entire ancient month. Server-side aggregate merges replace the unbounded
+  Go aggregate slice and per-aggregate network round trips. These changes do
+  not establish a fixed server scan, execution-time or storage-growth bound.
+- Revision 25 requeues preexisting retired shards whose physical tables
+  survive, because old retirement receipts did not prove finalization. An
+  interrupted DROP with an absent table remains eligible for receipt repair.
+- MariaDB additionally receives SELECT on the two exact-rollup key side
+  tables, required by its multi-table UPDATE privilege checks. They contain
+  the same natural keys already visible in rollups; no new mutation or DDL
+  privilege is granted. Runtime startup checks those reads too.
+
+### Correction Validation
+
+Executed on BuildServer using disposable databases and Go 1.26.6:
+
+- PostgreSQL 17/18: upgrade from the actual schema-35 `1954efe` binary,
+  verify migration 36 revokes legacy EXECUTE before grant repair, then run
+  `TestTelemetryHistoryWorkflowIntegration` with `-race`. Direct creation
+  calls are denied, startup rejects detached months, and missing-month
+  ingestion leaves no DEFAULT rows. Existing history/retention controls pass.
+- MySQL 8.4.10 / MariaDB 12.3.2: author revision 25 against both pinned
+  historical roots, then run `TestRealPrivileges` and
+  `TestRealTelemetryHistoryWorkflow` with `-race`. Direct retirement calls
+  finalize retained buckets, rollback undoes both aggregates and retirement,
+  ancient months produce no expired aggregates, and surviving old retirement
+  receipts are requeued. Runtime cannot mutate the exact-key side tables.
+- PostgreSQL 18 / MySQL / MariaDB: real Controller process startup tests
+  pass. MySQL/MariaDB additionally exercise all/api/worker/scheduler refusal
+  of missing telemetry months and focused backend HTTP read workflows.
+- Controller compile-all, database boundary/access-inventory and migration
+  metadata tests, Go formatting and changed shell-script syntax checks pass.
+
+Earlier six-role TLS/Agent E2E results are not relabeled as results for this
+patch; those complete workflows were not rerun. The two existing API fixture
+`42601` failures remain separately disclosed and unchanged.
+
+### Low-Data Measurements
+
+These are database-store observations, not HTTP latency or performance
+acceptance. Each engine ran sequentially on the shared BuildServer (2 ARM64
+vCPUs, approximately 11.6 GiB RAM), without the race detector: one node, six
+hourly metrics, 2,016 recent samples plus 4,464 samples across an outage month,
+concurrency one, 100 six-sample ingestion transactions, 100 raw 24-hour history
+queries and ten maintenance transactions. The first maintenance finalizes the
+outage month. With only ten maintenance observations, nearest-rank P95 is the
+maximum. No threshold assertion was applied.
+
+| Engine | Ingestion P95 | Query P95 | First Maintenance / P95 |
+| --- | --- | --- | --- |
+| MySQL 8.4.10 | 14.58 ms | 3.55 ms | 32.83 s / 32.83 s |
+| MariaDB 12.3.2 | 8.80 ms | 2.14 ms | 17.41 s / 17.41 s |
+
+The seconds-scale maintenance results remain a material open performance
+risk even at this low volume. Both runs reported zero additional global
+`Innodb_row_lock_time` milliseconds, but concurrency one cannot demonstrate
+contention behavior. Rollup row counts stayed at 12,972 over nine repeated
+maintenance calls after collection. Estimated telemetry allocation from
+`information_schema.tables` stayed at 8,781,824 bytes on MySQL and changed
+from 6,291,456 to 9,027,584 bytes on MariaDB. These estimates and a short
+no-new-data run do not establish long-term storage-growth acceptance.
+The retained EXPLAIN JSON covers one physical raw input table, not the full
+history UNION plan. PostgreSQL performance was not measured in this run.
+
+Raw logs and the task-owned measurement/upgrade fixtures are retained locally
+in `.cache/pr201-review-fixes/`, outside the commit. Diagnostic failures
+(missing revision embed, MariaDB side-table SELECT, and an overbroad ancient
+fixture assertion) were corrected before the final passing runs. Performance
+thresholds, contention/storage-duration validation and formal PR-07 acceptance
+remain open; the PR stays Draft and is not authorized for merge or release.

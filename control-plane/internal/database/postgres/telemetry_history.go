@@ -22,9 +22,6 @@ func (t *transaction) TelemetryHistoryStore() telemetryhistory.Store {
 
 func (s *TelemetryHistoryStore) Insert(ctx context.Context, nodeID, batchID uuid.UUID, samples []telemetryhistory.Sample) error {
 	for _, sample := range samples {
-		if _, err := s.tx.Exec(ctx, `SELECT telemetry_ensure_month_partition($1)`, sample.SampledAt); err != nil {
-			return fmt.Errorf("ensure telemetry partition: %w", err)
-		}
 		if _, err := s.tx.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, nodeID, batchID, sample.SampledAt, sample.Metric, sample.Value); err != nil {
 			return fmt.Errorf("insert telemetry sample: %w", err)
 		}

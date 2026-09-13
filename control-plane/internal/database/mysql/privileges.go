@@ -89,6 +89,15 @@ func (b *Backend) GrantRuntimePrivileges(ctx context.Context, account string) er
 			}
 		}
 	}
+	if b.engine == MariaDB {
+		// MariaDB's multi-table UPDATE checks SELECT on the FK side tables.
+		// These contain only the same natural keys already readable in rollups.
+		for _, table := range []string{"exact_telemetry_rollups_5m", "exact_telemetry_rollups_1h"} {
+			if _, err := b.Exec(ctx, "GRANT SELECT ON `"+name+"`.`"+table+"` TO "+quoted); err != nil {
+				return err
+			}
+		}
+	}
 	for _, table := range []string{"telemetry_rollups_5m", "telemetry_rollups_1h"} {
 		// A schema-scoped owner cannot inspect another account's complete
 		// INFORMATION_SCHEMA grants. Revoke directly, allowing only absence.

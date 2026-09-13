@@ -10,6 +10,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/semantictest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -44,6 +45,9 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 	}
 	defer ownerPool.Close()
 	owner := WrapPool(ownerPool)
+	if err := b.ValidateTelemetryRuntime(ctx); err != nil {
+		t.Fatalf("runtime capabilities after owner migration: %v", err)
+	}
 	t.Run("telemetry-privilege-upgrade", func(t *testing.T) {
 		var role string
 		if err := b.QueryRow(ctx, `SELECT current_user`).Scan(&role); err != nil {
@@ -61,8 +65,35 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 		if err := b.ValidateTelemetryRuntime(ctx); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := b.Exec(ctx, `SELECT telemetry_ensure_month_partition(now())`); !errors.Is(err, database.ErrPermission) {
+			t.Fatalf("runtime partition DDL capability remains: %v", err)
+		}
+		if _, err := owner.Exec(ctx, `GRANT EXECUTE ON FUNCTION telemetry_ensure_month_partition(timestamptz) TO `+pgx.Identifier{role}.Sanitize()); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ValidateTelemetryRuntime(ctx); !errors.Is(err, database.ErrPermission) {
+			t.Fatalf("indirect DDL capability accepted: %v", err)
+		}
+		if err := migrations.GrantRuntimePrivileges(ctx, ownerPool, role); err != nil {
+			t.Fatal(err)
+		}
 	})
 	now := time.Now().UTC()
+	t.Run("startup-requires-attached-month", func(t *testing.T) {
+		month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		name := pgx.Identifier{"telemetry_samples_" + month.Format("200601")}.Sanitize()
+		if _, err := owner.Exec(ctx, `ALTER TABLE telemetry_samples DETACH PARTITION `+name); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := owner.Exec(ctx, `ALTER TABLE telemetry_samples ATTACH PARTITION `+name+` FOR VALUES FROM ('`+month.Format(time.RFC3339)+`') TO ('`+month.AddDate(0, 1, 0).Format(time.RFC3339)+`')`); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := b.ValidateTelemetryRuntime(ctx); !errors.Is(err, database.ErrConstraint) {
+			t.Fatalf("missing attached month accepted at startup: %v", err)
+		}
+	})
 	workspace, node, batch := uuid.New(), uuid.New(), uuid.New()
 	if _, err = b.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'history',$2,now(),now())`, workspace, workspace.String()); err != nil {
 		t.Fatal(err)
@@ -83,6 +114,19 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	t.Run("unprovisioned-month-fails-closed", func(t *testing.T) {
+		at := now.AddDate(0, 6, 0)
+		err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			return NewTelemetryHistoryStore(tx).Insert(ctx, node, batch, []telemetryhistory.Sample{{SampledAt: at, Metric: "cpu_usage_ratio", Value: 1}})
+		})
+		if !errors.Is(err, database.ErrConstraint) {
+			t.Fatalf("missing month did not fail closed: %v", err)
+		}
+		var count int
+		if err := owner.QueryRow(ctx, `SELECT count(*) FROM ONLY telemetry_samples_default WHERE batch_id=$1 AND sampled_at=$2`, batch, at).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("sample leaked into default partition: %d %v", count, err)
+		}
+	})
 	semantictest.TelemetryHistoryWorkflow(t, semantictest.TelemetryHistoryHarness{
 		Backend: b, Now: now, Node: node, Batch: batch,
 		Prune: func(ctx context.Context, tx database.Tx, now time.Time) error {
@@ -90,11 +134,11 @@ func TestTelemetryHistoryWorkflowIntegration(t *testing.T) {
 			return err
 		},
 		SeedInfinity: func(at value.Timestamp) error {
-			_, err := b.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',7)`, node, batch, at)
+			_, err := owner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',7)`, node, batch, at)
 			return err
 		},
 		SeedOldRaw: func(at time.Time) error {
-			_, err := b.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',1)`, node, batch, at)
+			_, err := owner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'cpu_usage_ratio',1)`, node, batch, at)
 			return err
 		},
 		SeedExpiredRollups: func(five, hour time.Time) error {
