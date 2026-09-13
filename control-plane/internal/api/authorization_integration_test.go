@@ -283,7 +283,16 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
+	}
+	owner, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(owner.Close)
 	workspaceID, identityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeID, sessionID, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'synthetic audit',$2,now(),now());
@@ -294,18 +303,25 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 		pgx.QueryExecModeSimpleProtocol, workspaceID, "synthetic-audit-"+workspaceID.String(), identityID, identityID.String(), sessionID, nodeID, bindingID); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		for _, statement := range []string{
-			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
-			`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`,
-			`DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`,
-			`DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE id=$2`,
-			`DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM auth_sessions WHERE id=$3`,
-			`DELETE FROM identities WHERE id=$4`, `DELETE FROM workspaces WHERE id=$1`,
-		} {
-			_, _ = pool.Exec(context.Background(), statement, workspaceID, bindingID, sessionID, identityID)
+	t.Cleanup(func() {
+		_, err := owner.Exec(context.Background(), `BEGIN;
+			ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only;
+			DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1);
+			DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1);
+			DELETE FROM commands WHERE workspace_id=$1;
+			DELETE FROM operations WHERE workspace_id=$1;
+			DELETE FROM audit_events WHERE workspace_id=$1;
+			DELETE FROM role_bindings WHERE id=$2;
+			DELETE FROM nodes WHERE workspace_id=$1;
+			DELETE FROM auth_sessions WHERE id=$3;
+			DELETE FROM identities WHERE id=$4;
+			DELETE FROM workspaces WHERE id=$1;
+			ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only;
+			COMMIT`, pgx.QueryExecModeSimpleProtocol, workspaceID, bindingID, sessionID, identityID)
+		if err != nil {
+			t.Errorf("cleanup synthetic command audit fixture: %v", err)
 		}
-	}()
+	})
 
 	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))

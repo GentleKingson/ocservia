@@ -19,11 +19,12 @@ A fixture-only follow-up now runs their parameterized multi-statement setup SQL
 with the simple protocol; production queries retain the pool's default extended
 protocol. The same follow-up reports cleanup failures for the affected batch
 authorization and bootstrap-token fixtures and adds both previously failing
-tests to Basic CI's `regression-auth` profile. On 2026-09-13, BuildServer passed
+tests to Basic CI's PostgreSQL-only `regression-auth-postgres` profile. On
+2026-09-13, BuildServer passed
 the two targeted tests and the expanded `internal/api` package on both
 PostgreSQL 17 and 18, with no `42601` or cleanup error. The selected
-`regression-auth` profile also passed all six required tests with `-race` on
-both versions. The historical PR #201 results below remain unchanged.
+`regression-auth-postgres` profile also passed both required tests with `-race`
+on both versions. The historical PR #201 results below remain unchanged.
 
 ## Storage Decision
 
