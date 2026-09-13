@@ -43,14 +43,32 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
+	}
+	owner, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(owner.Close)
 	workspaceID := uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap API',$2,now(),now())`, workspaceID, "bootstrap-api-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM audit_events WHERE workspace_id=$1; DELETE FROM node_bootstrap_tokens WHERE workspace_id=$1; DELETE FROM workspaces WHERE id=$1`, workspaceID)
-	}()
+	t.Cleanup(func() {
+		_, err := owner.Exec(context.Background(), `BEGIN;
+			ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only;
+			DELETE FROM audit_events WHERE workspace_id=$1;
+			DELETE FROM node_bootstrap_tokens WHERE workspace_id=$1;
+			DELETE FROM workspaces WHERE id=$1;
+			ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only;
+			COMMIT`, pgx.QueryExecModeSimpleProtocol, workspaceID)
+		if err != nil {
+			t.Errorf("cleanup node bootstrap token fixture: %v", err)
+		}
+	})
 	signer, err := commandauth.NewRandomSigner()
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +283,16 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
+	}
+	owner, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(owner.Close)
 	workspaceID, identityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeID, sessionID, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'synthetic audit',$2,now(),now());
@@ -273,21 +300,28 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 		INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($5,$3,now()+interval '1 hour',now());
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($6,$1,'audit-node','active',1,now(),now());
 		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($7,$3,$1,'Operator','node',$6,$3,now())`,
-		workspaceID, "synthetic-audit-"+workspaceID.String(), identityID, identityID.String(), sessionID, nodeID, bindingID); err != nil {
+		pgx.QueryExecModeSimpleProtocol, workspaceID, "synthetic-audit-"+workspaceID.String(), identityID, identityID.String(), sessionID, nodeID, bindingID); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		for _, statement := range []string{
-			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
-			`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`,
-			`DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`,
-			`DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE id=$2`,
-			`DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM auth_sessions WHERE id=$3`,
-			`DELETE FROM identities WHERE id=$4`, `DELETE FROM workspaces WHERE id=$1`,
-		} {
-			_, _ = pool.Exec(context.Background(), statement, workspaceID, bindingID, sessionID, identityID)
+	t.Cleanup(func() {
+		_, err := owner.Exec(context.Background(), `BEGIN;
+			ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only;
+			DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1);
+			DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1);
+			DELETE FROM commands WHERE workspace_id=$1;
+			DELETE FROM operations WHERE workspace_id=$1;
+			DELETE FROM audit_events WHERE workspace_id=$1;
+			DELETE FROM role_bindings WHERE id=$2;
+			DELETE FROM nodes WHERE workspace_id=$1;
+			DELETE FROM auth_sessions WHERE id=$3;
+			DELETE FROM identities WHERE id=$4;
+			DELETE FROM workspaces WHERE id=$1;
+			ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only;
+			COMMIT`, pgx.QueryExecModeSimpleProtocol, workspaceID, bindingID, sessionID, identityID)
+		if err != nil {
+			t.Errorf("cleanup synthetic command audit fixture: %v", err)
 		}
-	}()
+	})
 
 	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
@@ -632,18 +666,30 @@ func TestBatchRouteAllowsNodeScopedPerItemAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
+	}
+	owner, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(owner.Close)
 	workspaceID, identityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	nodeA, nodeB, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'batch auth',$2,now(),now());
 		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now());
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($5,$1,'node-a','active',1,now(),now()),($6,$1,'node-b','active',1,now(),now());
-		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($7,$3,$1,'UserManager','node',$5,$3,now())`, workspaceID, "batch-auth-"+workspaceID.String(), identityID, identityID.String(), nodeA, nodeB, bindingID); err != nil {
+		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($7,$3,$1,'UserManager','node',$5,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "batch-auth-"+workspaceID.String(), identityID, identityID.String(), nodeA, nodeB, bindingID); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM nodes WHERE workspace_id=$2; DELETE FROM identities WHERE id=$3; DELETE FROM workspaces WHERE id=$2`, bindingID, workspaceID, identityID)
-	}()
+	t.Cleanup(func() {
+		_, err := owner.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM nodes WHERE workspace_id=$2; DELETE FROM identities WHERE id=$3; DELETE FROM workspaces WHERE id=$2`, pgx.QueryExecModeSimpleProtocol, bindingID, workspaceID, identityID)
+		if err != nil {
+			t.Errorf("cleanup batch authorization fixture: %v", err)
+		}
+	})
 
 	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool))}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.test/api/v1/user-batches", nil)

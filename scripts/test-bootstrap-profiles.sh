@@ -136,7 +136,7 @@ reject("pre-34 build must be full-only") unless
   database_script.index('if [[ "${scope}" == full ]]; then') < database_script.index('PRE34_ROOT="$(mktemp')
 critical_pg = database_script.split('if [[ "${scope}" == regression ]]; then', 2).last.split("\n  else\n", 2).first
 reject("PostgreSQL critical path must retain all business groups without an early exit") unless
-  %w[regression-postgres regression-outbox regression-fencing regression-auth regression-oidc regression-telemetry].all? { |group| critical_pg.include?(group) } &&
+  %w[regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-oidc regression-telemetry].all? { |group| critical_pg.include?(group) } &&
   !critical_pg.include?('exit 0') && !critical_pg.include?('./internal/database/...') && !critical_pg.include?('PRE34')
 reject("full MySQL must use complementary shards and retain business acceptance") unless
   foundation_script.include?('backend-mysql-current-full -race -timeout=60m "${package}" -skip "${history_pattern}"') &&

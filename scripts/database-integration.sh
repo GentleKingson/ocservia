@@ -282,7 +282,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-migrate-repeat.log" 2>&1
     assert_local_bootstrap_schema "${container}" ocservia
-    for group in regression-postgres regression-outbox regression-fencing regression-auth regression-oidc regression-telemetry; do
+    for group in regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-oidc regression-telemetry; do
       OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
         checked_go_tests "${group}" --select -race -p 1 -parallel 1
     done
