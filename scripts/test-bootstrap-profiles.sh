@@ -133,6 +133,9 @@ reject("database smoke must let the script build its own control binary") unless
 reject("PostgreSQL acceptance images must pin exact patch tags and digests") unless
   database_script.include?("postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f") &&
   database_script.include?("postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af")
+reject("PostgreSQL acceptance versions must match toolchains.lock") unless
+  toolchains.lines.map(&:strip).include?("postgresql_17=17.10") &&
+  toolchains.lines.map(&:strip).include?("postgresql_18=18.6")
 foundation_script = File.read(File.join(root, "scripts/database-foundation-integration.sh"))
 reject("MySQL-compatible acceptance images must pin exact patch tags and digests") unless
   foundation_script.include?("mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6") &&
