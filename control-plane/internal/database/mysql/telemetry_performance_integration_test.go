@@ -188,7 +188,7 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 		planPrefix = "EXPLAIN FORMAT=JSON "
 	}
 	var historyPlan string
-	if err := monitor.QueryRow(ctx, query(planPrefix+`SELECT sampled_at,value FROM `+planTable+` WHERE node_id=? AND metric=? AND sampled_at>=? ORDER BY sampled_at`), id(node), "cpu_usage_ratio", since).Scan(&historyPlan); err != nil {
+	if err := owner.QueryRow(ctx, query(planPrefix+`SELECT sampled_at,value FROM `+planTable+` WHERE node_id=? AND metric=? AND sampled_at>=? ORDER BY sampled_at`), id(node), "cpu_usage_ratio", since).Scan(&historyPlan); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("history_query_plan=%s", strings.ReplaceAll(historyPlan, "\n", " "))
