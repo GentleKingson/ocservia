@@ -75,7 +75,7 @@ func TestRealVersionFourDataUpgrade(t *testing.T) {
 	if created != fixtureTimestamp(t, old) || updated != created || disabled.Valid || revoked.Valid || expires != fixtureTimestamp(t, old.Add(time.Hour)) {
 		t.Fatalf("v4 finite/NULL values changed: %v %v %v %v %v", created, updated, disabled, expires, revoked)
 	}
-	if err = b.ValidateSchema(ctx, 34); err != nil {
+	if err = b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

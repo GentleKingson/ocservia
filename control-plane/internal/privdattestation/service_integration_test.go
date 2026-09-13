@@ -9,6 +9,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -49,7 +50,7 @@ func TestRootCredentialRegistrationReplayRotationAndRevocationIntegration(t *tes
 		}
 	}
 
-	service := New(pool)
+	service := NewBackend(postgres.WrapPool(pool))
 	service.now = func() time.Time { return now }
 	defer func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM node_capabilities WHERE node_id=$1 AND capability=$2`, nodeID, AttestationCapability)

@@ -114,7 +114,7 @@ func TestRealVersionEighteenEnrollmentUpgrade(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -66,31 +66,31 @@ func run() error {
 	}
 	defer b.Close()
 	if *mode == "check" {
-		return b.ValidateSchema(ctx, 34)
+		return b.ValidateSchema(ctx, 35)
 	}
 	if *mode == "telemetry-provision" {
 		if err := b.ProvisionTelemetryMonth(ctx, telemetryMonth); err != nil {
 			return err
 		}
-		return b.ValidateSchema(ctx, 34)
+		return b.ValidateSchema(ctx, 35)
 	}
 	if *mode == "telemetry-migrate-history" {
 		if err := b.MigrateTelemetryHistory(ctx); err != nil {
 			return err
 		}
-		if err := b.ValidateSchema(ctx, 34); err != nil {
+		if err := b.ValidateSchema(ctx, 35); err != nil {
 			return err
 		}
 		return b.ValidateTelemetryHistoryReady(ctx)
 	}
 	if *mode == "telemetry-collect" {
-		if err := b.ValidateSchema(ctx, 34); err != nil {
+		if err := b.ValidateSchema(ctx, 35); err != nil {
 			return err
 		}
 		return b.CollectRetiredTelemetryShards(ctx)
 	}
 	if *mode == "grant-test-privileges" {
-		if err := b.ValidateSchema(ctx, 34); err != nil {
+		if err := b.ValidateSchema(ctx, 35); err != nil {
 			return err
 		}
 		return b.GrantTestPrivileges(ctx)

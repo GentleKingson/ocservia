@@ -57,8 +57,9 @@ inside that callback. Do not replace a transaction with multiple callbacks.
 ## Access inventory and removal ownership
 
 `database-access-files.txt` is the broad candidate inventory, including SQL
-and external operations, not just imports. `database-driver-baseline.txt` is
-the narrower per-file driver symbol/import ceiling enforced by an AST test.
+and external operations, not just imports. The temporary driver baseline was
+removed in PR-07; the AST boundary test now allows no business driver imports.
+See `database-access-disposition.tsv` for the per-file PR-07 disposition.
 Test fixtures remain PostgreSQL-specific and are not business driver leakage.
 The following PR identifiers are the proposed follow-up sequence for this
 refactor, not claims that GitHub PRs with those numbers already exist.

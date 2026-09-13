@@ -12,6 +12,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -774,7 +775,7 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 		}
 		pool.Close()
 	})
-	return NewWithSigner(pool, 50, testCommandSigner(t)), pool, workspaceID, nodeID
+	return NewBackend(postgres.WrapPool(pool), 50, testCommandSigner(t)), pool, workspaceID, nodeID
 }
 
 func controlledTestRequest(nodeID uuid.UUID, key string, kind SyntheticKind, action, bootID, sessionID, ip string) CreateRequest {

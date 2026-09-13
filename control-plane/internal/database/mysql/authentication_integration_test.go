@@ -60,7 +60,7 @@ func TestRealAuthenticationSentinelRepair(t *testing.T) {
 	if blocked != finite || lease.Micros != value.NegativeInfinity {
 		t.Fatalf("explicit meanings changed: %+v %+v", blocked, lease)
 	}
-	if err = b.ValidateSchema(ctx, 34); err != nil {
+	if err = b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

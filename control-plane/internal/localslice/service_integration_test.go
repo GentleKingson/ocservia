@@ -17,6 +17,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,14 +108,14 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 			wrongEndpoint := endpoint
 			wrongEndpoint[0] ^= 0xff
 			wrongEventID := uuid.Must(uuid.NewV7())
-			err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: wrongEventID[:], NodeId: nodeID[:], EndpointId: wrongEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("wrong endpoint disconnect")})
+			err = NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: wrongEventID[:], NodeId: nodeID[:], EndpointId: wrongEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("wrong endpoint disconnect")})
 			if err != nil {
 				t.Fatalf("quarantine wrong-endpoint disconnect: %v", err)
 			}
 			assertEventQuarantined(t, pool, wrongEventID, nodeID, "node_endpoint_not_active")
 		}
 		eventID := uuid.Must(uuid.NewV7())
-		err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte(initialStatus + " disconnect")})
+		err = NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte(initialStatus + " disconnect")})
 		if initialStatus == "revoked" && err != nil {
 			t.Fatalf("revoked tombstone disconnect was rejected: %v", err)
 		}
@@ -164,7 +165,7 @@ func TestTransportEventsAdvanceNodeRevisionOnlyOnStatusChangeIntegration(t *test
 		pool.Close()
 	})
 
-	service := NewWithSigner(pool, integrationCommandSigner())
+	service := NewBackend(postgres.WrapPool(pool), integrationCommandSigner())
 	traceparent := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 	ingest := func(eventType transportv1.TransportEventType) {
 		t.Helper()
@@ -256,7 +257,7 @@ func TestOfflineTelemetryIngressSharesTheAuthoritativeTrustTransactionIntegratio
 		t.Fatal(err)
 	}
 	eventID := uuid.Must(uuid.NewV7())
-	if err := NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{
+	if err := NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:],
 		Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now),
 		Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: payload,
@@ -341,7 +342,7 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := uuid.Must(uuid.NewV7())
-	err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{
+	err = NewBackend(postgres.WrapPool(pool), integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeA[:], EndpointId: endpointA[:],
 		Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY,
 		OccurredAt: timestamppb.New(now), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: payload,
@@ -448,7 +449,7 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 			t.Fatal(err)
 		}
 		eventID := uuid.Must(uuid.NewV7())
-		if err := NewWithSigner(pool, signer).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}); err != nil {
+		if err := NewBackend(postgres.WrapPool(pool), signer).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -560,7 +561,7 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 		}
 		pool.Close()
 	})
-	return commandResultFixture{pool: pool, service: NewWithSigner(pool, signer), signer: signer, workspaceID: workspaceID, nodeID: nodeID, endpointID: endpointID, operationID: operationID, commandID: commandID, envelope: &envelope, payloadHash: payloadHash, traceparent: traceparent, issuedAt: now, originalTime: now}
+	return commandResultFixture{pool: pool, service: NewBackend(postgres.WrapPool(pool), signer), signer: signer, workspaceID: workspaceID, nodeID: nodeID, endpointID: endpointID, operationID: operationID, commandID: commandID, envelope: &envelope, payloadHash: payloadHash, traceparent: traceparent, issuedAt: now, originalTime: now}
 }
 
 func integrationCommandSigner() *commandauth.Signer {

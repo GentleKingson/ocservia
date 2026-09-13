@@ -35,13 +35,13 @@ func TestClassifyAgentVersion(t *testing.T) {
 }
 
 func TestApplyAgentVersionState(t *testing.T) {
-	service := NewWithRecommendedAgentVersion(nil, "0.2.0")
+	service := NewWithRecommendedAgentVersionBackend(nil, "0.2.0")
 	node := Node{AgentVersion: "0.1.1"}
 	service.applyAgentVersionState(&node)
 	if node.AgentVersionState != AgentVersionStateUpgradeAvailable || node.RecommendedAgentVersion != "0.2.0" {
 		t.Fatalf("unexpected derived node state: %#v", node)
 	}
-	unconfigured := New(nil)
+	unconfigured := NewBackend(nil)
 	unconfigured.applyAgentVersionState(&node)
 	if node.AgentVersionState != AgentVersionStateUnknown || node.RecommendedAgentVersion != "" {
 		t.Fatalf("missing recommendation must classify unknown: %#v", node)

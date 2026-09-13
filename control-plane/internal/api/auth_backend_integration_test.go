@@ -120,7 +120,7 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if _, err = service.CreateLocalCredential(ctx, name, password); !errors.Is(err, database.ErrUnique) {
 		t.Fatalf("duplicate credential: %v", err)
 	}
-	server := NewBackend("127.0.0.1:0", backend, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 34)
+	server := NewBackend("127.0.0.1:0", backend, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 35)
 	server.auth = service
 	server.EnableBrowserOrigin(authTestOrigin)
 	login := func(password string) *httptest.ResponseRecorder {

@@ -2,18 +2,22 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+
+	driver "github.com/go-sql-driver/mysql"
 )
 
 // Account creation/password rotation belongs to the provisioning administrator,
-// not the migration connection. This applies only to fresh, non-inheriting
-// accounts; it intentionally does not revoke an existing account's privileges.
+// not the migration connection. This expects dedicated, non-inheriting
+// accounts; only obsolete telemetry rollup DELETE grants are revoked here.
 // The acceptance harness creates and checks those accounts independently.
 var runtimePrivileges = []struct{ privileges, tables string }{
 	{"SELECT", "backend_migrations,backend_migration_steps,backend_schema_revisions,backend_schema_revision_steps,controller_schema_compatibility,roles,upstream_sync_records,telemetry_legacy_migration"},
-	{"SELECT,INSERT,UPDATE,DELETE", "workspaces,nodes,operations,local_auth_attempts,local_slice_jobs,commands,outbox_events,command_attempts,node_command_leases,operation_events,telemetry_rollups_5m,telemetry_rollups_1h,node_sessions"},
+	{"SELECT,INSERT,UPDATE,DELETE", "workspaces,nodes,operations,local_auth_attempts,local_slice_jobs,commands,outbox_events,command_attempts,node_command_leases,operation_events,node_sessions"},
+	{"SELECT,INSERT,UPDATE", "telemetry_rollups_5m,telemetry_rollups_1h"},
 	{"SELECT,INSERT,UPDATE", "enrollment_tokens,node_endpoint_keys,node_capabilities,node_bootstrap_tokens,node_trust_convergence,identities,auth_sessions,local_credentials,approval_requests,security_alerts,privd_attestation_enrollment_credentials,node_privd_attestation_keys,transport_event_cursor,node_observed_snapshots,desired_users,desired_groups,desired_user_policies,user_policy_mutations,observed_user_usage,user_usage_cursors,scheduler_leases,user_policy_enforcements,batch_operations,batch_operation_items,scheduler_leadership,connection_owner_fencing,node_config_state,config_apply_operations,agent_upgrade_operations,agent_rollouts,agent_rollout_nodes,certificates,artifact_operations,secret_provider_refs"},
 	{"SELECT,INSERT", "node_sealing_keys,audit_events,local_auth_bootstrap,audit_checkpoints,break_glass_uses,agent_command_results,transport_events,transport_event_quarantine,telemetry_ingest_batches,config_plans,node_agent_upgrade_results,telemetry_security_events,telemetry_samples,approval_authority_resources,approval_batch_items,business_locks"},
 	{"SELECT,INSERT,DELETE", "role_bindings,node_ip_bans,observed_users,observed_groups"},
@@ -84,6 +88,19 @@ func (b *Backend) GrantRuntimePrivileges(ctx context.Context, account string) er
 				return err
 			}
 		}
+	}
+	for _, table := range []string{"telemetry_rollups_5m", "telemetry_rollups_1h"} {
+		// A schema-scoped owner cannot inspect another account's complete
+		// INFORMATION_SCHEMA grants. Revoke directly, allowing only absence.
+		if _, err := b.pool.ExecContext(ctx, "REVOKE DELETE ON `"+name+"`.`"+table+"` FROM "+quoted); err != nil {
+			var serverError *driver.MySQLError
+			if !errors.As(err, &serverError) || serverError.Number != 1147 {
+				return safeError(err)
+			}
+		}
+	}
+	if _, err := b.Exec(ctx, "GRANT EXECUTE ON PROCEDURE `"+name+"`.telemetry_prune_rollups TO "+quoted); err != nil {
+		return err
 	}
 	return b.grantTelemetryPrivileges(ctx, quoted, true)
 }

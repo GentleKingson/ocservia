@@ -146,7 +146,7 @@ func TestReceiptUnknownProtobufFieldsDoNotChangeSignatureSemantics(t *testing.T)
 func TestReceiptMissingTransactionFailsClosed(t *testing.T) {
 	node, envelope, result, _ := receiptVerificationFixture(t)
 	for _, verification := range []Verification{
-		VerifyResult(context.Background(), nil, node, envelope, result),
+		VerifyResultTransaction(context.Background(), nil, node, envelope, result),
 		VerifyResultTransaction(context.Background(), nil, node, envelope, result),
 	} {
 		if verification.Status != "invalid" || verification.FailureReason != "receipt_key_lookup_failed" {

@@ -86,7 +86,7 @@ func TestRealAppendOnlyDraftUpgrade(t *testing.T) {
 			if _, err := b.Exec(ctx, `INSERT INTO identities(id,issuer,subject,email,created_at,updated_at) VALUES(?,?,?,?,?,?)`, id, "Issuer ", "Subject", nil, now, now); err != nil {
 				t.Fatal(err)
 			}
-			if err := b.ValidateSchema(ctx, 34); err == nil {
+			if err := b.ValidateSchema(ctx, 35); err == nil {
 				t.Fatal("old baseline accepted as latest revision")
 			}
 			results := make(chan error, 2)
@@ -101,7 +101,7 @@ func TestRealAppendOnlyDraftUpgrade(t *testing.T) {
 			if err := b.Migrate(ctx, ""); err != nil {
 				t.Fatal(err)
 			}
-			if err := b.ValidateSchema(ctx, 34); err != nil {
+			if err := b.ValidateSchema(ctx, 35); err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(before, baselineReceipts(t, b)) {
@@ -152,7 +152,7 @@ func TestRealRevisionConstraintFailureAndRepair(t *testing.T) {
 	if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
 		t.Fatal("failed revision not dirty", err)
 	}
-	if err := b.ValidateSchema(ctx, 34); !errors.Is(err, ErrDirty) {
+	if err := b.ValidateSchema(ctx, 35); !errors.Is(err, ErrDirty) {
 		t.Fatal("startup accepted dirty revision", err)
 	}
 	if !reflect.DeepEqual(before, baselineReceipts(t, b)) {
@@ -170,7 +170,7 @@ func TestRealRevisionConstraintFailureAndRepair(t *testing.T) {
 	if err := b.Migrate(ctx, sum); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(before, baselineReceipts(t, b)) {
@@ -235,7 +235,7 @@ func TestRealRevisionCrashAfterDDL(t *testing.T) {
 	if err = b.Migrate(ctx, sum); err != nil {
 		t.Fatal(err)
 	}
-	if err = b.ValidateSchema(ctx, 34); err != nil {
+	if err = b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(before, baselineReceipts(t, b)) {

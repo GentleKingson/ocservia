@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,7 +40,7 @@ func TestAgentVersionStateListGetConsistencyIntegration(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	batch := testBatch(nodeID, 1, now)
 	batch.Snapshot.AgentVersion = "0.1.1"
-	service := NewWithRecommendedAgentVersion(pool, "0.2.0")
+	service := NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), "0.2.0")
 	service.now = func() time.Time { return now }
 	if inserted, err := service.Ingest(ctx, batch); err != nil || !inserted {
 		t.Fatalf("ingest: inserted=%v err=%v", inserted, err)
@@ -72,7 +73,7 @@ func TestAgentVersionStateListGetConsistencyIntegration(t *testing.T) {
 	if encoded.AgentVersionState != AgentVersionStateUpgradeAvailable || encoded.RecommendedAgentVersion != "0.2.0" {
 		t.Fatalf("unexpected wire fields: %#v", encoded)
 	}
-	unconfigured := New(pool)
+	unconfigured := NewBackend(postgres.WrapPool(pool))
 	unconfigured.now = func() time.Time { return now }
 	node, err = unconfigured.GetNode(ctx, nodeID)
 	if err != nil {

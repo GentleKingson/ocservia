@@ -129,7 +129,7 @@ func TestRealVersionFiveDataUpgrade(t *testing.T) {
 	if activated != wantConsumed || until != fixtureTimestamp(t, base.Add(time.Hour)) || revoked != until {
 		t.Fatalf("revoked key times changed: %v %v %v", activated, until, revoked)
 	}
-	if err = b.ValidateSchema(ctx, 34); err != nil {
+	if err = b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

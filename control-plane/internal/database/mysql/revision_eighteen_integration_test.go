@@ -94,7 +94,7 @@ func TestRealVersionSeventeenTrustUpgrade(t *testing.T) {
 			t.Fatal("trust migration changed clock or lock", available, locked, created, updated, workerID)
 		}
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

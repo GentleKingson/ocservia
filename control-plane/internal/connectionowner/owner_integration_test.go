@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -85,7 +86,7 @@ func TestConnectionOwnerExactLeaseDeadlineHandoffIntegration(t *testing.T) {
 	ctx := context.Background()
 	node := testNode(t)
 
-	term, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 90*time.Second)
+	term, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 90*time.Second)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestConnectionOwnerExactLeaseDeadlineHandoffIntegration(t *testing.T) {
 		t.Fatalf("acquire deadline remainder %v outside (0, ttl]", remainder)
 	}
 
-	renewedUntil, err := term.Renew(ctx, pool)
+	renewedUntil, err := term.RenewBackend(ctx, postgres.WrapPool(pool))
 	if err != nil {
 		t.Fatalf("renew: %v", err)
 	}
@@ -110,12 +111,12 @@ func TestConnectionOwnerAcquireRenewAssertIntegration(t *testing.T) {
 	nodeA, nodeB := testNode(t), testNode(t)
 	identity := testIdentity(t)
 
-	term, err := Acquire(ctx, pool, nodeA, identity, testConnection(t), 2*time.Second)
+	term, err := AcquireBackend(ctx, postgres.WrapPool(pool), nodeA, identity, testConnection(t), 2*time.Second)
 	if err != nil || term.Epoch() != 1 {
 		t.Fatalf("first acquire = (%v, %v), want epoch 1", term, err)
 	}
 	assertExactLeaseDeadline(t, pool, nodeA, term.LeaseUntil())
-	renewedUntil, err := term.Renew(ctx, pool)
+	renewedUntil, err := term.RenewBackend(ctx, postgres.WrapPool(pool))
 	if err != nil {
 		t.Fatalf("renew current term: %v", err)
 	}
@@ -123,17 +124,17 @@ func TestConnectionOwnerAcquireRenewAssertIntegration(t *testing.T) {
 	if !renewedUntil.After(term.LeaseUntil()) {
 		t.Fatalf("renew deadline %v must extend acquire deadline %v", renewedUntil, term.LeaseUntil())
 	}
-	if err := term.AssertCurrent(ctx, pool); err != nil {
+	if err := term.AssertCurrentBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("assert current term: %v", err)
 	}
 
 	// Nodes fence independently: a second node starts at its own epoch one.
-	other, err := Acquire(ctx, pool, nodeB, testIdentity(t), testConnection(t), 2*time.Second)
+	other, err := AcquireBackend(ctx, postgres.WrapPool(pool), nodeB, testIdentity(t), testConnection(t), 2*time.Second)
 	if err != nil || other.Epoch() != 1 {
 		t.Fatalf("independent node acquire = (%v, %v), want epoch 1", other, err)
 	}
 
-	state, err := ReadState(ctx, pool, nodeA)
+	state, err := ReadStateBackend(ctx, postgres.WrapPool(pool), nodeA)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -147,18 +148,18 @@ func TestConnectionOwnerCrossInstanceTakeoverRequiresExpiryIntegration(t *testin
 	ctx := context.Background()
 	node := testNode(t)
 
-	first, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 30*time.Second)
+	first, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 30*time.Second)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 
 	// An unexpired lease blocks a different process incarnation.
-	if _, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 30*time.Second); !errors.Is(err, ErrLeaseHeld) {
+	if _, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 30*time.Second); !errors.Is(err, ErrLeaseHeld) {
 		t.Fatalf("takeover before expiry = %v, want ErrLeaseHeld", err)
 	}
 
 	forceExpire(t, pool, node)
-	second, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 30*time.Second)
+	second, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 30*time.Second)
 	if err != nil {
 		t.Fatalf("takeover after expiry: %v", err)
 	}
@@ -167,13 +168,13 @@ func TestConnectionOwnerCrossInstanceTakeoverRequiresExpiryIntegration(t *testin
 	}
 
 	// The fenced-out owner must fail renew and assert.
-	if _, err := first.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if _, err := first.RenewBackend(ctx, postgres.WrapPool(pool)); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("stale renew = %v, want ErrNotOwner", err)
 	}
-	if err := first.AssertCurrent(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if err := first.AssertCurrentBackend(ctx, postgres.WrapPool(pool)); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("stale assert = %v, want ErrNotOwner", err)
 	}
-	if err := second.AssertCurrent(ctx, pool); err != nil {
+	if err := second.AssertCurrentBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("new owner assert: %v", err)
 	}
 }
@@ -184,13 +185,13 @@ func TestConnectionOwnerSameOwnerNewConnectionIncrementsEpochIntegration(t *test
 	node := testNode(t)
 	identity := testIdentity(t)
 
-	first, err := Acquire(ctx, pool, node, identity, testConnection(t), 30*time.Second)
+	first, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, identity, testConnection(t), 30*time.Second)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	// The same process incarnation may replace its own connection without
 	// waiting for lease expiry, but never reuses an epoch.
-	second, err := Acquire(ctx, pool, node, identity, testConnection(t), 30*time.Second)
+	second, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, identity, testConnection(t), 30*time.Second)
 	if err != nil {
 		t.Fatalf("same-owner connection replacement: %v", err)
 	}
@@ -198,17 +199,17 @@ func TestConnectionOwnerSameOwnerNewConnectionIncrementsEpochIntegration(t *test
 		t.Fatalf("replacement epoch = %d, want > %d", second.Epoch(), first.Epoch())
 	}
 	// The replaced connection is fenced out immediately.
-	if _, err := first.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if _, err := first.RenewBackend(ctx, postgres.WrapPool(pool)); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("replaced connection renew = %v, want ErrNotOwner", err)
 	}
-	if err := first.AssertCurrent(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if err := first.AssertCurrentBackend(ctx, postgres.WrapPool(pool)); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("replaced connection assert = %v, want ErrNotOwner", err)
 	}
 
 	// A restarted incarnation of the same instance is a different owner and
 	// must wait for lease expiry like any cross-instance takeover.
 	restarted := Identity{InstanceID: identity.InstanceID, Incarnation: identity.Incarnation + 1}
-	if _, err := Acquire(ctx, pool, node, restarted, testConnection(t), 30*time.Second); !errors.Is(err, ErrLeaseHeld) {
+	if _, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, restarted, testConnection(t), 30*time.Second); !errors.Is(err, ErrLeaseHeld) {
 		t.Fatalf("restarted incarnation takeover before expiry = %v, want ErrLeaseHeld", err)
 	}
 }
@@ -218,7 +219,7 @@ func TestConnectionOwnerAssertRejectsMidTransactionExpiryIntegration(t *testing.
 	ctx := context.Background()
 	node := testNode(t)
 
-	term, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 1200*time.Millisecond)
+	term, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 1200*time.Millisecond)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -239,7 +240,7 @@ func TestConnectionOwnerAssertRejectsMidTransactionExpiryIntegration(t *testing.
 
 	// clock_timestamp() must reject the assert even though now() froze at a
 	// time when the lease was still valid.
-	if err := term.AssertFenced(ctx, tx); !errors.Is(err, ErrNotOwner) {
+	if err := term.AssertTransaction(ctx, postgres.WrapTx(tx)); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("mid-transaction assert = %v, want ErrNotOwner", err)
 	}
 
@@ -248,7 +249,7 @@ func TestConnectionOwnerAssertRejectsMidTransactionExpiryIntegration(t *testing.
 	// of queueing behind an erroneous FOR SHARE until rollback.
 	takeoverDone := make(chan error, 1)
 	go func() {
-		_, err := Acquire(context.Background(), pool, node, testIdentity(t), testConnection(t), 10*time.Second)
+		_, err := AcquireBackend(context.Background(), postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 10*time.Second)
 		takeoverDone <- err
 	}()
 	select {
@@ -259,7 +260,7 @@ func TestConnectionOwnerAssertRejectsMidTransactionExpiryIntegration(t *testing.
 	case <-time.After(5 * time.Second):
 		t.Fatal("rejected assert must not block takeover until the stale transaction rolls back")
 	}
-	if _, err := term.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if _, err := term.RenewBackend(ctx, postgres.WrapPool(pool)); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("stale renew after takeover = %v, want ErrNotOwner", err)
 	}
 }
@@ -275,7 +276,7 @@ func TestConnectionOwnerAssertBlocksTakeoverIntegration(t *testing.T) {
 	// A short lease lets the deadline lapse naturally while the fenced
 	// transaction stays open; forcing an expiry would itself block on the
 	// row lock the assert holds.
-	term, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 1500*time.Millisecond)
+	term, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 1500*time.Millisecond)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -284,14 +285,14 @@ func TestConnectionOwnerAssertBlocksTakeoverIntegration(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := term.AssertFenced(ctx, tx); err != nil {
+	if err := term.AssertTransaction(ctx, postgres.WrapTx(tx)); err != nil {
 		t.Fatalf("assert: %v", err)
 	}
 	time.Sleep(2 * time.Second)
 
 	takeoverDone := make(chan error, 1)
 	go func() {
-		_, err := Acquire(context.Background(), pool, node, testIdentity(t), testConnection(t), 10*time.Second)
+		_, err := AcquireBackend(context.Background(), postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 10*time.Second)
 		takeoverDone <- err
 	}()
 	select {
@@ -330,7 +331,7 @@ func TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration(t *testing
 	var node [16]byte
 	copy(node[:], raw)
 
-	retained, err := ReadState(ctx, pool, node)
+	retained, err := ReadStateBackend(ctx, postgres.WrapPool(pool), node)
 	if err != nil {
 		t.Fatalf("read retained ownership state: %v", err)
 	}
@@ -338,14 +339,14 @@ func TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration(t *testing
 		t.Fatalf("retained epoch must be at least one, got %d", retained.Epoch)
 	}
 	forceExpire(t, pool, node)
-	term, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 30*time.Second)
+	term, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 30*time.Second)
 	if err != nil {
 		t.Fatalf("real takeover over retained state: %v", err)
 	}
 	if term.Epoch() <= retained.Epoch {
 		t.Fatalf("takeover epoch = %d, want > retained epoch %d", term.Epoch(), retained.Epoch)
 	}
-	if err := term.AssertCurrent(ctx, pool); err != nil {
+	if err := term.AssertCurrentBackend(ctx, postgres.WrapPool(pool)); err != nil {
 		t.Fatalf("new owner assert after takeover: %v", err)
 	}
 }
@@ -365,9 +366,9 @@ func TestConnectionOwnerEpochNeverReusedIntegration(t *testing.T) {
 		var term *Term
 		var err error
 		if index == 3 {
-			term, err = Acquire(ctx, pool, node, identity, testConnection(t), 5*time.Second)
+			term, err = AcquireBackend(ctx, postgres.WrapPool(pool), node, identity, testConnection(t), 5*time.Second)
 		} else {
-			term, err = Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 5*time.Second)
+			term, err = AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 5*time.Second)
 		}
 		if err != nil {
 			t.Fatalf("takeover %d: %v", index, err)
@@ -392,12 +393,12 @@ func TestConnectionOwnerGuardObservedTermIntegration(t *testing.T) {
 	ctx := context.Background()
 	node := testNode(t)
 	identity := testIdentity(t)
-	term, err := Acquire(ctx, pool, node, identity, testConnection(t), 30*time.Second)
+	term, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, identity, testConnection(t), 30*time.Second)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 
-	release, err := GuardObservedTerm(ctx, pool, node, identity.InstanceID, identity.Incarnation, term.ConnectionID(), term.Epoch())
+	release, err := GuardObservedTermBackend(ctx, postgres.WrapPool(pool), node, identity.InstanceID, identity.Incarnation, term.ConnectionID(), term.Epoch())
 	if err != nil {
 		t.Fatalf("guard the exact term: %v", err)
 	}
@@ -407,7 +408,7 @@ func TestConnectionOwnerGuardObservedTermIntegration(t *testing.T) {
 	// wait for the fencing interval to end.
 	acquired := make(chan error, 1)
 	go func() {
-		_, err := Acquire(ctx, pool, node, identity, testConnection(t), 30*time.Second)
+		_, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, identity, testConnection(t), 30*time.Second)
 		acquired <- err
 	}()
 	select {
@@ -429,11 +430,11 @@ func TestConnectionOwnerGuardObservedTermIntegration(t *testing.T) {
 
 	// The successor's term is now the current row; the old term's guard must
 	// fail closed, as must every other mismatch of the exact-term predicate.
-	successor, err := ReadState(ctx, pool, node)
+	successor, err := ReadStateBackend(ctx, postgres.WrapPool(pool), node)
 	if err != nil {
 		t.Fatalf("read successor state: %v", err)
 	}
-	if _, err := GuardObservedTerm(ctx, pool, node, identity.InstanceID, identity.Incarnation, term.ConnectionID(), term.Epoch()); !errors.Is(err, ErrNotOwner) {
+	if _, err := GuardObservedTermBackend(ctx, postgres.WrapPool(pool), node, identity.InstanceID, identity.Incarnation, term.ConnectionID(), term.Epoch()); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("stale term guard = %v, want ErrNotOwner", err)
 	}
 	otherInstance := identity.InstanceID
@@ -453,19 +454,19 @@ func TestConnectionOwnerGuardObservedTermIntegration(t *testing.T) {
 		{"different connection", successor.InstanceID, successor.Incarnation, otherConnection, successor.Epoch},
 	}
 	for _, mismatch := range mismatches {
-		if _, err := GuardObservedTerm(ctx, pool, node, mismatch.instanceID, mismatch.incarnation, mismatch.connectionID, mismatch.epoch); !errors.Is(err, ErrNotOwner) {
+		if _, err := GuardObservedTermBackend(ctx, postgres.WrapPool(pool), node, mismatch.instanceID, mismatch.incarnation, mismatch.connectionID, mismatch.epoch); !errors.Is(err, ErrNotOwner) {
 			t.Fatalf("%s guard = %v, want ErrNotOwner", mismatch.name, err)
 		}
 	}
 
 	// The exact current term guards again, but an expired lease does not.
 	forceExpire(t, pool, node)
-	if _, err := GuardObservedTerm(ctx, pool, node, successor.InstanceID, successor.Incarnation, successor.ConnectionID, successor.Epoch); !errors.Is(err, ErrNotOwner) {
+	if _, err := GuardObservedTermBackend(ctx, postgres.WrapPool(pool), node, successor.InstanceID, successor.Incarnation, successor.ConnectionID, successor.Epoch); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("expired lease guard = %v, want ErrNotOwner", err)
 	}
 
 	// A node with no ownership row at all is not guardable either.
-	if _, err := GuardObservedTerm(ctx, pool, testNode(t), successor.InstanceID, successor.Incarnation, successor.ConnectionID, successor.Epoch); !errors.Is(err, ErrNotOwner) {
+	if _, err := GuardObservedTermBackend(ctx, postgres.WrapPool(pool), testNode(t), successor.InstanceID, successor.Incarnation, successor.ConnectionID, successor.Epoch); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("missing row guard = %v, want ErrNotOwner", err)
 	}
 }

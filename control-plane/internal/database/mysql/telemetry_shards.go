@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	driver "github.com/go-sql-driver/mysql"
 )
 
 const TelemetryShardCatalogDDL = `CREATE TABLE telemetry_sample_shards (
@@ -65,6 +67,96 @@ func (b *Backend) PrepareControllerTelemetry(ctx context.Context) error {
 	end := time.Date(now.Year(), now.Month()+3, 1, 0, 0, 0, 0, time.UTC)
 	for month := start; month.Before(end); month = month.AddDate(0, 1, 0) {
 		if err := b.ProvisionTelemetryMonth(ctx, month); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateTelemetryRuntime never provisions or repairs storage. Every month
+// accepted by ingestion must already be active and readable by this account.
+func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
+	grants, err := b.Query(ctx, `SHOW GRANTS FOR CURRENT_USER`)
+	if err != nil {
+		return err
+	}
+	for grants.Next() {
+		var grant string
+		if err := grants.Scan(&grant); err != nil {
+			grants.Close()
+			return err
+		}
+		prefix, rest, direct := strings.Cut(strings.ToUpper(grant), " ON ")
+		object, _, _ := strings.Cut(rest, " TO ")
+		unsafe := !direct || strings.Contains(rest, "WITH GRANT OPTION") || (strings.HasPrefix(rest, "*.* ") && prefix != "GRANT USAGE")
+		for _, privilege := range strings.Split(strings.TrimPrefix(prefix, "GRANT "), ",") {
+			words := strings.Fields(privilege)
+			if len(words) == 0 {
+				continue
+			}
+			switch words[0] {
+			case "ALL", "CREATE", "ALTER", "DROP", "TRIGGER", "EVENT":
+				unsafe = true
+			case "DELETE":
+				// Schema grants may not refresh on an already-open connection;
+				// inspect their scope as well as probing effective table access.
+				unsafe = unsafe || strings.HasSuffix(object, ".*")
+			}
+		}
+		if unsafe {
+			grants.Close()
+			return fmt.Errorf("runtime grants contain unrestricted authority or role inheritance: %w", ErrSchema)
+		}
+	}
+	err = grants.Err()
+	grants.Close()
+	if err != nil {
+		return err
+	}
+	for _, table := range []string{"telemetry_rollups_5m", "telemetry_rollups_1h"} {
+		// A false predicate checks effective privileges, including inherited
+		// global/schema grants, without deleting a row or relying on grant text.
+		_, err := b.Exec(ctx, `DELETE FROM `+table+` WHERE 1=0`)
+		if !errors.Is(err, database.ErrPermission) {
+			return fmt.Errorf("runtime must not have unrestricted telemetry DELETE privileges: %w", ErrSchema)
+		}
+	}
+	for _, routine := range []string{"telemetry_prune_rollups", "telemetry_retire_shards"} {
+		// NULL is rejected by each pinned routine before locks or writes. The
+		// expected signal proves EXECUTE is available without running cleanup.
+		_, err := b.pool.ExecContext(ctx, `CALL `+routine+`(NULL)`)
+		var serverError *driver.MySQLError
+		if !errors.As(err, &serverError) || serverError.Number != 1644 || string(serverError.SQLState[:]) != "45000" {
+			return fmt.Errorf("required telemetry maintenance routine is unavailable: %w", ErrSchema)
+		}
+	}
+	if err := b.ValidateTelemetryHistoryReady(ctx); err != nil {
+		return err
+	}
+	var now time.Time
+	if err := b.QueryRow(ctx, `SELECT UTC_TIMESTAMP(6)`).Scan(&now); err != nil {
+		return err
+	}
+	oldest := now.Add(-14 * 24 * time.Hour)
+	start := time.Date(oldest.Year(), oldest.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for month := start; !month.After(now.Add(5 * time.Minute)); month = month.AddDate(0, 1, 0) {
+		name, lo, hi, err := telemetryMonth(month)
+		if err != nil {
+			return err
+		}
+		var active bool
+		if err := b.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM telemetry_sample_shards WHERE table_name=? AND start_at=? AND end_at=? AND state='active')`, name, lo, hi).Scan(&active); err != nil {
+			return err
+		}
+		if !active {
+			return fmt.Errorf("required telemetry month %s is not provisioned: %w", month.Format("2006-01"), ErrSchema)
+		}
+		rows, err := b.Query(ctx, `SELECT node_id,batch_id,sampled_at,metric,value FROM `+name+` LIMIT 0`)
+		if err != nil {
+			return err
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
 			return err
 		}
 	}
@@ -543,7 +635,7 @@ func (b *Backend) CollectRetiredTelemetryShards(ctx context.Context) (result err
 		return err
 	}
 	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, lock)) }()
-	rows, err := conn.QueryContext(ctx, `SELECT table_name,start_at,end_at FROM telemetry_sample_shards WHERE state='retired' ORDER BY start_at`)
+	rows, err := conn.QueryContext(ctx, `SELECT table_name,start_at,end_at FROM telemetry_sample_shards WHERE state='retired' ORDER BY start_at LIMIT 1`)
 	if err != nil {
 		return safeError(err)
 	}

@@ -24,6 +24,12 @@ type Store interface {
 
 type Provider interface{ AuditStore() Store }
 
+// LegacyPreflight is used only while migrating checkpointed PostgreSQL history.
+type LegacyPreflight interface {
+	LockLegacy(context.Context) error
+	LegacyEvents(context.Context, uuid.UUID) (database.Rows, error)
+}
+
 func From(s database.Store) (Store, error) {
 	p, ok := s.(Provider)
 	if !ok {

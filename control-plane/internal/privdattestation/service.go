@@ -16,10 +16,8 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation/attestationstore"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -34,15 +32,6 @@ const AttestationCapability = "privd_result_attestation_v1"
 type KeyStateMetric struct {
 	State string `json:"state"`
 	Total int64  `json:"total"`
-}
-
-// KeyStateMetrics returns only the three protocol-defined states, keeping the
-// metric label set bounded even when a node fleet grows.
-func KeyStateMetrics(ctx context.Context, pool *pgxpool.Pool) ([]KeyStateMetric, error) {
-	if pool == nil {
-		return KeyStateMetricsBackend(ctx, nil)
-	}
-	return KeyStateMetricsBackend(ctx, postgres.WrapPool(pool))
 }
 
 func KeyStateMetricsBackend(ctx context.Context, backend database.Backend) ([]KeyStateMetric, error) {
@@ -85,13 +74,6 @@ type Service struct {
 	now             func() time.Time
 	random          func([]byte) error
 	rotationOverlap time.Duration
-}
-
-func New(pool *pgxpool.Pool) *Service {
-	if pool == nil {
-		return NewBackend(nil)
-	}
-	return NewBackend(postgres.WrapPool(pool))
 }
 
 // NewBackend runs the same enrollment, registration and revocation workflows

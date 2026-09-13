@@ -116,7 +116,7 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if err := run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err != nil {
 		t.Fatal("owner CLI migration", err)
 	}
-	if err := run(runtimeOptions, nil, "--schema-compatibility-check=34"); err != nil {
+	if err := run(runtimeOptions, nil, "--schema-compatibility-check=35"); err != nil {
 		t.Fatal("runtime CLI schema validation", err)
 	}
 	if err := run(runtimeOptions, nil, "--schema-compatibility-check=999"); err == nil {
@@ -138,6 +138,34 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
+	if runtimeOptions.Backend != "postgres" {
+		t.Run("roles-refuse-missing-telemetry-month", func(t *testing.T) {
+			var month []byte
+			if err := owner.Store.QueryRow(ctx, `SELECT table_name FROM telemetry_sample_shards WHERE state='active' AND start_at<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) AND end_at>TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))`).Scan(&month); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='retired' WHERE table_name=?`, month); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='active' WHERE table_name=?`, month); err != nil {
+					t.Error(err)
+				}
+			}()
+			for _, role := range []string{"api", "worker", "scheduler", "all"} {
+				t.Run(role, func(t *testing.T) {
+					checkCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+					defer stop()
+					cmd := exec.CommandContext(checkCtx, binary, "--role="+role)
+					cmd.Env = environment(runtimeOptions, nil)
+					output, err := cmd.CombinedOutput()
+					if err == nil || !bytes.Contains(output, []byte("validate required runtime database capabilities")) {
+						t.Fatalf("role did not refuse missing telemetry storage: %v\n%s", err, output)
+					}
+				})
+			}
+		})
+	}
 	if _, err := runtime.Store.Exec(ctx, `CREATE TABLE startup_forbidden(id int)`); !errors.Is(err, database.ErrPermission) {
 		t.Fatal("runtime DDL was not denied", err)
 	}

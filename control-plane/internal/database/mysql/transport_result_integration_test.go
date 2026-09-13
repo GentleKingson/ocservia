@@ -223,7 +223,7 @@ func TestRealTransportResults(t *testing.T) {
 	}
 	assertState(operation, "succeeded")
 	runResultProjectionWorkflows(t, owner, backend, workspace, signer)
-	if err := owner.ValidateSchema(ctx, 34); err != nil {
+	if err := owner.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

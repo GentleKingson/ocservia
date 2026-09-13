@@ -133,7 +133,7 @@ func TestRealTypeUpgradeRejectsInvalidLegacyArray(t *testing.T) {
 	if err = b.Migrate(ctx, checksum); err != nil {
 		t.Fatal("explicit type repair", err)
 	}
-	if err = b.ValidateSchema(ctx, 34); err != nil {
+	if err = b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

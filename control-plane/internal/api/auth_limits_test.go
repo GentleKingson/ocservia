@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -109,9 +109,9 @@ func TestAuthSourceTrustAndNormalization(t *testing.T) {
 }
 
 func TestAuthRouteAdmissionAndIsolation(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	var err error
-	server.auth, err = auth.New(context.Background(), &pgxpool.Pool{}, auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,9 +144,9 @@ func TestAuthRouteAdmissionAndIsolation(t *testing.T) {
 }
 
 func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	var err error
-	server.auth, err = auth.New(context.Background(), &pgxpool.Pool{}, auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}
