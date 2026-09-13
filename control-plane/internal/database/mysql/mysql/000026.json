@@ -1,0 +1,393 @@
+{
+  "version": 26,
+  "previous_checksum": "87328a342410ff3cce3196a0a60e16c4e6d85c517a8b342746cbb1ecdfd3e2c5",
+  "engine": "mysql",
+  "controller_schema": 36,
+  "minimum_controller_schema": 36,
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "telemetry_5m_key_lookup",
+          "object": "exact_telemetry_rollups_5m",
+          "kind": "table",
+          "sql": "ALTER TABLE exact_telemetry_rollups_5m ADD INDEX telemetry_key_lookup(key_value(255))",
+          "checksum": "0e22ffb806582cca9a96045b0e862ad8cb5e08dacada96d854c32a171f0cc095",
+          "before": "df2c2c651df0421b811883bd29f713104a9298b1c88918c6d5f0837904f5d2c7",
+          "after": "0471497d9e8898a0672402ee6d3a5185f39f79760deb60b2c55cd179cb61db45"
+        },
+        {
+          "name": "telemetry_1h_key_lookup",
+          "object": "exact_telemetry_rollups_1h",
+          "kind": "table",
+          "sql": "ALTER TABLE exact_telemetry_rollups_1h ADD INDEX telemetry_key_lookup(key_value(255))",
+          "checksum": "ef703fc68e83851e41975c820abe15827938c413dc376a3dfc95cb8fde4460d4",
+          "before": "0963afead5079f92498f824ecf6a4689b48dcc7e7c3f12326d18962a864d31ad",
+          "after": "5af99d4d767e759aaea8baf5470f8d862183f984b998e9fff3d63c62b16cc607"
+        },
+        {
+          "name": "telemetry_retirement_lookup",
+          "object": "telemetry_sample_shards",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_sample_shards ADD INDEX telemetry_retirement_lookup(state,end_at,start_at)",
+          "checksum": "ff095338ada2c864ae2f1593c72467749afeb96d84a6c2d6fd726021b307593d",
+          "before": "a5e00e9a2f72bef7e1e7e7a4ada54e1d2096a4f318b943474fb36ee66ac667fa",
+          "after": "27dc2880d60d71ba7543e4c111c076acad11be1ab37cf6bae5857364c0fbebc8"
+        },
+        {
+          "name": "telemetry_retire_before_v26",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "DROP PROCEDURE telemetry_retire_shards",
+          "checksum": "670a8b46146e65b61ebf998095746a56fa065158e568bf74de022ee14cfc9bbd",
+          "before": "771f54978a15ef0e1c6a3936c691a45d76fcd3df62d4957694b96cbcbe187474",
+          "after": ""
+        },
+        {
+          "name": "telemetry_progress",
+          "object": "telemetry_maintenance_progress",
+          "kind": "table",
+          "sql": "CREATE TABLE telemetry_maintenance_progress (\n singleton TINYINT PRIMARY KEY CHECK(singleton=1),\n phase TINYINT NOT NULL DEFAULT 0,\n cutoff BIGINT NOT NULL DEFAULT 0,\n candidate VARBINARY(64),\n cursor_at BIGINT,\n cursor_node VARBINARY(16),\n cursor_metric LONGBLOB\n) ENGINE=InnoDB",
+          "checksum": "f8a78b0e0729e57807c3a2569dcf2b812fef559190aee29a2f3a247bc02428e4",
+          "before": "",
+          "after": "6cc9488596be597dd76df5f1ad84c308ed7fc1f2a32606bb9f8c7e9b6d33b994"
+        },
+        {
+          "name": "telemetry_progress_seed",
+          "object": "telemetry_maintenance_progress",
+          "kind": "data",
+          "sql": "INSERT INTO telemetry_maintenance_progress(singleton) VALUES(1)",
+          "checksum": "c530f1c47e8fc1e1a70abdf4db745c40e5d18685b5a73cc74b023cd1932487cc",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(EXISTS(SELECT 1 FROM telemetry_maintenance_progress WHERE singleton=1),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "telemetry_page",
+          "object": "telemetry_maintenance_page",
+          "kind": "table",
+          "sql": "CREATE TABLE telemetry_maintenance_page (\n slot SMALLINT PRIMARY KEY CHECK(slot BETWEEN 1 AND 80),\n node_id VARBINARY(16) NOT NULL, metric LONGBLOB NOT NULL, bucket_at BIGINT NOT NULL,\n sample_count BIGINT NOT NULL, min_value DOUBLE NOT NULL, max_value DOUBLE NOT NULL, avg_value DOUBLE NOT NULL\n) ENGINE=InnoDB",
+          "checksum": "58857a67ae27b93699bca1348d12667245c7471602892688cabd16b349e2f632",
+          "before": "",
+          "after": "3ea4bde2c610d424e2e4a0a064a7bb84f89f8220875f06cbf0cbeaf32006140c"
+        },
+        {
+          "name": "telemetry_batch_retire_v26",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_retire_shards(IN requested_cutoff BIGINT)\nSQL SECURITY DEFINER\nmain: BEGIN\n DECLARE clock_at BIGINT;\n DECLARE phase_no INT;\n DECLARE cut_at BIGINT;\n DECLARE since_at BIGINT;\n DECLARE upper_at BIGINT;\n DECLARE stop_at BIGINT;\n DECLARE cursor_at BIGINT;\n DECLARE cursor_node VARBINARY(16);\n DECLARE cursor_metric LONGBLOB;\n DECLARE candidate VARBINARY(64);\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n DECLARE sources LONGTEXT;\n DECLARE aggregate_sql LONGTEXT;\n DECLARE target_table VARCHAR(64);\n DECLARE page_count INT;\n DECLARE statement_open BOOLEAN DEFAULT FALSE;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION\n BEGIN\n  IF statement_open THEN DEALLOCATE PREPARE telemetry_batch; END IF;\n  SET @telemetry_batch_sql=NULL, @telemetry_batch_matches=NULL;\n  RESIGNAL;\n END;\n SET clock_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6));\n IF requested_cutoff IS NULL OR requested_cutoff\u003eclock_at-1209600000000+300000000 THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry retention cutoff outside permitted window';\n END IF;\n SAVEPOINT ocservia_telemetry_batch_tx;\n RELEASE SAVEPOINT ocservia_telemetry_batch_tx;\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL OR migration_state\u003c\u003e'complete' THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry history migration is incomplete';\n END IF;\n SELECT phase,p.cutoff,p.candidate,p.cursor_at,p.cursor_node,p.cursor_metric\n INTO phase_no,cut_at,candidate,cursor_at,cursor_node,cursor_metric\n FROM telemetry_maintenance_progress p WHERE singleton=1 FOR UPDATE;\n IF phase_no=0 THEN\n  SET cut_at=LEAST(requested_cutoff,clock_at-1209600000000);\n  SET candidate=NULL;\n  SELECT table_name INTO candidate FROM telemetry_sample_shards FORCE INDEX (telemetry_retirement_lookup)\n  WHERE state='active' AND end_at\u003c=cut_at ORDER BY start_at LIMIT 1;\n  SET phase_no=1, cursor_at=NULL, cursor_node=NULL, cursor_metric=NULL;\n  UPDATE telemetry_maintenance_progress p SET phase=1,cutoff=cut_at,p.candidate=candidate,\n   cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n END IF;\n phases: WHILE phase_no\u003c=4 DO\n  IF phase_no\u003e=3 AND candidate IS NULL THEN LEAVE phases; END IF;\n  SET target_table=IF(MOD(phase_no,2)=1,'telemetry_rollups_5m','telemetry_rollups_1h');\n  IF phase_no\u003c=2 THEN\n   SET since_at=FLOOR(GREATEST(cut_at,clock_at-1209600000000)/IF(phase_no=1,300000000,3600000000))*IF(phase_no=1,300000000,3600000000);\n  ELSEIF phase_no=3 THEN\n   SET since_at=FLOOR((clock_at-7776000000000)/300000000)*300000000;\n  ELSE\n   SET since_at=FLOOR(TIMESTAMPDIFF(MICROSECOND,'2000-01-01',DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 13 MONTH))/3600000000)*3600000000;\n  END IF;\n  IF cursor_at IS NOT NULL THEN SET since_at=GREATEST(since_at,cursor_at); END IF;\n  SET stop_at=GREATEST(cut_at+1209600000000,clock_at)+300000000;\n  IF phase_no\u003e=3 THEN SELECT GREATEST(since_at,start_at),end_at INTO since_at,stop_at FROM telemetry_sample_shards WHERE table_name=candidate; END IF;\n  SET upper_at=9223372036854775807;\n  IF since_at\u003cstop_at-86400000000 THEN SET upper_at=since_at+86400000000; END IF;\n  SET sources='';\n  IF phase_no\u003c=2 THEN\n   SET sources=CONCAT('SELECT node_id,metric,sampled_at,value FROM telemetry_samples WHERE sampled_at\u003e=',since_at,' AND sampled_at\u003c=',upper_at,IF(upper_at=9223372036854775807,'','-1'));\n   BEGIN\n    DECLARE finished BOOLEAN DEFAULT FALSE;\n    DECLARE shard VARBINARY(64);\n    DECLARE shards CURSOR FOR SELECT table_name FROM telemetry_sample_shards WHERE state='active' AND end_at\u003esince_at ORDER BY start_at;\n    DECLARE CONTINUE HANDLER FOR NOT FOUND SET finished=TRUE;\n    OPEN shards;\n    shard_loop: LOOP\n     FETCH shards INTO shard;\n     IF finished THEN LEAVE shard_loop; END IF;\n     IF CONVERT(shard USING ascii) NOT REGEXP '^telemetry_samples_(m_[0-9]{6}|x_[pn][0-9]{7})$' THEN\n      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='invalid telemetry shard name';\n     END IF;\n     SET sources=CONCAT(sources,' UNION ALL SELECT node_id,metric,sampled_at,value FROM ',shard,' WHERE sampled_at\u003e=',since_at,' AND sampled_at\u003c=',upper_at,IF(upper_at=9223372036854775807,'','-1'));\n    END LOOP;\n    CLOSE shards;\n   END;\n  ELSE\n   IF CONVERT(candidate USING ascii) NOT REGEXP '^telemetry_samples_(m_[0-9]{6}|x_[pn][0-9]{7})$' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='invalid telemetry shard name';\n   END IF;\n   SET sources=CONCAT('SELECT node_id,metric,sampled_at,value FROM ',candidate,' WHERE sampled_at\u003e=',since_at,' AND sampled_at\u003c=',upper_at,IF(upper_at=9223372036854775807,'','-1'));\n  END IF;\n  SET aggregate_sql=IF(MOD(phase_no,2)=1,CONCAT('SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/300000000)*300000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (',sources,') AS samples GROUP BY node_id,metric,bucket_at'),CONCAT('SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/3600000000)*3600000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (',sources,') AS samples GROUP BY node_id,metric,bucket_at'));\n  DELETE FROM telemetry_maintenance_page;\n  SET @telemetry_batch_sql=CONCAT('INSERT INTO telemetry_maintenance_page SELECT ROW_NUMBER() OVER(ORDER BY bucket_at,node_id,BINARY metric),page.* FROM (SELECT a.* FROM (',aggregate_sql,') a LEFT JOIN ',target_table,\n   ' r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE (r.exact_row_id IS NULL OR NOT(r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value))');\n  IF cursor_node IS NOT NULL THEN\n   SET @telemetry_batch_sql=CONCAT(@telemetry_batch_sql,' AND (a.bucket_at\u003e',cursor_at,\n    ' OR (a.bucket_at=',cursor_at,' AND (a.node_id\u003eUNHEX(''',HEX(cursor_node),''')',\n    ' OR (a.node_id=UNHEX(''',HEX(cursor_node),''') AND BINARY a.metric\u003eUNHEX(''',HEX(cursor_metric),''')))))');\n  END IF;\n  SET @telemetry_batch_sql=CONCAT(@telemetry_batch_sql,' ORDER BY a.bucket_at,a.node_id,BINARY a.metric LIMIT 80) page');\n  PREPARE telemetry_batch FROM @telemetry_batch_sql;\n  SET statement_open=TRUE;\n  EXECUTE telemetry_batch;\n  DEALLOCATE PREPARE telemetry_batch;\n  SET statement_open=FALSE;\n  SELECT COUNT(*) INTO page_count FROM telemetry_maintenance_page;\n  IF page_count\u003e0 THEN\n   \n   SET guard_key=NULL;\n   SELECT key_name INTO guard_key FROM exact_key_guards WHERE key_name=target_table FOR UPDATE;\n   IF guard_key IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF;\n   IF NOT EXISTS(SELECT 1 FROM telemetry_maintenance_page WHERE OCTET_LENGTH(metric)\u003e255) THEN\nSET @telemetry_batch_sql=CONCAT('INSERT INTO ',target_table,'(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value FROM telemetry_maintenance_page WHERE TRUE ON DUPLICATE KEY UPDATE sample_count=VALUES(sample_count),min_value=VALUES(min_value),max_value=VALUES(max_value),avg_value=VALUES(avg_value)');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\nELSE\nSET @telemetry_batch_sql=CONCAT('UPDATE ',target_table,' r JOIN (SELECT node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value FROM telemetry_maintenance_page) a ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at SET r.sample_count=a.sample_count,r.min_value=a.min_value,r.max_value=a.max_value,r.avg_value=a.avg_value WHERE NOT (r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value)');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\nSET @telemetry_batch_sql=CONCAT('INSERT INTO ',target_table,'(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT a.node_id,a.metric,a.bucket_at,a.sample_count,a.min_value,a.max_value,a.avg_value FROM (SELECT node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value FROM telemetry_maintenance_page) a LEFT JOIN ',target_table,' r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE r.exact_row_id IS NULL');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\nEND IF;\n\n   SELECT p.bucket_at,p.node_id,p.metric INTO cursor_at,cursor_node,cursor_metric FROM telemetry_maintenance_page p ORDER BY slot DESC LIMIT 1;\n   UPDATE telemetry_maintenance_progress p SET p.cursor_at=cursor_at,p.cursor_node=cursor_node,p.cursor_metric=cursor_metric WHERE singleton=1;\n   SET @telemetry_batch_sql=NULL;\n   SELECT FALSE AS done;\n   LEAVE main;\n  END IF;\n  IF upper_at\u003cstop_at THEN\n   SET cursor_at=upper_at,cursor_node=NULL,cursor_metric=NULL;\n   UPDATE telemetry_maintenance_progress p SET p.cursor_at=cursor_at,p.cursor_node=NULL,p.cursor_metric=NULL WHERE singleton=1;\n   ITERATE phases;\n  END IF;\n  SET phase_no=phase_no+1,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL;\n  UPDATE telemetry_maintenance_progress SET phase=phase_no,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n END WHILE;\n IF candidate IS NOT NULL THEN\n  SELECT table_name INTO guard_key FROM telemetry_sample_shards WHERE table_name=candidate AND state='active' FOR UPDATE;\n  SET since_at=FLOOR((clock_at-7776000000000)/300000000)*300000000;\nSET @telemetry_batch_sql=CONCAT('SELECT NOT EXISTS(SELECT 1 FROM (SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/300000000)*300000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (SELECT node_id,metric,sampled_at,value FROM `',candidate,'` WHERE sampled_at\u003e=',since_at,') AS samples GROUP BY node_id,metric,bucket_at) a LEFT JOIN telemetry_rollups_5m r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE r.exact_row_id IS NULL OR NOT(r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value)) INTO @telemetry_batch_matches');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\n\n  IF NOT @telemetry_batch_matches THEN\n   UPDATE telemetry_maintenance_progress SET phase=3,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n   SET @telemetry_batch_sql=NULL,@telemetry_batch_matches=NULL;\n   SELECT FALSE AS done;\n   LEAVE main;\n  END IF;\nSET since_at=FLOOR(TIMESTAMPDIFF(MICROSECOND,'2000-01-01',DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 13 MONTH))/3600000000)*3600000000;\nSET @telemetry_batch_sql=CONCAT('SELECT NOT EXISTS(SELECT 1 FROM (SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/3600000000)*3600000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (SELECT node_id,metric,sampled_at,value FROM `',candidate,'` WHERE sampled_at\u003e=',since_at,') AS samples GROUP BY node_id,metric,bucket_at) a LEFT JOIN telemetry_rollups_1h r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE r.exact_row_id IS NULL OR NOT(r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value)) INTO @telemetry_batch_matches');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\n\n  IF NOT @telemetry_batch_matches THEN\n   UPDATE telemetry_maintenance_progress SET phase=3,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n   SET @telemetry_batch_sql=NULL,@telemetry_batch_matches=NULL;\n   SELECT FALSE AS done;\n   LEAVE main;\n  END IF;\n\n  UPDATE telemetry_sample_shards SET state='retired' WHERE table_name=candidate AND state='active';\n END IF;\n UPDATE telemetry_maintenance_progress SET phase=0,candidate=NULL,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n DELETE FROM telemetry_maintenance_page;\n SET @telemetry_batch_sql=NULL,@telemetry_batch_matches=NULL;\n SELECT TRUE AS done;\nEND",
+          "checksum": "51b16bfb6583257bcf700519253d74a25991a692286066c7ec387ae5662ece13",
+          "before": "",
+          "after": "9cd38b1d7f8dd965de77176f3c5c60197ff57e027b8fbe2c2403df09524ee9a5"
+        },
+        {
+          "name": "telemetry_rollups_5m_short_key",
+          "object": "telemetry_rollups_5m",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_5m ADD COLUMN short_metric VARBINARY(255) GENERATED ALWAYS AS (CASE WHEN OCTET_LENGTH(metric)\u003c=255 THEN CAST(metric AS BINARY) ELSE NULL END) STORED, ADD UNIQUE KEY telemetry_short_key(node_id,bucket_at,short_metric)",
+          "checksum": "4beca20ddc2217469e2a46ba86845edfb2013c80cffe8fdc18c847d463a28fa4",
+          "before": "850730f953b60b6ccbabf07eb253ed1cb9305c3c4d3a8e4e984602dddeba465c",
+          "after": "9eca8abde6bd5f0802c013197210f824c69fa9ffb499e044ecc57d9f1e9db6e6"
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_insert_before_v26",
+          "object": "exact_telemetry_rollups_5m_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_5m_insert",
+          "checksum": "5172c3cdbd93f3c4e5b1be2c3b5aee9b19bae642fb2741e6ace6e2577d97a2b9",
+          "before": "9cad3f50fca407b620881d89b769e687943943b8d2c9cf4d547715d84312a666",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_insert_v26",
+          "object": "exact_telemetry_rollups_5m_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_5m_insert AFTER INSERT ON telemetry_rollups_5m FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_5m' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_5m WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_5m(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "909433ce4bb1a9edd55ee1d877343a2b12e08e54ac5a8ec6b267d0aa3ab5d51e",
+          "before": "",
+          "after": "0ee0d41a1b329d4cc254ccaa80ddfcdfe3582bbb8c340c031021dd2a2cde193e"
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_update_before_v26",
+          "object": "exact_telemetry_rollups_5m_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_5m_update",
+          "checksum": "3340047a078ce3438c60bee323629ffb17cb9817b256b6e2814e70793698a2f3",
+          "before": "c7d020cf8c02bbb682ea01973b1e48c34dde55b693bc7937b749636db07a5ad5",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_update_v26",
+          "object": "exact_telemetry_rollups_5m_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_5m_update AFTER UPDATE ON telemetry_rollups_5m FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF NEW.node_id=OLD.node_id AND BINARY NEW.metric=BINARY OLD.metric AND NEW.bucket_at=OLD.bucket_at THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_5m' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM exact_telemetry_rollups_5m WHERE owner_id=NEW.exact_row_id; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_5m WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_5m(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "b9eb66d3d4d354813a9ec4ada9335bf9a67853efca882b76f94cee867dacf0dc",
+          "before": "",
+          "after": "548aed7a5e86642d996b2c9e1b8adcf16a7a514c05d00621a3f2965a0f197184"
+        },
+        {
+          "name": "telemetry_rollups_5m_short_key_receipts",
+          "object": "exact_telemetry_rollups_5m",
+          "kind": "data",
+          "sql": "DELETE s FROM exact_telemetry_rollups_5m s JOIN telemetry_rollups_5m r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255",
+          "checksum": "7637931a3f723a0611a82649e7d2935cffe2b667368053555ce9ea660530fa16",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM exact_telemetry_rollups_5m s JOIN telemetry_rollups_5m r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "telemetry_rollups_1h_short_key",
+          "object": "telemetry_rollups_1h",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_1h ADD COLUMN short_metric VARBINARY(255) GENERATED ALWAYS AS (CASE WHEN OCTET_LENGTH(metric)\u003c=255 THEN CAST(metric AS BINARY) ELSE NULL END) STORED, ADD UNIQUE KEY telemetry_short_key(node_id,bucket_at,short_metric)",
+          "checksum": "146e4150d7c4480c32b4d1e62ec9d50cb9154ba2cf3ae57c0bbcb181525d0a98",
+          "before": "db5441b77906d12215b47a66eaa3aa7ba997743c1cb0fd9c463600710efe0a23",
+          "after": "e9abc6bf6141e4c86b564ec5e1fcbc1429cd86dc01696d0d231155f444db445f"
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_insert_before_v26",
+          "object": "exact_telemetry_rollups_1h_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_1h_insert",
+          "checksum": "dfdf11c18e87478b48aab1e562916e2ca6497575c869e630d24296b47c24acc7",
+          "before": "1ace709f431f22d8f65c3d991101460d739069ad4b149d5d937775735c7082a1",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_insert_v26",
+          "object": "exact_telemetry_rollups_1h_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_1h_insert AFTER INSERT ON telemetry_rollups_1h FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_1h' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_1h WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_1h(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "90cf0f26b16ce1b896d2dd27a71a26a334453b27cf02ffa301e216bb91591280",
+          "before": "",
+          "after": "b6636eef80b102a5ada95c4aa0b1b9bf1e1da4cc1f9a0928cef0f3f4844760d7"
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_update_before_v26",
+          "object": "exact_telemetry_rollups_1h_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_1h_update",
+          "checksum": "6bf7afac7a9245dff34fd6d5b304d7072b15ea70b226f8bb265eb0127f685163",
+          "before": "852bcd26e9845d9cf281a1f0e7ccc06fbf60a0b103b4af5e8afb8f8af805b610",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_update_v26",
+          "object": "exact_telemetry_rollups_1h_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_1h_update AFTER UPDATE ON telemetry_rollups_1h FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF NEW.node_id=OLD.node_id AND BINARY NEW.metric=BINARY OLD.metric AND NEW.bucket_at=OLD.bucket_at THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_1h' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM exact_telemetry_rollups_1h WHERE owner_id=NEW.exact_row_id; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_1h WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_1h(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "99b7a8cf502737af5b78803dc6821c594f7579f24c5be6a8484cd56c5a0a8c8e",
+          "before": "",
+          "after": "f9f3b0d96bdea6a2ffee17c44ee07c9065320d9c8ae2d337ff50c9921754a98a"
+        },
+        {
+          "name": "telemetry_rollups_1h_short_key_receipts",
+          "object": "exact_telemetry_rollups_1h",
+          "kind": "data",
+          "sql": "DELETE s FROM exact_telemetry_rollups_1h s JOIN telemetry_rollups_1h r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255",
+          "checksum": "e7de3fedd4a3ef3b4400d89ee3f3b3d8f88b37c673f476456bd88a4f8aa6338f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM exact_telemetry_rollups_1h s JOIN telemetry_rollups_1h r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255),'valid','invalid')",
+          "repairable": true
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": [
+        {
+          "name": "telemetry_5m_key_lookup",
+          "object": "exact_telemetry_rollups_5m",
+          "kind": "table",
+          "sql": "ALTER TABLE exact_telemetry_rollups_5m ADD INDEX telemetry_key_lookup(key_value(255))",
+          "checksum": "0e22ffb806582cca9a96045b0e862ad8cb5e08dacada96d854c32a171f0cc095",
+          "before": "df2c2c651df0421b811883bd29f713104a9298b1c88918c6d5f0837904f5d2c7",
+          "after": "0471497d9e8898a0672402ee6d3a5185f39f79760deb60b2c55cd179cb61db45"
+        },
+        {
+          "name": "telemetry_1h_key_lookup",
+          "object": "exact_telemetry_rollups_1h",
+          "kind": "table",
+          "sql": "ALTER TABLE exact_telemetry_rollups_1h ADD INDEX telemetry_key_lookup(key_value(255))",
+          "checksum": "ef703fc68e83851e41975c820abe15827938c413dc376a3dfc95cb8fde4460d4",
+          "before": "0963afead5079f92498f824ecf6a4689b48dcc7e7c3f12326d18962a864d31ad",
+          "after": "5af99d4d767e759aaea8baf5470f8d862183f984b998e9fff3d63c62b16cc607"
+        },
+        {
+          "name": "telemetry_retirement_lookup",
+          "object": "telemetry_sample_shards",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_sample_shards ADD INDEX telemetry_retirement_lookup(state,end_at,start_at)",
+          "checksum": "ff095338ada2c864ae2f1593c72467749afeb96d84a6c2d6fd726021b307593d",
+          "before": "a5e00e9a2f72bef7e1e7e7a4ada54e1d2096a4f318b943474fb36ee66ac667fa",
+          "after": "27dc2880d60d71ba7543e4c111c076acad11be1ab37cf6bae5857364c0fbebc8"
+        },
+        {
+          "name": "telemetry_retire_before_v26",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "DROP PROCEDURE telemetry_retire_shards",
+          "checksum": "670a8b46146e65b61ebf998095746a56fa065158e568bf74de022ee14cfc9bbd",
+          "before": "771f54978a15ef0e1c6a3936c691a45d76fcd3df62d4957694b96cbcbe187474",
+          "after": ""
+        },
+        {
+          "name": "telemetry_progress",
+          "object": "telemetry_maintenance_progress",
+          "kind": "table",
+          "sql": "CREATE TABLE telemetry_maintenance_progress (\n singleton TINYINT PRIMARY KEY CHECK(singleton=1),\n phase TINYINT NOT NULL DEFAULT 0,\n cutoff BIGINT NOT NULL DEFAULT 0,\n candidate VARBINARY(64),\n cursor_at BIGINT,\n cursor_node VARBINARY(16),\n cursor_metric LONGBLOB\n) ENGINE=InnoDB",
+          "checksum": "f8a78b0e0729e57807c3a2569dcf2b812fef559190aee29a2f3a247bc02428e4",
+          "before": "",
+          "after": "6cc9488596be597dd76df5f1ad84c308ed7fc1f2a32606bb9f8c7e9b6d33b994"
+        },
+        {
+          "name": "telemetry_progress_seed",
+          "object": "telemetry_maintenance_progress",
+          "kind": "data",
+          "sql": "INSERT INTO telemetry_maintenance_progress(singleton) VALUES(1)",
+          "checksum": "c530f1c47e8fc1e1a70abdf4db745c40e5d18685b5a73cc74b023cd1932487cc",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(EXISTS(SELECT 1 FROM telemetry_maintenance_progress WHERE singleton=1),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "telemetry_page",
+          "object": "telemetry_maintenance_page",
+          "kind": "table",
+          "sql": "CREATE TABLE telemetry_maintenance_page (\n slot SMALLINT PRIMARY KEY CHECK(slot BETWEEN 1 AND 80),\n node_id VARBINARY(16) NOT NULL, metric LONGBLOB NOT NULL, bucket_at BIGINT NOT NULL,\n sample_count BIGINT NOT NULL, min_value DOUBLE NOT NULL, max_value DOUBLE NOT NULL, avg_value DOUBLE NOT NULL\n) ENGINE=InnoDB",
+          "checksum": "58857a67ae27b93699bca1348d12667245c7471602892688cabd16b349e2f632",
+          "before": "",
+          "after": "3ea4bde2c610d424e2e4a0a064a7bb84f89f8220875f06cbf0cbeaf32006140c"
+        },
+        {
+          "name": "telemetry_batch_retire_v26",
+          "object": "telemetry_retire_shards",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE telemetry_retire_shards(IN requested_cutoff BIGINT)\nSQL SECURITY DEFINER\nmain: BEGIN\n DECLARE clock_at BIGINT;\n DECLARE phase_no INT;\n DECLARE cut_at BIGINT;\n DECLARE since_at BIGINT;\n DECLARE upper_at BIGINT;\n DECLARE stop_at BIGINT;\n DECLARE cursor_at BIGINT;\n DECLARE cursor_node VARBINARY(16);\n DECLARE cursor_metric LONGBLOB;\n DECLARE candidate VARBINARY(64);\n DECLARE guard_key VARBINARY(128);\n DECLARE migration_state VARBINARY(16);\n DECLARE sources LONGTEXT;\n DECLARE aggregate_sql LONGTEXT;\n DECLARE target_table VARCHAR(64);\n DECLARE page_count INT;\n DECLARE statement_open BOOLEAN DEFAULT FALSE;\n DECLARE EXIT HANDLER FOR SQLEXCEPTION\n BEGIN\n  IF statement_open THEN DEALLOCATE PREPARE telemetry_batch; END IF;\n  SET @telemetry_batch_sql=NULL, @telemetry_batch_matches=NULL;\n  RESIGNAL;\n END;\n SET clock_at=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6));\n IF requested_cutoff IS NULL OR requested_cutoff\u003eclock_at-1209600000000+300000000 THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry retention cutoff outside permitted window';\n END IF;\n SAVEPOINT ocservia_telemetry_batch_tx;\n RELEASE SAVEPOINT ocservia_telemetry_batch_tx;\n SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;\n SELECT state INTO migration_state FROM telemetry_legacy_migration WHERE singleton=1 LOCK IN SHARE MODE;\n IF guard_key IS NULL OR migration_state IS NULL OR migration_state\u003c\u003e'complete' THEN\n  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry history migration is incomplete';\n END IF;\n SELECT phase,p.cutoff,p.candidate,p.cursor_at,p.cursor_node,p.cursor_metric\n INTO phase_no,cut_at,candidate,cursor_at,cursor_node,cursor_metric\n FROM telemetry_maintenance_progress p WHERE singleton=1 FOR UPDATE;\n IF phase_no=0 THEN\n  SET cut_at=LEAST(requested_cutoff,clock_at-1209600000000);\n  SET candidate=NULL;\n  SELECT table_name INTO candidate FROM telemetry_sample_shards FORCE INDEX (telemetry_retirement_lookup)\n  WHERE state='active' AND end_at\u003c=cut_at ORDER BY start_at LIMIT 1;\n  SET phase_no=1, cursor_at=NULL, cursor_node=NULL, cursor_metric=NULL;\n  UPDATE telemetry_maintenance_progress p SET phase=1,cutoff=cut_at,p.candidate=candidate,\n   cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n END IF;\n phases: WHILE phase_no\u003c=4 DO\n  IF phase_no\u003e=3 AND candidate IS NULL THEN LEAVE phases; END IF;\n  SET target_table=IF(MOD(phase_no,2)=1,'telemetry_rollups_5m','telemetry_rollups_1h');\n  IF phase_no\u003c=2 THEN\n   SET since_at=FLOOR(GREATEST(cut_at,clock_at-1209600000000)/IF(phase_no=1,300000000,3600000000))*IF(phase_no=1,300000000,3600000000);\n  ELSEIF phase_no=3 THEN\n   SET since_at=FLOOR((clock_at-7776000000000)/300000000)*300000000;\n  ELSE\n   SET since_at=FLOOR(TIMESTAMPDIFF(MICROSECOND,'2000-01-01',DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 13 MONTH))/3600000000)*3600000000;\n  END IF;\n  IF cursor_at IS NOT NULL THEN SET since_at=GREATEST(since_at,cursor_at); END IF;\n  SET stop_at=GREATEST(cut_at+1209600000000,clock_at)+300000000;\n  IF phase_no\u003e=3 THEN SELECT GREATEST(since_at,start_at),end_at INTO since_at,stop_at FROM telemetry_sample_shards WHERE table_name=candidate; END IF;\n  SET upper_at=9223372036854775807;\n  IF since_at\u003cstop_at-86400000000 THEN SET upper_at=since_at+86400000000; END IF;\n  SET sources='';\n  IF phase_no\u003c=2 THEN\n   SET sources=CONCAT('SELECT node_id,metric,sampled_at,value FROM telemetry_samples WHERE sampled_at\u003e=',since_at,' AND sampled_at\u003c=',upper_at,IF(upper_at=9223372036854775807,'','-1'));\n   BEGIN\n    DECLARE finished BOOLEAN DEFAULT FALSE;\n    DECLARE shard VARBINARY(64);\n    DECLARE shards CURSOR FOR SELECT table_name FROM telemetry_sample_shards WHERE state='active' AND end_at\u003esince_at ORDER BY start_at;\n    DECLARE CONTINUE HANDLER FOR NOT FOUND SET finished=TRUE;\n    OPEN shards;\n    shard_loop: LOOP\n     FETCH shards INTO shard;\n     IF finished THEN LEAVE shard_loop; END IF;\n     IF CONVERT(shard USING ascii) NOT REGEXP '^telemetry_samples_(m_[0-9]{6}|x_[pn][0-9]{7})$' THEN\n      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='invalid telemetry shard name';\n     END IF;\n     SET sources=CONCAT(sources,' UNION ALL SELECT node_id,metric,sampled_at,value FROM ',shard,' WHERE sampled_at\u003e=',since_at,' AND sampled_at\u003c=',upper_at,IF(upper_at=9223372036854775807,'','-1'));\n    END LOOP;\n    CLOSE shards;\n   END;\n  ELSE\n   IF CONVERT(candidate USING ascii) NOT REGEXP '^telemetry_samples_(m_[0-9]{6}|x_[pn][0-9]{7})$' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='invalid telemetry shard name';\n   END IF;\n   SET sources=CONCAT('SELECT node_id,metric,sampled_at,value FROM ',candidate,' WHERE sampled_at\u003e=',since_at,' AND sampled_at\u003c=',upper_at,IF(upper_at=9223372036854775807,'','-1'));\n  END IF;\n  SET aggregate_sql=IF(MOD(phase_no,2)=1,CONCAT('SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/300000000)*300000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (',sources,') AS samples GROUP BY node_id,metric,bucket_at'),CONCAT('SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/3600000000)*3600000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (',sources,') AS samples GROUP BY node_id,metric,bucket_at'));\n  DELETE FROM telemetry_maintenance_page;\n  SET @telemetry_batch_sql=CONCAT('INSERT INTO telemetry_maintenance_page SELECT ROW_NUMBER() OVER(ORDER BY bucket_at,node_id,BINARY metric),page.* FROM (SELECT a.* FROM (',aggregate_sql,') a LEFT JOIN ',target_table,\n   ' r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE (r.exact_row_id IS NULL OR NOT(r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value))');\n  IF cursor_node IS NOT NULL THEN\n   SET @telemetry_batch_sql=CONCAT(@telemetry_batch_sql,' AND (a.bucket_at\u003e',cursor_at,\n    ' OR (a.bucket_at=',cursor_at,' AND (a.node_id\u003eUNHEX(''',HEX(cursor_node),''')',\n    ' OR (a.node_id=UNHEX(''',HEX(cursor_node),''') AND BINARY a.metric\u003eUNHEX(''',HEX(cursor_metric),''')))))');\n  END IF;\n  SET @telemetry_batch_sql=CONCAT(@telemetry_batch_sql,' ORDER BY a.bucket_at,a.node_id,BINARY a.metric LIMIT 80) page');\n  PREPARE telemetry_batch FROM @telemetry_batch_sql;\n  SET statement_open=TRUE;\n  EXECUTE telemetry_batch;\n  DEALLOCATE PREPARE telemetry_batch;\n  SET statement_open=FALSE;\n  SELECT COUNT(*) INTO page_count FROM telemetry_maintenance_page;\n  IF page_count\u003e0 THEN\n   \n   SET guard_key=NULL;\n   SELECT key_name INTO guard_key FROM exact_key_guards WHERE key_name=target_table FOR UPDATE;\n   IF guard_key IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF;\n   IF NOT EXISTS(SELECT 1 FROM telemetry_maintenance_page WHERE OCTET_LENGTH(metric)\u003e255) THEN\nSET @telemetry_batch_sql=CONCAT('INSERT INTO ',target_table,'(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value FROM telemetry_maintenance_page WHERE TRUE ON DUPLICATE KEY UPDATE sample_count=VALUES(sample_count),min_value=VALUES(min_value),max_value=VALUES(max_value),avg_value=VALUES(avg_value)');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\nELSE\nSET @telemetry_batch_sql=CONCAT('UPDATE ',target_table,' r JOIN (SELECT node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value FROM telemetry_maintenance_page) a ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at SET r.sample_count=a.sample_count,r.min_value=a.min_value,r.max_value=a.max_value,r.avg_value=a.avg_value WHERE NOT (r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value)');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\nSET @telemetry_batch_sql=CONCAT('INSERT INTO ',target_table,'(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT a.node_id,a.metric,a.bucket_at,a.sample_count,a.min_value,a.max_value,a.avg_value FROM (SELECT node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value FROM telemetry_maintenance_page) a LEFT JOIN ',target_table,' r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE r.exact_row_id IS NULL');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\nEND IF;\n\n   SELECT p.bucket_at,p.node_id,p.metric INTO cursor_at,cursor_node,cursor_metric FROM telemetry_maintenance_page p ORDER BY slot DESC LIMIT 1;\n   UPDATE telemetry_maintenance_progress p SET p.cursor_at=cursor_at,p.cursor_node=cursor_node,p.cursor_metric=cursor_metric WHERE singleton=1;\n   SET @telemetry_batch_sql=NULL;\n   SELECT FALSE AS done;\n   LEAVE main;\n  END IF;\n  IF upper_at\u003cstop_at THEN\n   SET cursor_at=upper_at,cursor_node=NULL,cursor_metric=NULL;\n   UPDATE telemetry_maintenance_progress p SET p.cursor_at=cursor_at,p.cursor_node=NULL,p.cursor_metric=NULL WHERE singleton=1;\n   ITERATE phases;\n  END IF;\n  SET phase_no=phase_no+1,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL;\n  UPDATE telemetry_maintenance_progress SET phase=phase_no,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n END WHILE;\n IF candidate IS NOT NULL THEN\n  SELECT table_name INTO guard_key FROM telemetry_sample_shards WHERE table_name=candidate AND state='active' FOR UPDATE;\n  SET since_at=FLOOR((clock_at-7776000000000)/300000000)*300000000;\nSET @telemetry_batch_sql=CONCAT('SELECT NOT EXISTS(SELECT 1 FROM (SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/300000000)*300000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (SELECT node_id,metric,sampled_at,value FROM `',candidate,'` WHERE sampled_at\u003e=',since_at,') AS samples GROUP BY node_id,metric,bucket_at) a LEFT JOIN telemetry_rollups_5m r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE r.exact_row_id IS NULL OR NOT(r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value)) INTO @telemetry_batch_matches');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\n\n  IF NOT @telemetry_batch_matches THEN\n   UPDATE telemetry_maintenance_progress SET phase=3,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n   SET @telemetry_batch_sql=NULL,@telemetry_batch_matches=NULL;\n   SELECT FALSE AS done;\n   LEAVE main;\n  END IF;\nSET since_at=FLOOR(TIMESTAMPDIFF(MICROSECOND,'2000-01-01',DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 13 MONTH))/3600000000)*3600000000;\nSET @telemetry_batch_sql=CONCAT('SELECT NOT EXISTS(SELECT 1 FROM (SELECT node_id,metric,CASE WHEN sampled_at IN (-9223372036854775808,9223372036854775807) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/3600000000)*3600000000 END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (SELECT node_id,metric,sampled_at,value FROM `',candidate,'` WHERE sampled_at\u003e=',since_at,') AS samples GROUP BY node_id,metric,bucket_at) a LEFT JOIN telemetry_rollups_1h r ON r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at WHERE r.exact_row_id IS NULL OR NOT(r.sample_count \u003c=\u003e a.sample_count AND r.min_value \u003c=\u003e a.min_value AND r.max_value \u003c=\u003e a.max_value AND r.avg_value \u003c=\u003e a.avg_value)) INTO @telemetry_batch_matches');\nPREPARE telemetry_batch FROM @telemetry_batch_sql;\nSET statement_open=TRUE;\nEXECUTE telemetry_batch;\nDEALLOCATE PREPARE telemetry_batch;\nSET statement_open=FALSE;\n\n  IF NOT @telemetry_batch_matches THEN\n   UPDATE telemetry_maintenance_progress SET phase=3,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n   SET @telemetry_batch_sql=NULL,@telemetry_batch_matches=NULL;\n   SELECT FALSE AS done;\n   LEAVE main;\n  END IF;\n\n  UPDATE telemetry_sample_shards SET state='retired' WHERE table_name=candidate AND state='active';\n END IF;\n UPDATE telemetry_maintenance_progress SET phase=0,candidate=NULL,cursor_at=NULL,cursor_node=NULL,cursor_metric=NULL WHERE singleton=1;\n DELETE FROM telemetry_maintenance_page;\n SET @telemetry_batch_sql=NULL,@telemetry_batch_matches=NULL;\n SELECT TRUE AS done;\nEND",
+          "checksum": "51b16bfb6583257bcf700519253d74a25991a692286066c7ec387ae5662ece13",
+          "before": "",
+          "after": "9cd38b1d7f8dd965de77176f3c5c60197ff57e027b8fbe2c2403df09524ee9a5"
+        },
+        {
+          "name": "telemetry_rollups_5m_short_key",
+          "object": "telemetry_rollups_5m",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_5m ADD COLUMN short_metric VARBINARY(255) GENERATED ALWAYS AS (CASE WHEN OCTET_LENGTH(metric)\u003c=255 THEN CAST(metric AS BINARY) ELSE NULL END) STORED, ADD UNIQUE KEY telemetry_short_key(node_id,bucket_at,short_metric)",
+          "checksum": "4beca20ddc2217469e2a46ba86845edfb2013c80cffe8fdc18c847d463a28fa4",
+          "before": "850730f953b60b6ccbabf07eb253ed1cb9305c3c4d3a8e4e984602dddeba465c",
+          "after": "9eca8abde6bd5f0802c013197210f824c69fa9ffb499e044ecc57d9f1e9db6e6"
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_insert_before_v26",
+          "object": "exact_telemetry_rollups_5m_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_5m_insert",
+          "checksum": "5172c3cdbd93f3c4e5b1be2c3b5aee9b19bae642fb2741e6ace6e2577d97a2b9",
+          "before": "9cad3f50fca407b620881d89b769e687943943b8d2c9cf4d547715d84312a666",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_insert_v26",
+          "object": "exact_telemetry_rollups_5m_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_5m_insert AFTER INSERT ON telemetry_rollups_5m FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_5m' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_5m WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_5m(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "909433ce4bb1a9edd55ee1d877343a2b12e08e54ac5a8ec6b267d0aa3ab5d51e",
+          "before": "",
+          "after": "0ee0d41a1b329d4cc254ccaa80ddfcdfe3582bbb8c340c031021dd2a2cde193e"
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_update_before_v26",
+          "object": "exact_telemetry_rollups_5m_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_5m_update",
+          "checksum": "3340047a078ce3438c60bee323629ffb17cb9817b256b6e2814e70793698a2f3",
+          "before": "c7d020cf8c02bbb682ea01973b1e48c34dde55b693bc7937b749636db07a5ad5",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_5m_update_v26",
+          "object": "exact_telemetry_rollups_5m_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_5m_update AFTER UPDATE ON telemetry_rollups_5m FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF NEW.node_id=OLD.node_id AND BINARY NEW.metric=BINARY OLD.metric AND NEW.bucket_at=OLD.bucket_at THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_5m' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM exact_telemetry_rollups_5m WHERE owner_id=NEW.exact_row_id; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_5m WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_5m(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "b9eb66d3d4d354813a9ec4ada9335bf9a67853efca882b76f94cee867dacf0dc",
+          "before": "",
+          "after": "548aed7a5e86642d996b2c9e1b8adcf16a7a514c05d00621a3f2965a0f197184"
+        },
+        {
+          "name": "telemetry_rollups_5m_short_key_receipts",
+          "object": "exact_telemetry_rollups_5m",
+          "kind": "data",
+          "sql": "DELETE s FROM exact_telemetry_rollups_5m s JOIN telemetry_rollups_5m r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255",
+          "checksum": "7637931a3f723a0611a82649e7d2935cffe2b667368053555ce9ea660530fa16",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM exact_telemetry_rollups_5m s JOIN telemetry_rollups_5m r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255),'valid','invalid')",
+          "repairable": true
+        },
+        {
+          "name": "telemetry_rollups_1h_short_key",
+          "object": "telemetry_rollups_1h",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_rollups_1h ADD COLUMN short_metric VARBINARY(255) GENERATED ALWAYS AS (CASE WHEN OCTET_LENGTH(metric)\u003c=255 THEN CAST(metric AS BINARY) ELSE NULL END) STORED, ADD UNIQUE KEY telemetry_short_key(node_id,bucket_at,short_metric)",
+          "checksum": "146e4150d7c4480c32b4d1e62ec9d50cb9154ba2cf3ae57c0bbcb181525d0a98",
+          "before": "db5441b77906d12215b47a66eaa3aa7ba997743c1cb0fd9c463600710efe0a23",
+          "after": "e9abc6bf6141e4c86b564ec5e1fcbc1429cd86dc01696d0d231155f444db445f"
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_insert_before_v26",
+          "object": "exact_telemetry_rollups_1h_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_1h_insert",
+          "checksum": "dfdf11c18e87478b48aab1e562916e2ca6497575c869e630d24296b47c24acc7",
+          "before": "1ace709f431f22d8f65c3d991101460d739069ad4b149d5d937775735c7082a1",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_insert_v26",
+          "object": "exact_telemetry_rollups_1h_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_1h_insert AFTER INSERT ON telemetry_rollups_1h FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_1h' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_1h WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_1h(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "90cf0f26b16ce1b896d2dd27a71a26a334453b27cf02ffa301e216bb91591280",
+          "before": "",
+          "after": "b6636eef80b102a5ada95c4aa0b1b9bf1e1da4cc1f9a0928cef0f3f4844760d7"
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_update_before_v26",
+          "object": "exact_telemetry_rollups_1h_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER exact_telemetry_rollups_1h_update",
+          "checksum": "6bf7afac7a9245dff34fd6d5b304d7072b15ea70b226f8bb265eb0127f685163",
+          "before": "852bcd26e9845d9cf281a1f0e7ccc06fbf60a0b103b4af5e8afb8f8af805b610",
+          "after": ""
+        },
+        {
+          "name": "exact_telemetry_rollups_1h_update_v26",
+          "object": "exact_telemetry_rollups_1h_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER exact_telemetry_rollups_1h_update AFTER UPDATE ON telemetry_rollups_1h FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF NEW.node_id=OLD.node_id AND BINARY NEW.metric=BINARY OLD.metric AND NEW.bucket_at=OLD.bucket_at THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_1h' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM exact_telemetry_rollups_1h WHERE owner_id=NEW.exact_row_id; IF OCTET_LENGTH(NEW.metric)\u003c=255 THEN LEAVE main; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_1h WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_1h(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END",
+          "checksum": "99b7a8cf502737af5b78803dc6821c594f7579f24c5be6a8484cd56c5a0a8c8e",
+          "before": "",
+          "after": "f9f3b0d96bdea6a2ffee17c44ee07c9065320d9c8ae2d337ff50c9921754a98a"
+        },
+        {
+          "name": "telemetry_rollups_1h_short_key_receipts",
+          "object": "exact_telemetry_rollups_1h",
+          "kind": "data",
+          "sql": "DELETE s FROM exact_telemetry_rollups_1h s JOIN telemetry_rollups_1h r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255",
+          "checksum": "e7de3fedd4a3ef3b4400d89ee3f3b3d8f88b37c673f476456bd88a4f8aa6338f",
+          "before": "",
+          "after": "ec654fac9599f62e79e2706abef23dfb7c07c08185aa86db4d8695f0b718d1b3",
+          "verify_sql": "SELECT IF(NOT EXISTS(SELECT 1 FROM exact_telemetry_rollups_1h s JOIN telemetry_rollups_1h r ON r.exact_row_id=s.owner_id WHERE OCTET_LENGTH(r.metric)\u003c=255),'valid','invalid')",
+          "repairable": true
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

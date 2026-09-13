@@ -829,7 +829,7 @@ func (s *Service) HistoryFrom(ctx context.Context, nodeID uuid.UUID, metric, res
 
 func (s *Service) Maintain(ctx context.Context) error {
 	now := s.now().UTC()
-	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	return telemetryhistory.Maintain(ctx, s.backend, now, func(ctx context.Context, tx database.Tx) error {
 		store, err := telemetrywrite.From(tx)
 		if err != nil {
 			return err
@@ -843,13 +843,8 @@ func (s *Service) Maintain(ctx context.Context) error {
 				return err
 			}
 		}
-		history, err := telemetryhistory.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		if err := history.Maintain(ctx, now); err != nil {
-			return err
-		}
+		return nil
+	}, func(ctx context.Context, tx database.Tx) error {
 		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
 	})
 }

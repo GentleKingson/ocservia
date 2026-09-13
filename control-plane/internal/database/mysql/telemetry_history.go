@@ -67,23 +67,52 @@ func (s *TelemetryHistoryStore) Insert(ctx context.Context, nodeID, batchID uuid
 	if err := s.lockCatalog(ctx); err != nil {
 		return err
 	}
+	type shardBatch struct {
+		name string
+		args []any
+	}
+	var batches []shardBatch
+	months := map[string]int{}
 	for _, sample := range samples {
 		at, err := telemetryMicros(sample.SampledAt)
 		if err != nil {
 			return err
 		}
-		var name string
-		if err := s.tx.QueryRow(ctx, `SELECT table_name FROM telemetry_sample_shards WHERE start_at<=? AND end_at>? AND state='active' LOCK IN SHARE MODE`, at, at).Scan(&name); err != nil {
-			return fmt.Errorf("telemetry month is not provisioned: %w", err)
+		month := sample.SampledAt.UTC().Format("2006-01")
+		index, found := months[month]
+		if !found {
+			var name string
+			if err := s.tx.QueryRow(ctx, `SELECT table_name FROM telemetry_sample_shards WHERE start_at<=? AND end_at>? AND state='active' LOCK IN SHARE MODE`, at, at).Scan(&name); err != nil {
+				return fmt.Errorf("telemetry month is not provisioned: %w", err)
+			}
+			if !telemetryShardName.MatchString(name) {
+				return ErrSchema
+			}
+			index = len(batches)
+			months[month] = index
+			batches = append(batches, shardBatch{name: name})
 		}
-		if !telemetryShardName.MatchString(name) {
-			return ErrSchema
-		}
-		// Duplicate handling is confined to the same sample PK. IGNORE would
-		// also suppress foreign-key and CHECK violations, so it is forbidden.
-		_, err = s.tx.Exec(ctx, `INSERT INTO `+name+`(node_id,batch_id,sampled_at,metric,value) VALUES(?,?,?,?,?)`, UUIDBytes(nodeID), UUIDBytes(batchID), at, sample.Metric, sample.Value)
-		if err != nil && !errors.Is(err, database.ErrUnique) {
-			return fmt.Errorf("insert telemetry sample: %w", err)
+		batches[index].args = append(batches[index].args, UUIDBytes(nodeID), UUIDBytes(batchID), at, sample.Metric, sample.Value)
+	}
+	for _, batch := range batches {
+		for begin := 0; begin < len(batch.args); begin += 128 * 5 {
+			end := min(begin+128*5, len(batch.args))
+			args := batch.args[begin:end]
+			prefix := `INSERT INTO ` + batch.name + `(node_id,batch_id,sampled_at,metric,value) VALUES`
+			_, err := s.tx.Exec(ctx, prefix+strings.TrimSuffix(strings.Repeat("(?,?,?,?,?),", len(args)/5), ","), args...)
+			if errors.Is(err, database.ErrUnique) {
+				// InnoDB rolls back the entire failed INSERT. Replaying only
+				// this chunk preserves first-sample-wins duplicate semantics;
+				// IGNORE would incorrectly suppress FK and CHECK failures too.
+				for i := 0; i < len(args); i += 5 {
+					_, err = s.tx.Exec(ctx, prefix+"(?,?,?,?,?)", args[i:i+5]...)
+					if err != nil && !errors.Is(err, database.ErrUnique) {
+						return fmt.Errorf("insert telemetry sample: %w", err)
+					}
+				}
+			} else if err != nil {
+				return fmt.Errorf("insert telemetry samples: %w", err)
+			}
 		}
 	}
 	return nil
@@ -134,71 +163,36 @@ func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, m
 }
 
 func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) error {
-	now = now.UTC()
-	since, err := telemetryMicros(now.Add(-14 * 24 * time.Hour).Truncate(time.Hour))
-	if err != nil {
-		return err
+	// Compatibility for callers explicitly borrowing one transaction. The
+	// scheduler uses telemetryhistory.Maintain to commit between pages.
+	for {
+		done, err := s.MaintainBatch(ctx, now)
+		if err != nil || done {
+			return err
+		}
 	}
-	tables, err := s.activeTables(ctx, since)
-	if err != nil {
-		return err
-	}
-	if err := s.rollup(ctx, tables, now.Add(-14*24*time.Hour)); err != nil {
-		return fmt.Errorf("roll up recent telemetry: %w", err)
-	}
-	cutRaw, err := telemetryMicros(now.Add(-14 * 24 * time.Hour))
-	if err != nil {
-		return err
-	}
-	// The database capability finalizes the retained windows itself before
-	// retirement; callers cannot bypass backfill by invoking it directly.
-	at, err := telemetryMicros(now)
-	if err != nil {
-		return err
-	}
-	if _, err = s.tx.Exec(ctx, `CALL telemetry_prune_rollups(?)`, at); err != nil {
-		return fmt.Errorf("prune telemetry rollups: %w", err)
-	}
-	_, err = s.tx.Exec(ctx, `CALL telemetry_retire_shards(?)`, cutRaw)
-	if err != nil {
-		return fmt.Errorf("retire telemetry month: %w", err)
-	}
-	return nil
 }
 
-func (s *TelemetryHistoryStore) rollup(ctx context.Context, tables []string, begin time.Time) error {
-	for _, rollup := range []struct {
-		suffix string
-		width  int64
-	}{{"5m", 300000000}, {"1h", 3600000000}} {
-		// Cover accepted late samples without replacing the first bucket with
-		// a partial aggregate. The table list covers the widest (hour) bucket.
-		since, err := telemetryMicros(begin.Truncate(time.Duration(rollup.width) * time.Microsecond))
-		if err != nil {
-			return err
-		}
-		name := "telemetry_rollups_" + rollup.suffix
-		if err := LockExactKey(ctx, s.tx, name); err != nil {
-			return err
-		}
-		parts := make([]string, 0, len(tables))
-		args := make([]any, 0, len(tables))
-		for _, table := range tables {
-			parts = append(parts, `SELECT node_id,metric,sampled_at,value FROM `+table+` WHERE sampled_at>=?`)
-			args = append(args, since)
-		}
-		// PostgreSQL date_bin preserves infinities. They are ordered values,
-		// not finite microseconds to round (which would corrupt the sentinel).
-		query := telemetryAggregateSQL(strings.Join(parts, ` UNION ALL `), rollup.width)
-		// Aggregate inside the server, without Go materialization or per-row
-		// round trips. The exact-key guard serializes the two-statement upsert.
-		for _, statement := range telemetryMergeSQL(name, query) {
-			if _, err := s.tx.Exec(ctx, statement, args...); err != nil {
-				return err
-			}
-		}
+func (s *TelemetryHistoryStore) MaintainBatch(ctx context.Context, now time.Time) (bool, error) {
+	cutRaw, err := telemetryMicros(now.Add(-14 * 24 * time.Hour))
+	if err != nil {
+		return false, err
 	}
-	return nil
+	var done bool
+	if err := s.tx.QueryRow(ctx, `CALL telemetry_retire_shards(?)`, cutRaw).Scan(&done); err != nil {
+		return false, fmt.Errorf("advance telemetry maintenance: %w", err)
+	}
+	if !done {
+		return false, nil
+	}
+	at, err := telemetryMicros(now)
+	if err != nil {
+		return false, err
+	}
+	if _, err = s.tx.Exec(ctx, `CALL telemetry_prune_rollups(?)`, at); err != nil {
+		return false, fmt.Errorf("prune telemetry rollups: %w", err)
+	}
+	return true, nil
 }
 
 func telemetryAggregateSQL(source string, width int64) string {
@@ -208,7 +202,7 @@ func telemetryAggregateSQL(source string, width int64) string {
 func telemetryMergeSQL(table, aggregate string) []string {
 	match := `r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at`
 	return []string{
-		`UPDATE ` + table + ` r JOIN (` + aggregate + `) a ON ` + match + ` SET r.sample_count=a.sample_count,r.min_value=a.min_value,r.max_value=a.max_value,r.avg_value=a.avg_value`,
+		`UPDATE ` + table + ` r JOIN (` + aggregate + `) a ON ` + match + ` SET r.sample_count=a.sample_count,r.min_value=a.min_value,r.max_value=a.max_value,r.avg_value=a.avg_value WHERE NOT (r.sample_count <=> a.sample_count AND r.min_value <=> a.min_value AND r.max_value <=> a.max_value AND r.avg_value <=> a.avg_value)`,
 		`INSERT INTO ` + table + `(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT a.node_id,a.metric,a.bucket_at,a.sample_count,a.min_value,a.max_value,a.avg_value FROM (` + aggregate + `) a LEFT JOIN ` + table + ` r ON ` + match + ` WHERE r.exact_row_id IS NULL`,
 	}
 }

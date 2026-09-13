@@ -10,6 +10,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/semantictest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetryhistory"
 	"github.com/google/uuid"
 )
 
@@ -29,10 +30,27 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
+	for _, query := range []string{
+		`DELETE FROM telemetry_maintenance_progress WHERE 1=0`,
+		`UPDATE telemetry_maintenance_progress SET phase=0 WHERE 1=0`,
+		`INSERT INTO telemetry_maintenance_progress(singleton) SELECT 1 WHERE 1=0`,
+		`DELETE FROM telemetry_maintenance_page WHERE 1=0`,
+		`UPDATE telemetry_maintenance_page SET sample_count=1 WHERE 1=0`,
+		`INSERT INTO telemetry_maintenance_page(slot,node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT 1,REPEAT('x',16),'cpu_usage_ratio',0,1,1,1,1 WHERE 1=0`,
+	} {
+		if _, err := b.Exec(ctx, query); !errors.Is(err, database.ErrPermission) {
+			t.Fatalf("runtime gained maintenance receipt mutation: %v", err)
+		}
+	}
 	for _, table := range []string{"exact_telemetry_rollups_5m", "exact_telemetry_rollups_1h"} {
 		if _, err := b.Exec(ctx, `DELETE FROM `+table+` WHERE 1=0`); !errors.Is(err, database.ErrPermission) {
 			t.Fatalf("runtime gained exact-key mutation privilege: %v", err)
 		}
+	}
+	// CALL itself is not an atomic transaction. An autocommit caller must
+	// not be able to split progress, staging and retirement into separate commits.
+	if _, err := b.Exec(ctx, `CALL telemetry_retire_shards(?)`, fixtureTimestamp(t, now.Add(-14*24*time.Hour))); err == nil {
+		t.Fatal("maintenance capability accepted an autocommit caller")
 	}
 	t.Run("runtime-requires-active-month", func(t *testing.T) {
 		if err := b.ValidateTelemetryRuntime(ctx); err != nil {
@@ -64,6 +82,54 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 	if _, err = owner.Exec(ctx, `INSERT INTO telemetry_ingest_batches(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES(?,?,1,'raw_history',?,1)`, UUIDBytes(batch), UUIDBytes(node), fixtureTimestamp(t, now)); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("bulk-sample-constraints", func(t *testing.T) {
+		at := now.Truncate(time.Second)
+		err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			store := NewTelemetryHistoryStore(tx)
+			if err := store.Insert(ctx, node, batch, []telemetryhistory.Sample{
+				{SampledAt: at, Metric: "cpu_usage_ratio", Value: 1},
+				{SampledAt: at, Metric: "cpu_usage_ratio", Value: 2},
+				{SampledAt: at.Add(time.Second), Metric: "cpu_usage_ratio", Value: 3},
+			}); err != nil {
+				return err
+			}
+			points, err := store.History(ctx, node, "cpu_usage_ratio", "raw", fixtureTimestamp(t, at))
+			if err != nil {
+				return err
+			}
+			if len(points) != 2 || points[0].Average != 1 || points[1].Average != 3 {
+				return errors.New("bulk replay changed first-sample-wins semantics")
+			}
+			return context.Canceled
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			store := NewTelemetryHistoryStore(tx)
+			err := store.Insert(ctx, node, batch, []telemetryhistory.Sample{{SampledAt: at, Metric: "cpu_usage_ratio", Value: 1}, {SampledAt: at, Metric: "invalid", Value: 2}})
+			if !errors.Is(err, database.ErrConstraint) {
+				return errors.New("bulk insert suppressed metric constraint")
+			}
+			points, err := store.History(ctx, node, "cpu_usage_ratio", "raw", fixtureTimestamp(t, at))
+			if err != nil {
+				return err
+			}
+			if len(points) != 0 {
+				return errors.New("failed bulk statement left partial samples")
+			}
+			return context.Canceled
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			return NewTelemetryHistoryStore(tx).Insert(ctx, node, uuid.New(), []telemetryhistory.Sample{{SampledAt: at, Metric: "cpu_usage_ratio", Value: 1}})
+		})
+		if !errors.Is(err, database.ErrForeignKey) {
+			t.Fatalf("bulk insert suppressed foreign key: %v", err)
+		}
+	})
 	semantictest.TelemetryHistoryWorkflow(t, semantictest.TelemetryHistoryHarness{
 		Backend: b, Now: now, Node: node, Batch: batch,
 		Prune: func(ctx context.Context, tx database.Tx, now time.Time) error {
@@ -151,11 +217,17 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		maintain := func(rollback bool) error {
 			return database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 				// Invoke the capability directly, bypassing Go maintenance.
-				if _, err := tx.Exec(ctx, `CALL telemetry_retire_shards(?)`, fixtureTimestamp(t, now.Add(-14*24*time.Hour))); err != nil {
-					return err
-				}
-				if rollback {
-					return context.Canceled
+				for {
+					var done bool
+					if err := tx.QueryRow(ctx, `CALL telemetry_retire_shards(?)`, fixtureTimestamp(t, now.Add(-14*24*time.Hour))).Scan(&done); err != nil {
+						return err
+					}
+					if rollback {
+						return context.Canceled
+					}
+					if done {
+						break
+					}
 				}
 				return nil
 			})
@@ -170,11 +242,37 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_1h WHERE node_id=? AND metric='connection_rtt_ms'`, UUIDBytes(node)).Scan(&rolledBack); err != nil || rolledBack != 0 {
 			t.Fatalf("finalization escaped rollback: %d %v", rolledBack, err)
 		}
+		// Commit only one page, then resume through a fresh transaction. The
+		// catalog must remain active until database verification completes.
+		if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+			var done bool
+			if err := tx.QueryRow(ctx, `CALL telemetry_retire_shards(?)`, fixtureTimestamp(t, now.Add(-14*24*time.Hour))).Scan(&done); err != nil {
+				return err
+			}
+			if done {
+				return errors.New("retirement skipped durable page boundary")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if state(names[0]) != "active" {
+			t.Fatal("partial page retired its source")
+		}
+		// Change a historical bucket at the saved cursor. Final validation
+		// must detect it instead of treating the cursor as a retirement receipt.
+		if _, err := owner.Exec(ctx, `INSERT INTO `+names[0]+`(node_id,batch_id,sampled_at,metric,value) SELECT node_id,batch_id,sampled_at+1,metric,value FROM `+names[0]+` WHERE node_id=? AND metric='connection_rtt_ms'`, UUIDBytes(node)); err != nil {
+			t.Fatal(err)
+		}
 		if err := maintain(false); err != nil {
 			t.Fatal(err)
 		}
 		if state(names[0]) != "retired" || state(names[1]) != "active" {
 			t.Fatal("retirement did not stop after one month")
+		}
+		var lateCount int
+		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_1h WHERE node_id=? AND metric='connection_rtt_ms' AND sample_count=2`, UUIDBytes(node)).Scan(&lateCount); err != nil || lateCount != 1 {
+			t.Fatalf("final verification missed a changed historical bucket: %d %v", lateCount, err)
 		}
 		if err := maintain(false); err != nil {
 			t.Fatal(err)
@@ -183,7 +281,7 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 			t.Fatal("retirement did not resume")
 		}
 		var count int
-		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_1h WHERE node_id=? AND metric='connection_rtt_ms' AND sample_count=1 AND avg_value=12`, UUIDBytes(node)).Scan(&count); err != nil || count != 2 {
+		if err := owner.QueryRow(ctx, `SELECT sum(sample_count) FROM telemetry_rollups_1h WHERE node_id=? AND metric='connection_rtt_ms' AND avg_value=12`, UUIDBytes(node)).Scan(&count); err != nil || count != 3 {
 			t.Fatalf("outage rollups missing: count=%d err=%v", count, err)
 		}
 		if err := owner.QueryRow(ctx, `SELECT count(*) FROM telemetry_rollups_5m WHERE node_id=? AND metric='connection_rtt_ms'`, UUIDBytes(node)).Scan(&count); err != nil || count != 0 {

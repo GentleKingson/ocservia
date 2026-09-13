@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const latestRevisionVersion = 25
+const latestRevisionVersion = 26
 
 type revisionArtifact struct {
 	revision
@@ -112,7 +112,7 @@ func loadRevisionChain(engine Engine) ([]revisionArtifact, error) {
 		if version == 24 {
 			expectedController = 35
 		}
-		if version == 25 {
+		if version >= 25 {
 			expectedController = 36
 		}
 		if next.Engine != engine || next.Version != version || next.PreviousChecksum != sum || next.ControllerSchema != expectedController || next.MinimumControllerSchema != expectedController || len(next.Parents) != len(snapshots) || len(next.MetadataHashes) != 2 {

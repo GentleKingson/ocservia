@@ -121,6 +121,10 @@ func TestAuthorRevisionTwentyFive(t *testing.T) {
 	authorRevision(t, 25, TelemetryFinalizationSteps())
 }
 
+func TestAuthorRevisionTwentySix(t *testing.T) {
+	authorRevision(t, 26, TelemetryLookupSteps(testOptions(t).Engine))
+}
+
 func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	output := os.Getenv("PR02_AUTHOR_DIRECTORY")
 	if output == "" {
@@ -137,7 +141,7 @@ func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	if version == 24 {
 		next.ControllerSchema, next.MinimumControllerSchema = 35, 35
 	}
-	if version == 25 {
+	if version >= 25 {
 		next.ControllerSchema, next.MinimumControllerSchema = 36, 36
 	}
 	for _, old := range []bool{true, false} {

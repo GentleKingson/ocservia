@@ -68,7 +68,7 @@ func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) err
 		// Recompute the entire accepted lateness window, including the complete
 		// first bucket; a partial bucket would overwrite its earlier samples.
 		since := now.UTC().Add(-14 * 24 * time.Hour).Truncate(table.width)
-		_, err := s.tx.Exec(ctx, fmt.Sprintf(`INSERT INTO %s(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin($1::interval,sampled_at,'2000-01-01 00:00:00+00'::timestamptz),count(*),min(value),max(value),avg(value) FROM telemetry_samples WHERE sampled_at >= $2 GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value`, table.name), table.interval, since)
+		_, err := s.tx.Exec(ctx, fmt.Sprintf(`INSERT INTO %s AS existing(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin($1::interval,sampled_at,'2000-01-01 00:00:00+00'::timestamptz),count(*),min(value),max(value),avg(value) FROM telemetry_samples WHERE sampled_at >= $2 GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value WHERE (existing.sample_count,existing.min_value,existing.max_value,existing.avg_value) IS DISTINCT FROM (EXCLUDED.sample_count,EXCLUDED.min_value,EXCLUDED.max_value,EXCLUDED.avg_value)`, table.name), table.interval, since)
 		if err != nil {
 			return err
 		}

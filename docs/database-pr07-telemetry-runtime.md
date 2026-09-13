@@ -6,6 +6,12 @@ migration bytes are changed. The user subsequently authorized creating a
 Draft PR with the remaining acceptance gaps disclosed; no merge or production
 release is authorized.
 
+Current performance status (2026-09-13): the agreed four-workload, low-data
+gate passes on all four engines; see [bounded-transaction measurements](#bounded-transaction-measurements-2026-09-13).
+The sections below retain the chronological implementation and failed-attempt
+record. Earlier statements that thresholds were unspecified or performance
+was open describe their recorded candidate, not the latest measurements.
+
 ## Storage Decision
 
 The user confirmed keeping the existing monthly ordinary InnoDB tables for
@@ -53,7 +59,7 @@ ingestion transactions. PostgreSQL retains migration 000005's partitions.
   `api`, `worker`, `scheduler` processes, with committed scheduler maintenance
   evidence in addition to the existing transport/Agent/privd workflows.
 
-## Remaining Acceptance Work
+## Initial Acceptance Gaps
 
 These are open requirements, not waivers or completed inventory entries:
 
@@ -335,3 +341,192 @@ harness attempts lacked Ruby and the Docker CLI; those dependencies were
 provided in a disposable runner container, not by relaxing repository checks.
 The PR was restored from Ready to Draft. These functional results do not close
 the performance Gate or replace fresh complete Basic CI results for this fix.
+
+### Agreed Low-Data Performance Gate
+
+The user subsequently supplied the acceptance limits below. They replace the
+earlier "thresholds unspecified" status, not the earlier measured failures.
+The workload remains one managed node, six metrics and the recorded low-data
+dataset, with four simultaneous workloads: ingestion, history queries, an
+ordinary Controller database operation and maintenance.
+
+| Measurement | Limit |
+| --- | --- |
+| Ingestion P95 / P99 | 25 ms / 50 ms |
+| History query P95 / P99 | 10 ms / 25 ms |
+| Normal maintenance P95 / maximum | 1 s / 2 s |
+| First outage/catch-up maintenance | 5 s target; over 10 s is a hard failure |
+| Database lock wait P95 / maximum | 100 ms / 500 ms |
+| Deadlocks, timeouts, business request failures | Zero |
+| Fixed-dataset rollup counts after catch-up | Stable over ten maintenance calls |
+| Actual allocated database space after catch-up | At most 5% growth over ten maintenance calls |
+
+MySQL's 32.83 s and MariaDB's 17.41 s remain failures against these limits.
+PostgreSQL measurements and four-workload contention/storage validation are
+required before this Gate can close. Estimated table statistics alone are not
+actual allocation evidence.
+
+### Performance Candidate And Remaining Blockers
+
+The local candidate adds MySQL/MariaDB revision 26, keeping Controller schema
+36 and all published migration bytes unchanged. Two nonunique 255-byte
+lookup indexes accelerate the rollup side-table triggers' full encoded-key
+comparisons. They are not uniqueness constraints; equal prefixes with distinct
+long suffixes remain valid. Recent rollup merges on both backends now avoid
+rewriting unchanged aggregates.
+
+The first four-workload MySQL run exposed a real deadlock: retirement scanned
+the `start_at` index and attempted to lock a current-month catalog row while
+holding node foreign-key locks. Ingestion held that catalog row and queued
+behind a node update. Revision 26 adds and explicitly selects an expired-month
+range index, retaining finalization-before-retirement inside the procedure.
+The subsequent measured MySQL runs had no deadlock or business error, without
+adding automatic retries, but still failed the latency/lock-wait Gate.
+
+Final measurements used one node, 2,016 recent plus 4,464 outage-month samples,
+and four simultaneous workloads: 200 six-sample insert transactions, 200 raw
+history reads, 200 real updates to that same node's timestamp, and one catch-up
+plus ten normal maintenance transactions. The first three workloads pause
+10 ms between operations, maintenance 150 ms; this is a DB-store benchmark,
+not HTTP/TLS/Agent E2E. After concurrent work finishes, one final catch-up
+precedes the fixed-dataset ten-maintenance storage check. No race detector
+or other task-owned verification ran alongside measurements.
+
+| Engine | Ingest P95 / P99 (ms) | Query P95 / P99 (ms) | Catch-Up (s) | Normal P95 / Max (ms) | Lock Max Bound (ms) | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| PostgreSQL 17 | 5.14 / 7.43 | 1.76 / 3.03 | 0.227 | 32.08 / 32.08 | 16.82 | PASS |
+| PostgreSQL 18 | 5.00 / 8.50 | 2.16 / 3.26 | 0.252 | 33.95 / 33.95 | 17.79 | PASS |
+| MySQL 8.4.10 | 20.41 / 54.62 | 7.85 / 9.93 | 3.052 | 160.73 / 160.73 | 3013.90 | FAIL |
+| MariaDB 12.3.2 | Not completed | Not completed | Not completed | Not completed | Not completed | FAIL: serialization failure |
+
+The lock observer samples waiting transactions about every 5 ms and pads each
+observed episode by the largest sampling gap. Unobserved shorter waits are
+bounded by that gap; observer gaps over 100 ms fail verification rather than
+counting as zero wait. These are conservative sampled bounds, not exact lock
+event percentiles. Observed maximum gaps were 10.91 ms / 11.88 ms / 10.69 ms
+for PostgreSQL 17 / PostgreSQL 18 / MySQL, respectively. MySQL's lock P95 bound
+was 27.23 ms, but its maximum exceeded 500 ms; the Controller node update also
+took 3.018 s. Its ingestion P99 exceeded 50 ms.
+
+PostgreSQL 17 / 18 and MySQL retained 12,972 rollup rows and zero allocation
+growth over ten fixed-dataset maintenance calls. Actual allocation was
+16,283,315 / 16,684,735 / 66,109,440 bytes, respectively, measured using
+`pg_database_size` or InnoDB tablespace `ALLOCATED_SIZE`, not estimated table
+statistics. MariaDB's final run returned a serialization failure from recent
+rollup maintenance and did not reach storage acceptance. An earlier MariaDB
+diagnostic with no-op node updates passed, but is not acceptance evidence for
+real concurrent Controller writes.
+
+BuildServer separately passed Controller compile-all, database boundary and
+migration metadata tests, and the four-engine targeted history/retention
+regressions with `-race`. MySQL/MariaDB privilege and long-key write tests also
+passed, including distinct equal-prefix long keys. Revision 26 fingerprints
+were authored on both pinned roots of both engines. Raw logs and disposable
+harnesses are retained in `.cache/pr201-performance/`; the opt-in reproducible
+test is `TestTelemetryLowDataPerformance` (`PR07_PERFORMANCE=1`, isolated
+owner/runtime databases required).
+
+The performance Gate remains failed for the candidate measured above. The user
+subsequently authorized durable, fenced small transactions instead of one
+whole-maintenance transaction. No failed operation is automatically retried and
+no acceptance threshold is relaxed.
+
+### Bounded Transaction Candidate
+
+The unpublished revision 26 now also introduces definer-only durable progress
+and an 80-row staging table. Each capability call merges at most 80 aggregate
+rows and advances its keyset cursor in the same caller-owned transaction.
+The scheduler commits each page only after checking its leadership fence.
+An interrupted run resumes committed progress; a rejected page and its cursor
+roll back together. Offline-node changes remain atomic within the first fenced
+batch. PostgreSQL retains its existing single maintenance transaction.
+
+Aggregation is staged before the rollup write, separating its source snapshot
+from foreign-key checking. MariaDB locks only the staged page's parent nodes
+before starting the merge statement, preventing its concurrent parent-update
+serialization failure. MySQL relies on its normal FK checks without this extra
+prelock, which increased ingestion latency there. InnoDB enforces all node/batch foreign keys;
+foreign-key checks are never disabled. The database selects at most one
+expired month per job and, after both retained windows have been paged, checks
+their complete aggregates again under the candidate catalog lock before
+retirement. A changed historical bucket restarts backfill, not retirement.
+Runtime receives no write privileges on progress or staging tables. Calls do
+not create tables, commit, or bypass the caller's fence. The capability rejects
+autocommit calls before reading or mutating tables: its private savepoint probe
+only succeeds in a transaction. The savepoint name
+`ocservia_telemetry_batch_tx` is reserved for this routine.
+
+This is a bounded write/transaction design, not a claim that source aggregation
+has constant read cost. Source queries and final verification still read the
+retained dataset. Fresh functional and four-workload performance results are
+required; the earlier table is not evidence for this changed candidate.
+
+Short rollup metrics (at most 255 bytes) use a generated binary metric and a
+native unique index over the complete `(node_id,bucket_at,short_metric)` tuple.
+Longer metrics map to NULL in that index and retain the original guarded,
+full-byte side-table constraint. No unique prefix or hash replaces equality.
+Short metrics can therefore use native upsert without per-row side-table SQL;
+the long-metric path keeps the existing full-key merge. Unchanged natural keys
+do not rebuild their side-table receipt. These changes are telemetry-only;
+node/workspace/identity uniqueness triggers are unchanged.
+
+Raw insertion resolves each month once per call and batches at most 128 samples
+per statement. Only duplicate-key failures fall back to the existing ordered,
+first-sample-wins behavior; FK/CHECK failures, deadlocks and serialization
+failures are not suppressed. The MySQL/MariaDB pool retains four idle
+connections for the four-workload model; its maximum remains twenty.
+
+### Bounded Transaction Measurements (2026-09-13)
+
+The following replaces the failed whole-transaction measurements above for the
+single-node, six-metric acceptance workload. Tests ran sequentially on BuildServer
+against the actual revision manifests, with no diagnostic SQL replacement,
+retries, race instrumentation, or concurrent task-owned builds. MySQL and
+MariaDB revision 26 was authored against both supported historical roots.
+
+| Metric | MySQL 8.4.10 | MariaDB 12.3.2 | PostgreSQL 17 | PostgreSQL 18 |
+| --- | ---: | ---: | ---: | ---: |
+| Ingestion P95 / P99 (ms) | 22.21 / 30.02 | 13.07 / 16.67 | 5.36 / 9.21 | 4.69 / 7.78 |
+| Raw query P95 / P99 (ms) | 7.83 / 12.50 | 7.02 / 8.04 | 2.83 / 5.06 | 2.21 / 3.56 |
+| First catch-up (s) | 4.351 | 2.387 | 0.250 | 0.219 |
+| Normal maintenance P95 / max (ms) | 243.13 / 243.13 | 139.65 / 139.65 | 37.62 / 37.62 | 32.54 / 32.54 |
+| Sampled lock P95 / max upper bound (ms) | 23.56 / 60.00 | 9.11 / 9.11 | 9.11 / 9.11 | 10.27 / 10.27 |
+| Maximum observer gap (ms) | 9.96 | 9.11 | 9.11 | 10.27 |
+| Allocated bytes before / after 10 fixed runs | 43,433,984 / 43,433,984 | 39,038,976 / 39,038,976 | 16,283,315 / 16,283,315 | 16,774,847 / 16,774,847 |
+| Rollup rows before / after 10 fixed runs | 12,972 / 12,972 | 12,972 / 12,972 | 12,972 / 12,972 | 12,972 / 12,972 |
+
+All four runs passed the unchanged thresholds, including zero deadlocks,
+timeouts or business failures and zero measured allocation growth. Each run
+used 2,016 recent samples and 4,464 outage samples, followed by 200 six-sample
+ingestion transactions, 200 raw queries, 200 real node updates and 11 concurrent
+maintenance calls. Lock figures are conservative sampled bounds, not exact
+server event percentiles; no observed episode is reported as zero latency.
+This measures the database-store paths, not HTTP/TLS end-to-end latency or an
+arbitrary higher-volume workload. The MySQL ingestion/query/catch-up margins
+are modest; these results must not be extrapolated to larger deployments.
+
+Failed intermediate candidates remain evidence, not discarded retries:
+MariaDB without page-parent prelocking returned a serialization failure;
+adding that prelock to MySQL raised ingestion P95/P99 to 26.71/51.11 ms and
+failed. The final engine-specific manifests address the different locking
+behavior. Logs are retained in `.cache/pr201-performance/`:
+`mysql-performance-engine-final.log`, `mariadb-performance-parent-lock.log`,
+`pg17-performance-final.log`, and `pg18-performance-final.log`.
+
+BuildServer also passed the four-engine history and runtime service regressions
+with `-race`, MySQL/MariaDB privilege, long-key, bulk constraint, legacy migration
+and interrupted-retirement recovery tests, database boundary/migration metadata
+tests, and Controller compile-all. The batch unit tests verify fencing on every
+commit and failure without automatic retry.
+
+All six complete TLS/Agent E2E runs passed on this candidate, including committed
+scheduler maintenance: MySQL all/split (203.59/174.75 s), MariaDB all/split
+(159.29/161.09 s), and PostgreSQL 18 all/split (126.87/128.61 s). These use the
+real CLI, independent identities, TLS relays, root attestation, certificate
+lifecycle and user/group convergence, not mocked transports. Their logs are in
+the corresponding `e2e-<engine>-<mode>/` evidence directories.
+
+Latest-head Basic CI still must be confirmed after pushing this correction.
+These results are not merge approval; PR #201 remains Draft. The two unrelated
+API fixture `42601` failures disclosed above remain unchanged and are not
+represented as a passing full API integration package.

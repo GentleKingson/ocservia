@@ -97,10 +97,11 @@ func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 			switch words[0] {
 			case "ALL", "CREATE", "ALTER", "DROP", "TRIGGER", "EVENT":
 				unsafe = true
-			case "DELETE":
+			case "INSERT", "UPDATE", "DELETE":
 				// Schema grants may not refresh on an already-open connection;
 				// inspect their scope as well as probing effective table access.
-				unsafe = unsafe || strings.HasSuffix(object, ".*")
+				unquoted := strings.ReplaceAll(object, "`", "")
+				unsafe = unsafe || strings.HasSuffix(object, ".*") || strings.HasSuffix(unquoted, ".TELEMETRY_MAINTENANCE_PROGRESS") || strings.HasSuffix(unquoted, ".TELEMETRY_MAINTENANCE_PAGE")
 			}
 		}
 		if unsafe {
