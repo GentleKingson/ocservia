@@ -12,6 +12,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -276,7 +277,7 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM workspaces WHERE id=$1`, workspaceID)
 	})
 	now := time.Now().UTC().Truncate(time.Second)
-	service := New(pool)
+	service := NewBackend(postgres.WrapPool(pool))
 	service.now = func() time.Time { return now }
 	current := testBatch(nodeID, 2, now)
 	inserted, err := service.Ingest(ctx, current)

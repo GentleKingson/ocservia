@@ -74,7 +74,7 @@ func TestRealInitializationAndHistory(t *testing.T) {
 	if err := b.Migrate(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.ValidateSchema(ctx, 33); !errors.Is(err, ErrSchema) {
@@ -215,7 +215,7 @@ func TestRealCrashAndRepair(t *testing.T) {
 	if err := b.Migrate(ctx, sum); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -327,6 +327,45 @@ func TestRealPrivileges(t *testing.T) {
 	}
 	defer runtime.Close()
 	assertRuntimeDiagnostics(t, b, runtime)
+	t.Run("telemetry-privilege-upgrade", func(t *testing.T) {
+		if err := b.PrepareControllerTelemetry(ctx); err != nil {
+			t.Fatal(err)
+		}
+		for _, table := range []string{"telemetry_rollups_5m", "telemetry_rollups_1h"} {
+			if _, err := b.Exec(ctx, "GRANT DELETE ON `"+c.DBName+"`.`"+table+"` TO 'ocservia_app'@'%'"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := runtime.ValidateTelemetryRuntime(ctx); err == nil {
+			t.Fatal("legacy unrestricted DELETE accepted")
+		}
+		if err := b.GrantTestPrivileges(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.ValidateTelemetryRuntime(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.Exec(ctx, "REVOKE EXECUTE ON PROCEDURE `"+c.DBName+"`.telemetry_prune_rollups FROM 'ocservia_app'@'%'"); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.ValidateTelemetryRuntime(ctx); err == nil {
+			t.Fatal("missing cleanup EXECUTE accepted")
+		}
+		if err := b.GrantTestPrivileges(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.Exec(ctx, "GRANT DELETE ON `"+c.DBName+"`.* TO 'ocservia_app'@'%'"); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := b.Exec(ctx, "REVOKE DELETE ON `"+c.DBName+"`.* FROM 'ocservia_app'@'%'"); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := runtime.ValidateTelemetryRuntime(ctx); err == nil {
+			t.Fatal("database-wide DELETE accepted")
+		}
+	})
 	for _, table := range []string{"backend_schema_revisions", "backend_schema_revision_steps"} {
 		var count int
 		if err := runtime.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil {

@@ -21,14 +21,12 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -170,24 +168,9 @@ type Service struct {
 	releaseCatalog            *releasecatalog.Catalog
 }
 
-func New(pool *pgxpool.Pool) *Service {
-	return NewWithConcurrency(pool, 50)
-}
-
-func NewWithConcurrency(pool *pgxpool.Pool, commandLimit int) *Service {
-	return NewBackend(postgres.WrapPool(pool), commandLimit, nil)
-}
-
 // NewBackend supplies the common operation and background Worker lifecycle.
 func NewBackend(backend database.Backend, commandLimit int, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, now: func() time.Time { return time.Now().UTC() }, commandLimit: commandLimit, signer: signer, agentUpgradeReconcileTime: defaultAgentUpgradeReconcileTimeout}
-}
-
-// NewWithSigner configures command issuance with an end-to-end Controller signer.
-func NewWithSigner(pool *pgxpool.Pool, commandLimit int, signer *commandauth.Signer) *Service {
-	service := NewWithConcurrency(pool, commandLimit)
-	service.signer = signer
-	return service
 }
 
 // SetAgentUpgradeReconcileTimeout installs the bounded single-node upgrade

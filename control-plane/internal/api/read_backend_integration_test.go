@@ -55,7 +55,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	at, _ := value.FromTime(time.Now().UTC())
 	bindingID := uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, bindingID, identity, workspace, at)
-	server := NewBackend("127.0.0.1:0", backend, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 34)
+	server := NewBackend("127.0.0.1:0", backend, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 35)
 	server.EnableAuthorization(service, rbac.NewBackend(backend), nil, nil)
 	server.EnableBrowserOrigin(authTestOrigin)
 	server.EnableLocalSlice(localslice.NewBackend(backend, nil))
@@ -172,12 +172,12 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	var ready struct {
 		Schema int64 `json:"schema_version"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &ready); err != nil || ready.Schema != 34 {
+	if err := json.Unmarshal(w.Body.Bytes(), &ready); err != nil || ready.Schema != 35 {
 		t.Fatalf("schema readiness: %s %v", w.Body, err)
 	}
-	server.expectedSchema = 35
+	server.expectedSchema = 36
 	get("/readyz", uuid.Nil, nil, http.StatusServiceUnavailable)
-	server.expectedSchema = 34
+	server.expectedSchema = 35
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
 	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, bindingID)
 	w = get("/api/v1/workspaces", uuid.Nil, cookie, http.StatusOK)

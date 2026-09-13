@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ErrLeadershipLost reports that the maintenance body did not complete under
@@ -57,12 +56,6 @@ type Runner struct {
 	// starting new fenced work even before PostgreSQL confirms the loss.
 	localExpiry time.Time
 	now         func() time.Time
-}
-
-// NewRunner creates a leadership runner. The lease TTL must comfortably
-// exceed the renew interval and the renewal round trip.
-func NewRunner(pool *pgxpool.Pool, identity Identity, leaseTTL, renewInterval time.Duration, logger *slog.Logger) *Runner {
-	return NewRunnerBackend(schedulerBackend(pool), identity, leaseTTL, renewInterval, logger)
 }
 
 func NewRunnerBackend(backend database.Backend, identity Identity, leaseTTL, renewInterval time.Duration, logger *slog.Logger) *Runner {

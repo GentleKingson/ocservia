@@ -111,7 +111,7 @@ func TestRealVersionFifteenResultUpgrade(t *testing.T) {
 	if err := b.QueryRow(ctx, `SELECT available_at,expires_at,dispatched_at,created_at FROM local_slice_jobs WHERE operation_id=?`, UUIDBytes(operation)).Scan(&available, &expires, &dispatched, &created); err != nil || available != at || expires != fixtureTimestamp(t, end) || dispatched.Valid || created != at {
 		t.Fatal("simulator job migration", available, expires, dispatched, created, err)
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

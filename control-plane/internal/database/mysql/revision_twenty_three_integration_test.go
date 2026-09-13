@@ -173,7 +173,7 @@ func TestRealVersionTwentyTwoSharedUpgrade(t *testing.T) {
 	if !reflect.DeepEqual(before, receipts()) {
 		t.Fatal("earlier receipts changed on replay")
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

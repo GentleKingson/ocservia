@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,7 +40,7 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 			t.Fatalf("insert %s operation: %v", state, err)
 		}
 	}
-	service := New(pool)
+	service := NewBackend(postgres.WrapPool(pool), nil)
 	baseline, err := service.OperationSummaryInWorkspace(ctx, uuid.Nil)
 	if err != nil {
 		t.Fatal(err)

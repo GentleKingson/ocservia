@@ -12,7 +12,7 @@ import (
 )
 
 func TestRequestReadTimeout(t *testing.T) {
-	s := New("127.0.0.1:0", nil, BuildInfo{}, slog.Default(), 1024, 50*time.Millisecond, false, "", 0)
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.Default(), 1024, 50*time.Millisecond, false, "", 0)
 	// Scale the production deadline down; keep it longer than the handler timeout.
 	s.http.ReadTimeout /= 150
 	readErrors := make(chan error, 2)
@@ -60,7 +60,7 @@ func TestRequestReadTimeout(t *testing.T) {
 }
 
 func TestReadTimeoutPreservesStreamingWrites(t *testing.T) {
-	s := New("127.0.0.1:0", nil, BuildInfo{}, slog.Default(), 1024, 50*time.Millisecond, false, "", 0)
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.Default(), 1024, 50*time.Millisecond, false, "", 0)
 	s.http.ReadTimeout /= 150
 	s.http.Handler = s.timeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

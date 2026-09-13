@@ -151,6 +151,9 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		t.Fatalf("wire node mismatch: %v", err)
 	}
 	batch := testBatch(node, 1, now)
+	batch.Sessions[0].ClientIP = "2001:db8::10"
+	seconds := uint64(20)
+	batch.IPBans = []IPBan{{IP: "2001:db8::20", SecondsRemaining: &seconds}, {IP: "192.0.2.9"}, {IP: "2001:db8::2"}}
 	batch.Users = []User{{Username: "alice", Enabled: true, Revision: 1, Fingerprint: make([]byte, 32)}}
 	batch.Groups = []Group{{Name: "operators", Members: []string{"alice"}, Revision: 1, Fingerprint: make([]byte, 32)}}
 	batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "info", Type: "test.ingest", Detail: json.RawMessage(`{"large":1e1000}`)}}
@@ -200,6 +203,15 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	bans, err := service.ListIPBans(ctx, node, 200)
 	if err != nil || len(bans) != len(batch.IPBans) {
 		t.Fatalf("IP ban read: %+v %v", bans, err)
+	}
+	for i, want := range []IPBan{batch.IPBans[1], batch.IPBans[2], batch.IPBans[0]} {
+		got := bans[i]
+		if got.IP != want.IP || (got.SecondsRemaining == nil) != (want.SecondsRemaining == nil) || (got.SecondsRemaining != nil && *got.SecondsRemaining != *want.SecondsRemaining) {
+			t.Fatalf("IPv4/IPv6 ordering at %d: %+v want %+v", i, bans[i], want)
+		}
+	}
+	if next, more, err := service.ListSessions(ctx, node, sessionPage[0].ID, 1); err != nil || more || len(next) != 0 {
+		t.Fatalf("session cursor repeated IPv6 session: %+v %v %v", next, more, err)
 	}
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := observedstate.FromTransaction(tx)

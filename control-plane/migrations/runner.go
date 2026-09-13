@@ -231,13 +231,35 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT, UPDATE ON agent_rollouts, agent_rollout_nodes TO " + identifier,
 		"GRANT SELECT ON upstream_sync_records TO " + identifier,
 		"GRANT SELECT, INSERT ON telemetry_security_events, telemetry_samples TO " + identifier,
-		"GRANT SELECT, INSERT, UPDATE, DELETE ON telemetry_rollups_5m, telemetry_rollups_1h TO " + identifier,
+		"GRANT SELECT, INSERT, UPDATE ON telemetry_rollups_5m, telemetry_rollups_1h TO " + identifier,
 		"GRANT EXECUTE ON FUNCTION telemetry_ensure_month_partition(timestamptz) TO " + identifier,
 		"GRANT EXECUTE ON FUNCTION telemetry_drop_expired_partitions(timestamptz) TO " + identifier,
+	}
+	var bounded bool
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(max(version),0)>=35 FROM schema_migrations`).Scan(&bounded); err != nil {
+		return err
+	}
+	if bounded {
+		statements = append(statements,
+			"REVOKE DELETE, TRUNCATE ON telemetry_rollups_5m, telemetry_rollups_1h FROM "+identifier,
+			"GRANT EXECUTE ON FUNCTION telemetry_prune_rollups(timestamptz) TO "+identifier)
+	} else {
+		// Only historical schemas retain their old grants. A missing routine
+		// on schema 35 must fail rather than restore unrestricted DELETE.
+		statements = append(statements, "GRANT DELETE ON telemetry_rollups_5m, telemetry_rollups_1h TO "+identifier)
 	}
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("grant privileges to runtime role %q: %w", role, err)
+		}
+	}
+	if bounded {
+		var unsafe bool
+		if err := pool.QueryRow(ctx, `SELECT has_table_privilege($1,'telemetry_rollups_5m','DELETE,TRUNCATE') OR has_table_privilege($1,'telemetry_rollups_1h','DELETE,TRUNCATE')`, role).Scan(&unsafe); err != nil {
+			return err
+		}
+		if unsafe {
+			return errors.New("runtime inherits unrestricted telemetry cleanup privileges; remove the inherited grant")
 		}
 	}
 	return nil

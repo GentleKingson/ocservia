@@ -19,7 +19,6 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
@@ -30,8 +29,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -201,20 +198,12 @@ type Service struct {
 	agentUpgradeCatalog     *releasecatalog.Catalog
 }
 
-func New(pool *pgxpool.Pool) *Service {
-	return &Service{backend: postgres.WrapPool(pool), now: time.Now}
-}
-
 // NewBackend enables ingestion, read models and maintenance through domain stores.
 func NewBackend(backend database.Backend) *Service { return &Service{backend: backend, now: time.Now} }
 
-// NewWithRecommendedAgentVersion builds the read model with the
+// NewWithRecommendedAgentVersionBackend builds the read model with the
 // operator-configured recommended agent version used to derive per-node
 // agent version state.
-func NewWithRecommendedAgentVersion(pool *pgxpool.Pool, recommendedAgentVersion string) *Service {
-	return NewWithRecommendedAgentVersionBackend(postgres.WrapPool(pool), recommendedAgentVersion)
-}
-
 func NewWithRecommendedAgentVersionBackend(backend database.Backend, recommendedAgentVersion string) *Service {
 	return &Service{backend: backend, now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
 }
@@ -236,17 +225,6 @@ func (s *Service) IngestWire(ctx context.Context, expectedNodeID uuid.UUID, payl
 		return false, err
 	}
 	return s.ingest(ctx, batch, payloadBytes)
-}
-
-// IngestWireTx writes a validated telemetry batch using the caller's
-// authenticated node identity and transaction so the authoritative endpoint
-// check and every resulting state change share one commit boundary.
-func (s *Service) IngestWireTx(ctx context.Context, tx pgx.Tx, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
-	batch, payloadBytes, err := s.validateWire(expectedNodeID, payload)
-	if err != nil {
-		return false, err
-	}
-	return s.ingestTx(ctx, postgres.WrapTx(tx), batch, payloadBytes)
 }
 
 func (s *Service) validateWire(expectedNodeID uuid.UUID, payload []byte) (Batch, int, error) {

@@ -135,7 +135,7 @@ func (s *TelemetryHistoryStore) History(ctx context.Context, nodeID uuid.UUID, m
 
 func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) error {
 	now = now.UTC()
-	since, err := telemetryMicros(now.Add(-48 * time.Hour))
+	since, err := telemetryMicros(now.Add(-14 * 24 * time.Hour).Truncate(time.Hour))
 	if err != nil {
 		return err
 	}
@@ -143,10 +143,58 @@ func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) err
 	if err != nil {
 		return err
 	}
+	if err := s.rollup(ctx, tables, now.Add(-14*24*time.Hour)); err != nil {
+		return fmt.Errorf("roll up recent telemetry: %w", err)
+	}
+	cutRaw, err := telemetryMicros(now.Add(-14 * 24 * time.Hour))
+	if err != nil {
+		return err
+	}
+	// Finalize the one retirement candidate even after a long maintenance
+	// outage. Its catalog lock holds through rollups, retirement and fencing.
+	var candidate string
+	var start value.Timestamp
+	err = s.tx.QueryRow(ctx, `SELECT table_name,start_at FROM telemetry_sample_shards WHERE state='active' AND end_at<=LEAST(?,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))-1209600000000) ORDER BY start_at LIMIT 1 LOCK IN SHARE MODE`, cutRaw).Scan(&candidate, &start)
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
+		return err
+	}
+	if err == nil {
+		if !telemetryShardName.MatchString(candidate) {
+			return ErrSchema
+		}
+		begin, err := start.Time()
+		if err != nil {
+			return err
+		}
+		if err := s.rollup(ctx, []string{candidate}, begin); err != nil {
+			return err
+		}
+	}
+	at, err := telemetryMicros(now)
+	if err != nil {
+		return err
+	}
+	if _, err = s.tx.Exec(ctx, `CALL telemetry_prune_rollups(?)`, at); err != nil {
+		return fmt.Errorf("prune telemetry rollups: %w", err)
+	}
+	_, err = s.tx.Exec(ctx, `CALL telemetry_retire_shards(?)`, cutRaw)
+	if err != nil {
+		return fmt.Errorf("retire telemetry month: %w", err)
+	}
+	return nil
+}
+
+func (s *TelemetryHistoryStore) rollup(ctx context.Context, tables []string, begin time.Time) error {
 	for _, rollup := range []struct {
 		suffix string
 		width  int64
 	}{{"5m", 300000000}, {"1h", 3600000000}} {
+		// Cover accepted late samples without replacing the first bucket with
+		// a partial aggregate. The table list covers the widest (hour) bucket.
+		since, err := telemetryMicros(begin.Truncate(time.Duration(rollup.width) * time.Microsecond))
+		if err != nil {
+			return err
+		}
 		name := "telemetry_rollups_" + rollup.suffix
 		if err := LockExactKey(ctx, s.tx, name); err != nil {
 			return err
@@ -197,36 +245,7 @@ func (s *TelemetryHistoryStore) Maintain(ctx context.Context, now time.Time) err
 			}
 		}
 	}
-	cut5, err := telemetryMicros(now.Add(-90 * 24 * time.Hour))
-	if err != nil {
-		return err
-	}
-	// AddDate normalizes invalid days forward; PostgreSQL interval subtraction
-	// clamps to the target month's final day instead.
-	month := time.Date(now.Year(), now.Month()-13, 1, now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), time.UTC)
-	last := month.AddDate(0, 1, -1).Day()
-	day := now.Day()
-	if day > last {
-		day = last
-	}
-	cut1, err := telemetryMicros(month.AddDate(0, 0, day-1))
-	if err != nil {
-		return err
-	}
-	if _, err = s.tx.Exec(ctx, `DELETE FROM telemetry_rollups_5m WHERE bucket_at<?`, cut5); err != nil {
-		return err
-	}
-	if _, err = s.tx.Exec(ctx, `DELETE FROM telemetry_rollups_1h WHERE bucket_at<?`, cut1); err != nil {
-		return err
-	}
-	cutRaw, err := telemetryMicros(now.Add(-14 * 24 * time.Hour))
-	if err != nil {
-		return err
-	}
-	// Retirement, rollups and the caller's leadership assertion share one
-	// commit. Physical DROP is a separate owner operation after retirement.
-	_, err = s.tx.Exec(ctx, `CALL telemetry_retire_shards(?)`, cutRaw)
-	return err
+	return nil
 }
 
 var _ telemetryhistory.Store = (*TelemetryHistoryStore)(nil)

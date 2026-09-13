@@ -74,7 +74,7 @@ func TestRealVersionFourteenOwnerUpgrade(t *testing.T) {
 	if err := b.QueryRow(ctx, `SELECT owner_instance_id,owner_incarnation,connection_id,owner_epoch,lease_until,updated_at FROM connection_owner_fencing WHERE node_id=?`, node[:]).Scan(&gotInstance, &incarnation, &gotConnection, &epoch, &until, &updated); err != nil || gotInstance != instance || incarnation != 8 || !bytes.Equal(gotConnection, connection[:]) || epoch != 42 || until != fixtureTimestamp(t, end) || updated != fixtureTimestamp(t, start) {
 		t.Fatal("owner migration changed term or timestamp", gotInstance, incarnation, gotConnection, epoch, until, updated, err)
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

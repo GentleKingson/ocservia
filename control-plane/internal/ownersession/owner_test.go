@@ -440,7 +440,7 @@ func TestObserverExecuteFencedFailsClosedWhenTheAuthorityIsUnreadable(t *testing
 
 func TestObserverRequiresTheOwnershipAuthority(t *testing.T) {
 	signer, _ := testSigner(t)
-	if _, err := NewObserver(nil, &recordingReader{}, signer); err == nil {
+	if _, err := NewObserverBackend(nil, &recordingReader{}, signer); err == nil {
 		t.Fatal("observer accepted a nil authority pool")
 	}
 }

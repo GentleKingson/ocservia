@@ -152,7 +152,7 @@ func TestRealVersionSixCertificateUpgrade(t *testing.T) {
 	if err := b.QueryRow(ctx, `SELECT dispatch_lease_until,updated_at FROM agent_rollout_nodes WHERE rollout_id=? AND node_id=?`, UUIDBytes(rollout), UUIDBytes(node)).Scan(&expires, &updated); err != nil || expires.Valid || updated != want {
 		t.Fatal("rollout node migration changed clocks", expires, updated, err)
 	}
-	if err := b.ValidateSchema(ctx, 34); err != nil {
+	if err := b.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal(err)
 	}
 }

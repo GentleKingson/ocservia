@@ -54,6 +54,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(owner.Close)
+	installSchedulerEvidence(t, f.ctx, owner, runtimeOptions.Backend, account)
 	f.workspace = uuid.Must(uuid.NewV7()).String()
 	workspace := uuid.MustParse(f.workspace)
 	at, _ := value.FromTime(time.Now().UTC())
@@ -97,14 +98,30 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	f.startOcserv()
 	address := e2eAddress(t)
 	f.base = "http://" + address
-	f.start("controller", 65534, 65532, f.environment(runtimeOptions, map[string]string{
+	controllerEnvironment := f.environment(runtimeOptions, map[string]string{
 		"OCSERV_HTTP_ADDRESS": address, "OCSERV_PUBLIC_ORIGIN": f.base,
 		"OCSERV_CONTROLLER_ENDPOINT_ID": endpointID, "OCSERV_COMMAND_SIGNING_KEY_FILE": f.root + "/controller/signing.pem",
 		"OCSERV_TRANSPORT_SOCKET": f.root + "/transport/control.sock", "OCSERV_TRUST_SOCKET": f.root + "/controller/trust.sock",
 		"OCSERV_TRANSPORT_UID": "65532", "OCSERV_TRANSPORT_GID": "65532",
 		"OCSERV_CERTIFICATE_SIGNER_URL": signer.URL, "OCSERV_CERTIFICATE_SIGNER_TOKEN": "isolated-test-signer",
 		"SSL_CERT_FILE": f.root + "/signer-ca.pem",
-	}), f.root+"/ocserv-control")
+		"OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true",
+	})
+	roles := []string{"all"}
+	switch os.Getenv("PR07_CONTROLLER_ROLE_MODE") {
+	case "", "all":
+	case "split":
+		roles = []string{"api", "worker", "scheduler"}
+	default:
+		t.Fatal("invalid Controller E2E role mode")
+	}
+	for _, role := range roles {
+		f.start("controller-"+role, 65534, 65532, controllerEnvironment, f.root+"/ocserv-control", "--role="+role)
+	}
+	f.wait("scheduler maintenance commit", func() bool {
+		var completed int
+		return owner.Store.QueryRow(f.ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed) == nil && completed > 0
+	})
 	f.wait("Controller trust socket", func() bool { _, err := os.Stat(f.root + "/controller/trust.sock"); return err == nil })
 	// Match deployed enrollment policy: new nodes have no owner session yet.
 	// Once the Agent negotiates fencing, transportd always requires its binding.

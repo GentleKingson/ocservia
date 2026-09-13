@@ -47,6 +47,15 @@ func (s auditStore) AddCheckpoint(ctx context.Context, id, workspace, event uuid
 func (s auditStore) Workspaces(ctx context.Context) (database.Rows, error) {
 	return s.Query(ctx, `SELECT DISTINCT workspace_id FROM audit_events ORDER BY workspace_id`)
 }
+
+func (s auditStore) LockLegacy(ctx context.Context) error {
+	_, err := s.Exec(ctx, `LOCK TABLE audit_events, audit_checkpoints IN SHARE MODE`)
+	return err
+}
+
+func (s auditStore) LegacyEvents(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
+	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspace)
+}
 func (s auditStore) CheckpointHash(ctx context.Context, workspace, event uuid.UUID) ([]byte, error) {
 	var hash []byte
 	err := s.QueryRow(ctx, `SELECT through_event_hash FROM audit_checkpoints WHERE workspace_id=$1 AND through_event_id=$2`, workspace, event).Scan(&hash)

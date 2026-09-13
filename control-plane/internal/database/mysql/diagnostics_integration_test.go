@@ -14,18 +14,20 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		t.Helper()
 		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		if schema, err := runtime.ControllerSchema(bounded, 34); err != nil || schema != 34 {
+		if schema, err := runtime.ControllerSchema(bounded, 35); err != nil || schema != 35 {
 			t.Fatalf("runtime schema: %d %v", schema, err)
 		}
 	}
 	ready()
-	for _, expected := range []int64{0, 33, 35, 1 << 40} {
+	for _, expected := range []int64{0, 33, 34, 36, 1 << 40} {
 		if _, err := runtime.ControllerSchema(ctx, expected); !errors.Is(err, ErrSchema) {
 			t.Fatalf("incompatible Controller %d: %v", expected, err)
 		}
 	}
 	for _, change := range []struct{ mutate, restore string }{
 		{`UPDATE backend_migrations SET dirty=true`, `UPDATE backend_migrations SET dirty=false`},
+		// The immutable root receipt stays at 34; revision 24 independently
+		// raises the Controller contract to 35. Do not rewrite root history.
 		{`UPDATE controller_schema_compatibility SET current_schema=35,minimum_compatible_controller_schema=35`, `UPDATE controller_schema_compatibility SET current_schema=34,minimum_compatible_controller_schema=34`},
 		{`UPDATE backend_schema_revisions SET state='running' WHERE version=(SELECT MAX(version) FROM backend_schema_revision_steps)`, `UPDATE backend_schema_revisions SET state='verified' WHERE state='running'`},
 		{`UPDATE backend_schema_revision_steps SET ordinal=100001 WHERE version=3 AND ordinal=1`, `UPDATE backend_schema_revision_steps SET ordinal=1 WHERE version=3 AND ordinal=100001`},
@@ -33,7 +35,7 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		if n, err := owner.Exec(ctx, change.mutate); err != nil || n != 1 {
 			t.Fatalf("alter schema fixture: %d %v", n, err)
 		}
-		_, checkErr := runtime.ControllerSchema(ctx, 34)
+		_, checkErr := runtime.ControllerSchema(ctx, 35)
 		if _, err := owner.Exec(ctx, change.restore); err != nil {
 			t.Fatal(err)
 		}
@@ -49,7 +51,7 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 	if _, err := owner.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=REPEAT('0',64) WHERE version=3 AND ordinal=1`); err != nil {
 		t.Fatal(err)
 	}
-	_, checkErr := runtime.ControllerSchema(ctx, 34)
+	_, checkErr := runtime.ControllerSchema(ctx, 35)
 	if _, err := owner.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=? WHERE version=3 AND ordinal=1`, checksum); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +65,7 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		t.Fatal(err)
 	}
 	bounded, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	_, checkErr = runtime.ControllerSchema(bounded, 34)
+	_, checkErr = runtime.ControllerSchema(bounded, 35)
 	cancel()
 	if err := releaseMigrationConnection(conn, name); err != nil {
 		t.Fatal(err)
@@ -72,7 +74,7 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		t.Fatalf("migration lock wait ignored readiness deadline: %v", checkErr)
 	}
 	ready()
-	if err := owner.ValidateSchema(ctx, 34); err != nil {
+	if err := owner.ValidateSchema(ctx, 35); err != nil {
 		t.Fatal("owner physical validation", err)
 	}
 }
