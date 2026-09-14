@@ -50,32 +50,32 @@ func ValidateOptions(o Options) error {
 
 func configuration(o Options) (*driver.Config, error) {
 	if o.Environment != "test" && o.Environment != "development" && o.Environment != "production" {
-		return nil, errors.New("experimental database: invalid environment")
+		return nil, errors.New("database backend: invalid environment")
 	}
 	if o.Engine != MySQL && o.Engine != MariaDB {
-		return nil, errors.New("experimental database: select mysql or mariadb explicitly")
+		return nil, errors.New("database backend: select mysql or mariadb explicitly")
 	}
 	c, err := driver.ParseDSN(o.DSN)
 	if err != nil {
-		return nil, errors.New("experimental database: invalid DSN")
+		return nil, errors.New("database backend: invalid DSN")
 	}
 	if c.Net != "tcp" || c.User == "" || c.Passwd == "" || c.DBName == "" {
-		return nil, errors.New("experimental database: DSN requires user, password, tcp host:port and database")
+		return nil, errors.New("database backend: DSN requires user, password, tcp host:port and database")
 	}
 	host, port, err := net.SplitHostPort(c.Addr)
 	if err != nil || host == "" || port == "" {
-		return nil, errors.New("experimental database: invalid TCP address")
+		return nil, errors.New("database backend: invalid TCP address")
 	}
 	// Validate the raw query too: ParseDSN recognizes unsafe flags outside Params.
 	parameters := o.DSN[strings.LastIndexByte(o.DSN, '/')+1:]
 	if index := strings.IndexByte(parameters, '?'); index >= 0 {
 		query, err := url.ParseQuery(parameters[index+1:])
 		if err != nil {
-			return nil, errors.New("experimental database: invalid DSN parameters")
+			return nil, errors.New("database backend: invalid DSN parameters")
 		}
 		for key, values := range query {
 			if key != "tls" || len(values) != 1 {
-				return nil, errors.New("experimental database: only the tls DSN parameter is accepted")
+				return nil, errors.New("database backend: only the tls DSN parameter is accepted")
 			}
 		}
 	}
@@ -85,11 +85,11 @@ func configuration(o Options) (*driver.Config, error) {
 		if o.CAFile != "" {
 			pem, err := os.ReadFile(o.CAFile)
 			if err != nil {
-				return nil, errors.New("experimental database: cannot read TLS CA")
+				return nil, errors.New("database backend: cannot read TLS CA")
 			}
 			roots := x509.NewCertPool()
 			if !roots.AppendCertsFromPEM(pem) {
-				return nil, errors.New("experimental database: invalid TLS CA")
+				return nil, errors.New("database backend: invalid TLS CA")
 			}
 			c.TLS.RootCAs = roots
 		}
@@ -97,10 +97,10 @@ func configuration(o Options) (*driver.Config, error) {
 		ip := net.ParseIP(host)
 		developmentCompose := o.Environment == "development" && host == "database"
 		if ((ip == nil || !ip.IsLoopback()) && !developmentCompose) || o.CAFile != "" {
-			return nil, errors.New("experimental database: plaintext requires loopback or the fixed development Compose service and no CA")
+			return nil, errors.New("database backend: plaintext requires loopback or the fixed development Compose service and no CA")
 		}
 	default:
-		return nil, errors.New("experimental database: explicitly set tls=true (or tls=false for loopback tests)")
+		return nil, errors.New("database backend: explicitly set tls=true (or tls=false for loopback tests)")
 	}
 	c.ParseTime, c.Loc = true, time.UTC
 	c.Timeout, c.ReadTimeout, c.WriteTimeout = 5*time.Second, 30*time.Second, 30*time.Second
@@ -122,7 +122,7 @@ func configuration(o Options) (*driver.Config, error) {
 	}
 	c.Params["collation_connection"] = "'" + c.Collation + "'"
 	if err := c.Apply(driver.TimeTruncate(time.Microsecond)); err != nil {
-		return nil, errors.New("experimental database: invalid time precision")
+		return nil, errors.New("database backend: invalid time precision")
 	}
 	return c, nil
 }
@@ -134,7 +134,7 @@ func Open(ctx context.Context, o Options) (*Backend, error) {
 	}
 	_, err = driver.NewConnector(c)
 	if err != nil {
-		return nil, errors.New("experimental database: invalid connector")
+		return nil, errors.New("database backend: invalid connector")
 	}
 	db := sql.OpenDB(&connector{config: c})
 	db.SetMaxOpenConns(20)
@@ -149,7 +149,7 @@ func Open(ctx context.Context, o Options) (*Backend, error) {
 	valid := o.Engine == MySQL && version == MySQLVersion || o.Engine == MariaDB && strings.HasPrefix(version, MariaDBVersion+"-MariaDB")
 	if !valid {
 		db.Close()
-		return nil, errors.New("experimental database: server flavor/version does not match the pinned backend")
+		return nil, errors.New("database backend: server flavor/version does not match the pinned backend")
 	}
 	return &Backend{store: store{db}, pool: db, engine: o.Engine}, nil
 }
@@ -176,5 +176,5 @@ func safeError(err error) error {
 	if errors.As(err, &e) {
 		return classifyNumber(e.Number)
 	}
-	return errors.New("experimental database: operation failed (details redacted)")
+	return errors.New("database backend: operation failed (details redacted)")
 }
