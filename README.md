@@ -26,7 +26,7 @@ ocservia does not replace ocserv and does not carry VPN traffic. Each VPN server
 Operator browser
       |
       v
-Controller Web/API  --->  PostgreSQL and backups
+Controller Web/API  --->  supported database and backups
       |
       v
 Dedicated relays
@@ -40,7 +40,7 @@ The main pieces are:
 - **Controller** — the central Web console, API, database access, scheduling, audit records, and lifecycle commands.
 - **Managed node** — the services installed beside ocserv on each VPN server so the Controller can observe and manage it.
 - **Dedicated relays** — the network path used by the Controller and managed nodes to communicate in production.
-- **PostgreSQL and backups** — persistent Controller data and recovery state.
+- **Database and backups** — persistent Controller data and recovery state in bundled/external PostgreSQL 17, external MySQL 8.4.10, or external MariaDB 12.3.2.
 - **External services** — login, certificates, and monitoring endpoints prepared by the operator.
 
 See [Architecture](docs/architecture.md) for the plain-language system diagram and trust model.

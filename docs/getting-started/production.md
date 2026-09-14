@@ -4,7 +4,10 @@ This guide is the short production path for installing the ocservia Controller. 
 
 ## What the Controller does
 
-The Controller is the central Web/API service. It stores state in PostgreSQL, connects to managed nodes through dedicated relays, records audit events, and runs install, upgrade, rollback, and uninstall workflows for the Controller side.
+The Controller is the central Web/API service. It stores state in a supported
+database, connects to managed nodes through dedicated relays, records audit
+events, and runs install, upgrade, rollback, and uninstall workflows for the
+Controller side.
 
 ## Requirements
 
@@ -45,6 +48,7 @@ The exact variable names are in `install.env.example`. At a minimum, configure:
 | Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
 | Release trust | `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` |
+| Database | bundled/external PostgreSQL 17, external MySQL 8.4.10, or external MariaDB 12.3.2 |
 
 Keep `install.env` private and out of Git. Variables exported in the shell override values from the file.
 
@@ -55,7 +59,9 @@ Choose one of the complete [authentication mode examples](../operations/authenti
 Put production material in the protected directories referenced by `install.env`. Typical required material includes:
 
 - HTTPS certificate and key.
-- PostgreSQL passwords and database URLs.
+- Database owner, runtime, and backup credentials for the selected supported backend.
+- For external MySQL/MariaDB, `database-ca.pem`, separate owner/runtime DSN
+  files, and the backend-specific `database-backup.cnf`.
 - Session key and audit keys; OIDC client secret only when SSO is enabled.
 - Controller command signing key.
 - Certificate signer token.
@@ -125,4 +131,5 @@ Also verify that login works, a managed node can connect through each relay, and
 - [Enroll a node](../how-to/enroll-node.md)
 - [Configure dedicated relays](../how-to/dedicated-relays.md)
 - [Back up and restore PostgreSQL](../operations/postgres-backup.md)
+- [Back up and restore MySQL or MariaDB](../operations/mysql-backup.md)
 - [Production deployment reference](../operations/production-deployment.md)

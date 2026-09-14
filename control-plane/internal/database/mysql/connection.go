@@ -1,5 +1,4 @@
-// Package mysql implements the test/development MySQL and MariaDB backends.
-// Production startup remains gated pending complete Controller acceptance.
+// Package mysql implements the MySQL and MariaDB Controller backends.
 package mysql
 
 import (
@@ -50,8 +49,8 @@ func ValidateOptions(o Options) error {
 }
 
 func configuration(o Options) (*driver.Config, error) {
-	if o.Environment != "test" && o.Environment != "development" {
-		return nil, errors.New("experimental database: only test/development environments are permitted")
+	if o.Environment != "test" && o.Environment != "development" && o.Environment != "production" {
+		return nil, errors.New("experimental database: invalid environment")
 	}
 	if o.Engine != MySQL && o.Engine != MariaDB {
 		return nil, errors.New("experimental database: select mysql or mariadb explicitly")
