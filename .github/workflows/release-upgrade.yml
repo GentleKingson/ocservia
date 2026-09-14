@@ -1,0 +1,33 @@
+name: Native Release Upgrade Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate X.Y.Z version without v
+        type: string
+        required: true
+      baseline_release:
+        description: Exact published stable Release tag
+        type: string
+        required: true
+        default: v0.5.0
+      candidate_sha:
+        description: Exact 40-character SHA of the selected dispatch branch
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  registration-only:
+    name: Native Upgrade Result
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Refuse acceptance from the registration placeholder
+        run: |
+          echo '::error::Registration only. No upgrade validation was performed.'
+          echo 'Native Upgrade Result: NOT PASS (registration-only placeholder)' >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
