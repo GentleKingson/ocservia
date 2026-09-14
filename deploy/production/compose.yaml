@@ -66,6 +66,7 @@ services:
   postgres:
     <<: *service-defaults
     image: ${OCSERV_POSTGRES_IMAGE:?set OCSERV_POSTGRES_IMAGE to a digest-pinned PostgreSQL 17 image}
+    user: "999:999"
     environment:
       POSTGRES_DB: ocservia
       POSTGRES_USER: ocservia_owner
