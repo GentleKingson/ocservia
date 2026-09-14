@@ -45,3 +45,21 @@ func TestExternalPostgreSQLMajorVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMySQLCompatibleProductionTLSContract(t *testing.T) {
+	for _, backend := range []string{"mysql", "mariadb"} {
+		t.Run(backend, func(t *testing.T) {
+			base := Options{
+				Backend: backend, Environment: "production",
+				URL: "app:secret@tcp(database.example.test:3306)/ocservia?tls=true",
+			}
+			if err := ValidateOptions(base); err != nil {
+				t.Fatalf("verified production connection rejected: %v", err)
+			}
+			base.URL = "app:secret@tcp(database.example.test:3306)/ocservia?tls=false"
+			if err := ValidateOptions(base); err == nil {
+				t.Fatal("remote production plaintext accepted")
+			}
+		})
+	}
+}
