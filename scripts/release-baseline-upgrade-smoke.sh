@@ -24,6 +24,10 @@ report_error_line() {
 }
 trap report_error_line ERR
 
+record_scenario() {
+  if [[ -n "${UPGRADE_SCENARIOS_FILE:-}" ]]; then printf '%s\n' "$@" >>"${UPGRADE_SCENARIOS_FILE}"; fi
+}
+
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 VERSION="${VERSION:?candidate VERSION is required (plain SemVer)}"
@@ -34,38 +38,15 @@ if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "${BASELINE_RELEASE}" 
   exit 2
 fi
 BASELINE_VERSION="${BASELINE_RELEASE#v}"
-# The baseline GitHub release is not immutable, so the tag alone does not pin
-# the historical artifacts. This table fixes the exact SHA256SUMS bytes each
-# smoked baseline release must match, and a release without a pin here
-# refuses to run; the signature and package-digest checks below extend the
-# pinned identity to the installed package. Each pinned baseline also records
-# whether its package layout predates the upgrader binary/unit and the
-# read-only --version query, whether its payload could establish production
-# relay state, and whether it published RPM assets.
-case "${BASELINE_RELEASE}" in
-  v0.1.1)
-    baseline_sums_sha256=518a4e6e0393dfc5378d117069c7affdeeb26d7dea84521e128c40256d11a1d9
-    baseline_has_upgrader=no
-    baseline_has_version_query=no
-    baseline_has_production_relays=no
-    baseline_has_rpm=no
-    ;;
-  v0.3.0)
-    baseline_sums_sha256=018c7d7f1c4f6b5f5745c7d6fa076a6f51a53b1c1050eb26729dce3606394ed0
-    baseline_has_upgrader=yes
-    baseline_has_version_query=yes
-    baseline_has_production_relays=yes
-    baseline_has_rpm=yes
-    ;;
-  v0.4.0)
-    baseline_sums_sha256=52c6294d4e999864f087e00cd17d21df04542749f461a5ff0bce401a0d9b73cc
-    baseline_has_upgrader=yes
-    baseline_has_version_query=yes
-    baseline_has_production_relays=yes
-    baseline_has_rpm=yes
-    ;;
-  *) echo "no pinned SHA256SUMS identity for baseline release ${BASELINE_RELEASE}" >&2; exit 2 ;;
-esac
+# Historical pins and capabilities have one owner shared with upgrade prepare.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+baseline="$(jq -ce --arg tag "${BASELINE_RELEASE}" '.[$tag] // error("unregistered baseline")' \
+  "${ROOT}/scripts/release-upgrade-baselines.json")"
+baseline_sums_sha256="$(jq -er '.sums_sha256' <<<"${baseline}")"
+baseline_has_upgrader="$(jq -r 'if .upgrader then "yes" else "no" end' <<<"${baseline}")"
+baseline_has_version_query="$(jq -r 'if .version_query then "yes" else "no" end' <<<"${baseline}")"
+baseline_has_production_relays="$(jq -r 'if .production_relays then "yes" else "no" end' <<<"${baseline}")"
+baseline_has_rpm="$(jq -r 'if .rpm then "yes" else "no" end' <<<"${baseline}")"
 case "${BASELINE_RELEASE#v}" in
   *.*.*) ;;
   *) echo "baseline release must carry a plain SemVer version" >&2; exit 2 ;;
@@ -78,6 +59,7 @@ if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   echo "RUN_ID contains unsafe characters" >&2
   exit 2
 fi
+requested_arch="${PACKAGE_ARCH:-}"
 case "$(uname -m)" in
   x86_64) PACKAGE_ARCH=amd64 ;;
   aarch64) PACKAGE_ARCH=arm64 ;;
@@ -86,6 +68,10 @@ case "$(uname -m)" in
     exit 2
     ;;
 esac
+[[ -z "${requested_arch}" || "${requested_arch}" == "${PACKAGE_ARCH}" ]] || {
+  echo "requested package architecture does not match native host" >&2
+  exit 2
+}
 case "${PACKAGE_ARCH}" in
   amd64) rpm_arch=x86_64 ;;
   arm64) rpm_arch=aarch64 ;;
@@ -107,6 +93,11 @@ if [[ "${baseline_has_rpm}" == yes ]]; then
 fi
 # This smoke drives real host installation state; refuse to run anywhere that
 # already carries an Agent installation so cleanup can stay scoped.
+if [[ -n "${UPGRADE_SCENARIOS_FILE:-}" ]] &&
+  { sudo test -e /etc/ocservia/release-signing.pub.pem || sudo test -e /etc/ocservia/trusted-release-key.sha256; }; then
+  echo "host already carries release trust material; refusing to run" >&2
+  exit 2
+fi
 if sudo test -e /usr/libexec/ocservia || sudo test -e /etc/ocservia-agent || \
   getent passwd ocserv-agent >/dev/null 2>&1 || \
   sudo dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -q "install ok installed"; then
@@ -134,6 +125,9 @@ cleanup() {
     /usr/lib/systemd/system/ocservia-upgrader@.service \
     /usr/lib/systemd/system/ocservia-agent.service.d || status=1
   sudo rm -f -- /etc/ocservia/agent-install-production-relays || status=1
+  if [[ -n "${UPGRADE_SCENARIOS_FILE:-}" ]]; then
+    sudo rm -f -- /etc/ocservia/release-signing.pub.pem /etc/ocservia/trusted-release-key.sha256 || status=1
+  fi
   sudo userdel ocserv-agent >/dev/null 2>&1 || true
   sudo groupdel ocserv-agent >/dev/null 2>&1 || true
   sudo systemctl daemon-reload >/dev/null 2>&1 || true
@@ -164,6 +158,14 @@ for asset in "${baseline_assets[@]}"; do
 done
 printf '%s  %s\n' "${baseline_sums_sha256}" "${download_dir}/SHA256SUMS" \
   | sha256sum -c --strict -
+if [[ "$(jq -r '.key_der_sha256 // empty' <<<"${baseline}")" != "" ]]; then
+  fingerprint="$(openssl pkey -pubin -in "${download_dir}/release-signing.pub.pem" \
+    -outform DER | sha256sum | awk '{print $1}')"
+  [[ "${fingerprint}" == "$(jq -r '.key_der_sha256' <<<"${baseline}")" ]] || {
+    echo "baseline public key does not match independently pinned key" >&2
+    exit 1
+  }
+fi
 openssl pkeyutl -verify -rawin -pubin -inkey "${download_dir}/release-signing.pub.pem" \
   -in "${download_dir}/SHA256SUMS" -sigfile "${download_dir}/SHA256SUMS.sig" \
   >"${ARTIFACT_DIR}/baseline-manifest-signature.log" 2>&1 \
@@ -171,6 +173,10 @@ openssl pkeyutl -verify -rawin -pubin -inkey "${download_dir}/release-signing.pu
 (cd "${download_dir}" && grep -F " ${baseline_deb}" SHA256SUMS | sha256sum -c --strict -)
 if [[ "${baseline_has_rpm}" == yes ]]; then
   (cd "${download_dir}" && grep -F " ${baseline_rpm}" SHA256SUMS | sha256sum -c --strict -)
+fi
+(cd "${download_dir}" && sha256sum -- "${baseline_deb}" SHA256SUMS) >"${ARTIFACT_DIR}/baseline-digests.txt"
+if [[ "${baseline_has_rpm}" == yes ]]; then
+  (cd "${download_dir}" && sha256sum -- "${baseline_rpm}") >>"${ARTIFACT_DIR}/baseline-digests.txt"
 fi
 
 # The candidate upgrade preflight requires the shared command verification
@@ -335,6 +341,11 @@ if [[ "${baseline_has_production_relays}" == yes ]]; then
   sudo install -o root -g ocserv-agent -m 0640 "${work}/relay-access-token" \
     /etc/ocservia-agent/relay-access-token
   provision_upgrade_fixtures
+  if [[ -n "${UPGRADE_SCENARIOS_FILE:-}" ]]; then
+    sudo bash "${ROOT}/scripts/release-agent-state-check.sh" before "${work}/deb-state" "${BASELINE_VERSION}" "${PACKAGE_ARCH}"
+    [[ "$(dpkg-query -W -f='${Version}' ocservia-agent)" == "${BASELINE_VERSION}-1" ]]
+    record_scenario deb_baseline
+  fi
   { sudo dpkg -i "${CANDIDATE_DEB}"; } \
     >"${ARTIFACT_DIR}/baseline-production-candidate-upgrade.log" 2>&1
   assert_state "candidate production upgrade" "${VERSION}" yes yes
@@ -359,6 +370,23 @@ if [[ "${baseline_has_production_relays}" == yes ]]; then
   sudo test ! -e /etc/ocservia/agent-install-production-relays \
     || { echo "candidate production upgrade created a stale production request marker" >&2; exit 1; }
   echo "published baseline ${BASELINE_RELEASE} production node -> candidate ${VERSION} upgrade passed"
+  if [[ -n "${UPGRADE_SCENARIOS_FILE:-}" ]]; then
+    sudo bash "${ROOT}/scripts/release-agent-state-check.sh" after "${work}/deb-state" "${VERSION}" "${PACKAGE_ARCH}"
+    [[ "$(dpkg-query -W -f='${Version}' ocservia-agent)" == "${VERSION}-1" ]]
+    [[ "$(dpkg-query -W -f='${Architecture}' ocservia-agent)" == "${PACKAGE_ARCH}" ]]
+    record_scenario deb_upgrade deb_state
+    { sudo dpkg -i "${CANDIDATE_DEB}"; } >"${ARTIFACT_DIR}/deb-retry.log" 2>&1
+    sudo bash "${ROOT}/scripts/release-agent-state-check.sh" retry "${work}/deb-state" "${VERSION}" "${PACKAGE_ARCH}"
+    assert_state "candidate retry" "${VERSION}" yes yes
+    record_scenario deb_retry
+    sudo bash "${ROOT}/scripts/release-agent-state-check.sh" reject "${work}/deb-state" "${VERSION}" "${PACKAGE_ARCH}"
+    record_scenario deb_rejection
+    { sudo bash "${ROOT}/scripts/release-agent-state-check.sh" rollback "${work}/deb-state" "${BASELINE_VERSION}" "${PACKAGE_ARCH}"; } \
+      >"${ARTIFACT_DIR}/deb-rollback.log" 2>&1
+    record_scenario deb_rollback
+    sudo cp -r "${work}/deb-state" "${ARTIFACT_DIR}/deb-state"
+    sudo chown -R "$(id -u):$(id -g)" "${ARTIFACT_DIR}/deb-state"
+  fi
   host_reset_cycle
 fi
 
@@ -370,7 +398,7 @@ if [[ "${baseline_has_rpm}" == yes ]]; then
   # that can run scriptlets exactly as a real systemd host would.
   docker build --tag "${container_image}" - >"${ARTIFACT_DIR}/rpm-image-build.log" 2>&1 <<'DOCKERFILE'
 FROM rockylinux:9
-RUN dnf install -y systemd openssl && dnf clean all
+RUN dnf install -y systemd openssl file diffutils && dnf clean all
 DOCKERFILE
   docker run --privileged --detach --name "${container}" \
     --volume "${pkg_dir}":/packages:ro "${container_image}" /sbin/init \
@@ -382,6 +410,8 @@ DOCKERFILE
   done
   [[ "${state}" == "running" || "${state}" == "degraded" ]] \
     || { echo "rpm baseline container systemd never became ready (state: ${state})" >&2; exit 1; }
+  [[ "$(docker exec "${container}" uname -m)" == "$(uname -m)" ]]
+  [[ "$(docker image inspect --format '{{.Architecture}}' "${container_image}")" == "${PACKAGE_ARCH}" ]]
 
   container_assert_installed() {
     local context="$1" expected_version="$2" want_upgrader="$3"
@@ -468,6 +498,12 @@ DOCKERFILE
     rm -f /tmp/operator-relays.env /tmp/relay-access-token
   '
   container_provision_upgrade_fixtures
+  if [[ -n "${UPGRADE_SCENARIOS_FILE:-}" ]]; then
+    docker cp "${ROOT}/scripts/release-agent-state-check.sh" "${container}:/root/check.sh"
+    docker exec "${container}" bash /root/check.sh before /root/evidence "${BASELINE_VERSION}" "${PACKAGE_ARCH}"
+    [[ "$(docker exec "${container}" rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' ocservia-agent)" == "${BASELINE_VERSION}-1.${rpm_arch}" ]]
+    record_scenario rpm_baseline
+  fi
 
   docker exec "${container}" rpm -Uvh "/packages/${candidate_rpm_name}" \
     >"${ARTIFACT_DIR}/rpm-candidate-upgrade.log" 2>&1
@@ -494,6 +530,21 @@ DOCKERFILE
   docker exec "${container}" test ! -e /etc/ocservia/agent-install-production-relays \
     || { echo "rpm candidate upgrade created a stale production request marker" >&2; exit 1; }
   echo "published baseline ${BASELINE_RELEASE} RPM production node -> candidate ${VERSION} upgrade passed"
+  if [[ -n "${UPGRADE_SCENARIOS_FILE:-}" ]]; then
+    docker exec "${container}" bash /root/check.sh after /root/evidence "${VERSION}" "${PACKAGE_ARCH}"
+    [[ "$(docker exec "${container}" rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' ocservia-agent)" == "${VERSION}-1.${rpm_arch}" ]]
+    record_scenario rpm_upgrade rpm_state
+    docker exec "${container}" rpm -Uvh --replacepkgs "/packages/${candidate_rpm_name}" >"${ARTIFACT_DIR}/rpm-retry.log" 2>&1
+    docker exec "${container}" bash /root/check.sh retry /root/evidence "${VERSION}" "${PACKAGE_ARCH}"
+    container_assert_installed "rpm candidate retry" "${VERSION}" yes
+    record_scenario rpm_retry
+    docker exec "${container}" bash /root/check.sh reject /root/evidence "${VERSION}" "${PACKAGE_ARCH}"
+    record_scenario rpm_rejection
+    docker exec "${container}" bash /root/check.sh rollback /root/evidence "${BASELINE_VERSION}" "${PACKAGE_ARCH}" \
+      >"${ARTIFACT_DIR}/rpm-rollback.log" 2>&1
+    record_scenario rpm_rollback no_auto_enable
+    docker cp "${container}:/root/evidence" "${ARTIFACT_DIR}/rpm-state"
+  fi
 
   docker rm -f -- "${container}" >/dev/null
   docker rmi -f -- "${container_image}" >/dev/null

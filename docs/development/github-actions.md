@@ -292,7 +292,8 @@ to GHCR, or loads the production signing key.
   Agent, privd, and upgrader, produces a signed tar archive plus deb/rpm,
   and runs `scripts/release-native-package-smoke.sh` for the candidate's
   deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  Neither published-baseline upgrade smoke runs in the release workflow.
+  It also runs the published v0.5.0 DEB/RPM baseline package smoke.
+  The additional full upgrade gate below is independent of this release job.
 - Tag pushes and `arch=all` dry runs download both package sets and run
   `scripts/validate-release-packages.sh`. This retains package presence,
   signatures, architecture metadata, embedded payload consistency, and
@@ -326,6 +327,19 @@ to GHCR, or loads the production signing key.
   attestation/immutability verification, and repeated tag binding are not
   required by this workflow. Existing package signatures and installer trust
   verification remain unchanged.
+
+## Manual native upgrade validation
+
+`.github/workflows/release-upgrade.yml` is a separate, manual-only workflow.
+It always requires Agent and Controller upgrade results on both native
+`ubuntu-24.04` and `ubuntu-24.04-arm` runners. It neither publishes a release
+nor becomes a Basic CI required check. Candidate version, baseline tag, and
+exact dispatch SHA are frozen once before either matrix runs.
+
+See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
+trust anchors, evidence, reproduction, and the limits of this gate. The
+workflow must first be registered on the default branch; `--ref` alone cannot
+make a new Draft PR workflow dispatchable.
 
 ## Deferred native validation
 

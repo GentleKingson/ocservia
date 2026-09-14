@@ -498,6 +498,35 @@ if [[ -e "${installed_upgrader_unit}" || -L "${installed_upgrader_unit}" ]]; the
   validate_installed_snapshot_source "${installed_upgrader_unit}" 644
 fi
 
+# A completed identical retry must not snapshot the candidate over the old
+# release. Compare bytes too: rollback restores files, not installed-commit.
+same_install=true
+commit_record="${DESTDIR}${UPGRADE_STATE_DIR}/installed-commit"
+expected_archive="$(sed -n 's/^archive_sha256=//p' "${ROOT}/.ocservia-package-verified")"
+if [[ ! -f "${commit_record}" || -L "${commit_record}" ]] ||
+  [[ "$(stat -c '%u:%g:%a:%h' -- "${commit_record}")" != "0:0:600:1" ]] ||
+  [[ "$(cat -- "${commit_record}")" != "archive_sha256=${expected_archive}" ]]; then
+  same_install=false
+fi
+for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+  cmp -s "${ROOT}/rust/target/release/${binary}" "${DESTDIR}${PREFIX}/libexec/ocservia/${binary}" || same_install=false
+done
+for unit in ocservia-agent.service ocservia-privd.service ocservia-upgrader@.service; do
+  cmp -s "${ROOT}/deploy/systemd/${unit}" "${DESTDIR}${PREFIX}/lib/systemd/system/${unit}" || same_install=false
+done
+cmp -s "${ROOT}/scripts/verify-agent-package.sh" "${installed_verifier}" || same_install=false
+cmp -s "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback" || same_install=false
+if [[ "${INSTALL_PRODUCTION_RELAYS:-false}" == true || -e "${installed_relay_dropin}" ]]; then
+  cmp -s "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" "${installed_relay_dropin}" || same_install=false
+fi
+if [[ "${same_install}" == true ]]; then
+  echo "Identical verified Agent package already installed; preserving rollback snapshot"
+  if [[ -z "${DESTDIR}" ]]; then
+    systemctl try-restart ocservia-privd.service ocservia-agent.service
+  fi
+  exit 0
+fi
+
 # A pre-P1-06 node has no Controller-side sealing-key binding. Use the verified
 # new Agent binary to bind both descriptors through the existing EndpointID and
 # a fresh operator-issued token only after every rollback source is known-safe.

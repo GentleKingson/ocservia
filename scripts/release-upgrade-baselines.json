@@ -1,0 +1,40 @@
+{
+  "v0.1.1": {
+    "sums_sha256": "518a4e6e0393dfc5378d117069c7affdeeb26d7dea84521e128c40256d11a1d9",
+    "upgrader": false,
+    "version_query": false,
+    "production_relays": false,
+    "rpm": false
+  },
+  "v0.3.0": {
+    "sums_sha256": "018c7d7f1c4f6b5f5745c7d6fa076a6f51a53b1c1050eb26729dce3606394ed0",
+    "upgrader": true,
+    "version_query": true,
+    "production_relays": true,
+    "rpm": true
+  },
+  "v0.4.0": {
+    "sums_sha256": "52c6294d4e999864f087e00cd17d21df04542749f461a5ff0bce401a0d9b73cc",
+    "upgrader": true,
+    "version_query": true,
+    "production_relays": true,
+    "rpm": true
+  },
+  "v0.5.0": {
+    "sums_sha256": "9c617480271edd067cce4e62df25b0b2c64350c7ce5ed201311e8ae371bfb9f3",
+    "commit": "519275567a65f5785260e353ef02ab3fabf30244",
+    "key_der_sha256": "b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369",
+    "upgrader": true,
+    "version_query": true,
+    "production_relays": true,
+    "rpm": true,
+    "controller": { "database": "postgres", "migration": 30, "authentication": "oidc" },
+    "verification": {
+      "date": "2026-09-14",
+      "anchor": "v0.4.0 SHA256SUMS pinned in e9016da71e5b447d3532e8981e5ca08844de88ff",
+      "key_source": "ocservia-agent_0.4.0_arm64.deb/usr/share/ocservia-agent/release-signing.pub.pem",
+      "key_source_package_sha256": "fc1118d87367d5842b7eaf29f5069ef4c8b65d7b2871ea6f549270c5a50a9587",
+      "method": "Verify historical sums pin and DEB digest before extracting its public key; verify v0.5.0 SHA256SUMS.sig with that key; compare the v0.5.0 public key; cross-check immutable Release API digests and tag commit. No install or baseline rebuild."
+    }
+  }
+}

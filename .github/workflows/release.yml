@@ -99,18 +99,11 @@ jobs:
           openssl genpkey -algorithm ED25519 -out "${key_file}" >/dev/null 2>&1
           chmod 0600 "${key_file}"
           echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
-      - name: Build native Agent / privd / upgrader binaries
+      - name: Build native Agent / privd / upgrader and packages
         run: |
-          # shellcheck source=scripts/env.sh
-          # shellcheck disable=SC1091
-          source scripts/env.sh
-          cd rust
-          # The published package version is the binaries' release identity:
-          # the Agent heartbeat and the upgrade downgrade fence both compare
-          # against it, so it must be embedded at compile time.
-          OCSERV_AGENT_RELEASE_VERSION="${version}" \
-            cargo build --locked --release \
-            --package ocservia-agent --package ocservia-privd --package ocservia-upgrader
+          VERSION="${version}" PACKAGE_ARCH="${{ matrix.package_arch }}" \
+            OUTPUT_DIR="${RUNNER_TEMP}/packages" AGENT_SIGNING_KEY="${release_signing_key}" \
+            SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
       - name: Save native-package tool cache
         if: ${{ success() && steps.native-package-tools-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -119,35 +112,16 @@ jobs:
             .cache/downloads
             .tools
           key: ${{ steps.native-package-tools-cache.outputs.cache-primary-key }}
-      - name: Build tar / deb / rpm package set
-        run: |
-          # shellcheck source=scripts/env.sh
-          # shellcheck disable=SC1091
-          source scripts/env.sh
-          package_dir="${RUNNER_TEMP}/packages"
-          mkdir -p "${package_dir}"
-          OUTPUT_DIR="${package_dir}" AGENT_SIGNING_KEY="${release_signing_key}" \
-            VERSION="${version}" PACKAGE_ARCH="${{ matrix.package_arch }}" \
-            SOURCE_DATE_EPOCH="${source_date_epoch}" \
-            scripts/package-agent.sh >/dev/null
-          openssl pkey -in "${release_signing_key}" -pubout -out "${RUNNER_TEMP}/release-signing.pub.pem" >/dev/null 2>&1
-          fingerprint="$(openssl pkey -pubin -in "${RUNNER_TEMP}/release-signing.pub.pem" \
-            -outform DER | sha256sum | awk '{print $1}')"
-          OUTPUT_DIR="${package_dir}" VERSION="${version}" PACKAGE_ARCH="${{ matrix.package_arch }}" \
-            SOURCE_DATE_EPOCH="${source_date_epoch}" \
-            AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
-            scripts/package-native-agent.sh >/dev/null
-          ls -l "${package_dir}"
       - name: Validate native package lifecycle (${{ matrix.package_arch }})
         env:
           RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
         run: scripts/release-native-package-smoke.sh
-      - name: Validate published v0.4.0 upgrade (${{ matrix.package_arch }})
+      - name: Validate published v0.5.0 upgrade (${{ matrix.package_arch }})
         env:
           RUN_ID: baseline-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/baseline-upgrade
-          BASELINE_RELEASE: v0.4.0
+          BASELINE_RELEASE: v0.5.0
           PACKAGE_ARCH: ${{ matrix.package_arch }}
         run: |
           case "${PACKAGE_ARCH}" in
@@ -258,39 +232,9 @@ jobs:
       # the single reviewer-gated publish job.
       - name: Build Controller images
         run: |
-          set -euo pipefail
-          output_dir="${RUNNER_TEMP}/controller-images"
-          mkdir -p "${output_dir}"
-          build_image() {
-            local name="$1" dockerfile="$2" archive metadata
-            local -a build_args=(
-              --builder "${BUILDX_BUILDER}"
-              --platform "linux/${{ matrix.controller_arch }}"
-              --provenance=false
-              --pull
-              --output "type=docker,dest=${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
-              --metadata-file "${RUNNER_TEMP}/controller-${name}.metadata.json"
-              --label "org.opencontainers.image.version=${version}"
-              --label "org.opencontainers.image.revision=${source_commit}"
-              --tag "ghcr.io/gentlekingson/ocservia/${name}:${version}-linux-${{ matrix.controller_arch }}"
-              --file "${dockerfile}"
-            )
-            metadata="${RUNNER_TEMP}/controller-${name}.metadata.json"
-            if [[ "${name}" == control ]]; then
-              build_args+=(--build-arg "VERSION=${version}" --build-arg "COMMIT=${source_commit}")
-            fi
-            docker buildx build "${build_args[@]}" "${GITHUB_WORKSPACE}"
-            archive="${output_dir}/${name}-linux-${{ matrix.controller_arch }}.tar"
-            [[ -s "${archive}" ]] || {
-              echo "Controller image archive is missing or empty: ${archive}" >&2
-              exit 1
-            }
-            jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "${metadata}" >/dev/null
-          }
-          build_image gateway deploy/production/gateway.Dockerfile
-          build_image control control-plane/Dockerfile
-          build_image transport rust/transportd.Dockerfile
-          build_image backup deploy/production/backup.Dockerfile
+          VERSION="${version}" SOURCE_COMMIT="${source_commit}" \
+            CONTROLLER_ARCH="${{ matrix.controller_arch }}" OUTPUT_DIR="${RUNNER_TEMP}/controller-images" \
+            bash scripts/build-release-controller.sh
       - name: Smoke Controller images on the native runner
         # Runs for both tag pushes and dispatch dry runs: a dispatch must
         # prove the real build path produces runnable images, not just
