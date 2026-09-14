@@ -38,6 +38,9 @@ cleanup() {
   docker rm -f "${source_container}" "${target_container}" "${backup_container}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || status=1
   docker image rm -f "${backup_image}" >/dev/null 2>&1 || status=1
+  if declare -F set_backup_owner >/dev/null; then
+    set_backup_owner "$(id -u):$(id -g)" >/dev/null 2>&1 || true
+  fi
   rm -rf -- "${work}"
   exit "${status}"
 }
@@ -45,7 +48,10 @@ trap cleanup EXIT INT TERM
 
 docker network create "${network}" >/dev/null
 docker build -f "${ROOT}/${DOCKERFILE}" -t "${backup_image}" "${ROOT}" >"${ARTIFACT_DIR}/backup-image-build.log"
-docker run --rm -v "${work}/backup:/backup" --entrypoint chown "${SERVER_IMAGE}" -R 999:999 /backup
+set_backup_owner() {
+  docker run --rm -v "${work}/backup:/backup" --entrypoint chown "${SERVER_IMAGE}" -R "$1" /backup
+}
+set_backup_owner 999:999
 docker run -d --name "${source_container}" --network "${network}" --network-alias source \
   -e MYSQL_ROOT_PASSWORD="${password}" "${SERVER_IMAGE}" >/dev/null
 
@@ -94,8 +100,10 @@ docker run --name "${backup_container}" --network "${network}" \
   -e RUN_ID="${RUN_ID}" -v "${work}/backup.cnf:/run/secrets/database_backup_config:ro" \
   -v "${work}/backup:/backup" "${backup_image}" --once >"${ARTIFACT_DIR}/backup.log"
 docker rm "${backup_container}" >/dev/null
+set_backup_owner "$(id -u):$(id -g)"
 first_backup_id="$(cat "${work}/backup/LATEST")"
 sleep 1
+set_backup_owner 999:999
 docker run --name "${backup_container}" --network "${network}" \
   -e DATABASE_BACKEND="${ENGINE}" -e MYSQL_DATABASE=ocservia \
   -e MYSQL_CONFIG_SOURCE=/run/secrets/database_backup_config -e BACKUP_ROOT=/backup \
@@ -103,6 +111,7 @@ docker run --name "${backup_container}" --network "${network}" \
   -v "${work}/backup.cnf:/run/secrets/database_backup_config:ro" \
   -v "${work}/backup:/backup" "${backup_image}" --once >"${ARTIFACT_DIR}/backup-repeat.log"
 docker rm "${backup_container}" >/dev/null
+set_backup_owner "$(id -u):$(id -g)"
 [[ ! -e "${work}/backup/logical/${first_backup_id}" ]] || { echo "backup retention did not remove the oldest dump" >&2; exit 1; }
 
 backup_id="$(cat "${work}/backup/LATEST")"

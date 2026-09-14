@@ -30,14 +30,20 @@ database descriptor. Bundled PostgreSQL 17 remains the default and runs the HTTP
 gateway, control plane, transport service, PostgreSQL, and backup worker. An
 external PostgreSQL 17 descriptor is also implemented; it uses a dedicated
 egress network and requires `sslmode=verify-full` plus `database-ca.pem` for
-owner, runtime, and backup connections. The external MySQL and
-MariaDB descriptors are available for pre-support deployment validation, but
-their Controller production startup gate deliberately remains closed until the
-independent PR-09 acceptance matrix passes. Bundled MySQL/MariaDB is rejected.
+owner, runtime, and backup connections. External MySQL 8.4.10 and MariaDB
+12.3.2 are supported with verified TLS and backend-specific logical backups.
+Bundled MySQL/MariaDB is rejected.
 The project publishes only TCP 443. Bundled database, application, and
 observability traffic remain on internal networks. External database
 deployments additionally attach database clients to the dedicated non-internal
 `database-egress` network; no database port is published by ocservia.
+
+| Backend | Deployment | Supported on this branch |
+| --- | --- | --- |
+| PostgreSQL 17 | bundled or external | Yes; bundled remains the default |
+| MySQL 8.4.10 | external only | Yes |
+| MariaDB 12.3.2 | external only | Yes |
+| MySQL/MariaDB | bundled | No |
 
 Select a non-default descriptor explicitly:
 
@@ -47,11 +53,24 @@ OCSERV_DATABASE_DEPLOYMENT=external
 OCSERV_DATABASE_BACKUP_HOST=postgres.example.com
 ```
 
+External MySQL example (use `mariadb` for the pinned MariaDB 12.3.2 server):
+
+```dotenv
+OCSERV_DATABASE_BACKEND=mysql
+OCSERV_DATABASE_DEPLOYMENT=external
+OCSERV_DATABASE_BACKUP_HOST=mysql.example.com
+OCSERV_DATABASE_BACKUP_PORT=3306
+OCSERV_DATABASE_BACKUP_NAME=ocservia
+OCSERV_DATABASE_BACKUP_USER=ocservia_backup
+OCSERV_DATABASE_BACKUP_IMAGE=registry.example.com/ocservia-mysql-backup@sha256:<digest>
+```
+
 For MySQL/MariaDB, use `external`, provide separate owner and runtime DSNs in
 `database-owner-url` and `database-app-url`, and provision `database-ca.pem`
 plus `database-backup.cnf` in the protected secret directory. Only `migrate`
 receives the owner DSN. The runtime receives the application DSN and CA, never
-the owner credential. The backend-specific backup image must be digest-pinned
+the owner credential. Both DSNs must use `tls=true`; the production descriptor
+mounts `database-ca.pem` as the trust root. The backend-specific backup image must be digest-pinned
 through `OCSERV_DATABASE_BACKUP_IMAGE`. Snapshot restore, PITR, failover, and
 cross-engine movement are separate procedures; no PostgreSQL G6, HA, or PITR
 claim applies to either MySQL-compatible backend.
@@ -452,6 +471,11 @@ External PostgreSQL receives only verified base backup coverage from this
 deployment. Its operator must configure, retain, and test continuous WAL
 archiving independently before claiming PITR. The bundled WAL cleanup and PITR
 contract does not apply to an external server.
+
+External MySQL 8.4.10 and MariaDB 12.3.2 use the backend-specific logical
+backup and restore procedure in [MySQL and MariaDB backup and restore
+validation](mysql-backup.md). That procedure does not claim snapshot, PITR,
+failover, or cross-engine recovery coverage.
 
 Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:
 

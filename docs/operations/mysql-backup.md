@@ -1,8 +1,8 @@
 # MySQL and MariaDB backup and restore validation
 
-This is a pre-support operations contract. It does not enable production use;
-that gate remains closed until PR-09 independently validates the complete
-matrix. It covers pinned MySQL 8.4.10 and MariaDB 12.3.2 only.
+This production operations contract covers external MySQL 8.4.10 and external
+MariaDB 12.3.2 only. It does not cover bundled deployments, other server
+versions, HA, PITR, storage snapshots, or cross-engine migration.
 
 The backend-specific images built from `backup.mysql.Dockerfile` and
 `backup.mariadb.Dockerfile` use the matching native client. The worker creates

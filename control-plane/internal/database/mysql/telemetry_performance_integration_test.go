@@ -181,6 +181,17 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 		return telemetryhistory.Maintain(ctx, runtime, now, nil, func(context.Context, database.Tx) error { return nil })
 	}
 	since, _ := value.FromTime(now.Add(-24 * time.Hour))
+	planTable := "telemetry_samples"
+	planPrefix := "EXPLAIN (FORMAT JSON) "
+	if !pg {
+		planTable, _, _, _ = telemetryMonth(now)
+		planPrefix = "EXPLAIN FORMAT=JSON "
+	}
+	var historyPlan string
+	if err := owner.QueryRow(ctx, query(planPrefix+`SELECT sampled_at,value FROM `+planTable+` WHERE node_id=? AND metric=? AND sampled_at>=? ORDER BY sampled_at`), id(node), "cpu_usage_ratio", since).Scan(&historyPlan); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("history_query_plan=%s", strings.ReplaceAll(historyPlan, "\n", " "))
 	var durations [4][]time.Duration
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -237,6 +248,7 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
+	benchmarkStart := time.Now()
 	close(start)
 	last := time.Now()
 	maxGap := time.Duration(0)
@@ -295,6 +307,7 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 	for _, began := range active {
 		waits = append(waits, time.Since(began))
 	}
+	benchmarkDuration := time.Since(benchmarkStart)
 	close(errors)
 	for err := range errors {
 		t.Error(err)
@@ -327,6 +340,7 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 	if !pg {
 		t.Logf("runtime_pool=%+v", runtime.(*Backend).pool.Stats())
 	}
+	t.Logf("concurrent_throughput=%.2f_ops_per_second elapsed=%s", float64(len(durations[0])+len(durations[1])+len(durations[2])+len(durations[3]))/benchmarkDuration.Seconds(), benchmarkDuration)
 	percentile := func(values []time.Duration, p int) time.Duration {
 		v := append([]time.Duration(nil), values...)
 		sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })

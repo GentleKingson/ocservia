@@ -3,7 +3,11 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -11,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -51,8 +56,12 @@ func controllerProcessDatabase(t *testing.T) (owner, runtime connection.Options,
 		if err != nil {
 			t.Fatal("invalid fixture DSN")
 		}
+		caFile := os.Getenv("PR02_TLS_CA_FILE")
+		if caFile != "" {
+			cfg.TLSConfig = "true"
+		}
 		cfg.DBName, cfg.User, cfg.Passwd = name, "ocservia_owner", "pr02-owner-test-only"
-		owner = connection.Options{Backend: string(options.Engine), Environment: "test", URL: cfg.FormatDSN()}
+		owner = connection.Options{Backend: string(options.Engine), Environment: "production", URL: cfg.FormatDSN(), CAFile: caFile}
 		cfg.User, cfg.Passwd = user, "startup-runtime-test-only"
 		runtime = owner
 		runtime.URL = cfg.FormatDSN()
@@ -72,6 +81,26 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	dir := t.TempDir()
+	production := runtimeOptions.Environment == "production"
+	auditEventKeyFile, commandSigningKeyFile := "", ""
+	if production {
+		auditEventKeyFile = filepath.Join(dir, "audit-event-key")
+		if err := os.WriteFile(auditEventKeyFile, []byte(strings.Repeat("11", 32)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		commandSigningKeyFile = filepath.Join(dir, "controller-command-signing-key.pem")
+		if err := os.WriteFile(commandSigningKeyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	binary := filepath.Join(dir, "ocserv-control")
 	build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", binary, "../../../cmd/ocserv-control")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -85,7 +114,7 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 			}
 		}
 		values := map[string]string{
-			"OCSERV_ENVIRONMENT":               "test",
+			"OCSERV_ENVIRONMENT":               options.Environment,
 			"OCSERV_DATABASE_BACKEND":          options.Backend,
 			"OCSERV_DATABASE_URL":              options.URL,
 			"OCSERV_AUDIT_EVENT_KEY_ID":        "test-audit-event-v1",
@@ -94,6 +123,18 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 			"OCSERV_SESSION_KEY":               strings.Repeat("33", 32),
 			"OCSERV_LOCAL_AUTH_ENABLED":        "true",
 			"OCSERV_RECOMMENDED_AGENT_VERSION": "1.2.3",
+		}
+		if options.CAFile != "" {
+			values["OCSERV_DATABASE_TLS_CA_FILE"] = options.CAFile
+		}
+		if production {
+			delete(values, "OCSERV_TEST_AUDIT_EVENT_KEY_HEX")
+			values["OCSERV_AUDIT_EVENT_KEY_ID"] = "production-e2e-audit-v1"
+			values["OCSERV_AUDIT_EVENT_KEY_FILE"] = auditEventKeyFile
+			values["OCSERV_PUBLIC_ORIGIN"] = "https://controller.example.test"
+			values["OCSERV_COMMAND_SIGNING_KEY_FILE"] = commandSigningKeyFile
+			values["OCSERV_TRANSPORT_UID"] = strconv.Itoa(os.Geteuid() + 1)
+			values["OCSERV_TRANSPORT_GID"] = strconv.Itoa(os.Getegid())
 		}
 		for key, v := range extra {
 			values[key] = v
@@ -204,7 +245,9 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if err := run(runtimeOptions, bootstrap, "--bootstrap-local-admin"); err != nil {
 		t.Fatal("runtime CLI bootstrap", err)
 	}
-	installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
+	if !production {
+		installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -217,11 +260,16 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer log.Close()
-	cmd := exec.CommandContext(ctx, binary)
-	cmd.Env = environment(runtimeOptions, map[string]string{
-		"OCSERV_HTTP_ADDRESS": address, "OCSERV_PUBLIC_ORIGIN": "http://" + address,
-		"OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true",
-	})
+	processArgs := []string(nil)
+	extra := map[string]string{"OCSERV_HTTP_ADDRESS": address}
+	if production {
+		processArgs = append(processArgs, "--role=api")
+	} else {
+		extra["OCSERV_PUBLIC_ORIGIN"] = "http://" + address
+		extra["OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE"] = "true"
+	}
+	cmd := exec.CommandContext(ctx, binary, processArgs...)
+	cmd.Env = environment(runtimeOptions, extra)
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -268,7 +316,11 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	payload, _ := json.Marshal(map[string]string{"username": "process-admin", "password": password})
 	request, _ := http.NewRequestWithContext(ctx, "POST", base+"/api/v1/auth/login", bytes.NewReader(payload))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Origin", base)
+	origin := base
+	if production {
+		origin = "https://controller.example.test"
+	}
+	request.Header.Set("Origin", origin)
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -290,19 +342,24 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !json.Valid(body) {
 		t.Fatalf("real process authorized reader: %d %s", response.StatusCode, body)
 	}
-	completed := 0
-	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
-		if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil {
-			t.Fatal(err)
+	if !production {
+		completed := 0
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
+			if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil {
+				t.Fatal(err)
+			}
+			if completed > 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		if completed > 0 {
-			break
+		if completed == 0 {
+			output, _ := os.ReadFile(logPath)
+			t.Fatalf("real maintenance body did not finish with its fence\n%s", output)
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
-	if completed == 0 {
-		output, _ := os.ReadFile(logPath)
-		t.Fatalf("real maintenance body did not finish with its fence\n%s", output)
+	if production {
+		t.Log("production configuration, migration, runtime permissions, readiness, authenticated read, and database writes passed")
 	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)

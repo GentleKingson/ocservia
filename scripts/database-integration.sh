@@ -69,6 +69,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 mkdir -p "${TMP_ROOT}"
+export DATABASE_CASE_RESULTS="${TMP_ROOT}/required-case-results.jsonl"
 if [[ -n "${OCSERVIA_CONTROL_BIN:-}" ]]; then
   [[ -x "${BIN}" ]] || {
     echo "OCSERVIA_CONTROL_BIN must name an executable file" >&2
@@ -88,8 +89,9 @@ PRE34_ROOT="$(mktemp -d "${ROOT}/.p34-XXXXXX")"
 cp -R "${ROOT}/control-plane" "${PRE34_ROOT}/control-plane"
 # Do not inherit the repository workspace, which excludes this fixture module.
 (cd "${PRE34_ROOT}" && GOWORK=off go work init ./control-plane)
-rm "${PRE34_ROOT}/control-plane/migrations/000034_local_initialization.up.sql"
-rm "${PRE34_ROOT}/control-plane/migrations/000035_bounded_telemetry_retention.up.sql"
+rm "${PRE34_ROOT}/control-plane/migrations/000034_local_initialization.up.sql" \
+  "${PRE34_ROOT}/control-plane/migrations/000035_bounded_telemetry_retention.up.sql" \
+  "${PRE34_ROOT}/control-plane/migrations/000036_telemetry_owner_partitions.up.sql"
 sed '/"GRANT UPDATE (completion_pending,completed_at,approver_identity_id) ON local_auth_bootstrap TO " + identifier,/d' \
   "${ROOT}/control-plane/migrations/runner.go" >"${PRE34_ROOT}/control-plane/migrations/runner.go"
 # Restore only the historical runtime contract in this disposable fixture;
@@ -241,13 +243,18 @@ seed_verified_receipt() {
 }
 
 for major in "${POSTGRES_MAJORS[@]}"; do
+  : >"${DATABASE_CASE_RESULTS}"
   container="${PREFIX}-pg${major}"
   CONTAINERS+=("${container}")
   # Keep the selected loopback port stable across the lifecycle restart test.
   port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  case "${major}" in
+    17) postgres_image='postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f' ;;
+    18) postgres_image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
+  esac
   docker run -d --name "${container}" \
     -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-    -p "127.0.0.1:${port}:5432" "postgres:${major}-bookworm" >/dev/null
+    -p "127.0.0.1:${port}:5432" "${postgres_image}" >/dev/null
   wait_for_postgres "${container}"
   port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
@@ -294,7 +301,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
       echo 'migration accepted a checksum mismatch' >&2; exit 1
     fi
     grep -Fq 'migration 1 checksum does not match the applied schema' "${TMP_ROOT}/pg${major}-checksum-rejected.log"
+    required_cases="$(jq -s 'map(.required) | add // 0' "${DATABASE_CASE_RESULTS}")"
     echo "PostgreSQL ${major} regression: current migration, repeat migration, permissions, compatibility and checksum guards passed"
+    echo "Database acceptance required cases: backend=postgres${major} shard=regression passed=${required_cases} skipped=0"
   else
   # Preserve the latest database. Historical down chains use a separately
   # initialized schema-33 fixture, never a bypass of migration 34.
@@ -640,7 +649,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   stop_process "${pid}"
   rollback_database="ocservia_rollback_${major}"
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry -run Integration)
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment -p 1 ./internal/operations ./internal/enrollment ./internal/localslice -run Integration)
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
+    go test -p 1 ./internal/telemetry -run Integration -count=1)
   OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/test-enrollment-restart.sh" "${container}"
   # User workflows retain revision-zero commands and singleton lease state.
@@ -1074,7 +1085,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "DELETE FROM schema_migrations WHERE version = 37" >/dev/null
+  required_cases="$(jq -s 'map(.required) | add // 0' "${DATABASE_CASE_RESULTS}")"
   echo "PostgreSQL ${major} database integration complete"
+  echo "Database acceptance required cases: backend=postgres${major} shard=full passed=${required_cases} skipped=0"
   fi
 done
 
@@ -1087,7 +1100,7 @@ container="${PREFIX}-upgrade"
 CONTAINERS+=("${container}")
 docker run -d --name "${container}" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-  -p "127.0.0.1::5432" postgres:18-bookworm >/dev/null
+  -p "127.0.0.1::5432" 'postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' >/dev/null
 wait_for_postgres "${container}"
 port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
 docker exec "${container}" psql -U ocservia_owner -d ocservia -c \

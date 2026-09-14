@@ -31,7 +31,13 @@ func TestConnectionPolicy(t *testing.T) {
 			t.Fatal("secret leak")
 		}
 	}
-	for _, environment := range []string{"production", "", "staging"} {
+	production := base
+	production.Environment = "production"
+	production.DSN = "user:secret@tcp(db.internal:3306)/ocservia?tls=true"
+	if _, err := configuration(production); err != nil {
+		t.Fatalf("production TLS configuration rejected: %v", err)
+	}
+	for _, environment := range []string{"", "staging"} {
 		o := base
 		o.Environment = environment
 		if _, err := configuration(o); err == nil {

@@ -25,7 +25,14 @@ esac
 NAME="ocservia-pr02-${ENGINE}-$$"
 TLS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-pr02-tls-XXXXXX")"
 TLS_DIR="${TLS_ROOT}/certs"
+export DATABASE_CASE_RESULTS="${TLS_ROOT}/required-case-results.jsonl"
+: >"${DATABASE_CASE_RESULTS}"
 mkdir "${TLS_DIR}"
+report_required_cases() {
+  local required
+  required="$(jq -s 'map(.required) | add // 0' "${DATABASE_CASE_RESULTS}")"
+  echo "Database acceptance required cases: backend=${ENGINE} shard=${part} passed=${required} skipped=0"
+}
 diagnostics() {
   local query
   # Avoid query text (which may contain credentials); retain bounded wait/I/O evidence.
@@ -108,7 +115,7 @@ fi
 if [[ "${part}" != current ]]; then
   (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-history --select -race -timeout=60m)
 fi
-if [[ "${part}" == history ]]; then exit 0; fi
+if [[ "${part}" == history ]]; then report_required_cases; exit 0; fi
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend)Integration$')
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment --select -race -timeout=10m)
 bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
@@ -118,5 +125,6 @@ bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-auth -race -timeout=10m ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$')
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/telemetry -run '^TestTelemetryBackendWorkflowIntegration$')
 fi
-# Controller test/development selection must not unlock production startup.
+# Controller configuration checks retain the production safety requirements.
 (cd "${ROOT}/control-plane" && go test -count=1 ./internal/platform/config ./cmd/ocserv-db-foundation)
+report_required_cases

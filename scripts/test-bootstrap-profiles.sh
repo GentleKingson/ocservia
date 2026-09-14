@@ -37,7 +37,7 @@ worker_flags = {
   "web" => "run_web", "database-smoke" => "run_database"
 }
 reject("Basic CI job set drifted") unless
-  jobs.keys.sort == (worker_flags.keys + %w[ci-relevance basic-ci-result database-history-full]).sort
+  jobs.keys.sort == (worker_flags.keys + %w[ci-relevance basic-ci-result database-history-full database-recovery-full]).sort
 reject("workflow name must be Basic CI") unless workflow.fetch("name") == "Basic CI"
 trigger = workflow.fetch(true)
 reject("Basic CI triggers drifted") unless trigger.keys.sort == %w[pull_request push workflow_dispatch]
@@ -71,7 +71,8 @@ expected_commands = {
   "go" => ["scripts/bootstrap.sh go-test", "scripts/go-check.sh standard"],
   "rust" => ["scripts/bootstrap.sh rust-basic", "scripts/rust-check.sh"],
   "web" => ["scripts/bootstrap.sh web", "source scripts/env.sh\ncd web\nnpx playwright install --with-deps chromium\n", "scripts/web-check.sh"],
-  "database-history-full" => ["scripts/bootstrap.sh go-test", "bash scripts/database-foundation-integration.sh", 'echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"']
+  "database-history-full" => ["scripts/bootstrap.sh go-test", "bash scripts/database-foundation-integration.sh", 'echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"'],
+  "database-recovery-full" => ["scripts/test-database-deployment-config.sh", "RUN_ID=\"${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENGINE}\" \\\n  ARTIFACT_DIR=\"${RUNNER_TEMP}/database-recovery-${ENGINE}\" \\\n  bash scripts/i18-mysql-backup-restore-smoke.sh\n", 'echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"']
 }
 expected_commands.each do |id, commands|
   actual = jobs.fetch(id).fetch("steps").filter_map { |step| step["run"] }
@@ -95,10 +96,10 @@ reject("database smoke must cover PostgreSQL 17/18, MySQL and MariaDB independen
   database.fetch("env") == {"PG_MAJOR" => "${{ matrix.postgres }}", "ENGINE" => "${{ matrix.engine }}",
     "DATABASE_TEST_SCOPE" => "${{ needs.ci-relevance.outputs.database_scope }}"} &&
   database.fetch("strategy") == {"fail-fast" => false, "matrix" => {"include" => [
-    {"engine" => "postgres", "postgres" => "17"},
-    {"engine" => "postgres", "postgres" => "18"},
-    {"engine" => "mysql"},
-    {"engine" => "mariadb"}
+    {"engine" => "postgres", "postgres" => "17", "version" => "17.10"},
+    {"engine" => "postgres", "postgres" => "18", "version" => "18.6"},
+    {"engine" => "mysql", "version" => "8.4.10"},
+    {"engine" => "mariadb", "version" => "12.3.2"}
   ]}}
 database_commands = database.fetch("steps").select { |step| step.key?("run") }
 reject("database jobs must route only to their own backend test script") unless
@@ -115,14 +116,30 @@ reject("history must consume routing with two independent full engines") unless
   history.fetch("if") == "needs.ci-relevance.outputs.profile == 'full'" &&
   history.fetch("strategy") == {"fail-fast" => false, "matrix" => {"engine" => %w[mysql mariadb]}} &&
   history.fetch("env") == {"ENGINE" => "${{ matrix.engine }}", "DATABASE_TEST_SCOPE" => "${{ needs.ci-relevance.outputs.database_scope }}", "DATABASE_FULL_PART" => "history"}
-{"database-smoke" => %w[postgres17 postgres18 mysql mariadb], "database-history-full" => %w[mysql mariadb]}.each do |id, parts|
+recovery = jobs.fetch("database-recovery-full")
+reject("recovery must consume routing with two independent full engines") unless
+  recovery.fetch("needs") == "ci-relevance" &&
+  recovery.fetch("if") == "needs.ci-relevance.outputs.profile == 'full'" &&
+  recovery.fetch("strategy") == {"fail-fast" => false, "matrix" => {"engine" => %w[mysql mariadb]}} &&
+  recovery.fetch("env") == {"ENGINE" => "${{ matrix.engine }}"}
+{"database-smoke" => %w[postgres17 postgres18 mysql mariadb], "database-history-full" => %w[mysql mariadb], "database-recovery-full" => %w[mysql mariadb]}.each do |id, parts|
   reject("#{id} must expose every completed shard") unless jobs.fetch(id).fetch("outputs") ==
     parts.to_h { |part| [part, "${{ steps.completed.outputs.#{part} }}"] }
 end
 reject("database timeout budgets changed") unless [database, history].all? { |job| job.fetch("timeout-minutes") == 75 }
+reject("database recovery timeout budget changed") unless recovery.fetch("timeout-minutes") == 30
 reject("database smoke must let the script build its own control binary") unless
   database_script.include?('go build -trimpath -o "${BIN}" ./cmd/ocserv-control')
+reject("PostgreSQL acceptance images must pin exact patch tags and digests") unless
+  database_script.include?("postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f") &&
+  database_script.include?("postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af")
+reject("PostgreSQL acceptance versions must match toolchains.lock") unless
+  toolchains.lines.map(&:strip).include?("postgresql_17=17.10") &&
+  toolchains.lines.map(&:strip).include?("postgresql_18=18.6")
 foundation_script = File.read(File.join(root, "scripts/database-foundation-integration.sh"))
+reject("MySQL-compatible acceptance images must pin exact patch tags and digests") unless
+  foundation_script.include?("mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6") &&
+  foundation_script.include?("mariadb:12.3.2@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc")
 [database_script, foundation_script].each do |script|
   reject("manual scripts must default to full and reject invalid scope") unless
     script.include?('scope="${DATABASE_TEST_SCOPE-full}"') &&
@@ -134,6 +151,10 @@ foundation_script = File.read(File.join(root, "scripts/database-foundation-integ
 end
 reject("pre-34 build must be full-only") unless
   database_script.index('if [[ "${scope}" == full ]]; then') < database_script.index('PRE34_ROOT="$(mktemp')
+reject("pre-34 fixture must exclude every later migration") unless
+  %w[000034_local_initialization 000035_bounded_telemetry_retention 000036_telemetry_owner_partitions].all? do |migration|
+    database_script.include?("#{migration}.up.sql")
+  end
 critical_pg = database_script.split('if [[ "${scope}" == regression ]]; then', 2).last.split("\n  else\n", 2).first
 reject("PostgreSQL critical path must retain all business groups without an early exit") unless
   %w[regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-oidc regression-telemetry].all? { |group| critical_pg.include?(group) } &&
@@ -141,7 +162,7 @@ reject("PostgreSQL critical path must retain all business groups without an earl
 reject("full MySQL must use complementary shards and retain business acceptance") unless
   foundation_script.include?('backend-mysql-current-full -race -timeout=60m "${package}" -skip "${history_pattern}"') &&
   foundation_script.include?('backend-mysql-history --select -race -timeout=60m') &&
-  foundation_script.include?('if [[ "${part}" == history ]]; then exit 0; fi') &&
+  foundation_script.include?('if [[ "${part}" == history ]]; then report_required_cases; exit 0; fi') &&
   foundation_script.include?("backend-coordination -race") && foundation_script.include?("backend-auth -race")
 reject("PostgreSQL 17 must skip the legacy upgrade fixture") unless
   database_script.index('if [[ "${PG_MAJOR}" == "17" ]]; then') < database_script.index('container="${PREFIX}-upgrade"')
@@ -158,7 +179,7 @@ end
 result = jobs.fetch("basic-ci-result")
 reject("Basic CI Result must always summarize exactly the basic jobs and router") unless
   result.fetch("name") == "Basic CI Result" && result.fetch("if") == "always()" &&
-  result.fetch("needs").sort == (worker_flags.keys + %w[ci-relevance database-history-full]).sort
+  result.fetch("needs").sort == (worker_flags.keys + %w[ci-relevance database-history-full database-recovery-full]).sort
 reject("Basic CI Result must be documented") unless actions_doc.include?("Basic CI Result")
 require "json"
 require "open3"
@@ -171,19 +192,22 @@ summary = result.fetch("steps").first.fetch("run")
   needs["ci-relevance"]["outputs"].merge!("profile" => profile, "database_scope" => profile == "full" ? "full" : "regression")
   worker_flags.each_key { |id| needs[id] = {"result" => selected ? "success" : "skipped"} }
   needs["database-history-full"] = {"result" => profile == "full" ? "success" : "skipped"}
-  {"database-smoke" => %w[postgres17 postgres18 mysql mariadb], "database-history-full" => %w[mysql mariadb]}.each do |id, parts|
+  needs["database-recovery-full"] = {"result" => profile == "full" ? "success" : "skipped"}
+  {"database-smoke" => %w[postgres17 postgres18 mysql mariadb], "database-history-full" => %w[mysql mariadb], "database-recovery-full" => %w[mysql mariadb]}.each do |id, parts|
     next unless needs[id]["result"] == "success"
     needs[id]["outputs"] = parts.to_h { |part| [part, "success"] }
   end
   _, _, status = Open3.capture3({"RESULTS" => JSON.generate(needs)}, "bash", "-eo", "pipefail", "-c", summary)
   reject("summary rejected valid selected/skipped results") unless status.success?
-  %w[success failure cancelled skipped missing].each do |state|
-    next if state == needs["database-history-full"]["result"]
-    broken = Marshal.load(Marshal.dump(needs))
-    if state == "missing" then broken.delete("database-history-full")
-    else broken["database-history-full"]["result"] = state end
-    _, _, status = Open3.capture3({"RESULTS" => JSON.generate(broken)}, "bash", "-eo", "pipefail", "-c", summary)
-    reject("summary accepted unexpected history: #{profile}/#{state}") if status.success?
+  %w[database-history-full database-recovery-full].each do |full_job|
+    %w[success failure cancelled skipped missing].each do |state|
+      next if state == needs[full_job]["result"]
+      broken = Marshal.load(Marshal.dump(needs))
+      if state == "missing" then broken.delete(full_job)
+      else broken[full_job]["result"] = state end
+      _, _, status = Open3.capture3({"RESULTS" => JSON.generate(broken)}, "bash", "-eo", "pipefail", "-c", summary)
+      reject("summary accepted unexpected full job: #{full_job}/#{profile}/#{state}") if status.success?
+    end
   end
   needs.each do |id, job|
     next unless id.start_with?("database-") && job["result"] == "success"
