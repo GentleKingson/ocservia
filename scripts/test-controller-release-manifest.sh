@@ -41,13 +41,20 @@ assert_rejected() {
 run_manifest "${fixture}/manifest-a.json"
 run_manifest "${fixture}/manifest-b.json"
 cmp -s "${fixture}/manifest-a.json" "${fixture}/manifest-b.json"
-jq -e '
+expected_head=0
+for migration in "${ROOT}"/control-plane/migrations/*.up.sql; do
+  number="$(basename "${migration}")"
+  number="${number%%_*}"
+  if (( 10#${number} > expected_head )); then expected_head=$((10#${number})); fi
+done
+[[ "${expected_head}" -gt 0 ]]
+jq -e --argjson expected_head "${expected_head}" '
   .manifest_version == 1 and
   .release_version == "0.2.0" and
   .release_tag == "v0.2.0" and
   .source_commit == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
   .platform == "linux/amd64" and
-  .database_migration == 30 and
+  .database_migration == $expected_head and
   (.images | keys == ["backup", "control", "gateway", "otel", "postgres", "transport"]) and
   (.images | to_entries | all(.value | test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
 ' "${fixture}/manifest-a.json" >/dev/null

@@ -50,6 +50,37 @@ snapshot="${DESTDIR}/var/lib/ocservia-upgrade/upgrade-backup"
 sha256sum "${snapshot}/"* >"${work}/snapshot"
 "${new}/scripts/upgrade-agent.sh"
 sha256sum -c "${work}/snapshot"
+assert_retry_rejected() {
+  local label="$1" expected="$2"
+  find "${DESTDIR}" -type f -exec sha256sum {} + | sort >"${work}/before-rejection"
+  if "${new}/scripts/upgrade-agent.sh" >"${work}/rejection.log" 2>&1; then
+    echo "unsafe identical retry accepted: ${label}" >&2; exit 1
+  fi
+  grep -F "${expected}" "${work}/rejection.log"
+  find "${DESTDIR}" -type f -exec sha256sum {} + | sort >"${work}/after-rejection"
+  cmp "${work}/before-rejection" "${work}/after-rejection"
+}
+mv "${snapshot}/MANIFEST.sha256" "${work}/manifest"
+assert_retry_rejected missing-manifest 'missing, non-regular, or symlinked file'
+mv "${work}/manifest" "${snapshot}/MANIFEST.sha256"
+cp -p "${snapshot}/ocservia-agent.previous" "${work}/agent.previous"
+printf 'damage\n' >>"${snapshot}/ocservia-agent.previous"
+assert_retry_rejected corrupt-member 'digest does not match its trusted manifest'
+cp -p "${work}/agent.previous" "${snapshot}/ocservia-agent.previous"
+rollback="${DESTDIR}/usr/libexec/ocservia/ocservia-agent-rollback"
+mv "${rollback}" "${work}/rollback"
+ln -s "${work}/rollback" "${rollback}"
+assert_retry_rejected rollback-symlink 'must be regular files'
+rm "${rollback}"
+mv "${work}/rollback" "${rollback}"
+chmod 777 "${rollback}"
+assert_retry_rejected rollback-mode 'unsafe owner, group, mode, or link count'
+chmod 755 "${rollback}"
+chown 61000:61000 "${rollback}"
+assert_retry_rejected rollback-owner 'unsafe owner, group, mode, or link count'
+chown root:root "${rollback}"
+"${new}/scripts/upgrade-agent.sh"
+sha256sum -c "${work}/snapshot"
 "${new}/scripts/rollback-agent.sh"
 cmp "${old}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia/ocservia-agent"
 "${new}/scripts/upgrade-agent.sh"

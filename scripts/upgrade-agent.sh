@@ -452,6 +452,7 @@ installed_agent="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 installed_privd="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
 installed_upgrader="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
 installed_verifier="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
+installed_rollback="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
 installed_agent_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 installed_privd_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 installed_upgrader_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"
@@ -474,6 +475,7 @@ fi
 for installed_file in \
   "${installed_upgrader}" \
   "${installed_verifier}" \
+  "${installed_rollback}" \
   "${installed_upgrader_unit}"; do
   if [[ -e "${installed_file}" || -L "${installed_file}" ]] && \
     [[ ! -f "${installed_file}" || -L "${installed_file}" ]]; then
@@ -493,6 +495,9 @@ if [[ -e "${installed_upgrader}" || -L "${installed_upgrader}" ]]; then
 fi
 if [[ -e "${installed_verifier}" || -L "${installed_verifier}" ]]; then
   validate_installed_snapshot_source "${installed_verifier}" 755
+fi
+if [[ -e "${installed_rollback}" || -L "${installed_rollback}" ]]; then
+  validate_installed_snapshot_source "${installed_rollback}" 755
 fi
 if [[ -e "${installed_upgrader_unit}" || -L "${installed_upgrader_unit}" ]]; then
   validate_installed_snapshot_source "${installed_upgrader_unit}" 644
@@ -515,11 +520,13 @@ for unit in ocservia-agent.service ocservia-privd.service ocservia-upgrader@.ser
   cmp -s "${ROOT}/deploy/systemd/${unit}" "${DESTDIR}${PREFIX}/lib/systemd/system/${unit}" || same_install=false
 done
 cmp -s "${ROOT}/scripts/verify-agent-package.sh" "${installed_verifier}" || same_install=false
-cmp -s "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback" || same_install=false
+cmp -s "${ROOT}/scripts/rollback-agent.sh" "${installed_rollback}" || same_install=false
 if [[ "${INSTALL_PRODUCTION_RELAYS:-false}" == true || -e "${installed_relay_dropin}" ]]; then
   cmp -s "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" "${installed_relay_dropin}" || same_install=false
 fi
 if [[ "${same_install}" == true ]]; then
+  DESTDIR="${DESTDIR}" PREFIX="${PREFIX}" UPGRADE_STATE_DIR="${UPGRADE_STATE_DIR}" BACKUP_DIR="${BACKUP_DIR}" \
+    bash "${ROOT}/scripts/rollback-agent.sh" --verify-only
   echo "Identical verified Agent package already installed; preserving rollback snapshot"
   if [[ -z "${DESTDIR}" ]]; then
     systemctl try-restart ocservia-privd.service ocservia-agent.service

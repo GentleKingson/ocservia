@@ -5,6 +5,13 @@ DESTDIR="${DESTDIR:-}"
 PREFIX="${PREFIX:-/usr}"
 UPGRADE_STATE_DIR="${UPGRADE_STATE_DIR:-/var/lib/ocservia-upgrade}"
 BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${UPGRADE_STATE_DIR}/upgrade-backup}"
+verify_only=false
+if [[ "$#" == 1 && "$1" == --verify-only ]]; then
+  verify_only=true
+elif [[ "$#" != 0 ]]; then
+  echo 'usage: rollback-agent.sh [--verify-only]' >&2
+  exit 2
+fi
 
 rollback_error() {
   echo "Agent rollback blocked before modification: $1" >&2
@@ -175,6 +182,11 @@ resolve_optional_backup 'ocservia-upgrader@.service' 644
 upgrader_unit_backup="${resolved_backup}"
 resolve_optional_backup ocservia-agent-verify 755
 verifier_backup="${resolved_backup}"
+
+if [[ "${verify_only}" == true ]]; then
+  echo "Matched rollback snapshot verified without modification"
+  exit 0
+fi
 
 libexec="${DESTDIR}${PREFIX}/libexec/ocservia"
 systemd="${DESTDIR}${PREFIX}/lib/systemd/system"

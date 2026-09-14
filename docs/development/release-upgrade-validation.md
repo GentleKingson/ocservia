@@ -42,6 +42,10 @@ identity, relay configuration/token/drop-in, ownership and modes, execute
 candidate binaries, reinstall identical packages, reject corrupt payloads
 and unsafe upgrade prerequisites, and execute the installed rollback command.
 Rollback restores runtime binaries/units, not the package-manager version.
+An identical retry first uses the rollback command's `--verify-only` snapshot
+validation: missing manifests, corrupt members or unsafe installed rollback
+scripts fail before any retry restart. A broken snapshot is not silently
+replaced with candidate files.
 Unconfigured installs stay disabled. Restart requests during rollback are
 not proof of healthy services or a fresh online Controller report.
 

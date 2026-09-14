@@ -24,7 +24,11 @@ Implementation is submitted for review; real four-cell upgrade acceptance is
   package/systemd lifecycle. Existing user edits selecting v0.5.0 are retained.
 - Fixed `scripts/upgrade-agent.sh`: a verified identical-package retry no
   longer overwrites the old matched rollback snapshot with candidate files.
-  File comparison still permits re-upgrade after rollback.
+  Retry now also requires the existing snapshot to pass the real rollback
+  validator (`rollback-agent.sh --verify-only`) before returning success or
+  restarting services. The installed rollback script must be a regular,
+  non-symlinked root:root 0755 file with one link. File comparison still
+  permits re-upgrade after rollback.
 - Added `scripts/test-release-upgrade.{sh,mjs}` and
   `scripts/test-agent-upgrade-retry.sh`; updated the shared-build assertions
   in `scripts/test-controller-release-manifest.sh` and GitHub Actions docs.
@@ -45,11 +49,14 @@ systemd units were installed on the shared host.
 | Diagnostic secret redaction and workflow/publishing contracts | PASS |
 | Real installer retry/rollback/re-upgrade with stub binaries in DESTDIR | PASS, unit regression only |
 | `scripts/docs-check.sh` | PASS |
-| Existing Controller manifest test | FAIL: pre-existing schema-30 assertion, current migrations reach 36 |
+| Controller manifest test, including shared build/publishing assertions | PASS after replacing the stale schema-30 assertion with dynamic migration head |
+| Retry with missing manifest, corrupt snapshot member or unsafe installed rollback script | PASS: rejected before modification |
 
-The existing manifest test fails before the changed build assertions. Its
-unrelated hard-coded migration expectation was not changed. Shared build and
-publication conditions are also checked by the new focused contract test.
+The original review run found that the manifest test stopped at its stale
+schema-30 assertion before reaching the changed build assertions. The review
+follow-up computes the expected head from `control-plane/migrations/*.up.sql`
+instead of hard-coding 30 or 36, and reruns the whole test. Shared build and
+publication conditions are also checked by the focused contract test.
 No candidate package/image build or published-package upgrade is claimed by
 these static and fixture tests.
 
