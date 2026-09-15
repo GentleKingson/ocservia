@@ -20,7 +20,8 @@ export OCSERV_OIDC_REDIRECT_URL=https://localhost/api/v1/auth/callback
 export OCSERV_CERTIFICATE_SIGNER_URL=https://172.30.240.1:19443/signer
 export OCSERV_RELAY_URL_A=https://172.30.240.1:19443/relay-a OCSERV_RELAY_URL_B=https://172.30.240.1:19443/relay-b
 export OCSERV_OTEL_BACKEND_ENDPOINT=172.30.240.1:19443
-export OCSERV_AUDIT_EVENT_KEY_ID=upgrade-test OCSERV_BACKUP_INTERVAL_SECONDS=60
+# The explicit post-data backup must not race the worker's periodic cycle.
+export OCSERV_AUDIT_EVENT_KEY_ID=upgrade-test OCSERV_BACKUP_INTERVAL_SECONDS=86400
 unset OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH OCSERV_LOCAL_AUTH_ENABLED
 unset OCSERV_DATABASE_BACKEND OCSERV_DATABASE_DEPLOYMENT
 record() { printf '%s\n' "$@" >>"${UPGRADE_SCENARIOS_FILE}"; }
@@ -206,6 +207,13 @@ compose run --rm --no-deps backup --once >"${ARTIFACT_DIR}/baseline-backup.log" 
 backup_id="$(sudo cat "${OCSERV_BACKUP_DIR}/LATEST")"
 [[ "${backup_id}" =~ ^[a-zA-Z0-9._-]+$ ]]
 sudo cp -a "${OCSERV_BACKUP_DIR}/base/${backup_id}/." "${work}/restore/"
+# Production appends this bookkeeping marker after pg_basebackup's manifest.
+# Check it before removing it only from the disposable PostgreSQL restore copy.
+sudo test -f "${work}/restore/OCSERVIA_BACKUP_ID"
+sudo test ! -L "${work}/restore/OCSERVIA_BACKUP_ID"
+[[ "$(sudo cat "${work}/restore/OCSERVIA_BACKUP_ID")" == "${backup_id}" ]]
+printf '%s\n' "${backup_id}" >"${ARTIFACT_DIR}/backup-id.txt"
+sudo rm -- "${work}/restore/OCSERVIA_BACKUP_ID"
 
 # Load the exact four built archives once; Docker push yields registry manifest
 # digests. An image config ID is never used as a release digest.

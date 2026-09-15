@@ -135,7 +135,7 @@ cleanup() {
     docker rm -f -- "${container}" >/dev/null 2>&1 || true
     docker rmi -f -- "${container_image}" >/dev/null 2>&1 || true
   fi
-  rm -rf -- "${work}" || status=1
+  sudo rm -rf -- "${work}" || status=1
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
