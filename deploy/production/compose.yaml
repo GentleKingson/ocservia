@@ -180,6 +180,10 @@ services:
   transportd:
     <<: *service-defaults
     image: ${OCSERV_TRANSPORT_IMAGE:?set OCSERV_TRANSPORT_IMAGE to a digest-pinned image}
+    entrypoint: ["/usr/local/libexec/ocservia-transportd-relays"]
+    environment:
+      OCSERV_RELAY_URL_A: ${OCSERV_RELAY_URL_A:?set the dedicated HTTPS relay URL}
+      OCSERV_RELAY_URL_B: ${OCSERV_RELAY_URL_B:-}
     command:
       - --socket
       - /run/ocserv-platform/transportd.sock
@@ -191,12 +195,6 @@ services:
       - "65532"
       - --key-file
       - /run/secrets/controller_iroh_key
-      - --relay-mode
-      - custom
-      - --relay-url
-      - ${OCSERV_RELAY_URL_A:?set the first dedicated HTTPS relay URL}
-      - --relay-url
-      - ${OCSERV_RELAY_URL_B:?set the second dedicated HTTPS relay URL}
       - --relay-token-file
       - /run/secrets/relay_access_token
       - --known-agent-handshake-rate
@@ -239,7 +237,7 @@ services:
       - trust-runtime:/run/ocserv-trust
     tmpfs:
       - /tmp:size=8m,mode=0700
-    networks: [application, observability]
+    networks: [application, observability, relay-egress]
     depends_on:
       transport-runtime-init:
         condition: service_completed_successfully
@@ -279,6 +277,8 @@ services:
           pids: 256
 
 networks:
+  # Only transportd needs outbound HTTPS to independent dedicated Relays.
+  relay-egress: {}
   frontend: {}
   application:
     internal: true

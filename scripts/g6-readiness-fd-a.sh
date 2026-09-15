@@ -1159,6 +1159,10 @@ phase_cleanup() {
   return "${status}"
 }
 
+# Local integration probes can reuse setup and approval helpers without
+# executing a formal multi-failure-domain phase or changing its assertions.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
+
 case "${1:-}" in
 prepare) phase_prepare ;;
 publish-shared-secrets) phase_publish_shared_secrets "${2:?recipient certificate directory is required}" ;;

@@ -12,6 +12,7 @@ RUN groupadd --system --gid 65532 ocservia \
     && install -d -o transportd -g ocservia -m 0750 /run/ocserv-platform \
     && install -d -o 65534 -g ocservia -m 0750 /run/ocserv-trust
 COPY --chmod=0555 deploy/prepare-transport-runtime.sh /usr/local/libexec/ocservia-prepare-transport-runtime
+COPY --chmod=0555 deploy/production/transportd-relays.sh /usr/local/libexec/ocservia-transportd-relays
 USER transportd:ocservia
 
 FROM runtime-base

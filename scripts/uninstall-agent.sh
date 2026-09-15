@@ -36,7 +36,8 @@ rm -f "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback" \
-  "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
+  "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify" \
+  "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-relays"
 rmdir "${DESTDIR}${PREFIX}/libexec/ocservia" 2>/dev/null || true
 if [[ -z "${DESTDIR}" ]]; then
   systemctl daemon-reload

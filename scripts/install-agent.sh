@@ -74,6 +74,7 @@ validate_verified_package_source() {
     "${ROOT}/deploy/systemd/ocservia-privd.service" \
     "${ROOT}/deploy/systemd/ocservia-upgrader@.service" \
     "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" \
+    "${ROOT}/deploy/production/systemd/agent-relays.sh" \
     "${ROOT}/deploy/production/systemd/relays.env.example"; do
     if [[ ! -f "${source}" || -L "${source}" || "$(stat -c '%u:%g:%h' -- "${source}")" != "0:0:1" ]] || \
       (( (8#$(stat -c '%a' -- "${source}") & 8#022) != 0 )); then
@@ -225,6 +226,7 @@ install -m 0755 -- "${ROOT}/rust/target/release/ocservia-privd" "${DESTDIR}${PRE
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-upgrader" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
 install -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
 install -m 0755 -- "${ROOT}/scripts/verify-agent-package.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
+install -m 0755 -- "${ROOT}/deploy/production/systemd/agent-relays.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-relays"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-agent.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-privd.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-upgrader@.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"

@@ -40,7 +40,15 @@ sudo INSTALL_PRODUCTION_RELAYS=true \
   "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
 
-Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with both dedicated HTTPS relay URLs. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
+Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with required HTTPS `RELAY_URL_A` and optional distinct HTTPS `RELAY_URL_B`. Empty or absent B selects non-redundant single-relay operation. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
+
+The production drop-in executes the packaged fixed launcher
+`/usr/libexec/ocservia/ocservia-agent-relays`, which constructs one or two URL
+arguments and then replaces itself with the Agent. Base development units and
+direct binary invocations are unchanged. Archive and native installations,
+upgrades, rollback snapshots, and uninstall include this launcher; upgrades
+preserve operator configuration and identity. Uninstall removes the launcher
+but retains configuration and state unless the existing purge option is used.
 
 The verifier copies the archive, signed checksum, signature, and pinned public
 key into a unique `root:root` mode `0700` directory below
@@ -143,7 +151,7 @@ with read-only capabilities; mutation capability requires the two exact bound
 descriptors.
 After the preflight, the script retains one matched snapshot of the previous
 Agent and privd binaries, both base systemd units, and the production relay
-drop-in presence and content under the root-only
+drop-in and launcher presence and content under the root-only
 `/var/lib/ocservia-upgrade/upgrade-backup` hierarchy. This directory is outside
 privd's systemd-managed `StateDirectory`, so service startup cannot rewrite
 rollback evidence ownership. A root-owned manifest binds

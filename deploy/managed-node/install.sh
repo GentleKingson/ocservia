@@ -560,7 +560,8 @@ require_commands() {
 
 validate_operator_inputs() {
   local variable
-  for variable in CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
+  RELAY_URL_B="${RELAY_URL_B:-}"
+  for variable in CONTROLLER_ENDPOINT_ID RELAY_URL_A \
     RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE; do
     [[ -n "${!variable:-}" ]] ||
       fail "${variable} is not set; export the managed-node configuration before running the installer"
@@ -568,13 +569,20 @@ validate_operator_inputs() {
   [[ "${CONTROLLER_ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "CONTROLLER_ENDPOINT_ID must be the 64-lowercase-hex Controller EndpointID"
   for variable in RELAY_URL_A RELAY_URL_B; do
+    [[ "${variable}" == RELAY_URL_B && -z "${RELAY_URL_B}" ]] && continue
     case "${!variable}" in
       https://*) ;;
       *) fail "${variable} must be an https:// dedicated relay URL" ;;
     esac
+    # These values are written literally to a systemd EnvironmentFile.
+    # Reject characters that cannot round-trip; the binary validates URLs.
+    if [[ "${!variable}" =~ [[:space:]\"\'\`\$\\\?#@] ]]; then
+      fail "${variable} must be literal credential-free HTTPS without query or fragment"
+    fi
   done
+  # shellcheck disable=SC2153 # A was required through the allowlisted loop above.
   [[ "${RELAY_URL_A}" != "${RELAY_URL_B}" ]] ||
-    fail "RELAY_URL_A and RELAY_URL_B must be two distinct dedicated relay URLs"
+    fail "RELAY_URL_A and nonempty RELAY_URL_B must be distinct dedicated relay URLs"
   USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-user-password-v1}"
   P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-p12-password-v1}"
   for variable in USER_PASSWORD_SEAL_KEY_ID P12_PASSWORD_SEAL_KEY_ID; do
@@ -1132,6 +1140,10 @@ print_services_active() {
 }
 
 converge_enrollment() {
+  local -a relay_args=(--relay-mode custom --relay-url "${RELAY_URL_A}")
+  if [[ -n "${RELAY_URL_B}" ]]; then
+    relay_args+=(--relay-url "${RELAY_URL_B}")
+  fi
   local node_id staging metadata rerun_instruction
   # The single-file mode has no stable script path to print, and a rerun
   # without the version pin would fall back to the legacy checkout identity
@@ -1173,9 +1185,7 @@ converge_enrollment() {
     --user-password-seal-public-key-sha256 "${USER_SEAL_DESCRIPTOR}" \
     --p12-password-seal-key-id "${P12_PASSWORD_SEAL_KEY_ID}" \
     --p12-password-seal-public-key-sha256 "${P12_SEAL_DESCRIPTOR}" \
-    --relay-mode custom \
-    --relay-url "${RELAY_URL_A}" \
-    --relay-url "${RELAY_URL_B}" \
+    "${relay_args[@]}" \
     --relay-token-file "${RELAY_TOKEN_FILE}")" ||
     fail "enrollment failed; the identity and prepared configuration are unchanged — create a fresh one-time token and rerun (a token is one-time and short-lived)"
   node_id="$(printf '%s\n' "${node_id}" | awk 'NF {last=$0} END {print last}')"

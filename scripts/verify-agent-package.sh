@@ -217,6 +217,25 @@ if [[ ! -d "${package_root}" || -L "${package_root}" ]]; then
   echo "verified package root is missing or unsafe" >&2
   exit 1
 fi
+# Historical packages remain verifiable, but a launcher-based service must
+# ship its launcher. Refuse handing a live single-Relay node to old scripts.
+relay_launcher="${package_root}/deploy/production/systemd/agent-relays.sh"
+if grep -Fq '/usr/libexec/ocservia/ocservia-agent-relays' \
+  "${package_root}/deploy/production/systemd/ocservia-agent-relays.conf"; then
+  [[ -f "${relay_launcher}" && ! -L "${relay_launcher}" && -x "${relay_launcher}" ]] || {
+    echo 'package is missing the production Relay launcher' >&2
+    exit 1
+  }
+fi
+if [[ -e "${DESTDIR:-}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" && ! -f "${relay_launcher}" ]]; then
+  relay_env="${DESTDIR:-}/etc/ocservia-agent/relays.env"
+  relay_a="$(sed -n 's/^RELAY_URL_A=//p' "${relay_env}" | tail -n 1)"
+  relay_b="$(sed -n 's/^RELAY_URL_B=//p' "${relay_env}" | tail -n 1)"
+  if [[ "${relay_a}" != https://?* || "${relay_b}" != https://?* || "${relay_a}" == "${relay_b}" ]]; then
+    echo 'target predates single Relay support; restore valid distinct HTTPS A/B and both Relay services before downgrade' >&2
+    exit 1
+  fi
+fi
 if find "${package_root}" -xdev \! -type f \! -type d -print -quit | grep -q -- .; then
   echo "extracted package contains an unsupported filesystem object" >&2
   exit 1

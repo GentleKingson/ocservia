@@ -68,8 +68,13 @@ from an unverified directory.
 
 ## Relay is unavailable
 
-Keep the healthy dedicated relay configured, repair the failed relay, and
-verify both relay URLs independently. Do not fall back to a public relay or
+With one relay, restore the same address, certificate and credentials and
+verify fresh heartbeats and command results. Communication that depends on
+that relay is interrupted until recovery; this is not standby failover.
+With two, keep the healthy relay configured, repair the failed relay, and
+verify both URLs independently. Check DNS, HTTPS egress and authenticated
+relay connections: a healthy container or local socket is not that evidence.
+Do not fall back to a public relay or
 replace the Controller or Agent identity key.
 
 ## Database recovery is needed

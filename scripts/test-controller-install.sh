@@ -116,6 +116,7 @@ cat >"${repo}/deploy/production/controller.sh" <<'EOF'
 set -euo pipefail
 controller_log="${INSTALL_TEST_CONTROLLER_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/nonexistent}.controller.log}"
 printf '%s\n' "$*" >>"${controller_log}"
+printf 'relay-a:%s\nrelay-b:%s\n' "${OCSERV_RELAY_URL_A-<unset>}" "${OCSERV_RELAY_URL_B-<unset>}" >>"${controller_log}"
 exit "${MOCK_CONTROLLER_EXIT:-0}"
 EOF
 
@@ -616,6 +617,31 @@ if can_root; then
     assert_log_contains "${root_controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
     as_root chown -R "$(id -u):$(id -g)" "${repo}"
     echo "the operator root-lifecycle command forwards only production configuration across sudo env_reset"
+    for single_b in unset empty override; do
+      reset_logs
+      reset_checkout
+      printf 'OCSERV_RELAY_URL_A=https://relay-file.example.test\n' >"${repo}/install.env"
+      if [[ "${single_b}" == empty ]]; then printf 'OCSERV_RELAY_URL_B=\n' >>"${repo}/install.env"; fi
+      if [[ "${single_b}" == override ]]; then printf 'OCSERV_RELAY_URL_B=https://relay-b.example.test\n' >>"${repo}/install.env"; fi
+      RUN_STATUS=0
+      RUN_OUTPUT="$(
+        export PATH="${root_lifecycle_bin}"
+        export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
+        export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem"
+        unset OCSERV_RELAY_URL_A OCSERV_RELAY_URL_B
+        if [[ "${single_b}" == override ]]; then export OCSERV_RELAY_URL_B=; fi
+        cd -- "${repo}"
+        "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1
+      )" || RUN_STATUS=$?
+      assert_status 0
+      assert_log_contains "${root_controller_log}" 'relay-a:https://relay-file.example.test'
+      if [[ "${single_b}" == unset ]]; then
+        assert_log_contains "${root_controller_log}" 'relay-b:<unset>'
+      else
+        grep -qx 'relay-b:' "${root_controller_log}" || die 'sudo lost explicit empty Relay B'
+      fi
+      as_root chown -R "$(id -u):$(id -g)" "${repo}"
+    done
   fi
 
   # 6d. --root-lifecycle resolves install.env as the launcher user and

@@ -240,6 +240,8 @@ assert_state() {
   local context="$1" expected_version="$2" want_upgrader="$3" want_version_query="$4"
   local version_output binary
   if [[ "${expected_version}" == "${VERSION}" ]]; then
+    sudo test -x /usr/libexec/ocservia/ocservia-agent-relays \
+      || { echo "${context}: candidate Relay launcher missing" >&2; exit 1; }
     for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
       version_output="$(sudo "/usr/libexec/ocservia/${binary}" --version)"
       [[ "${version_output}" == "${binary} ${VERSION}" ]]
@@ -425,6 +427,8 @@ DOCKERFILE
     local context="$1" expected_version="$2" want_upgrader="$3"
     local binary version_output
     if [[ "${expected_version}" == "${VERSION}" ]]; then
+      docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent-relays \
+        || { echo "${context}: candidate Relay launcher missing" >&2; exit 1; }
       for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
         version_output="$(docker exec "${container}" "/usr/libexec/ocservia/${binary}" --version)"
         [[ "${version_output}" == "${binary} ${VERSION}" ]]

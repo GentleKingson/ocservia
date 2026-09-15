@@ -631,6 +631,7 @@ production_descriptor_paths() {
   local compose_file="${ROOT}/deploy/production/compose.yaml"
   printf '%s\n' \
     "deploy/production/compose.sh" \
+    "deploy/production/transportd-relays.sh" \
     "deploy/production/compose.oidc.yaml" \
     "deploy/production/compose.external-mysql.yaml" \
     "deploy/production/compose.external-postgres.yaml" \

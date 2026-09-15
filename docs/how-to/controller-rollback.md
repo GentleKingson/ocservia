@@ -23,6 +23,16 @@ The command selects only the protected previous release. It does not accept an
 operator-selected manifest and does not run a database down migration or
 restore.
 
+The optional-relay launcher and dedicated transport egress network change the
+production deployment descriptors. This transition is also **forward-only**
+through the guarded rollback entry point: old images do not contain the new
+launcher. Restoring two valid HTTPS relay URLs and both relay services is
+necessary before using any old version that requires two, but does not make
+the descriptor mismatch safe or bypass its guard. Recover forward or use the
+documented isolated recovery procedure; do not substitute old images into the
+new Compose deployment. Historical scripts and direct image replacement are
+outside the current preflight's control.
+
 Rollback also requires an unchanged production deployment contract. The static
 gateway/application IPAM and security transition from v0.4.0 is a historical
 **forward-only deployment change**; this command intentionally refuses that
