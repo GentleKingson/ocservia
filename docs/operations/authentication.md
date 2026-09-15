@@ -296,8 +296,9 @@ the complete receipt/checksum chain and the latest embedded revision's
 compatibility from the baseline row, manually mark a dirty migration clean, or
 copy PostgreSQL migration numbers into these tables.
 
-At the current migrated schema, workspace IDs are `BINARY(16)` in unswapped
-UUID byte order. Workspace times are signed `BIGINT` microseconds since
+At the current migrated schema, workspace IDs are `VARBINARY(16)` with an exact
+16-byte length constraint, using unswapped RFC UUID byte order.
+Workspace times are signed `BIGINT` microseconds since
 `2000-01-01 00:00:00 UTC`, not Unix seconds or SQL date/time strings.
 Use the same UUIDv7 text later in `OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID`:
 

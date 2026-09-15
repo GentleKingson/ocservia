@@ -125,7 +125,8 @@ unknown outcome; do not blindly replay writes.
 
 UUIDs and logical times cross the boundary through typed values. PostgreSQL
 uses native UUID/timestamp types; migrated MySQL/MariaDB domain tables use
-unswapped `BINARY(16)` UUIDs and signed BIGINT microseconds relative to
+`VARBINARY(16)` UUIDs with exact 16-byte length constraints and unswapped RFC
+UUID byte order, and signed BIGINT microseconds relative to
 `2000-01-01 UTC`, with explicit infinity handling where the contract permits it.
 Migration bookkeeping has its own storage types. Do not copy backend SQL or
 infer storage representation from a similarly named column; consult its store
