@@ -1,5 +1,13 @@
 # PR-02 Logical Time and Scheduler Adaptation
 
+> **Historical record, not a current operating guide.** Retained from the
+> 2026-09-15 source snapshot `cc8399641dc32083466a9c77369fcb8debf1ee48`;
+> this snapshot SHA is not a new acceptance baseline. Original execution dates,
+> tested revisions, Draft status, PASS/FAIL and unverified scope below remain
+> historical; an unrecorded test SHA is unknown, not the snapshot SHA.
+> Use the [current guide](operations/production-deployment.md#database-support) and
+> [maintained technical reference](development/control-plane.md) instead.
+
 This work remains Draft. It does not enable Controller production startup or
 establish complete Controller workflow parity.
 
