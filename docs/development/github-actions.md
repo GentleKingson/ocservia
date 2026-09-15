@@ -188,11 +188,18 @@ to GHCR, or loads the production signing key.
   arm64 Agent and Controller build legs for faster feedback. Tag pushes
   always build both amd64 and arm64, regardless of dispatch defaults.
 - Agent packages build natively on `ubuntu-24.04` (amd64) and
-  `ubuntu-24.04-arm` (arm64), without emulation. Each selected leg builds
+  `ubuntu-24.04-arm` (arm64), without emulation. The shared
+  `scripts/build-agent-binaries.sh` compiles inside a digest-pinned, native
+  Rocky 9 container with glibc 2.34, using the locked Rust toolchain and a
+  separate Cargo target directory. This prevents the Ubuntu runner's newer
+  libc from leaking into the common tar/DEB/RPM payload. Each selected leg builds
   Agent, privd, and upgrader, produces a signed tar archive plus deb/rpm,
   and runs `scripts/release-native-package-smoke.sh` for the candidate's
   deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  Neither published-baseline upgrade smoke runs in the release workflow.
+  The existing published v0.4.0 package lifecycle smoke also executes all
+  three installed candidate binaries on Ubuntu and systemd Rocky 9. It does
+  not prove that all historical baseline binaries can run on Rocky 9, nor
+  replace the independent four-unit real upgrade gate in PR #205.
 - Tag pushes and `arch=all` dry runs download both package sets and run
   `scripts/validate-release-packages.sh`. This retains package presence,
   signatures, architecture metadata, embedded payload consistency, and

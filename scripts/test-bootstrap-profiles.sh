@@ -154,6 +154,25 @@ build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")
 restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
 save = build_steps.find { |step| step["name"] == "Save native-package tool cache" }
 release_build = build_steps.find { |step| step["name"] == "Build native Agent / privd / upgrader binaries" }
+reject("release binaries must use the native Rocky 9 ABI build path") unless
+  release_build.fetch("run").include?("bash scripts/build-agent-binaries.sh") &&
+  !release_build.fetch("run").include?("cargo build")
+abi_build = File.read(File.join(root, "scripts/build-agent-binaries.sh"))
+abi_image = File.read(File.join(root, "rust/agent-build.Dockerfile"))
+reject("Agent ABI builder must pin its Rocky 9 base") unless
+  abi_image.match?(/^FROM rockylinux:9@sha256:[0-9a-f]{64}$/)
+reject("Agent ABI build must retain locked release builds and an isolated target directory") unless
+  abi_build.include?("cargo build --locked --release") &&
+  abi_build.include?('CARGO_TARGET_DIR="${OCSERVIA_ROOT}/rust/target/agent-${BUILD_CACHE_KEY}"') &&
+  abi_build.include?('[[ "$(getconf GNU_LIBC_VERSION)" == "glibc 2.34" ]]')
+native_smoke = File.read(File.join(root, "scripts/release-native-package-smoke.sh"))
+reject("real native lifecycle fixtures must use the release ABI builder") unless
+  native_smoke.include?("build-agent-binaries.sh") && !native_smoke.include?("cargo build")
+baseline_smoke = File.read(File.join(root, "scripts/release-baseline-upgrade-smoke.sh"))
+reject("candidate DEB/RPM smoke must execute all three installed binaries") unless
+  baseline_smoke.scan("for binary in ocservia-agent ocservia-privd ocservia-upgrader; do").length == 2 &&
+  baseline_smoke.include?('sudo "/usr/libexec/ocservia/${binary}" --version') &&
+  baseline_smoke.include?('docker exec "${container}" "/usr/libexec/ocservia/${binary}" --version')
 reject("release tool cache restore must expose its primary key") unless
   restore && restore["id"] == "native-package-tools-cache"
 reject("release tool cache save must reuse restore path and primary key") unless

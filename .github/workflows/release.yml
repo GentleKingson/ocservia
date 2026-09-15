@@ -103,16 +103,9 @@ jobs:
           echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
       - name: Build native Agent / privd / upgrader binaries
         run: |
-          # shellcheck source=scripts/env.sh
-          # shellcheck disable=SC1091
-          source scripts/env.sh
-          cd rust
-          # The published package version is the binaries' release identity:
-          # the Agent heartbeat and the upgrade downgrade fence both compare
-          # against it, so it must be embedded at compile time.
-          OCSERV_AGENT_RELEASE_VERSION="${version}" \
-            cargo build --locked --release \
-            --package ocservia-agent --package ocservia-privd --package ocservia-upgrader
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+          VERSION="${version}" PACKAGE_ARCH="${{ matrix.package_arch }}" \
+            bash scripts/build-agent-binaries.sh
       - name: Save native-package tool cache
         if: ${{ success() && steps.native-package-tools-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
