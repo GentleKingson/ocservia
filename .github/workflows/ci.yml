@@ -80,6 +80,20 @@ jobs:
           persist-credentials: false
       - run: scripts/bootstrap.sh rust-basic
       - run: scripts/rust-check.sh
+      - name: Relay launcher and installer contracts
+        run: |
+          bash scripts/test-managed-node-install.sh
+          bash scripts/test-controller-install.sh
+          bash scripts/test-controller-bootstrap.sh
+          docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
+            python3 /source/scripts/test-relay-launchers.py
+      - name: Single and dual Relay Compose contracts
+        env:
+          RUN_ID: relay-${{ github.run_id }}-${{ github.run_attempt }}
+          ARTIFACT_DIR: ${{ runner.temp }}/relay-compose
+        run: |
+          mkdir -m 0700 "$HOME/relay-compose-work"
+          RUNNER_TEMP="$HOME/relay-compose-work" bash scripts/i18-production-relays.sh --compose-only
 
   web:
     needs: ci-relevance

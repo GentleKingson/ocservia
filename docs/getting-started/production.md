@@ -16,7 +16,8 @@ Controller side.
 - A DNS name and HTTPS certificate for the Controller.
 - A selected login mode: Local only, OIDC only, or Local + OIDC. An OIDC provider and client are required only for SSO.
 - A certificate signing endpoint.
-- Two dedicated relay URLs for production node traffic.
+- One dedicated HTTPS relay for non-redundant production node traffic, or
+  two distinct relays in separate failure domains for recommended redundancy.
 - Protected directories for secrets and backups.
 - The release-signing public key provisioned through a protected channel separate from the downloaded release bundle.
 
@@ -45,7 +46,7 @@ The exact variable names are in `install.env.example`. At a minimum, configure:
 | Public address | `OCSERV_PUBLIC_HOST`, `OCSERV_CONTROLLER_PUBLIC_URL`, `OCSERV_HTTPS_ADDRESS` |
 | Login | `OCSERV_LOCAL_AUTH_ENABLED`, `OCSERV_PUBLIC_ORIGIN`, `OCSERV_SESSION_TTL`; OIDC settings only for SSO |
 | External services | `OCSERV_CERTIFICATE_SIGNER_URL` |
-| Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` |
+| Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, required `OCSERV_RELAY_URL_A`, optional `OCSERV_RELAY_URL_B` |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
 | Release trust | `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` |
 | Database | bundled/external PostgreSQL 17, external MySQL 8.4.10, or external MariaDB 12.3.2 |
@@ -116,7 +117,7 @@ For Local-only or dual-auth first deployments, follow the
 before verifying login. There is no default admin password, and normal restart
 does not reset credentials. For OIDC-only, use existing identity/RBAC provisioning.
 
-Also verify that login works, a managed node can connect through each relay, and the newest backup exists. When observability is enabled, verify that the backend receives traces.
+Also verify that login works, a managed node can connect through each configured relay, and the newest backup exists. When observability is enabled, verify that the backend receives traces. A healthy transport container only proves its local socket exists, not that a relay is reachable.
 
 ## 6. After installation
 

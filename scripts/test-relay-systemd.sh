@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [[ ! -e /usr/libexec/ocservia/ocservia-agent && ! -e /etc/ocservia-agent ]] || exit 2
 cleanup() {
   systemctl stop ocservia-agent.service ocservia-privd.service || true
+  systemctl reset-failed ocservia-agent.service ocservia-privd.service || true
   rm -f /etc/systemd/system/ocservia-agent.service /etc/systemd/system/ocservia-privd.service
   rm -rf /etc/systemd/system/ocservia-agent.service.d /etc/ocservia-agent /var/lib/ocservia-agent /usr/libexec/ocservia
   systemctl daemon-reload

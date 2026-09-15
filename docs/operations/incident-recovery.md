@@ -18,7 +18,7 @@ signing-key refresh and callback behavior before closing an OIDC incident.
 
 ## Transport and credentials
 
-For a relay outage, leave the healthy dedicated relay configured, repair the failed relay, and verify an Agent can reconnect through each URL independently. Do not switch production to public relays.
+For a single-relay outage, restore that relay at the same address with the same certificate and credentials, then verify fresh Agent heartbeats and reconciled command results. This restores the original path, not standby failover. For a dual-relay outage, leave the healthy relay configured, repair the failed relay, and verify each URL independently. Do not switch production to public relays, reset identities, or re-enroll nodes. Direct connectivity can mask an outage in a relay test.
 
 For Controller endpoint-key recovery, restore the encrypted offline backup to the configured secret path as UID 65532 with mode `0400`, then derive and compare the Controller EndpointID before starting transportd. Never silently generate a replacement key. If the backup or its identity check fails, keep transport offline, revoke trust in the old EndpointID, generate a new protected key, and re-enroll every node through the normal approval path. Record both EndpointIDs and the trust transition in the incident record.
 
