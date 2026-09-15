@@ -14,6 +14,8 @@ deploy/compose/compose.sh up --build
 Set `OCSERV_DATABASE_BACKEND=mysql` or `mariadb` to select the corresponding
 pinned development database. An unsupported value is rejected rather than
 falling back to PostgreSQL.
+This development selection does not define production admission; use the
+[production support matrix](../operations/production-deployment.md#database-support).
 
 The Web shell is available at `http://127.0.0.1:4173`. The control-plane live,
 readiness, and version endpoints are `http://127.0.0.1:8080/livez`, `/readyz`,
@@ -39,7 +41,7 @@ excess returns 429, global/watcher overload returns 503, and both include
 `Retry-After`. Empty scope counters are deleted, so the admission maps stay
 bounded by the global stream count.
 
-Subscribers do not own PostgreSQL tickers. One ref-counted watcher per active
+Subscribers do not own database polling tickers. One ref-counted watcher per active
 workspace or operation polls the durable event tables and fans out through
 bounded queues. A 1, 10, or 100 subscriber burst therefore produces one
 steady-state query stream for that scope. Database errors use jittered
@@ -93,24 +95,50 @@ when developing those identity-bound high-risk workflows.
 Database migrations run as a separate one-shot process using `--migrate-only`,
 an owner connection in `OCSERV_DATABASE_URL`, and the unprivileged role named
 by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives
-only the runtime role credentials. Migration execution uses a PostgreSQL
-advisory lock, validates the complete applied history, and grants the runtime
-role ordinary data access while limiting `audit_events` to `SELECT` and
-`INSERT`. Migration `000029` creates the authoritative singleton
-`controller_schema_compatibility` row with an exact range. Readiness accepts a
-Controller expected schema only when
-`minimum_compatible_controller_schema <= expected <= current_schema` and the
-applied migration history agrees with `current_schema`; missing, malformed, or
-unaccounted-for future metadata fails closed. Every later migration starts with
-an exact range and must explicitly declare a lower minimum in its own
-transaction after compatibility review.
+only the runtime role credentials. Migration execution serializes schema
+changes, validates the complete applied history, and grants the runtime
+role ordinary data access while keeping audit events read/append-only.
+PostgreSQL grants `SELECT`/`INSERT`; MySQL/MariaDB additionally grant a narrow
+column UPDATE privilege for locking reads, while immutable triggers reject
+actual updates. PostgreSQL uses an advisory lock and transactional SQL migrations;
+its migration `000029` introduced the singleton `controller_schema_compatibility`
+row. MySQL/MariaDB use a dedicated connection's `GET_LOCK` for migration
+serialization, immutable backend manifests and journaled, verified steps because
+DDL can implicitly commit. Their revision numbers are not PostgreSQL migration
+numbers; dirty or mismatched history fails closed, not automatic force-clean.
+PostgreSQL readiness accepts an expected Controller schema only when
+`minimum_compatible_controller_schema <= expected <= current_schema` and its
+applied history agrees with the compatibility row. MySQL/MariaDB validate
+the full baseline/appended receipts and the latest embedded revision's
+`minimum_controller_schema <= expected <= controller_schema`; their legacy
+compatibility row remains part of the frozen baseline, not the latest range.
+Missing, malformed or unaccounted-for future metadata fails closed. Every later migration starts with
+an exact range; a lower minimum requires explicit compatibility review and
+backend-specific migration metadata, not a version-number substitution.
+
+Business stores share transaction ownership, atomic audit/business writes,
+bounded cleanup and fencing semantics through `internal/database`. PostgreSQL
+transaction advisory locks and MySQL/MariaDB `business_locks` row locks are
+backend implementations of those semantics. Migration `GET_LOCK` is not the
+MySQL business-transaction lock. A commit acknowledgement error can mean an
+unknown outcome; do not blindly replay writes.
+
+UUIDs and logical times cross the boundary through typed values. PostgreSQL
+uses native UUID/timestamp types; migrated MySQL/MariaDB domain tables use
+unswapped `BINARY(16)` UUIDs and signed BIGINT microseconds relative to
+`2000-01-01 UTC`, with explicit infinity handling where the contract permits it.
+Migration bookkeeping has its own storage types. Do not copy backend SQL or
+infer storage representation from a similarly named column; consult its store
+and appended migration. See [database preparation](../operations/authentication.md#database-preparation)
+for a current workspace example.
 
 An additive migration is not automatically backward-compatible: verify all old
 Controller queries and writes before lowering the minimum. Destructive cleanup
 must follow an expand, deploy/migrate, and contract sequence, such as a
 post-deployment migration after all consumers stop depending on the old shape.
-The compatibility row is not a backup. PostgreSQL backups and PITR remain the
-disaster-recovery mechanism.
+The compatibility row is not a backup. Use [backend-specific recovery](../operations/incident-recovery.md#database-recovery):
+PostgreSQL backup/PITR within its scope or MySQL/MariaDB logical restore, not
+equivalent HA/PITR guarantees.
 
 Run the browser-to-simulator E2E with `make e2e`. The script scopes every
 container, network, and volume to `COMPOSE_PROJECT` and removes them on success,
@@ -131,4 +159,4 @@ deploy/compose/compose.sh down --volumes
 For persisted or shipped schema changes, do not rely on historical manual
 down-chains. Use a forward fix or a controlled database restore. Migration
 down/up behavior is verified by the current database integration harness; see
-[PostgreSQL backup](../operations/postgres-backup.md) for the restore workflow.
+[database recovery](../operations/incident-recovery.md#database-recovery) for the matching restore workflow.

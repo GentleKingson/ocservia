@@ -7,7 +7,7 @@ ocservia adds a management layer around existing ocserv / OpenConnect VPN server
 ```mermaid
 flowchart LR
     Operator["Operator browser"] -->|HTTPS| Controller["Controller Web/API"]
-    Controller --> Database[("PostgreSQL and backups")]
+    Controller --> Database[("Supported database and backups")]
     Controller --> Services["Login, certificate, and monitoring services"]
     Controller <-->|Dedicated relays| Node["Managed node services"]
     Node --> Helper["Local privileged helper"]
@@ -19,7 +19,7 @@ flowchart LR
 | Piece | Runs on | What it does |
 | --- | --- | --- |
 | Controller Web/API | Controller server | Provides the Web console, HTTP API, scheduling, audit records, node inventory, and lifecycle commands. |
-| PostgreSQL | Controller side | Stores Controller data and recovery state. |
+| Supported database | Controller side | Stores Controller data and recovery state; PostgreSQL is the default, not the only backend. |
 | Dedicated relays | Operator-managed relay hosts | Carry Controller-to-node traffic for production deployments. |
 | Managed node service | Each ocserv server | Connects the node to the Controller, reports health, receives approved work, and records results. |
 | Local privileged helper | Each ocserv server | Runs only fixed ocserv-related actions that require root access. |
@@ -27,6 +27,11 @@ flowchart LR
 | External services | Operator environment | Provide login, certificate signing, monitoring, secrets, and protected backups. |
 
 ## How deployment fits together
+
+Choose a backend and deployment mode from the authoritative
+[production support matrix](operations/production-deployment.md#database-support).
+Development/test coverage is not production support. Backup and recovery
+capabilities also differ by backend; see [database recovery](operations/incident-recovery.md#database-recovery).
 
 1. Deploy the Controller on a supported Linux host.
 2. Prepare production settings in `install.env` and provision secrets outside the repository checkout.

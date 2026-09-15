@@ -8,21 +8,29 @@ must be the complete lowercase commit SHA of that branch and must equal
 both the dispatch SHA and checkout HEAD. The candidate's numeric X.Y.Z
 version must be strictly newer than the baseline.
 
-GitHub requires this workflow to exist on the default branch before it can
-be dispatched. PR #206 registered the fail-closed placeholder on main at
-`c44c34ae7d48d0d0de7f7c02276233c4b8bd367e`; the complete branch workflow can
-now run without merging #205 or adding an automatic trigger. Dispatch only
-after all candidate edits are committed and pushed:
+The maintained `.github/workflows/release-upgrade.yml` is the complete manual
+workflow. Dispatch only after the candidate edits are committed and pushed to
+the selected branch. Replace the branch and numeric version placeholders;
+resolve and inspect the full 40-character lowercase SHA before dispatch, and
+do not move the branch while the dispatch is being created:
 
 ```bash
-branch=codex/native-release-upgrade
+branch='<candidate-branch>'
+version='<candidate-X.Y.Z>'
 sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
 gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version=0.6.0 -f baseline_release=v0.5.2 \
+  --ref "$branch" -f version="$version" -f baseline_release=v0.5.2 \
   -f candidate_sha="$sha"
 ```
 
 ## Scope
+
+Quick/Full Basic CI checks change regressions. `release.yml` builds packages
+and images, runs its release smoke checks, and publishes only through its
+tag/approval path. This workflow validates the registered old release to exact
+candidate upgrade on four native units without publishing. Formal G6 is the
+separate production-readiness/HA/PITR acceptance harness. None of these gates
+substitutes for another or extends a backend's production support.
 
 Four mandatory cells run with fail-fast disabled:
 
@@ -91,7 +99,7 @@ or relay end-to-end behavior, full database regression/security/G6 acceptance.
 `build-release-agent.sh` and `build-release-controller.sh` are shared with
 `release.yml`. Every cell builds one candidate package set or four production
 image archives. Tests consume those exact files and retain their digests.
-Agent builds use #209's `build-agent-binaries.sh` and digest-pinned native
+Agent builds use `build-agent-binaries.sh` and the digest-pinned native
 Rocky 9 build container for all three common tar/DEB/RPM payload binaries.
 The builder checks native architecture and glibc 2.34, isolates Cargo objects
 from Ubuntu-built objects, and executes every binary before packaging.
@@ -152,7 +160,9 @@ attempt artifacts into a new complete gate. Timing covers measured unit
 execution, not GitHub queue time or billed-minute rounding. No cold-cache
 duration guarantee is made.
 Any new candidate commit, including documentation or test-only edits, requires
-a fresh four-cell run at that exact SHA. Record final run links/results in the
+a fresh four-cell run **to claim native upgrade acceptance for that SHA**.
+This is not a requirement to rerun the gate for every documentation-only PR;
+existing evidence remains attached to its original SHA. Record final run links/results in the
 PR and external evidence report rather than changing the tested commit merely
 to embed its own SHA or run URL.
 
