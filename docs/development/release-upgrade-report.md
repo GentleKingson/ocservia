@@ -11,9 +11,9 @@ not release authorization.
 
 - Rebased main: `c44c34ae7d48d0d0de7f7c02276233c4b8bd367e`, including #206's
   registration placeholder. The conflict retains #205's full implementation.
-- Stable baseline: immutable `v0.5.1`, commit
-  `4afa4756fc89fcad30a0f93edb9b079d612453a6`, PostgreSQL schema 30.
-  Real checksum/signing-key pins are independently verified; v0.5.0 remains
+- Stable baseline: immutable `v0.5.2`, commit
+  `2bbbbbbc7dd4a9b328acfaae291fdaf11a35bfd6`, PostgreSQL schema 30.
+  Real checksum/signing-key pins are independently verified; v0.5.0/v0.5.1 remain
   in the historical registry, not overwritten or silently substituted.
 - Candidate version: `0.6.0`. The final pushed branch commit is the candidate;
   obtain its exact SHA using the command in the
@@ -25,10 +25,16 @@ not release authorization.
 - Extracted `scripts/build-release-agent.sh` and
   `scripts/build-release-controller.sh`; `release.yml` shares them without
   changing publishing dependencies, permissions or approval conditions.
+- Carried #209's native Rocky 9 ABI builder into the shared Agent build and
+  existing native lifecycle fixtures. All three payloads execute against
+  glibc 2.34 with isolated Cargo objects before packaging; candidate DEB/RPM
+  smoke also executes all three installed binaries in their real runtimes.
+- Updated the bootstrap cache-order test to locate the actual shared build
+  command rather than its obsolete step name, rejecting a missing build.
 - Extended `scripts/release-baseline-upgrade-smoke.sh` with shared baseline
   data and `scripts/release-agent-state-check.sh`, retaining its real native
   package/systemd lifecycle. Both workflow defaults and the release package
-  smoke now select the real v0.5.1 baseline.
+  smoke now select the real v0.5.2 baseline.
 - Reused the proven fresh-install fixture corrections from #207/#208: a native
   OIDC container joins the internal application network, and the test CA is
   written into container tmpfs before its namespace-only trust-store mount.
@@ -85,11 +91,11 @@ these static and fixture tests.
 
 At source-report preparation the new candidate has not been dispatched. Use
 the PR's exact-SHA run record for the current result, not this pre-dispatch
-table. Registration is complete and the runbook command selects v0.5.1.
+table. Registration is complete and the runbook command selects v0.5.2.
 Only four same-attempt passing results plus `Native Upgrade Result` permit
 acceptance. No runner-minute or runtime guarantee is inferred from local checks.
 
-## Historical baseline failure (resolved)
+## Historical baseline failures (resolved)
 
 A separate ARM64 baseline-only preflight used a newly created Docker-in-Docker
 daemon, the actual v0.5.0 production install entrypoint, unmodified signed
@@ -113,4 +119,15 @@ PR #207 fixed PostgreSQL startup identity and Caddy's file capability on the
 v0.5 maintenance line; #208 resolved independent release-readiness blockers.
 Their complete native fresh-install evidence and official v0.5.1 publication
 run 34916370091 close that baseline blocker, not #205's upgrade acceptance.
+
+The subsequent v0.5.1-to-v0.6.0 run 34922328905 on candidate
+`92fa333becf317a0861a80d9f2ee97b23d060f6c` passed both Controller units and
+the DEB paths, but failed both actual RPM baselines: privd required
+GLIBC_2.39 on Rocky 9's glibc 2.34. The aggregate correctly returned NOT PASS.
+No historical asset or runtime was changed to mask the failure. #209 fixed
+the common payload ABI, and v0.5.2 was genuinely published in run 34934040575
+with all ten jobs successful. All 21 assets, signatures and Controller
+bundles/indexes were independently verified against the historical trust
+anchor. The old run is retained only as failure evidence, not reused for
+the new candidate's four-cell acceptance.
 The Draft PR remains non-merge-ready until the new exact-SHA four-cell run passes.

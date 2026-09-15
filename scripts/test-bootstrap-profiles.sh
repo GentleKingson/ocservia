@@ -263,7 +263,7 @@ reject("publishing must wait for security success") unless
 build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")
 restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
 save = build_steps.find { |step| step["name"] == "Save native-package tool cache" }
-release_build = build_steps.find { |step| step["name"] == "Build native Agent / privd / upgrader binaries" }
+release_build = build_steps.find { |step| step.fetch("run", "").include?("bash scripts/build-release-agent.sh") }
 reject("release tool cache restore must expose its primary key") unless
   restore && restore["id"] == "native-package-tools-cache"
 reject("release tool cache save must reuse restore path and primary key") unless
@@ -273,7 +273,7 @@ reject("release tool cache save must require a successful miss") unless
   save.fetch("if").include?("success()") &&
     save.fetch("if").include?("steps.native-package-tools-cache.outputs.cache-hit != 'true'")
 reject("release tool cache must not save before native build success") unless
-  build_steps.index(release_build) < build_steps.index(save)
+  release_build && build_steps.index(release_build) < build_steps.index(save)
 publish = release_jobs.fetch("publish-release-packages")
 reject("release publishing environment changed") unless publish.fetch("environment") == "release-publishing"
 # The exact publishing permission set is pinned by

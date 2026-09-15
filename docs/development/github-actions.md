@@ -289,10 +289,15 @@ to GHCR, or loads the production signing key.
   always build both amd64 and arm64, regardless of dispatch defaults.
 - Agent packages build natively on `ubuntu-24.04` (amd64) and
   `ubuntu-24.04-arm` (arm64), without emulation. Each selected leg builds
-  Agent, privd, and upgrader, produces a signed tar archive plus deb/rpm,
+  Agent, privd, and upgrader through the shared `build-release-agent.sh` and
+  `build-agent-binaries.sh` entrypoints in a digest-pinned Rocky 9 container
+  with glibc 2.34. Cargo objects are isolated from host-built objects; native
+  host/daemon/container/ELF identity and all three binary versions are checked.
+  It produces a signed tar archive plus deb/rpm,
   and runs `scripts/release-native-package-smoke.sh` for the candidate's
   deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  It also runs the published v0.5.1 DEB/RPM baseline package smoke.
+  It also runs the published v0.5.2 DEB/RPM baseline package smoke, executing
+  all three installed candidate binaries on Ubuntu and systemd Rocky 9.
   The additional full upgrade gate below is independent of this release job.
 - Tag pushes and `arch=all` dry runs download both package sets and run
   `scripts/validate-release-packages.sh`. This retains package presence,

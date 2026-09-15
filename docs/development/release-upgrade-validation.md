@@ -2,7 +2,7 @@
 
 `Native Release Upgrade Validation` is an independent `workflow_dispatch`
 workflow, not a publisher and not part of Basic CI. Only `version`,
-`baseline_release` (default `v0.5.1`), and `candidate_sha` are accepted.
+`baseline_release` (default `v0.5.2`), and `candidate_sha` are accepted.
 Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
 must be the complete lowercase commit SHA of that branch and must equal
 both the dispatch SHA and checkout HEAD. The candidate's numeric X.Y.Z
@@ -18,7 +18,7 @@ after all candidate edits are committed and pushed:
 branch=codex/native-release-upgrade
 sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
 gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version=0.6.0 -f baseline_release=v0.5.1 \
+  --ref "$branch" -f version=0.6.0 -f baseline_release=v0.5.2 \
   -f candidate_sha="$sha"
 ```
 
@@ -91,7 +91,11 @@ or relay end-to-end behavior, full database regression/security/G6 acceptance.
 `build-release-agent.sh` and `build-release-controller.sh` are shared with
 `release.yml`. Every cell builds one candidate package set or four production
 image archives. Tests consume those exact files and retain their digests.
-Agent tools and Cargo locks and the four production Dockerfiles are unchanged.
+Agent builds use #209's `build-agent-binaries.sh` and digest-pinned native
+Rocky 9 build container for all three common tar/DEB/RPM payload binaries.
+The builder checks native architecture and glibc 2.34, isolates Cargo objects
+from Ubuntu-built objects, and executes every binary before packaging.
+The locked toolchain, Cargo locks and four Controller Dockerfiles are unchanged.
 BuildKit exports archives without registry access; the test daemon loads and
 pushes those archives to a registry bound only to `127.0.0.1:5000`. The actual
 registry manifest digests, never image config IDs, enter the generated
@@ -104,19 +108,23 @@ unchanged. Ordinary same-source native smoke remains a separate installer
 regression, not cross-version evidence.
 
 `release-upgrade-baselines.json` owns historical checksum pins and capabilities.
-The default v0.5.1 is bound to commit
-`4afa4756fc89fcad30a0f93edb9b079d612453a6`, schema 30, checksum-manifest SHA-256
-`b1f6b1319a50cdc99cbdf30a352b88af289fc8aa90150aea8088e32bf4e38c25`, and DER key SHA-256
+The default v0.5.2 is bound to commit
+`2bbbbbbc7dd4a9b328acfaae291fdaf11a35bfd6`, schema 30, checksum-manifest SHA-256
+`acbb66cf0f52fe64d3c3398e3fa6dfd8098190cf14863c24a0592e8f858af0be`, and DER key SHA-256
 `b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369`.
 On 2026-09-14, the key was recovered from the real v0.4.0 arm64 DEB after
 checking its digest against the already repository-pinned v0.4.0 SHA256SUMS.
 That independent historical key verified v0.5.0 SHA256SUMS.sig. On 2026-09-15
-the same anchor verified v0.5.1's signatures and all published assets, both
+the same anchor verified v0.5.2's signatures and all 21 published assets, both
 Controller bundles, and anonymous dual-platform indexes. Immutable Release
-388810408, direct tag commit and successful publication run 34916370091 were
+388897497, direct tag commit and successful publication run 34934040575 were
 cross-checked. The key was not accepted through trust-on-first-download.
-v0.5.0 remains registered as historical data, not a fallback: its bundled
-PostgreSQL/gateway startup defects were fixed by the genuine v0.5.1 release.
+v0.5.0 and v0.5.1 remain registered as historical data, not final-baseline
+recommendations or fallbacks. v0.5.1 fixed v0.5.0's PostgreSQL/gateway startup
+defects, but its immutable RPM privd requires GLIBC_2.39 and cannot execute on
+supported Rocky 9. The genuine v0.5.2 release fixes the common payload ABI;
+both native release jobs execute all three binaries on glibc 2.34. Its
+release/fresh-install acceptance does not replace this four-unit upgrade gate.
 
 To register another baseline, independently establish its key, verify its
 signed checksum manifest and both architectures' native packages and

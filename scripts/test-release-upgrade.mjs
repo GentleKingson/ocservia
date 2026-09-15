@@ -12,15 +12,18 @@ assert.equal(compareVersions("9007199254740993.0.0", "9007199254740992.0.0"), 1)
 assert.equal(compareVersions("00.05.0", "0.5.0"), 0);
 for (const v of ["v0.6.0", "0.6", "0.6.0-rc1", "0.6.0\n", "1;echo bad"])
   assert.throws(() => compareVersions(v, "0.5.0"));
-const tag = "v0.5.1";
+const tag = "v0.5.2";
 const valid = () => validateInputs("0.6.0", tag, sha, sha, sha, baselines);
-assert.equal(valid().commit, "4afa4756fc89fcad30a0f93edb9b079d612453a6");
-assert.equal(valid().sums_sha256, "b1f6b1319a50cdc99cbdf30a352b88af289fc8aa90150aea8088e32bf4e38c25");
+assert.equal(valid().commit, "2bbbbbbc7dd4a9b328acfaae291fdaf11a35bfd6");
+assert.equal(valid().sums_sha256, "acbb66cf0f52fe64d3c3398e3fa6dfd8098190cf14863c24a0592e8f858af0be");
 assert.equal(valid().key_der_sha256, baselines["v0.5.0"].key_der_sha256);
 assert.equal(baselines["v0.5.0"].commit, "519275567a65f5785260e353ef02ab3fabf30244");
+assert.equal(baselines["v0.5.1"].commit, "4afa4756fc89fcad30a0f93edb9b079d612453a6");
+assert.equal(baselines["v0.5.1"].sums_sha256, "b1f6b1319a50cdc99cbdf30a352b88af289fc8aa90150aea8088e32bf4e38c25");
+assert.equal(valid().key_der_sha256, baselines["v0.5.1"].key_der_sha256);
 for (const tag of ["latest", "v0.4.0", "v99.0.0"])
   assert.throws(() => validateInputs("100.0.0", tag, sha, sha, sha, baselines));
-for (const version of ["0.5.1", "0.5.0", "0.4.99"])
+for (const version of ["0.5.2", "0.5.1", "0.5.0", "0.4.99"])
   assert.throws(() => validateInputs(version, tag, sha, sha, sha, baselines));
 for (const values of [[sha.slice(0, 7), sha, sha], [sha, "b".repeat(40), sha], [sha, sha, "b".repeat(40)]])
   assert.throws(() => validateInputs("0.6.0", tag, ...values, baselines));
@@ -28,7 +31,7 @@ assert.deepEqual(architectures, {
   amd64: { runner: "ubuntu-24.04", runner_arch: "X64", kernel: "x86_64", rpm: "x86_64" },
   arm64: { runner: "ubuntu-24.04-arm", runner_arch: "ARM64", kernel: "aarch64", rpm: "aarch64" },
 });
-const release = { tag_name: tag, draft: false, prerelease: false, published_at: "2026-09-15T01:27:46Z",
+const release = { tag_name: tag, draft: false, prerelease: false, published_at: "2026-09-15T05:56:14Z",
   assets: requiredAssets(tag).map(name => ({ name, state: "uploaded" })) };
 const ref = { object: { type: "commit", sha: valid().commit } };
 validateRelease(release, tag, ref, valid());
