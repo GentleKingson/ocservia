@@ -446,8 +446,8 @@ fn build_relay_mode(
             "relay URLs and token are accepted only with custom relay mode",
         )),
         "custom" => {
-            if !(2..=8).contains(&raw_urls.len()) {
-                return Err(invalid("custom relay mode requires 2..8 relay URLs"));
+            if !(1..=8).contains(&raw_urls.len()) {
+                return Err(invalid("custom relay mode requires 1..8 relay URLs"));
             }
             let token_file = token_file
                 .ok_or_else(|| invalid("custom relay mode requires --relay-token-file"))?;
@@ -841,7 +841,76 @@ mod tests {
     }
 
     #[test]
-    fn production_relays_require_two_unique_https_urls_and_a_token() {
+    fn custom_relay_count_and_security_contract() {
+        let directory =
+            std::env::temp_dir().join(format!("relay-contract-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("test directory");
+        let token = directory.join("token");
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        for count in [0, 1, 2, 8, 9] {
+            let urls = (0..count)
+                .map(|i| format!("https://relay-{i}.example.test"))
+                .collect();
+            let result = build_relay_mode("custom", urls, Some(&token));
+            if (1..=8).contains(&count) {
+                let RelayMode::Custom(map) = result.expect("valid count") else {
+                    panic!("custom mode required");
+                };
+                assert_eq!(map.len(), count);
+            } else {
+                assert!(result.is_err(), "count {count}");
+            }
+        }
+        for invalid_url in [
+            "",
+            "not a URL",
+            "http://relay.example.test",
+            "https://user:pass@relay.example.test",
+            "https://relay.example.test?token=x",
+            "https://relay.example.test#fragment",
+            "https://bad host",
+            "https://user\"@relay.example.test",
+            "https://$(touch /tmp/relay-injection)",
+        ] {
+            assert!(
+                build_relay_mode("custom", vec![invalid_url.into()], Some(&token)).is_err(),
+                "accepted {invalid_url:?}"
+            );
+        }
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://RELAY.example.test:443".into(),
+                    "https://relay.example.test/".into()
+                ],
+                Some(&token)
+            )
+            .is_err()
+        );
+        let urls = vec!["https://relay.example.test".to_owned()];
+        assert!(build_relay_mode("custom", urls.clone(), None).is_err());
+        assert!(
+            build_relay_mode("custom", urls.clone(), Some(&directory.join("missing"))).is_err()
+        );
+        for mode in ["default", "disabled"] {
+            assert!(build_relay_mode(mode, vec![], None).is_ok());
+            assert!(build_relay_mode(mode, urls.clone(), None).is_err());
+            assert!(build_relay_mode(mode, vec![], Some(&token)).is_err());
+        }
+        for invalid_token in ["short", "0123456789abcdef 123456789abcdef0"] {
+            std::fs::write(&token, invalid_token).expect("invalid token");
+            assert!(build_relay_mode("custom", urls.clone(), Some(&token)).is_err());
+        }
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("valid token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("mode");
+        assert!(build_relay_mode("custom", urls, Some(&token)).is_err());
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn production_relays_require_unique_https_urls_and_a_token() {
         let directory =
             std::env::temp_dir().join(format!("ocservia-relay-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir(&directory).expect("create test directory");
@@ -870,7 +939,7 @@ mod tests {
                 vec!["https://relay-a.example.test".into()],
                 Some(&token)
             )
-            .is_err()
+            .is_ok()
         );
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
             .expect("make token insecure");
