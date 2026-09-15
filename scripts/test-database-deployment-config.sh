@@ -112,4 +112,12 @@ for backend in mysql mariadb; do
   ' "${work}/dev-${backend}.json" >/dev/null
 done
 
+for rendered in postgres external-postgres external-mysql external-mariadb; do
+  jq -e '
+    (.services.transportd.networks | keys) == ["application", "observability", "relay-egress"] and
+    (.networks["relay-egress"].internal // false) == false and
+    .networks.application.internal == true and .networks.observability.internal == true and
+    [.services | to_entries[] | select(.value.networks | has("relay-egress")) | .key] == ["transportd"]
+  ' "${work}/${rendered}.json" >/dev/null
+done
 echo "database deployment configuration checks passed"

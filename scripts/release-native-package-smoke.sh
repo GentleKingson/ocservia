@@ -185,6 +185,8 @@ assert_installed_state() {
     || { echo "${context}: privd unit missing" >&2; exit 1; }
   sudo test -f /usr/lib/systemd/system/ocservia-upgrader@.service \
     || { echo "${context}: upgrader unit missing" >&2; exit 1; }
+  sudo test -x /usr/libexec/ocservia/ocservia-agent-relays \
+    || { echo "${context}: production Relay launcher missing" >&2; exit 1; }
   sudo test -f "/usr/share/ocservia-agent/ocservia-agent-${expected_version}-linux-${PACKAGE_ARCH}.tar.gz" \
     || { echo "${context}: embedded archive missing" >&2; exit 1; }
   getent passwd ocserv-agent >/dev/null \
@@ -235,7 +237,7 @@ assert_upgraded_state() {
   assert_installed_state "${context}" "${expected_version}"
   sudo test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
     || { echo "${context}: upgrade rollback snapshot manifest missing" >&2; exit 1; }
-  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 8 \
+  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 9 \
     || { echo "${context}: upgrade rollback snapshot is incomplete" >&2; exit 1; }
   sudo grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" /etc/ocservia-agent/agent.env \
     || { echo "${context}: upgrade lost the configured agent environment" >&2; exit 1; }
@@ -425,6 +427,8 @@ docker exec "${container}" rpm -ivh "/packages/$(basename "${rpm_old}")" \
 
 container_assert_installed() {
   local context="$1" expected_version="$2" binary_sha
+  docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent-relays \
+    || { echo "${context}: Relay launcher missing" >&2; exit 1; }
   docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent \
     || { echo "${context}: Agent binary missing" >&2; exit 1; }
   docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-privd \
@@ -512,7 +516,7 @@ docker exec "${container}" grep -Fq 'RELAY_URL_A=https://relay-one.example.net' 
 docker exec "${container}" test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
   || { echo "rpm upgrade rollback snapshot manifest missing" >&2; exit 1; }
 docker exec "${container}" bash -c \
-  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 8' \
+  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 9' \
   || { echo "rpm upgrade rollback snapshot is incomplete" >&2; exit 1; }
 docker exec "${container}" grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" \
   /etc/ocservia-agent/agent.env \
@@ -523,6 +527,8 @@ docker exec "${container}" touch /etc/ocservia/agent-install-production-relays
 docker exec "${container}" rpm -e ocservia-agent >"${ARTIFACT_DIR}/rpm-remove.log" 2>&1
 docker exec "${container}" test ! -e /usr/libexec/ocservia/ocservia-agent \
   || { echo "rpm erase retained the Agent binary" >&2; exit 1; }
+docker exec "${container}" test ! -e /usr/libexec/ocservia/ocservia-agent-relays \
+  || { echo "rpm erase retained the Relay launcher" >&2; exit 1; }
 # The rpm payload registers files, not their parent directory, so erasing may
 # leave an empty /usr/share/ocservia-agent behind.
 docker exec "${container}" bash -c \

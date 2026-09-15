@@ -35,7 +35,8 @@ capabilities also differ by backend; see [database recovery](operations/incident
 
 1. Deploy the Controller on a supported Linux host.
 2. Prepare production settings in `install.env` and provision secrets outside the repository checkout.
-3. Configure two dedicated relays for production node communication.
+3. Configure one dedicated relay for non-redundant production node communication,
+   or two dedicated relays for the recommended redundant deployment.
 4. Install the managed-node package on each ocserv server.
 5. Enroll each node, approve it in the Controller, and then start the node services.
 6. Use the Web console or API to view health, manage users, inspect sessions, apply configuration changes, and run lifecycle operations.

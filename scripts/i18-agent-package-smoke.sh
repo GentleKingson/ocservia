@@ -270,7 +270,8 @@ assert_production_agent_exec_start() {
   fi
 }
 
-expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent --controller \$CONTROLLER_ENDPOINT_ID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --relay-mode custom --relay-url \$RELAY_URL_A --relay-url \$RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token"
+expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent-relays"
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent-relays"
 assert_production_agent_exec_start
 assert_privd_command_authority() {
   local unit="${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
@@ -305,13 +306,10 @@ sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
   | tee "${work}/legacy-agent.service" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
-sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
-  -e 's/ --user-password-seal-key-id [^ ]*//' \
-  -e 's/ --user-password-seal-public-key-sha256 [^ ]*//' \
-  -e 's/ --p12-password-seal-key-id [^ ]*//' \
-  -e 's/ --p12-password-seal-public-key-sha256 [^ ]*//' \
-  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
-  | tee "${work}/legacy-agent-relays.conf" >/dev/null
+printf '%s\n' '[Service]' 'EnvironmentFile=/etc/ocservia-agent/relays.env' 'ExecStart=' \
+  'ExecStart=/usr/libexec/ocservia/ocservia-agent --controller $CONTROLLER_ENDPOINT_ID --node-id $NODE_ID --relay-mode custom --relay-url $RELAY_URL_A --relay-url $RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token' \
+  >"${work}/legacy-agent-relays.conf"
+sudo rm -f "${rootfs}/usr/libexec/ocservia/ocservia-agent-relays"
 sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 sudo sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
@@ -573,7 +571,8 @@ backup_dir="${rootfs}/var/lib/ocservia-upgrade/upgrade-backup"
 test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
-test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 8
+test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 9
+sudo test -f "${backup_dir}/ocservia-agent-relays.absent"
 # The fresh package install already placed the durable runner set, so the
 # matched snapshot must carry it as concrete rollback sources.
 for runner_snapshot in ocservia-upgrader.previous ocservia-agent-verify.previous \
@@ -746,6 +745,7 @@ sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent-verify" \
 sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-upgrader@.service" \
   || { echo "rollback dropped the durable upgrade runner unit" >&2; exit 1; }
 echo "matched Agent/privd binary and systemd rollback passed"
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-relays"
 
 sudo rm -f -- \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
@@ -775,6 +775,7 @@ sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
 sudo test ! -e "${rootfs}/usr/lib/systemd/system/ocservia-upgrader@.service" \
   || { echo "uninstall retained the durable upgrade runner unit" >&2; exit 1; }
 echo "agent package uninstall preservation passed"
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-relays"
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/install-agent.sh"

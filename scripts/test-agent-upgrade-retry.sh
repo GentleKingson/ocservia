@@ -87,3 +87,29 @@ cmp "${old}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia
 cmp "${new}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia/ocservia-agent"
 sha256sum -c "${work}/snapshot"
 echo 'Identical-package retry preserves rollback; rollback/re-upgrade still works (installer unit test only)'
+
+# A single-Relay operator configuration survives upgrade and same-package
+# retries, but cannot be handed to a snapshot without the new launcher.
+"${new}/scripts/rollback-agent.sh"
+rm "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
+printf 'RELAY_URL_A=https://relay-a.example.test\nRELAY_URL_B=\n' >"${config}/relays.env"
+cp "${config}/relays.env" "${work}/single-relays.env"
+"${new}/scripts/upgrade-agent.sh"
+cmp "${config}/relays.env" "${work}/single-relays.env"
+test -f "${snapshot}/ocservia-agent-relays.absent"
+"${new}/scripts/upgrade-agent.sh"
+find "${DESTDIR}" -type f -exec sha256sum {} + | sort >"${work}/before-rollback"
+if "${new}/scripts/rollback-agent.sh" >"${work}/blocked-rollback.log" 2>&1; then
+  echo 'old snapshot accepted single Relay configuration' >&2; exit 1
+fi
+grep -F 'target predates single Relay support' "${work}/blocked-rollback.log"
+find "${DESTDIR}" -type f -exec sha256sum {} + | sort >"${work}/after-rollback"
+cmp "${work}/before-rollback" "${work}/after-rollback"
+printf 'RELAY_URL_A=https://relay-a.example.test\nRELAY_URL_B=https://relay-b.example.test\n' >"${config}/relays.env"
+"${new}/scripts/rollback-agent.sh"
+test ! -e "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
+"${new}/scripts/upgrade-agent.sh"
+"${new}/scripts/uninstall-agent.sh"
+test ! -e "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
+test -f "${config}/relays.env"
+echo 'Single Relay preservation, legacy rollback preflight and launcher uninstall passed'
