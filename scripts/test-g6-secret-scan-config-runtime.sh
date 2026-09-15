@@ -21,9 +21,66 @@ command -v openssl >/dev/null || {
   echo "openssl is required to generate the G6 scan-config private-key fixture" >&2
   exit 1
 }
+command -v jq >/dev/null || {
+  echo "jq is required to verify individual secret-scan findings" >&2
+  exit 1
+}
 
 fixture="$(mktemp -d)"
 trap 'rm -rf "${fixture}"' EXIT
+
+# Each new exemption must reproduce under defaults, pass under the config,
+# and leave other values in the same field/file/line visible. Inspect a single
+# finding per case so another hit or a detector error cannot fake rejection.
+mkdir -p "${fixture}/release-database"
+scan_public_literal() {
+  local expected="$1" code=0
+  shift
+  rm -f "${fixture}/report.json"
+  gitleaks dir --no-banner --redact --no-color --exit-code 10 --report-format json \
+    --report-path "${fixture}/report.json" "$@" "${fixture}/release-database" \
+    >"${fixture}/scan.log" 2>&1 || code=$?
+  if [[ "${code}" -eq "$((expected * 10))" ]] && jq -e --argjson expected "${expected}" '
+    length == $expected and all(.[]; .RuleID == "generic-api-key")
+  ' "${fixture}/report.json" >/dev/null; then
+    return
+  fi
+  echo "public-literal fixture expected ${expected} generic-api-key finding(s), exit=${code}" >&2
+  exit 1
+}
+fingerprint_a="b0156efe8c67273d773be595fa34546d0"
+fingerprint_b="86950961d8fa33b5f7bfe6297e80369"
+prose_a="validity"
+column_a="partial"
+database_a="pr02-isolated"
+literal_prefixes=('key_der_sha256": "' 'credential, ' 'idempotency_key, `' 'MYSQL_ROOT_PASSWORD=')
+literal_suffixes=('"' ' ' '`' ' ')
+public_literals=("${fingerprint_a}${fingerprint_b}" "${prose_a}/revocation" "${column_a}_460753916246" "${database_a}-test-root")
+other_a="0f1e2d3c4b5a6978"
+other_b="8796a5b4c3d2e1f0"
+for index in "${!public_literals[@]}"; do
+  prefix="${literal_prefixes[index]}"
+  suffix="${literal_suffixes[index]}"
+  literal="${public_literals[index]}"
+  record="${fixture}/release-database/record.txt"
+  printf '%s%s%s\n' "${prefix}" "${literal}" "${suffix}" >"${record}"
+  scan_public_literal 1
+  scan_public_literal 0 --config "${CONFIG}"
+  for value in "${other_a}${other_b}" "x${literal}" "${literal}x"; do
+    printf '%s%s%s\n' "${prefix}" "${value}" "${suffix}" >"${record}"
+    scan_public_literal 1 --config "${CONFIG}"
+  done
+  printf '%s%s%s api_token="%s%s"\n' "${prefix}" "${literal}" "${suffix}" \
+    "${other_a}" "${other_b}" >"${record}"
+  scan_public_literal 1 --config "${CONFIG}"
+done
+# A detector failure must not reuse the previous successful finding report.
+if (scan_public_literal 1 --config "${fixture}/missing.toml") >/dev/null 2>&1; then
+  echo "a secret-scan configuration error must not count as a detected credential" >&2
+  exit 1
+fi
+rm -rf "${fixture}/release-database" "${fixture}/report.json" "${fixture}/scan.log"
+
 mkdir -p "${fixture}/strict-wire"
 cp "${ROOT}/testdata/command-strict-wire.json" "${fixture}/strict-wire/command.json"
 if gitleaks dir --no-banner --redact --no-color "${fixture}/strict-wire" >/dev/null 2>&1; then
