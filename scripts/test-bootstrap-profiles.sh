@@ -139,6 +139,15 @@ reject("secret scans need complete history") unless
   scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
 reject("release must call candidate security checks") unless
   release_jobs.fetch("security").fetch("uses") == "./.github/workflows/security.yml"
+reject("only release callers should select candidate history") unless
+  release_jobs.fetch("security").fetch("with").fetch("candidate_history") == true &&
+  security.fetch(true).fetch("workflow_call").fetch("inputs").fetch("candidate_history") == {
+    "description" => "Scan the complete release candidate history instead of all repository refs",
+    "type" => "boolean", "default" => false
+  }
+reject("secret scanner must receive the fixed candidate flag only when selected") unless
+  checks.find { |check| check.fetch("profile") == "g6-secret-scan" }.fetch("command") ==
+    "scripts/security-check.sh ${{ inputs.candidate_history && '--candidate-history' || '' }}"
 reject("publishing must wait for security success") unless
   release_jobs.fetch("publish-release-packages").fetch("needs").include?("security")
 build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")

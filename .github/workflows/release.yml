@@ -34,6 +34,8 @@ env:
 jobs:
   security:
     uses: ./.github/workflows/security.yml
+    with:
+      candidate_history: true
 
   build-agent-packages:
     name: Build & Smoke Agent Packages (${{ matrix.package_arch }})
