@@ -85,8 +85,10 @@ logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
 Rolling back 000031 deletes local password hashes, not identities or sessions.
 Stop local provisioning/login and preserve credentials before applying down.
 
-Local login also requires migration 000033 for shared account failure backoff.
-`AuthenticateLocal` reserves a PostgreSQL single-flight lease before reading a
+Local login requires the installed release's complete backend migration history.
+PostgreSQL introduced shared account failure backoff in migration `000033`;
+MySQL/MariaDB provide it through their own manifests and storage revisions.
+`AuthenticateLocal` reserves a database-backed single-flight lease before reading a
 credential or executing KDF, then completes only an observed incorrect password
 as a failure. Admission serializes capacity allocation in a short transaction;
 verification runs after commit, without a held connection or database lock.
@@ -213,12 +215,17 @@ accounts. Duplicate normalized usernames return 409. Invalid input returns 400;
 OIDC/non-Local identity targets return 404 and are never modified, even with the
 same username/email. There is no linking, self-registration or MFA. Recovery uses
 surviving independently controlled accounts and approved resets, or the existing
-authorized backup/PITR procedure; it never reopens Bootstrap.
+authorized [backend-specific recovery](../operations/incident-recovery.md#database-recovery);
+it never reopens Bootstrap.
 
 R4 follows OWASP's [least privilege and deny-by-default authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)
 and [current-password verification for password changes](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
 
 ### R4 verification (2026-09-08)
+
+This subsection is historical evidence for the starting SHA below, not current
+multi-backend or release acceptance. Use [Production authentication](../operations/authentication.md)
+for current operating steps; the original results and limits are retained.
 
 Starting SHA: `002a42c0ef1a5b14f352eec7c8427504fff953de`; clean worktree.
 Reference `7e463a34bc8363021daeae12101d3cbd215e24ae` is an ancestor. No commit,
@@ -278,7 +285,9 @@ offline credential is rotated and the configured digest changes.
 
 ## Rollout and rollback
 
-Apply migration 000011 before enabling OIDC. Establish at least two separately
+Apply the installed release's complete backend migrations before enabling OIDC;
+`000011` is the historical PostgreSQL introduction, not a cross-backend target.
+Establish at least two separately
 owned SecurityAdmin bindings and test the independent approval path before
 removing development access. Verify an audit checkpoint, an IdP outage, and a
 break-glass rotation in the target environment.

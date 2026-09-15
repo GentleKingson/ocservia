@@ -1,5 +1,13 @@
 # PR-04 Draft: Outbox Coordination and Fencing
 
+> **Historical record, not a current operating guide.** Retained from the
+> 2026-09-15 source snapshot `cc8399641dc32083466a9c77369fcb8debf1ee48`;
+> this snapshot SHA is not a new acceptance baseline. Original execution dates,
+> tested revisions, Draft status, PASS/FAIL and unverified scope below remain
+> historical; an unrecorded test SHA is unknown, not the snapshot SHA.
+> Use the [current guide](operations/production-deployment.md#database-support) and
+> [maintained technical reference](development/operations-outbox.md) instead.
+
 Base: PR-01 through PR-03, merged through `1407b8d` (#194).
 MySQL/MariaDB remain test/development-only. No Agent protocol, signature format,
 schema migration, production admission, deployment or merge changes are included.

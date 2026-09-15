@@ -12,7 +12,7 @@ returns the original operation; reusing it with different input returns an RFC
 9457 conflict.
 
 The operation intent, typed Protobuf command, outbox event, and audit intent are
-committed in one PostgreSQL transaction. Workers claim available outbox rows
+committed in one database transaction through backend-owned stores. Workers claim available outbox rows
 with `FOR UPDATE SKIP LOCKED`, acquire one bounded lease per node, commit the
 claim, and only then call transportd. A successful transport acknowledgement is
 recorded after the network call. An expired claim is either redelivered or,
@@ -22,10 +22,14 @@ have failed or succeeded.
 Operation state is available through REST and the resumable
 `/api/v1/operations/{operation_id}/events` SSE stream. Queue health is exposed
 at `/api/v1/operations/queue-metrics`, including unpublished count, oldest age,
-queue depth, and unknown count. PostgreSQL notifications are wakeups only;
+queue depth, and unknown count. Where used, PostgreSQL notifications are wakeups only;
 polling remains the recovery mechanism.
 
-Rollback disables the worker/API version first, waits for active leases to
+The following is the historical PostgreSQL I09 removal boundary, not the
+current Controller rollback procedure. Use the guarded
+[Controller lifecycle](../how-to/controller-rollback.md) and backend-specific
+recovery for an installed release; do not apply this SQL to MySQL/MariaDB.
+Historical schema removal disables the worker/API version first, waits for active leases to
 expire, and then applies migration `000006_operations_outbox.down.sql`. The down
 migration removes I09 command history, so production rollback should normally
 be a forward fix while retained operations still require investigation.
