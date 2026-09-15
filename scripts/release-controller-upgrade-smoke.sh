@@ -9,13 +9,13 @@ candidate_commit="$(jq -er '.candidate_sha' "${FROZEN_FILE}")"
 baseline_version="$(jq -er '.baseline_tag | ltrimstr("v")' "${FROZEN_FILE}")"
 registry="ocservia-upgrade-registry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 restore="${registry}-restore"
-oidc_pid=""
+oidc="${registry}-oidc"
 active="${work}/baseline"
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backup"
 export OCSERV_CONTROLLER_STATE_ROOT="${work}/state"
 export OCSERV_PUBLIC_HOST=localhost OCSERV_HTTPS_ADDRESS=127.0.0.1
 export OCSERV_CONTROLLER_PUBLIC_URL=https://localhost
-export OCSERV_OIDC_ISSUER=https://172.30.240.1:19443 OCSERV_OIDC_CLIENT_ID=upgrade
+export OCSERV_OIDC_ISSUER=https://172.30.240.3:19443 OCSERV_OIDC_CLIENT_ID=upgrade
 export OCSERV_OIDC_REDIRECT_URL=https://localhost/api/v1/auth/callback
 export OCSERV_CERTIFICATE_SIGNER_URL=https://172.30.240.1:19443/signer
 export OCSERV_RELAY_URL_A=https://172.30.240.1:19443/relay-a OCSERV_RELAY_URL_B=https://172.30.240.1:19443/relay-b
@@ -48,9 +48,9 @@ cleanup() {
         "${work}/private-services.log" "${OCSERV_SECRET_DIR}" "${work}/redacted-services.log" &&
         sudo install -o "$(id -u)" -g "$(id -g)" -m 600 "${work}/redacted-services.log" "${ARTIFACT_DIR}/services.log" || true
     fi
-    compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   fi
-  [[ -z "${oidc_pid}" ]] || kill "${oidc_pid}" 2>/dev/null || true
+  docker rm -f "${oidc}" >/dev/null 2>&1 || true
+  compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   docker rm -f "${registry}" "${restore}" "${registry}-elf-gateway" "${registry}-elf-control" \
     "${registry}-elf-transport" "${registry}-elf-backup" >/dev/null 2>&1 || true
   sudo rm -rf -- "${work}" || true
@@ -97,7 +97,7 @@ for name in gateway control transport backup; do
   check_elf "$(jq -r --arg name "${name}" '.images[$name]' "${baseline_manifest}")" "${name}"
 done
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=upgrade-fixture \
-  -addext 'subjectAltName=DNS:localhost,IP:172.30.240.1' -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'subjectAltName=DNS:localhost,IP:172.30.240.3' -addext 'basicConstraints=critical,CA:TRUE' \
   -keyout "${OCSERV_SECRET_DIR}/tls.key" -out "${OCSERV_SECRET_DIR}/tls.crt" >/dev/null 2>&1
 export CURL_CA_BUNDLE="${OCSERV_SECRET_DIR}/tls.crt"
 for name in postgres-owner-password postgres-app-password postgres-backup-password oidc-client-secret \
@@ -123,9 +123,19 @@ sudo chown 65532:65532 "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECR
 sudo chmod 400 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" \
   "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
 sudo chown 999:999 "${work}/backup" "${work}/restore"
-node "${ROOT}/scripts/release-upgrade-oidc-fixture.mjs" "${OCSERV_SECRET_DIR}" "${OCSERV_OIDC_ISSUER}" >"${work}/oidc.log" 2>&1 &
-oidc_pid=$!
+oidc_image=node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7
+docker pull "${oidc_image}" >/dev/null
+[[ "$(docker image inspect --format '{{.Architecture}}' "${oidc_image}")" == "${CONTROLLER_ARCH}" ]]
+docker run -d --name "${oidc}" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  -p 127.0.0.1:19443:19443 \
+  -v "${ROOT}/scripts/release-upgrade-oidc-fixture.mjs:/fixture.mjs:ro" \
+  -v "${OCSERV_SECRET_DIR}/tls.key:/fixture/tls.key:ro" \
+  -v "${OCSERV_SECRET_DIR}/tls.crt:/fixture/tls.crt:ro" \
+  -v "${OCSERV_SECRET_DIR}/oidc-client-secret:/fixture/oidc-client-secret:ro" \
+  "${oidc_image}" node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" >/dev/null
 controller install --release-file "${baseline_manifest}"
+# Only the fixture joins the unchanged internal production network.
+docker network connect --ip 172.30.240.3 ocservia-production_application "${oidc}"
 check_version() {
   curl --fail --silent --show-error https://localhost/api/v1/readyz | jq -e '.status == "ok"' >/dev/null
   curl --fail --silent --show-error https://localhost/api/v1/version >"${ARTIFACT_DIR}/version-$1.json"
@@ -140,7 +150,7 @@ trust_oidc() {
   local container pid
   container="$(compose ps -q control-plane)"
   pid="$(docker inspect --format '{{.State.Pid}}' "${container}")"
-  docker cp "${OCSERV_SECRET_DIR}/tls.crt" "${container}:/tmp/upgrade-ca.crt"
+  docker exec --user 0 -i "${container}" sh -c 'cat > /tmp/upgrade-ca.crt; chmod 444 /tmp/upgrade-ca.crt' <"${OCSERV_SECRET_DIR}/tls.crt"
   sudo nsenter --target "${pid}" --mount --root --wd=/ \
     mount --bind /tmp/upgrade-ca.crt /etc/ssl/certs/ca-certificates.crt
 }
@@ -149,7 +159,8 @@ cookie="${work}/cookie"
 curl --fail --silent --show-error -c "${cookie}" -D "${work}/login.headers" https://localhost/api/v1/auth/login -o /dev/null
 location="$(awk 'tolower($1)=="location:" {sub(/\r$/, "", $2); print $2}' "${work}/login.headers")"
 [[ "${location}" == "${OCSERV_OIDC_ISSUER}/authorize?"* ]]
-curl --fail --silent --show-error -u "upgrade:$(cat "${OCSERV_SECRET_DIR}/oidc-client-secret")" \
+curl --fail --silent --show-error --connect-to 172.30.240.3:19443:127.0.0.1:19443 \
+  -u "upgrade:$(cat "${OCSERV_SECRET_DIR}/oidc-client-secret")" \
   -D "${work}/authorize.headers" "${location}" -o /dev/null
 location="$(awk 'tolower($1)=="location:" {sub(/\r$/, "", $2); print $2}' "${work}/authorize.headers")"
 [[ "${location}" == https://localhost/api/v1/auth/callback\?* ]]

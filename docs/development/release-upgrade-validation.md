@@ -2,21 +2,23 @@
 
 `Native Release Upgrade Validation` is an independent `workflow_dispatch`
 workflow, not a publisher and not part of Basic CI. Only `version`,
-`baseline_release` (default `v0.5.0`), and `candidate_sha` are accepted.
+`baseline_release` (default `v0.5.1`), and `candidate_sha` are accepted.
 Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
 must be the complete lowercase commit SHA of that branch and must equal
 both the dispatch SHA and checkout HEAD. The candidate's numeric X.Y.Z
 version must be strictly newer than the baseline.
 
 GitHub requires this workflow to exist on the default branch before it can
-be dispatched. A Draft PR and `--ref` do not bypass that requirement. Never
-merge or add an automatic trigger just to run acceptance. Once registered:
+be dispatched. PR #206 registered the fail-closed placeholder on main at
+`c44c34ae7d48d0d0de7f7c02276233c4b8bd367e`; the complete branch workflow can
+now run without merging #205 or adding an automatic trigger. Dispatch only
+after all candidate edits are committed and pushed:
 
 ```bash
 branch=codex/native-release-upgrade
 sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
 gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version=0.6.0 -f baseline_release=v0.5.0 \
+  --ref "$branch" -f version=0.6.0 -f baseline_release=v0.5.1 \
   -f candidate_sha="$sha"
 ```
 
@@ -55,6 +57,10 @@ credentials, PKI, identity keys and an OIDC provider with a password-protected
 principal and one-use PKCE codes. The fixture CA is mounted into only the
 running test Controller's trust-store namespace; TLS verification and real
 production authentication remain enabled. No host trust store is changed.
+The native, pinned Node fixture container joins the unchanged internal
+application network at its reserved test address; its host port is loopback
+only. The CA is written inside the container's writable tmpfs before mounting,
+not copied through Docker's read-only-root archive interface.
 Relay/signer/OTLP fixture addresses do not certify those external protocols.
 
 The old Controller creates the authenticated session and audited bootstrap
@@ -95,14 +101,19 @@ unchanged. Ordinary same-source native smoke remains a separate installer
 regression, not cross-version evidence.
 
 `release-upgrade-baselines.json` owns historical checksum pins and capabilities.
-v0.5.0 is bound to commit `519275567a65f5785260e353ef02ab3fabf30244`, schema 30,
-and DER key SHA-256
+The default v0.5.1 is bound to commit
+`4afa4756fc89fcad30a0f93edb9b079d612453a6`, schema 30, checksum-manifest SHA-256
+`b1f6b1319a50cdc99cbdf30a352b88af289fc8aa90150aea8088e32bf4e38c25`, and DER key SHA-256
 `b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369`.
 On 2026-09-14, the key was recovered from the real v0.4.0 arm64 DEB after
 checking its digest against the already repository-pinned v0.4.0 SHA256SUMS.
-That independent historical key verified v0.5.0 SHA256SUMS.sig, and matched
-the v0.5.0 public key. Immutable Release API digests and tag commit were also
-checked. The pin is not trust-on-first-download of the v0.5.0 key.
+That independent historical key verified v0.5.0 SHA256SUMS.sig. On 2026-09-15
+the same anchor verified v0.5.1's signatures and all published assets, both
+Controller bundles, and anonymous dual-platform indexes. Immutable Release
+388810408, direct tag commit and successful publication run 34916370091 were
+cross-checked. The key was not accepted through trust-on-first-download.
+v0.5.0 remains registered as historical data, not a fallback: its bundled
+PostgreSQL/gateway startup defects were fixed by the genuine v0.5.1 release.
 
 To register another baseline, independently establish its key, verify its
 signed checksum manifest and both architectures' native packages and
@@ -114,7 +125,9 @@ rebuild old sources or silently fall back to a different release.
 ## Evidence and reproduction
 
 Artifacts are `upgrade-frozen-RUN-ATTEMPT` and one
-`upgrade-COMPONENT-ARCH-RUN-ATTEMPT` per cell, retained for seven days. Each
+`upgrade-COMPONENT-ARCH-RUN-ATTEMPT` per cell. The workflow requests seven days,
+but repository policy currently caps retention at one day; download evidence
+promptly. Each
 cell includes `result.json`, scenario names, architecture proof, tested-file
 hashes and small logs. Controller bundles, version responses and lifecycle
 states contain no private key or database credential. No image archives or
@@ -127,6 +140,10 @@ pass. Use **Re-run all jobs**: re-running only failed jobs cannot combine old
 attempt artifacts into a new complete gate. Timing covers measured unit
 execution, not GitHub queue time or billed-minute rounding. No cold-cache
 duration guarantee is made.
+Any new candidate commit, including documentation or test-only edits, requires
+a fresh four-cell run at that exact SHA. Record final run links/results in the
+PR and external evidence report rather than changing the tested commit merely
+to embed its own SHA or run URL.
 
 Run local checks through `ssh BuildServer`, in a fresh checkout. Use
 `bash scripts/test-release-upgrade.sh`, Bash syntax, ShellCheck, actionlint,

@@ -1,14 +1,20 @@
 # Native upgrade implementation report
 
-Date: 2026-09-14. Implementation branch: `codex/native-release-upgrade`.
-Implementation is submitted for review; real four-cell upgrade acceptance is
-**BLOCKED / NOT RUN**, not PASS. This is not release authorization.
+Date: 2026-09-15. Implementation branch: `codex/native-release-upgrade`.
+The workflow-registration and published-baseline blockers are closed. This
+source report describes the candidate before dispatch; it does not claim
+four-cell PASS. The exact final SHA, run/attempt and results are recorded in
+PR #205 and downloaded evidence without changing the tested commit. This is
+not release authorization.
 
 ## Identities and changes
 
-- Rechecked main: `e9016da71e5b447d3532e8981e5ca08844de88ff`.
-- Stable baseline: immutable `v0.5.0`, commit
-  `519275567a65f5785260e353ef02ab3fabf30244`, PostgreSQL schema 30.
+- Rebased main: `c44c34ae7d48d0d0de7f7c02276233c4b8bd367e`, including #206's
+  registration placeholder. The conflict retains #205's full implementation.
+- Stable baseline: immutable `v0.5.1`, commit
+  `4afa4756fc89fcad30a0f93edb9b079d612453a6`, PostgreSQL schema 30.
+  Real checksum/signing-key pins are independently verified; v0.5.0 remains
+  in the historical registry, not overwritten or silently substituted.
 - Candidate version: `0.6.0`. The final pushed branch commit is the candidate;
   obtain its exact SHA using the command in the
   [runbook](release-upgrade-validation.md). Local preliminary baseline
@@ -21,7 +27,12 @@ Implementation is submitted for review; real four-cell upgrade acceptance is
   changing publishing dependencies, permissions or approval conditions.
 - Extended `scripts/release-baseline-upgrade-smoke.sh` with shared baseline
   data and `scripts/release-agent-state-check.sh`, retaining its real native
-  package/systemd lifecycle. Existing user edits selecting v0.5.0 are retained.
+  package/systemd lifecycle. Both workflow defaults and the release package
+  smoke now select the real v0.5.1 baseline.
+- Reused the proven fresh-install fixture corrections from #207/#208: a native
+  OIDC container joins the internal application network, and the test CA is
+  written into container tmpfs before its namespace-only trust-store mount.
+  No published baseline descriptor, manifest, signature or image is modified.
 - Fixed `scripts/upgrade-agent.sh`: a verified identical-package retry no
   longer overwrites the old matched rollback snapshot with candidate files.
   Retry now also requires the existing snapshot to pass the real rollback
@@ -35,7 +46,10 @@ Implementation is submitted for review; real four-cell upgrade acceptance is
 
 ## Executed checks
 
-All execution was on native ARM64 BuildServer. Tools requiring additional
+The following focused checks passed in the earlier implementation/review
+rounds; they are not evidence for a later candidate SHA. Updated focused
+validation and Actions results are recorded in PR #205. All local execution
+uses native ARM64 BuildServer. Tools requiring additional
 dependencies ran in disposable containers; no native packages, users or
 systemd units were installed on the shared host.
 
@@ -69,11 +83,13 @@ these static and fixture tests.
 | controller-amd64 (PostgreSQL) | NOT RUN |
 | controller-arm64 (PostgreSQL) | NOT RUN |
 
-Actions run URL: none. The new workflow is not registered on the default
-branch. A Draft PR and `--ref` cannot bypass GitHub's dispatch requirement;
-no merge or automatic trigger was used. The runbook contains the command to
-use after normal default-branch registration. No runner-minute or runtime
-guarantee is inferred from local checks.
+At source-report preparation the new candidate has not been dispatched. Use
+the PR's exact-SHA run record for the current result, not this pre-dispatch
+table. Registration is complete and the runbook command selects v0.5.1.
+Only four same-attempt passing results plus `Native Upgrade Result` permit
+acceptance. No runner-minute or runtime guarantee is inferred from local checks.
+
+## Historical baseline failure (resolved)
 
 A separate ARM64 baseline-only preflight used a newly created Docker-in-Docker
 daemon, the actual v0.5.0 production install entrypoint, unmodified signed
@@ -88,15 +104,13 @@ postgres-1 | chmod: changing permissions of '/var/run/postgresql': Operation not
 postgres-1 | find: '/var/run/postgresql': Permission denied
 ```
 
-The old descriptor drops all capabilities while PostgreSQL starts as root
-against postgres-owned runtime directories. This is a baseline-start blocker
-in the tested isolated environment, not evidence of a candidate regression
-or a completed ARM64 cell. The baseline was not edited, rebuilt, re-signed,
-replaced with v0.4.0 or granted bypass capabilities. Candidate migration,
-OIDC/data preservation, failure/recovery and restore paths remain unverified
-in integration and must not be treated as accepted based on their code alone.
+The old descriptor dropped all capabilities while PostgreSQL started as root
+against postgres-owned runtime directories. It was not evidence of a candidate
+regression or a completed ARM64 cell. The published baseline was not edited,
+rebuilt, re-signed, replaced with v0.4.0 or granted bypass capabilities.
 
-Proceeding requires ordinary default-branch workflow registration and a
-reviewed resolution of the genuine baseline installation blocker without
-misrepresenting modified assets as the published baseline. The Draft PR is
-kept non-merge-ready pending real acceptance.
+PR #207 fixed PostgreSQL startup identity and Caddy's file capability on the
+v0.5 maintenance line; #208 resolved independent release-readiness blockers.
+Their complete native fresh-install evidence and official v0.5.1 publication
+run 34916370091 close that baseline blocker, not #205's upgrade acceptance.
+The Draft PR remains non-merge-ready until the new exact-SHA four-cell run passes.

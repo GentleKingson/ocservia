@@ -292,7 +292,7 @@ to GHCR, or loads the production signing key.
   Agent, privd, and upgrader, produces a signed tar archive plus deb/rpm,
   and runs `scripts/release-native-package-smoke.sh` for the candidate's
   deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  It also runs the published v0.5.0 DEB/RPM baseline package smoke.
+  It also runs the published v0.5.1 DEB/RPM baseline package smoke.
   The additional full upgrade gate below is independent of this release job.
 - Tag pushes and `arch=all` dry runs download both package sets and run
   `scripts/validate-release-packages.sh`. This retains package presence,
@@ -338,8 +338,8 @@ exact dispatch SHA are frozen once before either matrix runs.
 
 See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
 trust anchors, evidence, reproduction, and the limits of this gate. The
-workflow must first be registered on the default branch; `--ref` alone cannot
-make a new Draft PR workflow dispatchable.
+workflow registration is complete through #206's fail-closed main placeholder.
+`--ref` can now select the complete #205 branch workflow without merging it.
 
 ## Deferred native validation
 
