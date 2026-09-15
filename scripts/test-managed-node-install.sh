@@ -1407,6 +1407,32 @@ assert_output "PENDING_APPROVAL"
 assert_log_empty "${systemctl_log}"
 echo "a failed bootstrap enrollment converges on rerun"
 
+# Single Relay: unset/empty B survives installation, registration and a
+# verification-only rerun; changing topology on the enrolled node fails.
+for single_b in unset empty; do
+  scenario
+  ROOT_ENV_OMIT=(RELAY_URL_B)
+  if [[ "${single_b}" == empty ]]; then EXTRA_ENV=("RELAY_URL_B="); fi
+  capture_root
+  assert_status 0
+  as_root grep -qx 'RELAY_URL_B=' "${sysroot}/etc/ocservia-agent/relays.env" || die 'single Relay configuration lost'
+  printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
+  as_root install -o root -g ocserv-agent -m 0640 "${fixture}/enrollment-token" "${sysroot}/etc/ocservia-agent/enrollment-token"
+  capture_root
+  assert_status 0
+  assert_output "PENDING_APPROVAL"
+  enrollment_line="$(grep -- '--enrollment-token-file' "${agent_log}")"
+  [[ "$(grep -o -- '--relay-url' <<<"${enrollment_line}" | wc -l)" -eq 1 ]] || die 'registration must receive one URL'
+  assert_log_contains "${agent_log}" "--relay-url https://relay-a.example.test --relay-token-file"
+  capture_root
+  assert_status 0
+  [[ "$(grep -c -- '--enrollment-token-file' "${agent_log}")" -eq 1 ]] || die 'rerun re-enrolled single Relay node'
+  EXTRA_ENV=("RELAY_URL_B=https://new-relay.example.test")
+  capture_root
+  assert_status 1
+  as_root grep -qx 'RELAY_URL_B=' "${sysroot}/etc/ocservia-agent/relays.env" || die 'rerun changed topology'
+done
+
 # 16. a valid protected token completes enrollment: the exact CLI contract,
 # atomic agent.env finalization, token consumption, PENDING_APPROVAL.
 scenario
@@ -1798,6 +1824,24 @@ EOF
     "${sysroot}/etc/ocservia-agent/relays.env" ||
     die "relays.env must carry the launcher-resolved relay URL A"
   echo "the root lifecycle re-execs the single file with the pinned version"
+  for single_b in unset empty override; do
+    scenario
+    ROOT_ENV_OMIT=(RELAY_URL_A RELAY_URL_B)
+    printf 'RELAY_URL_A=https://relay-root-file-a.example.test\n' >"${repo}/install.env"
+    if [[ "${single_b}" == empty ]]; then printf 'RELAY_URL_B=\n' >>"${repo}/install.env"; fi
+    if [[ "${single_b}" == override ]]; then printf 'RELAY_URL_B=https://relay-b.example.test\n' >>"${repo}/install.env"; fi
+    RUN_STATUS=0
+    RUN_OUTPUT="$(
+      export PATH="${root_lifecycle_bin}"
+      TEST_PATH_PREFIX="${root_lifecycle_bin}" build_env
+      cd -- "${repo}"
+      if [[ "${single_b}" == override ]]; then export RELAY_URL_B=; else unset RELAY_URL_B; fi
+      env "${ROOT_ENV[@]}" "${repo}/deploy/managed-node/install.sh" --root-lifecycle 2>&1
+    )" || RUN_STATUS=$?
+    assert_status 0
+    as_root grep -qx 'RELAY_URL_B=' "${sysroot}/etc/ocservia-agent/relays.env" || die 'sudo lost optional B'
+    echo "single Relay install.env ${single_b} crosses real sudo env_reset"
+  done
 else
   echo "root-lifecycle forwarding case skipped: running as root" >&2
 fi

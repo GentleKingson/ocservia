@@ -124,8 +124,8 @@ fi
 
 manifest="${BACKUP_DIR}/MANIFEST.sha256"
 validate_file "${manifest}" 600
-if [[ "$(wc -l <"${manifest}")" -ne 8 ]] || \
-  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|ocservia-agent-verify\.(previous|absent))$/ || NF != 2 { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
+if [[ "$(wc -l <"${manifest}")" -ne 8 && "$(wc -l <"${manifest}")" -ne 9 ]] || \
+  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-agent-relays\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|ocservia-agent-verify\.(previous|absent))$/ || NF != 2 || seen[$2]++ { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
   rollback_error "rollback snapshot manifest is malformed"
 fi
 
@@ -183,6 +183,22 @@ upgrader_unit_backup="${resolved_backup}"
 resolve_optional_backup ocservia-agent-verify 755
 verifier_backup="${resolved_backup}"
 
+# Eight-entry snapshots predate the optional-Relay launcher. Do not infer
+# single-Relay support from a version number or silently change relays.env.
+relay_launcher_backup=""
+if [[ "$(wc -l <"${manifest}")" -eq 9 ]]; then
+  resolve_optional_backup ocservia-agent-relays 755
+  relay_launcher_backup="${resolved_backup}"
+fi
+if [[ "${verify_only}" == false && "${restore_relay}" == true && -z "${relay_launcher_backup}" ]]; then
+  relay_env="${DESTDIR}/etc/ocservia-agent/relays.env"
+  relay_a="$(sed -n 's/^RELAY_URL_A=//p' "${relay_env}" | tail -n 1)"
+  relay_b="$(sed -n 's/^RELAY_URL_B=//p' "${relay_env}" | tail -n 1)"
+  if [[ "${relay_a}" != https://?* || "${relay_b}" != https://?* || "${relay_a}" == "${relay_b}" ]]; then
+    rollback_error "target predates single Relay support; first restore a valid, distinct HTTPS A/B configuration and both Relay services"
+  fi
+fi
+
 if [[ "${verify_only}" == true ]]; then
   echo "Matched rollback snapshot verified without modification"
   exit 0
@@ -194,6 +210,7 @@ relay_directory="${systemd}/ocservia-agent.service.d"
 relay_directory_missing=false
 validate_destination "${libexec}/ocservia-agent" 755
 validate_destination "${libexec}/ocservia-privd" 755
+validate_destination "${libexec}/ocservia-agent-relays" 755
 validate_destination "${systemd}/ocservia-agent.service" 644
 validate_destination "${systemd}/ocservia-privd.service" 644
 validate_root_ancestry "${libexec}"
@@ -258,6 +275,11 @@ fi
 
 restore_file "${BACKUP_DIR}/ocservia-agent.previous" "${libexec}/ocservia-agent" 755
 restore_file "${BACKUP_DIR}/ocservia-privd.previous" "${libexec}/ocservia-privd" 755
+if [[ -n "${relay_launcher_backup}" ]]; then
+  restore_file "${relay_launcher_backup}" "${libexec}/ocservia-agent-relays" 755
+else
+  rm -f -- "${libexec}/ocservia-agent-relays"
+fi
 restore_file "${BACKUP_DIR}/ocservia-agent.service.previous" "${systemd}/ocservia-agent.service" 644
 restore_file "${BACKUP_DIR}/ocservia-privd.service.previous" "${systemd}/ocservia-privd.service" 644
 if [[ -n "${upgrader_backup}" ]]; then

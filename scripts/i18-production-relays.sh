@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-full}"
-if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; then
-  echo "usage: $0 [--contract-only]" >&2
+if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" && "${MODE}" != "--compose-only" ]]; then
+  echo "usage: $0 [--contract-only|--compose-only]" >&2
   exit 2
 fi
 RUN_ID="${RUN_ID:?RUN_ID is required}"
@@ -109,6 +109,14 @@ COMPOSE_PROFILES=observability COMPOSE_PROJECT_NAME=unexpected \
   >"${ARTIFACT_DIR}/platform-compose.json"
 OCSERV_OTEL_BACKEND_ENDPOINT= "${ROOT}/deploy/production/compose.sh" config --format json \
   >"${ARTIFACT_DIR}/platform-compose-empty-otel.json"
+env -u OCSERV_RELAY_URL_B "${ROOT}/deploy/production/compose.sh" config --format json \
+  >"${ARTIFACT_DIR}/platform-compose-single-unset.json"
+OCSERV_RELAY_URL_B= "${ROOT}/deploy/production/compose.sh" config --format json \
+  >"${ARTIFACT_DIR}/platform-compose-single-empty.json"
+if env -u OCSERV_RELAY_URL_A "${ROOT}/deploy/production/compose.sh" config --quiet >/dev/null 2>&1; then
+  echo "production launcher accepted missing A with B configured" >&2
+  exit 1
+fi
 mkdir -p "${work}/env-fixture/deploy"
 cp -R "${ROOT}/deploy/production" "${work}/env-fixture/deploy/production"
 printf 'OCSERV_OTEL_BACKEND_ENDPOINT=injected.example.test:4317\nCOMPOSE_PROFILES=observability\n' \
@@ -163,7 +171,7 @@ if OCSERV_BACKUP_DIR="${work}/invalid-backup-owner" \
   exit 1
 fi
 
-python3 - "${ARTIFACT_DIR}/platform-compose.json" "${ARTIFACT_DIR}/relay-compose.json" <<'PY'
+python3 - "${ARTIFACT_DIR}/platform-compose.json" "${ARTIFACT_DIR}/relay-compose.json" "${MODE}" <<'PY'
 import json
 import pathlib
 import re
@@ -185,7 +193,7 @@ assert "otel-collector" not in platform["services"]["control-plane"]["depends_on
 
 assert platform["name"] == "ocservia-production"
 
-def hardened(service):
+def hardened(service, check_nofile=True):
     assert service.get("read_only") is True
     assert service.get("cap_drop") == ["ALL"]
     assert not service.get("cap_add") and service.get("privileged") is not True
@@ -193,7 +201,8 @@ def hardened(service):
     limits = service.get("deploy", {}).get("resources", {}).get("limits", {})
     assert limits.get("pids", 0) > 0 and limits.get("memory")
     nofile = service.get("ulimits", {}).get("nofile", {})
-    assert nofile.get("soft", 0) >= 256 and nofile.get("hard", 0) <= 8192
+    if check_nofile:
+        assert nofile.get("soft", 0) >= 256 and nofile.get("hard", 0) <= 8192
     serialized = json.dumps(service)
     for forbidden in ("docker.sock", "/proc", "/sys"):
         assert forbidden not in serialized
@@ -204,7 +213,9 @@ assert set(services) == {"transport-runtime-init", "gateway", "postgres", "migra
 for name, service in enabled_otel["services"].items():
     if name == "transport-runtime-init":
         continue
-    hardened(service)
+    # The focused Relay contract does not certify the untouched DB overlay's
+    # resource limits. The full I18 gate retains its original nofile check.
+    hardened(service, sys.argv[3] != "--compose-only" or name not in ("postgres", "backup"))
     assert re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", service["image"])
 runtime_init = services["transport-runtime-init"]
 assert re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", runtime_init["image"])
@@ -236,11 +247,21 @@ for name in ("gateway", "control-plane"):
 assert "database" not in services["gateway"]["networks"]
 for name in ("application", "database", "observability"):
     assert platform["networks"][name]["internal"] is True
+assert not platform["networks"]["relay-egress"].get("internal", False)
+assert set(services["transportd"]["networks"]) == {"application", "observability", "relay-egress"}
+assert [name for name, service in enabled_otel["services"].items()
+        if "relay-egress" in service.get("networks", {})] == ["transportd"]
 command = services["transportd"]["command"]
-assert command.count("--relay-url") == 2 and "--relay-mode" in command and "custom" in command
-urls = [command[index + 1] for index, value in enumerate(command) if value == "--relay-url"]
+assert "--relay-url" not in command and "--relay-mode" not in command
+assert services["transportd"]["entrypoint"] == ["/usr/local/libexec/ocservia-transportd-relays"]
+urls = [services["transportd"]["environment"][f"OCSERV_RELAY_URL_{name}"] for name in ("A", "B")]
 assert len(set(urls)) == 2 and all(url.startswith("https://") for url in urls)
 assert all("n0" not in url and "iroh.link" not in url for url in urls)
+single_unset = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-single-unset.json").read_text())
+single_empty = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-single-empty.json").read_text())
+assert single_unset == single_empty
+assert single_empty["services"]["transportd"]["environment"]["OCSERV_RELAY_URL_B"] == ""
+assert single_empty["services"]["transportd"]["command"] == command
 assert "/run/secrets/relay_access_token" in command
 assert "/run/secrets/controller_iroh_key" in command
 assert command[command.index("--control-plane-uid") + 1] == "65534"
@@ -276,6 +297,11 @@ relay_token = next(item for item in relay_service["secrets"] if item["target"] =
 assert relay_token["uid"] == "65532" and relay_token["gid"] == "65532" and relay_token["mode"] == "0400"
 print("I18 production topology validation passed")
 PY
+
+if [[ "${MODE}" == "--compose-only" ]]; then
+  echo "Production Compose single/dual Relay contracts passed (no runtime reachability claim)"
+  exit 0
+fi
 
 if grep -R -E 'docker compose .*deploy/production/(compose|relay/compose)\.yaml' \
   "${ROOT}/docs/operations"; then
