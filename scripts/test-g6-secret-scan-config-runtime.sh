@@ -36,10 +36,11 @@ mkdir -p "${fixture}/release-database"
 scan_public_literal() {
   local expected="$1" code=0
   shift
-  gitleaks dir --no-banner --redact --no-color --report-format json \
+  rm -f "${fixture}/report.json"
+  gitleaks dir --no-banner --redact --no-color --exit-code 10 --report-format json \
     --report-path "${fixture}/report.json" "$@" "${fixture}/release-database" \
     >"${fixture}/scan.log" 2>&1 || code=$?
-  if [[ "${code}" -eq "${expected}" ]] && jq -e --argjson expected "${expected}" '
+  if [[ "${code}" -eq "$((expected * 10))" ]] && jq -e --argjson expected "${expected}" '
     length == $expected and all(.[]; .RuleID == "generic-api-key")
   ' "${fixture}/report.json" >/dev/null; then
     return
@@ -73,6 +74,11 @@ for index in "${!public_literals[@]}"; do
     "${other_a}" "${other_b}" >"${record}"
   scan_public_literal 1 --config "${CONFIG}"
 done
+# A detector failure must not reuse the previous successful finding report.
+if (scan_public_literal 1 --config "${fixture}/missing.toml") >/dev/null 2>&1; then
+  echo "a secret-scan configuration error must not count as a detected credential" >&2
+  exit 1
+fi
 rm -rf "${fixture}/release-database" "${fixture}/report.json" "${fixture}/scan.log"
 
 mkdir -p "${fixture}/strict-wire"
