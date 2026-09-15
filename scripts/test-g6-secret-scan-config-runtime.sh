@@ -149,4 +149,60 @@ if gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}
   exit 1
 fi
 
-echo "g6 secret scan configuration runtime tests passed"
+# Exercise the real repository entrypoint with real Git history and Gitleaks.
+# Only its recursive post-scan regression invocation is stubbed in the fixture.
+history="${fixture}/history"
+mkdir -p "${history}/scripts"
+cp "${ROOT}/scripts/security-check.sh" "${ROOT}/scripts/env.sh" "${CONFIG}" "${history}/scripts/"
+printf '#!/usr/bin/env bash\nexit 0\n' >"${history}/scripts/test-g6-secret-scan-config-runtime.sh"
+chmod +x "${history}/scripts/test-g6-secret-scan-config-runtime.sh"
+git -C "${history}" init -q -b candidate
+git -C "${history}" config user.name 'Secret scan fixture'
+git -C "${history}" config user.email 'fixture@example.invalid'
+git -C "${history}" add scripts
+git -C "${history}" commit -qm 'Clean candidate'
+expect_scan() {
+  local expected="$1" status=0
+  shift
+  bash "${history}/scripts/security-check.sh" "$@" >"${fixture}/scan.log" 2>&1 || status=$?
+  if [[ "${status}" != "${expected}" ]]; then
+    cat "${fixture}/scan.log" >&2
+    echo "secret scan returned ${status}, expected ${expected}: $*" >&2
+    exit 1
+  fi
+}
+expect_scan 0 --candidate-history
+git -C "${history}" checkout -qb unrelated
+openssl genpkey -algorithm ED25519 -out "${history}/credential.pem" >/dev/null 2>&1
+git -C "${history}" add credential.pem
+git -C "${history}" commit -qm 'Unrelated branch credential'
+git -C "${history}" checkout -q candidate
+expect_scan 1
+expect_scan 0 --candidate-history
+expect_scan 2 --candidate-history --unexpected
+
+git -C "${history}" checkout -qb merged
+openssl genpkey -algorithm ED25519 -out "${history}/credential.pem" >/dev/null 2>&1
+git -C "${history}" add credential.pem
+git -C "${history}" commit -qm 'Candidate ancestor credential'
+expect_scan 1 --candidate-history
+git -C "${history}" rm -q credential.pem
+git -C "${history}" commit -qm 'Delete credential'
+expect_scan 1 --candidate-history
+git -C "${history}" checkout -q candidate
+git -C "${history}" merge -q --no-ff merged -m 'Merge ancestor history'
+expect_scan 1 --candidate-history
+
+git -C "${history}" checkout -q --orphan root-history
+openssl genpkey -algorithm ED25519 -out "${history}/credential.pem" >/dev/null 2>&1
+git -C "${history}" add credential.pem
+git -C "${history}" commit -qm 'Root commit credential'
+git -C "${history}" rm -q credential.pem
+git -C "${history}" commit -qm 'Delete root credential'
+expect_scan 1 --candidate-history
+
+git clone -q --depth 1 --branch candidate "file://${history}" "${fixture}/shallow"
+history="${fixture}/shallow"
+expect_scan 2 --candidate-history
+
+echo "g6 secret scan configuration and candidate history runtime tests passed"

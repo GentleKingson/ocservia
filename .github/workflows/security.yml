@@ -5,6 +5,11 @@ on:
     - cron: '23 3 * * 1'
   workflow_dispatch:
   workflow_call:
+    inputs:
+      candidate_history:
+        description: "Scan the complete release candidate history instead of all repository refs"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,7 +25,7 @@ jobs:
         include:
           - name: Repository secrets
             profile: g6-secret-scan
-            command: scripts/security-check.sh
+            command: scripts/security-check.sh ${{ inputs.candidate_history && '--candidate-history' || '' }}
           - name: Go vulnerabilities
             profile: go-quality
             command: |

@@ -63,6 +63,12 @@ blocks release publishing; it does not expand Basic CI or enable live security
 acceptance. A successful scan covers these tools and their current databases,
 not every possible vulnerability or the state of a deployed service.
 
+Release calls set `candidate_history: true`: the secret scan covers every
+ancestor of the checked-out candidate, including merged and deleted content,
+and rejects shallow history. Unrelated fetched branches cannot affect that
+candidate verdict. Standalone weekly/manual scans and direct script calls keep
+the all-ref scope. Neither mode suppresses findings or changes detection rules.
+
 ## Path routing
 
 `scripts/ci-relevance.sh` emits only five execution flags:
