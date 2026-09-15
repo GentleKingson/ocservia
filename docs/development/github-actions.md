@@ -289,10 +289,16 @@ to GHCR, or loads the production signing key.
   always build both amd64 and arm64, regardless of dispatch defaults.
 - Agent packages build natively on `ubuntu-24.04` (amd64) and
   `ubuntu-24.04-arm` (arm64), without emulation. Each selected leg builds
-  Agent, privd, and upgrader, produces a signed tar archive plus deb/rpm,
+  Agent, privd, and upgrader through the shared `build-release-agent.sh` and
+  `build-agent-binaries.sh` entrypoints in a digest-pinned Rocky 9 container
+  with glibc 2.34. Cargo objects are isolated from host-built objects; native
+  host/daemon/container/ELF identity and all three binary versions are checked.
+  It produces a signed tar archive plus deb/rpm,
   and runs `scripts/release-native-package-smoke.sh` for the candidate's
   deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  Neither published-baseline upgrade smoke runs in the release workflow.
+  It also runs the published v0.5.2 DEB/RPM baseline package smoke, executing
+  all three installed candidate binaries on Ubuntu and systemd Rocky 9.
+  The additional full upgrade gate below is independent of this release job.
 - Tag pushes and `arch=all` dry runs download both package sets and run
   `scripts/validate-release-packages.sh`. This retains package presence,
   signatures, architecture metadata, embedded payload consistency, and
@@ -326,6 +332,19 @@ to GHCR, or loads the production signing key.
   attestation/immutability verification, and repeated tag binding are not
   required by this workflow. Existing package signatures and installer trust
   verification remain unchanged.
+
+## Manual native upgrade validation
+
+`.github/workflows/release-upgrade.yml` is a separate, manual-only workflow.
+It always requires Agent and Controller upgrade results on both native
+`ubuntu-24.04` and `ubuntu-24.04-arm` runners. It neither publishes a release
+nor becomes a Basic CI required check. Candidate version, baseline tag, and
+exact dispatch SHA are frozen once before either matrix runs.
+
+See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
+trust anchors, evidence, reproduction, and the limits of this gate. The
+workflow registration is complete through #206's fail-closed main placeholder.
+`--ref` can now select the complete #205 branch workflow without merging it.
 
 ## Deferred native validation
 

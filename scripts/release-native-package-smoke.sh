@@ -96,7 +96,7 @@ write_stub_binaries() {
 if [[ "${STUB_BINARIES}" == true ]]; then
   write_stub_binaries 1.0.0
 else
-  (cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
+  VERSION=1.0.0 PACKAGE_ARCH="${PACKAGE_ARCH}" bash "${ROOT}/scripts/build-agent-binaries.sh"
   for binary in ocservia-agent ocservia-privd; do
     file_output="$(file -b "${ROOT}/rust/target/release/${binary}")"
     if [[ "${PACKAGE_ARCH}" == amd64 && "${file_output}" != *"x86-64"* ]] ||
@@ -136,8 +136,7 @@ build_packages() {
   if [[ "${STUB_BINARIES}" == true ]]; then
     write_stub_binaries "${version}"
   else
-    (cd "${ROOT}/rust" && OCSERV_AGENT_RELEASE_VERSION="${version}" cargo build --locked --release \
-      --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
+    VERSION="${version}" PACKAGE_ARCH="${PACKAGE_ARCH}" bash "${ROOT}/scripts/build-agent-binaries.sh"
   fi
   sha256sum "${ROOT}/rust/target/release/ocservia-agent" | awk '{print $1}' \
     >"${work}/binary-sha-${version}"

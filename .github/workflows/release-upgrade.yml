@@ -1,17 +1,18 @@
 name: Native Release Upgrade Validation
+run-name: Native upgrade ${{ inputs.baseline_release }} to ${{ inputs.version }} at ${{ inputs.candidate_sha }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Candidate X.Y.Z version without v
+        description: Candidate X.Y.Z version without v, strictly newer than baseline
         type: string
         required: true
       baseline_release:
-        description: Exact published stable Release tag
+        description: Registered published stable Release tag
         type: string
         required: true
-        default: v0.5.0
+        default: v0.5.2
       candidate_sha:
         description: Exact 40-character SHA of the selected dispatch branch
         type: string
@@ -20,14 +21,156 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: native-upgrade-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  registration-only:
-    name: Native Upgrade Result
+  prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 2
+    timeout-minutes: 15
     steps:
-      - name: Refuse acceptance from the registration placeholder
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Freeze candidate and registered baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          BASELINE_RELEASE: ${{ inputs.baseline_release }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
-          echo '::error::Registration only. No upgrade validation was performed.'
-          echo 'Native Upgrade Result: NOT PASS (registration-only placeholder)' >> "${GITHUB_STEP_SUMMARY}"
-          exit 1
+          node scripts/release-upgrade-contract.mjs prepare "${RUNNER_TEMP}/frozen"
+          bash scripts/release-upgrade-fetch.sh "${RUNNER_TEMP}/frozen/frozen.json" "${HOME}/.upgrade-baseline"
+          for arch in amd64 arm64; do
+            while IFS= read -r image; do
+              docker manifest inspect --verbose "${image}" | jq -e --arg arch "${arch}" '
+                if type == "array" then any(.[]; .Descriptor.platform.os == "linux" and .Descriptor.platform.architecture == $arch)
+                else .Descriptor.platform.os == "linux" and .Descriptor.platform.architecture == $arch end' >/dev/null
+            done < <(jq -r '.images[]' "${HOME}/.upgrade-baseline/bundle/controller-release-${arch}.json")
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upgrade-frozen-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frozen/frozen.json
+          if-no-files-found: error
+          retention-days: 7
+
+  agent-upgrade:
+    name: Agent Upgrade (${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          name: upgrade-frozen-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frozen
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+            rust/target
+          key: native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
+      - name: Build once and validate real package upgrades
+        # Hosted images include non-QEMU handlers too; remove every handler
+        # on this disposable runner before the strict native preflight.
+        env:
+          FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
+          ARTIFACT_DIR: ${{ runner.temp }}/agent-${{ matrix.arch }}
+        run: |
+          if [[ -f /proc/sys/fs/binfmt_misc/status ]]; then
+            printf '%s\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null
+          fi
+          bash scripts/release-upgrade-unit.sh agent "${{ matrix.arch }}"
+      - name: Preserve unit evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upgrade-agent-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agent-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  controller-upgrade:
+    name: Controller Upgrade (${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          name: upgrade-frozen-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frozen
+      - name: Build once and validate real Controller upgrade
+        env:
+          FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
+          ARTIFACT_DIR: ${{ runner.temp }}/controller-${{ matrix.arch }}
+        run: |
+          if [[ -f /proc/sys/fs/binfmt_misc/status ]]; then
+            printf '%s\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null
+          fi
+          bash scripts/release-upgrade-unit.sh controller "${{ matrix.arch }}"
+      - name: Preserve unit evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: upgrade-controller-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/controller-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  upgrade-result:
+    name: Native Upgrade Result
+    if: always()
+    needs: [prepare, agent-upgrade, controller-upgrade]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Collect same-attempt unit results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          pattern: upgrade-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/results
+      - name: Require four complete native units
+        if: always()
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/results/frozen"
+          frozen="${RUNNER_TEMP}/results/upgrade-frozen-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/frozen.json"
+          if [[ -f "${frozen}" ]]; then cp "${frozen}" "${RUNNER_TEMP}/results/frozen/frozen.json"; fi
+          node scripts/release-upgrade-contract.mjs aggregate "${RUNNER_TEMP}/results"
