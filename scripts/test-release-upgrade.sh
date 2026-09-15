@@ -16,6 +16,10 @@ abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
   abort 'incomplete native matrix' unless job['strategy']['matrix']['include'] == [
     {'arch'=>'amd64','runner'=>'ubuntu-24.04'}, {'arch'=>'arm64','runner'=>'ubuntu-24.04-arm'}]
   abort 'must wait for frozen prepare' unless job['needs'] == 'prepare'
+  execution = job['steps'].find { |step| step.fetch('run','').include?('bash scripts/release-upgrade-unit.sh') }.fetch('run')
+  removal = "printf '%s\\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null"
+  abort 'hosted binfmt handlers must be removed before strict native checks' unless
+    execution.include?(removal) && execution.index(removal) < execution.index('bash scripts/release-upgrade-unit.sh')
 end
 abort 'summary must always run' unless w['jobs']['upgrade-result']['if'] == 'always()'
 abort 'summary graph incomplete' unless w['jobs']['upgrade-result']['needs'].sort == %w[agent-upgrade controller-upgrade prepare]

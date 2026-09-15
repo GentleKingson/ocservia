@@ -89,10 +89,16 @@ jobs:
           key: native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
           restore-keys: native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
       - name: Build once and validate real package upgrades
+        # Hosted images include non-QEMU handlers too; remove every handler
+        # on this disposable runner before the strict native preflight.
         env:
           FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
           ARTIFACT_DIR: ${{ runner.temp }}/agent-${{ matrix.arch }}
-        run: bash scripts/release-upgrade-unit.sh agent "${{ matrix.arch }}"
+        run: |
+          if [[ -f /proc/sys/fs/binfmt_misc/status ]]; then
+            printf '%s\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null
+          fi
+          bash scripts/release-upgrade-unit.sh agent "${{ matrix.arch }}"
       - name: Preserve unit evidence
         if: always()
         timeout-minutes: 5
@@ -129,7 +135,11 @@ jobs:
         env:
           FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
           ARTIFACT_DIR: ${{ runner.temp }}/controller-${{ matrix.arch }}
-        run: bash scripts/release-upgrade-unit.sh controller "${{ matrix.arch }}"
+        run: |
+          if [[ -f /proc/sys/fs/binfmt_misc/status ]]; then
+            printf '%s\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null
+          fi
+          bash scripts/release-upgrade-unit.sh controller "${{ matrix.arch }}"
       - name: Preserve unit evidence
         if: always()
         timeout-minutes: 5

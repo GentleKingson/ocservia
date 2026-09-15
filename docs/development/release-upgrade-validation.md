@@ -35,6 +35,9 @@ Four mandatory cells run with fail-fast disabled:
 
 The host, local Docker daemon, image platform and executable ELF architecture
 must agree. Active binfmt handlers and remote Docker daemons are refused.
+Each disposable hosted runner first unregisters all preinstalled binfmt
+handlers, including LLVM's runtime handler, then executes the unchanged
+strict audit. This preparation is not run on shared BuildServer.
 There is no component/architecture skip input. RPM names use x86_64/aarch64;
 DEB metadata includes nfpm's `-1` revision, separate from the binary X.Y.Z.
 
