@@ -1,5 +1,13 @@
 # PR-03 Draft: Authentication, RBAC, Approvals and Audit
 
+> **Historical record, not a current operating guide.** Retained from the
+> 2026-09-15 source snapshot `cc8399641dc32083466a9c77369fcb8debf1ee48`;
+> this snapshot SHA is not a new acceptance baseline. Original execution dates,
+> tested revisions, Draft status, PASS/FAIL and unverified scope below remain
+> historical; an unrecorded test SHA is unknown, not the snapshot SHA.
+> Use the [current guide](operations/production-deployment.md#database-support) and
+> [maintained technical reference](operations/authentication.md) instead.
+
 Base: PR-01 (#192) and PR-02 (#193), merged through `7d0e1ad`.
 MySQL/MariaDB production admission remains disabled. No schema migration,
 historical audit rewrite, deployment or merge is part of this change.

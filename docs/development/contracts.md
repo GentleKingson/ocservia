@@ -12,15 +12,16 @@ The canonical sources are `openapi/openapi.yaml` and the schemas below
 `proto/`. Generate clients and message types with `make generate`; generated
 directories are replaced on every run and must not be edited manually.
 
-`scripts/docs-check.sh` also enforces the public bootstrap entrypoints and the
-minimum trust and lifecycle statements shared by the README, operator guides,
-hosting contract, and bootstrap closeout map. This keeps the short Quick Start
-from drifting away from the guarded Controller and native package authorities.
+`scripts/docs-check.sh` checks line endings, nonempty tracked Markdown and a
+small set of public bootstrap entrypoint requirements. It does not validate
+SQL, links/anchors, authentication modes or database support. Changed executable
+examples need focused validation on BuildServer; passing this check alone is
+not operational acceptance.
 
 GitHub Actions on the pinned `ubuntu-24.04` hosted runner is the authoritative
 pull-request validation environment. The workflow bootstraps from
 `toolchains.lock`, verifies downloaded tools against `scripts/checksums.txt`,
-and selects the basic docs, Go, Rust, Web, and PostgreSQL 17 checks from a
+and selects the basic docs, Go, Rust, Web, and database checks from a
 fresh checkout. Contract compatibility and generated-clean checks remain
 manual commands, not Basic CI jobs.
 

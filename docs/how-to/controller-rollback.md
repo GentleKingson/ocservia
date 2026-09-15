@@ -10,6 +10,8 @@ lifecycle.
 - The protected `previous-release.json` exists in the Controller state root.
 - You have reconciled every `Unknown` operation and confirmed the database
   compatibility and backup boundary for the incident.
+- Confirm the database backend/deployment and the actual current/previous
+  production descriptors, not just the release version numbers.
 
 ## Command
 
@@ -21,14 +23,14 @@ The command selects only the protected previous release. It does not accept an
 operator-selected manifest and does not run a database down migration or
 restore.
 
-Rollback also requires an unchanged production deployment contract. The release
-introducing the static gateway/application IPAM and security configuration is a
-**forward-only deployment change** from v0.4.0; this command intentionally refuses
-that rollback. For a failed upgrade, first retry the identical target through
+Rollback also requires an unchanged production deployment contract. The static
+gateway/application IPAM and security transition from v0.4.0 is a historical
+**forward-only deployment change**; this command intentionally refuses that
+rollback. Later releases are checked against their own descriptors and schema
+compatibility, not only this historical boundary. For a failed upgrade, first retry the identical target through
 the guarded lifecycle. If it cannot be recovered, preserve the evidence and
-follow the [backup/PITR recovery procedure](../operations/postgres-pitr-restore.md)
-in an isolated deployment before redirecting traffic, rather than bypassing the
-deployment-contract guard.
+follow [backend-specific recovery](../operations/incident-recovery.md#database-recovery)
+in an isolated deployment, rather than bypassing the deployment-contract guard.
 
 ## Verify
 
@@ -40,8 +42,14 @@ authenticated application and node paths.
 
 The confirmed release state remains unchanged and pending failure evidence is
 retained for a same-target retry. Do not redeploy old images manually. If the
-database cannot satisfy the compatibility contract, use the verified
-PostgreSQL backup/PITR procedure instead.
+database cannot satisfy the compatibility contract, select recovery by backend:
+PostgreSQL [backup](../operations/postgres-backup.md) or
+[PITR](../operations/postgres-pitr-restore.md) within the documented scope;
+MySQL/MariaDB [logical restore](../operations/mysql-backup.md), which is not
+PITR, failover, snapshots or cross-engine migration. Fence old writers, verify
+the restored database and real audit keys, and reconcile pending/Unknown work
+before restoring traffic or command authority. Backup verification alone is
+not a production reopening gate.
 
 See [Production deployment reference](../operations/production-deployment.md)
 for the compatibility and filesystem contracts.

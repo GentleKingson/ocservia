@@ -169,21 +169,19 @@ SameSite cookies, not OIDC tokens in browser storage.
 There is **no default administrator password**. Bootstrap is a separate,
 operator-invoked **one-shot**, not part of normal install or restart.
 
-1. Complete the pinned Controller installation with Local enabled. Migrations
-   must be applied through `000034`, and PostgreSQL must be ready. Stop older
-   Controllers before migration; schema 34 intentionally rejects older binaries.
+1. Complete the pinned Controller installation with Local enabled and a
+   [supported database deployment](production-deployment.md#database-support).
+   Apply the installed release's full migration history, not just the historical
+   Local-auth migrations. Stop incompatible older Controllers before migration.
+   Confirm the guarded installation's migration process exited successfully
+   (`database migrations complete`) and the Controller is ready.
    Use the installed release checkout and its effective exported production
    settings and verified image digests for the commands below.
 2. Select an existing management workspace UUIDv7. Bootstrap does not create a
    workspace. On a completely empty database, an authorized database operator
    must first provision one through the protected administrative connection.
-   For example, replacing the placeholder with a newly allocated UUIDv7:
-
-   ```sql
-   INSERT INTO workspaces (id, name, slug, created_at, updated_at)
-   VALUES ('<management-workspace-uuidv7>', 'Administration', 'administration', now(), now());
-   ```
-
+   Follow the matching [database preparation](#database-preparation) below;
+   the PostgreSQL SQL is not portable to MySQL/MariaDB.
    Record that UUID: the Local identity management workspace is fixed at
    bootstrap, not selected later by an API header.
 3. Assign the administrator and approver to **different responsible people**.
@@ -239,14 +237,94 @@ admin or resetting its password does not re-enable bootstrap. Preserve the
 initialization marker in backups; do not delete it or roll back its migration
 to recover an account.
 
+### Database preparation
+
+Use an authorized, protected administrative connection to the installed
+database, with verified TLS for an external server and credentials from the
+secret manager, never command-line passwords. The owner connection is for
+provisioning/migration, not for the running Controller or bootstrap command.
+Do not create another workspace when the intended management workspace exists.
+For an empty database, allocate a fresh UUIDv7 outside these SQL examples and
+replace `<management-workspace-uuidv7>` consistently; do not use a server UUID
+function that generates a different UUID version.
+
+#### PostgreSQL
+
+Inspect the applied history and compatibility metadata:
+
+```sql
+SELECT version, name FROM schema_migrations ORDER BY version;
+SELECT current_schema, minimum_compatible_controller_schema
+FROM controller_schema_compatibility;
+```
+
+The history must cover the installed release's `control-plane/migrations`
+and agree with the compatibility row. Migration `000034` is specifically the
+historical PostgreSQL two-person Local-bootstrap compatibility boundary; it
+is not the current migration target or a MySQL/MariaDB revision number.
+The normal migration/startup checks also verify history checksums; a maximum
+version alone is insufficient.
+
+PostgreSQL stores the workspace ID as native `uuid` and the times as
+`timestamptz`. On an empty database, provision the workspace:
+
+```sql
+INSERT INTO workspaces (id, name, slug, created_at, updated_at)
+VALUES ('<management-workspace-uuidv7>', 'Administration', 'administration', now(), now());
+```
+
+#### MySQL/MariaDB
+
+These backends have their own immutable manifests and appended revision
+histories under `control-plane/internal/database/mysql/{mysql,mariadb}`.
+Inspect both the baseline and appended history after the migration process
+succeeds:
+
+```sql
+SELECT engine, version, dirty, manifest_checksum FROM backend_migrations;
+SELECT version, state, manifest_checksum FROM backend_schema_revisions ORDER BY version;
+```
+
+The engine must match the deployment, `dirty` must be false, and every appended
+revision required by the installed release must be present and `verified`.
+The baseline row's `version` is not the latest appended revision or Controller
+schema version. The legacy `controller_schema_compatibility` row also belongs
+to the frozen baseline, not the latest appended Controller compatibility range.
+The owner migration checks schema shape; runtime startup and bootstrap validate
+the complete receipt/checksum chain and the latest embedded revision's
+`controller_schema`/`minimum_controller_schema`. Do not infer current
+compatibility from the baseline row, manually mark a dirty migration clean, or
+copy PostgreSQL migration numbers into these tables.
+
+At the current migrated schema, workspace IDs are `VARBINARY(16)` with an exact
+16-byte length constraint, using unswapped RFC UUID byte order.
+Workspace times are signed `BIGINT` microseconds since
+`2000-01-01 00:00:00 UTC`, not Unix seconds or SQL date/time strings.
+Use the same UUIDv7 text later in `OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID`:
+
+```sql
+SET @workspace_id = UNHEX(REPLACE('<management-workspace-uuidv7>', '-', ''));
+SET @created_at = TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6));
+INSERT INTO workspaces (id, name, slug, created_at, updated_at)
+VALUES (@workspace_id, 'Administration', 'administration', @created_at, @created_at);
+```
+
+Do not use swapped UUID bytes, `now()` directly in BIGINT columns, or this
+current-schema example on an incompletely migrated historical database.
+After either branch, return to step 3 of the shared bootstrap procedure.
+
 ### Upgrading a single-administrator installation
 
-Migration 34 records `completion_pending=true` only for the original active
+The historical PostgreSQL migration `000034` records `completion_pending=true`
+only for the original active
 Local bootstrap PlatformAdmin, with a matching bootstrap audit event and no
 other historical SecurityAdmin/PlatformAdmin binding in the fixed workspace.
 Disabled bindings also close eligibility. All other existing deployments are
 marked closed without changing identities, credentials or roles. No marker or
 no verifiable original admin means no automatic recovery exception.
+MySQL/MariaDB do not run that PostgreSQL migration; their initialized schema
+includes the two-person contract. Use the stored eligibility marker, not a
+backend revision number, to decide whether completion is allowed.
 
 Inspect the marker using the protected administrative database connection:
 
@@ -328,13 +406,22 @@ self-approve and must follow the existing rotation/incident policy.
 
 If no usable administrator/independent approver pair remains, stop writes,
 preserve incident evidence and follow the authorized
-[backup/PITR recovery procedure](postgres-pitr-restore.md) to a verified state
+[backend-specific recovery procedure](incident-recovery.md#database-recovery) to a verified state
 with independently controlled credentials. Keep all initialization markers and
 audit history. Before reopening access, revoke restored sessions using the
-protected administrative connection:
+protected administrative connection. For PostgreSQL:
 
 ```sql
 UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
+```
+
+For the current MySQL/MariaDB schema, session times use the same BIGINT
+microsecond epoch described above:
+
+```sql
+UPDATE auth_sessions
+SET revoked_at=TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6))
+WHERE revoked_at IS NULL;
 ```
 
 Record this offline recovery in the incident/change record, verify both logins
@@ -377,7 +464,7 @@ These are resource budgets, not password failure counters. OIDC and Break-glass
 keep their own entry points and budgets, including the independent emergency
 budget for a valid Break-glass credential.
 
-Account admission uses PostgreSQL `local_auth_attempts`, keyed by the exact
+Account admission uses the selected backend's `local_auth_attempts`, keyed by the exact
 Local username normalization (trim, lowercase, existing ASCII/input rules).
 Known and unknown usernames follow the same policy:
 
@@ -408,24 +495,28 @@ or unavailable completion leaves at most the lease duration before admission can
 recover; abandoned reservations are not silently classified as bad passwords.
 Expired lease holders cannot clear replacement state or create a session.
 
-Expiry is driven by the PostgreSQL clock. Admission deletes expired rows through
+Expiry is driven by the database clock. Admission deletes expired rows through
 the expiry index before allocating capacity. Rows expire when the observation
 window, cooldown and active lease no longer require them. Without login traffic,
 expired rows may remain physically present until the next admission, but the
 table remains bounded. Random usernames cannot evict live state: at capacity,
 new keys receive generic 503 while tracked keys retain their protection.
 Cleanup/admission/completion errors also fail closed with generic 503, never
-unlimited verification. PostgreSQL autovacuum remains responsible for dead tuples.
+unlimited verification. PostgreSQL autovacuum handles its dead tuples; this is
+not a MySQL/MariaDB maintenance mechanism.
 
 Password reset and disable delete the account state in the existing credential,
 revocation and audit transaction. Rollback preserves it. Credential revalidation
 and lease-token matching prevent an older verified request from clearing failures
 or leases created after that transaction commits.
 
-Migration 000033 creates the table and expiry index. The normal migration runner
+PostgreSQL migration `000033` created the table and expiry index; MySQL/MariaDB
+provide them through their own baseline and time-storage revisions. The normal migration runner
 grants only SELECT/INSERT/UPDATE/DELETE on this table to the runtime role; Owner
 or TRUNCATE permissions are not needed. The minimum compatible Controller schema
-is 33 because older binaries do not enforce this policy. Drain/stop older Local
+was 33 at the PostgreSQL policy's introduction because older binaries did not
+enforce it; the installed release's current compatibility metadata remains
+authoritative. Drain/stop older Local
 login instances before migration and replacement; do not mix old and new login
 handlers. Reverting this migration removes backoff state and requires stopping
 schema-33 Controllers and the normal coordinated schema/metadata rollback.
@@ -513,7 +604,7 @@ accounts on managed nodes. There is no self-registration or automatic linking.
 Local user administration uses existing RBAC (`local_user.manage`) in the fixed
 management workspace, not a new role system. Creating a user does not grant roles.
 Password reset needs the existing independent approval flow. See
-[identity administration](../development/identity-authorization-audit.md#initial-local-administrator-and-lifecycle-p4)
+[identity administration](../development/identity-authorization-audit.md#local-initialization-and-lifecycle-r4)
 for endpoints and permission details.
 
 Disabling a user or resetting its password revokes **all sessions for that

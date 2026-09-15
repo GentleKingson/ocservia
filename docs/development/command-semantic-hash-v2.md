@@ -36,7 +36,7 @@ expected current hash, and unsigned 64-bit desired effect revision.
 
 The Controller emits v2 only after the session-authority protocol is available.
 The Agent independently recomputes v2 before journal acceptance. Results retain
-the exact hash version, and PostgreSQL accepts v2 explicitly rather than using
+the exact hash version, and backend stores accept v2 explicitly rather than using
 an unknown-version fallback.
 
 The shared Go/Rust ConfigPlan vector is

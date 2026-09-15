@@ -10,6 +10,10 @@ the target and records pending evidence.
 - The checkout is clean and matches the target release's `source_commit`.
 - The release bundle for the host architecture is in one protected directory.
 - The required production environment and secrets are still available.
+- Confirm the selected database backend/deployment and its
+  [recovery procedure](../operations/incident-recovery.md#database-recovery).
+- Review the target's production deployment descriptor and schema compatibility;
+  neither a newer version number nor an additive migration guarantees rollback.
 - For the legacy v0.4.0 application-network migration, reserve a maintenance
   window and verify a recoverable backup. The guarded upgrade recreates gateway,
   control-plane, transportd and only their application network, preserving named
@@ -45,13 +49,16 @@ bundle and pending state intact; correct the reported cause and rerun the same
 volumes or the database network. Do not delete pending evidence or substitute
 direct Compose commands.
 
-This network/security release is a **forward-only deployment change** relative
-to v0.4.0: the changed production deployment contract causes standard `rollback`
-to fail closed, even if the database schema is compatible. If same-target
-recovery is impossible, preserve failure evidence and use the
-[backup/PITR recovery procedure](../operations/postgres-pitr-restore.md)
-in an isolated deployment before redirecting traffic. Do not
-force old images onto the partially upgraded deployment.
+The v0.4.0 network/security transition is a historical **forward-only deployment
+change**, not the complete rollback rule for later releases. The lifecycle
+compares the actual current/previous deployment descriptors and database
+compatibility; changed deployment contracts can reject rollback even with a
+compatible schema. If same-target recovery is impossible, preserve failure
+evidence and select the [backend-specific recovery procedure](../operations/incident-recovery.md#database-recovery):
+PostgreSQL backup/PITR within its scope, or MySQL/MariaDB isolated logical
+restore, without implying equivalent recovery capabilities. Complete its
+fencing, audit and unfinished-work checks before redirecting traffic or enabling
+commands. Do not force old images onto the partially upgraded deployment.
 
 For state transitions, source matching, migration compatibility, and failure
 semantics, see [Production deployment reference](../operations/production-deployment.md).

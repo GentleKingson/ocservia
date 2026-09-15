@@ -14,8 +14,20 @@ deploy/production/compose.sh config --quiet
 
 Check that all six image variables are full SHA-256 digests, the protected
 secret directory and backup directory meet their ownership/mode contracts, and
-the required OIDC, PKI, Controller EndpointID, and relay settings are
-present. Do not bypass `controller.sh` with direct Compose.
+the required PKI, Controller EndpointID, and relay settings are present.
+Check authentication against the selected
+[mode](../operations/authentication.md#choose-a-mode): Local-only needs no
+OIDC settings or client secret; OIDC-only and dual-auth need a complete OIDC
+configuration and protected client secret. Partial OIDC configuration is
+invalid even with Local enabled. Do not bypass `controller.sh` with direct Compose.
+
+## Identity provider is unavailable
+
+Local-only is independent of the IdP. In dual-auth, already enabled and
+initialized Local accounts remain usable; new SSO logins that cannot complete
+verification fail closed. OIDC-only must not automatically switch authentication
+methods or bypass verification. Existing valid sessions retain their normal
+expiry and revocation checks. Follow [authentication incident recovery](../operations/incident-recovery.md#authentication-outage).
 
 ## Optional traces are missing
 
@@ -60,9 +72,18 @@ Keep the healthy dedicated relay configured, repair the failed relay, and
 verify both relay URLs independently. Do not fall back to a public relay or
 replace the Controller or Agent identity key.
 
-## PostgreSQL recovery is needed
+## Database recovery is needed
 
-Use [PostgreSQL backup and restore](../operations/postgres-backup.md),
-[PostgreSQL failover](../operations/postgres-failover.md), or [point-in-time
-recovery](../operations/postgres-pitr-restore.md). Do not treat application
-rollback as a database restore.
+Confirm `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` from the
+effective deployment configuration before choosing a procedure:
+
+- PostgreSQL: [backup and restore](../operations/postgres-backup.md),
+  [failover](../operations/postgres-failover.md), or
+  [PITR](../operations/postgres-pitr-restore.md), within each guide's scope.
+- MySQL/MariaDB: [isolated logical restore](../operations/mysql-backup.md),
+  not PostgreSQL commands. This does not provide PITR, failover, storage
+  snapshots or cross-engine migration.
+
+Do not treat application rollback or backup checksum verification as database
+recovery. Follow the [reopening conditions](../operations/incident-recovery.md#database-recovery)
+before restoring traffic or command authority.

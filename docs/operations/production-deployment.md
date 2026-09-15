@@ -25,6 +25,8 @@ the durable release checkout.
 Until that hosting has operational ownership and byte-verification evidence,
 the public Quick Start obtains Stage-1 from a clean exact-release checkout.
 
+## Database support
+
 The production launcher combines `deploy/production/compose.yaml` with one
 database descriptor. Bundled PostgreSQL 17 remains the default and runs the HTTPS
 gateway, control plane, transport service, PostgreSQL, and backup worker. An
@@ -38,7 +40,7 @@ observability traffic remain on internal networks. External database
 deployments additionally attach database clients to the dedicated non-internal
 `database-egress` network; no database port is published by ocservia.
 
-| Backend | Deployment | Supported on this branch |
+| Backend | Deployment | Production support |
 | --- | --- | --- |
 | PostgreSQL 17 | bundled or external | Yes; bundled remains the default |
 | MySQL 8.4.10 | external only | Yes |
@@ -318,7 +320,7 @@ long-term lifecycle manager.
 
 Upgrade validates the confirmed current state and target first, checks the
 target `source_commit` against a clean checkout before any Compose operation,
-checks the current PostgreSQL and backup health, renders the target Compose configuration,
+checks the current descriptor's dependency and backup health, renders the target Compose configuration,
 pulls target images while the current release is still running, migrates a
 legacy application network when required (see the authentication section below),
 and then runs the existing database migration and `up -d --wait` dependency graph. Release smoke
@@ -344,11 +346,11 @@ Compose file must be unchanged between the two source commits. Same-schema
 rollback remains supported. When `database_migration` differs, the current
 Controller image runs a read-only compatibility preflight through the protected
 Compose path before any previous image is activated. The preflight validates the
-authoritative compatibility row, the migration history, and
-`previous.database_migration >= minimum_compatible_controller_schema` and
-`previous.database_migration <= current_schema`. Missing, malformed,
+backend's authoritative compatibility metadata and migration history, and
+requires `previous.database_migration` to fall within that backend's verified
+Controller schema range. Missing, malformed,
 inconsistent, unreachable, or otherwise non-permitting compatibility metadata
-fails closed. This first version also fails closed when the deployment contract
+fails closed. Rollback also fails closed when the deployment contract
 changed. It performs no down migration or database restore.
 
 Rollback renders and pulls the previous digest-pinned images, then requires the
@@ -360,9 +362,9 @@ compatibility result and starts every runtime service except `migrate` with
 is not executed against a newer database schema. This activation does not run a
 down migration or change database state. A failure after activation leaves
 confirmed state unchanged and retains pending failure evidence for a same-target
-retry; it does not automatically redeploy the current images. PostgreSQL
-backup/PITR is the disaster-recovery boundary, not an application rollback
-mechanism.
+retry; it does not automatically redeploy the current images.
+[Backend-specific recovery](incident-recovery.md#database-recovery) is the
+disaster-recovery boundary, not an application rollback mechanism.
 
 To stop and remove the production Controller runtime without deleting its
 persistent data, run:
@@ -417,7 +419,7 @@ off-host backups, operator-created TLS/PKI/key material, the repository
 checkout, Docker images, or unrelated Docker volumes. The lifecycle lock is
 retained so a later invocation cannot create an unprotected replacement state
 root. This is local data deletion, not secure erase and not disaster-recovery
-backup deletion; restore PostgreSQL from the existing backup/PITR procedure
+backup deletion; use the matching [database recovery procedure](incident-recovery.md#database-recovery)
 when needed.
 
 Both forms refuse to run while a pending install, upgrade, or rollback
@@ -429,8 +431,8 @@ claiming that purge completed.
 Controller rollback and uninstall remain `controller.sh` operations over the
 protected lifecycle state. Neither operation downloads or re-enters Stage-0.
 
-Database compatibility is authoritative in the singleton
-`controller_schema_compatibility` row created by migration `000029`. Its
+PostgreSQL compatibility is authoritative in the singleton
+`controller_schema_compatibility` row, introduced by migration `000029`. Its
 `current_schema` must agree with the applied migration history, and a Controller
 is ready only when its expected schema is within the declared range
 `minimum_compatible_controller_schema <= expected <= current_schema`. The
@@ -439,16 +441,22 @@ that the older Controller does not depend on the changed database shape;
 additive changes are not automatically compatible. Destructive cleanup belongs
 to a later contract phase after consumers have moved to the expanded shape.
 Missing, malformed, or undeclared future metadata keeps the Controller
-unready. This metadata is not a backup; use PostgreSQL backup/PITR for disaster
-recovery.
+unready. MySQL/MariaDB validate their own immutable baseline and appended
+revision receipts/checksums plus the latest embedded revision's
+`minimum_controller_schema <= expected <= controller_schema`. Their legacy
+`controller_schema_compatibility` row is frozen baseline metadata, not the
+latest revision's compatibility range. Backend revision numbers are not
+PostgreSQL schema versions. The lifecycle consumes this backend-validated
+compatibility result; do not substitute an operator's standalone SQL query.
+This metadata is not a backup; use [backend-specific database recovery](incident-recovery.md#database-recovery).
 
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
 Lifecycle acceptance keeps separate evidence for five boundaries: Compose
 container health and dependency readiness; functional release identity from the
 release smoke; application rollback of the last confirmed release; database
-compatibility from the `controller_schema_compatibility` contract; and
-disaster recovery from verified PostgreSQL backup/PITR. Passing one boundary
+compatibility from the backend's verified schema contract; and
+disaster recovery through the selected backend's documented procedure. Passing one boundary
 does not establish the others.
 
 For bundled PostgreSQL, backups retain the configured number of verified base
@@ -546,13 +554,13 @@ network, including the state where removal already succeeded. Do not delete
 pending state, invoke direct Compose, use `down --volumes`, or purge data.
 Ordinary gateway recreation after migration keeps the same trusted `/32`.
 
-This release is a **forward-only deployment change** from v0.4.0. The changed
+This historical network transition is a **forward-only deployment change** from v0.4.0. The changed
 Compose/security deployment contract makes standard `controller.sh rollback`
 refuse that previous release; database compatibility alone is insufficient.
 Before rollout, verify the backup/PITR recovery path and retain release bundles
 and configuration. Prefer same-target recovery after failure. If that cannot
 restore service, preserve failure evidence and follow the
-[backup/PITR recovery procedure](postgres-pitr-restore.md) in an isolated
+[backend-specific recovery procedure](incident-recovery.md#database-recovery) in an isolated
 deployment, validating readiness, authentication and node
 state before redirecting traffic. Do not force old images onto migrated state
 or bypass the rollback deployment-contract guard.

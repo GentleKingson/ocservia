@@ -1,5 +1,13 @@
 # Native upgrade implementation report
 
+> **Historical record, not a current operating guide.** Retained from the
+> 2026-09-15 source snapshot `cc8399641dc32083466a9c77369fcb8debf1ee48`;
+> this snapshot SHA is not a new acceptance baseline. Original execution dates,
+> tested revisions, Draft status, PASS/FAIL and unverified scope below remain
+> historical; an unrecorded test SHA is unknown, not the snapshot SHA.
+> Use the [current guide](release-upgrade-validation.md) and
+> [maintained technical reference](github-actions.md) instead.
+
 Date: 2026-09-15. Implementation branch: `codex/native-release-upgrade`.
 The workflow-registration and published-baseline blockers are closed. This
 source report describes the candidate before dispatch; it does not claim

@@ -28,7 +28,7 @@ The Controller rejects a missing, substituted, or unregistered binding.
 P12 export uses a fresh random password and a separately random artifact token.
 The password is sealed with the node's dedicated P12-password public key and
 cannot be opened by the independent user-password key. The password and token
-are returned only by the initial request and are never stored in PostgreSQL.
+are returned only by the initial request and are never stored in the Controller database.
 Privd decrypts the typed secret locally, creates an encrypted UUID-addressed
 artifact in its fixed root-owned spool, and records its certificate/version,
 operation, digest, size, expiry, and state in the authenticated effect store.

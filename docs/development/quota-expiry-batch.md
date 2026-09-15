@@ -13,7 +13,7 @@ bytes, and an observation older than the durable session cursor is ignored. A
 counter decrease in a newer observation is treated as a new counter epoch and
 contributes the new value rather than guessing an outcome.
 
-The scheduler uses a PostgreSQL lease and a reentrant scan. Restarting it simply
+The scheduler uses a database-backed leadership lease and a reentrant scan. Restarting it simply
 replays the scan with stable idempotency keys. Quota or expiry enforcement
 creates the existing typed `user_disable` desired-state operation; it never
 executes local commands. Node write serialization remains in the command worker.

@@ -52,10 +52,13 @@ conflicts, cross-language semantic hash vectors, explicit safe retry, expiry,
 clock skew, revision, capability, cancellation, size limits, and SQLite
 read-only, full, and corrupt failures.
 
-Database schema version 9 stores structured Agent command result history in
-PostgreSQL. Migration 8 persists the semantic hash algorithm version, migration
+Structured Agent command result history is stored by the selected Controller
+backend. In PostgreSQL's historical migration sequence, schema version 9 stores
+that history; migration 8 persists the semantic hash algorithm version, migration
 9 restricts it to the supported legacy (`0`) and canonical v1 (`1`) values,
-and migration 17 adds session-authority v2 (`2`). Every `command_result` event must decode and satisfy its state,
+and migration 17 adds session-authority v2 (`2`). MySQL/MariaDB implement the
+same hash-version contract through their own manifests, not these PostgreSQL
+migration numbers. Every `command_result` event must decode and satisfy its state,
 identity, hash-version, hash, size, and time constraints; invalid results roll
 back the whole ingestion transaction. Development simulation completion uses
 the distinct `simulation_result` event type. Agent timestamps remain history

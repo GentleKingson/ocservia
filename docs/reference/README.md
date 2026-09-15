@@ -33,6 +33,7 @@ operating the system.
 ## Validation and release engineering
 
 - [GitHub Actions validation](../development/github-actions.md)
+- [Native release upgrade validation](../development/release-upgrade-validation.md)
 - [Cross-VM real E2E validation](../development/real-e2e.md)
 - [P1 resilience and initial capacity validation](../development/p1-resilience-capacity.md)
 - [G6 readiness harness](../development/g6-readiness.md)

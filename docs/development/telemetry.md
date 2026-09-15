@@ -14,12 +14,14 @@ shown offline after its latest heartbeat is more than 90 seconds old.
   aggregate, health, and security data and reports drop counts.
 - A wire batch is limited to 512 KiB. Session, username, and client IP fields
   are stored in the node session read model and must not be metric labels.
-- Raw samples are monthly PostgreSQL partitions. Scheduler maintenance builds
+- PostgreSQL stores raw samples in monthly partitions; MySQL/MariaDB use
+  owner-managed monthly shard tables and a durable shard catalog. Runtime
+  writers do not create or drop these objects. Scheduler maintenance builds
   5-minute and 1-hour rollups and applies the 14-day, 90-day, and 13-month
   retention periods idempotently.
 - The Controller accepts snapshot, metric, and security-observation timestamps
   from the preceding 14 days through five minutes in the future. Events outside
-  that window are rejected before PostgreSQL partition selection.
+  that window are rejected before backend partition/shard selection.
 
 ## Transport ingestion recovery
 
@@ -38,6 +40,14 @@ and optional RFC 3339 start time. SSE is only an invalidation signal: clients
 rebuild authoritative state through REST after connecting or reconnecting.
 
 ## Upgrade and rollback
+
+The migration numbers and down-SQL instructions below describe historical
+PostgreSQL boundaries, not the current generic rollback path. Apply the
+installed release's complete backend history and use the guarded
+[Controller rollback](../how-to/controller-rollback.md). MySQL/MariaDB use
+their own append-only manifests and verified revision history; PostgreSQL
+down migrations do not apply to them. Preserve quarantine and cursor evidence
+through any backend-specific recovery.
 
 Apply database migration `000005_telemetry_observed` before deploying the new
 Controller, transportd, Agent, or Web images. The protocol change is additive,

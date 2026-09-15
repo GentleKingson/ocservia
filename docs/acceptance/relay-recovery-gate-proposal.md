@@ -1,5 +1,12 @@
 # Relay Recovery Gate Proposal
 
+> **Historical proposal and experiment record.** Retained from the 2026-09-15
+> source snapshot `cc8399641dc32083466a9c77369fcb8debf1ee48`, not a new tested
+> baseline. The status, run IDs and release restrictions below belong to that
+> implementation history, not current release authorization. Use the
+> [maintained readiness contracts](README.md) and
+> [Formal G6 guide](../development/g6-readiness.md) for current validation.
+
 Status: **approved; implementation under validation, not release authorization**.
 
 The historical cause of G6 run 33966370408 attempt 1 remains unknown. The

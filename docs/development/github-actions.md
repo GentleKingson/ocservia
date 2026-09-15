@@ -25,6 +25,7 @@ Full means the existing manual Basic CI coverage, not every acceptance command.
 | `g6-readiness.yml` | G6 Formal Readiness | Manual dispatch only |
 | `g6-harness-core.yml` | G6 Readiness Core (Reusable) | Reusable workflow called by formal G6 |
 | `release.yml` | Agent Release Packages | Version tag pushes and manual dry runs |
+| `release-upgrade.yml` | Native Release Upgrade Validation | Manual dispatch only |
 
 ## Basic checks
 
@@ -60,8 +61,9 @@ or G6 smoke. The Web job does run the required authentication browser subset:
 `web/e2e/auth-workspace.spec.ts`. It installs Playwright Chromium and its system
 dependencies after Web bootstrap and before `scripts/web-check.sh`.
 
-The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. The PostgreSQL
-script builds `ocserv-control` itself; only full scope builds its historical
+The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. This test
+matrix is not the [production support matrix](../operations/production-deployment.md#database-support).
+The PostgreSQL script builds `ocserv-control` itself; only full scope builds its historical
 Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
 All database matrices need only the router and run alongside language checks.
 Neither needs a Rust build or a shared binary artifact.
@@ -178,8 +180,8 @@ Each package shard retains race detection, count 1 and its 60-minute timeout;
 each Actions database job retains 75 minutes. JSON streams live through the
 required-test guard. Failed full shards print bounded database diagnostics.
 Parallelization can reduce wall time without reducing total runner minutes.
-See the [full sharding measurement](database-ci-sharding-measurement-2026-09-12.md)
-for coverage evidence, retained failure records and measured runner time.
+Earlier measured timings and failures are historical evidence, not a current
+performance guarantee; record new measurements against their exact source SHA.
 
 Before release, run both scripts with `DATABASE_TEST_SCOPE=full` for all four
 backends on BuildServer, or manually dispatch the existing Basic CI workflow.
@@ -342,9 +344,12 @@ nor becomes a Basic CI required check. Candidate version, baseline tag, and
 exact dispatch SHA are frozen once before either matrix runs.
 
 See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
-trust anchors, evidence, reproduction, and the limits of this gate. The
-workflow registration is complete through #206's fail-closed main placeholder.
-`--ref` can now select the complete #205 branch workflow without merging it.
+trust anchors, evidence, reproduction, and the limits of this gate. Select the
+pushed candidate branch, a numeric candidate version newer than the registered
+baseline, and that branch's full SHA. The default registered baseline remains
+`v0.5.2`; a new release does not automatically register itself. Unlike Quick/Full
+CI this is cross-version native upgrade evidence, unlike Release it does not
+publish, and unlike Formal G6 it does not certify full readiness, HA or PITR.
 
 ## Deferred native validation
 
