@@ -41,13 +41,20 @@ assert_rejected() {
 run_manifest "${fixture}/manifest-a.json"
 run_manifest "${fixture}/manifest-b.json"
 cmp -s "${fixture}/manifest-a.json" "${fixture}/manifest-b.json"
-jq -e '
+expected_head=0
+for migration in "${ROOT}"/control-plane/migrations/*.up.sql; do
+  number="$(basename "${migration}")"
+  number="${number%%_*}"
+  if (( 10#${number} > expected_head )); then expected_head=$((10#${number})); fi
+done
+[[ "${expected_head}" -gt 0 ]]
+jq -e --argjson expected_head "${expected_head}" '
   .manifest_version == 1 and
   .release_version == "0.2.0" and
   .release_tag == "v0.2.0" and
   .source_commit == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
   .platform == "linux/amd64" and
-  .database_migration == 30 and
+  .database_migration == $expected_head and
   (.images | keys == ["backup", "control", "gateway", "otel", "postgres", "transport"]) and
   (.images | to_entries | all(.value | test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
 ' "${fixture}/manifest-a.json" >/dev/null
@@ -134,13 +141,16 @@ uses.each do |use|
   abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
 end
 run_steps = Array(controller.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+abort("Controller release must use the shared native build entrypoint") unless
+  run_steps.include?("bash scripts/build-release-controller.sh")
+build_script = File.read(File.expand_path("../../scripts/build-release-controller.sh", File.dirname(ARGV.fetch(0))))
 abort("Controller image legs must build one matrix platform per leg") unless
-  run_steps.include?('--platform "linux/${{ matrix.controller_arch }}"')
+  build_script.include?('--platform "linux/${CONTROLLER_ARCH}"')
 abort("Controller image legs must export Docker image archives") unless
-  run_steps.include?("type=docker,dest=") &&
-  !run_steps.include?("type=oci,dest=")
+  build_script.include?("type=docker,dest=") &&
+  !build_script.include?("type=oci,dest=")
 abort("Controller image legs must build each image once") unless
-  run_steps.scan("docker buildx build").length == 1
+  build_script.scan("docker buildx build").length == 1
 abort("Controller image legs must smoke the built images on the native runner") unless
   run_steps.include?("scripts/release-controller-image-smoke.sh")
 abort("Controller image smoke must load the persisted Docker archive") unless
@@ -150,7 +160,7 @@ abort("Controller image smoke must load the persisted Docker archive") unless
   !smoke.include?("tar -xOf")
 %w[docker\ login push=true imagetools].each do |forbidden|
   abort("Controller image legs must not write to a registry: #{forbidden}") if
-    run_steps.include?(forbidden)
+    (run_steps + build_script).include?(forbidden)
 end
 
 abort("Controller publishing must wait for the image build legs") unless
