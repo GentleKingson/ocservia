@@ -7,12 +7,42 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/google/uuid"
 )
+
+func TestShutdownWaitsForTimedOutHandler(t *testing.T) {
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Millisecond, false, "", 36)
+	release, finished := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	handler := s.timeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(finished)
+		<-r.Context().Done()
+		<-release
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("GET", "/", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatal("request did not time out", response.Code)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := s.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown ignored inner database handler: %v", err)
+	}
+	// Cleanup the deliberately stalled test handler without leaving a waiter.
+	t.Cleanup(func() {
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Error("inner handler did not finish")
+		}
+	})
+}
 
 func TestShutdownDoesNotReopenEventStreams(t *testing.T) {
 	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 36)

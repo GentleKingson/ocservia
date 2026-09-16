@@ -84,6 +84,9 @@ type Server struct {
 	eventAdmission   *eventstream.Manager
 	platformEvents   *eventstream.Hub
 	operationEvents  *eventstream.Hub
+	requestsMu       sync.Mutex
+	requests         sync.WaitGroup
+	stopping         bool
 }
 
 func NewBackend(address string, backend database.Backend, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
@@ -246,12 +249,25 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.requestsMu.Lock()
+	s.stopping = true
+	s.requestsMu.Unlock()
 	s.closeEventStreams()
-	if err := s.http.Shutdown(ctx); err != nil {
+	err := s.http.Shutdown(ctx)
+	if err != nil {
 		// Shutdown alone leaves active connections open after its deadline.
-		return errors.Join(err, s.http.Close())
+		err = errors.Join(err, s.http.Close())
 	}
-	return nil
+	// TimeoutHandler can finish the HTTP request before its inner database
+	// handler returns. Admission is closed above, so no Add can race this wait.
+	done := make(chan struct{})
+	go func() { s.requests.Wait(); close(done) }()
+	select {
+	case <-done:
+		return err
+	case <-ctx.Done():
+		return errors.Join(err, ctx.Err())
+	}
 }
 
 func (s *Server) EnableLocalSlice(service *localslice.Service) {
@@ -482,6 +498,7 @@ func routeMethod(path string) (string, bool) {
 }
 
 func (s *Server) timeout(next http.Handler) http.Handler {
+	next = s.trackRequests(next)
 	timed := http.TimeoutHandler(next, s.requestTimeout, `{"type":"https://ocservia.dev/problems/timeout","title":"Request timed out","status":503}`)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/events/stream" || strings.HasSuffix(r.URL.Path, "/events") && strings.HasPrefix(r.URL.Path, "/api/v1/operations/") {
@@ -490,6 +507,21 @@ func (s *Server) timeout(next http.Handler) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/problem+json")
 		timed.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) trackRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.requestsMu.Lock()
+		if s.stopping {
+			s.requestsMu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		s.requests.Add(1)
+		s.requestsMu.Unlock()
+		defer s.requests.Done()
+		next.ServeHTTP(w, r)
 	})
 }
 

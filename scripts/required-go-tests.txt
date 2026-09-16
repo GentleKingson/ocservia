@@ -188,6 +188,7 @@ unit internal/platform/app TestWorkerRoleAssembly
 unit internal/platform/app TestWorkerPartialStartupClosesTrust
 unit internal/api TestShutdownDoesNotReopenEventStreams
 unit internal/api TestShutdownTimeoutClosesConnections
+unit internal/api TestShutdownWaitsForTimedOutHandler
 unit internal/localslice TestWorkerJoinsWatchAndDispatch
 unit internal/localslice TestWorkerCancelsSiblingOnFailure
 unit internal/coordination TestRunnerStopWaitsForRenewal

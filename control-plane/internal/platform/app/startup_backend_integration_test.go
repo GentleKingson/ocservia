@@ -80,7 +80,9 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	ownerOptions, runtimeOptions, account := controllerProcessDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	dir := t.TempDir()
+	// Production secrets reject a world-writable TMPDIR ancestor (including
+	// /tmp on CI). Keep this fixture under the private repository ancestry.
+	dir := socketDirectory(t)
 	production := runtimeOptions.Environment == "production"
 	auditEventKeyFile, commandSigningKeyFile := "", ""
 	if production {
