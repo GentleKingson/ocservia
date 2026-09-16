@@ -63,6 +63,15 @@ func requestID(r *http.Request) string {
 	return value
 }
 
+func requireIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+		return "", false
+	}
+	return key, true
+}
+
 func randomID() string {
 	var data [16]byte
 	if _, err := rand.Read(data[:]); err != nil {
