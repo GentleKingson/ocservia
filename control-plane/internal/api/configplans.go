@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
@@ -37,9 +36,8 @@ func (s *Server) createConfigPlan(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "node_id must be UUIDv7")
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if idempotencyKey == "" {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+	idempotencyKey, ok := requireIdempotencyKey(w, r)
+	if !ok {
 		return
 	}
 	var body createConfigPlanRequest
@@ -102,12 +100,12 @@ func (s *Server) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "plan_id must be UUIDv7")
 		return
 	}
-	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	key, ok := requireIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	var body applyConfigPlanRequest
-	if key == "" || !decodeStrictJSON(w, r, &body) {
-		if key == "" {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
-		}
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	approvalID, err := parseUUIDv7(body.ApprovalID)

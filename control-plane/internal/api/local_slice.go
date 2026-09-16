@@ -1,16 +1,17 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
+	"runtime"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 )
 
 func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
@@ -184,41 +185,40 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	s.serveEventStream(w, r, flusher, false, workspaceID.String(), "workspace-events:"+workspaceID.String(), after)
 }
 
-func pageSize(r *http.Request, fallback int) (int, bool) {
-	value := r.URL.Query().Get("page_size")
-	if value == "" {
-		return fallback, true
+func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
+	if !s.localSimulator {
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
+		return
 	}
-	parsed, err := strconv.Atoi(value)
-	return parsed, err == nil && parsed >= 1 && parsed <= 200
-}
-
-func requestTraceparent(r *http.Request) string {
-	span := trace.SpanContextFromContext(r.Context())
-	if span.IsValid() {
-		flags := "00"
-		if span.IsSampled() {
-			flags = "01"
-		}
-		return fmt.Sprintf("00-%s-%s-%s", span.TraceID(), span.SpanID(), flags)
+	var pool database.PoolStats
+	if diagnostics, ok := s.backend.(database.Diagnostics); ok {
+		pool = diagnostics.PoolStats()
 	}
-	traceID := correlationHex(32)
-	spanID := correlationHex(16)
-	return "00-" + traceID + "-" + spanID + "-01"
-}
-
-func correlationHex(length int) string {
-	id, err := uuid.NewV7()
+	admission, platformHub, operationHub := s.eventStreamSnapshots()
+	metricsContext, cancelMetrics := context.WithTimeout(r.Context(), time.Second)
+	defer cancelMetrics()
+	keyStates, err := privdattestation.KeyStateMetricsBackend(metricsContext, s.backend)
+	keyStatesAvailable := s.backend != nil && err == nil
 	if err != nil {
-		return strings.Repeat("1", length)
+		// Keep process and SSE diagnostics available while the database is down.
+		// The availability bit prevents the bounded zero-value series from being
+		// mistaken for a successful database observation.
+		keyStates, _ = privdattestation.KeyStateMetricsBackend(r.Context(), nil)
 	}
-	return strings.ReplaceAll(id.String(), "-", "")[:length]
-}
-
-func parseEventID(value string) (uuid.UUID, bool) {
-	if value == "" {
-		return uuid.Nil, true
-	}
-	id, err := uuid.Parse(value)
-	return id, err == nil && id.Version() == 7
+	writeJSON(w, http.StatusOK, map[string]any{
+		"goroutines":                             runtime.NumGoroutine(),
+		"db_acquired":                            pool.Acquired,
+		"db_idle":                                pool.Idle,
+		"db_total":                               pool.Total,
+		"sse_active_streams":                     admission.Active,
+		"sse_rejected_streams":                   admission.RejectedGlobal + admission.RejectedIdentity + admission.RejectedSession + admission.RejectedWorkspace + admission.RejectedResource,
+		"sse_watchers":                           platformHub.Watchers + operationHub.Watchers,
+		"sse_unhealthy_watchers":                 platformHub.UnhealthyWatchers + operationHub.UnhealthyWatchers,
+		"sse_sql_queries":                        platformHub.Queries + operationHub.Queries,
+		"sse_slow_consumer_disconnects":          platformHub.SlowConsumerDisconnects + operationHub.SlowConsumerDisconnects,
+		"sse_database_backoff_seconds":           (platformHub.DatabaseBackoff + operationHub.DatabaseBackoff).Seconds(),
+		"privd_receipt_verifications":            privdattestation.VerificationMetrics(),
+		"privd_attestation_key_states":           keyStates,
+		"privd_attestation_key_states_available": keyStatesAvailable,
+	})
 }

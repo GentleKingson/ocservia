@@ -34,6 +34,9 @@ regression-mysql internal/database/mysql TestRealIndependentTransactionCleanup
 regression-mysql internal/database/mysql TestRealLogicalValues
 regression-mysql internal/database/mysql TestRealIdentityProfiles
 regression-mysql internal/database/mysql TestRealAuditRBACController
+regression-mysql internal/database/mysql TestRealConfigurationReadAndIntent
+regression-mysql internal/database/mysql TestRealCertificateIssuanceTransactions
+regression-mysql internal/database/mysql TestRealObservedStateTransactions
 regression-mysql internal/database/mysql TestRealQueryRowPoisonsBeforeScan mariadb
 regression-postgres internal/database/postgres TestTransactionCancellationRollbackIntegration
 regression-postgres internal/database/postgres TestUsageCrossStoreTransactionIntegration
@@ -45,11 +48,18 @@ regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/tenant/
 regression-auth internal/api TestAuthenticationBackendHTTPIntegration
+regression-auth internal/api TestControllerReadsBackendHTTPIntegration
+regression-auth internal/api TestNodeReadsBackendHTTPBaseline
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration/capacity
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration/absent-singleton-lock
 regression-auth-postgres internal/api TestSyntheticCommandAuditUsesAuthenticatedOperator
 regression-auth-postgres internal/api TestBatchRouteAllowsNodeScopedPerItemAuthorization
+regression-auth-postgres internal/api TestAuthHTTPLoginLogoutIntegration
+regression-auth-postgres internal/api TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations
+regression-auth-postgres internal/api TestCertificateRoutesUseNodeScopedAuthorizationIntegration
+regression-auth-postgres internal/api TestConfigPlanApprovalResolvesNodeScopedApprover
+regression-auth-postgres internal/api TestHTTPConfigPlanResponseBaselineIntegration
 regression-outbox internal/operations TestOutboxBackendIntegration/atomic-intent-and-ambiguous-commit
 regression-outbox internal/operations TestOutboxBackendIntegration/two-workers-and-commit-readback
 regression-outbox internal/operations TestOutboxBackendIntegration/early-and-duplicate-result
@@ -159,6 +169,17 @@ unit internal/auth TestLegacyPasswordVerification
 unit internal/auth TestPasswordWriteEntrypointsRejectBeforeDatabase
 unit internal/auth TestLocalAccountLogReference
 unit internal/api TestDecodeStrictJSONUTF8
+unit internal/api TestHTTPRouteInventory
+unit internal/api TestHTTPPathBaseline
+unit internal/api TestHTTPStrictJSONBaseline
+unit internal/api TestHTTPConfigPlanValidationBaseline
+unit internal/api TestHTTPRequestContextBaseline
+unit internal/api TestHTTPTimeoutAndSSEBaseline
+unit internal/api TestHTTPShutdownAdmissionBaseline
+unit internal/api TestHTTPDisabledServicesBaseline
+unit internal/api TestAuthRouteAdmissionAndIsolation
+unit internal/api TestReadTimeoutPreservesStreamingWrites
+unit internal/api TestRequestReadTimeout
 unit internal/api TestDecodeStrictJSONBodyLimit
 unit internal/api TestChangeLocalPasswordAuthorization
 unit internal/api TestAuthHTTPMethodsAndDisabledRoutes

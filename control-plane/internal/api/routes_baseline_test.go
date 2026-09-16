@@ -1,0 +1,269 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"go.opentelemetry.io/otel/trace"
+)
+
+const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
+
+// Frozen at de26ea4: pattern | handler/wrapper | method rule | permission.
+// "self" identifies endpoint validation, not requireOperationAuth. This is a
+// test inventory, never an input to production routing or authorization.
+const routeBaseline = `GET /livez|s.live|GET|public
+GET /readyz|s.ready|GET|public
+GET /version|s.version|GET|public
+GET /api/v1/livez|s.live|GET|public
+GET /api/v1/readyz|s.ready|GET|public
+GET /api/v1/version|s.version|GET|public
+GET /api/v1/auth/login|s.limitAuthentication(newAuthAdmission(30, 120, 8), s.login)|GET, POST|self
+POST /api/v1/auth/login|s.localLogin|GET, POST|self
+GET /api/v1/auth/methods|s.authMethods|GET|public
+GET /api/v1/auth/callback|s.limitAuthentication(newAuthAdmission(30, 120, 8), s.callback)|GET|self
+POST /api/v1/auth/logout|s.requireOperationAuth(s.logout)|POST|session
+POST /api/v1/auth/change-password|s.requireOperationAuth(s.changeLocalPassword)|POST|local-session
+POST /api/v1/local-users|s.requireOperationAuth(s.createLocalUser)|POST|local_user.manage
+POST /api/v1/local-users/{local_user_action}|s.requireOperationAuth(s.localUserAction)|POST|local_user.manage
+POST /api/v1/auth/break-glass|s.breakGlass|POST|self
+POST /api/v1/development/simulations|s.createSimulation|POST|self
+GET /api/v1/development/runtime|s.developmentRuntime|GET|self
+GET /api/v1/operations|s.requireOperationAuth(s.listOperations)|GET|operation.read
+GET /api/v1/operations/summary|s.requireOperationAuth(s.operationSummary)|GET|operation.read
+GET /api/v1/operations/{operation_id}|s.requireOperationAuth(s.getOperation)|GET|operation.read
+GET /api/v1/operations/{operation_id}/events|s.requireOperationAuth(s.streamOperationEvents)|GET|operation.read
+GET /api/v1/operations/queue-metrics|s.requireOperationAuth(s.queueMetrics)|GET|operation.read
+POST /api/v1/nodes/{node_id}/synthetic-commands|s.requireOperationAuth(s.createSyntheticCommand)|POST|operation.create
+POST /api/v1/nodes/{node_id}/sessions/{session_action}|s.requireOperationAuth(s.sessionAction)|POST|session.disconnect
+POST /api/v1/nodes/{node_id}/ip-bans/{ip_action}|s.requireOperationAuth(s.ipBanAction)|POST|ip_ban.remove
+POST /api/v1/nodes/{node_id}/service:reload|s.requireOperationAuth(s.reloadService)|POST|service.reload
+POST /api/v1/nodes/{node_id}/agent-upgrade|s.requireOperationAuth(s.upgradeAgent)|POST|agent.upgrade
+GET /api/v1/events|s.requireOperationAuth(s.listEvents)|GET|operation.read
+GET /api/v1/events/stream|s.requireOperationAuth(s.streamEvents)|GET|operation.read
+POST /api/v1/enrollment-tokens|s.requireOperationAuth(s.createEnrollmentToken)|POST|enrollment_token.create
+POST /api/v1/node-bootstrap-tokens|s.requireOperationAuth(s.createNodeBootstrapToken)|POST|node_bootstrap_token.create
+POST /api/v1/nodes/{node_id}/approval|s.requireOperationAuth(s.approveNode)|POST|node.approve
+POST /api/v1/nodes/{node_id}/revocation|s.requireOperationAuth(s.revokeNode)|POST|node.revoke
+POST /api/v1/nodes/{node_id}/privd-attestation-credentials|s.requireOperationAuth(s.createPrivdAttestationCredential)|POST|privd.attestation.manage
+POST /api/v1/nodes/{node_id}/privd-attestation-keys:register|s.registerPrivdAttestationKey|POST|self
+POST /api/v1/nodes/{node_id}/privd-attestation-keys:revoke|s.requireOperationAuth(s.revokePrivdAttestationKey)|POST|privd.attestation.manage
+GET /api/v1/nodes|s.requireOperationAuth(s.listNodes)|GET|node.read
+GET /api/v1/nodes/{node_id}|s.requireOperationAuth(s.getNode)|GET|node.read
+GET /api/v1/nodes/{node_id}/sessions|s.requireOperationAuth(s.listNodeSessions)|GET|node.read
+GET /api/v1/nodes/{node_id}/ip-bans|s.requireOperationAuth(s.listNodeIPBans)|GET|node.read
+GET /api/v1/nodes/{node_id}/telemetry|s.requireOperationAuth(s.listNodeTelemetry)|GET|node.read
+GET /api/v1/nodes/{node_id}/user-group-state|s.requireOperationAuth(s.listUserGroupState)|GET|node.read
+POST /api/v1/nodes/{node_id}/users|s.requireOperationAuth(s.createUser)|POST|user.manage
+POST /api/v1/nodes/{node_id}/users/{user_action}|s.requireOperationAuth(s.userAction)|POST|user.manage
+PUT /api/v1/nodes/{node_id}/groups/{group_name}|s.requireOperationAuth(s.applyGroup)|PUT|group.manage
+GET /api/v1/nodes/{node_id}/users/{username}/policy|s.requireOperationAuth(s.getUserPolicy)|GET, PUT|node.read
+PUT /api/v1/nodes/{node_id}/users/{username}/policy|s.requireOperationAuth(s.setUserPolicy)|GET, PUT|user.manage
+POST /api/v1/user-batches|s.requireOperationAuth(s.createUserBatch)|POST|user.manage
+GET /api/v1/user-batches/{batch_id}|s.requireOperationAuth(s.getUserBatch)|GET|operation.read
+POST /api/v1/agent-rollouts|s.requireOperationAuth(s.createAgentRollout)|GET, POST|agent.upgrade
+GET /api/v1/agent-rollouts|s.requireOperationAuth(s.listAgentRollouts)|GET, POST|operation.read
+GET /api/v1/agent-rollouts/{rollout_id}|s.requireOperationAuth(s.getAgentRollout)|GET|operation.read
+POST /api/v1/agent-rollouts/{rollout_id}/resume|s.requireOperationAuth(s.resumeAgentRollout)|POST|agent.upgrade
+GET /api/v1/user-operations/metrics|s.requireOperationAuth(s.userOperationMetrics)|GET|operation.read
+POST /api/v1/nodes/{node_id}/config-plans|s.requireOperationAuth(s.createConfigPlan)|POST|config.plan
+GET /api/v1/config-plans/{plan_id}|s.requireOperationAuth(s.getConfigPlan)|GET|config.review
+POST /api/v1/config-plans/{plan_id}/apply|s.requireOperationAuth(s.applyConfigPlan)|unreachable|config.apply
+POST /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.createCertificate)|GET, POST|certificate.issue
+GET /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.listNodeCertificates)|GET, POST|certificate.read
+GET /api/v1/certificates/{certificate_id}|s.requireOperationAuth(s.getCertificate)|GET|certificate.read
+POST /api/v1/certificates/{certificate_action}|s.requireOperationAuth(s.certificateAction)|POST|certificate.issue
+GET /api/v1/artifacts/{artifact_id}|s.requireOperationAuth(s.downloadArtifact)|GET|certificate.private_key.export
+POST /api/v1/secret-provider-refs|s.requireOperationAuth(s.createSecretRef)|POST|secret.manage
+GET /api/v1/secret-provider-refs/{secret_ref_id}|s.requireOperationAuth(s.getSecretRef)|GET|secret.read
+POST /api/v1/secret-provider-refs/{secret_ref_action}|s.requireOperationAuth(s.rotateSecretRef)|POST|secret.manage
+POST /api/v1/approval-requests|s.requireOperationAuth(s.createApproval)|POST|approval.request
+GET /api/v1/approval-requests/{approval_id}|s.requireOperationAuth(s.getApproval)|GET|approval.approve
+POST /api/v1/approval-requests/{approval_id}|s.requireOperationAuth(s.approveRequest)|POST|approval.approve
+GET /api/v1/audit/events|s.requireOperationAuth(s.listAuditEvents)|GET|audit.read
+POST /api/v1/audit:verify|s.requireOperationAuth(s.verifyAudit)|POST|audit.verify
+GET /api/v1/workspaces|s.requireOperationAuth(s.listWorkspaces)|GET|session
+POST /api/v1/role-bindings|s.requireOperationAuth(s.createRoleBinding)|POST|role_binding.manage`
+
+func baselineServer(t *testing.T, dev bool) *Server {
+	t.Helper()
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "baseline", Commit: "fixture", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, dev, "", 36)
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+	return s
+}
+
+func baselineRequest(method, path string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(method, path, body)
+	r.Header.Set("X-Request-ID", "baseline-request")
+	// A fixed span makes Problem bodies and log correlation deterministic without
+	// removing trace IDs or other fields from comparisons.
+	tid, _ := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	sid, _ := trace.SpanIDFromHex("0123456789abcdef")
+	return r.WithContext(trace.ContextWithSpanContext(r.Context(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid})))
+}
+
+func assertBaselineProblem(t *testing.T, w *httptest.ResponseRecorder, path string, status int, kind, title, detail string) {
+	t.Helper()
+	if w.Code != status || w.Header().Get("Content-Type") != "application/problem+json" || w.Header().Get("X-Request-ID") != "baseline-request" {
+		t.Fatalf("response: %d %v %s", w.Code, w.Header(), w.Body)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"type": "https://ocservia.dev/problems/" + kind, "title": title, "detail": detail, "status": float64(status), "instance": path, "trace_id": "0123456789abcdef0123456789abcdef"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Problem = %#v, want %#v", got, want)
+	}
+}
+
+func TestHTTPRouteInventory(t *testing.T) {
+	// Check only literal HandleFunc registrations, including wrapper arguments.
+	// No production metadata or second runtime permission map is introduced.
+	registered := map[string]string{}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "HandleFunc" {
+				return true
+			}
+			literal, ok := call.Args[0].(*ast.BasicLit)
+			if !ok {
+				t.Fatal("route pattern is no longer literal")
+			}
+			pattern, err := strconv.Unquote(literal.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var handler bytes.Buffer
+			if err := format.Node(&handler, fset, call.Args[1]); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := registered[pattern]; exists {
+				t.Fatalf("duplicate %s", pattern)
+			}
+			registered[pattern] = handler.String()
+			return true
+		})
+	}
+	s := baselineServer(t, false)
+	for _, line := range strings.Split(routeBaseline, "\n") {
+		fields := strings.Split(line, "|")
+		pattern, handler, allow, permission := fields[0], fields[1], fields[2], fields[3]
+		t.Run(pattern, func(t *testing.T) {
+			if registered[pattern] != handler {
+				t.Fatalf("registration = %q, want %q", registered[pattern], handler)
+			}
+			delete(registered, pattern)
+			method, path, _ := strings.Cut(pattern, " ")
+			path = strings.NewReplacer("{local_user_action}", baselineID+":disable", "{session_action}", "42:disconnect", "{ip_action}", "192.0.2.9:remove", "{user_action}", "alice:disable", "{certificate_action}", baselineID+":issue", "{secret_ref_action}", baselineID+":rotate", "{group_name}", "operators", "{username}", "alice").Replace(path)
+			for strings.Contains(path, "{") {
+				start, end := strings.Index(path, "{"), strings.Index(path, "}")
+				path = path[:start] + baselineID + path[end+1:]
+			}
+			if handler == "s.requireOperationAuth(s.approveRequest)" {
+				path += ":approve"
+			}
+			r := baselineRequest(method, path, nil)
+			// Existing routeMethod omission: registered, but every method is
+			// rejected before authentication. Fixing that is outside this PR.
+			if allow == "unreachable" {
+				for _, method := range []string{"GET", "POST", "HEAD", "OPTIONS", "BREW"} {
+					w := httptest.NewRecorder()
+					s.http.Handler.ServeHTTP(w, baselineRequest(method, path, nil))
+					assertBaselineProblem(t, w, path, 404, "not-found", "Resource not found", "the requested resource does not exist")
+					if w.Header().Get("Allow") != "" {
+						t.Fatal(w.Header())
+					}
+				}
+				if routeAction(r) != permission {
+					t.Fatal("apply action changed")
+				}
+				return
+			}
+			w := httptest.NewRecorder()
+			s.http.Handler.ServeHTTP(w, r)
+			if strings.Contains(handler, "requireOperationAuth") {
+				assertBaselineProblem(t, w, path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
+				if w.Header().Get("WWW-Authenticate") != "OIDC" {
+					t.Fatal("missing challenge")
+				}
+				if permission != "session" && permission != "local-session" && routeAction(r) != permission {
+					t.Fatalf("action = %q, want %q", routeAction(r), permission)
+				}
+			} else {
+				switch handler {
+				case "s.live":
+					if w.Code != 200 || w.Header().Get("Content-Type") != "application/json" || w.Body.String() != "{\"status\":\"ok\"}\n" {
+						t.Fatalf("live: %d %s", w.Code, w.Body)
+					}
+				case "s.version":
+					if w.Code != 200 || w.Body.String() != "{\"version\":\"baseline\",\"commit\":\"fixture\",\"role\":\"api\"}\n" {
+						t.Fatalf("version: %d %s", w.Code, w.Body)
+					}
+				case "s.authMethods":
+					if w.Code != 200 || w.Body.String() != "{\"local\":false,\"oidc\":false}\n" || w.Header().Get("Cache-Control") != "no-store" {
+						t.Fatalf("methods: %d %s", w.Code, w.Body)
+					}
+				case "s.ready":
+					assertBaselineProblem(t, w, path, 503, "database-unavailable", "Service is not ready", "database dependency is unavailable")
+				default:
+					detail := "the requested resource does not exist"
+					switch handler {
+					case "s.localLogin":
+						detail = "Local authentication is not configured"
+					case "s.breakGlass":
+						detail = "break-glass is not configured"
+					case "s.limitAuthentication(newAuthAdmission(30, 120, 8), s.login)", "s.limitAuthentication(newAuthAdmission(30, 120, 8), s.callback)":
+						detail = "OIDC authentication is not configured"
+					case "s.registerPrivdAttestationKey":
+						detail = "privd attestation provisioning is not enabled"
+					}
+					assertBaselineProblem(t, w, path, 404, "not-found", "Resource not found", detail)
+				}
+			}
+			for _, wrong := range []string{"HEAD", "OPTIONS", "BREW"} {
+				w := httptest.NewRecorder()
+				s.http.Handler.ServeHTTP(w, baselineRequest(wrong, path, nil))
+				assertBaselineProblem(t, w, path, 405, "method-not-allowed", "Method not allowed", "the requested method is not supported")
+				if w.Header().Get("Allow") != allow || w.Header().Get("WWW-Authenticate") != "" {
+					t.Fatalf("method headers: %v", w.Header())
+				}
+			}
+		})
+	}
+	if len(registered) != 0 {
+		t.Fatalf("unrecorded routes: %v", registered)
+	}
+}

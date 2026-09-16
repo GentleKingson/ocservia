@@ -1,17 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
-	"mime"
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
@@ -205,37 +200,6 @@ func (s *Server) adminExecuteFenced(ctx context.Context, nodeID uuid.UUID, kind 
 	return s.fences.ExecuteFenced(ctx, fixed, kind, operationID, ownersession.FencingCapability, action)
 }
 
-// decodeStrictJSON is the single request-body decoder for JSON endpoints.
-// The media type must be application/json (parameters such as charset are
-// allowed) so a form or text payload cannot ride through a JSON parser,
-// unknown fields and anything after the first JSON value are rejected, and
-// the error response is already written when it returns false.
-func decodeStrictJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeProblem(w, r, http.StatusUnsupportedMediaType, "https://ocservia.dev/problems/unsupported-media-type", "Unsupported media type", "Content-Type must be application/json")
-		return false
-	}
-	// limitBody has already bounded the request. Check before encoding/json
-	// can silently replace malformed UTF-8 in strings with U+FFFD.
-	body, err := io.ReadAll(r.Body)
-	if err != nil || !utf8.Valid(body) {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "request body must be valid UTF-8 JSON")
-		return false
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "request body is invalid")
-		return false
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "request body must contain one JSON value")
-		return false
-	}
-	return true
-}
-
 func (s *Server) writeEnrollmentError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, approvalstore.ErrNotReady):
@@ -251,16 +215,4 @@ func (s *Server) writeEnrollmentError(w http.ResponseWriter, r *http.Request, er
 		w.Header().Set("Retry-After", "1")
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Enrollment service unavailable", "the enrollment database is temporarily unavailable")
 	}
-}
-
-func parseUUIDv7(value string) (uuid.UUID, error) {
-	id, err := uuid.Parse(value)
-	if err != nil || id.Version() != 7 {
-		return uuid.Nil, errors.New("not UUIDv7")
-	}
-	return id, nil
-}
-func requestID(r *http.Request) string {
-	value, _ := r.Context().Value(requestIDKey{}).(string)
-	return value
 }
