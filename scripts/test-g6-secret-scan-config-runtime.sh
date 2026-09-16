@@ -53,9 +53,10 @@ fingerprint_b="86950961d8fa33b5f7bfe6297e80369"
 prose_a="validity"
 column_a="partial"
 database_a="pr02-isolated"
-literal_prefixes=('key_der_sha256": "' 'credential, ' 'idempotency_key, `' 'MYSQL_ROOT_PASSWORD=')
-literal_suffixes=('"' ' ' '`' ' ')
-public_literals=("${fingerprint_a}${fingerprint_b}" "${prose_a}/revocation" "${column_a}_460753916246" "${database_a}-test-root")
+relay_half="0123456789abcdef"
+literal_prefixes=('key_der_sha256": "' 'credential, ' 'idempotency_key, `' 'MYSQL_ROOT_PASSWORD=' 'std::fs::write(&token, "')
+literal_suffixes=('"' ' ' '`' ' ' '").expect("token");')
+public_literals=("${fingerprint_a}${fingerprint_b}" "${prose_a}/revocation" "${column_a}_460753916246" "${database_a}-test-root" "${relay_half}${relay_half}")
 other_a="0f1e2d3c4b5a6978"
 other_b="8796a5b4c3d2e1f0"
 for index in "${!public_literals[@]}"; do
