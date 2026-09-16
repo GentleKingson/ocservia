@@ -33,25 +33,13 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
-	"github.com/GentleKingson/ocservia/control-plane/migrations"
-	"github.com/google/uuid"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 )
 
 type BuildInfo struct{ Version, Commit string }
 
 func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.Logger) error {
-	// Reject new bootstrap passwords before startup can transition audit state.
-	if cfg.BootstrapLocalAdmin {
-		if err := auth.ValidateNewPassword(cfg.LocalBootstrapPassword); err != nil {
-			return err
-		}
-	}
-	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
-		if err := auth.ValidateNewPassword(cfg.LocalBootstrapApproverPassword); err != nil {
-			return err
-		}
+	if err := validateBootstrapPasswords(cfg); err != nil {
+		return err
 	}
 	shutdownTelemetry, err := telemetry.Configure(ctx, cfg.OTLPEndpoint, build.Version, cfg.Environment)
 	if err != nil {
@@ -71,81 +59,15 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	defer conn.Close()
 	backend := conn.Store
-	databaseTimeout := 30 * time.Second
-	if cfg.MigrateOnly {
-		databaseTimeout = 10 * time.Minute
-	}
-	databaseCtx, cancel := context.WithTimeout(ctx, databaseTimeout)
-	defer cancel()
-	if err := conn.ValidateDeployment(databaseCtx); err != nil {
-		return fmt.Errorf("validate database deployment: %w", err)
-	}
-	if cfg.SchemaCompatibilityCheck > 0 {
-		if _, err := backend.ControllerSchema(databaseCtx, cfg.SchemaCompatibilityCheck); err != nil {
-			return fmt.Errorf("validate schema compatibility: %w", err)
-		}
-		logger.Info("database schema compatibility check passed", "schema", cfg.SchemaCompatibilityCheck)
-		return nil
-	}
-	if cfg.MigrateOnly {
-		auditManager, err := newAuditManager(backend, cfg)
-		if err != nil {
-			return err
-		}
-		if err := conn.Migrate(databaseCtx, auditManager); err != nil {
-			return fmt.Errorf("migrate database: %w", err)
-		}
-		if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
-			return fmt.Errorf("transition audit event authentication: %w", err)
-		}
-		if err := conn.GrantRuntimePrivileges(databaseCtx, cfg.RuntimeDBRole); err != nil {
-			return fmt.Errorf("grant runtime database privileges: %w", err)
-		}
-		logger.Info("database migrations complete")
-		return nil
-	}
-	expectedSchemaVersion, err := migrations.LatestSchemaVersion()
-	if err != nil {
+	startup, err := initializeDatabase(ctx, conn, cfg, logger)
+	if err != nil || startup == nil {
 		return err
 	}
-	if _, err := backend.ControllerSchema(databaseCtx, expectedSchemaVersion); err != nil {
-		return fmt.Errorf("validate database schema: %w", err)
-	}
-	auditManager, err := newAuditManager(backend, cfg)
-	if err != nil {
-		return err
-	}
-	if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
-		return fmt.Errorf("verify audit event authentication: %w", err)
-	}
+	return runRoles(ctx, cfg, build, backend, startup.audit, startup.schemaVersion, logger)
+}
 
-	if cfg.BootstrapLocalAdmin || cfg.CompleteLocalBootstrap {
-		service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
-		if err != nil {
-			return errors.New("configure bootstrap authentication failed")
-		}
-		workspaceID, err := uuid.Parse(cfg.LocalBootstrapWorkspace)
-		if err != nil || workspaceID.Version() != 7 {
-			return errors.New("bootstrap workspace ID must be UUIDv7")
-		}
-		initialize := service.BootstrapLocalAdmin
-		if cfg.CompleteLocalBootstrap {
-			initialize = service.CompleteLocalBootstrap
-		}
-		id, err := initialize(ctx, cfg.LocalBootstrapUsername, cfg.LocalBootstrapPassword, workspaceID, cfg.LocalBootstrapApproverUsername, cfg.LocalBootstrapApproverPassword)
-		if err != nil {
-			if errors.Is(err, auth.ErrLocalWorkspaceMissing) {
-				return err
-			}
-			return errors.New("Local administrator bootstrap rejected; check initialization state, workspace and credentials")
-		}
-		logger.Info("Local initialization complete", "administrator_identity_id", id, "workspace_id", workspaceID, "upgrade_completion", cfg.CompleteLocalBootstrap)
-		return nil
-	}
-
-	if err := conn.ValidateRuntime(databaseCtx); err != nil {
-		return fmt.Errorf("validate required runtime database capabilities: %w", err)
-	}
+func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, expectedSchemaVersion int64, logger *slog.Logger) error {
+	var err error
 	logger.Info("control plane starting", "role", cfg.Role)
 	if cfg.PprofAddress != "" {
 		pprofServer := &http.Server{Addr: cfg.PprofAddress, Handler: http.DefaultServeMux, ReadHeaderTimeout: 5 * time.Second}
@@ -306,70 +228,23 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		// renewed in the background; losing renewal cancels the session
 		// context, which aborts fenced transactions before they can commit.
 		leader := coordination.NewRunnerBackend(backend, identity, 15*time.Second, 5*time.Second, logger)
+
+		work := maintenanceWork{
+			users:        userOperationsService.RunOnce,
+			rollouts:     operationService.AdvanceAgentRollouts,
+			telemetry:    telemetryService.Maintain,
+			certificates: certificateService.Maintain,
+			audit:        auditManager.CheckpointAll,
+		}
+		if cfg.TestSchedulerEvidence {
+			work.evidence = func(ctx context.Context, session *coordination.Session) error {
+				return coordination.RecordMaintenanceCompletion(ctx, backend, session)
+			}
+		}
 		go func() {
-			defer leader.Stop()
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
-			for {
-				started := time.Now()
-				err := leader.WithSession(componentCtx, func(sessionCtx context.Context, session *coordination.Session) error {
-					runCtx, span := otel.Tracer("ocservia.useroperations").Start(sessionCtx, "user_operations.scheduler.run")
-					if err := userOperationsService.RunOnce(runCtx); err != nil {
-						span.RecordError(err)
-						span.SetStatus(codes.Error, "scheduler run failed")
-						span.End()
-						return err
-					}
-					span.End()
-					logger.InfoContext(sessionCtx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", cfg.UserOperationConcurrency)
-					if err := operationService.AdvanceAgentRollouts(sessionCtx); err != nil {
-						logger.ErrorContext(sessionCtx, "advance agent rollouts", "error", err)
-					}
-					if err := telemetryService.Maintain(sessionCtx); err != nil {
-						return err
-					}
-					certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(sessionCtx, "certificates.maintenance.run")
-					if err := certificateService.Maintain(certificateCtx); err != nil {
-						certificateSpan.RecordError(err)
-						certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
-						certificateSpan.End()
-						return err
-					}
-					certificateSpan.End()
-					if err := auditManager.CheckpointAll(sessionCtx); err != nil {
-						return err
-					}
-					if cfg.TestSchedulerEvidence {
-						if err := coordination.RecordMaintenanceCompletion(sessionCtx, backend, session); err != nil {
-							return err
-						}
-					}
-					return nil
-				})
-				if err != nil {
-					// Leadership loss is expected during failover: stay
-					// alive, stop scheduling, and retry on the next tick. A
-					// cancellation while the component context is still live
-					// means the session context was cancelled by renewal
-					// loss, not a shutdown.
-					leadershipLost := errors.Is(err, coordination.ErrLeadershipLost) ||
-						errors.Is(err, coordination.ErrNotLeader) ||
-						(componentCtx.Err() == nil && errors.Is(err, context.Canceled))
-					if leadershipLost {
-						logger.WarnContext(componentCtx, "maintenance session lost leadership", "alert_kind", "scheduler.leadership_lost", "error", err)
-					} else {
-						logger.ErrorContext(componentCtx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
-						maintenanceErr <- err
-						return
-					}
-				}
-				select {
-				case <-componentCtx.Done():
-					maintenanceErr <- componentCtx.Err()
-					return
-				case <-ticker.C:
-				}
-			}
+			maintenanceErr <- runScheduler(componentCtx, leader, ticker.C, work, cfg.UserOperationConcurrency, logger)
 		}()
 	}
 	if !cfg.RunsAPI() {
@@ -467,17 +342,6 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		logger.Info("control plane stopped", "role", cfg.Role)
 		return ctx.Err()
 	}
-}
-
-func newAuditManager(backend database.Backend, cfg config.Config) (*audit.Manager, error) {
-	if len(cfg.AuditEventKey) == 0 {
-		return audit.NewBackendManager(backend, cfg.AuditCheckpointKey), nil
-	}
-	manager, err := audit.NewBackendManagerWithEventKey(backend, cfg.AuditCheckpointKey, cfg.AuditEventKeyID, cfg.AuditEventKey)
-	if err != nil {
-		return nil, fmt.Errorf("configure audit event authentication: %w", err)
-	}
-	return manager, nil
 }
 
 func operationAuthEnabled(cfg config.Config) bool {
