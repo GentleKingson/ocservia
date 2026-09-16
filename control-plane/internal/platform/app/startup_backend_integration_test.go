@@ -146,9 +146,22 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	}
 	run := func(options connection.Options, extra map[string]string, args ...string) error {
 		t.Helper()
+		// Every invocation here is one-shot. Invalid role-only resources must
+		// never be constructed, even with the default all role and an endpoint.
+		oneShot := map[string]string{
+			"OCSERV_COMMAND_SIGNING_KEY_FILE": filepath.Join(dir, "missing-role-key"),
+			"OCSERV_CONTROLLER_ENDPOINT_ID":   strings.Repeat("ab", 32),
+			"OCSERV_TRUST_SOCKET":             filepath.Join(dir, "unused-trust.sock"),
+		}
+		for key, value := range extra {
+			oneShot[key] = value
+		}
 		cmd := exec.CommandContext(ctx, binary, args...)
-		cmd.Env = environment(options, extra)
+		cmd.Env = environment(options, oneShot)
 		output, err := cmd.CombinedOutput()
+		if _, statErr := os.Stat(oneShot["OCSERV_TRUST_SOCKET"]); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal("one-shot command created a Trust socket", statErr)
+		}
 		if err != nil {
 			return errors.New(string(output))
 		}
@@ -373,6 +386,11 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Controller shutdown timed out")
 	}
+	rebound, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal("HTTP listener survived SIGTERM", err)
+	}
+	_ = rebound.Close()
 }
 
 func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connection.Connection, backend, account string) {
