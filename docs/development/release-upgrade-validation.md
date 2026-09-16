@@ -2,7 +2,7 @@
 
 `Native Release Upgrade Validation` is an independent `workflow_dispatch`
 workflow, not a publisher and not part of Basic CI. Only `version`,
-`baseline_release` (default `v0.5.2`), and `candidate_sha` are accepted.
+`baseline_release` (default `v0.6.0`), and `candidate_sha` are accepted.
 Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
 must be the complete lowercase commit SHA of that branch and must equal
 both the dispatch SHA and checkout HEAD. The candidate's numeric X.Y.Z
@@ -19,7 +19,7 @@ branch='<candidate-branch>'
 version='<candidate-X.Y.Z>'
 sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
 gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version="$version" -f baseline_release=v0.5.2 \
+  --ref "$branch" -f version="$version" -f baseline_release=v0.6.0 \
   -f candidate_sha="$sha"
 ```
 
@@ -116,9 +116,9 @@ unchanged. Ordinary same-source native smoke remains a separate installer
 regression, not cross-version evidence.
 
 `release-upgrade-baselines.json` owns historical checksum pins and capabilities.
-The default v0.5.2 is bound to commit
-`2bbbbbbc7dd4a9b328acfaae291fdaf11a35bfd6`, schema 30, checksum-manifest SHA-256
-`acbb66cf0f52fe64d3c3398e3fa6dfd8098190cf14863c24a0592e8f858af0be`, and DER key SHA-256
+The default v0.6.0 is bound to commit
+`cc8399641dc32083466a9c77369fcb8debf1ee48`, schema 36, checksum-manifest SHA-256
+`26f4ab236630ff52777dabf5723cd3d5814022d4e08ab4079768117dd4e262df`, and DER key SHA-256
 `b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369`.
 On 2026-09-14, the key was recovered from the real v0.4.0 arm64 DEB after
 checking its digest against the already repository-pinned v0.4.0 SHA256SUMS.
@@ -126,8 +126,12 @@ That independent historical key verified v0.5.0 SHA256SUMS.sig. On 2026-09-15
 the same anchor verified v0.5.2's signatures and all 21 published assets, both
 Controller bundles, and anonymous dual-platform indexes. Immutable Release
 388897497, direct tag commit and successful publication run 34934040575 were
+cross-checked. On 2026-09-16, the same historical anchor verified v0.6.0's
+signed checksums and all 21 published assets, both Controller bundles at
+schema 36, and anonymous dual-platform image indexes. Immutable Release
+388971765, direct tag commit and successful publication run 34945045708 were
 cross-checked. The key was not accepted through trust-on-first-download.
-v0.5.0 and v0.5.1 remain registered as historical data, not final-baseline
+v0.5.0, v0.5.1 and v0.5.2 remain registered as historical data, not final-baseline
 recommendations or fallbacks. v0.5.1 fixed v0.5.0's PostgreSQL/gateway startup
 defects, but its immutable RPM privd requires GLIBC_2.39 and cannot execute on
 supported Rocky 9. The genuine v0.5.2 release fixes the common payload ABI;

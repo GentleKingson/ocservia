@@ -298,7 +298,7 @@ to GHCR, or loads the production signing key.
   It produces a signed tar archive plus deb/rpm,
   and runs `scripts/release-native-package-smoke.sh` for the candidate's
   deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  It also runs the published v0.5.2 DEB/RPM baseline package smoke, executing
+  It also runs the published v0.6.0 DEB/RPM baseline package smoke, executing
   all three installed candidate binaries on Ubuntu and systemd Rocky 9.
   The additional full upgrade gate below is independent of this release job.
 - Tag pushes and `arch=all` dry runs download both package sets and run
@@ -347,7 +347,7 @@ See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
 trust anchors, evidence, reproduction, and the limits of this gate. Select the
 pushed candidate branch, a numeric candidate version newer than the registered
 baseline, and that branch's full SHA. The default registered baseline remains
-`v0.5.2`; a new release does not automatically register itself. Unlike Quick/Full
+`v0.6.0`; a new release does not automatically register itself. Unlike Quick/Full
 CI this is cross-version native upgrade evidence, unlike Release it does not
 publish, and unlike Formal G6 it does not certify full readiness, HA or PITR.
 
