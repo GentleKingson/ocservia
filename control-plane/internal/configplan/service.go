@@ -73,13 +73,19 @@ type ApplyRequest struct {
 	Reason          string
 }
 
+type operationCreator interface {
+	CreateSynthetic(context.Context, operations.CreateRequest) (operations.Operation, bool, error)
+}
+
+var _ operationCreator = (*operations.Service)(nil)
+
 type Service struct {
 	backend    database.Backend
-	operations *operations.Service
+	operations operationCreator
 	now        func() time.Time
 }
 
-func NewBackend(backend database.Backend, operationService *operations.Service) *Service {
+func NewBackend(backend database.Backend, operationService operationCreator) *Service {
 	return &Service{backend: backend, operations: operationService, now: func() time.Time { return time.Now().UTC() }}
 }
 

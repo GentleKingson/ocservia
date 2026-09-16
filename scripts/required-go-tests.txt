@@ -2,8 +2,12 @@
 # PR-06 policy, configuration, certificate and upgrade acceptance.
 backend-policy-userstate internal/userstate TestUserStateBackendIntegration
 backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration
+backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration/quota-port-errors
+backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration/reset-port-errors
+backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration/batch-port-errors
 backend-policy-api internal/api TestControllerReadsBackendHTTPIntegration
 backend-policy-config internal/configplan TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration
+backend-policy-config internal/configplan TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration/apply-rollback
 backend-policy-certificates internal/certificates TestCertificateIssueArtifactAndRevokeIntegration
 backend-policy-upgrades internal/api TestAgentUpgradeRouteResolvesTrustedReleasesIntegration
 backend-policy-upgrades internal/api TestAgentRolloutFleetLifecycleIntegration
@@ -35,6 +39,8 @@ regression-mysql internal/database/mysql TestRealLogicalValues
 regression-mysql internal/database/mysql TestRealIdentityProfiles
 regression-mysql internal/database/mysql TestRealAuditRBACController
 regression-mysql internal/database/mysql TestRealConfigurationReadAndIntent
+regression-mysql internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain
+regression-mysql internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain/apply-rollback
 regression-mysql internal/database/mysql TestRealCertificateIssuanceTransactions
 regression-mysql internal/database/mysql TestRealObservedStateTransactions
 regression-mysql internal/database/mysql TestRealQueryRowPoisonsBeforeScan mariadb
@@ -84,6 +90,8 @@ backend-mysql-current internal/database/mysql TestRealCertificateIssuanceTransac
 backend-mysql-current internal/database/mysql TestRealCommandLimits
 backend-mysql-current internal/database/mysql TestRealConcurrentMigration
 backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent
+backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain
+backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain/apply-rollback
 backend-mysql-current internal/database/mysql TestRealConnectionOwner
 backend-mysql-history internal/database/mysql TestRealCrashAndRepair
 backend-mysql-current internal/database/mysql TestRealExistingLongTextBounds
@@ -148,6 +156,11 @@ backend-mysql-history internal/database/mysql TestRealVersionTwentyTwoSharedUpgr
 backend-mysql-history internal/database/mysql TestRealVersionTwentyUserOperationsUpgrade
 backend-mysql-history internal/database/mysql TestRealVersionTwoReceiptsSurviveNextRevision
 unit internal/database TestCoordinationRetryBoundaries
+unit internal/configplan TestConsumerServiceBoundaries
+unit internal/configplan TestOperationCreatorValidationAndErrors
+unit internal/useroperations TestUserMutatorValidationAndConcurrency
+unit internal/useroperations TestStableSchedulerIdentityAndBatchLimit
+unit internal/useroperations TestBatchApprovalHashBindsOrderedContent
 unit internal/audit TestAppendHashesPersistedTime
 unit internal/audit TestAppendHashesPersistedJSON
 unit internal/audit TestLegacyNumericPayloadRemainsIdentical

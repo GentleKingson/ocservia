@@ -126,4 +126,7 @@ func TestRealConfigurationReadAndIntent(t *testing.T) {
 	if err := owner.QueryRow(ctx, `SELECT desired_revision,updated_at FROM node_config_state WHERE node_id=?`, UUIDBytes(node)).Scan(&revision, &updated); err != nil || revision != 2 || updated != positive {
 		t.Fatal("revision rollback", revision, updated, err)
 	}
+	t.Run("consumer-service-chain", func(t *testing.T) {
+		runConfigPlanServiceChain(t, owner, backend)
+	})
 }

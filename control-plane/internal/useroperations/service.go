@@ -18,6 +18,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
@@ -107,19 +108,25 @@ type UsageSample = userusage.Sample
 
 type Metrics = userstore.Metrics
 
+type userMutator interface {
+	Mutate(context.Context, userstate.MutationRequest) (operations.Operation, bool, error)
+}
+
+var _ userMutator = (*userstate.Service)(nil)
+
 type Service struct {
 	backend   database.Backend
-	users     *userstate.Service
+	users     userMutator
 	now       func() time.Time
 	newID     func() uuid.UUID
 	batchSize int
 }
 
-func NewBackend(backend database.Backend, users *userstate.Service) *Service {
+func NewBackend(backend database.Backend, users userMutator) *Service {
 	return &Service{backend: backend, users: users, now: func() time.Time { return time.Now().UTC() }, newID: func() uuid.UUID { return uuid.Must(uuid.NewV7()) }, batchSize: DefaultGlobalConcurrency}
 }
 
-func NewWithConcurrencyBackend(backend database.Backend, users *userstate.Service, concurrency int) *Service {
+func NewWithConcurrencyBackend(backend database.Backend, users userMutator, concurrency int) *Service {
 	service := NewBackend(backend, users)
 	if concurrency > 0 {
 		service.batchSize = concurrency

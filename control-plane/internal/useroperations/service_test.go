@@ -2,6 +2,7 @@ package useroperations
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,10 @@ func TestQuotaDirectionAndMonthlyBoundary(t *testing.T) {
 
 func TestStableSchedulerIdentityAndBatchLimit(t *testing.T) {
 	first := stableKey("policy", "node", "alice", "2", "quota", "2026-08-01T00:00:00Z")
+	// Captured from main at 5eb5896 before the port substitution.
+	if first != "i14-d0bab4db91ed94274aca33de89ee0cc44448605f14c9ed502494599b22eb6f7d" || stableTraceparent(first) != "00-4cc2ffdfcb3701893e1ddaf39bd3e959-a48d3e519fe5231b-01" {
+		t.Fatal("scheduler identity baseline changed")
+	}
 	if second := stableKey("policy", "node", "alice", "2", "quota", "2026-08-01T00:00:00Z"); first != second {
 		t.Fatal("scheduler idempotency key changed")
 	}
@@ -100,9 +105,13 @@ func TestBulkDisableRequiresApproval(t *testing.T) {
 }
 
 func TestBatchApprovalHashBindsOrderedContent(t *testing.T) {
-	nodeA, nodeB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	nodeA := uuid.MustParse("00000000-0000-7000-8000-000000000001")
+	nodeB := uuid.MustParse("00000000-0000-7000-8000-000000000002")
 	items := []BatchItemRequest{{NodeID: nodeA, Username: "alice", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: nodeB, Username: "bob", Action: "enable", ExpectedVersion: 2}}
 	original := BatchRequestHash(items)
+	if fmt.Sprintf("%x", original) != "2ea98c109c8d8f6beefe074d60b2cb09e9211e5447032ed3cd0c1c96e964e907" {
+		t.Fatal("batch approval hash baseline changed")
+	}
 	reordered := BatchRequestHash([]BatchItemRequest{items[1], items[0]})
 	if original == reordered {
 		t.Fatal("reordering batch items did not change the approval hash")

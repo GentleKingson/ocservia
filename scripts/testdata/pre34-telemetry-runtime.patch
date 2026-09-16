@@ -1,12 +1,10 @@
---- a/control-plane/internal/platform/app/app.go
-+++ b/control-plane/internal/platform/app/app.go
-@@ -143,6 +143,3 @@
+--- a/control-plane/internal/platform/app/startup.go
++++ b/control-plane/internal/platform/app/startup.go
+@@ -115,4 +114,0 @@
 -	if err := conn.ValidateRuntime(databaseCtx); err != nil {
--		return fmt.Errorf("validate required runtime database capabilities: %w", err)
+-		return nil, fmt.Errorf("validate required runtime database capabilities: %w", err)
 -	}
- 	logger.Info("control plane starting", "role", cfg.Role)
- 	if cfg.PprofAddress != "" {
- 		pprofServer := &http.Server{Addr: cfg.PprofAddress, Handler: http.DefaultServeMux, ReadHeaderTimeout: 5 * time.Second}
+-
 --- a/control-plane/internal/database/postgres/telemetry_history.go
 +++ b/control-plane/internal/database/postgres/telemetry_history.go
 @@ -79,6 +79,9 @@

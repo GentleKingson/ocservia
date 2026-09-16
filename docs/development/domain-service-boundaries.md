@@ -1,0 +1,46 @@
+# Consumer service boundaries
+
+PR-04 narrows two method sets. It does not isolate all domains or introduce a
+runtime authorization boundary. Shared DTOs, error identities, database Backends
+and cross-Store transactions remain intentional.
+
+Baseline inspected: `5eb5896dcd1352412d3e1ab3045d6906a1e5861a` (PR-03).
+
+| Consumer | Previous dependency | Consumer-owned port and call sites | Assembly and context | Transaction owner |
+| --- | --- | --- | --- | --- |
+| `configplan.Service` | `*operations.Service` | `operationCreator.CreateSynthetic`: `Create`, `Apply` | `platform/app` passes its existing configured Operations instance; original request context | ConfigPlan owns pre-read transactions, Operations owns command/Plan/Outbox/audit writes and bound approval consumption |
+| `useroperations.Service` | `*userstate.Service` | `userMutator.Mutate`: monthly reset, policy enforcement, batch submission | `platform/app` passes the shared signed UserState instance; original scheduler context including its fence | UserOperations owns policy/claim/receipt transactions; UserState owns desired-state/command/Outbox/audit commit and its fencing check |
+
+The constructors retain their names, delegation and concurrency defaults.
+Read/validation paths do not require a writer. Neither consumer checks whether
+its writer is nil; converting a typed nil does not add a fallback or make writes
+succeed. Production assembly always supplies the original configured instance.
+
+## Verification entry points
+
+- `scripts/go-check.sh standard`: interface validation, minimal constructor and
+  field boundaries, no concrete-Service bypass or reverse HTTP/assembly import,
+  stable scheduler identities/batch hashes, and the existing nodehttp/httpx and
+  lifecycle/HTTP unit baselines.
+- PostgreSQL `DATABASE_TEST_SCOPE=regression PG_MAJOR=all
+  scripts/database-integration.sh`: `backend-policy-config` exercises recorded
+  Create/Apply requests, signed result ingress, approval consumption and rollback;
+  `backend-policy-useroperations` exercises all three mutation paths and fencing.
+- MySQL/MariaDB `DATABASE_TEST_SCOPE=regression ENGINE=mysql` (or `mariadb`)
+  `bash scripts/database-foundation-integration.sh`: the required
+  `TestRealConfigurationReadAndIntent/consumer-service-chain` runs the actual
+  ConfigPlan-to-Operations chain using the existing restricted-runtime fixture;
+  `backend-policy-useroperations` uses the existing multi-backend service fixture.
+- The same service tests remain selected by Full. Required-test manifests reject
+  missing or skipped service cases; ordinary database skips are not acceptance.
+
+ConfigPlan's PostgreSQL-only historical test is not four-backend evidence. The
+MySQL/MariaDB consumer chain is checked separately, not inferred from Store tests.
+Apply is exercised directly at the service boundary, not via the known HTTP
+`routeMethod` omission. HTTP routing, contracts and generated clients are unchanged.
+
+The baseline runtime grants omit `DELETE` on `user_policy_enforcements` on all
+backends, while the existing conflict branches ignore cleanup errors. This PR
+does not change that authorization policy or error handling. Policy error tests
+use the fixture's existing owner connection to verify successful cleanup; normal
+mutation, replay, batch and fencing workflows still use the restricted runtime.

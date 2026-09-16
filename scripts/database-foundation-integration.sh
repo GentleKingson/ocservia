@@ -100,7 +100,7 @@ if [[ "${part}" != history ]]; then
 fi
 if [[ "${scope}" == regression ]]; then
   (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" regression-mysql --select -race -timeout=60m)
-  for group in regression-disconnect regression-outbox regression-fencing regression-auth regression-telemetry; do
+  for group in regression-disconnect regression-outbox regression-fencing regression-auth regression-telemetry backend-policy-useroperations; do
     (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" "${group}" --select -race -timeout=10m)
   done
 else
