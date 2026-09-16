@@ -10,10 +10,10 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -81,12 +81,7 @@ func randomID() string {
 }
 
 func pageSize(r *http.Request, fallback int) (int, bool) {
-	value := r.URL.Query().Get("page_size")
-	if value == "" {
-		return fallback, true
-	}
-	parsed, err := strconv.Atoi(value)
-	return parsed, err == nil && parsed >= 1 && parsed <= 200
+	return httpx.PageSize(r, fallback)
 }
 
 func requestTraceparent(r *http.Request) string {
@@ -112,9 +107,5 @@ func correlationHex(length int) string {
 }
 
 func parseEventID(value string) (uuid.UUID, bool) {
-	if value == "" {
-		return uuid.Nil, true
-	}
-	id, err := uuid.Parse(value)
-	return id, err == nil && id.Version() == 7
+	return httpx.ParseOptionalUUIDv7(value)
 }
