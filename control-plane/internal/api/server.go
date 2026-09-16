@@ -247,7 +247,11 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.closeEventStreams()
-	return s.http.Shutdown(ctx)
+	if err := s.http.Shutdown(ctx); err != nil {
+		// Shutdown alone leaves active connections open after its deadline.
+		return errors.Join(err, s.http.Close())
+	}
+	return nil
 }
 
 func (s *Server) EnableLocalSlice(service *localslice.Service) {

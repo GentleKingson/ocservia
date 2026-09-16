@@ -96,7 +96,8 @@ func (s *Server) eventStreamComponents(operation bool) (eventstream.Config, *eve
 func (s *Server) closeEventStreams() {
 	s.eventStreamsMu.Lock()
 	manager, platform, operations := s.eventAdmission, s.platformEvents, s.operationEvents
-	s.eventAdmission, s.platformEvents, s.operationEvents = nil, nil, nil
+	// Retain closed admission/hubs so an in-flight request cannot lazily
+	// create a new watcher set while HTTP shutdown is draining requests.
 	s.eventStreamsMu.Unlock()
 	if manager != nil {
 		manager.Close()

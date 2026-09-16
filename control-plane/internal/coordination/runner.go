@@ -50,6 +50,7 @@ type Runner struct {
 	sessionCtx    context.Context
 	cancelSession context.CancelFunc
 	renewStop     chan struct{}
+	renewals      sync.WaitGroup
 	// localExpiry is the local deadline of the current session, anchored
 	// before each acquire or renew round trip so it can never be later than
 	// the lease PostgreSQL actually granted. Once passed, the runner stops
@@ -124,6 +125,7 @@ func (r *Runner) lost(err error, session *Session) {
 }
 
 func (r *Runner) renewLoop(session *Session, sessionCtx context.Context, stop <-chan struct{}) {
+	defer r.renewals.Done()
 	ticker := time.NewTicker(r.renewInterval)
 	defer ticker.Stop()
 	for {
@@ -190,6 +192,7 @@ func (r *Runner) installSession(ctx context.Context, session *Session, deadline 
 	r.cancelSession = cancel
 	r.renewStop = stop
 	r.localExpiry = deadline
+	r.renewals.Add(1)
 	go r.renewLoop(session, sessionCtx, stop)
 	return sessionSnapshot{session: session, ctx: sessionCtx}, true
 }
@@ -240,7 +243,10 @@ func (r *Runner) WithSession(ctx context.Context, body func(sessionCtx context.C
 // PostgreSQL time and another instance takes over with a higher epoch.
 func (r *Runner) Stop() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.stopped = true
 	r.dropSessionLocked()
+	r.mu.Unlock()
+	// Renewals have their existing five-second deadline. Join them before the
+	// caller closes the shared database, without holding the session mutex.
+	r.renewals.Wait()
 }

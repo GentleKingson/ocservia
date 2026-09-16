@@ -374,6 +374,21 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if production {
 		t.Log("production configuration, migration, runtime permissions, readiness, authenticated read, and database writes passed")
 	}
+	streamRequest, _ := http.NewRequestWithContext(ctx, "GET", base+"/api/v1/events/stream", nil)
+	streamRequest.AddCookie(cookie)
+	streamRequest.Header.Set("X-Workspace-ID", workspace.String())
+	streamClient := &http.Client{}
+	defer streamClient.CloseIdleConnections()
+	stream, err := streamClient.Do(streamRequest)
+	if err != nil {
+		t.Fatal("open real process SSE", err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("SSE not active: %d", stream.StatusCode)
+	}
+	streamDone := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, stream.Body); close(streamDone) }()
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -386,11 +401,38 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Controller shutdown timed out")
 	}
+	select {
+	case <-streamDone:
+	case <-time.After(time.Second):
+		t.Fatal("SSE survived process shutdown")
+	}
 	rebound, err := net.Listen("tcp", address)
 	if err != nil {
 		t.Fatal("HTTP listener survived SIGTERM", err)
 	}
 	_ = rebound.Close()
+	t.Run("HTTP-failure-exit", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		failed := exec.CommandContext(ctx, binary, "--role=all")
+		trustSocket := filepath.Join(socketDirectory(t), "trust.sock")
+		failed.Env = environment(runtimeOptions, map[string]string{
+			"OCSERV_HTTP_ADDRESS":           listener.Addr().String(),
+			"OCSERV_CONTROLLER_ENDPOINT_ID": strings.Repeat("ab", 32),
+			"OCSERV_TRUST_SOCKET":           trustSocket,
+		})
+		output, err := failed.CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 || !bytes.Contains(output, []byte("serve HTTP")) {
+			t.Fatalf("real CLI failure was not exit 1: %v\n%s", err, output)
+		}
+		if _, err := os.Stat(trustSocket); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("failed CLI left Trust socket", err)
+		}
+	})
 }
 
 func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connection.Connection, backend, account string) {
