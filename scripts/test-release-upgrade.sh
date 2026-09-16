@@ -8,7 +8,7 @@ w = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 triggers = w['on'] || w[true]
 abort 'manual-only entrypoint required' unless triggers.keys == ['workflow_dispatch']
 abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release candidate_sha version]
-abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v0.5.2'
+abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v0.6.0'
 abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
 %w[agent-upgrade controller-upgrade].each do |name|
   job = w['jobs'][name]
@@ -37,8 +37,8 @@ release = YAML.safe_load(File.read('.github/workflows/release.yml'))
 jobs = release.fetch('jobs')
 baseline_steps = jobs['build-agent-packages']['steps'].select { |step| step.fetch('name','').start_with?('Validate published ') }
 abort 'published upgrade baseline drift' unless baseline_steps.length == 1 &&
-  baseline_steps[0]['name'] == 'Validate published v0.5.2 upgrade (${{ matrix.package_arch }})' &&
-  baseline_steps[0].dig('env','BASELINE_RELEASE') == 'v0.5.2'
+  baseline_steps[0]['name'] == 'Validate published v0.6.0 upgrade (${{ matrix.package_arch }})' &&
+  baseline_steps[0].dig('env','BASELINE_RELEASE') == 'v0.6.0'
 abort 'release dispatch can publish' unless jobs['publish-release-packages']['if'] == "github.event_name == 'push'"
 abort 'publication guard changed' unless jobs['publish-release-packages']['environment'] == 'release-publishing' &&
   jobs['publish-release-packages']['needs'].sort == %w[build-controller-images security validate-release-packages]
