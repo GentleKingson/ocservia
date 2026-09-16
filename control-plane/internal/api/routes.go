@@ -71,11 +71,7 @@ func (s *Server) registerEnrollmentRoutes(mux *http.ServeMux) {
 }
 
 func (s *Server) registerNodeRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/nodes", s.requireOperationAuth(s.listNodes))
-	mux.HandleFunc("GET /api/v1/nodes/{node_id}", s.requireOperationAuth(s.getNode))
-	mux.HandleFunc("GET /api/v1/nodes/{node_id}/sessions", s.requireOperationAuth(s.listNodeSessions))
-	mux.HandleFunc("GET /api/v1/nodes/{node_id}/ip-bans", s.requireOperationAuth(s.listNodeIPBans))
-	mux.HandleFunc("GET /api/v1/nodes/{node_id}/telemetry", s.requireOperationAuth(s.listNodeTelemetry))
+	s.nodeHTTP.Register(mux, s.requireActionAuth)
 }
 
 func (s *Server) registerUserRoutes(mux *http.ServeMux) {

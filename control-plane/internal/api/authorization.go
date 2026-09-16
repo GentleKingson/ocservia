@@ -42,6 +42,10 @@ func (s *Server) authenticate(r *http.Request) (auth.Principal, error) {
 }
 
 func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (context.Context, error) {
+	return s.authorizeRouteAction(r, principal, "")
+}
+
+func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal, action string) (context.Context, error) {
 	if r.URL.Path == "/api/v1/auth/change-password" {
 		if s.auth == nil || principal.Issuer != auth.LocalIssuer || principal.BreakGlass || principal.IdentityID == uuid.Nil || principal.SessionID == uuid.Nil {
 			return nil, rbac.ErrForbidden
@@ -83,7 +87,9 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		}
 		return context.WithValue(ctx, workspaceKey{}, resource.WorkspaceID), nil
 	}
-	action := routeAction(r)
+	if action == "" {
+		action = routeAction(r)
+	}
 	if action == "" {
 		return nil, rbac.ErrForbidden
 	}
@@ -384,6 +390,10 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireActionAuth("", next)
+}
+
+func (s *Server) requireActionAuth(action string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, err := s.authenticate(r)
 		if err != nil {
@@ -395,7 +405,7 @@ func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
 			return
 		}
-		ctx, err := s.authorizeRoute(r, principal)
+		ctx, err := s.authorizeRouteAction(r, principal, action)
 		if err != nil {
 			s.writeAuthorizationError(w, r, err)
 			return

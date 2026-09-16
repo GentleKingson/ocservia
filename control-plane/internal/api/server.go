@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
@@ -57,7 +58,7 @@ type Server struct {
 	enrollment       *enrollment.Service
 	transport        *transportclient.Client
 	fences           ownersession.FencedExecutor
-	telemetry        *telemetrystore.Service
+	nodeHTTP         *nodehttp.Handler
 	releaseCatalog   *releasecatalog.Catalog
 	auth             *auth.Service
 	authProxies      []netip.Prefix
@@ -90,6 +91,7 @@ func NewBackend(address string, backend database.Backend, build BuildInfo, logge
 		panic(err)
 	}
 	mux := http.NewServeMux()
+	s.nodeHTTP = nodehttp.New(logger, workspace)
 	s.registerRoutes(mux)
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	// Bound request reads without a global write deadline that would end SSE streams.
@@ -97,7 +99,16 @@ func NewBackend(address string, backend database.Backend, build BuildInfo, logge
 	return s
 }
 
-func (s *Server) EnableTelemetry(service *telemetrystore.Service) { s.telemetry = service }
+var _ nodehttp.Reader = (*telemetrystore.Service)(nil)
+
+// EnableTelemetry supplies the configured read service before HTTP starts.
+func (s *Server) EnableTelemetry(service *telemetrystore.Service) {
+	if service == nil {
+		s.nodeHTTP.SetReader(nil)
+		return
+	}
+	s.nodeHTTP.SetReader(service)
+}
 
 // EnableBrowserOrigin installs the exact public browser origin that may spend
 // a session cookie on state changing requests. An origin that does not

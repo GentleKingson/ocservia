@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
 	"github.com/google/uuid"
@@ -60,7 +63,8 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	s := baselineServer(t, false)
 	s.backend = b
 	s.EnableAuthorization(authn, rbac.NewBackend(b), nil, nil)
-	s.EnableTelemetry(telemetry.NewBackend(b))
+	var disabled *telemetry.Service
+	s.EnableTelemetry(disabled)
 	s.EnableBrowserOrigin(authTestOrigin)
 	login := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":%q}`, username, password), authTestOrigin)
 	if login.Code != 204 || len(login.Result().Cookies()) != 1 {
@@ -94,6 +98,17 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	nodeJSON := func(id uuid.UUID, sessions int) string {
 		return fmt.Sprintf(`{"id":%q,"name":%q,"version":7,"trust_status":"active","connection_state":"offline","freshness":"never","agent_version_state":"unknown","agent_upgrade_eligible":false,"dropped":{"security":0,"health":0,"aggregate":0,"raw":0},"session_count":%d}`, id, "node-"+id.String(), sessions)
 	}
+	// The routes already exist, and real authentication/resource errors must
+	// still precede the absent reader (including a typed-nil service).
+	for _, path := range []string{"/api/v1/nodes", nodePath, nodePath + "/sessions", nodePath + "/ip-bans", nodePath + "/telemetry"} {
+		assertBaselineProblem(t, get(path, ws, nil), path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
+		assertBaselineProblem(t, get(path, ws, cookie), path, 503, "telemetry-unavailable", "Telemetry unavailable", "the telemetry read model is unavailable")
+	}
+	assertBaselineProblem(t, get("/api/v1/nodes/invalid", ws, cookie), "/api/v1/nodes/invalid", 404, "not-found", "Resource not found", "the requested resource does not exist")
+	foreignPath := "/api/v1/nodes/" + ids[51].String()
+	assertBaselineProblem(t, get(foreignPath, ws, cookie), foreignPath, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	readService := telemetry.NewBackend(b)
+	s.EnableTelemetry(readService)
 	assertBaselineJSON(t, get(nodePath, uuid.Nil, cookie), nodeJSON(ids[0], 0))
 	// Resource ownership, not a caller-supplied workspace header, selects a node's scope.
 	assertBaselineJSON(t, get(nodePath, other, cookie), nodeJSON(ids[0], 0))
@@ -164,6 +179,10 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 			assertBaselineProblem(t, get(tc.path, ws, cookie), path, 400, tc.kind, tc.title, tc.detail)
 		})
 	}
+	// Any read after an authorization rejection is a failure, not just a
+	// coincidentally identical response from a permissive Reader.
+	reader := &observedNodeReader{Reader: readService}
+	s.nodeHTTP.SetReader(reader)
 	for _, suffix := range []string{"", "/sessions", "/ip-bans", "/telemetry?metric=cpu_usage_ratio"} {
 		path, _, _ := strings.Cut(nodePath+suffix, "?")
 		assertBaselineProblem(t, get(nodePath+suffix, ws, nil), path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
@@ -181,4 +200,96 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	for _, path := range []string{"/api/v1/nodes", nodePath, nodePath + "/sessions", nodePath + "/ip-bans", nodePath + "/telemetry"} {
 		assertBaselineProblem(t, get(path, ws, cookie), path, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
 	}
+	if reader.calls.Load() != 0 {
+		t.Fatal("denied request reached Reader")
+	}
+
+	// A node-scoped Viewer can read only its own node, including when the
+	// caller supplies a misleading workspace or action header.
+	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'Viewer','node',?,?)`, binding, identity, ws, ids[0], stamp)
+	for _, suffix := range []string{"", "/sessions", "/ip-bans", "/telemetry?metric=cpu_usage_ratio"} {
+		if w := get(nodePath+suffix, other, cookie); w.Code != 200 {
+			t.Fatalf("node-scoped read: %d %s", w.Code, w.Body)
+		}
+		path := "/api/v1/nodes/" + ids[1].String() + suffix
+		plain, _, _ := strings.Cut(path, "?")
+		assertBaselineProblem(t, get(path, ws, cookie), plain, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	}
+	assertBaselineProblem(t, get("/api/v1/nodes", ws, cookie), "/api/v1/nodes", 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	if reader.calls.Load() != 4 {
+		t.Fatalf("authorized Reader calls = %d", reader.calls.Load())
+	}
+	t.Run("explicit-action-input", func(t *testing.T) {
+		// Counterfactual actions distinguish the new runtime input from
+		// routeAction's node.read inference. This uses the actual unified guard.
+		for _, tc := range []struct {
+			path, action string
+			status       int
+		}{
+			{"/api/v1/nodes/{node_id}", "node.revoke", 403},
+			{"/explicit/{node_id}", "node.read", 204},
+		} {
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET "+tc.path, s.requireActionAuth(tc.action, func(w http.ResponseWriter, r *http.Request) {
+				if workspace(r) != ws || principal(r).IdentityID != identity {
+					t.Error("authorized context lost")
+				}
+				w.WriteHeader(204)
+			}))
+			r := baselineRequest("GET", strings.ReplaceAll(tc.path, "{node_id}", ids[0].String()), nil)
+			r.Header.Set("X-Action", "node.read")
+			r.AddCookie(cookie)
+			w := httptest.NewRecorder()
+			s.requestContext(mux).ServeHTTP(w, r)
+			if w.Code != tc.status {
+				t.Fatalf("explicit %s: %d %s", tc.action, w.Code, w.Body)
+			}
+		}
+	})
+	for _, path := range []string{nodePath + "/sessions/42:disconnect", nodePath + "/ip-bans/192.0.2.9:remove"} {
+		r := baselineRequest("POST", path, nil)
+		r.Header.Set("Origin", authTestOrigin)
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		s.http.Handler.ServeHTTP(w, r)
+		assertBaselineProblem(t, w, path, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
+	}
+	if reader.calls.Load() != 4 {
+		t.Fatal("adjacent route reached Reader")
+	}
+
+	t.Run("configured-service", func(t *testing.T) {
+		// Match application assembly: configure recommendation and catalog on
+		// the existing service, then inject it after NewBackend registers routes.
+		manifest := filepath.Join(t.TempDir(), "releases.json")
+		if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("0", 64)+`"}]}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		catalog, err := releasecatalog.Load(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now, err := value.FromTime(time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$3,'module',$4,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$5)`, "INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,`system`,path,last_heartbeat_at) VALUES(?,?,?,'module',?,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',?)", ids[0], now, now, uuid.Must(uuid.NewV7()), now)
+		exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,'ocserv.agent.upgrade.v2',true)`, ids[0])
+		configured := telemetry.NewWithRecommendedAgentVersionBackend(b, "2.0.0")
+		configured.EnableAgentUpgradeEligibility(catalog)
+		server := baselineServer(t, false)
+		server.EnableAuthorization(authn, rbac.NewBackend(b), nil, nil)
+		server.EnableTelemetry(configured)
+		r := baselineRequest("GET", nodePath, nil)
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(w, r)
+		var node telemetry.Node
+		if err := json.Unmarshal(w.Body.Bytes(), &node); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != 200 || node.RecommendedAgentVersion != "2.0.0" || node.AgentVersionState != "upgrade_available" || !node.AgentUpgradeEligible {
+			t.Fatalf("configured service lost: %d %s", w.Code, w.Body)
+		}
+	})
 }

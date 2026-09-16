@@ -23,7 +23,7 @@ control-plane/internal/api/rollouts.go
 control-plane/internal/api/schema_compatibility_integration_test.go
 control-plane/internal/api/server.go
 control-plane/internal/api/server_test.go
-control-plane/internal/api/telemetry.go
+control-plane/internal/api/nodehttp/handler.go
 control-plane/internal/api/telemetry_test.go
 control-plane/internal/api/useroperations.go
 control-plane/internal/approvals/service.go
