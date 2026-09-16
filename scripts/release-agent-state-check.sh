@@ -9,7 +9,6 @@ state() {
     /etc/ocservia/release-signing.pub.pem /etc/ocservia/trusted-release-key.sha256 \
     /etc/ocservia-agent/user-password-seal-private.pem /etc/ocservia-agent/p12-password-seal-private.pem \
     /etc/ocservia-agent/relays.env /etc/ocservia-agent/relay-access-token \
-    /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
     /var/lib/ocservia-agent/identity/identity-sentinel \
     /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint; do
     test -f "${path}"
@@ -17,6 +16,37 @@ state() {
     stat -c '%n %U:%G %a' "${path}"
   done
 }
+# Package-owned Relay files may change across releases; operator state may not.
+relay_runtime() {
+  local path mode
+  for path in /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
+    /usr/libexec/ocservia/ocservia-agent-relays; do
+    mode=644
+    if [[ "${path}" == /usr/libexec/ocservia/ocservia-agent-relays ]]; then
+      mode=755
+      if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+        printf 'absent %s\n' "${path}"
+        continue
+      fi
+    fi
+    [[ -f "${path}" && ! -L "${path}" ]]
+    [[ "$(stat -c '%u:%g:%a' "${path}")" == "0:0:${mode}" ]]
+    sha256sum "${path}"
+    stat -c '%n %U:%G %a' "${path}"
+  done
+}
+verify_candidate_relays() (
+  package=/usr/share/ocservia-agent
+  archive="${package}/ocservia-agent-${version}-linux-${arch}.tar.gz"
+  fingerprint="$(cat "${package}/trusted-release-key.sha256")"
+  verified="$(AGENT_TRUSTED_KEY_SHA256="${fingerprint}" "${package}/verify-agent-package.sh" \
+    "${archive}" "${archive}.sha256" "${archive}.sha256.sig" "${package}/release-signing.pub.pem")"
+  trap 'rm -rf -- "${verified%%/extracted/*}"' EXIT
+  cmp "${verified}/deploy/production/systemd/ocservia-agent-relays.conf" \
+    /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf
+  cmp "${verified}/deploy/production/systemd/agent-relays.sh" \
+    /usr/libexec/ocservia/ocservia-agent-relays
+)
 binaries() {
   local name machine
   for name in ocservia-agent ocservia-privd ocservia-upgrader; do
@@ -35,18 +65,23 @@ case "${mode}" in
     runuser -u ocserv-agent -- /usr/libexec/ocservia/ocservia-agent \
       --identity-dir /var/lib/ocservia-agent/identity --controller "${controller}" --prepare-enrollment >"${evidence}/endpoint-id"
     state >"${evidence}/state.before"
+    relay_runtime >"${evidence}/relay-runtime.before"
     sha256sum /usr/libexec/ocservia/ocservia-{agent,privd,upgrader} >"${evidence}/binaries.before"
     binaries
     ;;
   after)
     state >"${evidence}/state.after"
     cmp "${evidence}/state.before" "${evidence}/state.after"
+    verify_candidate_relays
+    relay_runtime >"${evidence}/relay-runtime.after"
     binaries
     sha256sum /var/lib/ocservia-upgrade/upgrade-backup/* >"${evidence}/snapshot.before-retry"
     ;;
   retry)
     state >"${evidence}/state.retry"
     cmp "${evidence}/state.before" "${evidence}/state.retry"
+    relay_runtime >"${evidence}/relay-runtime.retry"
+    cmp "${evidence}/relay-runtime.after" "${evidence}/relay-runtime.retry"
     sha256sum -c "${evidence}/snapshot.before-retry"
     binaries
     ;;
@@ -80,6 +115,8 @@ case "${mode}" in
     sha256sum -c "${evidence}/snapshot.before-retry"
     state >"${evidence}/state.rejected"
     cmp "${evidence}/state.before" "${evidence}/state.rejected"
+    relay_runtime >"${evidence}/relay-runtime.rejected"
+    cmp "${evidence}/relay-runtime.after" "${evidence}/relay-runtime.rejected"
     ;;
   rollback)
     /usr/libexec/ocservia/ocservia-agent-rollback
@@ -87,6 +124,8 @@ case "${mode}" in
     binaries
     state >"${evidence}/state.rollback"
     cmp "${evidence}/state.before" "${evidence}/state.rollback"
+    relay_runtime >"${evidence}/relay-runtime.rollback"
+    cmp "${evidence}/relay-runtime.before" "${evidence}/relay-runtime.rollback"
     # Rollback requests restarts; this fixture does not prove online reporting.
     systemctl stop ocservia-agent.service ocservia-privd.service
     ;;

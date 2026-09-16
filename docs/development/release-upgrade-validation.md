@@ -55,6 +55,10 @@ identity, relay configuration/token/drop-in, ownership and modes, execute
 candidate binaries, reinstall identical packages, reject corrupt payloads
 and unsafe upgrade prerequisites, and execute the installed rollback command.
 Rollback restores runtime binaries/units, not the package-manager version.
+Operator state remains byte-identical across upgrade, retry and rollback.
+Package-owned Relay drop-ins and launchers are checked against the signed
+candidate payload after upgrade, must remain unchanged on retry/rejection,
+and must return to their exact baseline content or absence on rollback.
 An identical retry first uses the rollback command's `--verify-only` snapshot
 validation: missing manifests, corrupt members or unsafe installed rollback
 scripts fail before any retry restart. A broken snapshot is not silently
