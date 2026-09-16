@@ -44,7 +44,59 @@ Existing Local/OIDC, Origin, JSON and PR-01 shutdown cases remain in use.
 MariaDB; PostgreSQL additionally selects the Local/OIDC and ConfigPlan HTTP
 response baselines. Required-test guards reject missing or skipped cases.
 
-This keeps `api`, concrete service fields, `Server`, `NewBackend`, `EnableXXX`,
+PR-02 kept `api`, concrete service fields, `Server`, `NewBackend`, `EnableXXX`,
 `routeMethod`, `routeAction` and resource authorization. Node/telemetry handler
-extraction and fixing the apply-route omission remain separate follow-ups.
+extraction and fixing the apply-route omission were separate follow-ups.
 Final candidate SHA and command results belong in the Draft PR evidence.
+
+## Node read module (PR-03)
+
+Base: `b34b91df057a2dd824fc0a0c2e3326c4a1da7819` (PR-02, #217).
+Only the following five registrations move from `api/routes.go` to
+`api/nodehttp/routes.go`; the inventory still covers all 72 registrations.
+
+| GET path | Module handler |
+| --- | --- |
+| `/api/v1/nodes` | `listNodes` |
+| `/api/v1/nodes/{node_id}` | `getNode` |
+| `/api/v1/nodes/{node_id}/sessions` | `listNodeSessions` |
+| `/api/v1/nodes/{node_id}/ip-bans` | `listNodeIPBans` |
+| `/api/v1/nodes/{node_id}/telemetry` | `listNodeTelemetry` |
+
+Each registration declares `guard("node.read", handler)` on the same root
+ServeMux. The parent supplies `requireActionAuth`, reusing authentication,
+browser checks, resource resolution, RBAC and authorized request context.
+Only a missing explicit action falls back to `routeAction` for legacy routes.
+The module obtains the workspace through the existing context accessor,
+never from a client header. A missing guard fails at registration.
+
+`nodehttp.Reader` exposes exactly `ListNodesInWorkspace`, `GetNode`,
+`ListSessions`, `ListIPBans`, and `HistoryFrom`, with the original signatures.
+In particular, `ListSessions` returns `[]telemetryread.Session`, not the
+ingestion model `[]telemetry.Session`. Shared telemetry read models, errors
+and `value.Timestamp` stay in their existing packages. No database/store,
+Transport, concrete Service or parent Server is retained by the module.
+
+`NewBackend` creates the stable module before registering routes.
+`EnableTelemetry` is a startup-only adapter that explicitly converts a nil
+`*telemetry.Service` to a nil Reader and otherwise injects the same configured
+service, preserving its recommendation and release catalog. There is no second
+Service field, replacement Service, runtime swapping mechanism or old Server
+handler. Application assembly and the HTTP/lifecycle wrapper order are unchanged.
+
+`httpx` owns the single JSON/Problem encoders, page-size parser and optional
+UUIDv7 parser. Parent functions are thin compatibility adapters; strict JSON,
+idempotency and command trace helpers remain in `api`.
+
+Module tests use a handwritten Reader without a database or Transport.
+The real Local-session baseline additionally checks nil/late injection,
+Reader exclusion on denial, node-scoped access, counterfactual explicit actions,
+adjacent write routes and configured service fields. These run through the
+existing four-backend `regression-auth` selection, with required subtests for
+explicit actions and configuration. Full-chain cancellation tests ensure node
+reads keep the original deadline/cancellation and remain part of Shutdown
+draining. Small AST/type checks protect these package boundaries.
+
+Other handlers, centralized resource resolution, `routeMethod`, and the
+ConfigPlan apply omission remain unchanged. This is not full API modularization
+or the PR-04 service-interface work.

@@ -24,7 +24,7 @@ control-plane/internal/api/rollouts.go	common-boundary	No driver/raw SQL; intern
 control-plane/internal/api/schema_compatibility_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
 control-plane/internal/api/server.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, audit, auth, browserorigin, certificates, configplan, database, enrollment, eventstream, localslice, operations, ownersession, privdattestation, rbac, releasecatalog, telemetry, transportclient, useroperations, userstate
 control-plane/internal/api/server_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
-control-plane/internal/api/telemetry.go	common-boundary	No driver/raw SQL; internal dependencies: database, database/value, telemetry
+control-plane/internal/api/nodehttp/handler.go	common-boundary	No driver/raw SQL; database.ErrNotFound and value.Timestamp only; reads through nodehttp.Reader
 control-plane/internal/api/telemetry_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
 control-plane/internal/api/useroperations.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, database, rbac, useroperations
 control-plane/internal/approvals/service.go	common-boundary	No driver/raw SQL; internal dependencies: approvals/approvalstore, audit, database, database/value
