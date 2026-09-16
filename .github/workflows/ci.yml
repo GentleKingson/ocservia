@@ -87,6 +87,8 @@ jobs:
           bash scripts/test-controller-bootstrap.sh
           docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
             python3 /source/scripts/test-relay-launchers.py
+          docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
+            bash /source/scripts/test-release-agent-state-check.sh
       - name: Single and dual Relay Compose contracts
         env:
           RUN_ID: relay-${{ github.run_id }}-${{ github.run_attempt }}
