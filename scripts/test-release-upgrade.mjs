@@ -12,21 +12,26 @@ assert.equal(compareVersions("9007199254740993.0.0", "9007199254740992.0.0"), 1)
 assert.equal(compareVersions("00.05.0", "0.5.0"), 0);
 for (const v of ["v0.6.0", "0.6", "0.6.0-rc1", "0.6.0\n", "1;echo bad"])
   assert.throws(() => compareVersions(v, "0.5.0"));
-const tag = "v0.5.2";
-const valid = () => validateInputs("0.6.0", tag, sha, sha, sha, baselines);
-assert.equal(valid().commit, "2bbbbbbc7dd4a9b328acfaae291fdaf11a35bfd6");
-assert.equal(valid().sums_sha256, "acbb66cf0f52fe64d3c3398e3fa6dfd8098190cf14863c24a0592e8f858af0be");
+const tag = "v0.6.0";
+const valid = () => validateInputs("0.6.1", tag, sha, sha, sha, baselines);
+assert.equal(valid().commit, "cc8399641dc32083466a9c77369fcb8debf1ee48");
+assert.equal(valid().sums_sha256, "26f4ab236630ff52777dabf5723cd3d5814022d4e08ab4079768117dd4e262df");
+assert.deepEqual(valid().controller, { database: "postgres", migration: 36, authentication: "oidc" });
 assert.equal(valid().key_der_sha256, baselines["v0.5.0"].key_der_sha256);
 assert.equal(baselines["v0.5.0"].commit, "519275567a65f5785260e353ef02ab3fabf30244");
 assert.equal(baselines["v0.5.1"].commit, "4afa4756fc89fcad30a0f93edb9b079d612453a6");
 assert.equal(baselines["v0.5.1"].sums_sha256, "b1f6b1319a50cdc99cbdf30a352b88af289fc8aa90150aea8088e32bf4e38c25");
 assert.equal(valid().key_der_sha256, baselines["v0.5.1"].key_der_sha256);
+const historical = validateInputs("0.6.0", "v0.5.2", sha, sha, sha, baselines);
+assert.equal(historical.commit, "2bbbbbbc7dd4a9b328acfaae291fdaf11a35bfd6");
+assert.equal(historical.sums_sha256, "acbb66cf0f52fe64d3c3398e3fa6dfd8098190cf14863c24a0592e8f858af0be");
+assert.equal(valid().key_der_sha256, historical.key_der_sha256);
 for (const tag of ["latest", "v0.4.0", "v99.0.0"])
   assert.throws(() => validateInputs("100.0.0", tag, sha, sha, sha, baselines));
-for (const version of ["0.5.2", "0.5.1", "0.5.0", "0.4.99"])
+for (const version of ["0.6.0", "0.5.2", "0.5.1", "0.5.0", "0.4.99"])
   assert.throws(() => validateInputs(version, tag, sha, sha, sha, baselines));
 for (const values of [[sha.slice(0, 7), sha, sha], [sha, "b".repeat(40), sha], [sha, sha, "b".repeat(40)]])
-  assert.throws(() => validateInputs("0.6.0", tag, ...values, baselines));
+  assert.throws(() => validateInputs("0.6.1", tag, ...values, baselines));
 assert.deepEqual(architectures, {
   amd64: { runner: "ubuntu-24.04", runner_arch: "X64", kernel: "x86_64", rpm: "x86_64" },
   arm64: { runner: "ubuntu-24.04-arm", runner_arch: "ARM64", kernel: "aarch64", rpm: "aarch64" },
@@ -40,7 +45,7 @@ for (const asset of release.assets)
 for (const field of ["draft", "prerelease"])
   assert.throws(() => validateRelease({ ...release, [field]: true }, tag, ref, valid()));
 assert.throws(() => validateRelease(release, tag, { object: { type: "commit", sha } }, valid()));
-const frozen = { candidate_sha: sha, candidate_version: "0.6.0", baseline_tag: tag, baseline_commit: valid().commit,
+const frozen = { candidate_sha: sha, candidate_version: "0.6.1", baseline_tag: tag, baseline_commit: valid().commit,
   baseline_lock_sha256: "b".repeat(64), run_id: run, run_attempt: attempt };
 const needs = Object.fromEntries(["prepare", "agent-upgrade", "controller-upgrade"].map(j => [j, { result: "success" }]));
 const units = Object.entries(scenarios).flatMap(([component, required]) => Object.entries(architectures).map(([arch, native]) => ({

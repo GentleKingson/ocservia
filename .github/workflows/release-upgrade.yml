@@ -12,7 +12,7 @@ on:
         description: Registered published stable Release tag
         type: string
         required: true
-        default: v0.5.2
+        default: v0.6.0
       candidate_sha:
         description: Exact 40-character SHA of the selected dispatch branch
         type: string
