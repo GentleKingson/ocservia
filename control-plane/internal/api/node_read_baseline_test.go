@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
 	"github.com/google/uuid"
 )
 
@@ -105,8 +107,24 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	assertBaselineJSON(t, get("/api/v1/nodes?cursor="+ids[50].String(), ws, cookie), `{"items":[],"page":{"has_more":false}}`)
 	assertBaselineJSON(t, get(nodePath+"/sessions", ws, cookie), `{"items":[],"page":{"has_more":false}}`)
 	assertBaselineJSON(t, get(nodePath+"/ip-bans", ws, cookie), `{"items":[]}`)
+	observed := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	var sessions []telemetrywrite.Session
 	for i := 0; i < 51; i++ {
-		exec(`INSERT INTO node_sessions(node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at) VALUES($1,$2,'alice','2001:db8::10',$3,123,456,$4)`, `INSERT INTO node_sessions(node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at) VALUES(?,?,'alice','2001:db8::10',?,123,456,?)`, ids[0], fmt.Sprintf("s%02d", i), stamp, stamp)
+		sessions = append(sessions, telemetrywrite.Session{ID: fmt.Sprintf("s%02d", i), Username: "alice", ClientIP: "2001:db8::10", ConnectedAt: observed, BytesIn: 123, BytesOut: 456})
+	}
+	// Use the existing store so fixtures retain each backend's IP encoding.
+	if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := telemetrywrite.From(tx)
+		if err != nil {
+			return err
+		}
+		if err := store.ReplaceSessions(ctx, ids[0], observed, sessions); err != nil {
+			return err
+		}
+		seconds := uint64(20)
+		return store.ReplaceIPBans(ctx, ids[0], observed, []telemetrywrite.IPBan{{IP: "192.0.2.9", SecondsRemaining: &seconds}, {IP: "2001:db8::20"}})
+	}); err != nil {
+		t.Fatal(err)
 	}
 	sessionJSON := func(i int) string {
 		return fmt.Sprintf(`{"id":"s%02d","username":"alice","client_ip":"2001:db8::10","connected_at":"2000-01-01T00:00:00Z","bytes_in":123,"bytes_out":456}`, i)
@@ -120,7 +138,6 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	assertBaselineJSON(t, get(nodePath+"/sessions?cursor=s49", ws, cookie), `{"items":[`+sessionJSON(50)+`],"page":{"has_more":false}}`)
 	assertBaselineJSON(t, get(nodePath+"/sessions?cursor=zzz", ws, cookie), `{"items":[],"page":{"has_more":false}}`)
 	assertBaselineJSON(t, get(nodePath, ws, cookie), nodeJSON(ids[0], 51))
-	exec(`INSERT INTO node_ip_bans(node_id,ip,seconds_remaining,observed_at) VALUES($1,'192.0.2.9',20,$2),($3,'2001:db8::20',NULL,$4)`, `INSERT INTO node_ip_bans(node_id,ip,seconds_remaining,observed_at) VALUES(?,'192.0.2.9',20,?),(?,'2001:db8::20',NULL,?)`, ids[0], stamp, ids[0], stamp)
 	for _, query := range []string{"", "?cursor=invalid&page_size=0"} {
 		assertBaselineJSON(t, get(nodePath+"/ip-bans"+query, ws, cookie), `{"items":[{"ip":"192.0.2.9","seconds_remaining":20},{"ip":"2001:db8::20"}]}`)
 	}
