@@ -246,3 +246,16 @@ func writeCertificateError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/certificate-unavailable", "Certificate service unavailable", "certificate processing is temporarily unavailable")
 	}
 }
+
+func (s *Server) certificateAction(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasSuffix(r.PathValue("certificate_action"), ":issue"):
+		s.issueCertificate(w, r)
+	case strings.HasSuffix(r.PathValue("certificate_action"), ":revoke"):
+		s.revokeCertificate(w, r)
+	case strings.HasSuffix(r.PathValue("certificate_action"), ":p12"):
+		s.createCertificateP12(w, r)
+	default:
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the certificate action does not exist")
+	}
+}

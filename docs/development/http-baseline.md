@@ -12,7 +12,7 @@ not request tracking. Shutdown still closes admission and event hubs, shuts down
 HTTP, closes connections on deadline, and waits for inner work. Closed hubs are
 retained to prevent late watcher creation.
 
-Planned mechanical moves, without signature or visibility changes:
+Mechanical moves, without signature or visibility changes:
 
 - `server.go`: registrations to `routes.go`, method/path checks to `routing.go`,
   generic wrappers to `middleware.go`, response writers to `response.go`;
