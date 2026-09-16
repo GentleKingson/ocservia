@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"net/http"
 	"slices"
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
@@ -379,4 +381,69 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the principal is not authorized for this resource and action")
+}
+
+func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, err := s.authenticate(r)
+		if err != nil {
+			w.Header().Set("WWW-Authenticate", "OIDC")
+			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "operation state requires an authenticated principal")
+			return
+		}
+		if err := s.validateBrowserMutation(r, principal); err != nil {
+			writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
+			return
+		}
+		ctx, err := s.authorizeRoute(r, principal)
+		if err != nil {
+			s.writeAuthorizationError(w, r, err)
+			return
+		}
+		next(w, r.WithContext(ctx))
+	}
+}
+
+var errCrossOrigin = errors.New("the request Origin does not match the trusted browser origin")
+
+// validateBrowserMutation enforces the browser trust boundary for state
+// changing requests: a session cookie established through Local, OIDC or break-glass
+// may only be spent by the exact public browser origin, so a sibling origin
+// on the same site, an unknown site, or a missing Origin cannot drive a
+// mutation. Development bearer principals are non-browser credentials and
+// safe methods never mutate state, so neither requires an Origin. A
+// cross-site Fetch Metadata signal is rejected even before the Origin
+// comparison, while same-site and same-origin signals never replace it.
+func (s *Server) validateBrowserMutation(r *http.Request, principal auth.Principal) error {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		return nil
+	}
+	if principal.Issuer == "development" {
+		return nil
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return errCrossOrigin
+	}
+	if s.browserOrigin == "" {
+		return errCrossOrigin
+	}
+	origin, ok := browserorigin.Normalize(r.Header.Get("Origin"))
+	if !ok || origin != s.browserOrigin {
+		return errCrossOrigin
+	}
+	return nil
+}
+
+func (s *Server) hasOperationPrincipal(r *http.Request) bool {
+	if s.devAuth {
+		return true
+	}
+	const prefix = "Bearer "
+	authorization := r.Header.Get("Authorization")
+	if s.devAuthToken == "" || !strings.HasPrefix(authorization, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(strings.TrimPrefix(authorization, prefix))), []byte(s.devAuthToken)) == 1
 }
