@@ -46,13 +46,14 @@ func TestTelemetryHistoryErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			server := &Server{telemetry: telemetry.NewBackend(postgres.WrapPool(pool)), logger: slog.New(slog.NewTextHandler(&logs, nil))}
+			server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(&logs, nil)), 1024, time.Second, true, "", 36)
+			server.EnableTelemetry(telemetry.NewBackend(postgres.WrapPool(pool)))
+			t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			request := httptest.NewRequest(http.MethodGet, "/?"+tc.query, nil).WithContext(ctx)
-			request.SetPathValue("node_id", uuid.Must(uuid.NewV7()).String())
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/"+uuid.Must(uuid.NewV7()).String()+"/telemetry?"+tc.query, nil).WithContext(ctx)
 			response := httptest.NewRecorder()
-			server.listNodeTelemetry(response, request)
+			server.http.Handler.ServeHTTP(response, request)
 			if response.Code != tc.status || !strings.Contains(response.Body.String(), tc.detail) {
 				t.Fatalf("response = %d %s", response.Code, response.Body.String())
 			}

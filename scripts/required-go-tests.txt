@@ -50,6 +50,8 @@ regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/t
 regression-auth internal/api TestAuthenticationBackendHTTPIntegration
 regression-auth internal/api TestControllerReadsBackendHTTPIntegration
 regression-auth internal/api TestNodeReadsBackendHTTPBaseline
+regression-auth internal/api TestNodeReadsBackendHTTPBaseline/explicit-action-input
+regression-auth internal/api TestNodeReadsBackendHTTPBaseline/configured-service
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration/capacity
 regression-auth internal/api TestAuthenticationBackendSafetyIntegration/absent-singleton-lock
@@ -170,6 +172,14 @@ unit internal/auth TestPasswordWriteEntrypointsRejectBeforeDatabase
 unit internal/auth TestLocalAccountLogReference
 unit internal/api TestDecodeStrictJSONUTF8
 unit internal/api TestHTTPRouteInventory
+unit internal/api TestNodeHTTPBoundary
+unit internal/api TestNodeHTTPContextLifetime
+unit internal/api/nodehttp TestNodeReads
+unit internal/api/nodehttp TestNodeReadParsing
+unit internal/api/nodehttp TestNodeReadErrors
+unit internal/api/nodehttp TestNodeReadUnavailable
+unit internal/api/nodehttp TestNodeReadContext
+unit internal/api/nodehttp TestNodeRoutesRequireGuard
 unit internal/api TestHTTPPathBaseline
 unit internal/api TestHTTPStrictJSONBaseline
 unit internal/api TestHTTPConfigPlanValidationBaseline

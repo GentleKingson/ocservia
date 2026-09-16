@@ -24,7 +24,8 @@ import (
 
 const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
 
-// Frozen at de26ea4: pattern | handler/wrapper | method rule | permission.
+// Behavior frozen at de26ea4: pattern | handler/wrapper | method rule | permission.
+// PR-03 changes only the five nodehttp handler/wrapper expressions.
 // "self" identifies endpoint validation, not requireOperationAuth. This is a
 // test inventory, never an input to production routing or authorization.
 const routeBaseline = `GET /livez|s.live|GET|public
@@ -63,11 +64,11 @@ POST /api/v1/nodes/{node_id}/revocation|s.requireOperationAuth(s.revokeNode)|POS
 POST /api/v1/nodes/{node_id}/privd-attestation-credentials|s.requireOperationAuth(s.createPrivdAttestationCredential)|POST|privd.attestation.manage
 POST /api/v1/nodes/{node_id}/privd-attestation-keys:register|s.registerPrivdAttestationKey|POST|self
 POST /api/v1/nodes/{node_id}/privd-attestation-keys:revoke|s.requireOperationAuth(s.revokePrivdAttestationKey)|POST|privd.attestation.manage
-GET /api/v1/nodes|s.requireOperationAuth(s.listNodes)|GET|node.read
-GET /api/v1/nodes/{node_id}|s.requireOperationAuth(s.getNode)|GET|node.read
-GET /api/v1/nodes/{node_id}/sessions|s.requireOperationAuth(s.listNodeSessions)|GET|node.read
-GET /api/v1/nodes/{node_id}/ip-bans|s.requireOperationAuth(s.listNodeIPBans)|GET|node.read
-GET /api/v1/nodes/{node_id}/telemetry|s.requireOperationAuth(s.listNodeTelemetry)|GET|node.read
+GET /api/v1/nodes|guard("node.read", h.listNodes)|GET|node.read
+GET /api/v1/nodes/{node_id}|guard("node.read", h.getNode)|GET|node.read
+GET /api/v1/nodes/{node_id}/sessions|guard("node.read", h.listNodeSessions)|GET|node.read
+GET /api/v1/nodes/{node_id}/ip-bans|guard("node.read", h.listNodeIPBans)|GET|node.read
+GET /api/v1/nodes/{node_id}/telemetry|guard("node.read", h.listNodeTelemetry)|GET|node.read
 GET /api/v1/nodes/{node_id}/user-group-state|s.requireOperationAuth(s.listUserGroupState)|GET|node.read
 POST /api/v1/nodes/{node_id}/users|s.requireOperationAuth(s.createUser)|POST|user.manage
 POST /api/v1/nodes/{node_id}/users/{user_action}|s.requireOperationAuth(s.userAction)|POST|user.manage
@@ -136,10 +137,16 @@ func TestHTTPRouteInventory(t *testing.T) {
 	// Check only literal HandleFunc registrations, including wrapper arguments.
 	// No production metadata or second runtime permission map is introduced.
 	registered := map[string]string{}
+	explicitActions := map[string]string{}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	moduleFiles, err := filepath.Glob("nodehttp/*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, moduleFiles...)
 	fset := token.NewFileSet()
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -174,6 +181,20 @@ func TestHTTPRouteInventory(t *testing.T) {
 				t.Fatalf("duplicate %s", pattern)
 			}
 			registered[pattern] = handler.String()
+			if filepath.Dir(name) == "nodehttp" {
+				guard, ok := call.Args[1].(*ast.CallExpr)
+				if !ok || len(guard.Args) != 2 {
+					t.Fatal("node route must declare its guard action")
+				}
+				action, ok := guard.Args[0].(*ast.BasicLit)
+				if !ok {
+					t.Fatal("node permission is no longer literal")
+				}
+				explicitActions[pattern], err = strconv.Unquote(action.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			return true
 		})
 	}
@@ -214,12 +235,16 @@ func TestHTTPRouteInventory(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			s.http.Handler.ServeHTTP(w, r)
-			if strings.Contains(handler, "requireOperationAuth") {
+			if strings.Contains(handler, "requireOperationAuth") || strings.HasPrefix(handler, "guard(") {
 				assertBaselineProblem(t, w, path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
 				if w.Header().Get("WWW-Authenticate") != "OIDC" {
 					t.Fatal("missing challenge")
 				}
-				if permission != "session" && permission != "local-session" && routeAction(r) != permission {
+				if action, explicit := explicitActions[pattern]; explicit {
+					if action != permission {
+						t.Fatalf("explicit action = %q, want %q", action, permission)
+					}
+				} else if permission != "session" && permission != "local-session" && routeAction(r) != permission {
 					t.Fatalf("action = %q, want %q", routeAction(r), permission)
 				}
 			} else {
