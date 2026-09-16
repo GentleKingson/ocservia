@@ -539,8 +539,13 @@ func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler Eve
 	defer streamCancel()
 	events := make(chan *transportv1.TransportEvent, c.queueCapacity)
 	consumerErr := make(chan error, 1)
+	consumerDone := make(chan struct{})
 	go func() {
+		defer close(consumerDone)
 		for event := range events {
+			if watchCtx.Err() != nil {
+				return
+			}
 			eventCtx, eventCancel := context.WithTimeout(watchCtx, c.deadline)
 			err := handler.Ingest(eventCtx, event)
 			eventCancel()
@@ -552,7 +557,11 @@ func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler Eve
 		}
 		consumerErr <- nil
 	}()
-	defer close(events)
+	defer func() {
+		watchCancel()
+		close(events)
+		<-consumerDone
+	}()
 	for {
 		event, err := stream.Recv()
 		if err != nil {

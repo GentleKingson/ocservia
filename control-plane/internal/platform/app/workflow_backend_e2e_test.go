@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -200,7 +201,39 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	if verified["valid"] != true || verified["checkpoint_valid"] != true {
 		t.Fatal("real workflow audit chain/checkpoint verification failed")
 	}
+	// Keep real Agent and transport alive while the Controller drains its
+	// owner/Trust/worker loops. Cleanup's forced-kill fallback is not evidence.
+	for _, process := range f.processes {
+		if !strings.HasPrefix(process.name, "controller-") {
+			continue
+		}
+		if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, process := range f.processes {
+		if !strings.HasPrefix(process.name, "controller-") {
+			continue
+		}
+		select {
+		case <-process.done:
+			if process.err != nil {
+				t.Fatalf("%s SIGTERM: %v", process.name, process.err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s did not drain", process.name)
+		}
+	}
+	if _, err := os.Stat(f.root + "/controller/trust.sock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Trust socket survived Controller exit", err)
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal("HTTP port survived Controller exit", err)
+	}
+	listener.Close()
 	t.Log("real CLI, independent local identities, two dedicated TLS relays, enrollment, root attestation, fenced certificate lifecycle and one-use artifact passed")
+	t.Log("all Controller roles drained after SIGTERM with real Agent/transport still running; Trust socket and HTTP port released")
 }
 
 type controllerE2E struct {

@@ -23,18 +23,29 @@ func NewWorker(service *Service, transport *transportclient.Client, logger *slog
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	return runWorker(ctx, func(ctx context.Context) error {
+		return w.transport.RunWatch(ctx, w.service, w.service)
+	}, w.dispatch)
+}
+
+func runWorker(ctx context.Context, watch, dispatch func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	errCh := make(chan error, 2)
-	go func() { errCh <- w.transport.RunWatch(ctx, w.service, w.service) }()
-	go func() { errCh <- w.dispatch(ctx) }()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
+	go func() { errCh <- watch(ctx) }()
+	go func() { errCh <- dispatch(ctx) }()
+	var failures []error
+	for range 2 {
+		err := <-errCh
+		cancel()
 		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
+			failures = append(failures, err)
 		}
-		return ctx.Err()
 	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (w *Worker) dispatch(ctx context.Context) error {

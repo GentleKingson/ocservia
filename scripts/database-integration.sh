@@ -285,6 +285,14 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   grep -Fq 'schema compatibility does not allow Controller schema 33' \
     "${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log"
 
+  # CLI bootstrap and role lifecycle fixtures must not alter the shared
+  # database used by the authentication and migration acceptance below.
+  clone_database "${container}" ocservia ocservia_startup
+  OCSERV_TEST_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia_startup?sslmode=disable" \
+    OCSERV_TEST_OWNER_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia_startup?sslmode=disable" \
+    checked_go_tests backend-controller-startup --select -race -p 1 -parallel 1
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'DROP DATABASE ocservia_startup' >/dev/null
+
   if [[ "${scope}" == regression ]]; then
     OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-migrate-repeat.log" 2>&1
