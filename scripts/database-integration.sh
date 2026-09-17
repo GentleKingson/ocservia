@@ -690,8 +690,11 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     checked_go_tests backend-auth -p 1 -parallel 1 ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$'
   assert_auth_fixture_cleanup "${container}" ocservia_auth_backend
   docker exec "${container}" dropdb -U ocservia_owner ocservia_auth_backend
-  OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
+  clone_database "${container}" ocservia_latest ocservia_policy_api
+  OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_policy_api}" \
+    OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_policy_api}" \
     checked_go_tests backend-policy-api --select -race -p 1 -parallel 1
+  docker exec "${container}" dropdb -U ocservia_owner ocservia_policy_api
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     checked_go_tests database-auth -p 1 -parallel 1 ./internal/rbac ./internal/auth -run Integration
   assert_auth_fixture_cleanup "${container}" ocservia_latest

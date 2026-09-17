@@ -148,6 +148,10 @@ grep -Fq 'go test -p 1 ./internal/telemetry -run Integration -count=1)' \
   "${ROOT}/scripts/database-integration.sh"
 grep -Fq 'checked_go_tests backend-policy-api --select -race -p 1 -parallel 1' \
   "${ROOT}/scripts/database-integration.sh"
+grep -Fq 'clone_database "${container}" ocservia_latest ocservia_policy_api' \
+  "${ROOT}/scripts/database-integration.sh"
+grep -Fq 'dropdb -U ocservia_owner ocservia_policy_api' \
+  "${ROOT}/scripts/database-integration.sh"
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.
 mkdir "${tmp}/selection"
