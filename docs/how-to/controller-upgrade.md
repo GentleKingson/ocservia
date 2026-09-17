@@ -30,6 +30,33 @@ deploy/production/controller.sh upgrade \
 Use the manifest matching the Docker daemon architecture. Do not supply a
 caller-selected image tag or replace the lifecycle with direct Compose.
 
+## Policy cleanup authorization
+
+The F-2 fix grants the configured runtime account `DELETE` on
+`user_policy_enforcements` only. PostgreSQL uses the configured role;
+MySQL/MariaDB use its explicit `user@host`. This grants table-level deletion;
+the Store's conditional DELETE, not the database grant, limits which unfinished
+records the policy workflow removes. Other tables and DDL privileges are unchanged.
+
+Replacing only the binary does not repair an existing account. Use the guarded
+`controller.sh upgrade` command above with the signed target release. Its target
+Compose descriptor runs the existing one-shot `migrate` service with
+`--migrate-only`, mounted owner credentials, and `OCSERV_RUNTIME_DATABASE_ROLE`
+before the Controller starts. That path reapplies runtime grants even with no
+new schema migration and is repeatable. Keep the selected authentication mode,
+session and audit secrets (including the audit event key ID/file), database TLS
+CA and backend/role settings intact; the production descriptors supply these
+to the migration service. Do not replace the runtime database secret with an
+owner secret or bypass signature, source, or compatibility checks.
+
+Confirm the migration service completed successfully and subsequent maintenance
+completes without `user_operations.cleanup_failed`. That error means cleanup
+failed and the remaining maintenance steps were skipped; the process stays alive
+and retries at the normal tick, not in a fast loop. Persistent failures require
+repairing the authorization or underlying database fault. Long-running
+Controllers retain runtime credentials only and never execute GRANT themselves.
+This upgrade does not promise a full-table cleanup of historical policy records.
+
 ## Verify
 
 Wait for the command and release smoke check to succeed. Then check the public

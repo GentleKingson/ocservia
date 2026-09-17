@@ -41,8 +41,21 @@ HTTP `routeMethod` omission unchanged. The subsequent F-1 functional fix restore
 that route and adds four-backend HTTP acceptance in `regression-auth` alongside,
 not instead of, these service tests. Contracts and generated clients are unchanged.
 
-The baseline runtime grants omit `DELETE` on `user_policy_enforcements` on all
-backends, while the existing conflict branches ignore cleanup errors. This PR
-does not change that authorization policy or error handling. Policy error tests
-use the fixture's existing owner connection to verify successful cleanup; normal
-mutation, replay, batch and fencing workflows still use the restricted runtime.
+At the PR-04 baseline, runtime grants omitted `DELETE` on
+`user_policy_enforcements` on all backends and four cleanup branches ignored
+errors. The F-2 functional fix adds only that table's DELETE grant through the
+existing production authorization entry points. This is a table-level database
+permission, not row-level authorization: the existing Store predicates still
+bind node, user, policy version, cause, period, unfinished operation and, where
+required, source user version. Policy error tests now use restricted runtime
+connections; owner credentials are confined to fixture setup and fault injection.
+
+Cleanup failures preserve their cause as `EnforcementCleanupError`. They end the
+current maintenance pass without running later steps or recording completion.
+The Scheduler logs the failure and waits for its existing next tick; persistent
+failure keeps those later steps blocked until permissions or storage recover.
+Leadership loss, parent cancellation, ordinary fatal errors and rollout handling
+retain their existing classification. No new retry timer or background service
+is introduced. Existing installations need the owner `--migrate-only`
+reauthorization path even when the schema is already current; see
+[Controller upgrade](../how-to/controller-upgrade.md).
