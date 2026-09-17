@@ -9,7 +9,7 @@ control-plane/internal/api/auth_logging_test.go	test-fixture	Explicit fixture dr
 control-plane/internal/api/authorization.go	common-boundary	No driver/raw SQL; internal dependencies: auth, database, rbac
 control-plane/internal/api/authorization_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
 control-plane/internal/api/certificates.go	common-boundary	No driver/raw SQL; internal dependencies: certificates, database, operations
-control-plane/internal/api/configplans.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, configplan, database, operations, rbac
+control-plane/internal/api/configplanhttp/handler.go	common-boundary	R2-02 moves api/configplans.go; domain values/errors only, no driver/raw SQL or concrete Service; Secret authorization remains in api
 control-plane/internal/api/enrollment.go	common-boundary	No driver/raw SQL; internal dependencies: approvals, enrollment, ownersession
 control-plane/internal/api/event_streams.go	common-boundary	No driver/raw SQL; internal dependencies: auth, eventstream, localslice
 control-plane/internal/api/local_account_limits_integration_test.go	test-fixture	Explicit fixture driver/SQL; canonical Backend calls compile; not runtime wiring
