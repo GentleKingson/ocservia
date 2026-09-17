@@ -697,7 +697,9 @@ func TestBatchRouteAllowsNodeScopedPerItemAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set("X-Workspace-ID", workspaceID.String())
-	authorized, err := server.authorizeRoute(request, auth.Principal{IdentityID: identityID, Issuer: "integration"})
+	// This low-level test covers workspace selection and per-node resources;
+	// the registered HTTP guard is covered by the multi-backend route regression.
+	authorized, err := server.authorizeRouteAction(request, auth.Principal{IdentityID: identityID, Issuer: "integration"}, "user.manage")
 	if err != nil {
 		t.Fatalf("node-scoped batch route: %v", err)
 	}
