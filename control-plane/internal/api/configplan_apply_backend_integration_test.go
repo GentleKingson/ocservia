@@ -468,6 +468,35 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			}
 			g.unchanged(plan, after, approval)
 		})
+		t.Run("node-version-drift-replay", func(t *testing.T) {
+			g := f
+			g.t = t
+			var originalVersion, committedVersion int64
+			if err := g.row(`SELECT n.version,c.expected_version FROM commands c JOIN nodes n ON n.id=c.node_id WHERE c.operation_id=$1`, `SELECT n.version,c.expected_version FROM commands c JOIN nodes n ON n.id=c.node_id WHERE c.operation_id=?`, uuid.MustParse(op.ID)).Scan(&originalVersion, &committedVersion); err != nil || originalVersion != committedVersion {
+				t.Fatalf("initial node/command versions: %d/%d %v", originalVersion, committedVersion, err)
+			}
+			event := uuid.Must(uuid.NewV7())
+			endpoint := sha256.Sum256(plan.NodeID[:])
+			if err := localslice.NewBackend(g.b, g.signer).Ingest(t.Context(), &transportv1.TransportEvent{
+				EventId: event[:], NodeId: plan.NodeID[:], EndpointId: endpoint[:],
+				Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED,
+				OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("connection closed"),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var version, expectedVersion int64
+			var status string
+			if err := g.row(`SELECT n.version,n.status,c.expected_version FROM commands c JOIN nodes n ON n.id=c.node_id WHERE c.operation_id=$1`, `SELECT n.version,n.status,c.expected_version FROM commands c JOIN nodes n ON n.id=c.node_id WHERE c.operation_id=?`, uuid.MustParse(op.ID)).Scan(&version, &status, &expectedVersion); err != nil || version != originalVersion+1 || status != "offline" || expectedVersion != committedVersion {
+				t.Fatalf("transport node/command versions: %d/%s/%d %v", version, status, expectedVersion, err)
+			}
+			t.Logf("transport changed node version %d -> %d; committed expected_version remains %d", originalVersion, version, expectedVersion)
+			w := g.call("POST", path, body, key, g.requester.cookie, nil)
+			var replay operations.Operation
+			if w.Code != 202 || w.Header().Get("Idempotency-Replayed") != "true" || w.Header().Get("Location") != "/api/v1/operations/"+op.ID || json.Unmarshal(w.Body.Bytes(), &replay) != nil || replay.ID != op.ID {
+				t.Fatalf("node version drift replay: %d %v %s", w.Code, w.Header(), w.Body)
+			}
+			g.unchanged(plan, after, approval)
+		})
 		assertApplyHTTPProblem(t, f.call("POST", path, strings.Replace(body, "apply reviewed configuration", "different intent", 1), key, f.requester.cookie, nil), 409, "idempotency-conflict")
 		f.bind(f.reader, plan.NodeID, "ConfigManager")
 		assertApplyHTTPProblem(t, f.call("POST", path, body, key, f.reader.cookie, nil), 409, "idempotency-conflict")

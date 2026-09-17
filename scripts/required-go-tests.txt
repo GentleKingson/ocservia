@@ -9,6 +9,7 @@ backend-policy-api internal/api TestControllerReadsBackendHTTPIntegration
 backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration
 backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/atomic-rollback
 backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/immediate-replay
+backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/node-version-drift-replay
 backend-policy-config internal/configplan TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration
 backend-policy-config internal/configplan TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration/apply-rollback
 backend-policy-certificates internal/certificates TestCertificateIssueArtifactAndRevokeIntegration
@@ -65,6 +66,7 @@ regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/plan-and-
 regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay
 regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/atomic-rollback
 regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/immediate-replay
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/node-version-drift-replay
 regression-auth internal/api TestControllerReadsBackendHTTPIntegration
 regression-auth internal/api TestNodeReadsBackendHTTPBaseline
 regression-auth internal/api TestNodeReadsBackendHTTPBaseline/explicit-action-input
