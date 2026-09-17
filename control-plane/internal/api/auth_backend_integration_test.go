@@ -20,8 +20,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,6 +33,12 @@ func authenticationBackend(t *testing.T) database.Backend {
 }
 
 func authenticationBackendFixture(t *testing.T) (database.Backend, database.Backend) {
+	return authenticationBackendFixtureWithIsolation(t, false)
+}
+
+// Scheduler HTTP regressions need a private database, not just a workspace:
+// the existing scheduler intentionally scans pending batches across workspaces.
+func authenticationBackendFixtureWithIsolation(t *testing.T, isolated bool) (database.Backend, database.Backend) {
 	t.Helper()
 	ctx := context.Background()
 	if dsn := os.Getenv("PR02_DSN"); dsn != "" {
@@ -84,6 +92,49 @@ func authenticationBackendFixture(t *testing.T) (database.Backend, database.Back
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("real PostgreSQL or PR02 database required")
+	}
+	if isolated {
+		ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+		if ownerURL == "" {
+			t.Fatal("owner URL required for isolated database")
+		}
+		admin, err := pgxpool.New(ctx, ownerURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(admin.Close)
+		name := "r203_http_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		identifier := pgx.Identifier{name}.Sanitize()
+		if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if _, err := admin.Exec(context.Background(), "DROP DATABASE "+identifier); err != nil {
+				t.Error(err)
+			}
+		})
+		open := func(url string) *pgxpool.Pool {
+			t.Helper()
+			cfg, err := pgxpool.ParseConfig(url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.ConnConfig.Database = name
+			pool, err := pgxpool.NewWithConfig(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(pool.Close)
+			return pool
+		}
+		owner, runtime := open(ownerURL), open(dsn)
+		if err := migrations.Migrate(ctx, owner); err != nil {
+			t.Fatal(err)
+		}
+		if err := migrations.GrantRuntimePrivileges(ctx, owner, runtime.Config().ConnConfig.User); err != nil {
+			t.Fatal(err)
+		}
+		return postgres.WrapPool(runtime), postgres.WrapPool(owner)
 	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

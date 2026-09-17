@@ -50,6 +50,11 @@ type applyHTTPFixture struct {
 func newApplyHTTPFixture(t *testing.T) applyHTTPFixture {
 	t.Helper()
 	b, owner := authenticationBackendFixture(t)
+	return newApplyHTTPFixtureWithBackend(t, b, owner)
+}
+
+func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) applyHTTPFixture {
+	t.Helper()
 	if owner == nil {
 		t.Fatal("owner connection required for isolated Apply fixtures")
 	}
