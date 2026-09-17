@@ -126,6 +126,14 @@ also uses HTTP, including self-approval rejection. The tests cover input and
 resource denials, exact conflict Problems, persisted Operation/Plan/approval/
 command/Outbox/audit associations, replay, and rollback after approval consumption.
 
+The HTTP regression also exposed an immediate-replay defect: the first Apply
+advances the desired revision, so recomputing the next revision changed the
+otherwise identical intent hash. `ApplyInput` now reuses the committed revision
+only for the same Plan and workspace-scoped idempotency key. New keys retain
+the existing allocation path. ConfigPlan prechecks, Operations' complete intent
+comparison, transactional revision checks and approval consumption remain in
+their original layers; neither the global hash format nor Schema changes.
+
 A 202 means an asynchronous operation intent was committed, not that a real
 Rust Agent applied configuration. F-2, broader architecture work and release
 readiness are not covered by this fix.

@@ -45,8 +45,8 @@ func (s configurationStore) Get(ctx context.Context, id uuid.UUID) (v configurat
 	return
 }
 
-func (s configurationStore) ApplyInput(ctx context.Context, id uuid.UUID) (v configurationstore.ApplyInput, err error) {
-	err = s.QueryRow(ctx, `SELECT n.version,COALESCE(state.desired_revision,0),c.envelope FROM nodes n JOIN config_plans p ON p.node_id=n.id JOIN commands c ON c.operation_id=p.operation_id LEFT JOIN node_config_state state ON state.node_id=n.id WHERE p.id=$1`, id).Scan(&v.NodeVersion, &v.DesiredRevision, &v.Envelope)
+func (s configurationStore) ApplyInput(ctx context.Context, id uuid.UUID, key string) (v configurationstore.ApplyInput, err error) {
+	err = s.QueryRow(ctx, `SELECT n.version,COALESCE((SELECT a.desired_revision-1 FROM config_apply_operations a JOIN operations o ON o.id=a.operation_id WHERE a.plan_id=p.id AND o.workspace_id=p.workspace_id AND o.idempotency_key=$2),state.desired_revision,0),c.envelope FROM nodes n JOIN config_plans p ON p.node_id=n.id JOIN commands c ON c.operation_id=p.operation_id LEFT JOIN node_config_state state ON state.node_id=n.id WHERE p.id=$1`, id, key).Scan(&v.NodeVersion, &v.DesiredRevision, &v.Envelope)
 	return
 }
 
