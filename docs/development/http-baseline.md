@@ -25,11 +25,12 @@ Mechanical moves, without signature or visibility changes:
   write the identical missing-key Problem. UUID checks still precede it, JSON
   decoding follows it, and their different success Locations remain unchanged.
 
-Baseline observations (not fixed here):
+Historical PR-02 observations:
 
-- ConfigPlan apply is registered, but `routeMethod` rejects its path with 404
-  before authentication for every method. The inventory locks this behavior;
-  supplemental direct-handler tests cover its idempotency/body error priority.
+- ConfigPlan apply was registered, but `routeMethod` rejected its path with 404
+  before authentication for every method. PR-02 froze that defect as
+  `unreachable`; the F-1 functional fix below supersedes only this expectation.
+  Supplemental direct-handler tests still cover idempotency/body error priority.
 - HEAD is rejected even on GET routes. Unknown paths return Problem 404;
   a trailing slash on a parameter path can instead reach ServeMux's plain-text
   404. With the pinned Go 1.26.6 toolchain, a doubled leading slash on the node
@@ -97,6 +98,34 @@ explicit actions and configuration. Full-chain cancellation tests ensure node
 reads keep the original deadline/cancellation and remain part of Shutdown
 draining. Small AST/type checks protect these package boundaries.
 
-Other handlers, centralized resource resolution, `routeMethod`, and the
-ConfigPlan apply omission remain unchanged. This is not full API modularization
-or the PR-04 service-interface work.
+PR-03 left other handlers, centralized resource resolution, `routeMethod`, and
+the historical ConfigPlan apply omission unchanged. This was not full API
+modularization or the PR-04 service-interface work.
+
+## ConfigPlan Apply reachability (F-1)
+
+The existing `POST /api/v1/config-plans/{plan_id}/apply` registration now passes
+the segmented method check. Only the exact five-part shape with a nonempty ID
+and `apply` action is recognized; UUID validation remains downstream. The root
+ServeMux, `requireOperationAuth`, `config.apply`, request format and 72-route
+inventory are unchanged. The obsolete `unreachable` exception is removed.
+
+`TestConfigPlanApplyHTTPRoute` first reproduced the old 404, then verifies the
+unauthenticated POST's 401/challenge and other methods' Problem 405/Allow.
+Path tests preserve current trailing-slash, doubled-slash and escaped-segment
+behavior rather than normalizing the entire router. Connection tests disable
+redirect following and assert that malformed paths create no Apply intent.
+
+`TestConfigPlanApplyBackendHTTPIntegration` is selected and required by
+`regression-auth` on PostgreSQL 17/18, MySQL and MariaDB. It uses real Local
+login cookies, trusted Origin, node-scoped roles, and restricted runtime
+connections for all services. Owner access is limited to fixture setup and
+isolated fault/state injection. Plans are created via HTTP and validated through
+`localslice.Ingest` with controlled signed result fixtures. Independent approval
+also uses HTTP, including self-approval rejection. The tests cover input and
+resource denials, exact conflict Problems, persisted Operation/Plan/approval/
+command/Outbox/audit associations, replay, and rollback after approval consumption.
+
+A 202 means an asynchronous operation intent was committed, not that a real
+Rust Agent applied configuration. F-2, broader architecture work and release
+readiness are not covered by this fix.

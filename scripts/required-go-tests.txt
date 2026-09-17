@@ -6,6 +6,9 @@ backend-policy-useroperations internal/useroperations TestUserOperationsBackendI
 backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration/reset-port-errors
 backend-policy-useroperations internal/useroperations TestUserOperationsBackendIntegration/batch-port-errors
 backend-policy-api internal/api TestControllerReadsBackendHTTPIntegration
+backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration
+backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/atomic-rollback
+backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/immediate-replay
 backend-policy-config internal/configplan TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration
 backend-policy-config internal/configplan TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration/apply-rollback
 backend-policy-certificates internal/certificates TestCertificateIssueArtifactAndRevokeIntegration
@@ -54,6 +57,14 @@ regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/tenant/
 regression-auth internal/api TestAuthenticationBackendHTTPIntegration
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/noncanonical-paths
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/authorization-and-input
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/resource-boundaries
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/plan-and-approval-rejections
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/atomic-rollback
+regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/rollback-submit-replay/immediate-replay
 regression-auth internal/api TestControllerReadsBackendHTTPIntegration
 regression-auth internal/api TestNodeReadsBackendHTTPBaseline
 regression-auth internal/api TestNodeReadsBackendHTTPBaseline/explicit-action-input
@@ -185,6 +196,8 @@ unit internal/auth TestPasswordWriteEntrypointsRejectBeforeDatabase
 unit internal/auth TestLocalAccountLogReference
 unit internal/api TestDecodeStrictJSONUTF8
 unit internal/api TestHTTPRouteInventory
+unit internal/api TestConfigPlanApplyHTTPRoute
+unit internal/api TestConfigPlanApplyHTTPPathBoundaries
 unit internal/api TestNodeHTTPBoundary
 unit internal/api TestNodeHTTPContextLifetime
 unit internal/api/nodehttp TestNodeReads
