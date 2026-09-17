@@ -239,4 +239,77 @@ injection, Secret denials and a valid signed Plan submission/replay on all four
 backends using the existing restricted-runtime Local-login fixture. The older
 PostgreSQL response/approval tests remain PostgreSQL-only evidence. R2-01 and
 F-1/F-2 regressions remain selected. No Agent execution or release readiness is
-implied, and user-policy/batch HTTP extraction remains R2-03 work.
+implied. The following R2-03 section covers user-policy/batch extraction.
+
+## R2-03: User Policy and Batch HTTP
+
+`api/useroperationshttp` owns these five implementations, their private HTTP
+request types and their original Problem mappings. They register directly on
+the same root ServeMux with a required, explicit Guard:
+
+| Method and path | Action |
+| --- | --- |
+| GET `/api/v1/nodes/{node_id}/users/{username}/policy` | `node.read` |
+| PUT `/api/v1/nodes/{node_id}/users/{username}/policy` | `user.manage` |
+| POST `/api/v1/user-batches` | `user.manage` |
+| GET `/api/v1/user-batches/{batch_id}` | `operation.read` |
+| GET `/api/v1/user-operations/metrics` | `operation.read` |
+
+The inventory now also scans `useroperationshttp`, retaining 72 registrations
+and 13 explicit actions. No route inference, method handling, authentication,
+Origin, workspace selection, SSE or shared lifecycle behavior changes.
+
+The consuming module defines two interfaces: `Operations` has only GetPolicy,
+SetPolicy, CreateBatch, GetBatch and Metrics; `Authorizer` has only Node and
+Authorize. It shares domain values/errors, `auth.Principal` and `rbac.Resource`,
+not concrete services, stores, a parent Server or sibling HTTP modules.
+`NewBackend` constructs the stable Handler before route registration.
+`EnableUserOperations` and `EnableAuthorization` inject the same configured
+business/RBAC instances at startup and explicitly convert typed nil. The parent
+stores only the module object, not the full UserOperations Service. The app
+continues using its original service for scheduling. No parent lookup is needed:
+approval HTTP still uses the domain batch types, validation and hash functions.
+
+`useroperations_access.go` obtains Principal and workspace from the authorized
+context, plus the original actor, request ID and traceparent. `X-Approval-ID`
+remains a client reference parsed by `approvalID()`: missing, malformed and
+non-v7 values become nil. It is not a trusted approval decision or a new JSON
+field. Binding, saved item order/versions, independent approval and consumption
+remain within the existing domain transaction.
+
+Policy writes retain key-before-JSON validation, RFC3339 parsing with a trailing
+Z, domain validation of fractional seconds, body `expected_version`, trimmed
+reason, 200, revision ETag and replay headers. Replay still reads current policy
+state. Batch creation retains 202 and Location. A missing or foreign node rejects
+the entire batch; an unauthorized same-workspace item persists as forbidden,
+while an authorized missing user persists as failed/not_found. Client-supplied
+`authorized` is rejected by strict JSON; items are not sorted or deduplicated.
+Development per-item bypass depends on the Principal issuer, not Server devAuth.
+
+Batch reads keep their special lookup/workspace 404 before the additional read
+check. Creators skip only that additional workspace-wide check, never the outer
+session/permission guard. Other readers need workspace `operation.read`; node
+managers do not gain workspace metrics. Missing module capabilities fail closed
+after the public guard. A standalone noncreator read without an Authorizer now
+returns service-unavailable rather than dereferencing nil; configured requests
+retain the original authorization error mapping.
+
+Handwritten module tests exercise real ServeMux dispatch, request values,
+context identity, validation order, response headers and missing capabilities.
+The full-chain lifecycle tests cover cancellation, deadlines and Shutdown for
+all five methods. The shared multi-backend Local-login fixture optionally creates
+a private PostgreSQL database for scheduler tests; MySQL/MariaDB already do so.
+Normal HTTP and scheduling calls use runtime, not owner. A scoped audit constraint
+forces failure after approval consumption and batch/item insertion, proving
+transaction rollback before the same HTTP request succeeds.
+
+New approval/rollback, policy, per-item and assembly tests are required in both
+`regression-auth` and Full's `backend-policy-api`; PostgreSQL Full now executes
+that existing policy HTTP group as well as MySQL/MariaDB. R2-01/R2-02 tests and
+F-1/F-2 coverage remain intact. HTTP assertions prove saved intent only. A
+separate original Service RunOnce path verifies signed child Command, Outbox,
+idempotency and actor/session/request/audit linkage, not real Agent execution.
+
+The three second-round HTTP modules do not make all APIs modular or create a
+runtime security boundary. Central resource authorization, other concrete Server
+services, shared domain types and existing transactions intentionally remain.
