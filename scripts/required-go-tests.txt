@@ -238,6 +238,12 @@ unit internal/auth TestPasswordWriteEntrypointsRejectBeforeDatabase
 unit internal/auth TestLocalAccountLogReference
 unit internal/api TestDecodeStrictJSONUTF8
 unit internal/api TestHTTPRouteInventory
+unit internal/api TestModuleMethodCompatibility
+unit internal/api TestModuleMethodRegistration
+unit internal/api TestModuleMethodRegistrationFailure
+unit internal/api TestModuleMethodPrecedence
+unit internal/api TestModuleMethodIsolationAndOrder
+unit internal/api TestModuleMethodRejectedWrites
 unit internal/api TestHTTPConstruction
 unit internal/api TestHTTPConstructionTypedNil
 unit internal/api TestHTTPConstructionRejectsInvalidSSE

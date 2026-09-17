@@ -17,7 +17,7 @@ func TestNodeHTTPBoundary(t *testing.T) {
 	const internal = "github.com/GentleKingson/ocservia/control-plane/internal/"
 	// Allow shared values and errors, not the stores/providers living beside them.
 	allowed := map[string]map[string]bool{
-		internal + "api/httpx":      {"WriteJSON": true, "WriteProblem": true, "PageSize": true, "ParseOptionalUUIDv7": true},
+		internal + "api/httpx":      {"Registrar": true, "WriteJSON": true, "WriteProblem": true, "PageSize": true, "ParseOptionalUUIDv7": true},
 		internal + "database":       {"ErrNotFound": true},
 		internal + "database/value": {"Timestamp": true, "ParseTimestamp": true},
 		internal + "telemetry":      {"Node": true, "IPBan": true, "HistoryPoint": true, "ErrInvalidMetric": true, "ErrInvalidResolution": true},

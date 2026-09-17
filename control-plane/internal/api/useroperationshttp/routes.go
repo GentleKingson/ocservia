@@ -1,10 +1,14 @@
 package useroperationshttp
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
+)
 
 type Guard func(string, http.HandlerFunc) http.HandlerFunc
 
-func (h *Handler) Register(mux *http.ServeMux, guard Guard) {
+func (h *Handler) Register(mux httpx.Registrar, guard Guard) {
 	if guard == nil {
 		panic("useroperationshttp: authorization guard is required")
 	}

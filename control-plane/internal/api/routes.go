@@ -1,18 +1,24 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
 
-func (s *Server) registerRoutes(mux *http.ServeMux) {
+	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
+)
+
+func (s *Server) registerRoutes(mux *http.ServeMux) []moduleMethodRule {
+	modules := &moduleRegistrar{mux: mux}
 	s.registerHealthRoutes(mux)
 	s.registerAuthRoutes(mux)
 	s.registerDevelopmentRoutes(mux)
 	s.registerOperationsRoutes(mux)
 	s.registerEnrollmentRoutes(mux)
-	s.registerNodeRoutes(mux)
-	s.registerUserRoutes(mux)
-	s.registerConfigPlanRoutes(mux)
+	s.registerNodeRoutes(modules)
+	s.registerUserRoutes(mux, modules)
+	s.registerConfigPlanRoutes(modules)
 	s.registerCertificateRoutes(mux)
 	s.registerAuthorizationRoutes(mux)
+	return modules.rules
 }
 
 func (s *Server) registerHealthRoutes(mux *http.ServeMux) {
@@ -70,19 +76,19 @@ func (s *Server) registerEnrollmentRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/privd-attestation-keys:revoke", s.requireOperationAuth(s.revokePrivdAttestationKey))
 }
 
-func (s *Server) registerNodeRoutes(mux *http.ServeMux) {
+func (s *Server) registerNodeRoutes(mux httpx.Registrar) {
 	s.nodeHTTP.Register(mux, s.requireActionAuth)
 }
 
-func (s *Server) registerUserRoutes(mux *http.ServeMux) {
+func (s *Server) registerUserRoutes(mux *http.ServeMux, modules httpx.Registrar) {
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/user-group-state", s.requireOperationAuth(s.listUserGroupState))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users", s.requireOperationAuth(s.createUser))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users/{user_action}", s.requireOperationAuth(s.userAction))
 	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/groups/{group_name}", s.requireOperationAuth(s.applyGroup))
-	s.userOpsHTTP.Register(mux, s.requireActionAuth)
+	s.userOpsHTTP.Register(modules, s.requireActionAuth)
 }
 
-func (s *Server) registerConfigPlanRoutes(mux *http.ServeMux) {
+func (s *Server) registerConfigPlanRoutes(mux httpx.Registrar) {
 	s.configPlanHTTP.Register(mux, s.requireActionAuth)
 }
 

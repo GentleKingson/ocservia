@@ -388,3 +388,66 @@ The inventory remains 72 routes and 13 explicit actions. Other startup adapters
 and LocalSlice runtime state remain intentional. S-02 method rules, new handler
 extraction, domain refactors, generated contracts and release readiness are not
 part of this change. Executed SHA-bound evidence belongs in the Draft PR.
+
+## Registration-derived module methods (S-02)
+
+Base: `e41b9a78e74c5920fe4741061800c1b8e8f56dc1` (S-01, #225).
+The thirteen literal registrations in `nodehttp`, `configplanhttp` and
+`useroperationshttp` are now the only production source of their method rules.
+They yield twelve path shapes: the two policy registrations merge into
+`GET, PUT`, while their `node.read` and `user.manage` Guards remain distinct.
+The inventory still checks all 72 registrations and 13 explicit permissions,
+and now queries the combined rules of the actual constructed Server. It also
+requires every pilot route to be absent from the remaining legacy table.
+
+`httpx.Registrar` exposes only the exact `ServeMux.HandleFunc` signature.
+The parent construction registrar parses each declaration, rejects unsupported
+or overlapping shapes, forwards the original pattern and handler to the root
+ServeMux, then publishes the successful registration's method set. Duplicate
+methods, invalid names and root-mux conflicts still panic; failed registration
+does not publish a method or silently replace a handler. No handler copies,
+second dispatcher, module route table or runtime registration cache are added.
+
+Only explicit methods, hostless paths, literal segments and whole-segment
+`{name}` parameters are supported. Subtrees, remainder wildcards, `{$}`,
+embedded parameters, escaped pattern literals and dot segments are rejected.
+Different overlapping shapes, including differently named equivalent parameter
+shapes, are rejected rather than resolved by registration order. There is no
+attempt to reproduce the full ServeMux pattern language.
+
+`NewServer` retains the completed per-instance rules from its existing single
+registration pass. Runtime queries are read-only and bounded by the registered
+shapes. S-01 module construction, final SSE configuration and middleware order
+are unchanged. `routeErrors` first finds a path, then checks the method; a pilot
+hit cannot fall back to legacy rules after a method denial. `legacyRouteMethod`
+still serves the unmigrated routes and value-dependent dynamic actions,
+including user-group-state, Session/IP Ban actions, user management, Groups,
+certificates, Secret Rotation and approval actions. S-03 is not implemented.
+
+Path matching deliberately preserves full-string comparison for static paths
+and the old Trim/Split semantics for parameter paths, using `URL.Path` without
+cleaning or decoding it again. The original request and parameter names reach
+ServeMux unchanged. HEAD is not implied by GET. Problem errors, authentication
+order, trailing-slash plain-text 404s, encoded-segment differences and 307
+responses are not unified. Actual handler dispatch remains `ServeHTTP` on the
+same root ServeMux, not handler probing or response rewriting.
+
+The test-only frozen precheck is tied to the base SHA. Before production changes,
+the independent corpus ran against that base: 2,165 paths and 17,320 requests,
+including all pilot shapes, adjacent legacy actions, incorrect methods, encoded
+separators, double encoding, dot segments and noncanonical slashes. The same
+corpus compares path recognition, methods, complete headers and complete bodies
+after the change, with fixed request/trace IDs. Existing inventory and path tests
+retain independent expected responses. New required ordinary tests prove that
+one previously unknown registration installs a real handler and derives methods,
+a second method merges without another table, rejected writes cannot reach
+business capabilities, construction failures leave metadata unchanged, different
+Servers are isolated, and order changes/concurrent reads preserve results.
+
+The inventory excludes only the structurally identified direct forwarding call
+inside `moduleRegistrar.HandleFunc`; all other nonliteral declarations still
+fail. Module boundary allowlists add only `httpx.Registrar`. Existing S-01,
+three-module, F-1/F-2 and restricted-runtime four-backend HTTP/Controller
+regressions remain selected by the existing required-test mechanism. Exact
+candidate SHA, execution results and CI status belong in the Draft PR evidence;
+ordinary database skips are not database acceptance.
