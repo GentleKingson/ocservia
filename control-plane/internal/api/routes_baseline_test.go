@@ -136,11 +136,43 @@ func assertBaselineProblem(t *testing.T, w *httptest.ResponseRecorder, path stri
 	}
 }
 
+// Recognize only the single, direct, unchanged forwarding call in the exact
+// construction registrar method. Other nonliteral route declarations fail.
+func isModuleMethodForwarder(fset *token.FileSet, name string, file *ast.File, call *ast.CallExpr) bool {
+	if name != "routing.go" {
+		return false
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "HandleFunc" || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
+			continue
+		}
+		field := fn.Recv.List[0]
+		if len(field.Names) != 1 || field.Names[0].Name != "r" {
+			continue
+		}
+		var receiver, signature, expression bytes.Buffer
+		if format.Node(&receiver, fset, field.Type) != nil || format.Node(&signature, fset, fn.Type) != nil || format.Node(&expression, fset, call) != nil {
+			return false
+		}
+		if receiver.String() != "*moduleRegistrar" || signature.String() != "func(pattern string, handler func(http.ResponseWriter, *http.Request))" || expression.String() != "r.mux.HandleFunc(pattern, handler)" {
+			continue
+		}
+		for _, stmt := range fn.Body.List {
+			if expr, ok := stmt.(*ast.ExprStmt); ok && expr.X == call {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestHTTPRouteInventory(t *testing.T) {
 	// Check only literal HandleFunc registrations, including wrapper arguments.
 	// No production metadata or second runtime permission map is introduced.
 	registered := map[string]string{}
 	explicitActions := map[string]string{}
+	forwarders := 0
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +204,10 @@ func TestHTTPRouteInventory(t *testing.T) {
 			}
 			literal, ok := call.Args[0].(*ast.BasicLit)
 			if !ok {
+				if isModuleMethodForwarder(fset, name, file, call) {
+					forwarders++
+					return true
+				}
 				t.Fatal("route pattern is no longer literal")
 			}
 			pattern, err := strconv.Unquote(literal.Value)
@@ -218,7 +254,17 @@ func TestHTTPRouteInventory(t *testing.T) {
 	if len(registered) != 72 || len(explicitActions) != 13 {
 		t.Fatalf("registrations/actions = %d/%d, want 72/13", len(registered), len(explicitActions))
 	}
+	if forwarders != 1 {
+		t.Fatalf("registration forwarders = %d, want exactly one", forwarders)
+	}
 	s := baselineServer(t, false)
+	derived := 0
+	for _, rule := range s.moduleMethods {
+		derived += len(rule.methods)
+	}
+	if derived != 13 || len(s.moduleMethods) != 12 {
+		t.Fatalf("derived registrations/shapes = %d/%d, want 13/12", derived, len(s.moduleMethods))
+	}
 	for _, line := range strings.Split(routeBaseline, "\n") {
 		fields := strings.Split(line, "|")
 		pattern, handler, allow, permission := fields[0], fields[1], fields[2], fields[3]
@@ -237,8 +283,16 @@ func TestHTTPRouteInventory(t *testing.T) {
 				path += ":approve"
 			}
 			r := baselineRequest(method, path, nil)
-			if rule, ok := routeMethod(path); !ok || strings.ReplaceAll(rule, "_OR_", ", ") != allow {
+			if rule, ok := s.routeMethods(path); !ok || rule.allow() != allow {
 				t.Fatalf("registered route is unreachable: %s (%q)", pattern, rule)
+			}
+			if _, explicit := explicitActions[pattern]; explicit {
+				if rule, ok := moduleRouteMethods(s.moduleMethods, path); !ok || rule.allow() != allow {
+					t.Fatalf("module route not derived: %s (%q)", pattern, rule)
+				}
+				if rule, ok := legacyRouteMethod(path); ok {
+					t.Fatalf("module route still duplicated in legacy rules: %s (%q)", pattern, rule)
+				}
 			}
 			w := httptest.NewRecorder()
 			s.http.Handler.ServeHTTP(w, r)

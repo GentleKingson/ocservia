@@ -16,7 +16,7 @@ import (
 func TestConfigPlanHTTPBoundary(t *testing.T) {
 	const internal = "github.com/GentleKingson/ocservia/control-plane/internal/"
 	allowed := map[string]map[string]bool{
-		internal + "api/httpx":  {"WriteJSON": true, "WriteProblem": true, "ParseUUIDv7": true, "DecodeStrictJSON": true, "RequireIdempotencyKey": true},
+		internal + "api/httpx":  {"Registrar": true, "WriteJSON": true, "WriteProblem": true, "ParseUUIDv7": true, "DecodeStrictJSON": true, "RequireIdempotencyKey": true},
 		internal + "configplan": {"CreateRequest": true, "ApplyRequest": true, "Plan": true, "Template": true, "ErrInvalid": true, "ErrStaleRevision": true, "ErrCapability": true},
 		internal + "operations": {"Operation": true, "ErrInvalidRequest": true, "ErrStaleRevision": true, "ErrCapabilityMissing": true, "ErrIdempotencyConflict": true, "ErrConfigApplyActive": true},
 		internal + "approvals":  {"ErrNotReady": true},

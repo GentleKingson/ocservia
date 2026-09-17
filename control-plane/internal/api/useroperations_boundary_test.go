@@ -16,7 +16,7 @@ import (
 func TestUserOperationsHTTPBoundary(t *testing.T) {
 	const internal = "github.com/GentleKingson/ocservia/control-plane/internal/"
 	allowed := map[string]map[string]bool{
-		internal + "api/httpx":      {"WriteJSON": true, "WriteProblem": true, "ParseUUIDv7": true, "DecodeStrictJSON": true, "RequireIdempotencyKey": true},
+		internal + "api/httpx":      {"Registrar": true, "WriteJSON": true, "WriteProblem": true, "ParseUUIDv7": true, "DecodeStrictJSON": true, "RequireIdempotencyKey": true},
 		internal + "useroperations": {"Policy": true, "PolicyRequest": true, "Batch": true, "BatchRequest": true, "BatchItemRequest": true, "Metrics": true, "ErrInvalidRequest": true, "ErrVersionConflict": true, "ErrIdempotencyConflict": true, "ErrNotFound": true},
 		internal + "auth":           {"Principal": true},
 		internal + "rbac":           {"Resource": true, "ErrForbidden": true},
