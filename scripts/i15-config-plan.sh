@@ -22,7 +22,7 @@ grep -Fq 'staging.remove().await?' "${ROOT}/rust/crates/ocserv-adapter/src/lib.r
 
 if grep -REnE 'target_path|shell[.]exec|command[.]run|occtl[.]raw|systemctl[.]raw' \
   "${ROOT}/control-plane/internal/configplan" \
-  "${ROOT}/control-plane/internal/api/configplans.go" \
+  "${ROOT}/control-plane/internal/api/configplanhttp" \
   "${ROOT}/proto/ocserv/platform/agent/v1/agent.proto"; then
   echo "I15 exposed a caller-selected path or arbitrary execution surface" >&2
   exit 1
@@ -30,7 +30,7 @@ fi
 
 if grep -REnE 'os[.]Rename|tokio::fs::rename|service_reload' \
   "${ROOT}/control-plane/internal/configplan" \
-  "${ROOT}/control-plane/internal/api/configplans.go"; then
+  "${ROOT}/control-plane/internal/api/configplanhttp"; then
   echo "I15 planning path contains reload or current-file replacement behavior" >&2
   exit 1
 fi

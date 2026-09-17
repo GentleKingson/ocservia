@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
@@ -18,6 +19,8 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 	// Reuse the restricted-backend, real Local login and HTTP Plan fixture.
 	f := newApplyHTTPFixture(t)
 	plan := f.plan(false)
+	plans := &observedConfigPlans{Plans: f.s.configPlanLookup.(*configplan.Service)}
+	f.s.configPlanHTTP.SetPlans(plans)
 	f.s.EnableUserOperations(useroperations.NewBackend(f.b, nil))
 	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1`, `DELETE FROM role_bindings WHERE identity_id=?`, f.approver.principal.IdentityID)
 	f.bind(f.approver, plan.NodeID, "UserManager")
@@ -73,9 +76,9 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 		t.Fatal("batch Location", w.Header())
 	}
 	// Count successful business intent, not normal rejection audit records.
-	counts := func(t *testing.T) [7]int {
+	counts := func(t *testing.T) [9]int {
 		t.Helper()
-		var result [7]int
+		var result [9]int
 		queries := [][2]string{
 			{`SELECT count(*) FROM operations WHERE workspace_id=$1`, `SELECT count(*) FROM operations WHERE workspace_id=?`},
 			{`SELECT count(*) FROM commands WHERE workspace_id=$1`, `SELECT count(*) FROM commands WHERE workspace_id=?`},
@@ -90,9 +93,10 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		result[7], result[8] = int(plans.creates.Load()), int(plans.applies.Load())
 		return result
 	}
-	unchanged := func(t *testing.T, before [7]int) {
+	unchanged := func(t *testing.T, before [9]int) {
 		t.Helper()
 		if after := counts(t); after != before {
 			t.Fatalf("denied request changed business intent: %v -> %v", before, after)
@@ -172,6 +176,7 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 		g := f
 		g.t, g.workspace = t, other
 		foreignPlan := g.plan(false)
+		before[7]++ // The foreign-workspace fixture deliberately creates one Plan.
 		for _, actor := range []applyHTTPActor{f.reader, manager} {
 			f.exec(`DELETE FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2`, `DELETE FROM role_bindings WHERE identity_id=? AND workspace_id=?`, actor.principal.IdentityID, other)
 		}
@@ -278,6 +283,8 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 			w := f.call("POST", nodePath+"/config-plans", body, uuid.NewString(), f.requester.cookie, nil)
 			if scope == f.workspace {
 				assertApplyHTTPProblem(t, w, 400, "config-plan-invalid")
+				// This historical assertion intentionally enters domain validation.
+				before[7]++
 			} else {
 				assertApplyHTTPProblem(t, w, 403, "forbidden")
 			}

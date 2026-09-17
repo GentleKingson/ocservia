@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/api/configplanhttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
-	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
@@ -70,7 +70,7 @@ type Server struct {
 	audit            *audit.Manager
 	userstate        *userstate.Service
 	useroperations   *useroperations.Service
-	configplans      *configplan.Service
+	configPlanHTTP   *configplanhttp.Handler
 	configPlanLookup configPlanLookup
 	certificates     *certificates.Service
 	privdAttestation *privdattestation.Service
@@ -93,6 +93,7 @@ func NewBackend(address string, backend database.Backend, build BuildInfo, logge
 	}
 	mux := http.NewServeMux()
 	s.nodeHTTP = nodehttp.New(logger, workspace)
+	s.configPlanHTTP = configplanhttp.New(configPlanRequestInfo, s.allowConfigPlanSecret)
 	s.registerRoutes(mux)
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	// Bound request reads without a global write deadline that would end SSE streams.
@@ -136,15 +137,6 @@ func (s *Server) EnableReleaseCatalog(catalog *releasecatalog.Catalog) { s.relea
 func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
 
 func (s *Server) EnableUserOperations(service *useroperations.Service) { s.useroperations = service }
-
-func (s *Server) EnableConfigPlans(service *configplan.Service) {
-	s.configplans = service
-	if service == nil {
-		s.configPlanLookup = nil
-		return
-	}
-	s.configPlanLookup = service
-}
 
 func (s *Server) EnableCertificates(service *certificates.Service) { s.certificates = service }
 

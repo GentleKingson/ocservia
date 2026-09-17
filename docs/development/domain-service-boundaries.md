@@ -59,3 +59,27 @@ retain their existing classification. No new retry timer or background service
 is introduced. Existing installations need the owner `--migrate-only`
 reauthorization path even when the schema is already current; see
 [Controller upgrade](../how-to/controller-upgrade.md).
+
+## ConfigPlan HTTP capabilities (R2-02)
+
+Following R2-01 (#222, `3266e8fb1ec8248e9f94ed0f0dd0f47a08ac2515`), the three
+ConfigPlan routes live in `internal/api/configplanhttp`, not on `api.Server`.
+
+| Consumer | Consumer-owned capability | Assembly and retained behavior |
+| --- | --- | --- |
+| `configplanhttp.Handler` | `Plans.Create/Get/Apply`, original domain values/errors | A stable Handler receives the existing ConfigPlan instance before HTTP starts; the original request context reaches the domain methods unchanged |
+| Parent authorization and approval creation | `configPlanLookup.Get/Resource` | `EnableConfigPlans` exposes a read-only view of that same instance and explicitly clears both views on nil; no duplicate Service or Plan state |
+| ConfigPlan request parsing | Authenticated actor/identity/session/request/trace values and a single-reference Secret-use function | Existing parent context conversion and authorized workspace checks; the adapter sees Certificates/RBAC injected later at startup |
+
+The parent still owns centralized resource authorization, all saved approval
+authority checks and legacy fallback, plus approval HTTP creation/decisions.
+Approval creation continues to use Get's interpreted validation and safe diff,
+not a raw row or Resource-only shortcut. The module cannot Create approvals or
+consume them. Domain ConfigPlan/Operations transactions, signed command intent,
+revision and version allocation, Outbox, audit and idempotency are untouched.
+
+Shared strict JSON/UUID/idempotency helpers are in `api/httpx`; they do not gain
+authentication or business dependencies. Other concrete Server services, shared
+domain models, route compatibility and centralized guards remain intentional.
+See [HTTP baseline](http-baseline.md#configplan-http-module-r2-02) for scope,
+the limited disabled-development-path nil fix and regression entry points.

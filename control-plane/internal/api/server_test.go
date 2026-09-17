@@ -26,10 +26,9 @@ import (
 func TestCommonStoreNotFoundProblems(t *testing.T) {
 	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	for name, write := range map[string]func(http.ResponseWriter, *http.Request, error){
-		"configuration": writeConfigPlanError,
-		"rollout":       server.writeRolloutError,
-		"operation":     server.writeOperationError,
-		"certificate":   writeCertificateError,
+		"rollout":     server.writeRolloutError,
+		"operation":   server.writeOperationError,
+		"certificate": writeCertificateError,
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := httptest.NewRecorder()
