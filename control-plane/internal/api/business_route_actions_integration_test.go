@@ -21,7 +21,8 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 	plan := f.plan(false)
 	plans := &observedConfigPlans{Plans: f.s.configPlanLookup.(*configplan.Service)}
 	f.s.configPlanHTTP.SetPlans(plans)
-	f.s.EnableUserOperations(useroperations.NewBackend(f.b, nil))
+	userOperations := useroperations.NewBackend(f.b, nil)
+	f.s.EnableUserOperations(userOperations)
 	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1`, `DELETE FROM role_bindings WHERE identity_id=?`, f.approver.principal.IdentityID)
 	f.bind(f.approver, plan.NodeID, "UserManager")
 	manager := f.approver
@@ -42,7 +43,7 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 		for _, node := range nodes {
 			items = append(items, useroperations.BatchItemRequest{NodeID: node, Username: "alice", Action: "enable", ExpectedVersion: 1})
 		}
-		body, err := json.Marshal(userBatchRequest{Reason: "route regression", Items: items})
+		body, err := json.Marshal(map[string]any{"reason": "route regression", "items": items})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,7 +211,7 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 		}
 		path := "/api/v1/user-batches/" + mixed.ID.String()
 		assertStatus(t, f.call("GET", path, "", "", manager.cookie, nil), 200)
-		stored, err := f.s.useroperations.GetBatch(t.Context(), mixed.ID)
+		stored, err := userOperations.GetBatch(t.Context(), mixed.ID)
 		if err != nil || stored.ActorIdentityID == nil || *stored.ActorIdentityID != manager.principal.IdentityID || stored.Items[1].State != "forbidden" {
 			t.Fatalf("persisted batch actor/items: %+v %v", stored, err)
 		}

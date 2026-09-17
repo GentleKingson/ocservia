@@ -79,11 +79,7 @@ func (s *Server) registerUserRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users", s.requireOperationAuth(s.createUser))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users/{user_action}", s.requireOperationAuth(s.userAction))
 	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/groups/{group_name}", s.requireOperationAuth(s.applyGroup))
-	mux.HandleFunc("GET /api/v1/nodes/{node_id}/users/{username}/policy", s.requireActionAuth("node.read", s.getUserPolicy))
-	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/users/{username}/policy", s.requireActionAuth("user.manage", s.setUserPolicy))
-	mux.HandleFunc("POST /api/v1/user-batches", s.requireActionAuth("user.manage", s.createUserBatch))
-	mux.HandleFunc("GET /api/v1/user-batches/{batch_id}", s.requireActionAuth("operation.read", s.getUserBatch))
-	mux.HandleFunc("GET /api/v1/user-operations/metrics", s.requireActionAuth("operation.read", s.userOperationMetrics))
+	s.userOpsHTTP.Register(mux, s.requireActionAuth)
 }
 
 func (s *Server) registerConfigPlanRoutes(mux *http.ServeMux) {
