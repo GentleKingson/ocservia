@@ -157,7 +157,7 @@ func (f applyHTTPFixture) plan(validated bool) configplan.Plan {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'Apply HTTP','active',3,$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,'Apply HTTP','active',3,?,?)`, node, f.workspace, at, at)
+	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',3,$4,$5)`, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES(?,?,?,'active',3,?,?)`, node, f.workspace, "apply-"+node.String(), at, at)
 	f.bind(f.requester, node, "ConfigManager")
 	// The requester may review approvals, but independence still forbids self-approval.
 	f.bind(f.requester, node, "SecurityAdmin")
@@ -204,7 +204,7 @@ func (f applyHTTPFixture) plan(validated bool) configplan.Plan {
 	}
 	event := uuid.Must(uuid.NewV7())
 	// Controlled signed result fixture, not evidence of a real Agent execution.
-	if err := localslice.NewBackend(f.b, f.signer).Ingest(f.t.Context(), &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Payload: resultBytes}); err != nil {
+	if err := localslice.NewBackend(f.b, f.signer).Ingest(f.t.Context(), &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: resultBytes}); err != nil {
 		f.t.Fatal(err)
 	}
 	w = f.call("GET", "/api/v1/config-plans/"+plan.ID.String(), "", "", f.requester.cookie, nil)
@@ -340,18 +340,14 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 		if read.Code != 200 {
 			t.Fatalf("reader cannot review: %d %s", read.Code, read.Body)
 		}
-		t.Run("expired-session", func(t *testing.T) {
+		t.Run("revoked-session", func(t *testing.T) {
 			g := f
 			g.t = t
-			expires, err := value.FromTime(f.requester.principal.ExpiresAt)
-			if err != nil {
-				t.Fatal(err)
-			}
 			t.Cleanup(func() {
-				g.exec(`UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`, `UPDATE auth_sessions SET expires_at=? WHERE id=?`, expires, f.requester.principal.SessionID)
+				g.exec(`UPDATE auth_sessions SET revoked_at=NULL WHERE id=$1`, `UPDATE auth_sessions SET revoked_at=NULL WHERE id=?`, f.requester.principal.SessionID)
 			})
-			g.exec(`UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`, `UPDATE auth_sessions SET expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, f.requester.principal.SessionID)
-			w := g.call("POST", path, body, "expired-session", f.requester.cookie, nil)
+			g.exec(`UPDATE auth_sessions SET revoked_at=$1 WHERE id=$2`, `UPDATE auth_sessions SET revoked_at=? WHERE id=?`, value.Timestamp{Valid: true}, f.requester.principal.SessionID)
+			w := g.call("POST", path, body, "revoked-session", f.requester.cookie, nil)
 			assertApplyHTTPProblem(t, w, 401, "unauthenticated")
 			if w.Header().Get("WWW-Authenticate") != "OIDC" {
 				t.Fatal("missing challenge")
@@ -411,7 +407,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 					kind = "stale-revision"
 					f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,1,1,'',$2)`, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES(?,1,1,'',?)`, plan.NodeID, value.Timestamp{Valid: true})
 				case "expired-approval":
-					f.exec(`UPDATE approval_requests SET expires_at=$1 WHERE id=$2`, `UPDATE approval_requests SET expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, approval.ID)
+					f.exec(`UPDATE approval_requests SET created_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, value.Timestamp{Valid: true, Micros: 1}, approval.ID)
 				case "self-approval":
 					w := f.call("POST", "/api/v1/approval-requests/"+approval.ID.String()+":approve", fmt.Sprintf(`{"reason":"self","expected_request_hash":%q}`, approval.RequestHash), "", f.requester.cookie, nil)
 					assertApplyHTTPProblem(t, w, 403, "self-approval-forbidden")
@@ -433,6 +429,9 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 	t.Run("rollback-submit-replay", func(t *testing.T) {
 		f := root
 		f.t = t
+		// Keep the audit failure constraint disjoint from earlier successful Applies.
+		f.workspace = uuid.Must(uuid.NewV7())
+		f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Apply rollback',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Apply rollback',?,?,?)`, f.workspace, f.workspace.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
 		plan := f.plan(true)
 		approval := f.approval(plan, true)
 		path, body, key := "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(approval.ID), uuid.NewString()
