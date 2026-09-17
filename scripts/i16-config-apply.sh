@@ -11,7 +11,7 @@ if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; th
   exit 2
 fi
 if [[ "${MODE}" == "full" ]]; then
-  (cd "${ROOT}/control-plane" && go test ./internal/configplan ./internal/operations ./internal/localslice ./internal/api -count=1)
+  (cd "${ROOT}/control-plane" && go test ./internal/configplan ./internal/operations ./internal/localslice ./internal/api ./internal/api/configplanhttp ./internal/api/httpx -count=1)
   (cd "${ROOT}/rust" && cargo test -p ocservia-agent-protocol -p ocservia-ocserv-adapter -p ocservia-privd -p ocservia-agent)
 fi
 
@@ -20,7 +20,8 @@ grep -Fq 'ConfigApplyResult' "${ROOT}/proto/ocserv/platform/agent/v1/agent.proto
 grep -Fq 'automation_locked' "${ROOT}/control-plane/migrations/000015_config_apply_rollback.up.sql"
 grep -Fq 'atomic_replace(&stage_path, &self.resources.config)' "${ROOT}/rust/crates/ocserv-adapter/src/lib.rs"
 grep -Fq 'sync_directory(parent).await' "${ROOT}/rust/crates/ocserv-adapter/src/lib.rs"
-grep -Fq 'config_apply.rollback_failed' "${ROOT}/control-plane/internal/localslice/service.go"
+grep -Fq 'config_apply.rollback_failed' "${ROOT}/control-plane/internal/database/postgres/command_result.go"
+grep -Fq 'config_apply.rollback_failed' "${ROOT}/control-plane/internal/database/mysql/command_result.go"
 
 if grep -REnE 'caller_path|target_path|shell[.]exec|command[.]run|occtl[.]raw|systemctl[.]raw' \
   "${ROOT}/control-plane/internal/configplan" \

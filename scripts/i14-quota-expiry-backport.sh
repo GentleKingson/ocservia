@@ -11,7 +11,7 @@ if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; th
   exit 2
 fi
 if [[ "${MODE}" == "full" ]]; then
-  (cd "${ROOT}/control-plane" && go test ./internal/useroperations ./internal/api ./internal/telemetry -count=1)
+  (cd "${ROOT}/control-plane" && go test ./internal/useroperations ./internal/api ./internal/api/useroperationshttp ./internal/api/httpx ./internal/telemetry -count=1)
 fi
 
 grep -Fq 'b8f59026c4d879f40c1da43dc00d97e34f9790bc' "${ROOT}/docs/upstream/v4.9-post1.md"
@@ -70,26 +70,28 @@ done
 if command -v rg >/dev/null 2>&1; then
   boundary_scanner='rg'
   boundary_matches() {
-    local pattern="$1"
-    shift
-    rg -n --glob '!**/*_test.go' --glob '!api/generated/**' "${pattern}" "$@"
+    local pattern="$1" include="$2"
+    shift 2
+    rg -n --glob "${include}" --glob '!**/*_test.go' --glob '!api/generated/**' "${pattern}" "$@"
   }
 else
   boundary_scanner='grep'
   boundary_matches() {
-    local pattern="$1"
-    shift
-    grep -REnE --exclude='*_test.go' --exclude-dir=generated "${pattern}" "$@"
+    local pattern="$1" include="$2"
+    shift 2
+    grep -REnE --include="${include}" --exclude='*_test.go' --exclude-dir=generated "${pattern}" "$@"
   }
 fi
 
 # Browser strings may describe typed remote configuration; local path access is
 # forbidden specifically in the controller, while execution surfaces are
-# forbidden across both controller and Web code.
-if boundary_matches "${rejected_execution_pattern}" \
-  "${ROOT}/control-plane/internal" \
+# forbidden across both controller and Web code. Scan controller Go sources, not
+# database JSON manifests containing historical upstream classification text.
+if boundary_matches "${rejected_execution_pattern}" '*.go' \
+  "${ROOT}/control-plane/internal" || \
+  boundary_matches "${rejected_execution_pattern}" '*' \
   "${ROOT}/web/src" || \
-  boundary_matches "${rejected_local_path_pattern}" \
+  boundary_matches "${rejected_local_path_pattern}" '*.go' \
   "${ROOT}/control-plane/internal"; then
   echo "I14 imported a rejected local-execution boundary" >&2
   exit 1
