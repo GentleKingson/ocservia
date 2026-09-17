@@ -284,19 +284,8 @@ func routeAction(r *http.Request) string {
 		return "service.reload"
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/agent-upgrade"):
 		return "agent.upgrade"
-	case strings.HasSuffix(path, "/apply") && strings.Contains(path, "/config-plans/"):
-		return "config.apply"
 	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"):
 		return "user.manage"
-	case strings.Contains(path, "/users/") && strings.HasSuffix(path, "/policy"):
-		if r.Method == http.MethodPut {
-			return "user.manage"
-		}
-		return "node.read"
-	case path == "/api/v1/user-batches":
-		return "user.manage"
-	case strings.HasPrefix(path, "/api/v1/user-batches/"):
-		return "operation.read"
 	case path == "/api/v1/agent-rollouts":
 		if r.Method == http.MethodPost {
 			return "agent.upgrade"
@@ -307,10 +296,6 @@ func routeAction(r *http.Request) string {
 			return "agent.upgrade"
 		}
 		return "operation.read"
-	case path == "/api/v1/user-operations/metrics":
-		return "operation.read"
-	case r.Method == http.MethodPost && strings.HasSuffix(path, "/config-plans"):
-		return "config.plan"
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/certificates"):
 		return "certificate.issue"
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/certificates"):
@@ -331,8 +316,6 @@ func routeAction(r *http.Request) string {
 		return "secret.manage"
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/secret-provider-refs/"):
 		return "secret.read"
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/config-plans/"):
-		return "config.review"
 	case strings.Contains(path, "/groups/"):
 		return "group.manage"
 	case strings.HasSuffix(path, "/approval"):

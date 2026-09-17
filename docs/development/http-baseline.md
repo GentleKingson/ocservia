@@ -143,3 +143,44 @@ format nor Schema changes.
 A 202 means an asynchronous operation intent was committed, not that a real
 Rust Agent applied configuration. F-2, broader architecture work and release
 readiness are not covered by this fix.
+
+## Explicit business route actions (R2-01)
+
+Base: `d8b9cdc3883896cc22dc1ccb9c47d00c1beecaf2` (#221).
+The F-1 wrapper description above records that fix's historical state. R2-01
+subsequently replaces `requireOperationAuth(handler)` with
+`requireActionAuth("fixed.action", handler)` at these eight registrations:
+
+| Method and path | Action |
+| --- | --- |
+| `POST /api/v1/nodes/{node_id}/config-plans` | `config.plan` |
+| `GET /api/v1/config-plans/{plan_id}` | `config.review` |
+| `POST /api/v1/config-plans/{plan_id}/apply` | `config.apply` |
+| `GET /api/v1/nodes/{node_id}/users/{username}/policy` | `node.read` |
+| `PUT /api/v1/nodes/{node_id}/users/{username}/policy` | `user.manage` |
+| `POST /api/v1/user-batches` | `user.manage` |
+| `GET /api/v1/user-batches/{batch_id}` | `operation.read` |
+| `GET /api/v1/user-operations/metrics` | `operation.read` |
+
+Their seven dedicated `routeAction` branches (including the combined policy
+GET/PUT branch) are removed. Shared node reads, Operations, Events, rollouts,
+certificates, approvals and dynamic actions still use the existing inference.
+`requireOperationAuth`, `authorizeRoute` (including SSE revalidation), and the
+unchanged `routeMethod` compatibility layer remain. There are still 72 routes,
+including the five explicit `nodehttp` guards.
+
+The unified guard still authenticates, checks browser mutations, resolves the
+actual resource/workspace, authorizes the supplied action and writes context.
+Plan/approval node ownership and batch workspace selection are unchanged, as
+are handler-level per-item checks, batch reader restrictions, Secret usage and
+independent Apply approval. No handlers or service dependencies move modules.
+
+The inventory now recognizes only the two explicit wrapper forms and compares
+their literal action and original handler against independent expectations.
+`TestBusinessRouteActionsBackendHTTPIntegration` reuses the Local-session Apply
+fixture and real `NewBackend().http.Handler` for all eight routes. It complements
+the existing Apply success/replay/approval tests with denial intent counts,
+workspace and per-item boundaries, and counterfactual actions through the real
+guard. `regression-auth` requires it on all four backends. The old PostgreSQL-only
+batch resource test now supplies `user.manage` explicitly; it is not the HTTP
+acceptance evidence. Candidate SHA and executed results belong in the Draft PR.

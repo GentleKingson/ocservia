@@ -27,6 +27,7 @@ const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
 // Behavior frozen at de26ea4: pattern | handler/wrapper | method rule | permission.
 // PR-03 changes only the five nodehttp handler/wrapper expressions.
 // F-1 restores the registered ConfigPlan Apply route's POST method rule.
+// R2-01 changes eight business wrappers to fixed, explicit actions.
 // "self" identifies endpoint validation, not requireOperationAuth. This is a
 // test inventory, never an input to production routing or authorization.
 const routeBaseline = `GET /livez|s.live|GET|public
@@ -74,18 +75,18 @@ GET /api/v1/nodes/{node_id}/user-group-state|s.requireOperationAuth(s.listUserGr
 POST /api/v1/nodes/{node_id}/users|s.requireOperationAuth(s.createUser)|POST|user.manage
 POST /api/v1/nodes/{node_id}/users/{user_action}|s.requireOperationAuth(s.userAction)|POST|user.manage
 PUT /api/v1/nodes/{node_id}/groups/{group_name}|s.requireOperationAuth(s.applyGroup)|PUT|group.manage
-GET /api/v1/nodes/{node_id}/users/{username}/policy|s.requireOperationAuth(s.getUserPolicy)|GET, PUT|node.read
-PUT /api/v1/nodes/{node_id}/users/{username}/policy|s.requireOperationAuth(s.setUserPolicy)|GET, PUT|user.manage
-POST /api/v1/user-batches|s.requireOperationAuth(s.createUserBatch)|POST|user.manage
-GET /api/v1/user-batches/{batch_id}|s.requireOperationAuth(s.getUserBatch)|GET|operation.read
+GET /api/v1/nodes/{node_id}/users/{username}/policy|s.requireActionAuth("node.read", s.getUserPolicy)|GET, PUT|node.read
+PUT /api/v1/nodes/{node_id}/users/{username}/policy|s.requireActionAuth("user.manage", s.setUserPolicy)|GET, PUT|user.manage
+POST /api/v1/user-batches|s.requireActionAuth("user.manage", s.createUserBatch)|POST|user.manage
+GET /api/v1/user-batches/{batch_id}|s.requireActionAuth("operation.read", s.getUserBatch)|GET|operation.read
 POST /api/v1/agent-rollouts|s.requireOperationAuth(s.createAgentRollout)|GET, POST|agent.upgrade
 GET /api/v1/agent-rollouts|s.requireOperationAuth(s.listAgentRollouts)|GET, POST|operation.read
 GET /api/v1/agent-rollouts/{rollout_id}|s.requireOperationAuth(s.getAgentRollout)|GET|operation.read
 POST /api/v1/agent-rollouts/{rollout_id}/resume|s.requireOperationAuth(s.resumeAgentRollout)|POST|agent.upgrade
-GET /api/v1/user-operations/metrics|s.requireOperationAuth(s.userOperationMetrics)|GET|operation.read
-POST /api/v1/nodes/{node_id}/config-plans|s.requireOperationAuth(s.createConfigPlan)|POST|config.plan
-GET /api/v1/config-plans/{plan_id}|s.requireOperationAuth(s.getConfigPlan)|GET|config.review
-POST /api/v1/config-plans/{plan_id}/apply|s.requireOperationAuth(s.applyConfigPlan)|POST|config.apply
+GET /api/v1/user-operations/metrics|s.requireActionAuth("operation.read", s.userOperationMetrics)|GET|operation.read
+POST /api/v1/nodes/{node_id}/config-plans|s.requireActionAuth("config.plan", s.createConfigPlan)|POST|config.plan
+GET /api/v1/config-plans/{plan_id}|s.requireActionAuth("config.review", s.getConfigPlan)|GET|config.review
+POST /api/v1/config-plans/{plan_id}/apply|s.requireActionAuth("config.apply", s.applyConfigPlan)|POST|config.apply
 POST /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.createCertificate)|GET, POST|certificate.issue
 GET /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.listNodeCertificates)|GET, POST|certificate.read
 GET /api/v1/certificates/{certificate_id}|s.requireOperationAuth(s.getCertificate)|GET|certificate.read
@@ -182,22 +183,37 @@ func TestHTTPRouteInventory(t *testing.T) {
 				t.Fatalf("duplicate %s", pattern)
 			}
 			registered[pattern] = handler.String()
-			if filepath.Dir(name) == "nodehttp" {
-				guard, ok := call.Args[1].(*ast.CallExpr)
-				if !ok || len(guard.Args) != 2 {
-					t.Fatal("node route must declare its guard action")
+			guard, wrapped := call.Args[1].(*ast.CallExpr)
+			var wrapper bytes.Buffer
+			if wrapped {
+				if err := format.Node(&wrapper, fset, guard.Fun); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if filepath.Dir(name) == "nodehttp" && wrapper.String() != "guard" {
+				t.Fatal("node route must declare its guard action")
+			}
+			if wrapper.String() == "s.requireActionAuth" || wrapper.String() == "guard" {
+				if len(guard.Args) != 2 {
+					t.Fatal("explicit authorization requires an action and handler")
 				}
 				action, ok := guard.Args[0].(*ast.BasicLit)
-				if !ok {
-					t.Fatal("node permission is no longer literal")
+				if !ok || action.Kind != token.STRING {
+					t.Fatal("permission is no longer a fixed string")
 				}
 				explicitActions[pattern], err = strconv.Unquote(action.Value)
-				if err != nil {
-					t.Fatal(err)
+				if err != nil || strings.TrimSpace(explicitActions[pattern]) == "" {
+					t.Fatal("explicit permission must be nonempty", err)
+				}
+				if _, ok := guard.Args[1].(*ast.SelectorExpr); !ok {
+					t.Fatal("explicit authorization must wrap the original handler")
 				}
 			}
 			return true
 		})
+	}
+	if len(registered) != 72 || len(explicitActions) != 13 {
+		t.Fatalf("registrations/actions = %d/%d, want 72/13", len(registered), len(explicitActions))
 	}
 	s := baselineServer(t, false)
 	for _, line := range strings.Split(routeBaseline, "\n") {
@@ -223,7 +239,7 @@ func TestHTTPRouteInventory(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			s.http.Handler.ServeHTTP(w, r)
-			if strings.Contains(handler, "requireOperationAuth") || strings.HasPrefix(handler, "guard(") {
+			if strings.HasPrefix(handler, "s.requireOperationAuth(") || strings.HasPrefix(handler, "s.requireActionAuth(") || strings.HasPrefix(handler, "guard(") {
 				assertBaselineProblem(t, w, path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
 				if w.Header().Get("WWW-Authenticate") != "OIDC" {
 					t.Fatal("missing challenge")
