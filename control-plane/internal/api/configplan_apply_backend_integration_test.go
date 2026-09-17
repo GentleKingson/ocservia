@@ -479,7 +479,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			endpoint := sha256.Sum256(plan.NodeID[:])
 			if err := localslice.NewBackend(g.b, g.signer).Ingest(t.Context(), &transportv1.TransportEvent{
 				EventId: event[:], NodeId: plan.NodeID[:], EndpointId: endpoint[:],
-				Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED,
+				Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED,
 				OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("connection closed"),
 			}); err != nil {
 				t.Fatal(err)

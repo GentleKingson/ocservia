@@ -64,8 +64,9 @@ type Store interface {
 	Node(context.Context, uuid.UUID) (Node, error)
 	Capabilities(context.Context, uuid.UUID) ([]string, error)
 	Get(context.Context, uuid.UUID) (Plan, error)
-	// A committed retry retains its allocated revision; Operations still compares
-	// the complete intent and owns approval consumption and revision fencing.
+	// A committed retry retains its allocated revision and expected node version;
+	// Operations still compares the complete intent and owns approval consumption
+	// and revision fencing.
 	ApplyInput(context.Context, uuid.UUID, string) (ApplyInput, error)
 	Resource(context.Context, uuid.UUID) (uuid.UUID, uuid.UUID, error)
 	State(context.Context, uuid.UUID) (State, error)

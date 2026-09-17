@@ -128,11 +128,17 @@ command/Outbox/audit associations, replay, and rollback after approval consumpti
 
 The HTTP regression also exposed an immediate-replay defect: the first Apply
 advances the desired revision, so recomputing the next revision changed the
-otherwise identical intent hash. `ApplyInput` now reuses the committed revision
-only for the same Plan and workspace-scoped idempotency key. New keys retain
-the existing allocation path. ConfigPlan prechecks, Operations' complete intent
-comparison, transactional revision checks and approval consumption remain in
-their original layers; neither the global hash format nor Schema changes.
+otherwise identical intent hash. Background transport activity can likewise
+advance the node version between identical requests. `ApplyInput` now reuses
+both the committed revision and the original command's `expected_version`
+only for the same Plan and workspace-scoped idempotency key. The required
+`node-version-drift-replay` HTTP regression ingests a normal disconnect through
+the runtime connection, asserts the version increment, and verifies replay
+without another Operation, command, Outbox or success audit. New keys retain
+the live node version and existing allocation path. ConfigPlan prechecks,
+Operations' complete intent comparison, transactional revision checks and
+approval consumption remain in their original layers; neither the global hash
+format nor Schema changes.
 
 A 202 means an asynchronous operation intent was committed, not that a real
 Rust Agent applied configuration. F-2, broader architecture work and release
