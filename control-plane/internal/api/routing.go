@@ -1,26 +1,144 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
+type methodSet []string
+
+func (m methodSet) allows(method string) bool { return slices.Contains(m, method) }
+func (m methodSet) allow() string             { return strings.Join(m, ", ") }
+
+func (m methodSet) with(method string) methodSet {
+	if m.allows(method) {
+		return m
+	}
+	result := append(slices.Clone(m), method)
+	slices.Sort(result)
+	return result
+}
+
+type moduleMethodRule struct {
+	path     string
+	segments []string
+	dynamic  bool
+	methods  methodSet
+}
+
+// moduleRegistrar is construction-only metadata collection, not a dispatcher.
+// The Server retains only its rules; no registrar or handler copies survive.
+type moduleRegistrar struct {
+	mux   *http.ServeMux
+	rules []moduleMethodRule
+}
+
+func (r *moduleRegistrar) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	rule, method := parseModulePattern(pattern)
+	index := -1
+	for i, existing := range r.rules {
+		if existing.path == rule.path {
+			index = i
+			rule.methods = existing.methods
+		} else if modulePathsOverlap(existing, rule) {
+			panic(fmt.Sprintf("module route %q overlaps %q; keep ambiguous shapes outside the method pilot", pattern, existing.path))
+		}
+	}
+	rule.methods = rule.methods.with(method)
+	// ServeMux still rejects invalid names/methods, duplicate registrations and
+	// conflicts, including conflicts with legacy registrations. Publish only after
+	// it succeeds, so a panic cannot advertise an unregistered method.
+	r.mux.HandleFunc(pattern, handler)
+	if index >= 0 {
+		r.rules[index] = rule
+	} else {
+		r.rules = append(r.rules, rule)
+	}
+}
+
+func parseModulePattern(pattern string) (moduleMethodRule, string) {
+	method, path, ok := strings.Cut(pattern, " ")
+	if !ok || method == "" || strings.ContainsAny(method, "\t\r\n") || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "%?#\\ \t\r\n") {
+		panic(fmt.Sprintf("unsupported module route pattern %q: require METHOD /path", pattern))
+	}
+	rule := moduleMethodRule{path: path, segments: strings.Split(path[1:], "/")}
+	for _, segment := range rule.segments {
+		if segment == "" || segment == "." || segment == ".." {
+			panic(fmt.Sprintf("unsupported module route pattern %q: empty or dot segment", pattern))
+		}
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+			name := segment[1 : len(segment)-1]
+			if name == "" || strings.ContainsAny(name, "{}.$") {
+				panic(fmt.Sprintf("unsupported module route pattern %q: require whole-segment {name}", pattern))
+			}
+			rule.dynamic = true
+		} else if strings.ContainsAny(segment, "{}") {
+			panic(fmt.Sprintf("unsupported module route pattern %q: embedded parameter", pattern))
+		}
+	}
+	return rule, method
+}
+
+func modulePathsOverlap(a, b moduleMethodRule) bool {
+	if len(a.segments) != len(b.segments) {
+		return false
+	}
+	for i, segment := range a.segments {
+		if segment != b.segments[i] && segment[0] != '{' && b.segments[i][0] != '{' {
+			return false
+		}
+	}
+	return true
+}
+
+func (rule moduleMethodRule) matches(path string) bool {
+	if !rule.dynamic {
+		return path == rule.path
+	}
+	// Preserve the old parameter-path Trim/Split contract on URL.Path, not
+	// ServeMux's escaped-segment contract. Never clean or decode the request.
+	path = strings.Trim(path, "/")
+	for _, segment := range rule.segments {
+		part, rest, _ := strings.Cut(path, "/")
+		if part == "" || segment[0] != '{' && part != segment {
+			return false
+		}
+		path = rest
+	}
+	return path == ""
+}
+
+func moduleRouteMethods(rules []moduleMethodRule, path string) (methodSet, bool) {
+	for _, rule := range rules {
+		if rule.matches(path) {
+			return rule.methods, true
+		}
+	}
+	return nil, false
+}
+
+func (s *Server) routeMethods(path string) (methodSet, bool) {
+	if methods, ok := moduleRouteMethods(s.moduleMethods, path); ok {
+		return methods, true
+	}
+	method, ok := legacyRouteMethod(path)
+	if !ok {
+		return nil, false
+	}
+	return methodSet(strings.Split(method, "_OR_")), true
+}
+
 func (s *Server) routeErrors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		expectedMethod, ok := routeMethod(r.URL.Path)
+		methods, ok := s.routeMethods(r.URL.Path)
 		if !ok {
 			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 			return
 		}
-		methodAllowed := r.Method == expectedMethod || expectedMethod == "GET_OR_PUT" && (r.Method == http.MethodGet || r.Method == http.MethodPut) || expectedMethod == "GET_OR_POST" && (r.Method == http.MethodGet || r.Method == http.MethodPost)
-		if !methodAllowed {
-			allow := expectedMethod
-			if expectedMethod == "GET_OR_PUT" {
-				allow = "GET, PUT"
-			} else if expectedMethod == "GET_OR_POST" {
-				allow = "GET, POST"
-			}
-			w.Header().Set("Allow", allow)
+		if !methods.allows(r.Method) {
+			w.Header().Set("Allow", methods.allow())
 			writeProblem(w, r, http.StatusMethodNotAllowed, "https://ocservia.dev/problems/method-not-allowed", "Method not allowed", "the requested method is not supported")
 			return
 		}
@@ -28,7 +146,8 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 	})
 }
 
-func routeMethod(path string) (string, bool) {
+// legacyRouteMethod retains unmigrated routes and value-dependent actions.
+func legacyRouteMethod(path string) (string, bool) {
 	if path == "/api/v1/local-users" {
 		return http.MethodPost, true
 	}
@@ -40,15 +159,13 @@ func routeMethod(path string) (string, bool) {
 		return "", false
 	}
 	switch path {
-	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/operations/summary", "/api/v1/user-operations/metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/methods", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/operations/summary", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/methods", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
 		return http.MethodGet, true
 	case "/api/v1/auth/login":
 		return "GET_OR_POST", true
-	case "/api/v1/nodes":
-		return http.MethodGet, true
 	case "/api/v1/development/simulations":
 		return http.MethodPost, true
-	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/change-password", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
+	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/change-password", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings":
 		return http.MethodPost, true
 	}
 	if path == "/api/v1/secret-provider-refs" {
@@ -76,10 +193,7 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "privd-attestation-credentials" || parts[4] == "privd-attestation-keys:register" || parts[4] == "privd-attestation-keys:revoke") {
 		return http.MethodPost, true
 	}
-	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" {
-		return http.MethodGet, true
-	}
-	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry" || parts[4] == "ip-bans" || parts[4] == "user-group-state") {
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "user-group-state" {
 		return http.MethodGet, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" {
@@ -90,12 +204,6 @@ func routeMethod(path string) (string, bool) {
 	}
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "groups" && parts[5] != "" {
 		return http.MethodPut, true
-	}
-	if len(parts) == 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" && parts[5] != "" && parts[6] == "policy" {
-		return "GET_OR_PUT", true
-	}
-	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "user-batches" && parts[3] != "" {
-		return http.MethodGet, true
 	}
 	if path == "/api/v1/agent-rollouts" {
 		return "GET_OR_POST", true
@@ -109,17 +217,8 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "synthetic-commands" {
 		return http.MethodPost, true
 	}
-	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "config-plans" {
-		return http.MethodPost, true
-	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "certificates" {
 		return "GET_OR_POST", true
-	}
-	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "config-plans" && parts[3] != "" {
-		return http.MethodGet, true
-	}
-	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "config-plans" && parts[3] != "" && parts[4] == "apply" {
-		return http.MethodPost, true
 	}
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "sessions" && (strings.HasSuffix(parts[5], ":disconnect") || strings.HasSuffix(parts[5], ":terminate")) {
 		return http.MethodPost, true

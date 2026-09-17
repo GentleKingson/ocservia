@@ -1,11 +1,15 @@
 package configplanhttp
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/api/httpx"
+)
 
 // Guard authenticates and authorizes the declared action before next.
 type Guard func(string, http.HandlerFunc) http.HandlerFunc
 
-func (h *Handler) Register(mux *http.ServeMux, guard Guard) {
+func (h *Handler) Register(mux httpx.Registrar, guard Guard) {
 	if guard == nil {
 		panic("configplanhttp: authorization guard is required")
 	}

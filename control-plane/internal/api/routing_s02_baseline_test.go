@@ -63,8 +63,8 @@ func TestModuleMethodCompatibility(t *testing.T) {
 		for _, method := range methods {
 			r := baselineRequest(method, path, strings.NewReader("broken JSON"))
 			want, wantOK := s02BaselineRouteMethod(r.URL.Path)
-			got, gotOK := routeMethod(r.URL.Path)
-			if got != want || gotOK != wantOK {
+			got, gotOK := s.routeMethods(r.URL.Path)
+			if got.allow() != strings.ReplaceAll(want, "_OR_", ", ") || gotOK != wantOK {
 				t.Fatalf("%s: rule=%q/%v, baseline=%q/%v", path, got, gotOK, want, wantOK)
 			}
 			w, old := httptest.NewRecorder(), httptest.NewRecorder()
