@@ -37,12 +37,19 @@ func (s *roleTransport) WatchEvents(_ *transportv1.WatchEventsRequest, stream tr
 type maintenanceLog struct {
 	slog.Handler
 	completed chan struct{}
+	failed    chan struct{}
 }
 
 func (h maintenanceLog) Handle(ctx context.Context, record slog.Record) error {
 	if record.Message == "user operations scheduler completed" {
 		select {
 		case h.completed <- struct{}{}:
+		default:
+		}
+	}
+	if record.Message == "policy enforcement cleanup failed; remaining maintenance skipped; retry on next tick" {
+		select {
+		case h.failed <- struct{}{}:
 		default:
 		}
 	}
@@ -76,11 +83,32 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 	if err := Run(ctx, ownerConfig, BuildInfo{}, quietLogger()); err != nil {
 		t.Fatal(err)
 	}
+	owner, err := connection.Open(ctx, ownerOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	runtime, err := connection.Open(ctx, runtimeOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
 
 	for _, role := range []config.Role{config.RoleAPI, config.RoleWorker, config.RoleScheduler, config.RoleAll} {
 		t.Run(string(role), func(t *testing.T) {
 			cfg := runtimeConfig(t, runtimeOptions)
 			cfg.Role, cfg.ControllerEndpointID = role, strings.Repeat("ab", 32)
+			var cleanup *policyCleanupState
+			var completedBefore int
+			if cfg.RunsScheduler() {
+				cfg.TestSchedulerEvidence = true
+				cleanup = seedPolicyCleanup(t, ctx, owner, runtime, runtimeOptions.Backend, account)
+				cleanup.revoke(t, ctx, runtimeOptions.Backend)
+				if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completedBefore); err != nil {
+					t.Fatal(err)
+				}
+			}
 			dir := socketDirectory(t)
 			cfg.TrustSocket, cfg.TransportSocket = filepath.Join(dir, "trust.sock"), filepath.Join(dir, "transport.sock")
 			listener, err := net.Listen("unix", cfg.TransportSocket)
@@ -99,7 +127,7 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 			go func() { served <- grpcServer.Serve(listener) }()
 			defer func() { grpcServer.Stop(); listener.Close(); <-served }()
 			cfg.HTTPAddress = e2eAddress(t)
-			log := maintenanceLog{quietLogger().Handler(), make(chan struct{}, 1)}
+			log := maintenanceLog{quietLogger().Handler(), make(chan struct{}, 1), make(chan struct{}, 1)}
 			runCtx, stop := context.WithCancel(ctx)
 			done := make(chan error, 1)
 			go func() { done <- Run(runCtx, cfg, BuildInfo{}, slog.New(log)) }()
@@ -116,8 +144,8 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 			}()
 			client := &http.Client{Timeout: time.Second}
 			defer client.CloseIdleConnections()
-			ready, maintenance := false, false
-			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+			ready, maintenance, cleanupFailed := false, false, false
+			for deadline := time.Now().Add(65 * time.Second); time.Now().Before(deadline); {
 				select {
 				case err := <-done:
 					finished = true
@@ -126,7 +154,22 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 				}
 				select {
 				case <-log.completed:
+					if cleanup != nil && !cleanupFailed {
+						t.Fatal("cleanup failure logged success")
+					}
 					maintenance = true
+				default:
+				}
+				select {
+				case <-log.failed:
+					cleanupFailed = true
+					var completed int
+					if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil || completed != completedBefore {
+						t.Fatal("failed maintenance wrote completion evidence", completed, err)
+					}
+					if err := owner.GrantRuntimePrivileges(ctx, account); err != nil {
+						t.Fatal(err)
+					}
 				default:
 				}
 				apiReady := !cfg.RunsAPI()
@@ -138,7 +181,15 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 					}
 				}
 				workerReady := !cfg.RunsWorker() || transport.active.Load() == 2
-				if apiReady && workerReady && (!cfg.RunsScheduler() || maintenance) {
+				maintenanceDone := !cfg.RunsScheduler()
+				if maintenance {
+					var completed int
+					if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil {
+						t.Fatal(err)
+					}
+					maintenanceDone = completed > completedBefore
+				}
+				if apiReady && workerReady && maintenanceDone {
 					ready = true
 					break
 				}

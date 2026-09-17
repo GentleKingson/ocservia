@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
+	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 )
 
-// Fixed maintenance steps, not a registry: only rollout errors are nonfatal.
+// Fixed maintenance steps, not a registry: only rollout errors allow the
+// remaining steps in the same pass to continue.
 type maintenanceWork struct {
 	users, rollouts, telemetry, certificates, audit func(context.Context) error
 	evidence                                        func(context.Context, *coordination.Session) error
@@ -60,17 +62,27 @@ type schedulerLeader interface {
 func runScheduler(ctx context.Context, leader schedulerLeader, ticks <-chan time.Time, work maintenanceWork, concurrency int, logger *slog.Logger) error {
 	defer leader.Stop()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		started := time.Now()
 		err := leader.WithSession(ctx, func(sessionCtx context.Context, session *coordination.Session) error {
 			return work.run(sessionCtx, session, started, concurrency, logger)
 		})
 		if err != nil {
+			var cleanup *useroperations.EnforcementCleanupError
+			cleanupFailed := errors.As(err, &cleanup)
+			if cleanupFailed && ctx.Err() != nil {
+				return ctx.Err()
+			}
 			// Renewal loss cancels the session, not the process. Retry on the next tick.
 			leadershipLost := errors.Is(err, coordination.ErrLeadershipLost) ||
 				errors.Is(err, coordination.ErrNotLeader) ||
 				(ctx.Err() == nil && errors.Is(err, context.Canceled))
 			if leadershipLost {
 				logger.WarnContext(ctx, "maintenance session lost leadership", "alert_kind", "scheduler.leadership_lost", "error", err)
+			} else if cleanupFailed {
+				logger.ErrorContext(ctx, "policy enforcement cleanup failed; remaining maintenance skipped; retry on next tick", "alert_kind", "user_operations.cleanup_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
 			} else {
 				logger.ErrorContext(ctx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
 				return err

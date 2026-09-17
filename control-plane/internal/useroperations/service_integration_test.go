@@ -27,14 +27,15 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	ownerPool := pool
-	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" {
-		ownerPool, err = pgxpool.New(ctx, ownerURL)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer ownerPool.Close()
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Fatal("separate owner fixture required; runtime must not act as owner")
 	}
+	ownerPool, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerPool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I14 test',$2,now(),now())`, workspaceID, "i14-"+workspaceID.String()); err != nil {
 		t.Fatal(err)

@@ -42,6 +42,24 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
 )
 
+// EnforcementCleanupError means this maintenance pass did not finish. A later
+// scheduled pass may retry after the underlying permission or storage fault is
+// repaired. Unwrap preserves cancellation and leadership-loss classification.
+type EnforcementCleanupError struct {
+	NodeID        uuid.UUID
+	Username      string
+	PolicyVersion int64
+	Cause         string
+	PeriodStart   value.Timestamp
+	Err           error
+}
+
+func (e *EnforcementCleanupError) Error() string {
+	return fmt.Sprintf("cleanup policy enforcement node=%s user=%q policy_version=%d cause=%s period_start=%v: %v", e.NodeID, e.Username, e.PolicyVersion, e.Cause, e.PeriodStart, e.Err)
+}
+
+func (e *EnforcementCleanupError) Unwrap() error { return e.Err }
+
 type Policy struct {
 	NodeID          uuid.UUID        `json:"node_id"`
 	Username        string           `json:"username"`
@@ -472,7 +490,9 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 				return 0, findErr
 			}
 			if !found {
-				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, false) })
+				if err := s.cleanupEnforcement(ctx, item, false); err != nil {
+					return 0, err
+				}
 				continue
 			}
 			if err := s.withStore(ctx, func(store userstore.Store) error {
@@ -489,7 +509,9 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 				return processed, nil
 			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
-				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, true) })
+				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
+					return 0, err
+				}
 				continue
 			}
 			return 0, mutateErr
@@ -520,6 +542,15 @@ func (s *Service) withStore(ctx context.Context, change func(userstore.Store) er
 		}
 		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
 	})
+}
+
+func (s *Service) cleanupEnforcement(ctx context.Context, item userstore.Candidate, checkSource bool) error {
+	if err := s.withStore(ctx, func(store userstore.Store) error {
+		return store.DeleteEnforcement(ctx, item, checkSource)
+	}); err != nil {
+		return &EnforcementCleanupError{NodeID: item.NodeID, Username: item.Username, PolicyVersion: item.PolicyVersion, Cause: item.Cause, PeriodStart: item.PeriodStart, Err: err}
+	}
+	return nil
 }
 
 func commit(ctx context.Context, tx database.Tx) error {
@@ -575,7 +606,9 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 				return 0, findErr
 			}
 			if !found {
-				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, false) })
+				if err := s.cleanupEnforcement(ctx, item, false); err != nil {
+					return 0, err
+				}
 				continue
 			}
 			if err := s.withStore(ctx, func(store userstore.Store) error {
@@ -592,7 +625,9 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 				return processed, nil
 			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
-				_ = s.withStore(ctx, func(store userstore.Store) error { return store.DeleteEnforcement(ctx, item, true) })
+				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
+					return 0, err
+				}
 				continue
 			}
 			return 0, mutateErr
