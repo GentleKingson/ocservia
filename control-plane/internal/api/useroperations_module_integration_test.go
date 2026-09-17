@@ -158,7 +158,7 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		f.unchanged(before)
 		expired := f.approval(items, true)
 		// Expiry is a fixture clock condition, never a direct approval shortcut.
-		f.exec(`UPDATE approval_requests SET expires_at=$1 WHERE id=$2`, `UPDATE approval_requests SET expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, expired.ID)
+		f.exec(`UPDATE approval_requests SET created_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE approval_requests SET created_at=?,expires_at=? WHERE id=?`, value.Timestamp{Valid: true}, value.Timestamp{Valid: true, Micros: 1}, expired.ID)
 		assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", body, key, f.requester.cookie, approvalHeader(expired.ID.String())), 403, "approval-required")
 		f.approvalState(expired.ID, "approved")
 		f.unchanged(before)
@@ -320,6 +320,7 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		for i, expiry := range []string{`,"expires_at":null`, "", `,"expires_at":"2000-01-01T00:00:00Z"`} {
 			body := fmt.Sprintf(`{"quota_period":"none","quota_direction":"rxtx","quota_bytes":0,"expected_version":%d,"reason":"date paths"%s}`, i+1, expiry)
 			w := f.call("PUT", path, body, uuid.NewString(), f.requester.cookie, nil)
+			got = useroperations.Policy{}
 			assertUserJSON(t, w, 200, &got)
 			if got.Version != int64(i+2) || (got.ExpiresAt == nil) != (i < 2) || got.Expired != (i == 2) {
 				t.Fatal("date semantics", got)
