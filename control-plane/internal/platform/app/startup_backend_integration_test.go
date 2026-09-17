@@ -194,6 +194,11 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
+	t.Run("cleanup-privilege-repair", func(t *testing.T) {
+		checkCleanupCLIRecovery(t, ctx, owner, runtime, runtimeOptions.Backend, account, func() error {
+			return run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only")
+		})
+	})
 	if runtimeOptions.Backend != "postgres" {
 		t.Run("roles-refuse-missing-telemetry-month", func(t *testing.T) {
 			var month []byte

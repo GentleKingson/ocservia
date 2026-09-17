@@ -139,7 +139,9 @@ func TestSchedulerCleanupFailureWaitsForTick(t *testing.T) {
 		cancel()
 		return nil
 	}
-	leader := &schedulerLeaderStub{session: func(ctx context.Context, body func(context.Context, *coordination.Session) error) error { return body(ctx, nil) }}
+	leader := &schedulerLeaderStub{session: func(ctx context.Context, body func(context.Context, *coordination.Session) error) error {
+		return body(ctx, nil)
+	}}
 	done := make(chan error, 1)
 	go func() { done <- runScheduler(ctx, leader, ticks, work, 1, slog.New(log)) }()
 	select {

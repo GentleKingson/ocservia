@@ -21,8 +21,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
+	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	driver "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -74,36 +76,51 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 	if dsn == "" {
 		t.Skip("real PostgreSQL or PR02 backend required")
 	}
-	pool, err := pgxpool.New(ctx, dsn)
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Fatal("separate PostgreSQL owner fixture required; runtime must not act as owner")
+	}
+	admin, err := pgxpool.New(ctx, ownerURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	ownerPool := pool
-	if ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL"); ownerURL != "" {
-		ownerPool, err = pgxpool.New(ctx, ownerURL)
+	t.Cleanup(admin.Close)
+	name := "policy_cleanup_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	identifier := pgx.Identifier{name}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+identifier); err != nil {
+			t.Error(err)
+		}
+	})
+	open := func(url string) *pgxpool.Pool {
+		t.Helper()
+		cfg, err := pgxpool.ParseConfig(url)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(ownerPool.Close)
-	}
-	// PostgreSQL packages share a database. Preserve the fencing epoch, but
-	// leave the singleton expired both before and after this fixture.
-	expireLeadership := func() {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := pool.Exec(ctx, `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`); err != nil {
-			t.Fatalf("expire fixture scheduler leadership: %v", err)
+		cfg.ConnConfig.Database = name
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
 		}
+		t.Cleanup(pool.Close)
+		return pool
 	}
-	t.Cleanup(expireLeadership)
-	expireLeadership()
+	ownerPool, pool := open(ownerURL), open(dsn)
+	if err := migrations.Migrate(ctx, ownerPool); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.GrantRuntimePrivileges(ctx, ownerPool, pool.Config().ConnConfig.User); err != nil {
+		t.Fatal(err)
+	}
 	return postgres.WrapPool(pool), postgres.WrapPool(ownerPool)
 }
 
 func TestUserOperationsBackendIntegration(t *testing.T) {
-	b, owner := userOperationsBackend(t)
+	b, _ := userOperationsBackend(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	_, my := b.(*mysql.Backend)
@@ -158,10 +175,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	mutator := &recordingUserMutator{delegate: users}
 	s := NewBackend(b, mutator)
 	s.now = func() time.Time { return now }
-	// Runtime grants currently omit enforcement DELETE on every backend. Keep
-	// successful workflows restricted; use the existing owner only to observe
-	// the intended cleanup branches, without changing production privileges.
-	policyErrors := NewBackend(owner, mutator)
+	policyErrors := NewBackend(b, mutator)
 	policyErrors.now = s.now
 	checkPolicyErrors := func(t *testing.T, run func(context.Context, int) (int, error), want userstate.MutationRequest, cause string) {
 		t.Helper()
