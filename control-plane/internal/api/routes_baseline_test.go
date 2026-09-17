@@ -26,6 +26,7 @@ const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
 
 // Behavior frozen at de26ea4: pattern | handler/wrapper | method rule | permission.
 // PR-03 changes only the five nodehttp handler/wrapper expressions.
+// F-1 restores the registered ConfigPlan Apply route's POST method rule.
 // "self" identifies endpoint validation, not requireOperationAuth. This is a
 // test inventory, never an input to production routing or authorization.
 const routeBaseline = `GET /livez|s.live|GET|public
@@ -84,7 +85,7 @@ POST /api/v1/agent-rollouts/{rollout_id}/resume|s.requireOperationAuth(s.resumeA
 GET /api/v1/user-operations/metrics|s.requireOperationAuth(s.userOperationMetrics)|GET|operation.read
 POST /api/v1/nodes/{node_id}/config-plans|s.requireOperationAuth(s.createConfigPlan)|POST|config.plan
 GET /api/v1/config-plans/{plan_id}|s.requireOperationAuth(s.getConfigPlan)|GET|config.review
-POST /api/v1/config-plans/{plan_id}/apply|s.requireOperationAuth(s.applyConfigPlan)|unreachable|config.apply
+POST /api/v1/config-plans/{plan_id}/apply|s.requireOperationAuth(s.applyConfigPlan)|POST|config.apply
 POST /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.createCertificate)|GET, POST|certificate.issue
 GET /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.listNodeCertificates)|GET, POST|certificate.read
 GET /api/v1/certificates/{certificate_id}|s.requireOperationAuth(s.getCertificate)|GET|certificate.read
@@ -217,21 +218,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 				path += ":approve"
 			}
 			r := baselineRequest(method, path, nil)
-			// Existing routeMethod omission: registered, but every method is
-			// rejected before authentication. Fixing that is outside this PR.
-			if allow == "unreachable" {
-				for _, method := range []string{"GET", "POST", "HEAD", "OPTIONS", "BREW"} {
-					w := httptest.NewRecorder()
-					s.http.Handler.ServeHTTP(w, baselineRequest(method, path, nil))
-					assertBaselineProblem(t, w, path, 404, "not-found", "Resource not found", "the requested resource does not exist")
-					if w.Header().Get("Allow") != "" {
-						t.Fatal(w.Header())
-					}
-				}
-				if routeAction(r) != permission {
-					t.Fatal("apply action changed")
-				}
-				return
+			if rule, ok := routeMethod(path); !ok || strings.ReplaceAll(rule, "_OR_", ", ") != allow {
+				t.Fatalf("registered route is unreachable: %s (%q)", pattern, rule)
 			}
 			w := httptest.NewRecorder()
 			s.http.Handler.ServeHTTP(w, r)

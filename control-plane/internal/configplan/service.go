@@ -241,7 +241,7 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 		if err != nil {
 			return err
 		}
-		input, err = store.ApplyInput(ctx, request.PlanID)
+		input, err = store.ApplyInput(ctx, request.PlanID, request.IdempotencyKey)
 		return err
 	}); err != nil {
 		return operations.Operation{}, false, err
