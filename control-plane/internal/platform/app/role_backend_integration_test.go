@@ -94,6 +94,9 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 	}
 	defer runtime.Close()
 	installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
+	t.Run("HTTP-assembly", func(t *testing.T) {
+		testHTTPServerAssembly(t, runtimeConfig(t, runtimeOptions), owner, runtime)
+	})
 
 	for _, role := range []config.Role{config.RoleAPI, config.RoleWorker, config.RoleScheduler, config.RoleAll} {
 		t.Run(string(role), func(t *testing.T) {
@@ -231,13 +234,17 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 			}
 		})
 	}
-	for _, failure := range []string{"late-construction", "HTTP-bind"} {
+	for _, failure := range []string{"late-construction", "SSE-configuration", "authentication-configuration", "HTTP-bind"} {
 		t.Run(failure, func(t *testing.T) {
 			cfg := runtimeConfig(t, runtimeOptions)
 			cfg.Role, cfg.ControllerEndpointID = config.RoleAll, strings.Repeat("ab", 32)
 			cfg.TrustSocket = filepath.Join(socketDirectory(t), "trust.sock")
 			if failure == "late-construction" {
 				cfg.CertificateSignerURL = "invalid-signer-url"
+			} else if failure == "SSE-configuration" {
+				cfg.EventStreams.Watchers = 0
+			} else if failure == "authentication-configuration" {
+				cfg.LocalAuth, cfg.SessionKey = true, nil
 			} else {
 				listener, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {
@@ -250,6 +257,10 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 			want := "configure external certificate signer"
 			if failure == "HTTP-bind" {
 				want = "serve HTTP"
+			} else if failure == "SSE-configuration" {
+				want = "configure SSE admission"
+			} else if failure == "authentication-configuration" {
+				want = "configure authentication"
 			}
 			if err == nil || !strings.Contains(err.Error(), want) || errors.Is(err, context.Canceled) {
 				t.Fatalf("wrong failure cause: %v", err)

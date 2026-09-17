@@ -79,7 +79,7 @@ regression-auth internal/api TestConfigPlanLookupBackendHTTPIntegration
 regression-auth internal/api TestConfigPlanLookupBackendHTTPIntegration/authority-resources-before-legacy-fallback
 regression-auth internal/api TestConfigPlanLookupBackendHTTPIntegration/approval-plan-checks
 regression-auth internal/api TestConfigPlanModuleBackendHTTPIntegration
-regression-auth internal/api TestConfigPlanModuleBackendHTTPIntegration/late-injection-and-nil
+regression-auth internal/api TestConfigPlanModuleBackendHTTPIntegration/construction-and-nil
 regression-auth internal/api TestConfigPlanModuleBackendHTTPIntegration/secret-service-unconfigured
 regression-auth internal/api TestConfigPlanModuleBackendHTTPIntegration/secret-denials-stop-before-create
 regression-auth internal/api TestConfigPlanModuleBackendHTTPIntegration/valid-secret-submission
@@ -238,6 +238,13 @@ unit internal/auth TestPasswordWriteEntrypointsRejectBeforeDatabase
 unit internal/auth TestLocalAccountLogReference
 unit internal/api TestDecodeStrictJSONUTF8
 unit internal/api TestHTTPRouteInventory
+unit internal/api TestHTTPConstruction
+unit internal/api TestHTTPConstructionTypedNil
+unit internal/api TestHTTPConstructionRejectsInvalidSSE
+unit internal/api TestHTTPAssemblyBoundary
+unit internal/api TestConfiguredHubsShareGlobalWatcherBudget
+unit internal/api TestStreamAdmissionWrites429BeforeSSEHeaders
+unit internal/api TestStreamGlobalOverloadWrites503BeforeSSEHeaders
 unit internal/api TestConfigPlanApplyHTTPRoute
 unit internal/api TestConfigPlanApplyHTTPPathBoundaries
 unit internal/api TestNodeHTTPBoundary
@@ -306,6 +313,8 @@ unit internal/platform/app TestLifecycleSimultaneousFailures
 unit internal/platform/app TestLifecycleFailureProcessExit
 unit internal/platform/app TestWorkerRoleAssembly
 unit internal/platform/app TestWorkerPartialStartupClosesTrust
+unit internal/platform/app TestHTTPAssemblyFailureOwnership
+unit internal/platform/app TestNonAPIRolesSkipHTTPConstruction
 unit internal/api TestShutdownDoesNotReopenEventStreams
 unit internal/api TestShutdownTimeoutClosesConnections
 unit internal/api TestShutdownWaitsForTimedOutHandler
@@ -323,6 +332,9 @@ backend-controller-startup internal/platform/app TestControllerRoleLifecycleBack
 backend-controller-startup internal/platform/app TestControllerRoleLifecycleBackendIntegration/all
 backend-controller-startup internal/platform/app TestControllerRoleLifecycleBackendIntegration/late-construction
 backend-controller-startup internal/platform/app TestControllerRoleLifecycleBackendIntegration/HTTP-bind
+backend-controller-startup internal/platform/app TestControllerRoleLifecycleBackendIntegration/HTTP-assembly
+backend-controller-startup internal/platform/app TestControllerRoleLifecycleBackendIntegration/SSE-configuration
+backend-controller-startup internal/platform/app TestControllerRoleLifecycleBackendIntegration/authentication-configuration
 unit internal/platform/config TestLocalBootstrapConfig
 unit internal/platform/config TestBootstrapSecretFileProtection
 unit internal/platform/config TestProductionAuthenticationConfiguration

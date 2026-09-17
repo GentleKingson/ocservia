@@ -19,18 +19,6 @@ type configPlanLookup interface {
 var _ configPlanLookup = (*configplan.Service)(nil)
 var _ configplanhttp.Plans = (*configplan.Service)(nil)
 
-// EnableConfigPlans supplies two capability views of the same instance before
-// HTTP starts. Convert typed nil explicitly and clear both views together.
-func (s *Server) EnableConfigPlans(service *configplan.Service) {
-	if service == nil {
-		s.configPlanHTTP.SetPlans(nil)
-		s.configPlanLookup = nil
-		return
-	}
-	s.configPlanHTTP.SetPlans(service)
-	s.configPlanLookup = service
-}
-
 func configPlanRequestInfo(r *http.Request) configplanhttp.RequestInfo {
 	actor := principal(r)
 	return configplanhttp.RequestInfo{
@@ -39,8 +27,8 @@ func configPlanRequestInfo(r *http.Request) configplanhttp.RequestInfo {
 	}
 }
 
-// Resolve startup configuration at request time: Certificates and RBAC may be
-// injected after ConfigPlans. This adapter grants no other Server capabilities.
+// Dependencies are fixed before binding this adapter; resource and permission
+// queries remain live on every request. It grants no other Server capabilities.
 func (s *Server) allowConfigPlanSecret(w http.ResponseWriter, r *http.Request, id uuid.UUID) bool {
 	if s.certificates == nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service unavailable", "secret reference service is unavailable")

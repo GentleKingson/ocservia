@@ -119,8 +119,7 @@ func TestHTTPStrictJSONBaseline(t *testing.T) {
 func TestHTTPConfigPlanValidationBaseline(t *testing.T) {
 	for _, route := range []string{"/api/v1/nodes/" + baselineID + "/config-plans", "/api/v1/config-plans/" + baselineID + "/apply"} {
 		for _, key := range []string{"", " \t ", " fixture-key "} {
-			s := baselineServer(t, true)
-			s.EnableConfigPlans(&configplan.Service{})
+			s := newTestServer(t, testHTTPConfig(true), nil, Modules{ConfigPlans: &configplan.Service{}}, Authorization{})
 			r := baselineRequest("POST", route, strings.NewReader("{"))
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Idempotency-Key", key)
@@ -134,8 +133,7 @@ func TestHTTPConfigPlanValidationBaseline(t *testing.T) {
 		}
 	}
 	for _, id := range []string{baselineID, strings.ReplaceAll(baselineID, "-", ""), "urn:uuid:" + baselineID, "{" + baselineID + "}", "invalid", "519fc0a4-6d92-465c-a8a1-4af556614cc3"} {
-		s := baselineServer(t, true)
-		s.EnableConfigPlans(&configplan.Service{})
+		s := newTestServer(t, testHTTPConfig(true), nil, Modules{ConfigPlans: &configplan.Service{}}, Authorization{})
 		// Directly setting RawPath is unnecessary: the request URL parser retains
 		// the baseline's accepted UUID spellings in the segment.
 		r := baselineRequest("POST", "/api/v1/nodes/"+id+"/config-plans", nil)

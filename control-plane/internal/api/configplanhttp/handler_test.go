@@ -89,10 +89,7 @@ func TestConfigPlanHTTPResponses(t *testing.T) {
 	for _, replay := range []bool{false, true} {
 		t.Run(fmt.Sprint(replay), func(t *testing.T) {
 			calls := []string{}
-			h := New(func(*http.Request) RequestInfo { return testInfo }, nil)
-			mux := testMux(h)
-			// The mux retains the stable Handler, not the nil service at registration.
-			h.SetPlans(fakePlans{
+			h := New(fakePlans{
 				create: func(_ context.Context, got configplan.CreateRequest) (configplan.Plan, bool, error) {
 					calls = append(calls, "create")
 					want := configplan.CreateRequest{NodeID: id, ExpectedRevision: 7, Template: configplan.Template{Name: "unit", Directives: []configplan.Directive{{Name: "tcp-port", Value: "${port}"}}}, NodeVariables: map[string]string{"port": "443"}, TTL: 15 * time.Minute, IdempotencyKey: "key", ActorID: testInfo.ActorID, ActorIdentityID: testInfo.ActorIdentityID, ActorSessionID: testInfo.ActorSessionID, RequestID: testInfo.RequestID, Traceparent: testInfo.Traceparent, Reason: "review"}
@@ -116,7 +113,8 @@ func TestConfigPlanHTTPResponses(t *testing.T) {
 					}
 					return op, replay, nil
 				},
-			})
+			}, func(*http.Request) RequestInfo { return testInfo }, nil)
+			mux := testMux(h)
 			for _, tc := range []struct {
 				method, path, body, location string
 				status                       int
@@ -168,9 +166,8 @@ func TestConfigPlanHTTPErrors(t *testing.T) {
 		{errors.Join(database.ErrNotFound, configplan.ErrInvalid), 400, "config-plan-invalid", "the template, variables, revision, or lifetime is invalid"},
 	} {
 		t.Run(tc.err.Error(), func(t *testing.T) {
-			h := New(func(*http.Request) RequestInfo { return testInfo }, nil)
 			err := fmt.Errorf("wrapped: %w", tc.err)
-			h.SetPlans(fakePlans{
+			h := New(fakePlans{
 				create: func(context.Context, configplan.CreateRequest) (configplan.Plan, bool, error) {
 					return configplan.Plan{}, true, err
 				},
@@ -178,7 +175,7 @@ func TestConfigPlanHTTPErrors(t *testing.T) {
 				apply: func(context.Context, configplan.ApplyRequest) (operations.Operation, bool, error) {
 					return operations.Operation{}, true, err
 				},
-			})
+			}, func(*http.Request) RequestInfo { return testInfo }, nil)
 			mux := testMux(h)
 			for _, r := range []*http.Request{request("POST", createPath, createBody, "key", "application/json"), request("GET", getPath, "", "", ""), request("POST", applyPath, applyBody, "key", "application/json")} {
 				problem(t, serve(mux, r), tc.status, tc.kind, tc.detail)
@@ -211,17 +208,17 @@ func TestConfigPlanHTTPValidationOrder(t *testing.T) {
 		{"apply-identity-body", "POST", applyPath, `{"session_id":"forged"}`, "key", "application/json", true, 400, "invalid-request", "request body is invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := New(func(*http.Request) RequestInfo { t.Fatal("validation reached identity"); return RequestInfo{} }, nil)
+			var plans Plans
 			if tc.enabled {
-				h.SetPlans(fakePlans{})
+				plans = fakePlans{}
 			}
+			h := New(plans, func(*http.Request) RequestInfo { t.Fatal("validation reached identity"); return RequestInfo{} }, nil)
 			problem(t, serve(testMux(h), request(tc.method, tc.path, tc.body, tc.key, tc.media)), tc.status, tc.kind, tc.detail)
 		})
 	}
 	for _, body := range []string{"{\"reason\":\"\xff\"}", `{} {}`, `{"unknown":1}`} {
 		for _, path := range []string{createPath, applyPath} {
-			h := New(func(*http.Request) RequestInfo { t.Fatal("invalid JSON reached identity"); return RequestInfo{} }, nil)
-			h.SetPlans(fakePlans{})
+			h := New(fakePlans{}, func(*http.Request) RequestInfo { t.Fatal("invalid JSON reached identity"); return RequestInfo{} }, nil)
 			problem(t, serve(testMux(h), request("POST", path, body, "key", "application/json")), 400, "invalid-request", "")
 		}
 	}
@@ -245,14 +242,13 @@ func TestConfigPlanHTTPSecretOrder(t *testing.T) {
 					return true
 				}
 			}
-			h := New(func(*http.Request) RequestInfo { return testInfo }, check)
-			h.SetPlans(fakePlans{create: func(_ context.Context, got configplan.CreateRequest) (configplan.Plan, bool, error) {
+			h := New(fakePlans{create: func(_ context.Context, got configplan.CreateRequest) (configplan.Plan, bool, error) {
 				created++
 				if len(got.Template.Directives) != 3 || got.Template.Directives[0].SecretRef.ID != first || got.Template.Directives[2].SecretRef.ID != second {
 					t.Fatal("directive order changed")
 				}
 				return configplan.Plan{ID: first}, false, nil
-			}})
+			}}, func(*http.Request) RequestInfo { return testInfo }, check)
 			w := serve(testMux(h), request("POST", createPath, body, "key", "application/json"))
 			switch failAt {
 			case -1:
@@ -277,12 +273,12 @@ func TestConfigPlanHTTPSecretOrder(t *testing.T) {
 func TestConfigPlanHTTPContext(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), struct{}{}, "marker"), time.Now().Add(time.Minute))
 	defer cancel()
-	h := New(func(r *http.Request) RequestInfo {
+	info := func(r *http.Request) RequestInfo {
 		if r.Context() != ctx {
 			t.Error("identity context replaced")
 		}
 		return testInfo
-	}, nil)
+	}
 	check := func(got context.Context) {
 		if got != ctx || got.Value(struct{}{}) != "marker" {
 			t.Error("service context replaced")
@@ -296,7 +292,7 @@ func TestConfigPlanHTTPContext(t *testing.T) {
 			t.Error("cancellation lost")
 		}
 	}
-	h.SetPlans(fakePlans{
+	h := New(fakePlans{
 		create: func(c context.Context, _ configplan.CreateRequest) (configplan.Plan, bool, error) {
 			check(c)
 			return configplan.Plan{}, false, c.Err()
@@ -309,7 +305,7 @@ func TestConfigPlanHTTPContext(t *testing.T) {
 			check(c)
 			return operations.Operation{}, false, c.Err()
 		},
-	})
+	}, info, nil)
 	mux := testMux(h)
 	cancel()
 	for _, r := range []*http.Request{request("POST", createPath, createBody, "key", "application/json"), request("GET", getPath, "", "", ""), request("POST", applyPath, applyBody, "key", "application/json")} {
@@ -318,8 +314,8 @@ func TestConfigPlanHTTPContext(t *testing.T) {
 }
 
 func TestConfigPlanHTTPRequiredCapabilities(t *testing.T) {
-	for _, run := range []func(){func() { New(nil, nil) }, func() {
-		New(func(*http.Request) RequestInfo { return testInfo }, nil).Register(http.NewServeMux(), nil)
+	for _, run := range []func(){func() { New(nil, nil, nil) }, func() {
+		New(nil, func(*http.Request) RequestInfo { return testInfo }, nil).Register(http.NewServeMux(), nil)
 	}} {
 		func() {
 			defer func() {
@@ -330,8 +326,7 @@ func TestConfigPlanHTTPRequiredCapabilities(t *testing.T) {
 			run()
 		}()
 	}
-	h := New(func(*http.Request) RequestInfo { t.Fatal("denied guard entered Handler"); return RequestInfo{} }, nil)
-	h.SetPlans(fakePlans{})
+	h := New(fakePlans{}, func(*http.Request) RequestInfo { t.Fatal("denied guard entered Handler"); return RequestInfo{} }, nil)
 	mux := http.NewServeMux()
 	var actions []string
 	h.Register(mux, func(action string, _ http.HandlerFunc) http.HandlerFunc {

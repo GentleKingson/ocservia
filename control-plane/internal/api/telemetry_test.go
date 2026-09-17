@@ -46,8 +46,12 @@ func TestTelemetryHistoryErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(&logs, nil)), 1024, time.Second, true, "", 36)
-			server.EnableTelemetry(telemetry.NewBackend(postgres.WrapPool(pool)))
+			config := testHTTPConfig(true)
+			config.BodyLimit, config.RequestTimeout = 1024, time.Second
+			server, err := NewServer(config, nil, BuildInfo{}, slog.New(slog.NewTextHandler(&logs, nil)), Modules{Nodes: telemetry.NewBackend(postgres.WrapPool(pool))}, Authorization{})
+			if err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()

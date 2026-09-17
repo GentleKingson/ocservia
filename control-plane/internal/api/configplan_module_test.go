@@ -3,8 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -12,31 +10,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/api/configplanhttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 )
 
 type observedConfigPlans struct {
-	configplanhttp.Plans
+	ConfigPlans
 	creates, gets, applies atomic.Int64
 }
 
 func (p *observedConfigPlans) Create(ctx context.Context, r configplan.CreateRequest) (configplan.Plan, bool, error) {
 	p.creates.Add(1)
-	return p.Plans.Create(ctx, r)
+	return p.ConfigPlans.Create(ctx, r)
 }
 func (p *observedConfigPlans) Get(ctx context.Context, id uuid.UUID) (configplan.Plan, error) {
 	p.gets.Add(1)
-	return p.Plans.Get(ctx, id)
+	return p.ConfigPlans.Get(ctx, id)
 }
 func (p *observedConfigPlans) Apply(ctx context.Context, r configplan.ApplyRequest) (operations.Operation, bool, error) {
 	p.applies.Add(1)
-	return p.Plans.Apply(ctx, r)
+	return p.ConfigPlans.Apply(ctx, r)
 }
 
 type blockedConfigPlans struct {
+	ConfigPlans
 	started  chan context.Context
 	canceled chan error
 	release  chan struct{}
@@ -75,12 +73,13 @@ func TestConfigPlanHTTPContextLifetime(t *testing.T) {
 				if cancelRequest {
 					timeout = time.Second
 				}
-				s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, timeout, true, "", 36)
 				plans := &blockedConfigPlans{started: make(chan context.Context, 1), canceled: make(chan error, 1), release: make(chan struct{})}
+				config := testHTTPConfig(true)
+				config.BodyLimit, config.RequestTimeout = 1024, timeout
+				s := newTestServer(t, config, nil, Modules{ConfigPlans: plans}, Authorization{})
 				var once sync.Once
 				release := func() { once.Do(func() { close(plans.release) }) }
 				t.Cleanup(func() { release(); _ = s.Shutdown(context.Background()) })
-				s.configPlanHTTP.SetPlans(plans)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				done := make(chan *httptest.ResponseRecorder, 1)
