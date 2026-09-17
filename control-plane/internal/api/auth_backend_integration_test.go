@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -171,9 +169,7 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if _, err = service.CreateLocalCredential(ctx, name, password); !errors.Is(err, database.ErrUnique) {
 		t.Fatalf("duplicate credential: %v", err)
 	}
-	server := NewBackend("127.0.0.1:0", backend, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 36)
-	server.auth = service
-	server.EnableBrowserOrigin(authTestOrigin)
+	server := newTestServer(t, testHTTPConfig(false), backend, Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(backend), Approvals: approvals.NewBackend(backend)})
 	login := func(password string) *httptest.ResponseRecorder {
 		return authHTTPRequest(server, "POST", "login", `{"username":"`+name+`","password":"`+password+`"}`, authTestOrigin)
 	}
@@ -273,7 +269,6 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if admin.IdentityID != adminID {
 		t.Fatal("wrong bootstrap principal")
 	}
-	server.EnableAuthorization(service, rbac.NewBackend(backend), approvals.NewBackend(backend), nil)
 	for _, node := range []string{"invalid", uuid.Must(uuid.NewV7()).String()} {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/"+node, nil)
 		r.AddCookie(adminCookie)

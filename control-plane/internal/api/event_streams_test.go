@@ -3,8 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,19 +40,9 @@ func TestStreamAdmissionWrites429BeforeSSEHeaders(t *testing.T) {
 }
 
 func TestStreamGlobalOverloadWrites503BeforeSSEHeaders(t *testing.T) {
-	server, _, principal, workspaceID := streamAdmissionFixture(t)
-	server.eventStreamsMu.Lock()
-	config := server.eventConfig
-	server.eventStreamsMu.Unlock()
-	config.GlobalStreams = 1
-	config.IdentityStreams = 1
-	config.SessionStreams = 1
-	config.WorkspaceStreams = 1
-	config.ResourceStreams = 1
-	config.Watchers = 1
-	if err := server.ConfigureEventStreams(config); err != nil {
-		t.Fatal(err)
-	}
+	server, _, principal, workspaceID := streamAdmissionFixture(t, func(config *eventstream.Config) {
+		config.GlobalStreams, config.WorkspaceStreams, config.ResourceStreams, config.Watchers = 1, 1, 1, 1
+	})
 	lease, err := server.eventAdmission.Acquire(eventAdmissionKey(principal, workspaceID, "held"))
 	if err != nil {
 		t.Fatal(err)
@@ -73,11 +61,7 @@ func TestStreamGlobalOverloadWrites503BeforeSSEHeaders(t *testing.T) {
 }
 
 func TestConfiguredHubsShareGlobalWatcherBudget(t *testing.T) {
-	server, config, _, _ := streamAdmissionFixture(t)
-	config.Watchers = 1
-	if err := server.ConfigureEventStreams(config); err != nil {
-		t.Fatal(err)
-	}
+	server, _, _, _ := streamAdmissionFixture(t, func(config *eventstream.Config) { config.Watchers = 1 })
 	platform, err := server.platformEvents.Subscribe(context.Background(), "workspace-a", uuid.Nil)
 	if err != nil {
 		t.Fatal(err)
@@ -153,9 +137,8 @@ func TestEventStreamCursorSupportsAfterAndLastEventID(t *testing.T) {
 	}
 }
 
-func streamAdmissionFixture(t *testing.T) (*Server, eventstream.Config, auth.Principal, uuid.UUID) {
+func streamAdmissionFixture(t *testing.T, configure ...func(*eventstream.Config)) (*Server, eventstream.Config, auth.Principal, uuid.UUID) {
 	t.Helper()
-	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	config := eventstream.DefaultConfig()
 	config.GlobalStreams = 2
 	config.IdentityStreams = 1
@@ -163,10 +146,12 @@ func streamAdmissionFixture(t *testing.T) (*Server, eventstream.Config, auth.Pri
 	config.WorkspaceStreams = 2
 	config.ResourceStreams = 2
 	config.Watchers = 2
-	if err := server.ConfigureEventStreams(config); err != nil {
-		t.Fatal(err)
+	for _, set := range configure {
+		set(&config)
 	}
-	t.Cleanup(server.closeEventStreams)
+	httpConfig := testHTTPConfig(false)
+	httpConfig.EventStreams = config
+	server := newTestServer(t, httpConfig, nil, Modules{}, Authorization{})
 	principal := auth.Principal{IdentityID: uuid.Must(uuid.NewV7()), SessionID: uuid.Must(uuid.NewV7()), ExpiresAt: time.Now().Add(time.Hour)}
 	return server, config, principal, uuid.Must(uuid.NewV7())
 }

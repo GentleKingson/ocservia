@@ -313,3 +313,78 @@ idempotency and actor/session/request/audit linkage, not real Agent execution.
 The three second-round HTTP modules do not make all APIs modular or create a
 runtime security boundary. Central resource authorization, other concrete Server
 services, shared domain types and existing transactions intentionally remain.
+
+## Single-pass HTTP assembly (S-01)
+
+Base: `533f7b41e0e46ed81068b1bbc6fb8165ec8e0d27` (#224).
+The late-injection descriptions above record their respective historical
+baselines. S-01 replaces those assembly tests with construction scenarios; it
+does not classify all historical startup setters as vulnerabilities.
+
+`api.NewServer(HTTPConfig, backend, build, logger, Modules, Authorization)` is
+the single core constructor. The compatibility `NewBackend` delegates with
+explicit default SSE values and disabled optional modules/authentication; it
+cannot be completed through business setters. Deployment assembly uses
+`newHTTPServer`, not that compatibility wrapper.
+
+`runRoles` still creates and configures the shared business instances, Transport
+and Owner Fencing and starts only the selected Worker/Scheduler tasks. Non-API
+roles return before authentication or HTTP construction. For API roles:
+
+1. Validate the final SSE configuration and construct authentication.
+2. Establish parent RBAC, approvals, audit, Certificates and Plan lookup.
+3. Construct node, ConfigPlan and UserOperations handlers with final narrow
+   interfaces and authenticated request accessors.
+4. Create one admission manager and one watcher budget shared by the platform
+   and operation hubs, then register the original routes and middleware.
+5. Transfer Shutdown ownership to lifecycle immediately, finish the remaining
+   non-module startup adapters, and return the complete Server for listening.
+
+`Modules.ConfigPlans` is one combined construction capability, split into
+`Plans.Create/Get/Apply` and `configPlanLookup.Get/Resource`; consumers cannot
+receive different instances. `Authorization.RBAC` supplies both the parent
+guard and the batch module's `Node/Authorize` view. Known concrete typed-nil
+Services are normalized at this boundary. Nil means disabled, not a substitute
+Service or a constructor error. Request accessors and registration Guards
+retain their required-capability contracts. Modules and Server do not retain
+the assembly input structures.
+
+The Secret adapter is bound after Certificates, RBAC and devAuth are fixed.
+It still queries current resources and permissions on every request, including
+the historical `s.devAuth` exception. No SecretRef needs no Certificates service;
+missing services return 503, while lookup, workspace and permission failures
+retain their denial order. Browser Origin normalization and trusted-proxy slice
+copying are unchanged. Telemetry recommendation/catalog, UserOperations
+concurrency, scheduler sharing and Operations/ConfigPlan sharing are preserved.
+
+SSE requires an explicit valid `eventstream.Config`; callers choosing defaults
+use `DefaultConfig()`. Invalid or partial configuration returns an error and no
+Server, never a silent fallback. There is no public SSE reconfiguration or
+request-time lazy constructor. Hubs start polling only upon subscription.
+Static constructor-site checks complement component identity, nondefault limit,
+shared-budget recovery, independent-Server and closed-subscription tests.
+
+All reachable configuration failures occur before allocating HTTP resources.
+The SSE constructor still closes any already-created manager/hub on an error.
+Successful construction transfers ownership before listening, so later startup
+failures and normal shutdown use the existing lifecycle. HTTP owns only its
+listener, tracked handlers and SSE, not the shared database or domain services.
+Closed objects remain installed; Shutdown still drains inner TimeoutHandler
+work and closes connections on deadline. Synchronization and SSE admission,
+backoff, cursor, revalidation and response-header order remain unchanged.
+
+The ordinary Go group covers construction, typed nil, copied inputs, boundaries,
+SSE and failure ownership. The existing four-backend Controller startup group
+now includes `HTTP-assembly`, `SSE-configuration` and
+`authentication-configuration`. The production `newHTTPServer` test uses a real
+Local login and restricted runtime, checks all three modules on their first
+requests, nondefault SSE admission/Retry-After, live role revocation and stream
+revalidation. It stays inside the isolated startup database. Existing HTTP
+fixtures construct separate Servers over their persisted identities/business
+objects instead of swapping dependencies, retaining F-1/F-2, approval, rollback,
+replay, scheduling and cancellation assertions.
+
+The inventory remains 72 routes and 13 explicit actions. Other startup adapters
+and LocalSlice runtime state remain intentional. S-02 method rules, new handler
+extraction, domain refactors, generated contracts and release readiness are not
+part of this change. Executed SHA-bound evidence belongs in the Draft PR.

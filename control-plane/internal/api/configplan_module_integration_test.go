@@ -24,13 +24,15 @@ func TestConfigPlanModuleBackendHTTPIntegration(t *testing.T) {
 	f := newApplyHTTPFixture(t)
 	plan := f.plan(true)
 	service := f.s.configPlanLookup.(*configplan.Service)
-	handler := f.s.configPlanHTTP
 	path := "/api/v1/nodes/" + plan.NodeID.String() + "/config-plans"
 	plainBody := `{"expected_revision":0,"template":{"name":"module","directives":[{"name":"tcp-port","value":"443"}]},"ttl_seconds":900,"reason":"module request"}`
-	t.Run("late-injection-and-nil", func(t *testing.T) {
-		f.s.EnableConfigPlans(nil)
-		if f.s.configPlanLookup != nil || f.s.configPlanHTTP != handler {
-			t.Fatal("typed nil or replaced Handler")
+	t.Run("construction-and-nil", func(t *testing.T) {
+		f := f
+		f.t = t
+		var disabled *configplan.Service
+		f.s = f.newServer(Modules{ConfigPlans: disabled})
+		if f.s.configPlanLookup != nil {
+			t.Fatal("typed nil retained in lookup")
 		}
 		for _, route := range []struct {
 			method, path string
@@ -47,22 +49,22 @@ func TestConfigPlanModuleBackendHTTPIntegration(t *testing.T) {
 				assertApplyHTTPProblem(t, f.call(route.method, route.path, "{", "", f.requester.cookie, func(r *http.Request) { r.Header.Set("Origin", "https://untrusted.example") }), 403, "cross-origin-request")
 			}
 		}
-		f.s.EnableConfigPlans(service)
-		if f.s.configPlanLookup != service || f.s.configPlanHTTP != handler {
-			t.Fatal("same startup instance not restored")
+		f.s = f.newServer(Modules{ConfigPlans: service})
+		if f.s.configPlanLookup != service {
+			t.Fatal("construction did not preserve the shared service")
 		}
 		w := f.call("GET", "/api/v1/config-plans/"+plan.ID.String(), "", "", f.requester.cookie, nil)
 		if w.Code != 200 {
-			t.Fatalf("restored read: %d %s", w.Code, w.Body)
+			t.Fatalf("first read: %d %s", w.Code, w.Body)
 		}
 		// Certificates is still absent; a request without SecretRef must submit.
 		w = f.call("POST", path, plainBody, uuid.NewString(), f.requester.cookie, nil)
 		if w.Code != 202 {
-			t.Fatalf("restored Create without Secrets: %d %s", w.Code, w.Body)
+			t.Fatalf("Create without Secrets: %d %s", w.Code, w.Body)
 		}
 	})
-	plans := &observedConfigPlans{Plans: service}
-	f.s.configPlanHTTP.SetPlans(plans)
+	plans := &observedConfigPlans{ConfigPlans: service}
+	f.s = f.newServer(Modules{ConfigPlans: plans})
 	secretBody := func(ids ...uuid.UUID) string {
 		directives := []configplan.Directive{}
 		for i, id := range ids {
@@ -80,9 +82,9 @@ func TestConfigPlanModuleBackendHTTPIntegration(t *testing.T) {
 			t.Fatal("missing Secret service reached Create")
 		}
 	})
-	// Production enables Certificates after ConfigPlans and route registration.
+	// Secret capability is bound only after Certificates and RBAC are fixed.
 	certs := certificates.NewBackend(f.b, f.s.operations, nil, nil, nil, f.signer)
-	f.s.EnableCertificates(certs)
+	f.s = f.newServer(Modules{ConfigPlans: plans, Certificates: certs})
 	foreign := uuid.Must(uuid.NewV7())
 	stamp := value.Timestamp{Valid: true}
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Secret module',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Secret module',?,?,?)`, foreign, foreign.String(), stamp, stamp)
@@ -161,9 +163,8 @@ func TestConfigPlanModuleBackendHTTPIntegration(t *testing.T) {
 		if f.s.allowConfigPlanSecret(w, r, refs[0]) || w.Code != 403 {
 			t.Fatal("Local principal gained secret.use")
 		}
-		f.s.devAuth = true
-		defer func() { f.s.devAuth = false }()
-		if !f.s.allowConfigPlanSecret(httptest.NewRecorder(), r, refs[0]) {
+		dev := newTestServer(t, testHTTPConfig(true), f.b, Modules{ConfigPlans: plans, Certificates: certs}, Authorization{RBAC: f.s.rbac})
+		if !dev.allowConfigPlanSecret(httptest.NewRecorder(), r, refs[0]) {
 			t.Fatal("development mode was replaced by issuer check")
 		}
 	})

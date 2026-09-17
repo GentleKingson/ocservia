@@ -3,8 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -64,13 +62,13 @@ func TestUserOperationsHTTPContextLifetime(t *testing.T) {
 				if cancelRequest {
 					timeout = time.Second
 				}
-				s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, timeout, true, "", 36)
 				plans := &blockedUserOperations{started: make(chan context.Context, 1), canceled: make(chan error, 1), release: make(chan struct{})}
 				var once sync.Once
 				release := func() { once.Do(func() { close(plans.release) }) }
-				t.Cleanup(func() { release(); _ = s.Shutdown(context.Background()) })
-				s.userOpsHTTP.SetOperations(plans)
-				s.userOpsHTTP.SetAuthorizer(rbac.NewBackend(nil))
+				config := testHTTPConfig(true)
+				config.BodyLimit, config.RequestTimeout = 1024, timeout
+				s := newTestServer(t, config, nil, Modules{UserOperations: plans}, Authorization{RBAC: rbac.NewBackend(nil)})
+				t.Cleanup(release)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				done := make(chan *httptest.ResponseRecorder, 1)

@@ -3,9 +3,9 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -15,12 +15,59 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 )
 
 type baselineBlockedDatabase struct {
 	database.Backend
 	started, release, finished chan struct{}
+	events                     *baselineEventStore
+}
+
+func (b *baselineBlockedDatabase) Begin(context.Context, database.Isolation) (database.Tx, error) {
+	return baselineEventTx{events: b.events}, nil
+}
+
+type baselineEventTx struct {
+	database.Tx
+	events *baselineEventStore
+}
+
+func (tx baselineEventTx) Commit(context.Context) error         { return nil }
+func (tx baselineEventTx) Rollback(context.Context) error       { return nil }
+func (tx baselineEventTx) OperationStore() operationstore.Store { return tx.events }
+
+type baselineEventStore struct {
+	operationstore.Store
+	emit          chan struct{}
+	first, second uuid.UUID
+}
+
+func (s *baselineEventStore) Events(ctx context.Context, operationID, after uuid.UUID, _ int) ([]operationstore.Event, error) {
+	select {
+	case <-s.emit:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if after == s.second {
+		return nil, nil
+	}
+	return []operationstore.Event{{ID: s.second.String(), OperationID: operationID.String(), Sequence: 2, State: "running"}}, nil
+}
+
+func (s *baselineEventStore) EventSequence(_ context.Context, _, id uuid.UUID) (int64, error) {
+	if id == s.first {
+		return 1, nil
+	}
+	if id == s.second {
+		return 2, nil
+	}
+	return 0, database.ErrNotFound
+}
+
+func (s *baselineEventStore) Get(context.Context, uuid.UUID) (operationstore.Operation, error) {
+	return operationstore.Operation{State: "running"}, nil
 }
 
 func (b *baselineBlockedDatabase) Ping(ctx context.Context) error {
@@ -37,39 +84,18 @@ func (*baselineBlockedDatabase) ControllerSchema(context.Context, int64) (int64,
 
 func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	b := &baselineBlockedDatabase{started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
-	s := NewBackend("127.0.0.1:0", b, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, 20*time.Millisecond, true, "", 36)
+	config := testHTTPConfig(true)
+	config.BodyLimit, config.RequestTimeout = 1024, 20*time.Millisecond
+	config.EventStreams.PollInterval = 100 * time.Millisecond
+	s := newTestServer(t, config, b, Modules{}, Authorization{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(b.release) }) }
 	t.Cleanup(func() { release(); _ = s.Shutdown(context.Background()) })
-	s.EnableOperations(&operations.Service{})
+	s.EnableOperations(operations.NewBackend(b, 50, nil))
 	first, second := uuid.MustParse(baselineID), uuid.MustParse("019fc0a4-6d92-765c-a8a1-4af556614cc4")
 	emit := make(chan struct{})
-	config := eventstream.DefaultConfig()
-	config.PollInterval = 100 * time.Millisecond
-	hub, err := eventstream.NewHub(config, func(ctx context.Context, scope string, after uuid.UUID, limit int) ([]eventstream.Event, error) {
-		select {
-		case <-emit:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-		if after == second {
-			return nil, nil
-		}
-		return []eventstream.Event{{ID: second, Sequence: 2, Name: "operation", Data: []byte(`{"state":"running"}`)}}, nil
-	}, func(ctx context.Context, scope string, id uuid.UUID) (uint64, error) {
-		if id == first {
-			return 1, nil
-		}
-		if id == second {
-			return 2, nil
-		}
-		return 0, eventstream.ErrInvalidCursor
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.operationEvents.Close()
-	s.operationEvents = hub
+	b.events = &baselineEventStore{emit: emit, first: first, second: second}
+	hub := s.operationEvents
 	server := httptest.NewServer(s.http.Handler)
 	t.Cleanup(server.Close)
 	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -98,7 +124,11 @@ func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	}
 	close(emit)
 	reader := bufio.NewReader(stream.Body)
-	for _, want := range []string{"id: " + second.String() + "\n", "event: operation\n", "data: {\"state\":\"running\"}\n", "\n"} {
+	eventJSON, err := json.Marshal(operationstore.Event{ID: second.String(), OperationID: baselineID, State: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"id: " + second.String() + "\n", "event: operation\n", "data: " + string(eventJSON) + "\n", "\n"} {
 		line, err := reader.ReadString('\n')
 		if err != nil || line != want {
 			t.Fatalf("SSE frame: %q want %q: %v", line, want, err)

@@ -559,9 +559,9 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, 15*time.Second, false, "", 1)
-	server.EnableBrowserOrigin("https://admin.example.test")
-	server.EnableAuthorization(authService, rbac.NewBackend(postgres.WrapPool(pool)), approvalstore.NewBackend(postgres.WrapPool(pool)), nil)
+	config := testHTTPConfig(false)
+	config.BodyLimit, config.ExpectedSchema = 1024, 1
+	server := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: authService, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvalstore.NewBackend(postgres.WrapPool(pool))})
 	server.EnableOperations(apiOperationService(pool))
 
 	do := func(method, path, origin, fetchSite, contentType, cookie, idempotencyKey, body string) *httptest.ResponseRecorder {

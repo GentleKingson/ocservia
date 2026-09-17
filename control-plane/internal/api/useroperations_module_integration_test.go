@@ -35,7 +35,7 @@ func newUserOperationsHTTPFixture(t *testing.T) userOperationsHTTPFixture {
 	f := userOperationsHTTPFixture{applyHTTPFixture: newApplyHTTPFixtureWithBackend(t, b, owner)}
 	users := userstate.NewWithSignerBackend(b, f.signer)
 	f.service = useroperations.NewWithConcurrencyBackend(b, users, 1)
-	f.s.EnableUserOperations(f.service)
+	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlanLookup.(ConfigPlans), UserOperations: f.service})
 	f.node, f.sibling = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, node := range []uuid.UUID{f.node, f.sibling} {
 		stamp := value.Timestamp{Valid: true}
@@ -389,20 +389,20 @@ func TestUserOperationsHTTPAssemblyBackendIntegration(t *testing.T) {
 	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'Viewer','workspace',?)`, uuid.Must(uuid.NewV7()), f.reader.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
 	path := "/api/v1/nodes/" + f.node.String() + "/users/alice/policy"
 	body := userBatchBody(t, []useroperations.BatchItemRequest{{NodeID: f.node, Username: "alice", Action: "enable", ExpectedVersion: 1}})
-	for _, serviceFirst := range []bool{false, true} {
-		t.Run(fmt.Sprintf("service-first=%v", serviceFirst), func(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configured=%v", enabled), func(t *testing.T) {
 			f := f
 			f.t = t
 			before := f.counts()
-			authn, authz, approvals, audit := f.s.auth, f.s.rbac, f.s.approvals, f.s.audit
-			f.s.EnableUserOperations(nil)
-			f.s.EnableAuthorization(nil, nil, approvals, audit)
+			authorization := Authorization{Authentication: f.s.auth, RBAC: f.s.rbac, Approvals: f.s.approvals, Audit: f.s.audit}
+			f.s = newTestServer(t, testHTTPConfig(false), f.b, Modules{}, Authorization{})
 			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", "{", "", f.requester.cookie, nil), 401, "unauthenticated")
-			if serviceFirst {
-				f.s.EnableUserOperations(f.service)
+			modules := Modules{}
+			if enabled {
+				modules.UserOperations = f.service
 			}
-			f.s.EnableAuthorization(authn, authz, approvals, audit)
-			if !serviceFirst {
+			f.s = newTestServer(t, testHTTPConfig(false), f.b, modules, authorization)
+			if !enabled {
 				assertApplyHTTPProblem(t, f.call("GET", "/api/v1/user-operations/metrics", "", "", f.reader.cookie, nil), 503, "service-unavailable")
 				for _, route := range []struct{ method, path string }{{"GET", path}, {"PUT", path}, {"POST", "/api/v1/user-batches"}, {"GET", "/api/v1/user-batches/" + uuid.Must(uuid.NewV7()).String()}} {
 					assertApplyHTTPProblem(t, f.call(route.method, route.path, "{", "", f.requester.cookie, nil), 503, "service-unavailable")
@@ -410,24 +410,21 @@ func TestUserOperationsHTTPAssemblyBackendIntegration(t *testing.T) {
 				assertApplyHTTPProblem(t, f.call("PUT", path, "{", "", f.reader.cookie, nil), 403, "forbidden")
 				assertApplyHTTPProblem(t, f.call("GET", path, "", "", nil, nil), 401, "unauthenticated")
 				assertApplyHTTPProblem(t, f.call("GET", "/api/v1/nodes/bad/users/alice/policy", "", "", f.requester.cookie, nil), 404, "not-found")
-				f.s.EnableUserOperations(f.service)
+				f.s = newTestServer(t, testHTTPConfig(false), f.b, Modules{UserOperations: f.service}, authorization)
 			}
 			f.unchanged(before)
 			var batch useroperations.Batch
 			assertUserJSON(t, f.call("POST", "/api/v1/user-batches", body, uuid.NewString(), f.requester.cookie, nil), 202, &batch)
 			assertUserJSON(t, f.call("GET", "/api/v1/user-batches/"+batch.ID.String(), "", "", f.requester.cookie, nil), 200, nil)
 			var nilService *useroperations.Service
-			f.s.EnableUserOperations(nilService)
+			f.s = newTestServer(t, testHTTPConfig(false), f.b, Modules{UserOperations: nilService}, authorization)
 			assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.requester.cookie, nil), 503, "service-unavailable")
-			f.s.EnableUserOperations(f.service)
 			var nilRBAC *rbac.Service
-			f.s.EnableAuthorization(authn, nilRBAC, approvals, audit)
+			authorization.RBAC = nilRBAC
 			// Development bypasses the entry guard but still needs a real batch
 			// authorizer. This detects a stale or typed-nil module capability.
-			f.s.devAuth = true
+			f.s = newTestServer(t, testHTTPConfig(true), f.b, Modules{UserOperations: f.service}, authorization)
 			assertApplyHTTPProblem(t, f.call("POST", "/api/v1/user-batches", "{", "", nil, nil), 503, "service-unavailable")
-			f.s.devAuth = false
-			f.s.EnableAuthorization(authn, authz, approvals, audit)
 		})
 	}
 }
