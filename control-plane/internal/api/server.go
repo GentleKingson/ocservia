@@ -71,6 +71,7 @@ type Server struct {
 	userstate        *userstate.Service
 	useroperations   *useroperations.Service
 	configplans      *configplan.Service
+	configPlanLookup configPlanLookup
 	certificates     *certificates.Service
 	privdAttestation *privdattestation.Service
 	eventStreamsMu   sync.Mutex
@@ -136,7 +137,14 @@ func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = ser
 
 func (s *Server) EnableUserOperations(service *useroperations.Service) { s.useroperations = service }
 
-func (s *Server) EnableConfigPlans(service *configplan.Service) { s.configplans = service }
+func (s *Server) EnableConfigPlans(service *configplan.Service) {
+	s.configplans = service
+	if service == nil {
+		s.configPlanLookup = nil
+		return
+	}
+	s.configPlanLookup = service
+}
 
 func (s *Server) EnableCertificates(service *certificates.Service) { s.certificates = service }
 

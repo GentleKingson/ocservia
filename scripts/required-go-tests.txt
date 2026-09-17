@@ -65,6 +65,9 @@ regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/tenant/
 regression-auth internal/api TestAuthenticationBackendHTTPIntegration
+regression-auth internal/api TestConfigPlanLookupBackendHTTPIntegration
+regression-auth internal/api TestConfigPlanLookupBackendHTTPIntegration/authority-resources-before-legacy-fallback
+regression-auth internal/api TestConfigPlanLookupBackendHTTPIntegration/approval-plan-checks
 regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration
 regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/authentication-and-origin
 regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/distinct-policy-and-plan-actions
