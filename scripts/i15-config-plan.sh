@@ -11,7 +11,7 @@ if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; th
   exit 2
 fi
 if [[ "${MODE}" == "full" ]]; then
-  (cd "${ROOT}/control-plane" && go test ./internal/configplan ./internal/api ./internal/operations -count=1)
+  (cd "${ROOT}/control-plane" && go test ./internal/configplan ./internal/api ./internal/api/configplanhttp ./internal/api/httpx ./internal/operations -count=1)
   (cd "${ROOT}/rust" && cargo test -p ocservia-agent-protocol -p ocservia-ocserv-adapter -p ocservia-privd -p ocservia-agent)
 fi
 
