@@ -65,6 +65,14 @@ regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/tenant/
 regression-auth internal/api TestAuthenticationBackendHTTPIntegration
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/authentication-and-origin
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/distinct-policy-and-plan-actions
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/resource-and-workspace-boundaries
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/batch-per-item-and-reader
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/explicit-action-input
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/secret-resource-boundaries
+regression-auth internal/api TestBusinessRouteActionsBackendHTTPIntegration/legacy-dynamic-and-sse
 regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration
 regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/noncanonical-paths
 regression-auth internal/api TestConfigPlanApplyBackendHTTPIntegration/authorization-and-input

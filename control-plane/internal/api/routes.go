@@ -79,17 +79,17 @@ func (s *Server) registerUserRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users", s.requireOperationAuth(s.createUser))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users/{user_action}", s.requireOperationAuth(s.userAction))
 	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/groups/{group_name}", s.requireOperationAuth(s.applyGroup))
-	mux.HandleFunc("GET /api/v1/nodes/{node_id}/users/{username}/policy", s.requireOperationAuth(s.getUserPolicy))
-	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/users/{username}/policy", s.requireOperationAuth(s.setUserPolicy))
-	mux.HandleFunc("POST /api/v1/user-batches", s.requireOperationAuth(s.createUserBatch))
-	mux.HandleFunc("GET /api/v1/user-batches/{batch_id}", s.requireOperationAuth(s.getUserBatch))
-	mux.HandleFunc("GET /api/v1/user-operations/metrics", s.requireOperationAuth(s.userOperationMetrics))
+	mux.HandleFunc("GET /api/v1/nodes/{node_id}/users/{username}/policy", s.requireActionAuth("node.read", s.getUserPolicy))
+	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/users/{username}/policy", s.requireActionAuth("user.manage", s.setUserPolicy))
+	mux.HandleFunc("POST /api/v1/user-batches", s.requireActionAuth("user.manage", s.createUserBatch))
+	mux.HandleFunc("GET /api/v1/user-batches/{batch_id}", s.requireActionAuth("operation.read", s.getUserBatch))
+	mux.HandleFunc("GET /api/v1/user-operations/metrics", s.requireActionAuth("operation.read", s.userOperationMetrics))
 }
 
 func (s *Server) registerConfigPlanRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/nodes/{node_id}/config-plans", s.requireOperationAuth(s.createConfigPlan))
-	mux.HandleFunc("GET /api/v1/config-plans/{plan_id}", s.requireOperationAuth(s.getConfigPlan))
-	mux.HandleFunc("POST /api/v1/config-plans/{plan_id}/apply", s.requireOperationAuth(s.applyConfigPlan))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/config-plans", s.requireActionAuth("config.plan", s.createConfigPlan))
+	mux.HandleFunc("GET /api/v1/config-plans/{plan_id}", s.requireActionAuth("config.review", s.getConfigPlan))
+	mux.HandleFunc("POST /api/v1/config-plans/{plan_id}/apply", s.requireActionAuth("config.apply", s.applyConfigPlan))
 }
 
 func (s *Server) registerCertificateRoutes(mux *http.ServeMux) {
