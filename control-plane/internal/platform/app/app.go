@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/api"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
@@ -19,7 +20,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
-	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
@@ -164,24 +164,18 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		return life.wait()
 	}
 
-	server, err := newHTTPServer(life, cfg, build, backend, auditManager, expectedSchemaVersion, logger)
+	services := httpServices{
+		modules:    api.Modules{Nodes: telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService},
+		operations: operationService, releaseCatalog: releaseCatalog, userState: userStateService, localSlice: sliceService,
+	}
+	if cfg.ControllerEndpointID != "" {
+		services.enrollment = enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
+		services.transport, services.fences = controlTransport, fenceExecutor
+	}
+	server, err := newHTTPServer(life, cfg, build, backend, auditManager, expectedSchemaVersion, logger, services)
 	if err != nil {
 		return err
 	}
-	server.EnableOperations(operationService)
-	server.EnableReleaseCatalog(releaseCatalog)
-	server.EnableUserState(userStateService)
-	server.EnableUserOperations(userOperationsService)
-	server.EnableConfigPlans(configplan.NewBackend(backend, operationService))
-	server.EnableCertificates(certificateService)
-	server.EnablePrivdAttestation(privdattestation.NewBackend(backend))
-	server.EnableTelemetry(telemetryService)
-	if cfg.ControllerEndpointID != "" {
-		server.EnableEnrollment(enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner), controlTransport)
-		server.EnableOwnerFencing(fenceExecutor)
-	}
-	server.EnableLocalSlice(sliceService)
-	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)
 	life.start("serve HTTP", func(context.Context) error { return server.ListenAndServe() })
 	return life.wait()
 }

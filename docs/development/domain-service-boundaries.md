@@ -68,8 +68,8 @@ ConfigPlan routes live in `internal/api/configplanhttp`, not on `api.Server`.
 | Consumer | Consumer-owned capability | Assembly and retained behavior |
 | --- | --- | --- |
 | `configplanhttp.Handler` | `Plans.Create/Get/Apply`, original domain values/errors | A stable Handler receives the existing ConfigPlan instance before HTTP starts; the original request context reaches the domain methods unchanged |
-| Parent authorization and approval creation | `configPlanLookup.Get/Resource` | `EnableConfigPlans` exposes a read-only view of that same instance and explicitly clears both views on nil; no duplicate Service or Plan state |
-| ConfigPlan request parsing | Authenticated actor/identity/session/request/trace values and a single-reference Secret-use function | Existing parent context conversion and authorized workspace checks; the adapter sees Certificates/RBAC injected later at startup |
+| Parent authorization and approval creation | `configPlanLookup.Get/Resource` | S-01 `NewServer` derives both views from one ConfigPlans input and normalizes concrete typed nil; no duplicate Service or Plan state |
+| ConfigPlan request parsing | Authenticated actor/identity/session/request/trace values and a single-reference Secret-use function | Existing parent context conversion and authorized workspace checks; S-01 fixes Certificates/RBAC before binding the adapter, while resource/permission queries remain live |
 
 The parent still owns centralized resource authorization, all saved approval
 authority checks and legacy fallback, plus approval HTTP creation/decisions.

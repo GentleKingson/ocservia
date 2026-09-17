@@ -20,16 +20,12 @@ type Handler struct {
 }
 
 // New requires access to the workspace already selected by the authorization guard.
-func New(logger *slog.Logger, workspace func(*http.Request) uuid.UUID) *Handler {
+func New(reader Reader, logger *slog.Logger, workspace func(*http.Request) uuid.UUID) *Handler {
 	if workspace == nil {
 		panic("nodehttp: authorized workspace accessor is required")
 	}
-	return &Handler{logger: logger, workspace: workspace}
+	return &Handler{reader: reader, logger: logger, workspace: workspace}
 }
-
-// SetReader configures reads at startup, before serving requests. A nil reader
-// keeps the routes registered with their existing unavailable responses.
-func (h *Handler) SetReader(reader Reader) { h.reader = reader }
 
 func (h *Handler) listNodes(w http.ResponseWriter, r *http.Request) {
 	if h.reader == nil {

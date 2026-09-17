@@ -67,8 +67,8 @@ func fixtureInfo() RequestInfo {
 	return RequestInfo{Principal: auth.Principal{IdentityID: uuid.Must(uuid.NewV7()), SessionID: uuid.Must(uuid.NewV7()), Issuer: auth.LocalIssuer, BreakGlass: true}, WorkspaceID: uuid.Must(uuid.NewV7()), ActorID: "operator", RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", ApprovalID: uuid.Must(uuid.NewV7())}
 }
 
-func module(info *RequestInfo) (*Handler, *http.ServeMux) {
-	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), func(*http.Request) RequestInfo { return *info })
+func module(info *RequestInfo, operations Operations, authorizer Authorizer) (*Handler, *http.ServeMux) {
+	h := New(operations, authorizer, func(*http.Request) RequestInfo { return *info }, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	mux := http.NewServeMux()
 	h.Register(mux, func(_ string, next http.HandlerFunc) http.HandlerFunc { return next })
 	return h, mux
@@ -101,7 +101,6 @@ func problem(t *testing.T, w *httptest.ResponseRecorder, status int, kind, detai
 
 func TestUserOperationsHTTPContracts(t *testing.T) {
 	info := fixtureInfo()
-	h, mux := module(&info)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	checkContext := func(got context.Context) {
@@ -114,7 +113,7 @@ func TestUserOperationsHTTPContracts(t *testing.T) {
 	batch := useroperations.Batch{ID: nodeID, WorkspaceID: info.WorkspaceID, ActorIdentityID: &info.Principal.IdentityID}
 	expires, _ := time.Parse(time.RFC3339, "2030-01-02T03:04:05.123456Z")
 	var calls []string
-	h.SetOperations(operationsStub{
+	operations := operationsStub{
 		getPolicy: func(c context.Context, id uuid.UUID, name string) (useroperations.Policy, error) {
 			checkContext(c)
 			calls = append(calls, "getPolicy")
@@ -157,8 +156,8 @@ func TestUserOperationsHTTPContracts(t *testing.T) {
 			}
 			return useroperations.Metrics{}, nil
 		},
-	})
-	h.SetAuthorizer(authorizerStub{
+	}
+	authorizer := authorizerStub{
 		node: func(c context.Context, id uuid.UUID) (rbac.Resource, error) {
 			checkContext(c)
 			if id != nodeID {
@@ -173,7 +172,8 @@ func TestUserOperationsHTTPContracts(t *testing.T) {
 			}
 			return nil
 		},
-	})
+	}
+	_, mux := module(&info, operations, authorizer)
 	for _, tc := range []struct {
 		method, path, body     string
 		status                 int
@@ -208,15 +208,14 @@ func TestUserOperationsHTTPValidation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := fixtureInfo()
-			h, mux := module(&info)
 			called := false
-			h.SetOperations(operationsStub{setPolicy: func(_ context.Context, r useroperations.PolicyRequest) (useroperations.Policy, bool, error) {
+			_, mux := module(&info, operationsStub{setPolicy: func(_ context.Context, r useroperations.PolicyRequest) (useroperations.Policy, bool, error) {
 				called = true
 				if (r.ExpiresAt == nil) != (tc.name == "absent" || tc.name == "null") {
 					t.Fatal("expiry presence", r.ExpiresAt)
 				}
 				return useroperations.Policy{Version: 1}, false, nil
-			}})
+			}}, nil)
 			w := call(mux, t.Context(), "PUT", policyPath, `{"reason":"test"`+tc.expiry+`}`, "key")
 			if called != tc.accepted {
 				t.Fatal("service entry", called)
@@ -231,9 +230,7 @@ func TestUserOperationsHTTPValidation(t *testing.T) {
 		})
 	}
 	info := fixtureInfo()
-	h, mux := module(&info)
-	h.SetOperations(operationsStub{}) // Any unexpected domain entry panics.
-	h.SetAuthorizer(authorizerStub{})
+	_, mux := module(&info, operationsStub{}, authorizerStub{}) // Any unexpected domain entry panics.
 	for _, tc := range []struct {
 		method, path, body, key, media string
 		status                         int
@@ -265,13 +262,12 @@ func TestUserOperationsHTTPAuthorization(t *testing.T) {
 	for _, mode := range []string{"per-item", "development", "missing-node", "foreign-node"} {
 		t.Run(mode, func(t *testing.T) {
 			info := fixtureInfo()
-			h, mux := module(&info)
 			second := uuid.Must(uuid.NewV7())
 			called, checks := false, 0
 			if mode == "development" {
 				info.Principal.Issuer = "development"
 			}
-			h.SetAuthorizer(authorizerStub{
+			authorizer := authorizerStub{
 				node: func(c context.Context, id uuid.UUID) (rbac.Resource, error) {
 					if c != t.Context() {
 						t.Fatal("node context lost")
@@ -297,14 +293,14 @@ func TestUserOperationsHTTPAuthorization(t *testing.T) {
 					}
 					return nil
 				},
-			})
-			h.SetOperations(operationsStub{createBatch: func(_ context.Context, r useroperations.BatchRequest) (useroperations.Batch, bool, error) {
+			}
+			_, mux := module(&info, operationsStub{createBatch: func(_ context.Context, r useroperations.BatchRequest) (useroperations.Batch, bool, error) {
 				called = true
 				if len(r.Items) != 3 || r.Items[0].NodeID != nodeID || !r.Items[0].Authorized || r.Items[1].NodeID != second || r.Items[1].Authorized != (mode == "development") || r.Items[2].NodeID != nodeID || r.Items[2].ExpectedVersion != 8 {
 					t.Fatal("item order/authorization/version changed", r.Items)
 				}
 				return useroperations.Batch{ID: nodeID}, false, nil
-			}})
+			}}, authorizer)
 			body := fmt.Sprintf(`{"items":[{"node_id":%q},{"node_id":%q},{"node_id":%q,"expected_version":8}]}`, nodeID, second, nodeID)
 			w := call(mux, t.Context(), "POST", "/api/v1/user-batches", body, "key")
 			if mode == "missing-node" || mode == "foreign-node" {
@@ -323,7 +319,6 @@ func TestUserOperationsHTTPAuthorization(t *testing.T) {
 	for _, mode := range []string{"creator", "development", "reader", "denied", "lookup-error", "foreign", "missing-authorizer", "authorization-not-found"} {
 		t.Run(mode, func(t *testing.T) {
 			info := fixtureInfo()
-			h, mux := module(&info)
 			checks := 0
 			batch := useroperations.Batch{ID: nodeID, WorkspaceID: info.WorkspaceID}
 			if mode == "creator" {
@@ -335,14 +330,15 @@ func TestUserOperationsHTTPAuthorization(t *testing.T) {
 			if mode == "foreign" {
 				batch.WorkspaceID = uuid.Nil
 			}
-			h.SetOperations(operationsStub{getBatch: func(context.Context, uuid.UUID) (useroperations.Batch, error) {
+			operations := operationsStub{getBatch: func(context.Context, uuid.UUID) (useroperations.Batch, error) {
 				if mode == "lookup-error" {
 					return batch, errors.New("storage")
 				}
 				return batch, nil
-			}})
+			}}
+			var authorizer Authorizer
 			if mode != "missing-authorizer" {
-				h.SetAuthorizer(authorizerStub{authorize: func(c context.Context, id uuid.UUID, action string, r rbac.Resource, glass bool) error {
+				authorizer = authorizerStub{authorize: func(c context.Context, id uuid.UUID, action string, r rbac.Resource, glass bool) error {
 					checks++
 					if c != t.Context() || id != info.Principal.IdentityID || action != "operation.read" || r != (rbac.Resource{WorkspaceID: info.WorkspaceID, Type: "workspace"}) || !glass {
 						t.Fatal("workspace check inputs")
@@ -354,8 +350,9 @@ func TestUserOperationsHTTPAuthorization(t *testing.T) {
 						return database.ErrNotFound
 					}
 					return nil
-				}})
+				}}
 			}
+			_, mux := module(&info, operations, authorizer)
 			w := call(mux, t.Context(), "GET", batchPath, "", "")
 			switch mode {
 			case "lookup-error", "foreign":
@@ -399,10 +396,9 @@ func TestUserOperationsHTTPErrors(t *testing.T) {
 	} {
 		t.Run(tc.err.Error(), func(t *testing.T) {
 			info := fixtureInfo()
-			h, mux := module(&info)
-			h.SetOperations(operationsStub{getPolicy: func(context.Context, uuid.UUID, string) (useroperations.Policy, error) {
+			_, mux := module(&info, operationsStub{getPolicy: func(context.Context, uuid.UUID, string) (useroperations.Policy, error) {
 				return useroperations.Policy{}, fmt.Errorf("wrapped: %w", tc.err)
-			}})
+			}}, nil)
 			problem(t, call(mux, t.Context(), "GET", policyPath, "", ""), tc.status, tc.kind, tc.detail)
 		})
 	}
@@ -410,11 +406,11 @@ func TestUserOperationsHTTPErrors(t *testing.T) {
 
 func TestUserOperationsHTTPRequiredCapabilities(t *testing.T) {
 	info := fixtureInfo()
-	h, mux := module(&info)
+	h, mux := module(&info, nil, nil)
 	for _, route := range []struct{ method, path string }{{"GET", policyPath}, {"PUT", policyPath}, {"POST", "/api/v1/user-batches"}, {"GET", batchPath}, {"GET", "/api/v1/user-operations/metrics"}} {
 		problem(t, call(mux, t.Context(), route.method, route.path, "{", ""), 503, "service-unavailable", "user operations service is unavailable")
 	}
-	h.SetOperations(operationsStub{})
+	h, mux = module(&info, operationsStub{}, nil)
 	problem(t, call(mux, t.Context(), "POST", "/api/v1/user-batches", "{", ""), 503, "service-unavailable", "user operations service is unavailable")
 	for _, missing := range []string{"guard", "request-info"} {
 		t.Run(missing, func(t *testing.T) {
@@ -426,7 +422,7 @@ func TestUserOperationsHTTPRequiredCapabilities(t *testing.T) {
 			if missing == "guard" {
 				h.Register(http.NewServeMux(), nil)
 			} else {
-				New(slog.Default(), nil)
+				New(nil, nil, nil, slog.Default())
 			}
 		})
 	}

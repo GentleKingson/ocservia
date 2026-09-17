@@ -48,10 +48,9 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 	if _, err := attestationtest.InstallKey(ctx, pool, node); err != nil {
 		t.Fatal(err)
 	}
-	s := baselineServer(t, true)
 	ops := apiOperationService(pool)
+	s := newTestServer(t, testHTTPConfig(true), postgres.WrapPool(pool), Modules{ConfigPlans: configplan.NewBackend(postgres.WrapPool(pool), ops)}, Authorization{})
 	s.EnableOperations(ops)
-	s.EnableConfigPlans(configplan.NewBackend(postgres.WrapPool(pool), ops))
 	path := "/api/v1/nodes/" + node.String() + "/config-plans"
 	body := `{"expected_revision":0,"template":{"name":"baseline","directives":[{"name":"tcp-port","value":"443"}]},"ttl_seconds":900,"reason":"HTTP baseline"}`
 	post := func(key string) *httptest.ResponseRecorder {

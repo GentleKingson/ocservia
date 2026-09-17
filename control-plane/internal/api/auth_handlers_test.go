@@ -8,8 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,9 +42,9 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, issuer stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewBackend("127.0.0.1:0", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 1)
-	s.auth = service
-	s.EnableBrowserOrigin(authTestOrigin)
+	config := testHTTPConfig(false)
+	config.ExpectedSchema = 1
+	s := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvals.NewBackend(postgres.WrapPool(pool))})
 	return s
 }
 
@@ -459,7 +457,6 @@ func assertAuthenticationAuthorizationParity(t *testing.T, s *Server, pool *pgxp
 	if err != nil || actor.BreakGlass {
 		t.Fatalf("ordinary principal: %+v %v", actor, err)
 	}
-	s.EnableAuthorization(s.auth, rbac.NewBackend(postgres.WrapPool(pool)), approvals.NewBackend(postgres.WrapPool(pool)), nil)
 	workspaceID, targetID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'P6 parity',$2,now(),now())`, workspaceID, "parity-"+workspaceID.String()); err != nil {
 		t.Fatal(err)

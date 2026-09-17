@@ -16,14 +16,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// ConfigureEventStreams installs validated capacity limits before the HTTP
-// server starts. Reconfiguration closes any old watcher set instead of leaving
-// orphaned database polling behind.
-func (s *Server) ConfigureEventStreams(config eventstream.Config) error {
-	return s.configureEventStreams(config)
-}
-
-func (s *Server) configureEventStreams(config eventstream.Config) error {
+// initEventStreams is called only by NewServer, before ownership is transferred.
+func (s *Server) initEventStreams(config eventstream.Config) error {
 	manager, err := eventstream.NewManager(config)
 	if err != nil {
 		return err
@@ -44,49 +38,13 @@ func (s *Server) configureEventStreams(config eventstream.Config) error {
 		platformHub.Close()
 		return err
 	}
-	s.eventStreamsMu.Lock()
-	oldManager, oldPlatform, oldOperation := s.eventAdmission, s.platformEvents, s.operationEvents
 	s.eventConfig, s.eventAdmission, s.platformEvents, s.operationEvents = config, manager, platformHub, operationHub
-	s.eventStreamsMu.Unlock()
-	if oldManager != nil {
-		oldManager.Close()
-	}
-	if oldPlatform != nil {
-		oldPlatform.Close()
-	}
-	if oldOperation != nil {
-		oldOperation.Close()
-	}
 	return nil
 }
 
 func (s *Server) eventStreamComponents(operation bool) (eventstream.Config, *eventstream.Manager, *eventstream.Hub) {
 	s.eventStreamsMu.Lock()
 	defer s.eventStreamsMu.Unlock()
-	if s.eventAdmission == nil {
-		config := eventstream.DefaultConfig()
-		manager, err := eventstream.NewManager(config)
-		if err != nil {
-			panic(err)
-		}
-		budget, err := eventstream.NewWatcherBudget(config.Watchers)
-		if err != nil {
-			manager.Close()
-			panic(err)
-		}
-		platform, err := eventstream.NewHubWithWatcherBudget(config, budget, s.fetchPlatformEvents, s.resolvePlatformEventCursor)
-		if err != nil {
-			manager.Close()
-			panic(err)
-		}
-		operations, err := eventstream.NewHubWithWatcherBudget(config, budget, s.fetchOperationEvents, s.resolveOperationEventCursor)
-		if err != nil {
-			manager.Close()
-			platform.Close()
-			panic(err)
-		}
-		s.eventConfig, s.eventAdmission, s.platformEvents, s.operationEvents = config, manager, platform, operations
-	}
 	if operation {
 		return s.eventConfig, s.eventAdmission, s.operationEvents
 	}
@@ -96,8 +54,7 @@ func (s *Server) eventStreamComponents(operation bool) (eventstream.Config, *eve
 func (s *Server) closeEventStreams() {
 	s.eventStreamsMu.Lock()
 	manager, platform, operations := s.eventAdmission, s.platformEvents, s.operationEvents
-	// Retain closed admission/hubs so an in-flight request cannot lazily
-	// create a new watcher set while HTTP shutdown is draining requests.
+	// Retain closed admission/hubs so late requests observe their closed state.
 	s.eventStreamsMu.Unlock()
 	if manager != nil {
 		manager.Close()

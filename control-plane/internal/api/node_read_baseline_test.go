@@ -60,12 +60,9 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	}
 	binding := uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'PlatformAdmin','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'PlatformAdmin','workspace',?)`, binding, identity, ws, stamp)
-	s := baselineServer(t, false)
-	s.backend = b
-	s.EnableAuthorization(authn, rbac.NewBackend(b), nil, nil)
+	authorization := Authorization{Authentication: authn, RBAC: rbac.NewBackend(b)}
 	var disabled *telemetry.Service
-	s.EnableTelemetry(disabled)
-	s.EnableBrowserOrigin(authTestOrigin)
+	s := newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: disabled}, authorization)
 	login := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":%q}`, username, password), authTestOrigin)
 	if login.Code != 204 || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("login: %d %s", login.Code, login.Body)
@@ -108,7 +105,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	foreignPath := "/api/v1/nodes/" + ids[51].String()
 	assertBaselineProblem(t, get(foreignPath, ws, cookie), foreignPath, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
 	readService := telemetry.NewBackend(b)
-	s.EnableTelemetry(readService)
+	s = newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: readService}, authorization)
 	assertBaselineJSON(t, get(nodePath, uuid.Nil, cookie), nodeJSON(ids[0], 0))
 	// Resource ownership, not a caller-supplied workspace header, selects a node's scope.
 	assertBaselineJSON(t, get(nodePath, other, cookie), nodeJSON(ids[0], 0))
@@ -182,7 +179,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	// Any read after an authorization rejection is a failure, not just a
 	// coincidentally identical response from a permissive Reader.
 	reader := &observedNodeReader{Reader: readService}
-	s.nodeHTTP.SetReader(reader)
+	s = newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: reader}, authorization)
 	for _, suffix := range []string{"", "/sessions", "/ip-bans", "/telemetry?metric=cpu_usage_ratio"} {
 		path, _, _ := strings.Cut(nodePath+suffix, "?")
 		assertBaselineProblem(t, get(nodePath+suffix, ws, nil), path, 401, "unauthenticated", "Authentication required", "operation state requires an authenticated principal")
@@ -260,7 +257,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 
 	t.Run("configured-service", func(t *testing.T) {
 		// Match application assembly: configure recommendation and catalog on
-		// the existing service, then inject it after NewBackend registers routes.
+		// the existing service, then supply it before route registration.
 		manifest := filepath.Join(t.TempDir(), "releases.json")
 		if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("0", 64)+`"}]}`), 0600); err != nil {
 			t.Fatal(err)
@@ -277,9 +274,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,'ocserv.agent.upgrade.v2',true)`, ids[0])
 		configured := telemetry.NewWithRecommendedAgentVersionBackend(b, "2.0.0")
 		configured.EnableAgentUpgradeEligibility(catalog)
-		server := baselineServer(t, false)
-		server.EnableAuthorization(authn, rbac.NewBackend(b), nil, nil)
-		server.EnableTelemetry(configured)
+		server := newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: configured}, authorization)
 		r := baselineRequest("GET", nodePath, nil)
 		r.AddCookie(cookie)
 		w := httptest.NewRecorder()

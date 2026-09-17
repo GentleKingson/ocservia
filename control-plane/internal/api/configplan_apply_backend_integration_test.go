@@ -2,13 +2,11 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -67,14 +65,10 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewBackend("127.0.0.1:0", b, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1<<20, 15*time.Second, false, "", 36)
-	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
-	s.EnableAuthorization(authn, rbac.NewBackend(b), approvals.NewBackend(b), nil)
-	s.EnableBrowserOrigin(authTestOrigin)
 	signer := commandauth.NewSignerFromSeed([32]byte{4})
 	ops := operations.NewBackend(b, 50, signer)
+	s := newTestServer(t, testHTTPConfig(false), b, Modules{ConfigPlans: configplan.NewBackend(b, ops)}, Authorization{Authentication: authn, RBAC: rbac.NewBackend(b), Approvals: approvals.NewBackend(b)})
 	s.EnableOperations(ops)
-	s.EnableConfigPlans(configplan.NewBackend(b, ops))
 	f := applyHTTPFixture{t: t, b: b, owner: owner, s: s, signer: signer, workspace: uuid.Must(uuid.NewV7())}
 	stamp, err := value.FromTime(time.Now().UTC())
 	if err != nil {
@@ -100,6 +94,14 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 	}
 	f.requester, f.approver, f.reader = login(), login(), login()
 	return f
+}
+
+// Construct another Server over the same persisted fixture and shared services.
+// Each scenario owns new modules, admission counters and hubs.
+func (f applyHTTPFixture) newServer(modules Modules) *Server {
+	s := newTestServer(f.t, testHTTPConfig(false), f.b, modules, Authorization{Authentication: f.s.auth, RBAC: f.s.rbac, Approvals: f.s.approvals, Audit: f.s.audit})
+	s.EnableOperations(f.s.operations)
+	return s
 }
 
 func (f applyHTTPFixture) exec(pg, my string, args ...any) {

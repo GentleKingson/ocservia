@@ -21,15 +21,12 @@ type Handler struct {
 }
 
 // New accepts authenticated request values and the parent's Secret-use check.
-func New(requestInfo func(*http.Request) RequestInfo, secretUse SecretUse) *Handler {
+func New(plans Plans, requestInfo func(*http.Request) RequestInfo, secretUse SecretUse) *Handler {
 	if requestInfo == nil {
 		panic("configplanhttp: authenticated request accessor is required")
 	}
-	return &Handler{requestInfo: requestInfo, secretUse: secretUse}
+	return &Handler{plans: plans, requestInfo: requestInfo, secretUse: secretUse}
 }
-
-// SetPlans injects business methods at startup, before HTTP starts.
-func (h *Handler) SetPlans(plans Plans) { h.plans = plans }
 
 func (h *Handler) requirePlans(w http.ResponseWriter, r *http.Request) bool {
 	if h.plans == nil {

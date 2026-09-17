@@ -120,9 +120,13 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	server := NewBackend("", postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), 1<<20, time.Second*15, false, "", 32)
-	server.EnableAuthorization(svc, rbac.NewBackend(postgres.WrapPool(pool)), approvals.NewBackend(postgres.WrapPool(pool)), nil)
-	server.EnableBrowserOrigin("https://console.example")
+	config := testHTTPConfig(false)
+	config.Address, config.ExpectedSchema, config.BrowserOrigin = "", 32, "https://console.example"
+	server, err := NewServer(config, postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), Modules{}, Authorization{Authentication: svc, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvals.NewBackend(postgres.WrapPool(pool))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.closeEventStreams)
 	call := func(path, body string, cookie *http.Cookie, origin, approval string) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/"+path, strings.NewReader(body))

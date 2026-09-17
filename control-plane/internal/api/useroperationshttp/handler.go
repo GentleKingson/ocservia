@@ -23,16 +23,12 @@ type Handler struct {
 	logger      *slog.Logger
 }
 
-func New(logger *slog.Logger, requestInfo func(*http.Request) RequestInfo) *Handler {
+func New(operations Operations, authorizer Authorizer, requestInfo func(*http.Request) RequestInfo, logger *slog.Logger) *Handler {
 	if requestInfo == nil {
 		panic("useroperationshttp: authenticated request accessor is required")
 	}
-	return &Handler{logger: logger, requestInfo: requestInfo}
+	return &Handler{operations: operations, authorizer: authorizer, logger: logger, requestInfo: requestInfo}
 }
-
-// SetOperations and SetAuthorizer are startup injection, before serving HTTP.
-func (h *Handler) SetOperations(operations Operations) { h.operations = operations }
-func (h *Handler) SetAuthorizer(authorizer Authorizer) { h.authorizer = authorizer }
 
 type userPolicyRequest struct {
 	QuotaPeriod     string  `json:"quota_period"`

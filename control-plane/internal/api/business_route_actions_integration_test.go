@@ -19,10 +19,9 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 	// Reuse the restricted-backend, real Local login and HTTP Plan fixture.
 	f := newApplyHTTPFixture(t)
 	plan := f.plan(false)
-	plans := &observedConfigPlans{Plans: f.s.configPlanLookup.(*configplan.Service)}
-	f.s.configPlanHTTP.SetPlans(plans)
+	plans := &observedConfigPlans{ConfigPlans: f.s.configPlanLookup.(*configplan.Service)}
 	userOperations := useroperations.NewBackend(f.b, nil)
-	f.s.EnableUserOperations(userOperations)
+	f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations})
 	f.exec(`DELETE FROM role_bindings WHERE identity_id=$1`, `DELETE FROM role_bindings WHERE identity_id=?`, f.approver.principal.IdentityID)
 	f.bind(f.approver, plan.NodeID, "UserManager")
 	manager := f.approver
@@ -269,7 +268,7 @@ func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
 	})
 	t.Run("secret-resource-boundaries", func(t *testing.T) {
 		service := certificates.NewBackend(f.b, f.s.operations, nil, nil, nil, f.signer)
-		f.s.EnableCertificates(service)
+		f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations, Certificates: service})
 		for _, scope := range []uuid.UUID{f.workspace, other} {
 			ref, err := service.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: "fixture", KeyPath: "vpn/key", Version: "v1", Reason: "route fixture", RequestID: uuid.NewString()})
 			if err != nil {

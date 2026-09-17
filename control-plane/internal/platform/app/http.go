@@ -14,17 +14,34 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
+	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
-func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, expectedSchemaVersion int64, logger *slog.Logger) (*api.Server, error) {
+// HTTP consumers reuse services already configured by runRoles. This input is
+// not retained by Server or passed to any handler.
+type httpServices struct {
+	modules        api.Modules
+	operations     *operations.Service
+	releaseCatalog *releasecatalog.Catalog
+	userState      *userstate.Service
+	enrollment     *enrollment.Service
+	transport      *transportclient.Client
+	fences         ownersession.FencedExecutor
+	localSlice     *localslice.Service
+}
+
+func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, expectedSchemaVersion int64, logger *slog.Logger, services httpServices) (*api.Server, error) {
 	var err error
-	server := api.NewBackend(cfg.HTTPAddress, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
-	life.http = server
-	server.EnableBrowserOrigin(cfg.BrowserOrigin())
-	server.ConfigureAuthProxies(cfg.AuthTrustedProxyCIDRs)
-	if err := server.ConfigureEventStreams(cfg.EventStreams); err != nil {
+	if err := cfg.EventStreams.Validate(); err != nil {
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
 	var authService *auth.Service
@@ -39,7 +56,26 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 			return nil, fmt.Errorf("configure authentication: %w", err)
 		}
 	}
-	server.EnableAuthorization(authService, rbac.NewBackend(backend), approvals.NewBackend(backend), auditManager)
+	server, err := api.NewServer(api.HTTPConfig{
+		Address: cfg.HTTPAddress, BodyLimit: cfg.BodyLimit, RequestTimeout: cfg.RequestTimeout,
+		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken, ExpectedSchema: expectedSchemaVersion,
+		BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
+	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, services.modules,
+		api.Authorization{Authentication: authService, RBAC: rbac.NewBackend(backend), Approvals: approvals.NewBackend(backend), Audit: auditManager})
+	if err != nil {
+		return nil, err
+	}
+	// No HTTP resources exist on earlier failures. From this point lifecycle
+	// owns Shutdown, including failures before the listener starts.
+	life.http = server
+	server.EnableOperations(services.operations)
+	server.EnableReleaseCatalog(services.releaseCatalog)
+	server.EnableUserState(services.userState)
+	server.EnablePrivdAttestation(privdattestation.NewBackend(backend))
+	server.EnableEnrollment(services.enrollment, services.transport)
+	server.EnableOwnerFencing(services.fences)
+	server.EnableLocalSlice(services.localSlice)
+	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)
 
 	return server, nil
 }
