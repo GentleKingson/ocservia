@@ -152,10 +152,10 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 			return context.WithValue(ctx, workspaceKey{}, approval.WorkspaceID), nil
 		}
 		if approval.ResourceType == "config_plan" {
-			if s.configplans == nil {
+			if s.configPlanLookup == nil {
 				return nil, database.ErrNotFound
 			}
-			workspaceID, nodeID, resourceErr := s.configplans.Resource(r.Context(), approval.ResourceID)
+			workspaceID, nodeID, resourceErr := s.configPlanLookup.Resource(r.Context(), approval.ResourceID)
 			if resourceErr != nil {
 				return nil, resourceErr
 			}
@@ -177,10 +177,10 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 		}
 	} else if planText := r.PathValue("plan_id"); planText != "" {
 		planID, parseErr := uuid.Parse(planText)
-		if parseErr != nil || planID.Version() != 7 || s.configplans == nil {
+		if parseErr != nil || planID.Version() != 7 || s.configPlanLookup == nil {
 			return nil, database.ErrNotFound
 		}
-		workspaceID, nodeID, resourceErr := s.configplans.Resource(r.Context(), planID)
+		workspaceID, nodeID, resourceErr := s.configPlanLookup.Resource(r.Context(), planID)
 		if resourceErr != nil {
 			return nil, resourceErr
 		}

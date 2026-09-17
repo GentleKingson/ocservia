@@ -376,7 +376,7 @@ func TestConfigPlanApprovalResolvesNodeScopedApprover(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM approval_requests WHERE id=$2; DELETE FROM config_plans WHERE id=$3; DELETE FROM operations WHERE id=$3; DELETE FROM nodes WHERE id=$4; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$7`, pgx.QueryExecModeSimpleProtocol, bindingID, approvalID, operationID, nodeID, requesterID, approverID, workspaceID)
 	}()
 	operationService := apiOperationService(pool)
-	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), approvals: approvalstore.NewBackend(postgres.WrapPool(pool)), configplans: configplanstore.NewBackend(postgres.WrapPool(pool), operationService)}
+	server := &Server{rbac: rbac.NewBackend(postgres.WrapPool(pool)), approvals: approvalstore.NewBackend(postgres.WrapPool(pool)), configPlanLookup: configplanstore.NewBackend(postgres.WrapPool(pool), operationService)}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/approval-requests/"+approvalID.String(), nil)
 	request.SetPathValue("approval_id", approvalID.String())
 	if _, err := server.authorizeRoute(request, auth.Principal{IdentityID: approverID, Issuer: "integration"}); err != nil {

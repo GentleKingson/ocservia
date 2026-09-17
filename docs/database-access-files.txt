@@ -8,7 +8,7 @@ control-plane/internal/api/auth_logging_test.go
 control-plane/internal/api/authorization.go
 control-plane/internal/api/authorization_integration_test.go
 control-plane/internal/api/certificates.go
-control-plane/internal/api/configplans.go
+control-plane/internal/api/configplanhttp/handler.go
 control-plane/internal/api/enrollment.go
 control-plane/internal/api/event_streams.go
 control-plane/internal/api/local_account_limits_integration_test.go

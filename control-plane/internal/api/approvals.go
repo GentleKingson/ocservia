@@ -151,11 +151,11 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if action == "config.apply" {
-		if resource.Type != "config_plan" || s.configplans == nil {
+		if resource.Type != "config_plan" || s.configPlanLookup == nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "configuration approval requires an existing validated plan")
 			return
 		}
-		plan, planErr := s.configplans.Get(r.Context(), resourceID)
+		plan, planErr := s.configPlanLookup.Get(r.Context(), resourceID)
 		now, clockErr := value.FromTime(time.Now().UTC())
 		if planErr != nil || clockErr != nil || plan.Validation != "valid" || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= now.Micros {
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-plan-not-ready", "Configuration plan is not ready", "the plan must be valid and unexpired before approval")

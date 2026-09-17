@@ -28,6 +28,7 @@ const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
 // PR-03 changes only the five nodehttp handler/wrapper expressions.
 // F-1 restores the registered ConfigPlan Apply route's POST method rule.
 // R2-01 changes eight business wrappers to fixed, explicit actions.
+// R2-02 moves only the three ConfigPlan handler/wrapper expressions.
 // "self" identifies endpoint validation, not requireOperationAuth. This is a
 // test inventory, never an input to production routing or authorization.
 const routeBaseline = `GET /livez|s.live|GET|public
@@ -84,9 +85,9 @@ GET /api/v1/agent-rollouts|s.requireOperationAuth(s.listAgentRollouts)|GET, POST
 GET /api/v1/agent-rollouts/{rollout_id}|s.requireOperationAuth(s.getAgentRollout)|GET|operation.read
 POST /api/v1/agent-rollouts/{rollout_id}/resume|s.requireOperationAuth(s.resumeAgentRollout)|POST|agent.upgrade
 GET /api/v1/user-operations/metrics|s.requireActionAuth("operation.read", s.userOperationMetrics)|GET|operation.read
-POST /api/v1/nodes/{node_id}/config-plans|s.requireActionAuth("config.plan", s.createConfigPlan)|POST|config.plan
-GET /api/v1/config-plans/{plan_id}|s.requireActionAuth("config.review", s.getConfigPlan)|GET|config.review
-POST /api/v1/config-plans/{plan_id}/apply|s.requireActionAuth("config.apply", s.applyConfigPlan)|POST|config.apply
+POST /api/v1/nodes/{node_id}/config-plans|guard("config.plan", h.createConfigPlan)|POST|config.plan
+GET /api/v1/config-plans/{plan_id}|guard("config.review", h.getConfigPlan)|GET|config.review
+POST /api/v1/config-plans/{plan_id}/apply|guard("config.apply", h.applyConfigPlan)|POST|config.apply
 POST /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.createCertificate)|GET, POST|certificate.issue
 GET /api/v1/nodes/{node_id}/certificates|s.requireOperationAuth(s.listNodeCertificates)|GET, POST|certificate.read
 GET /api/v1/certificates/{certificate_id}|s.requireOperationAuth(s.getCertificate)|GET|certificate.read
@@ -144,11 +145,13 @@ func TestHTTPRouteInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	moduleFiles, err := filepath.Glob("nodehttp/*.go")
-	if err != nil {
-		t.Fatal(err)
+	for _, module := range []string{"nodehttp", "configplanhttp"} {
+		moduleFiles, err := filepath.Glob(module + "/*.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, moduleFiles...)
 	}
-	files = append(files, moduleFiles...)
 	fset := token.NewFileSet()
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -190,8 +193,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if filepath.Dir(name) == "nodehttp" && wrapper.String() != "guard" {
-				t.Fatal("node route must declare its guard action")
+			if (filepath.Dir(name) == "nodehttp" || filepath.Dir(name) == "configplanhttp") && wrapper.String() != "guard" {
+				t.Fatal("module route must declare its guard action")
 			}
 			if wrapper.String() == "s.requireActionAuth" || wrapper.String() == "guard" {
 				if len(guard.Args) != 2 {

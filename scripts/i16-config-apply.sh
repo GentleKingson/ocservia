@@ -24,7 +24,7 @@ grep -Fq 'config_apply.rollback_failed' "${ROOT}/control-plane/internal/localsli
 
 if grep -REnE 'caller_path|target_path|shell[.]exec|command[.]run|occtl[.]raw|systemctl[.]raw' \
   "${ROOT}/control-plane/internal/configplan" \
-  "${ROOT}/control-plane/internal/api/configplans.go" \
+  "${ROOT}/control-plane/internal/api/configplanhttp" \
   "${ROOT}/rust/crates/agent-protocol/src/lib.rs"; then
   echo "I16 exposed a caller-selected path or arbitrary execution surface" >&2
   exit 1

@@ -184,3 +184,59 @@ workspace and per-item boundaries, and counterfactual actions through the real
 guard. `regression-auth` requires it on all four backends. The old PostgreSQL-only
 batch resource test now supplies `user.manage` explicitly; it is not the HTTP
 acceptance evidence. Candidate SHA and executed results belong in the Draft PR.
+
+## ConfigPlan HTTP module (R2-02)
+
+Base: `3266e8fb1ec8248e9f94ed0f0dd0f47a08ac2515` (R2-01, #222).
+`api/configplanhttp` now owns Create, Get and Apply, their private request types
+and ConfigPlan error mapping. Its `routes.go` registers the same three complete
+paths on the root ServeMux with `config.plan`, `config.review`, and `config.apply`.
+The independent inventory scans `api`, `nodehttp` and `configplanhttp`: still
+72 routes and 13 explicit actions. The other five R2-01 business actions and the
+removed inference branches are unchanged.
+
+The module consumes only `Plans.Create/Get/Apply`, authenticated request values
+(actor, identity, session, request ID and traceparent), and one Secret-use check.
+It retains no concrete Service, database/Store, Transport or parent Server.
+`api/configplan_access.go` supplies values using the existing context accessors.
+Its Secret adapter resolves the final Certificates/RBAC configuration, checks
+each reference's real workspace against the authorized context and applies the
+existing `s.devAuth` exception, not an issuer-based exception. No references means
+no Certificates dependency; a missing adapter or Certificates service fails with
+503 only when a reference is used. Query/ownership/permission failures still deny
+with 403 and stop before Create. The domain transaction still validates and
+resolves the stored reference's state, version and node workspace.
+
+`NewBackend` creates the stable Handler before registration. Startup-only
+`EnableConfigPlans` supplies two views of the same instance: the module's business
+methods and the parent's `configPlanLookup.Get/Resource`. Explicit nil clears
+both. The parent no longer stores `*configplan.Service`. Plan authorization and
+legacy approval fallback use Resource; approval creation still uses the fully
+interpreted Get result, its validity/expiry, workspace, candidate/current hashes,
+revision and redacted diff. Saved approval authority resources are all checked
+before considering any legacy fallback. Approvals and consumption remain in
+their original layers.
+
+Strict JSON, UUIDv7 parsing and idempotency-key checks join the existing helpers
+in `httpx`, with thin parent adapters and no business/auth imports. Media types,
+UTF-8, unknown-field and single-value checks are unchanged, as is the shared body
+limit. The historical direct Apply validation test now exercises the full HTTP
+chain. Create still checks availability before its ID; Apply checks ID, key,
+JSON and approval ID before its business call. Success remains Plan versus
+Operation with different Locations and unchanged replay headers.
+
+One narrowly accompanying defect fix covers previously reachable development
+requests with no ConfigPlan service: Get and Apply used to dereference nil after
+their input checks. They now return the existing service-unavailable Problem at
+that point. Ordinary authentication/Origin/resource guards still run first,
+including 401 and missing-lookup 404; there is no blanket pre-guard 503.
+
+Handwritten module tests use `ServeMux.ServeHTTP`, not direct Handler dispatch.
+Boundary tests prohibit capability recovery and old Server handlers. Full-chain
+tests cover all three requests' cancellation, deadline and Shutdown draining.
+`regression-auth` additionally requires lookup/approval compatibility, nil/late
+injection, Secret denials and a valid signed Plan submission/replay on all four
+backends using the existing restricted-runtime Local-login fixture. The older
+PostgreSQL response/approval tests remain PostgreSQL-only evidence. R2-01 and
+F-1/F-2 regressions remain selected. No Agent execution or release readiness is
+implied, and user-policy/batch HTTP extraction remains R2-03 work.

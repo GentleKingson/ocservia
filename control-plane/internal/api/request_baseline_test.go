@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -126,14 +125,7 @@ func TestHTTPConfigPlanValidationBaseline(t *testing.T) {
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Idempotency-Key", key)
 			w := httptest.NewRecorder()
-			if strings.HasSuffix(route, "/apply") {
-				// Supplemental handler assertion: the full-chain inventory locks
-				// the existing routeMethod 404 separately.
-				r.SetPathValue("plan_id", baselineID)
-				s.requestContext(http.HandlerFunc(s.applyConfigPlan)).ServeHTTP(w, r)
-			} else {
-				s.http.Handler.ServeHTTP(w, r)
-			}
+			s.http.Handler.ServeHTTP(w, r)
 			if strings.TrimSpace(key) == "" {
 				assertBaselineProblem(t, w, route, 400, "idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
 			} else {

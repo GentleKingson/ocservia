@@ -87,9 +87,7 @@ func (s *Server) registerUserRoutes(mux *http.ServeMux) {
 }
 
 func (s *Server) registerConfigPlanRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/nodes/{node_id}/config-plans", s.requireActionAuth("config.plan", s.createConfigPlan))
-	mux.HandleFunc("GET /api/v1/config-plans/{plan_id}", s.requireActionAuth("config.review", s.getConfigPlan))
-	mux.HandleFunc("POST /api/v1/config-plans/{plan_id}/apply", s.requireActionAuth("config.apply", s.applyConfigPlan))
+	s.configPlanHTTP.Register(mux, s.requireActionAuth)
 }
 
 func (s *Server) registerCertificateRoutes(mux *http.ServeMux) {
