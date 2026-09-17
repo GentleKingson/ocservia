@@ -88,8 +88,12 @@ func TestConfigPlanModuleBackendHTTPIntegration(t *testing.T) {
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Secret module',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Secret module',?,?,?)`, foreign, foreign.String(), stamp, stamp)
 	f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'config.tls',true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,'config.tls',true)`, plan.NodeID)
 	refs := []uuid.UUID{}
-	for _, scope := range []uuid.UUID{f.workspace, f.workspace, foreign} {
-		ref, err := certs.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: "fixture", KeyPath: "vpn/key", Version: "v1", Reason: "module fixture", RequestID: uuid.NewString()})
+	for i, scope := range []uuid.UUID{f.workspace, f.workspace, foreign} {
+		keyPath := "vpn/key"
+		if i == 1 {
+			keyPath = "vpn/denied"
+		}
+		ref, err := certs.CreateSecretRef(t.Context(), certificates.SecretRefRequest{WorkspaceID: scope, ActorID: f.requester.principal.IdentityID, SessionID: f.requester.principal.SessionID, Provider: "fixture", KeyPath: keyPath, Version: "v1", Reason: "module fixture", RequestID: uuid.NewString()})
 		if err != nil {
 			t.Fatal(err)
 		}
