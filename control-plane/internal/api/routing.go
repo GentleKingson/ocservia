@@ -118,6 +118,9 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "config-plans" && parts[3] != "" {
 		return http.MethodGet, true
 	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "config-plans" && parts[3] != "" && parts[4] == "apply" {
+		return http.MethodPost, true
+	}
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "sessions" && (strings.HasSuffix(parts[5], ":disconnect") || strings.HasSuffix(parts[5], ":terminate")) {
 		return http.MethodPost, true
 	}

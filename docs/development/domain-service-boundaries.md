@@ -36,8 +36,10 @@ succeed. Production assembly always supplies the original configured instance.
 
 ConfigPlan's PostgreSQL-only historical test is not four-backend evidence. The
 MySQL/MariaDB consumer chain is checked separately, not inferred from Store tests.
-Apply is exercised directly at the service boundary, not via the known HTTP
-`routeMethod` omission. HTTP routing, contracts and generated clients are unchanged.
+PR-04 exercised Apply directly at the service boundary, leaving the historical
+HTTP `routeMethod` omission unchanged. The subsequent F-1 functional fix restores
+that route and adds four-backend HTTP acceptance in `regression-auth` alongside,
+not instead of, these service tests. Contracts and generated clients are unchanged.
 
 The baseline runtime grants omit `DELETE` on `user_policy_enforcements` on all
 backends, while the existing conflict branches ignore cleanup errors. This PR
