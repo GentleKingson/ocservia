@@ -268,11 +268,19 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		if err := f.row(`SELECT count(*) FROM audit_events WHERE resource_id=$1 AND command_id=$2 AND actor_id=$3 AND source_session_id=$4 AND request_id=$5 AND action='user.disable'`, `SELECT count(*) FROM audit_events WHERE resource_id=? AND command_id=? AND actor_id=? AND source_session_id=? AND request_id=? AND action='user.disable'`, child, command, actor, session, childRequest).Scan(&audits); err != nil || audits != 1 {
 			t.Fatal("child audit", audits, err)
 		}
-		afterTick := f.counts()
 		if err := f.service.RunOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
-		f.unchanged(afterTick)
+		// Queued commands are not the scheduler's active execution budget;
+		// the next tick may submit the second item, but must retain the first.
+		stored, err = f.service.GetBatch(t.Context(), batch.ID)
+		if err != nil || stored.Items[0].ChildOperationID == nil || *stored.Items[0].ChildOperationID != child {
+			t.Fatal("scheduler replaced existing child", stored, err)
+		}
+		var sameKey int
+		if err := f.row(`SELECT count(*) FROM commands WHERE workspace_id=$1 AND idempotency_key=$2`, `SELECT count(*) FROM commands WHERE workspace_id=? AND idempotency_key=?`, f.workspace, childKey).Scan(&sameKey); err != nil || sameKey != 1 {
+			t.Fatal("scheduler duplicated first child", sameKey, err)
+		}
 	})
 	t.Run("policy-save-read-replay-and-input", func(t *testing.T) {
 		f := f
