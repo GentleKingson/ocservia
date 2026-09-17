@@ -188,3 +188,16 @@ func TestSchedulerFailureIsNotRetried(t *testing.T) {
 		t.Fatalf("failure/stop: %v", err)
 	}
 }
+
+func TestSchedulerCanceledParentPreservesOtherFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	failure := errors.New("database maintenance failed")
+	leader := &schedulerLeaderStub{session: func(context.Context, func(context.Context, *coordination.Session) error) error {
+		cancel()
+		return failure
+	}}
+	if err := runScheduler(ctx, leader, nil, maintenanceWork{}, 1, quietLogger()); !errors.Is(err, failure) || !leader.stopped {
+		t.Fatal("cancellation masked an unrelated fatal maintenance error", err)
+	}
+}

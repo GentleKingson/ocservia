@@ -246,6 +246,7 @@ unit internal/platform/app TestSchedulerLeadershipRetry
 unit internal/platform/app TestSchedulerFailureIsNotRetried
 unit internal/platform/app TestSchedulerCleanupFailureWaitsForTick
 unit internal/platform/app TestSchedulerCanceledCleanupDoesNotRetry
+unit internal/platform/app TestSchedulerCanceledParentPreservesOtherFailure
 unit internal/useroperations TestEnforcementCleanupTransactionErrors
 unit internal/platform/app TestLifecycleCleanup
 unit internal/platform/app TestLifecycleFailureDuringCancellation

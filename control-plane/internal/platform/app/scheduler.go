@@ -70,17 +70,18 @@ func runScheduler(ctx context.Context, leader schedulerLeader, ticks <-chan time
 			return work.run(sessionCtx, session, started, concurrency, logger)
 		})
 		if err != nil {
-			if ctx.Err() != nil {
+			var cleanup *useroperations.EnforcementCleanupError
+			cleanupFailed := errors.As(err, &cleanup)
+			if cleanupFailed && ctx.Err() != nil {
 				return ctx.Err()
 			}
 			// Renewal loss cancels the session, not the process. Retry on the next tick.
 			leadershipLost := errors.Is(err, coordination.ErrLeadershipLost) ||
 				errors.Is(err, coordination.ErrNotLeader) ||
 				(ctx.Err() == nil && errors.Is(err, context.Canceled))
-			var cleanup *useroperations.EnforcementCleanupError
 			if leadershipLost {
 				logger.WarnContext(ctx, "maintenance session lost leadership", "alert_kind", "scheduler.leadership_lost", "error", err)
-			} else if errors.As(err, &cleanup) {
+			} else if cleanupFailed {
 				logger.ErrorContext(ctx, "policy enforcement cleanup failed; remaining maintenance skipped; retry on next tick", "alert_kind", "user_operations.cleanup_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
 			} else {
 				logger.ErrorContext(ctx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
