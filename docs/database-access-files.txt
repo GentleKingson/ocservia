@@ -25,7 +25,7 @@ control-plane/internal/api/server.go
 control-plane/internal/api/server_test.go
 control-plane/internal/api/nodehttp/handler.go
 control-plane/internal/api/telemetry_test.go
-control-plane/internal/api/useroperations.go
+control-plane/internal/api/useroperationshttp/handler.go
 control-plane/internal/approvals/service.go
 control-plane/internal/approvals/service_integration_test.go
 control-plane/internal/attestationtest/helper.go

@@ -11,6 +11,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/configplanhttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/api/nodehttp"
+	"github.com/GentleKingson/ocservia/control-plane/internal/api/useroperationshttp"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
@@ -27,7 +28,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
-	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -69,7 +69,7 @@ type Server struct {
 	approvals        *approvals.Service
 	audit            *audit.Manager
 	userstate        *userstate.Service
-	useroperations   *useroperations.Service
+	userOpsHTTP      *useroperationshttp.Handler
 	configPlanHTTP   *configplanhttp.Handler
 	configPlanLookup configPlanLookup
 	certificates     *certificates.Service
@@ -94,6 +94,7 @@ func NewBackend(address string, backend database.Backend, build BuildInfo, logge
 	mux := http.NewServeMux()
 	s.nodeHTTP = nodehttp.New(logger, workspace)
 	s.configPlanHTTP = configplanhttp.New(configPlanRequestInfo, s.allowConfigPlanSecret)
+	s.userOpsHTTP = useroperationshttp.New(logger, userOperationsRequestInfo)
 	s.registerRoutes(mux)
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	// Bound request reads without a global write deadline that would end SSE streams.
@@ -136,8 +137,6 @@ func (s *Server) EnableReleaseCatalog(catalog *releasecatalog.Catalog) { s.relea
 
 func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
 
-func (s *Server) EnableUserOperations(service *useroperations.Service) { s.useroperations = service }
-
 func (s *Server) EnableCertificates(service *certificates.Service) { s.certificates = service }
 
 func (s *Server) EnablePrivdAttestation(service *privdattestation.Service) {
@@ -146,6 +145,11 @@ func (s *Server) EnablePrivdAttestation(service *privdattestation.Service) {
 
 func (s *Server) EnableAuthorization(authn *auth.Service, authz *rbac.Service, approvalService *approvals.Service, auditManager *audit.Manager) {
 	s.auth, s.rbac, s.approvals, s.audit = authn, authz, approvalService, auditManager
+	if authz == nil {
+		s.userOpsHTTP.SetAuthorizer(nil)
+	} else {
+		s.userOpsHTTP.SetAuthorizer(authz)
+	}
 }
 
 func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transportclient.Client) {

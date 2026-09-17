@@ -76,15 +76,15 @@ GET /api/v1/nodes/{node_id}/user-group-state|s.requireOperationAuth(s.listUserGr
 POST /api/v1/nodes/{node_id}/users|s.requireOperationAuth(s.createUser)|POST|user.manage
 POST /api/v1/nodes/{node_id}/users/{user_action}|s.requireOperationAuth(s.userAction)|POST|user.manage
 PUT /api/v1/nodes/{node_id}/groups/{group_name}|s.requireOperationAuth(s.applyGroup)|PUT|group.manage
-GET /api/v1/nodes/{node_id}/users/{username}/policy|s.requireActionAuth("node.read", s.getUserPolicy)|GET, PUT|node.read
-PUT /api/v1/nodes/{node_id}/users/{username}/policy|s.requireActionAuth("user.manage", s.setUserPolicy)|GET, PUT|user.manage
-POST /api/v1/user-batches|s.requireActionAuth("user.manage", s.createUserBatch)|POST|user.manage
-GET /api/v1/user-batches/{batch_id}|s.requireActionAuth("operation.read", s.getUserBatch)|GET|operation.read
+GET /api/v1/nodes/{node_id}/users/{username}/policy|guard("node.read", h.getUserPolicy)|GET, PUT|node.read
+PUT /api/v1/nodes/{node_id}/users/{username}/policy|guard("user.manage", h.setUserPolicy)|GET, PUT|user.manage
+POST /api/v1/user-batches|guard("user.manage", h.createUserBatch)|POST|user.manage
+GET /api/v1/user-batches/{batch_id}|guard("operation.read", h.getUserBatch)|GET|operation.read
 POST /api/v1/agent-rollouts|s.requireOperationAuth(s.createAgentRollout)|GET, POST|agent.upgrade
 GET /api/v1/agent-rollouts|s.requireOperationAuth(s.listAgentRollouts)|GET, POST|operation.read
 GET /api/v1/agent-rollouts/{rollout_id}|s.requireOperationAuth(s.getAgentRollout)|GET|operation.read
 POST /api/v1/agent-rollouts/{rollout_id}/resume|s.requireOperationAuth(s.resumeAgentRollout)|POST|agent.upgrade
-GET /api/v1/user-operations/metrics|s.requireActionAuth("operation.read", s.userOperationMetrics)|GET|operation.read
+GET /api/v1/user-operations/metrics|guard("operation.read", h.userOperationMetrics)|GET|operation.read
 POST /api/v1/nodes/{node_id}/config-plans|guard("config.plan", h.createConfigPlan)|POST|config.plan
 GET /api/v1/config-plans/{plan_id}|guard("config.review", h.getConfigPlan)|GET|config.review
 POST /api/v1/config-plans/{plan_id}/apply|guard("config.apply", h.applyConfigPlan)|POST|config.apply
@@ -145,7 +145,7 @@ func TestHTTPRouteInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, module := range []string{"nodehttp", "configplanhttp"} {
+	for _, module := range []string{"nodehttp", "configplanhttp", "useroperationshttp"} {
 		moduleFiles, err := filepath.Glob(module + "/*.go")
 		if err != nil {
 			t.Fatal(err)
@@ -193,7 +193,7 @@ func TestHTTPRouteInventory(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if (filepath.Dir(name) == "nodehttp" || filepath.Dir(name) == "configplanhttp") && wrapper.String() != "guard" {
+			if filepath.Dir(name) != "." && wrapper.String() != "guard" {
 				t.Fatal("module route must declare its guard action")
 			}
 			if wrapper.String() == "s.requireActionAuth" || wrapper.String() == "guard" {
