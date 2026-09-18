@@ -175,6 +175,12 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
   run(env.merge('FIXTURE_CC' => 'missing-cc'), bash, "#{work}/scripts/go-check.sh", 'race', error: 'required test command is missing: missing-cc')
   run(env, bash, "#{work}/scripts/go-check.sh", 'race', error: 'C compiler that can compile and link')
   run(env.merge('FIXTURE_DOCKER' => '1'), bash, "#{work}/scripts/database-foundation-integration.sh", error: 'access to a running Docker daemon')
+  # Full PostgreSQL needs sha256sum, not the unused shasum fallback. This PATH
+  # has no shasum; stop at the injected Docker error after command preflight.
+  %w[18 all].each do |major|
+    run(env.merge('DATABASE_TEST_SCOPE' => 'full', 'PG_MAJOR' => major, 'FIXTURE_DOCKER' => '1'),
+        bash, "#{work}/scripts/database-integration.sh", error: 'access to a running Docker daemon')
+  end
   raise 'preflight started Go tests' if File.exist?("#{work}/launched")
 end
 puts 'Simulated bootstrap platforms, reuse, verification failures and entrypoint preflights passed (not native execution)'

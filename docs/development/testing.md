@@ -70,7 +70,7 @@ the additional dependencies for the entrypoint being used:
 | `test-required-go-tests.sh` | Go, jq, setsid, Ruby, Python 3; includes real standalone `GOWORK=off` fixtures and signal/timeout tests |
 | `test-bootstrap-profiles.sh` / `docs-check.sh` | Ruby, tar, gzip and a SHA-256 utility for disposable platform/preflight fixtures; profile/workflow assertions also need jq |
 | `go-check.sh race` (also the race part of `full`) | `CGO_ENABLED=1`, a C compiler selected by `go env CC`, linker and C development headers; no Docker requirement |
-| `database-integration.sh` | Go/race prerequisites, jq, setsid, Ruby, Python 3, curl, sha256sum, Docker CLI and daemon access; full scope also needs patch, and PostgreSQL 18/all full needs shasum |
+| `database-integration.sh` | Go/race prerequisites, jq, setsid, Ruby, Python 3, curl, sha256sum, Docker CLI and daemon access; full scope also needs patch |
 | `database-foundation-integration.sh` | Go/race prerequisites, jq, setsid, Python 3, OpenSSL with `req -addext`, Docker CLI and daemon access; full-scope diagnostics also use timeout |
 
 Missing commands, inaccessible Docker, disabled cgo and a compiler unable to

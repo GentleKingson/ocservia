@@ -14,7 +14,6 @@ source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid ruby python3 curl sha256sum
 if [[ "${scope}" == full ]]; then
   require_test_commands patch
-  if [[ "${PG_MAJOR:-all}" != 17 ]]; then require_test_commands shasum; fi
 fi
 require_test_docker
 require_go_race
