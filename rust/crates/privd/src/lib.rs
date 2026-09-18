@@ -232,15 +232,11 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::Execute(claims, accepted_at))) => {
-            let command = request
-                .authorization_command
-                .clone()
-                .expect("validated command must be present");
+        Ok((deadline, ValidatedRequest::Execute(command, claims, accepted_at))) => {
             match tokio::time::timeout(
                 deadline,
                 execute_command(
-                    &command,
+                    command,
                     &claims,
                     &accepted_at,
                     node_id,
@@ -258,13 +254,8 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::Reconcile(claims))) => {
-            let command = request
-                .authorization_command
-                .clone()
-                .expect("validated command must be present");
-            match tokio::time::timeout(deadline, reconcile_command(&command, &claims, adapter))
-                .await
+        Ok((deadline, ValidatedRequest::Reconcile(command, claims))) => {
+            match tokio::time::timeout(deadline, reconcile_command(command, &claims, adapter)).await
             {
                 Ok(mut response) => {
                     response.request_id = request_id;
@@ -348,20 +339,24 @@ async fn dispatch_upgrade(
     dispatch_attested(&request, node_id, command_keys, &key, upgrades, adapter).await
 }
 
-enum ValidatedRequest {
+enum ValidatedRequest<'a> {
     Read,
-    Execute(CommandAuthorizationV1, prost_types::Timestamp),
-    Reconcile(CommandAuthorizationV1),
+    Execute(
+        &'a CommandEnvelope,
+        CommandAuthorizationV1,
+        prost_types::Timestamp,
+    ),
+    Reconcile(&'a CommandEnvelope, CommandAuthorizationV1),
     ArtifactRead(ArtifactGrantClaimsV1, u64),
     ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool),
 }
 
 #[allow(clippy::too_many_lines)]
-fn validate_request(
-    request: &PrivdRequest,
+fn validate_request<'a>(
+    request: &'a PrivdRequest,
     node_id: &[u8; 16],
     command_keys: &ControllerCommandKeyring,
-) -> Result<(Duration, ValidatedRequest), PrivdError> {
+) -> Result<(Duration, ValidatedRequest<'a>), PrivdError> {
     let id = Uuid::from_slice(&request.request_id)
         .map_err(|_| error(ErrorKind::InvalidRequest, "request_id must be UUIDv7"))?;
     if id.get_version_num() != 7 {
@@ -425,7 +420,7 @@ fn validate_request(
                         "journal acceptance timestamp invalid",
                     ));
                 }
-                ValidatedRequest::Execute(claims, accepted)
+                ValidatedRequest::Execute(command, claims, accepted)
             }
             (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
                 if effect_binding(command, &claims).is_none() {
@@ -434,7 +429,7 @@ fn validate_request(
                         "command does not support privileged reconciliation",
                     ));
                 }
-                ValidatedRequest::Reconcile(claims)
+                ValidatedRequest::Reconcile(command, claims)
             }
             _ => {
                 return Err(error(
@@ -2943,6 +2938,166 @@ mod tests {
         server.await.expect("join server").expect("serve fixture");
         remove_socket(&socket).expect("remove fixture socket");
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let signing = SigningKey::from_bytes(&[13; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let (adapter, _, counter, directory) = test_adapter();
+        let now = unix_seconds();
+        let command = signed_service_reload(&signing, node_id, now, now + 60);
+        let send = |bytes: Vec<u8>, peer_uid| {
+            let (mut client, server) = UnixStream::pair().expect("real Unix socket pair");
+            let task = tokio::spawn(handle_client(
+                server,
+                peer_uid,
+                node_id,
+                keys.clone(),
+                Arc::new(SigningKey::from_bytes(&[41; 32])),
+                UpgradeScheduler::disabled(),
+                adapter.clone(),
+            ));
+            async move {
+                let written = client.write_all(&bytes).await;
+                let finished = client.shutdown().await;
+                let response: Result<PrivdResponse, _> = read_frame(&mut client).await;
+                let status = task.await.expect("privd must not panic");
+                if peer_uid == rustix_uid() {
+                    written.expect("write admitted peer request");
+                    finished.expect("finish admitted peer request");
+                }
+                (response, status)
+            }
+        };
+        let frame = |body: Vec<u8>| {
+            let mut bytes = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
+            bytes.extend(body);
+            bytes
+        };
+        let request = command_request(command.clone());
+        let mut variants = Vec::new();
+        for mutate in [
+            |value: &mut CommandEnvelope| value.authorization.as_mut().unwrap().signature[0] ^= 1,
+            |value: &mut CommandEnvelope| value.action = "config.apply".to_owned(),
+            |value: &mut CommandEnvelope| {
+                value.required_capability = "ocserv.config.apply".to_owned();
+            },
+            |value: &mut CommandEnvelope| value.semantic_payload_sha256[0] ^= 1,
+            |value: &mut CommandEnvelope| {
+                value.payload = Some(command_envelope::Payload::IpBanRemove(
+                    ocservia_contracts::generated::ocserv::platform::agent::v1::IpBanRemove {
+                        ip: "192.0.2.1".to_owned(),
+                    },
+                ));
+            },
+        ] {
+            let mut changed = command.clone();
+            mutate(&mut changed);
+            variants.push(command_request(changed));
+        }
+        for changed in [
+            signed_service_reload(&signing, *Uuid::now_v7().as_bytes(), now, now + 60),
+            signed_service_reload(&signing, node_id, now - 60, now - 1),
+            signed_service_reload(&signing, node_id, now + 301, now + 360),
+        ] {
+            variants.push(command_request(changed));
+        }
+        let mut changed = request.clone();
+        changed.privileged_mode = 127;
+        variants.push(changed);
+        let mut changed = request.clone();
+        changed.privileged_mode = PrivilegedRequestMode::Reconcile.into();
+        variants.push(changed);
+        let mut changed = request.clone();
+        changed.accepted_at = None;
+        variants.push(changed);
+        for changed in variants {
+            let (response, status) = send(frame(changed.encode_to_vec()), rustix_uid()).await;
+            status.expect("decoded request handled");
+            let response = response.expect("rejection response");
+            assert!(matches!(
+                response.result,
+                Some(privd_response::Result::Error(_))
+            ));
+            assert!(response.privileged_result_proof.is_none());
+            assert!(
+                !counter.exists(),
+                "rejected request performed a root effect"
+            );
+            assert!(
+                !directory.join("effects.sqlite3").exists(),
+                "rejected request created an effect record"
+            );
+        }
+        // Unknown fields remain additive; duplicate known fields use prost's
+        // decoded value. Neither encoding permits skipping verification.
+        let mut duplicate_mode = request.encode_to_vec();
+        duplicate_mode.extend([0x40, 0x7f]);
+        let (response, _) = send(frame(duplicate_mode), rustix_uid()).await;
+        assert!(matches!(
+            response.unwrap().result,
+            Some(privd_response::Result::Error(_))
+        ));
+        assert!(!counter.exists());
+        for bytes in [vec![0, 0, 0, 0], vec![0xff; 4], vec![0, 0, 0, 2, 0x80]] {
+            let (response, status) = send(bytes, rustix_uid()).await;
+            assert!(response.is_err());
+            assert!(status.is_err());
+            assert!(!counter.exists());
+        }
+        let (response, status) = send(frame(request.encode_to_vec()), rustix_uid() + 1).await;
+        assert!(response.is_err());
+        assert_eq!(status.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(!counter.exists());
+
+        let mut additive = request.encode_to_vec();
+        additive.extend([0xf8, 0x07, 0x01, 0x40, 0x01]);
+        let (first, status) = send(frame(additive), rustix_uid()).await;
+        status.unwrap();
+        let first = first.unwrap();
+        assert!(
+            matches!(first.result, Some(privd_response::Result::Mutation(ref result)) if result.applied)
+        );
+        assert!(first.privileged_result_proof.is_some());
+        for replay in [request, reconcile_request(command.clone(), &signing)] {
+            let (response, status) = send(frame(replay.encode_to_vec()), rustix_uid()).await;
+            status.unwrap();
+            let response = response.unwrap();
+            assert_eq!(response.result, first.result);
+            assert_eq!(
+                response.privileged_result_proof,
+                first.privileged_result_proof
+            );
+            assert_eq!(fs::read(&counter).unwrap(), b"x");
+        }
+        let mut conflict = command;
+        conflict.expected_revision += 1;
+        let claims = claims_from_envelope_v1(&conflict).unwrap();
+        conflict.authorization.as_mut().unwrap().signature = signing
+            .sign(&canonical_v1(&claims).unwrap())
+            .to_bytes()
+            .to_vec();
+        let (response, status) = send(
+            frame(command_request(conflict).encode_to_vec()),
+            rustix_uid(),
+        )
+        .await;
+        status.unwrap();
+        assert!(matches!(
+            response.unwrap().result,
+            Some(privd_response::Result::Error(_))
+        ));
+        assert_eq!(
+            fs::read(&counter).unwrap(),
+            b"x",
+            "conflicting signed identity repeated an effect"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
