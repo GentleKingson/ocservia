@@ -29,6 +29,7 @@ makefile = File.read(File.join(root, "Makefile"))
 checksums = File.read(File.join(root, "scripts/checksums.txt"))
 toolchains = File.read(File.join(root, "toolchains.lock"))
 database_script = File.read(File.join(root, "scripts/database-integration.sh"))
+startup_test = File.read(File.join(root, "control-plane/internal/platform/app/startup_backend_integration_test.go"))
 actions_doc = File.read(File.join(root, "docs/development/github-actions.md"))
 
 def reject(message)
@@ -179,8 +180,12 @@ reject("database recovery timeout budget changed") unless recovery.fetch("timeou
 reject("database smoke must let the script build its own control binary") unless
   database_script.include?('go build -trimpath -buildvcs=false -o "${BIN}" ./cmd/ocserv-control') &&
   database_script.include?('STARTUP_BIN="${BIN}"') &&
-  database_script.include?('unset OCSERVIA_CONTROL_BIN') &&
-  database_script.include?('export OCSERVIA_CONTROL_BIN="${STARTUP_BIN}"')
+  database_script.include?('export OCSERVIA_TEST_STARTUP_BIN="${STARTUP_BIN}"')
+reject("standalone startup must ignore ordinary binary overrides and rebuild for an empty test override") unless
+  startup_test.include?('binary := os.Getenv("OCSERVIA_TEST_STARTUP_BIN")') &&
+  startup_test.include?('if binary != "" {') &&
+  !startup_test.include?('"OCSERVIA_CONTROL_BIN"') &&
+  startup_test.include?('exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "../../../cmd/ocserv-control")')
 reject("PostgreSQL acceptance images must pin exact patch tags and digests") unless
   database_script.include?("postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f") &&
   database_script.include?("postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af")

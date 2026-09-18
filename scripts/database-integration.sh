@@ -223,9 +223,8 @@ checked_go_tests() {
   shift
   (
     if [[ "${group}" == backend-controller-startup ]]; then
-      # Only reuse the current binary built above, never an external override.
-      unset OCSERVIA_CONTROL_BIN
-      if [[ -n "${STARTUP_BIN}" ]]; then export OCSERVIA_CONTROL_BIN="${STARTUP_BIN}"; fi
+      # Ignore inherited test overrides; only reuse the current binary built above.
+      export OCSERVIA_TEST_STARTUP_BIN="${STARTUP_BIN}"
     fi
     cd "${ROOT}/control-plane"
     exec bash "${ROOT}/scripts/required-go-tests.sh" "${group}" "$@" -timeout=3m

@@ -103,11 +103,12 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	binary, supplied := os.LookupEnv("OCSERVIA_CONTROL_BIN")
-	if supplied {
+	// Only the database script supplies a binary freshly built for this test.
+	binary := os.Getenv("OCSERVIA_TEST_STARTUP_BIN")
+	if binary != "" {
 		info, err := os.Stat(binary)
 		if err != nil || !filepath.IsAbs(binary) || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-			t.Fatalf("OCSERVIA_CONTROL_BIN must name an absolute executable file: %v", err)
+			t.Fatalf("OCSERVIA_TEST_STARTUP_BIN must name an absolute executable file: %v", err)
 		}
 	} else {
 		binary = filepath.Join(dir, "ocserv-control")

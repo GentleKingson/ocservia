@@ -74,8 +74,10 @@ matrix is not the [production support matrix](../operations/production-deploymen
 The PostgreSQL script builds `ocserv-control` itself; only full scope builds its historical
 Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
 Its startup test reuses only the ordinary CLI built in that same invocation;
-standalone startup tests still build their own CLI. An external script binary
-override is not forwarded as a fresh startup-test build. Historical and race
+the script alone supplies `OCSERVIA_TEST_STARTUP_BIN` for that reuse. When this
+test-only variable is unset or empty, standalone startup tests build their own
+CLI, regardless of `OCSERVIA_CONTROL_BIN`. An external script binary override
+is not forwarded as a fresh startup-test build. Historical and race
 artifacts are never substituted for the current ordinary CLI.
 All database matrices need only the router and run alongside language checks.
 Neither needs a Rust build or a shared binary artifact.
