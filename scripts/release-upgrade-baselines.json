@@ -87,5 +87,22 @@
       "key_source_package_sha256": "fc1118d87367d5842b7eaf29f5069ef4c8b65d7b2871ea6f549270c5a50a9587",
       "method": "Verify immutable Release 388971765 and direct tag commit; verify v0.6.0 SHA256SUMS digest and signature with the independently anchored historical key; verify all 21 published asset digests, both Controller bundles at schema 36, and anonymous dual-platform image indexes. Cross-check successful publication run 34945045708. No TOFU or baseline rebuild."
     }
+  },
+  "v0.6.1": {
+    "sums_sha256": "d562822bfdc55c784bf950a21c746f380a1cb6a7a2c86c6c801cfa25121df53b",
+    "commit": "1805962fe1a98a22955b3105bfa8ebce7f2ea1eb",
+    "key_der_sha256": "b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369",
+    "upgrader": true,
+    "version_query": true,
+    "production_relays": true,
+    "rpm": true,
+    "controller": { "database": "postgres", "migration": 36, "authentication": "oidc" },
+    "verification": {
+      "date": "2026-09-18",
+      "anchor": "Historical v0.4.0 package key independently established for v0.5.0 through v0.6.0; same DER fingerprint",
+      "key_source": "ocservia-agent_0.4.0_arm64.deb/usr/share/ocservia-agent/release-signing.pub.pem",
+      "key_source_package_sha256": "fc1118d87367d5842b7eaf29f5069ef4c8b65d7b2871ea6f549270c5a50a9587",
+      "method": "Recover the historical key after checking its DEB digest; verify v0.6.1 SHA256SUMS.sig, both archive signatures and all 21 published asset digests, compare the published key, and verify both Controller bundles at schema 36 and anonymous dual-platform image indexes. Cross-check immutable Release 389674680, direct tag commit and successful publication run 35061703465. No TOFU, installation or baseline rebuild."
+    }
   }
 }
