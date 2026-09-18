@@ -17,6 +17,16 @@ case "${MODE}" in
     ;;
 esac
 
+# shellcheck source=scripts/go-test-environment.sh
+source "${ROOT}/scripts/go-test-environment.sh"
+require_test_commands go
+if [[ "${MODE}" != race ]]; then
+  require_test_commands gofmt jq setsid
+fi
+if [[ "${MODE}" != standard ]]; then
+  require_go_race
+fi
+
 GO_MODULES=(control-plane tools/g6-harness)
 
 if [[ "${MODE}" != "race" ]]; then

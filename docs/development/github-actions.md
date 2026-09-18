@@ -35,7 +35,7 @@ dependency between workers.
 
 | Job | Command | Bootstrap profile | Coverage |
 | --- | --- | --- | --- |
-| `docs` | `scripts/docs-check.sh` | none | Line endings, nonempty Markdown, and bootstrap documentation |
+| `docs` | `scripts/docs-check.sh` | none | Line endings, nonempty Markdown, bootstrap documentation and isolated bootstrap/preflight fixtures |
 | `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
 | `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
 | `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
@@ -60,6 +60,14 @@ or G6 smoke. The Web job does run the required authentication browser subset:
 12 desktop Chromium regressions from `web/e2e/login.spec.ts` and
 `web/e2e/auth-workspace.spec.ts`. It installs Playwright Chromium and its system
 dependencies after Web bootstrap and before `scripts/web-check.sh`.
+
+For native Linux ARM64 Go bootstrap, per-entrypoint system dependencies and the
+tested isolated BuildServer environment, see
+[Linux ARM64 Go validation](testing.md#linux-arm64-go-validation-on-buildserver).
+The docs entrypoint runs the same lightweight platform/preflight fixtures as
+`test-bootstrap-profiles.sh`; these use disposable command substitutes, not
+downloads, real Go tests or database acceptance. Basic CI's runner architecture,
+Quick/Full routing and database matrix are unchanged.
 
 The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. This test
 matrix is not the [production support matrix](../operations/production-deployment.md#database-support).

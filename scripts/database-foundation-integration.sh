@@ -23,6 +23,12 @@ case "${ENGINE}" in
   *) echo 'ENGINE must be mysql or mariadb' >&2; exit 2 ;;
 esac
 NAME="ocservia-pr02-${ENGINE}-$$"
+# shellcheck source=scripts/go-test-environment.sh
+source "${ROOT}/scripts/go-test-environment.sh"
+require_test_commands go jq setsid python3 openssl
+if [[ "${scope}" == full ]]; then require_test_commands timeout; fi
+require_test_docker
+require_go_race
 TLS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-pr02-tls-XXXXXX")"
 TLS_DIR="${TLS_ROOT}/certs"
 export DATABASE_CASE_RESULTS="${TLS_ROOT}/required-case-results.jsonl"
