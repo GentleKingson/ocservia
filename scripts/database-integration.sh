@@ -9,6 +9,14 @@ case "${scope}" in
   full|regression) ;;
   *) echo 'DATABASE_TEST_SCOPE must be full or regression' >&2; exit 2 ;;
 esac
+# shellcheck source=scripts/go-test-environment.sh
+source "${ROOT}/scripts/go-test-environment.sh"
+require_test_commands go jq setsid ruby python3 curl sha256sum
+if [[ "${scope}" == full ]]; then
+  require_test_commands patch
+fi
+require_test_docker
+require_go_race
 bash "${ROOT}/scripts/test-required-go-tests.sh"
 (cd "${ROOT}" && sha256sum -c docs/database-migrations.sha256)
 

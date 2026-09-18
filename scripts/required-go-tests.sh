@@ -3,6 +3,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 group="${1:?required test group}"
 shift
+# shellcheck source=scripts/go-test-environment.sh
+source "${ROOT}/scripts/go-test-environment.sh"
+require_test_commands go jq setsid tee mktemp
+for argument in "$@"; do
+  case "${argument}" in -race|-race=true) require_go_race; break ;; esac
+done
 if [[ "${1:-}" == --select ]]; then
   shift
   selection="$(jq -nr --arg group "${group}" --arg mode select \

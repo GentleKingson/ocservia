@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/go-test-environment.sh
+source "${ROOT}/scripts/go-test-environment.sh"
+require_test_commands go jq setsid ruby python3
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/required-go-tests-selftest-XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 trap 'exit 130' INT
@@ -189,7 +192,8 @@ echo 'Required Go test guard checks passed'
 
 # Exercise the real wrapper, without a database or a second test inventory.
 mkdir -p "${tmp}/wrapper/scripts" "${tmp}/wrapper/bin"
-cp "${ROOT}/scripts/required-go-tests.sh" "${ROOT}/scripts/check-required-go-tests.jq" "${tmp}/wrapper/scripts/"
+cp "${ROOT}/scripts/required-go-tests.sh" "${ROOT}/scripts/check-required-go-tests.jq" \
+  "${ROOT}/scripts/go-test-environment.sh" "${tmp}/wrapper/scripts/"
 printf 'fixture internal/fixture TestRequired\n' >"${tmp}/wrapper/scripts/required-go-tests.txt"
 cat >"${tmp}/wrapper/bin/go" <<'SH'
 #!/usr/bin/env bash
@@ -279,6 +283,8 @@ done
 SH
 cat >"${tmp}/wrapper/bin/go" <<'SH'
 #!/usr/bin/env bash
+if [[ "$*" == 'env CGO_ENABLED' ]]; then echo 1; exit 0; fi
+if [[ "$*" == 'env CC' ]]; then echo true; exit 0; fi
 printf '%s\n' "$*" >>"${ROUTE_LOG}"
 SH
 chmod +x "${tmp}/wrapper/bin/"*
