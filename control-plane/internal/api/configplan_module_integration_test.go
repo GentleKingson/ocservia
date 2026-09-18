@@ -20,8 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestConfigPlanModuleBackendHTTPIntegration(t *testing.T) {
-	f := newApplyHTTPFixture(t)
+func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
 	plan := f.plan(true)
 	service := f.s.configPlanLookup.(*configplan.Service)
 	path := "/api/v1/nodes/" + plan.NodeID.String() + "/config-plans"

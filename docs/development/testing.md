@@ -20,6 +20,22 @@ git diff --check
 
 ## Choose a broader check when needed
 
+For module-local iteration, keep using `make test-go`, `make test-rust` or
+`make test-web`. `make test` intentionally runs all three modules; it is not
+the shortest feedback loop for a one-module edit.
+
+`make verify` runs `scripts/lint.sh common` for shared repository/protocol
+checks, then the existing Go/Rust/Web checks. Equivalent vet, Clippy and Web
+format/lint/type checks run once. Standalone `make lint` still performs all
+lint checks. Rust Clippy covers the same workspace/targets/features without a
+preceding duplicate `cargo check`; measure the whole cold chain, not the removed
+command alone, when assessing its benefit.
+
+`scripts/web-check.sh` builds the generated client once, then uses
+`npm --ignore-scripts run lint` and `npx --no-install vue-tsc --noEmit` from
+`web`. The hook override applies only to that explicit lint command. Independent
+`npm run lint` and `npm run typecheck` still prepare their generated client.
+
 - Database migrations or database behavior: `make database-integration`
 - Go and transport local integration: `make integration`
 - Browser or runtime behavior: `make e2e`

@@ -38,6 +38,20 @@ classify_path() {
       run_docs=true ;;
     deploy/real-e2e/*|scripts/real-e2e-*.sh|scripts/test-real-e2e-*.sh|scripts/p1-resilience-capacity.sh|scripts/test-p1-resilience-capacity.sh|scripts/security-acceptance-f[123].sh)
       run_docs=true ;;
+    scripts/web-check.sh)
+      run_docs=true; run_web=true ;;
+    scripts/rust-check.sh|scripts/test-managed-node-install.sh|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh)
+      run_docs=true; run_rust=true ;;
+    scripts/go-check.sh)
+      run_docs=true; run_go=true ;;
+    scripts/required-go-tests.sh|scripts/required-go-tests.txt|scripts/check-required-go-tests.jq|scripts/test-required-go-tests.sh|scripts/go-test-environment.sh|scripts/database-integration.sh|scripts/database-foundation-integration.sh|scripts/i14-quota-expiry-backport.sh)
+      run_docs=true; run_go=true; run_database=true ;;
+    scripts/i15-config-plan.sh|scripts/i16-config-apply.sh)
+      run_docs=true; run_go=true; run_rust=true; run_database=true ;;
+    proto/*|openapi/*|control-plane/gen/proto/*|rust/crates/contracts/src/generated/*|web/src/api/generated/*)
+      fail_closed shared_contract_changed ;;
+    control-plane/internal/domain/operation/operation_test.go)
+      run_go=true ;;
     .github/workflows/*|scripts/*|toolchains.lock|Makefile|.node-version|.nvmrc|.tool-versions)
       fail_closed infrastructure_changed ;;
     web/*)

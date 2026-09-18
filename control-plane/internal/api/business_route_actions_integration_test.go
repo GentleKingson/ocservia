@@ -15,9 +15,8 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestBusinessRouteActionsBackendHTTPIntegration(t *testing.T) {
+func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
 	// Reuse the restricted-backend, real Local login and HTTP Plan fixture.
-	f := newApplyHTTPFixture(t)
 	plan := f.plan(false)
 	plans := &observedConfigPlans{ConfigPlans: f.s.configPlanLookup.(*configplan.Service)}
 	userOperations := useroperations.NewBackend(f.b, nil)

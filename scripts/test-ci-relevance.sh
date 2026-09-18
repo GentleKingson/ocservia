@@ -7,6 +7,33 @@ fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
 flags=(run_docs run_go run_rust run_web run_database)
+domain_cases=(
+  'scripts/web-check.sh run_docs run_web'
+  'scripts/rust-check.sh run_docs run_rust'
+  'scripts/go-check.sh run_docs run_go'
+  'scripts/test-managed-node-install.sh run_docs run_rust'
+  'scripts/test-controller-install.sh run_docs run_rust'
+  'scripts/test-controller-bootstrap.sh run_docs run_rust'
+  'scripts/test-relay-launchers.py run_docs run_rust'
+  'scripts/test-release-agent-state-check.sh run_docs run_rust'
+  'scripts/required-go-tests.sh run_docs run_go run_database'
+  'scripts/required-go-tests.txt run_docs run_go run_database'
+  'scripts/check-required-go-tests.jq run_docs run_go run_database'
+  'scripts/test-required-go-tests.sh run_docs run_go run_database'
+  'scripts/go-test-environment.sh run_docs run_go run_database'
+  'scripts/database-integration.sh run_docs run_go run_database'
+  'scripts/database-foundation-integration.sh run_docs run_go run_database'
+  'scripts/i14-quota-expiry-backport.sh run_docs run_go run_database'
+  'scripts/i15-config-plan.sh run_docs run_go run_rust run_database'
+  'scripts/i16-config-apply.sh run_docs run_go run_rust run_database'
+  'control-plane/internal/domain/operation/operation_test.go run_go'
+)
+shared_paths=(
+  scripts/bootstrap.sh scripts/env.sh scripts/checksums.txt scripts/generate.sh scripts/ci-go-cache-key.sh scripts/unknown.sh
+  proto/ocserv/platform/agent/v1/agent.proto openapi/openapi.yaml
+  control-plane/gen/proto/agent.pb.go rust/crates/contracts/src/generated/mod.rs
+  web/src/api/generated/index.ts
+)
 
 git -C "${fixture}" init -q
 git -C "${fixture}" config user.name test
@@ -35,6 +62,11 @@ paths=(
   scripts/test-p1-resilience-capacity.sh
   scripts/security-acceptance-f1.sh scripts/security-acceptance-f2.sh scripts/security-acceptance-f3.sh
 )
+paths+=("${shared_paths[@]}")
+for entry in "${domain_cases[@]}"; do
+  read -r -a domain_case <<<"${entry}"
+  paths+=("${domain_case[0]}")
+done
 for path in "${paths[@]}"; do
   mkdir -p "${fixture}/$(dirname "${path}")"
   printf 'base\n' >"${fixture}/${path}"
@@ -109,6 +141,18 @@ for path in .github/workflows/ci.yml scripts/ci-relevance.sh toolchains.lock Mak
   out="$(case_commit "infra_$(basename "${path}")" "${path}")"
   expect_only "${out}" "${flags[@]}"
 done
+for path in "${shared_paths[@]}"; do
+  out="$(case_commit "shared_$(basename "${path}")" "${path}")"
+  expect_only "${out}" "${flags[@]}"
+done
+for entry in "${domain_cases[@]}"; do
+  read -r -a domain_case <<<"${entry}"
+  out="$(case_commit "domain_$(basename "${domain_case[0]}")" "${domain_case[0]}")"
+  expect_only "${out}" "${domain_case[@]:1}"
+  push_out="${out}.push.output"
+  (cd "${fixture}" && "${SCRIPT}" push "${base}" "$(git rev-parse HEAD)" "${push_out}")
+  expect_only "${push_out}" "${domain_case[@]:1}"
+done
 
 # G6-only changes select basic documentation checks, never acceptance.
 for path in .github/workflows/g6-readiness.yml .github/workflows/g6-harness-core.yml \
@@ -140,6 +184,8 @@ out="$(case_commit migration_web control-plane/migrations/000001.up.sql web/src/
 expect_only "${out}" run_docs run_go run_database run_web
 out="$(case_commit api_database control-plane/internal/api/login.go control-plane/internal/database/mysql/backend.go)"
 expect_only "${out}" run_go run_database
+out="$(case_commit domain_mix scripts/web-check.sh scripts/i14-quota-expiry-backport.sh)"
+expect_only "${out}" run_docs run_web run_go run_database
 
 # Deletions retain the old path's impact. With rename detection off, both
 # sides of a cross-domain rename contribute to the union.
@@ -156,6 +202,18 @@ git -C "${fixture}" commit -qm rename_known
 head="$(git -C "${fixture}" rev-parse HEAD)"; out="${fixture}/rename.output"
 (cd "${fixture}" && "${SCRIPT}" pull_request "${base}" "${head}" "${out}")
 expect_only "${out}" run_docs run_rust
+git -C "${fixture}" checkout -q --detach "${base}"
+git -C "${fixture}" rm -q scripts/web-check.sh
+git -C "${fixture}" commit -qm delete_domain_script
+head="$(git -C "${fixture}" rev-parse HEAD)"; out="${fixture}/delete-domain.output"
+(cd "${fixture}" && "${SCRIPT}" pull_request "${base}" "${head}" "${out}")
+expect_only "${out}" run_docs run_web
+git -C "${fixture}" checkout -q --detach "${base}"
+git -C "${fixture}" mv control-plane/internal/domain/operation/operation_test.go control-plane/internal/domain/operation/operation.go
+git -C "${fixture}" commit -qm rename_unit_to_production
+head="$(git -C "${fixture}" rev-parse HEAD)"; out="${fixture}/rename-domain.output"
+(cd "${fixture}" && "${SCRIPT}" pull_request "${base}" "${head}" "${out}")
+expect_only "${out}" run_go run_database
 
 # Unknown, empty, invalid, and dispatch classifications fail closed.
 git -C "${fixture}" checkout -q --detach "${base}"
