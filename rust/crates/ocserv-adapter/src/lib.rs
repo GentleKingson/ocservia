@@ -6858,6 +6858,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    #[expect(
+        clippy::verbose_bit_mask,
+        reason = "compare the explicit Unix permission policy with the old predicate"
+    )]
+    fn csr_key_permission_predicates_are_equivalent() {
+        for high in [0, 0x8000_0000, 0xffff_0000] {
+            for low in 0..=0xffff_u32 {
+                let mode = std::fs::Permissions::from_mode(high | low).mode();
+                assert_eq!(mode.trailing_zeros() >= 6, mode & 0o077 == 0, "{mode:#o}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn certificate_csr_keeps_private_key_local() {
         let directory = std::env::temp_dir().join(format!("ocservia-cert-{}", Uuid::now_v7()));
@@ -6902,6 +6916,21 @@ mod tests {
             .await
             .expect("repeat CSR with the same private key");
         assert_eq!(repeated.public_key_sha256, result.public_key_sha256);
+        for mode in [0o400, 0o600, 0o700] {
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+            let reused = adapter
+                .certificate_csr(id.as_bytes(), "vpn.example.test", &[], 2048)
+                .await
+                .expect("owner-only modes retain the existing key");
+            assert_eq!(reused.public_key_sha256, result.public_key_sha256);
+        }
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(matches!(
+            adapter
+                .certificate_csr(id.as_bytes(), "vpn.example.test", &[], 2048)
+                .await,
+            Err(AdapterError::InvalidResource)
+        ));
         std::fs::remove_dir_all(directory).expect("cleanup certificate directory");
     }
 
@@ -7613,11 +7642,15 @@ impl Adapter {
             .resources
             .certificate_key_dir
             .join(format!("{id}.key.pem"));
+        #[expect(
+            clippy::verbose_bit_mask,
+            reason = "the octal mask directly expresses forbidden group/other permissions"
+        )]
         let existing_key = match tokio::fs::symlink_metadata(&key_path).await {
             Ok(key_metadata)
                 if key_metadata.is_file()
                     && !key_metadata.file_type().is_symlink()
-                    && key_metadata.permissions().mode().trailing_zeros() >= 6 =>
+                    && key_metadata.permissions().mode() & 0o077 == 0 =>
             {
                 true
             }

@@ -48,8 +48,26 @@ datagram routing on a full queue belonging to an unconnected relay. A
 production-graph lifecycle regressions; the production default remains 60
 seconds. Persistent connections are disabled by default. Ocservia transportd
 and Agent endpoints enable them only for custom relay maps containing at least
-two members. Default, disabled, and single-member custom relay modes retain the
-upstream behavior. The complete upstream test and example suite is not added to
-the ocservia workspace. Relay lifecycle regressions execute through the
-production crates and the vendored crate's focused actor tests against the
-production workspace lock graph.
+two members. Default, disabled, and single-member custom relay modes do not opt
+in to persistent connections. Shared connection-state, queue and path-selection
+changes are not all gated by that option.
+
+The complete upstream test and example suite is not added to the ocservia
+workspace. Production relay lifecycle regressions run through the transportd
+and Agent crates using `rust/Cargo.lock`. Focused actor/path tests instead use
+the preserved archive lockfile at `vendor/iroh/Cargo.lock`; this is a different
+dependency graph, not production-graph evidence. From `rust/`, run each focused
+test with:
+
+```sh
+cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
+  --no-default-features --features metrics,tls-ring --lib <test_name>
+```
+
+The focused names are `concurrent_relay_status_transitions_preserve_every_actor`,
+`datagrams_for_disconnected_relays_are_dropped_not_queued`,
+`relay_paths_offered_only_for_connected_relays`,
+`home_relay_failover_only_picks_connected_configured_standbys`, and
+`persistent_relay_retry_sleep_stays_inside_recovery_budget`. These tests are not
+currently invoked by `scripts/rust-check.sh`; do not infer their execution from
+a green workspace-only Rust job.
