@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-"${ROOT}/scripts/lint.sh"
+"${ROOT}/scripts/lint.sh" common
 "${ROOT}/scripts/check-breaking.sh"
 "${ROOT}/scripts/go-check.sh"
 "${ROOT}/scripts/rust-check.sh"

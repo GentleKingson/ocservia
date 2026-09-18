@@ -20,29 +20,63 @@ import (
 )
 
 type cleanupFixture struct {
-	b, owner database.Backend
-	s        *Service
-	node     uuid.UUID
-	op       uuid.UUID
-	now      time.Time
-	at       value.Timestamp
-	my       bool
+	b, owner  database.Backend
+	s         *Service
+	workspace uuid.UUID
+	node      uuid.UUID
+	op        uuid.UUID
+	now       time.Time
+	at        value.Timestamp
+	my        bool
 }
 
 func newCleanupFixture(t *testing.T) *cleanupFixture {
 	t.Helper()
 	b, owner := userOperationsBackend(t)
+	return newCleanupFixtureWithBackend(t, b, owner)
+}
+
+func newCleanupFixtureWithBackend(t *testing.T, b, owner database.Backend) *cleanupFixture {
+	t.Helper()
 	_, my := b.(*mysql.Backend)
-	f := &cleanupFixture{b: b, owner: owner, node: uuid.New(), op: uuid.New(), now: time.Now().UTC().Truncate(time.Second), my: my}
+	f := &cleanupFixture{b: b, owner: owner, workspace: uuid.New(), node: uuid.New(), op: uuid.New(), now: time.Now().UTC().Truncate(time.Second), my: my}
 	f.at, _ = value.FromTime(f.now)
 	f.s = NewWithConcurrencyBackend(b, userstate.NewWithSignerBackend(b, commandauth.NewSignerFromSeed([32]byte{3})), 1)
 	f.s.now = func() time.Time { return f.now }
-	workspace := uuid.New()
+	workspace := f.workspace
 	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'cleanup',$2,$3,$4)`, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES(?,'cleanup',?,?,?)`, workspace, workspace.String(), f.at, f.at)
 	f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'cleanup','active',$3,$4)`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,'cleanup','active',?,?)`, f.node, workspace, f.at, f.at)
 	f.exec(t, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.users.write',true)`, f.node)
 	f.exec(t, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)VALUES($1,$2,$3,'succeeded',1,'prior','prior',$4,$5,$6)`, `INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)VALUES(?,?,?,'succeeded',1,'prior','prior',?,?,?)`, f.op, workspace, f.node, make([]byte, 32), f.at, f.at)
 	return f
+}
+
+func (f *cleanupFixture) clear(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The revoke cleanup runs first; prove the runtime grant is restored before reuse.
+	if _, err := f.b.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE 1=0`); err != nil {
+		t.Error("cleanup fixture DELETE grant not restored", err)
+		return
+	}
+	for _, table := range []string{"user_policy_enforcements", "desired_user_policies", "desired_users", "node_capabilities", "operations"} {
+		q, args := f.query("DELETE FROM "+table+" WHERE node_id=$1", "DELETE FROM "+table+" WHERE node_id=?", []any{f.node})
+		if _, err := f.owner.Exec(ctx, q, args...); err != nil {
+			t.Error("clear cleanup fixture", table, err)
+			return
+		}
+	}
+	for _, row := range []struct {
+		table string
+		id    uuid.UUID
+	}{{"nodes", f.node}, {"workspaces", f.workspace}} {
+		q, args := f.query("DELETE FROM "+row.table+" WHERE id=$1", "DELETE FROM "+row.table+" WHERE id=?", []any{row.id})
+		if _, err := f.owner.Exec(ctx, q, args...); err != nil {
+			t.Error("clear cleanup fixture", row.table, err)
+			return
+		}
+	}
 }
 
 func (f *cleanupFixture) query(pg, my string, args []any) (string, []any) {
@@ -141,9 +175,21 @@ func (f *cleanupFixture) revokeDelete(t *testing.T) func() {
 }
 
 func TestEnforcementCleanupBackendIntegration(t *testing.T) {
+	parent := t
+	var shared, sharedOwner database.Backend
 	for _, name := range []string{"enforce-orphan", "enforce-conflict", "reset-orphan", "reset-conflict"} {
-		t.Run(name, func(t *testing.T) {
-			f := newCleanupFixture(t)
+		if !t.Run(name, func(t *testing.T) {
+			if shared == nil {
+				shared, sharedOwner = userOperationsBackendWithCleanup(t, parent)
+			}
+			for _, table := range []string{"user_policy_enforcements", "desired_user_policies", "desired_users", "node_capabilities", "operations", "commands", "nodes", "workspaces"} {
+				var count int
+				if err := sharedOwner.QueryRow(t.Context(), "SELECT count(*) FROM "+table).Scan(&count); err != nil || count != 0 {
+					t.Fatal("shared cleanup fixture is not empty", table, count, err)
+				}
+			}
+			f := newCleanupFixtureWithBackend(t, shared, sharedOwner)
+			t.Cleanup(func() { f.clear(t) })
 			reset, conflict := strings.HasPrefix(name, "reset"), strings.HasSuffix(name, "conflict")
 			item := f.seed(t, "alice", reset != conflict, reset)
 			mutator := &recordingUserMutator{err: userstate.ErrVersionConflict}
@@ -180,7 +226,9 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 			if err := f.b.QueryRow(t.Context(), `SELECT count(*) FROM commands`).Scan(&commands); err != nil || commands != 0 {
 				t.Fatal("cleanup created commands", commands, err)
 			}
-		})
+		}) {
+			return
+		}
 	}
 	t.Run("conditional-delete-and-fencing", func(t *testing.T) {
 		f := newCleanupFixture(t)

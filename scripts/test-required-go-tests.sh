@@ -167,6 +167,10 @@ func TestSelected(t *testing.T) {
   t.Run("other", func(t *testing.T) { t.Fatal("unselected sibling ran") })
 }
 func TestSelectedExtra(t *testing.T) { t.Fatal("unselected parent ran") }
+func TestShared(t *testing.T) {
+  t.Run("original", func(t *testing.T) { t.Run("nested", func(t *testing.T) {}) })
+}
+func TestOther(t *testing.T) {}
 GO
 printf 'fixture internal/selectionfixture TestSelected/literal.+(x)[y]$\n' >"${tmp}/selection.txt"
 selection="$(jq -nr --arg group fixture --arg mode select --rawfile manifest "${tmp}/selection.txt" -f "${ROOT}/scripts/check-required-go-tests.jq")"
@@ -177,6 +181,19 @@ printf 'fixture internal/selectionfixture TestSelectedExtra/other\n' >>"${tmp}/s
 if jq -ne --arg group fixture --arg mode select --rawfile manifest "${tmp}/selection.txt" \
   -f "${ROOT}/scripts/check-required-go-tests.jq" >/dev/null 2>&1; then
   echo 'unrelated subtest parents accepted a cross-product selection' >&2; exit 1
+fi
+# Shared preparation keeps the original cases below a selected parent, alongside
+# unrelated top-level tests. Missing descendants must still fail the real guard.
+printf 'fixture internal/selectionfixture TestShared\nfixture internal/selectionfixture TestShared/original\nfixture internal/selectionfixture TestShared/original/nested\nfixture internal/selectionfixture TestOther\n' >"${tmp}/shared.txt"
+selection="$(jq -nr --arg group fixture --arg mode select --rawfile manifest "${tmp}/shared.txt" -f "${ROOT}/scripts/check-required-go-tests.jq")"
+IFS=$'\t' read -r package pattern <<<"${selection}"
+[[ "${package}" == github.com/GentleKingson/ocservia/control-plane/internal/selectionfixture ]]
+(cd "${tmp}/selection" && GOWORK=off go test -json -count=1 -run "${pattern}") >"${tmp}/shared.json"
+jq -se --arg group fixture --rawfile manifest "${tmp}/shared.txt" -f "${ROOT}/scripts/check-required-go-tests.jq" "${tmp}/shared.json"
+jq -c 'select(.Test != "TestShared/original/nested")' "${tmp}/shared.json" >"${tmp}/bad.json"
+if jq -se --arg group fixture --rawfile manifest "${tmp}/shared.txt" \
+  -f "${ROOT}/scripts/check-required-go-tests.jq" "${tmp}/bad.json" >/dev/null 2>&1; then
+  echo 'shared fixture accepted missing original descendant' >&2; exit 1
 fi
 echo 'Explicit critical inventories, scope rejection and real subtest selection passed'
 for missing in OCSERV_TEST_DATABASE_URL OCSERV_TEST_OWNER_DATABASE_URL; do

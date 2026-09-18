@@ -177,7 +177,7 @@ independent Apply approval. No handlers or service dependencies move modules.
 
 The inventory now recognizes only the two explicit wrapper forms and compares
 their literal action and original handler against independent expectations.
-`TestBusinessRouteActionsBackendHTTPIntegration` reuses the Local-session Apply
+`TestPlanRoutesBackendHTTPIntegration/TestBusinessRouteActionsBackendHTTPIntegration` reuses the Local-session Apply
 fixture and real `NewBackend().http.Handler` for all eight routes. It complements
 the existing Apply success/replay/approval tests with denial intent counts,
 workspace and per-item boundaries, and counterfactual actions through the real

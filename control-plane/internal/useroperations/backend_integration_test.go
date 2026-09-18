@@ -30,6 +30,12 @@ import (
 
 func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 	t.Helper()
+	return userOperationsBackendWithCleanup(t, t)
+}
+
+func userOperationsBackendWithCleanup(t, cleanupT *testing.T) (database.Backend, database.Backend) {
+	t.Helper()
+	// Report setup errors in the current child, but let its parent own the resources.
 	ctx := context.Background()
 	if dsn := os.Getenv("PR02_DSN"); dsn != "" {
 		options := mysql.Options{Engine: mysql.Engine(os.Getenv("PR02_ENGINE")), Environment: "test", DSN: dsn}
@@ -37,12 +43,18 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = admin.Close() })
+		cleanupT.Cleanup(func() { _ = admin.Close() })
 		name := "pr02_user_operations_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		if _, err := admin.Exec(ctx, "CREATE DATABASE `"+name+"`"); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _, _ = admin.Exec(ctx, "DROP DATABASE `"+name+"`") })
+		cleanupT.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := admin.Exec(ctx, "DROP DATABASE `"+name+"`"); err != nil {
+				cleanupT.Error("drop user operations fixture", err)
+			}
+		})
 		if _, err := admin.Exec(ctx, "GRANT ALL ON `"+name+"`.* TO 'ocservia_owner'@'%' WITH GRANT OPTION"); err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +68,7 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = owner.Close() })
+		cleanupT.Cleanup(func() { _ = owner.Close() })
 		if err := owner.Migrate(ctx, ""); err != nil {
 			t.Fatal(err)
 		}
@@ -69,7 +81,7 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = b.Close() })
+		cleanupT.Cleanup(func() { _ = b.Close() })
 		return b, owner
 	}
 	dsn := os.Getenv("OCSERV_TEST_DATABASE_URL")
@@ -84,15 +96,17 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(admin.Close)
+	cleanupT.Cleanup(admin.Close)
 	name := "policy_cleanup_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	identifier := pgx.Identifier{name}.Sanitize()
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+identifier); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+identifier); err != nil {
-			t.Error(err)
+	cleanupT.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := admin.Exec(ctx, "DROP DATABASE "+identifier); err != nil {
+			cleanupT.Error("drop user operations fixture", err)
 		}
 	})
 	open := func(url string) *pgxpool.Pool {
@@ -106,7 +120,7 @@ func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(pool.Close)
+		cleanupT.Cleanup(pool.Close)
 		return pool
 	}
 	ownerPool, pool := open(ownerURL), open(dsn)

@@ -38,14 +38,32 @@ func (l *observedConfigPlanLookup) Resource(ctx context.Context, id uuid.UUID) (
 	return l.configPlanLookup.Resource(ctx, id)
 }
 
-func TestConfigPlanLookupBackendHTTPIntegration(t *testing.T) {
+func TestPlanRoutesBackendHTTPIntegration(t *testing.T) {
+	// Only resource-scoped routes share this database; maintenance suites stay isolated.
+	b, owner := authenticationBackendFixtureWithIsolation(t, true)
+	for _, scenario := range []struct {
+		name string
+		run  func(*testing.T, applyHTTPFixture)
+	}{
+		{"TestConfigPlanLookupBackendHTTPIntegration", testConfigPlanLookupBackendHTTPIntegration},
+		{"TestConfigPlanModuleBackendHTTPIntegration", testConfigPlanModuleBackendHTTPIntegration},
+		{"TestBusinessRouteActionsBackendHTTPIntegration", testBusinessRouteActionsBackendHTTPIntegration},
+	} {
+		if !t.Run(scenario.name, func(t *testing.T) {
+			scenario.run(t, newApplyHTTPFixtureWithBackend(t, b, owner))
+		}) {
+			return
+		}
+	}
+}
+
+func testConfigPlanLookupBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
 	assertStatus := func(t *testing.T, w *httptest.ResponseRecorder, status int) {
 		t.Helper()
 		if w.Code != status {
 			t.Fatalf("want %d, got %d %s", status, w.Code, w.Body)
 		}
 	}
-	f := newApplyHTTPFixture(t)
 	plan := f.plan(true)
 	lookup := &observedConfigPlanLookup{configPlanLookup: f.s.configPlanLookup}
 	f.s.configPlanLookup = lookup
