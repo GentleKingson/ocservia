@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="${ROOT}/scripts/bootstrap.sh"
 WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 RELEASE_WORKFLOW="${ROOT}/.github/workflows/release.yml"
+# shellcheck source=scripts/go-test-environment.sh
+source "${ROOT}/scripts/go-test-environment.sh"
+require_test_commands ruby jq
+bash "${ROOT}/scripts/test-bootstrap-platforms.sh"
 
 set +e
 output="$(GITHUB_ACTIONS=true "${BOOTSTRAP}" 2>&1)"
@@ -69,7 +73,18 @@ reject("router must receive the unmodified manual input") unless
 expected_commands = {
   "docs" => ["scripts/docs-check.sh"],
   "go" => ["scripts/bootstrap.sh go-test", "scripts/go-check.sh standard"],
-  "rust" => ["scripts/bootstrap.sh rust-basic", "scripts/rust-check.sh"],
+  "rust" => ["scripts/bootstrap.sh rust-basic", "scripts/rust-check.sh", <<~'SH', <<~'SH'],
+    bash scripts/test-managed-node-install.sh
+    bash scripts/test-controller-install.sh
+    bash scripts/test-controller-bootstrap.sh
+    docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
+      python3 /source/scripts/test-relay-launchers.py
+    docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
+      bash /source/scripts/test-release-agent-state-check.sh
+  SH
+    mkdir -m 0700 "$HOME/relay-compose-work"
+    RUNNER_TEMP="$HOME/relay-compose-work" bash scripts/i18-production-relays.sh --compose-only
+  SH
   "web" => ["scripts/bootstrap.sh web", "source scripts/env.sh\ncd web\nnpx playwright install --with-deps chromium\n", "scripts/web-check.sh"],
   "database-history-full" => ["scripts/bootstrap.sh go-test", "bash scripts/database-foundation-integration.sh", 'echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"'],
   "database-recovery-full" => ["scripts/test-database-deployment-config.sh", "RUN_ID=\"${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENGINE}\" \\\n  ARTIFACT_DIR=\"${RUNNER_TEMP}/database-recovery-${ENGINE}\" \\\n  bash scripts/i18-mysql-backup-restore-smoke.sh\n", 'echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"']

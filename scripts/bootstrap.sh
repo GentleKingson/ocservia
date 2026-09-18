@@ -28,8 +28,6 @@ case "${PROFILE}" in
     ;;
 esac
 
-mkdir -p "${TOOLS}/bin" "${CACHE}"
-
 version() {
   sed -n "s/^$1=//p" "${ROOT}/toolchains.lock"
 }
@@ -52,12 +50,25 @@ verify_sha256() {
 }
 
 download() {
-  local url="$1" artifact="$2" destination="${CACHE}/$2"
-  if [[ ! -f "${destination}" ]]; then
-    curl --fail --location --retry 3 --output "${destination}.tmp" "${url}"
-    mv "${destination}.tmp" "${destination}"
+  local url="$1" artifact="$2" destination="${CACHE}/$2" expected
+  expected="$(checksum "${artifact}")"
+  [[ "${expected}" =~ ^[a-fA-F0-9]{64}$ ]] || {
+    echo "missing or invalid SHA-256 checksum for ${artifact}" >&2
+    return 1
+  }
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    echo 'required host command is missing: sha256sum or shasum' >&2
+    return 1
   fi
-  verify_sha256 "${destination}" "$(checksum "${artifact}")"
+  if [[ ! -f "${destination}" ]]; then
+    verify_host_command curl
+    curl --fail --location --retry 3 --output "${destination}.tmp" "${url}" || return 1
+    verify_sha256 "${destination}.tmp" "${expected}" || return 1
+    mv "${destination}.tmp" "${destination}" || return 1
+  fi
+  # Command substitutions do not reliably inherit errexit. Never return a path
+  # after failed verification, even when the caller assigns download's output.
+  verify_sha256 "${destination}" "${expected}" || return 1
   printf '%s\n' "${destination}"
 }
 
@@ -81,7 +92,8 @@ version_output_equals() {
   [[ "${output}" == "${expected}" ]]
 }
 
-case "$(uname -s)-$(uname -m)" in
+platform="$(uname -s)-$(uname -m)"
+case "${platform}" in
   Darwin-arm64)
     go_platform="darwin-arm64"
     node_platform="darwin-arm64"
@@ -111,29 +123,52 @@ case "$(uname -s)-$(uname -m)" in
     nfpm_platform="Linux_x86_64"
     ;;
   Linux-aarch64)
-    # Only the native release packaging toolchain is mirrored for this
-    # platform; other profiles fail closed on their missing platform mappings.
+    go_platform="linux-arm64"
     rust_platform="aarch64-unknown-linux-gnu"
     nfpm_platform="Linux_arm64"
+    case "${PROFILE}" in
+      go-test | rust-basic | native-packages) ;;
+      *)
+        echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, rustup and nfpm (no Node, quality tools or sccache)" >&2
+        exit 1
+        ;;
+    esac
     ;;
   *)
-    echo "unsupported bootstrap platform: $(uname -s)-$(uname -m)" >&2
+    echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; no artifact mappings" >&2
     exit 1
     ;;
 esac
 
-install_go() {
-  local go_version go_artifact archive
+go_toolchain_matches() {
+  local executable="$1" expected_version="$2" identity
+  [[ -x "${executable}" ]] || return 1
+  identity="$("${executable}" env GOVERSION GOHOSTOS GOHOSTARCH)" || return 1
+  [[ "${identity}" == "$(printf 'go%s\n%s\n%s' "${expected_version}" "${go_platform%-*}" "${go_platform#*-}")" ]]
+}
+
+install_go() (
+  local go_version go_artifact archive staging
   go_version="$(version go)"
   go_artifact="go${go_version}.${go_platform}.tar.gz"
-  if ! version_output_contains "go version go${go_version} " "${TOOLS}/go/bin/go" \
-    "${TOOLS}/go/bin/go" version; then
-    archive="$(download "https://go.dev/dl/${go_artifact}" "${go_artifact}")"
-    rm -rf "${TOOLS}/go"
-    tar -xzf "${archive}" -C "${TOOLS}"
+  if go_toolchain_matches "${TOOLS}/go/bin/go" "${go_version}"; then
+    return 0
   fi
-  [[ "$("${TOOLS}/go/bin/go" env GOVERSION)" == "go${go_version}" ]]
-}
+  verify_host_command tar
+  verify_host_command gzip
+  archive="$(download "https://go.dev/dl/${go_artifact}" "${go_artifact}")"
+  staging="$(mktemp -d "${TOOLS}/.go-install-XXXXXX")"
+  trap 'rm -rf "${staging}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  tar -xzf "${archive}" -C "${staging}"
+  go_toolchain_matches "${staging}/go/bin/go" "${go_version}" || {
+    echo "invalid Go toolchain: expected go${go_version} host ${go_platform}" >&2
+    exit 1
+  }
+  rm -rf "${TOOLS}/go"
+  mv "${staging}/go" "${TOOLS}/go"
+)
 
 install_node() {
   local node_version node_artifact archive
@@ -358,6 +393,8 @@ verify_java() {
 # shellcheck source=scripts/env.sh
 # shellcheck disable=SC1091
 source "${ROOT}/scripts/env.sh"
+
+mkdir -p "${TOOLS}/bin" "${CACHE}"
 
 case "${PROFILE}" in
   all)
