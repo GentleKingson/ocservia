@@ -26,6 +26,13 @@ const historical = validateInputs("0.6.0", "v0.5.2", sha, sha, sha, baselines);
 assert.equal(historical.commit, "2bbbbbbc7dd4a9b328acfaae291fdaf11a35bfd6");
 assert.equal(historical.sums_sha256, "acbb66cf0f52fe64d3c3398e3fa6dfd8098190cf14863c24a0592e8f858af0be");
 assert.equal(valid().key_der_sha256, historical.key_der_sha256);
+const latest = validateInputs("0.6.2", "v0.6.1", sha, sha, sha, baselines);
+assert.equal(latest.commit, "1805962fe1a98a22955b3105bfa8ebce7f2ea1eb");
+assert.equal(latest.sums_sha256, "d562822bfdc55c784bf950a21c746f380a1cb6a7a2c86c6c801cfa25121df53b");
+assert.equal(latest.key_der_sha256, valid().key_der_sha256);
+assert.deepEqual(latest.controller, { database: "postgres", migration: 36, authentication: "oidc" });
+for (const version of ["0.6.1", "0.6.0"])
+  assert.throws(() => validateInputs(version, "v0.6.1", sha, sha, sha, baselines));
 for (const tag of ["latest", "v0.4.0", "v99.0.0"])
   assert.throws(() => validateInputs("100.0.0", tag, sha, sha, sha, baselines));
 for (const version of ["0.6.0", "0.5.2", "0.5.1", "0.5.0", "0.4.99"])
