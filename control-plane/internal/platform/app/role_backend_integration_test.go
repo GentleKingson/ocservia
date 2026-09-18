@@ -106,8 +106,10 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 			var completedBefore int
 			if cfg.RunsScheduler() {
 				cfg.TestSchedulerEvidence = true
-				cleanup = seedPolicyCleanup(t, ctx, owner, runtime, runtimeOptions.Backend, account)
-				cleanup.revoke(t, ctx, runtimeOptions.Backend)
+				if role == config.RoleAll {
+					cleanup = seedPolicyCleanup(t, ctx, owner, runtime, runtimeOptions.Backend, account)
+					cleanup.revoke(t, ctx, runtimeOptions.Backend)
+				}
 				if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completedBefore); err != nil {
 					t.Fatal(err)
 				}
@@ -165,6 +167,9 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 				}
 				select {
 				case <-log.failed:
+					if cleanup == nil {
+						t.Fatal("normal scheduler maintenance failed")
+					}
 					cleanupFailed = true
 					var completed int
 					if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil || completed != completedBefore {
@@ -231,6 +236,16 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 					t.Fatal("HTTP port survived Run", err)
 				}
 				rebound.Close()
+			}
+			if cfg.RunsScheduler() {
+				// Run has joined its renewal loop; only expire this fixture's lease.
+				query := `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`
+				if runtimeOptions.Backend != "postgres" {
+					query = `UPDATE scheduler_leadership SET lease_until=-9223372036854775808 WHERE id=1`
+				}
+				if _, err := owner.Store.Exec(ctx, query); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}

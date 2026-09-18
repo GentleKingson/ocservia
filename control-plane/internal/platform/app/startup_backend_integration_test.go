@@ -103,10 +103,18 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	binary := filepath.Join(dir, "ocserv-control")
-	build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", binary, "../../../cmd/ocserv-control")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build Controller: %v\n%s", err, output)
+	binary, supplied := os.LookupEnv("OCSERVIA_CONTROL_BIN")
+	if supplied {
+		info, err := os.Stat(binary)
+		if err != nil || !filepath.IsAbs(binary) || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("OCSERVIA_CONTROL_BIN must name an absolute executable file: %v", err)
+		}
+	} else {
+		binary = filepath.Join(dir, "ocserv-control")
+		build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "../../../cmd/ocserv-control")
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build Controller: %v\n%s", err, output)
+		}
 	}
 	environment := func(options connection.Options, extra map[string]string) []string {
 		var env []string

@@ -36,8 +36,8 @@ dependency between workers.
 | Job | Command | Bootstrap profile | Coverage |
 | --- | --- | --- | --- |
 | `docs` | `scripts/docs-check.sh` | none | Line endings, nonempty Markdown, bootstrap documentation and isolated bootstrap/preflight fixtures |
-| `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, and ordinary Go tests |
-| `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, check, clippy, and workspace tests |
+| `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, ordinary Go tests, required-wrapper/workflow self-tests and I14/I15/I16 script contracts |
+| `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, clippy (all targets/features), and workspace tests |
 | `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
 | `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Pinned PostgreSQL 17.10/18.6, MySQL 8.4.10 and MariaDB 12.3.2 critical regression in Quick; PostgreSQL full and MySQL/MariaDB current in Full |
 | `database-history-full` | `scripts/database-foundation-integration.sh` | `go-test` | MySQL/MariaDB complementary history, Full only |
@@ -73,6 +73,10 @@ The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. This test
 matrix is not the [production support matrix](../operations/production-deployment.md#database-support).
 The PostgreSQL script builds `ocserv-control` itself; only full scope builds its historical
 Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
+Its startup test reuses only the ordinary CLI built in that same invocation;
+standalone startup tests still build their own CLI. An external script binary
+override is not forwarded as a fresh startup-test build. Historical and race
+artifacts are never substituted for the current ordinary CLI.
 All database matrices need only the router and run alongside language checks.
 Neither needs a Rust build or a shared binary artifact.
 
@@ -103,9 +107,15 @@ Reason and changed-file count are diagnostic metadata.
 | G6 workflows, actions, scripts, harness, deployment fixtures, and dedicated Rust runtime files | docs |
 | Manual P1/security acceptance scripts, real-E2E scripts and their checks, `deploy/real-e2e` | docs |
 | Web | web + docs |
-| Go sources, module/workspace files, control-plane code and migrations | go + database-smoke |
+| Go sources, module/workspace files, control-plane code and migrations | go + database-smoke (except the pure `internal/domain/operation/operation_test.go`: go only) |
 | Rust workspace | rust |
-| Workflows, scripts, shared toolchain files, Makefile | All five basic checks |
+| `scripts/web-check.sh` | docs + web |
+| `scripts/rust-check.sh`, managed-node/Controller install/bootstrap and Relay launcher/release-state contract tests | docs + rust |
+| `scripts/go-check.sh` | docs + go |
+| Database integration, required-Go guard/manifest and I14 scripts | docs + go + database-smoke |
+| I15/I16 scripts | docs + go + rust + database-smoke |
+| Protocol/OpenAPI definitions and generated clients/contracts | All five basic checks |
+| Other workflows/scripts, shared toolchain files, Makefile | All five basic checks |
 | Unrecognized paths | All five basic checks |
 
 Mixed changes use the union of their checks. Documentation-only PRs do
@@ -137,7 +147,7 @@ explicit selection from the `regression-*` groups in
 | --- | --- |
 | `regression-mysql` | Empty/current migration, repeat migration and checksum refusal; trusted/untrusted TLS; runtime/maintenance permissions; transaction cancellation, rollback and panic cleanup; logical values, identity profiles and audit/RBAC. Each test keeps its own fixture; logical values/transaction probes need only small tables. The snapshot-abort test is MariaDB-only. |
 | `regression-postgres` | Transaction cancellation and recovery, cross-store commit/rollback, logical values, identity profiles and audit/RBAC on current structure. The script separately checks current migration, idempotence, privileges, incompatible Controller rejection and checksum corruption. |
-| `regression-auth` | Local HTTP login/logout, password changes, session revocation, denied management/self-approval, OIDC identity-store boundaries, and audit/business rollback. Both top-level tests run intact because Safety has assertions outside its children. |
+| `regression-auth` | Local HTTP login/logout, password changes, session revocation, denied management/self-approval, OIDC identity-store boundaries, and audit/business rollback; complete route suites including the three-scenario `TestPlanRoutesBackendHTTPIntegration`. Safety remains intact, including assertions outside its children. |
 | `regression-oidc` | PostgreSQL authorization-code/PKCE, issuer identity boundaries, invalid-token rejection and session behavior. MySQL/MariaDB retain their backend identity-store coverage, not this PostgreSQL-specific protocol fixture. |
 | `regression-outbox` | Atomic intent and ambiguous commit, two workers with durable claim/readback, early and duplicate results. Each selected child owns a disposable current-schema database. |
 | `regression-fencing` | Owner expiry while waiting to assert; competing controllers, retained epochs and rejected stale owners. Parent initialization is retained; these children create independent nodes. |
@@ -152,6 +162,18 @@ avoiding cross-product matches between unrelated parents.
 See [Go subtest matching](https://go.dev/blog/subtests) for the slash-separated
 matching rules. Child-only groups use separate invocations; top-level sets are
 batched by package.
+
+Only the four simple enforcement cleanup scenarios share one lazily initialized
+database, sequentially. Each restores permissions and clears its own data with
+a bounded background context; any failed child/cleanup stops reuse. Fencing
+and bounded scans retain separate fixtures, with no extra shared database when
+selected alone. The three plan-route scenarios (Lookup, Module, BusinessRouteActions)
+share a parent-owned database but retain separate workspaces, actors and HTTP
+fixtures. ControllerReads and NodeReads remain independent: telemetry maintenance
+can affect data outside a workspace. Migration, privilege and global-state tests
+retain real initialization. Role `all` retains real permission-failure recovery;
+`scheduler` retains normal maintenance and complete shutdown. No production
+interval is shortened, and a fixture lease expires only after its runner exits.
 
 Full retains whole-package MySQL/MariaDB tests, the original required inventory
 (`backend-mysql-current`, `backend-mysql-history` and audit groups), complete
@@ -173,6 +195,11 @@ Every selected database unit must also emit its own completion output after
 its script succeeds. Missing outputs fail even if a matrix result says success.
 Unknown/missing profiles, inconsistent scope, missing routing flags and
 unexpected job failure/cancellation/skip all fail the always-running summary.
+Selecting any database also requires `run_go=true` and a successful Go job,
+where the database-independent required-wrapper self-test runs once rather than
+once per PostgreSQL unit. Legal partial selections are tested separately from
+all-selected/all-skipped cases; four successful database outputs alone cannot
+hide an incorrectly skipped Go guard.
 
 `DATABASE_FULL_PART=all|current|history` is an internal full-only control for
 `database-foundation-integration.sh`; setting it with regression is rejected,
@@ -198,6 +225,30 @@ then select the candidate branch using the UI or
 `gh workflow run ci.yml --ref <candidate-branch> -f profile=full` (or
 `-f profile=quick`). A branch-only workflow is not
 a workaround for this prerequisite. See [GitHub manual workflow documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
+
+## Go cache trial
+
+Basic CI restores only `.cache/go-mod` and `.cache/go-build`, the paths in
+`scripts/env.sh`. `ci-go-cache-key.sh` includes the OS/image, Go and C compiler
+identity, CGO/GOFLAGS, locks and bootstrap/build-policy files. Ordinary and
+database/race objects have separate keys; build keys append the source SHA and
+restore only within the same compatibility prefix. Tool downloads still use
+locked versions and checksums; cache misses take the normal cold path.
+
+Only successful main-push jobs save: Go writes modules/ordinary objects, and
+the MySQL current unit alone writes database objects. PRs and manual runs are
+restore-only; history/recovery jobs are unchanged. No test command is skipped
+on a hit. Required and real database tests retain `-count=1`, so cached PASS
+results cannot substitute for current execution.
+
+Configuration validation is not performance acceptance. A new schema has no
+main cache until a normal authorized main push saves it; restore-only PR runs
+cannot create their own subsequent hit evidence. Branch/PR caches and main
+caches have distinct [access scopes](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache).
+Record actual miss/hit, restore/save, total wall time and runner-minutes before
+claiming a net speedup. Until then, Actions benefit is **unverified**. Remove
+the trial entries if two comparable rounds show no net benefit or cold fallback
+becomes unreliable. This trial adds no scheduled runs or workflow dependencies.
 
 ## Required check migration
 

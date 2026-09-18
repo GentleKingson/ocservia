@@ -17,7 +17,6 @@ if [[ "${scope}" == full ]]; then
 fi
 require_test_docker
 require_go_race
-bash "${ROOT}/scripts/test-required-go-tests.sh"
 (cd "${ROOT}" && sha256sum -c docs/database-migrations.sha256)
 
 UPSTREAM_MANIFEST="${ROOT}/docs/upstream/v4.9-post1.manifest.json"
@@ -78,13 +77,15 @@ trap 'exit 143' TERM
 
 mkdir -p "${TMP_ROOT}"
 export DATABASE_CASE_RESULTS="${TMP_ROOT}/required-case-results.jsonl"
+STARTUP_BIN=""
 if [[ -n "${OCSERVIA_CONTROL_BIN:-}" ]]; then
   [[ -x "${BIN}" ]] || {
     echo "OCSERVIA_CONTROL_BIN must name an executable file" >&2
     exit 2
   }
 else
-  (cd "${ROOT}/control-plane" && go build -trimpath -o "${BIN}" ./cmd/ocserv-control)
+  (cd "${ROOT}/control-plane" && go build -trimpath -buildvcs=false -o "${BIN}" ./cmd/ocserv-control)
+  STARTUP_BIN="${BIN}"
 fi
 
 # Historical rollback tests need a genuine pre-34 database, not a bypass of
@@ -220,7 +221,15 @@ clone_database() {
 checked_go_tests() {
   local group=$1
   shift
-  (cd "${ROOT}/control-plane" && exec bash "${ROOT}/scripts/required-go-tests.sh" "${group}" "$@" -timeout=3m) &
+  (
+    if [[ "${group}" == backend-controller-startup ]]; then
+      # Only reuse the current binary built above, never an external override.
+      unset OCSERVIA_CONTROL_BIN
+      if [[ -n "${STARTUP_BIN}" ]]; then export OCSERVIA_CONTROL_BIN="${STARTUP_BIN}"; fi
+    fi
+    cd "${ROOT}/control-plane"
+    exec bash "${ROOT}/scripts/required-go-tests.sh" "${group}" "$@" -timeout=3m
+  ) &
   local test_pid=$! index=${#PIDS[@]}
   PIDS+=("${test_pid}")
   wait "${test_pid}"

@@ -65,6 +65,7 @@ router = jobs.fetch("ci-relevance")
 reject("router must expose five domains and the resolved mode") unless
   router.fetch("outputs").keys.sort == (worker_flags.values + %w[profile database_scope]).sort
 reject("router requires full history") unless router.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
+reject("router must exercise path routing") unless router.fetch("steps").any? { |step| step["run"] == "bash scripts/test-ci-relevance.sh" }
 relevance = router.fetch("steps").find { |step| step["id"] == "relevance" }
 reject("router must receive the unmodified manual input") unless
   relevance.fetch("env").fetch("CI_PROFILE") == "${{ inputs.profile }}" &&
@@ -72,7 +73,18 @@ reject("router must receive the unmodified manual input") unless
 
 expected_commands = {
   "docs" => ["scripts/docs-check.sh"],
-  "go" => ["scripts/bootstrap.sh go-test", "scripts/go-check.sh standard"],
+  "go" => ["scripts/bootstrap.sh go-test", 'bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"', <<~'SH', "scripts/go-check.sh standard", <<~'SH'],
+    source scripts/env.sh
+    command -v go
+    go version
+    bash scripts/test-required-go-tests.sh
+    bash scripts/test-bootstrap-profiles.sh
+  SH
+    source scripts/env.sh
+    bash scripts/i14-quota-expiry-backport.sh --contract-only
+    bash scripts/i15-config-plan.sh --contract-only
+    bash scripts/i16-config-apply.sh --contract-only
+  SH
   "rust" => ["scripts/bootstrap.sh rust-basic", "scripts/rust-check.sh", <<~'SH', <<~'SH'],
     bash scripts/test-managed-node-install.sh
     bash scripts/test-controller-install.sh
@@ -120,11 +132,32 @@ database_commands = database.fetch("steps").select { |step| step.key?("run") }
 reject("database jobs must route only to their own backend test script") unless
   database_commands == [
     {"run" => "scripts/bootstrap.sh go-test"},
+    {"id" => "cache-key", "run" => 'bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"'},
     {"if" => "matrix.engine == 'postgres'", "run" => "scripts/database-integration.sh"},
     {"if" => "matrix.engine != 'postgres'",
      "run" => "unset DATABASE_FULL_PART\nif [[ \"${DATABASE_TEST_SCOPE}\" == full ]]; then export DATABASE_FULL_PART=current; fi\nbash scripts/database-foundation-integration.sh\n"},
     {"id" => "completed", "run" => 'echo "${ENGINE}${PG_MAJOR}=success" >> "${GITHUB_OUTPUT}"'}
   ]
+%w[go database-smoke].each do |id|
+  steps = jobs.fetch(id).fetch("steps")
+  kind = id == "go" ? "unit" : "db-race"
+  prefix = "basic-go-build-v1-#{kind}-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-"
+  restores = steps.select { |step| step.fetch("uses", "").start_with?("actions/cache/restore@") }
+  reject("#{id} must restore only compatible module/build caches") unless restores.map { |step| [step["id"], step["with"]] } == [
+    ["go-mod-cache", {"path" => ".cache/go-mod", "key" => "basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}"}],
+    ["go-build-cache", {"path" => ".cache/go-build", "key" => prefix + "${{ github.sha }}", "restore-keys" => prefix}]
+  ]
+  saves = steps.select { |step| step.fetch("uses", "").start_with?("actions/cache/save@") }
+  writers = id == "go" ? %w[mod build] : %w[build]
+  reject("#{id} cache writers drifted") unless saves.length == writers.length
+  saves.zip(writers).each do |step, cache|
+    matrix = id == "go" ? "" : " && matrix.engine == 'mysql'"
+    reject("#{id} must save only successful main pushes with one database writer") unless
+      step["if"] == "${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main'#{matrix} && steps.go-#{cache}-cache.outputs.cache-hit != 'true' }}" &&
+      step["with"] == {"path" => ".cache/go-#{cache}", "key" => "${{ steps.go-#{cache}-cache.outputs.cache-primary-key }}"} &&
+      steps.index(step) > steps.index(steps.find { |candidate| candidate["run"] == (id == "go" ? "scripts/go-check.sh standard" : 'echo "${ENGINE}${PG_MAJOR}=success" >> "${GITHUB_OUTPUT}"') })
+  end
+end
 history = jobs.fetch("database-history-full")
 reject("history must consume routing with two independent full engines") unless
   history.fetch("needs") == "ci-relevance" &&
@@ -144,7 +177,10 @@ end
 reject("database timeout budgets changed") unless [database, history].all? { |job| job.fetch("timeout-minutes") == 75 }
 reject("database recovery timeout budget changed") unless recovery.fetch("timeout-minutes") == 30
 reject("database smoke must let the script build its own control binary") unless
-  database_script.include?('go build -trimpath -o "${BIN}" ./cmd/ocserv-control')
+  database_script.include?('go build -trimpath -buildvcs=false -o "${BIN}" ./cmd/ocserv-control') &&
+  database_script.include?('STARTUP_BIN="${BIN}"') &&
+  database_script.include?('unset OCSERVIA_CONTROL_BIN') &&
+  database_script.include?('export OCSERVIA_CONTROL_BIN="${STARTUP_BIN}"')
 reject("PostgreSQL acceptance images must pin exact patch tags and digests") unless
   database_script.include?("postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f") &&
   database_script.include?("postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af")
@@ -152,6 +188,8 @@ reject("PostgreSQL acceptance versions must match toolchains.lock") unless
   toolchains.lines.map(&:strip).include?("postgresql_17=17.10") &&
   toolchains.lines.map(&:strip).include?("postgresql_18=18.6")
 foundation_script = File.read(File.join(root, "scripts/database-foundation-integration.sh"))
+reject("database jobs must not repeat the database-independent guard self-test") if
+  [database_script, foundation_script].any? { |script| script.include?("scripts/test-required-go-tests.sh") }
 reject("MySQL-compatible acceptance images must pin exact patch tags and digests") unless
   foundation_script.include?("mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6") &&
   foundation_script.include?("mariadb:12.3.2@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc")
@@ -201,11 +239,12 @@ require "open3"
 summary = result.fetch("steps").first.fetch("run")
 # Exercise the actual summary command, including unexpected skips and missing flags.
 %w[quick full].each do |profile|
-[false, true].each do |selected|
-  next if profile == "full" && !selected
-  needs = {"ci-relevance" => {"result" => "success", "outputs" => worker_flags.values.to_h { |flag| [flag, selected.to_s] }}}
+selections = profile == "full" ? [worker_flags.keys] : [[], %w[docs], %w[docs web], %w[docs rust], %w[go], %w[go database-smoke], worker_flags.keys]
+selections.each do |selected|
+  flags = worker_flags.to_h { |id, flag| [flag, selected.include?(id).to_s] }
+  needs = {"ci-relevance" => {"result" => "success", "outputs" => flags}}
   needs["ci-relevance"]["outputs"].merge!("profile" => profile, "database_scope" => profile == "full" ? "full" : "regression")
-  worker_flags.each_key { |id| needs[id] = {"result" => selected ? "success" : "skipped"} }
+  worker_flags.each_key { |id| needs[id] = {"result" => selected.include?(id) ? "success" : "skipped"} }
   needs["database-history-full"] = {"result" => profile == "full" ? "success" : "skipped"}
   needs["database-recovery-full"] = {"result" => profile == "full" ? "success" : "skipped"}
   {"database-smoke" => %w[postgres17 postgres18 mysql mariadb], "database-history-full" => %w[mysql mariadb], "database-recovery-full" => %w[mysql mariadb]}.each do |id, parts|
@@ -214,6 +253,13 @@ summary = result.fetch("steps").first.fetch("run")
   end
   _, _, status = Open3.capture3({"RESULTS" => JSON.generate(needs)}, "bash", "-eo", "pipefail", "-c", summary)
   reject("summary rejected valid selected/skipped results") unless status.success?
+  if selected.include?("database-smoke")
+    broken = Marshal.load(Marshal.dump(needs))
+    broken["ci-relevance"]["outputs"]["run_go"] = "false"
+    broken["go"]["result"] = "skipped"
+    _, _, status = Open3.capture3({"RESULTS" => JSON.generate(broken)}, "bash", "-eo", "pipefail", "-c", summary)
+    reject("summary accepted successful databases without the Go guard self-test") if status.success?
+  end
   %w[database-history-full database-recovery-full].each do |full_job|
     %w[success failure cancelled skipped missing].each do |state|
       next if state == needs[full_job]["result"]
@@ -244,8 +290,8 @@ summary = result.fetch("steps").first.fetch("run")
     end
   end
   (worker_flags.keys + ["ci-relevance"]).each do |id|
-    %w[failure cancelled skipped missing].each do |state|
-      next if !selected && id != "ci-relevance" && state == "skipped"
+    %w[success failure cancelled skipped missing].each do |state|
+      next if state == needs.fetch(id).fetch("result")
       broken = Marshal.load(Marshal.dump(needs))
       if state == "missing" then broken.delete(id)
       else broken[id]["result"] = state end

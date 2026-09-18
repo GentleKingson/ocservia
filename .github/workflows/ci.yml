@@ -38,6 +38,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - run: bash scripts/test-ci-relevance.sh
       - name: Classify the change set
         id: relevance
         env:
@@ -67,7 +68,45 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/bootstrap.sh go-test
+      - id: cache-key
+        run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
+      - id: go-mod-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-mod
+          key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}
+      - id: go-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-build
+          key: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
+          restore-keys: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
+      - name: CI guard and workflow contracts
+        run: |
+          source scripts/env.sh
+          command -v go
+          go version
+          bash scripts/test-required-go-tests.sh
+          bash scripts/test-bootstrap-profiles.sh
       - run: scripts/go-check.sh standard
+      - name: Domain script contracts
+        run: |
+          source scripts/env.sh
+          bash scripts/i14-quota-expiry-backport.sh --contract-only
+          bash scripts/i15-config-plan.sh --contract-only
+          bash scripts/i16-config-apply.sh --contract-only
+      - name: Save Go modules (main only)
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-mod
+          key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
+      - name: Save ordinary Go objects (main only)
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-build
+          key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
 
   rust:
     needs: ci-relevance
@@ -150,6 +189,19 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/bootstrap.sh go-test
+      - id: cache-key
+        run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
+      - id: go-mod-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-mod
+          key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}
+      - id: go-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-build
+          key: basic-go-build-v1-db-race-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
+          restore-keys: basic-go-build-v1-db-race-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - if: matrix.engine == 'postgres'
         run: scripts/database-integration.sh
       - if: matrix.engine != 'postgres'
@@ -159,6 +211,12 @@ jobs:
           bash scripts/database-foundation-integration.sh
       - id: completed
         run: echo "${ENGINE}${PG_MAJOR}=success" >> "${GITHUB_OUTPUT}"
+      - name: Save database Go objects (one main writer)
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.engine == 'mysql' && steps.go-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-build
+          key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
 
   database-history-full:
     needs: ci-relevance
@@ -240,6 +298,7 @@ jobs:
               .["database-recovery-full"].result == "skipped"
             else false end) and
             (if $routing.run_database == "true" then
+              $routing.run_go == "true" and .["go"].result == "success" and
               completed("database-smoke"; ["postgres17", "postgres18", "mysql", "mariadb"])
             else true end) and
             (.["ci-relevance"].outputs as $flags |
