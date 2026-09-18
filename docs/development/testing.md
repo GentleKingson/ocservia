@@ -201,6 +201,37 @@ failure, skipped non-required integration test, simulated platform test, native
 Go run and container run must be reported separately. Earlier ARM64 workaround
 measurements remain historical records, not instructions to wrap Go now.
 
+## Bundled PostgreSQL initialization
+
+Run the focused initializer regression only in an authorized, isolated
+BuildServer environment, using a private checkout directory, host root, Python
+3, `setpriv`, and a local Docker daemon. Do not use a production host, real
+credentials, or existing database volumes. Select the target release's
+digest-pinned PostgreSQL 17 image rather than `latest`:
+
+```bash
+python3 scripts/test-postgres-init-observation.py \
+  --image "${OCSERV_POSTGRES_IMAGE:?set the target PostgreSQL 17 digest}" \
+  --expect-argv no
+```
+
+The test uses generated task directories, fake credentials, an internal Docker
+network and the real image entrypoint. It requires successful argv reads before
+checking that passwords and their base64 forms are absent. It also exercises
+special characters, existing-role preservation, both role logins, physical
+backup verification, invalid passwords, error propagation and no HBA append
+after an SQL error. A catalog lock extends the observation window; its duration
+is not the duration of an ordinary initialization.
+
+Its log and temporary-file observations are supplementary: collection success
+is not asserted, and matching covers complete raw/base64 values, not every
+SQL-escaped representation. Negative results do not establish that all output
+channels are free of credentials. Keep this limitation with saved results.
+Record the candidate commit, script digest, image identity, command status and
+JSON output; do not relabel historical runs as executions of a new commit.
+The script cleans up its task-owned container, network and temporary directory.
+This privileged regression is manual; a green workspace CI does not imply it ran.
+
 ## Authoritative references
 
 - The current targets are defined in [`Makefile`](../../Makefile).

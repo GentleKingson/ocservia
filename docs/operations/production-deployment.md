@@ -120,6 +120,30 @@ Provision the backup bind mount for the non-root PostgreSQL UID before startup. 
 sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
 ```
 
+### PostgreSQL initialization updates
+
+Bundled PostgreSQL role initialization passes application and backup passwords
+through standard input, not process arguments. This concerns initialization,
+not a persistent exposure from an already initialized database.
+
+For new installations or a planned reinitialization, use a release checkout
+containing the updated `deploy/production/postgres-init/001-runtime-role.sh`.
+The production Compose descriptor mounts that checkout's `postgres-init`
+directory; updating an Agent package or a Controller image alone does not
+replace these initialization files.
+
+The [official PostgreSQL image](https://hub.docker.com/_/postgres) runs
+`/docker-entrypoint-initdb.d` scripts only when the data directory is empty.
+Restarting or upgrading an existing database does not rerun this initialization.
+Do not delete a data volume or rebuild a database just to apply this update.
+The update does not undo any historical credential access. Assess application
+and backup credential rotation separately based on who could access the host
+during initialization; do not assume credentials were read. When rotation is
+needed, use the existing credential-rotation procedure below as a separate
+operator action, not an automatic part of this update.
+
+### Release manifests
+
 Formal GitHub Releases publish the Controller release manifests
 `controller-release-amd64.json` and `controller-release-arm64.json` with their
 `.sha256` checksums alongside the Agent assets, plus the byte-identical

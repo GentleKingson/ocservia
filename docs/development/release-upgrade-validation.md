@@ -142,6 +142,24 @@ supported Rocky 9. The genuine v0.5.2 release fixes the common payload ABI;
 both native release jobs execute all three binaries on glibc 2.34. Its
 release/fresh-install acceptance does not replace this four-unit upgrade gate.
 
+### v0.6.1 supplemental baseline
+
+The registered v0.6.1 baseline is commit
+`1805962fe1a98a22955b3105bfa8ebce7f2ea1eb`, schema 36, with checksum-manifest
+SHA-256 `d562822bfdc55c784bf950a21c746f380a1cb6a7a2c86c6c801cfa25121df53b` and
+the same independently anchored key fingerprint above. On 2026-09-18, its
+signed checksums, both archive signatures, all 21 asset digests, both Controller
+bundles and anonymous dual-platform indexes were verified using the historical
+v0.4.0 package key. Immutable Release 389674680 and publication run 35061703465
+were cross-checked. This metadata verification did not install or rebuild the
+baseline and is not upgrade acceptance.
+
+The existing v0.6.0 release smoke and manual default remain unchanged. Before
+releasing v0.6.2, additionally dispatch this workflow with
+`-f baseline_release=v0.6.1 -f version=0.6.2` and the exact candidate branch/SHA.
+Require all four native units and the result gate on that same SHA. A v0.6.0
+run cannot be reported as v0.6.1 upgrade evidence.
+
 To register another baseline, independently establish its key, verify its
 signed checksum manifest and both architectures' native packages and
 Controller bundles, inspect its actual installation/authentication/database
