@@ -62,7 +62,7 @@ render "${ROOT}/deploy/package/nfpm.yaml" "${staging}/nfpm.yaml"
 render "${ROOT}/deploy/package/postinstall.sh" "${staging}/postinstall.sh"
 render "${ROOT}/deploy/package/preremove.sh" "${staging}/preremove.sh"
 
-deb="${OUTPUT_DIR}/ocservia-agent_${VERSION}_${PACKAGE_ARCH}.deb"
+deb="${OUTPUT_DIR}/ocservia-agent_${VERSION}-1_${PACKAGE_ARCH}.deb"
 rpm="${OUTPUT_DIR}/ocservia-agent-${VERSION}-1.${rpm_arch}.rpm"
 (cd "${staging}" && SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
   nfpm package --config nfpm.yaml --packager deb --target "${deb}")

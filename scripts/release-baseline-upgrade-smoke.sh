@@ -76,6 +76,8 @@ case "${PACKAGE_ARCH}" in
   amd64) rpm_arch=x86_64 ;;
   arm64) rpm_arch=aarch64 ;;
 esac
+baseline_deb="$(node "${ROOT}/scripts/release-upgrade-contract.mjs" baseline-deb \
+  "${BASELINE_RELEASE}" "${PACKAGE_ARCH}" <<<"${baseline}")"
 if ! command -v dpkg-deb >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
   echo "baseline upgrade smoke requires dpkg-deb and curl on the host" >&2
   exit 2
@@ -146,7 +148,6 @@ trap cleanup EXIT INT TERM
 # baseline package digests; this validates release-set integrity, not the
 # production signing key (that is provisioned out of band on real hosts).
 base_url="https://github.com/GentleKingson/ocservia/releases/download/${BASELINE_RELEASE}"
-baseline_deb="ocservia-agent_${BASELINE_VERSION}_${PACKAGE_ARCH}.deb"
 baseline_rpm="ocservia-agent-${BASELINE_VERSION}-1.${rpm_arch}.rpm"
 baseline_assets=("${baseline_deb}" SHA256SUMS SHA256SUMS.sig release-signing.pub.pem)
 if [[ "${baseline_has_rpm}" == yes ]]; then

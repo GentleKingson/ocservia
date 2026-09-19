@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { architectures, scenarios, compareVersions, validateInputs, validateRelease, requiredAssets, validateResults, readJSON, candidateArtifacts } from "./release-upgrade-contract.mjs";
+import { architectures, scenarios, compareVersions, validateInputs, validateRelease, requiredAssets, validateResults, readJSON, candidateArtifacts, baselineDebAsset } from "./release-upgrade-contract.mjs";
 const baselines = readJSON(new URL("./release-upgrade-baselines.json", import.meta.url));
 const sha = "a".repeat(40), run = "123", attempt = "2";
 assert.equal(compareVersions("0.10.0", "0.9.9"), 1);
@@ -31,6 +31,35 @@ assert.equal(latest.commit, "1805962fe1a98a22955b3105bfa8ebce7f2ea1eb");
 assert.equal(latest.sums_sha256, "d562822bfdc55c784bf950a21c746f380a1cb6a7a2c86c6c801cfa25121df53b");
 assert.equal(latest.key_der_sha256, valid().key_der_sha256);
 assert.deepEqual(latest.controller, { database: "postgres", migration: 36, authentication: "oidc" });
+for (const arch of Object.keys(architectures)) {
+  for (const baselineTag of ["v0.1.1", "v0.3.0", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0", "v0.6.1"]) {
+    assert.equal(baselineDebAsset(baselineTag, arch, baselines[baselineTag]), `ocservia-agent_${baselineTag.slice(1)}_${arch}.deb`);
+  }
+  // Synthetic metadata, not a rewrite of any published release.
+  const future = { ...latest, deb_asset_release: 1 };
+  const legacyName = `ocservia-agent_0.6.1_${arch}.deb`;
+  const futureName = `ocservia-agent_1.0.0-1_${arch}.deb`;
+  assert(requiredAssets("v0.6.1", latest).includes(legacyName));
+  assert(requiredAssets("v1.0.0", future).includes(futureName));
+  assert(!requiredAssets("v1.0.0", future).includes(`ocservia-agent_1.0.0_${arch}.deb`));
+  assert.equal(baselineDebAsset("v1.0.0", arch, { deb_asset_release: 2 }), `ocservia-agent_1.0.0-2_${arch}.deb`);
+  assert.equal(candidateArtifacts("agent", arch, "1.0.0")[0], futureName);
+  for (const [baselineTag, baseline, expected] of [["v0.6.1", latest, legacyName], ["v1.0.0", future, futureName]]) {
+    const actual = execFileSync(process.execPath, [new URL("./release-upgrade-contract.mjs", import.meta.url).pathname,
+      "baseline-deb", baselineTag, arch], { input: JSON.stringify(baseline), encoding: "utf8" }).trim();
+    assert.equal(actual, expected);
+    const published = { tag_name: baselineTag, draft: false, prerelease: false, published_at: "2026-09-19T00:00:00Z",
+      assets: requiredAssets(baselineTag, baseline).map(name => ({ name, state: "uploaded" })) };
+    const ref = { object: { type: "commit", sha: baseline.commit } };
+    validateRelease(published, baselineTag, ref, baseline);
+    published.assets = published.assets.filter(asset => asset.name !== expected);
+    assert.throws(() => validateRelease(published, baselineTag, ref, baseline));
+  }
+}
+for (const release of [0, -1, 1.5, "1", null, true]) {
+  assert.throws(() => requiredAssets("v1.0.0", { ...latest, deb_asset_release: release }), /deb_asset_release/);
+}
+console.log("Legacy v0.6.1 and revisioned baseline DEB naming, CLI and candidate separation passed");
 for (const version of ["0.6.1", "0.6.0"])
   assert.throws(() => validateInputs(version, "v0.6.1", sha, sha, sha, baselines));
 for (const tag of ["latest", "v0.4.0", "v99.0.0"])
@@ -44,7 +73,7 @@ assert.deepEqual(architectures, {
   arm64: { runner: "ubuntu-24.04-arm", runner_arch: "ARM64", kernel: "aarch64", rpm: "aarch64" },
 });
 const release = { tag_name: tag, draft: false, prerelease: false, published_at: "2026-09-15T05:56:14Z",
-  assets: requiredAssets(tag).map(name => ({ name, state: "uploaded" })) };
+  assets: requiredAssets(tag, valid()).map(name => ({ name, state: "uploaded" })) };
 const ref = { object: { type: "commit", sha: valid().commit } };
 validateRelease(release, tag, ref, valid());
 for (const asset of release.assets)
@@ -63,6 +92,9 @@ const units = Object.entries(scenarios).flatMap(([component, required]) => Objec
 })));
 const gate = (results = units, jobs = needs) => validateResults(frozen, results, jobs, run, attempt);
 assert.equal(gate().status, "pass");
+const legacyCandidate = structuredClone(units);
+legacyCandidate[0].artifacts[0].name = `ocservia-agent_${frozen.candidate_version}_${legacyCandidate[0].arch}.deb`;
+assert.throws(() => gate(legacyCandidate), /missing or duplicate candidate artifact/);
 for (let i = 0; i < 4; i++) {
   assert.throws(() => gate(units.filter((_, index) => index !== i)));
   for (const [field, bad] of Object.entries({ candidate_sha: "b".repeat(40), baseline_tag: "v0.4.0", run_attempt: "1", status: "cancelled", artifacts: [], failure: "failure" })) {

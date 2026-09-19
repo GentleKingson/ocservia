@@ -513,7 +513,6 @@ detect_platform() {
   case "${os_id} ${os_version_id}" in
     "ubuntu 22.04" | "ubuntu 24.04" | "ubuntu 26.04" | "debian 12" | "debian 13")
       PACKAGE_FAMILY=deb
-      PACKAGE_FILE="ocservia-agent_${RELEASE_VERSION}_${ARCH_WORD}.deb"
       ;;
     "rocky 9" | "rocky 9."*)
       PACKAGE_FAMILY=rpm
@@ -531,7 +530,7 @@ detect_platform() {
   esac
   command -v "${PACKAGE_MANAGER}" >/dev/null 2>&1 ||
     fail "${PACKAGE_MANAGER} is required to install the native package"
-  echo "platform: ${os_id} ${os_version_id} (${PACKAGE_FAMILY}, ${ARCH_WORD}; package ${PACKAGE_FILE})"
+  echo "platform: ${os_id} ${os_version_id} (${PACKAGE_FAMILY}, ${ARCH_WORD})"
 }
 
 validate_sysroot() {
@@ -664,7 +663,7 @@ verify_trust_anchor() {
 
 download_release_artifacts() {
   local name
-  for name in SHA256SUMS SHA256SUMS.sig "${PACKAGE_FILE}"; do
+  for name in "$@"; do
     echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
     curl -fsSL --proto '=https' --tlsv1.2 \
       --output "${STAGING_DIR}/${name}" "${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
@@ -672,16 +671,16 @@ download_release_artifacts() {
 }
 
 freeze_release_artifacts() {
-  # Freeze the downloaded artifacts beside the frozen release key before any
-  # trust verification. The launcher's staging directory stays writable by
+  # Freeze each downloaded artifact beside the release key before checking it.
+  # The launcher's staging directory stays writable by
   # the launcher, so verifying bytes there and then parsing the manifest or
   # digesting the package from there would let a second launcher-UID process
   # swap the signed manifest (and the package) after the signature check
   # succeeds — the digest that authorizes the install must come from exactly
-  # the manifest that passed verification. From this point on the bootstrap
-  # never reads the launcher staging again.
+  # the manifest that passed verification. Each artifact is frozen once;
+  # subsequent checks only read its root-owned copy.
   local name
-  for name in SHA256SUMS SHA256SUMS.sig "${PACKAGE_FILE}"; do
+  for name in "$@"; do
     priv install -o root -g root -m 0644 -- "${STAGING_DIR}/${name}" \
       "${PACKAGE_STAGING_DIR}/${name}"
   done
@@ -689,6 +688,7 @@ freeze_release_artifacts() {
 
 verify_release_trust() {
   local manifest_line expected_digest actual_digest matches
+  local legacy_deb revisioned_deb
   # The release-signing public key is intentionally absent from the download:
   # trust comes only from the operator-provisioned anchor verified above.
   # The frozen key, the signature, the manifest parse, and the package digest
@@ -699,13 +699,26 @@ verify_release_trust() {
     -in "${PACKAGE_STAGING_DIR}/SHA256SUMS" \
     -sigfile "${PACKAGE_STAGING_DIR}/SHA256SUMS.sig" >/dev/null ||
     fail "the release checksum manifest signature verification failed"
+  if [[ "${PACKAGE_FAMILY}" == deb ]]; then
+    # Published releases may use either spelling. Only the verified manifest
+    # decides; never infer from a version cutoff or probe a missing asset.
+    legacy_deb="ocservia-agent_${RELEASE_VERSION}_${ARCH_WORD}.deb"
+    revisioned_deb="ocservia-agent_${RELEASE_VERSION}-1_${ARCH_WORD}.deb"
+    # shellcheck disable=SC2016 # awk fields are not shell expansions.
+    PACKAGE_FILE="$(priv awk -v legacy="${legacy_deb}" -v revisioned="${revisioned_deb}" \
+      '$2 == legacy || $2 == revisioned { print $2 }' "${PACKAGE_STAGING_DIR}/SHA256SUMS")"
+    [[ "${PACKAGE_FILE}" == "${legacy_deb}" || "${PACKAGE_FILE}" == "${revisioned_deb}" ]] ||
+      fail "the signed checksum manifest must name exactly one supported DEB package for ${RELEASE_VERSION} ${ARCH_WORD}"
+  fi
   manifest_line="$(priv grep -F -- "  ${PACKAGE_FILE}" "${PACKAGE_STAGING_DIR}/SHA256SUMS" || true)"
   matches="$(priv grep -cF -- "  ${PACKAGE_FILE}" "${PACKAGE_STAGING_DIR}/SHA256SUMS" || true)"
   [[ "${matches}" == 1 ]] ||
     fail "the signed checksum manifest must name ${PACKAGE_FILE} exactly once (found ${matches})"
   expected_digest="${manifest_line%%"  "*}"
-  [[ "${expected_digest}" =~ ^[0-9a-f]{64}$ ]] ||
+  [[ "${expected_digest}" =~ ^[0-9a-f]{64}$ && "${manifest_line}" == "${expected_digest}  ${PACKAGE_FILE}" ]] ||
     fail "the signed checksum entry for ${PACKAGE_FILE} is malformed"
+  download_release_artifacts "${PACKAGE_FILE}"
+  freeze_release_artifacts "${PACKAGE_FILE}"
   actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')" ||
     fail "cannot digest the downloaded package"
   [[ "${actual_digest}" == "${expected_digest}" ]] ||
@@ -1218,8 +1231,8 @@ else
   resolve_trust_anchor
   freeze_trust_anchor
   verify_trust_anchor
-  download_release_artifacts
-  freeze_release_artifacts
+  download_release_artifacts SHA256SUMS SHA256SUMS.sig
+  freeze_release_artifacts SHA256SUMS SHA256SUMS.sig
   verify_release_trust
   install_native_package
 fi

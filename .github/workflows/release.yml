@@ -129,7 +129,7 @@ jobs:
             arm64) rpm_arch=aarch64 ;;
           esac
           VERSION="${version}" \
-            CANDIDATE_DEB="${RUNNER_TEMP}/packages/ocservia-agent_${version}_${PACKAGE_ARCH}.deb" \
+            CANDIDATE_DEB="${RUNNER_TEMP}/packages/ocservia-agent_${version}-1_${PACKAGE_ARCH}.deb" \
             CANDIDATE_RPM="${RUNNER_TEMP}/packages/ocservia-agent-${version}-1.${rpm_arch}.rpm" \
             scripts/release-baseline-upgrade-smoke.sh
       - name: Upload published baseline upgrade evidence
@@ -580,8 +580,8 @@ jobs:
             "${assets}/ocservia-agent-${version}-linux-arm64.tar.gz" \
             "${assets}/ocservia-agent-${version}-linux-arm64.tar.gz.sha256" \
             "${assets}/ocservia-agent-${version}-linux-arm64.tar.gz.sha256.sig" \
-            "${assets}/ocservia-agent_${version}_amd64.deb" \
-            "${assets}/ocservia-agent_${version}_arm64.deb" \
+            "${assets}/ocservia-agent_${version}-1_amd64.deb" \
+            "${assets}/ocservia-agent_${version}-1_arm64.deb" \
             "${assets}/ocservia-agent-${version}-1.x86_64.rpm" \
             "${assets}/ocservia-agent-${version}-1.aarch64.rpm" \
             "${assets}/controller-release.json" \

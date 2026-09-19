@@ -120,6 +120,15 @@ unchanged. Ordinary same-source native smoke remains a separate installer
 regression, not cross-version evidence.
 
 `release-upgrade-baselines.json` owns historical checksum pins and capabilities.
+Its optional `deb_asset_release` must be a positive integer (not a string).
+Omitting it selects the legacy `ocservia-agent_<version>_<arch>.deb` asset;
+setting it to `1` selects `ocservia-agent_<version>-1_<arch>.deb`. Add it only
+when registering a release actually published with the revisioned filename.
+Existing baselines, including v0.6.1, retain their original metadata and asset
+names, such as `ocservia-agent_0.6.1_amd64.deb`. Candidate packages always use
+`-1`; their naming never determines the historical baseline filename.
+The baseline smoke uses Node to share this resolver with upgrade prepare.
+
 The default v0.6.0 is bound to commit
 `cc8399641dc32083466a9c77369fcb8debf1ee48`, schema 36, checksum-manifest SHA-256
 `26f4ab236630ff52777dabf5723cd3d5814022d4e08ab4079768117dd4e262df`, and DER key SHA-256

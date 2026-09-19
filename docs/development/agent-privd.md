@@ -149,7 +149,7 @@ OUTPUT_DIR=dist VERSION=1.0.0 PACKAGE_ARCH=amd64 \
 
 It requires the `tar.gz` triple produced by `package-agent.sh` plus the
 DER SHA-256 fingerprint of the signing key, and emits
-`ocservia-agent_<version>_amd64.deb` and
+`ocservia-agent_<version>-1_amd64.deb` and
 `ocservia-agent-<version>-1.x86_64.rpm` (arm64 builds map to `arm64` and
 `aarch64`). Both formats embed the signed archive triple, the release public
 key, the pinned fingerprint, and `verify-agent-package.sh` under
@@ -160,6 +160,12 @@ trusted staging with the pinned fingerprint, and then runs the verified
 automatically; `/etc/ocservia-agent/agent.env` must be provisioned first.
 Removing the package runs the verified `uninstall-agent.sh` and preserves
 identity, state, and configuration.
+
+Both DEB and RPM use package release `1`. DEB includes it as the `-1`
+Debian Version revision and, starting with new releases, explicitly in the
+asset filename; RPM keeps it in its separate Release field. The software
+version and archive names do not change. Published historical assets retain
+their original names.
 
 Before enabling the units, install the independently provisioned Controller
 command verification key and two distinct RSA private keys for user-password
