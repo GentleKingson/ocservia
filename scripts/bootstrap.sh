@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-rust-integration|native|native-packages|rust-basic|rust-validation|web|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-rust-integration | native | native-packages | rust-basic | rust-validation | web | security) ;;
+  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -456,6 +456,10 @@ case "${PROFILE}" in
     install_go_quality_tools
     verify_host_command jq
     ;;
+  go-security)
+    install_go
+    install_govulncheck
+    ;;
   go-rust-integration)
     install_go
     install_rust
@@ -472,6 +476,11 @@ case "${PROFILE}" in
     install_rust_quality_tools
     install_sccache
     ;;
+  rust-security)
+    install_rust
+    install_cargo_audit
+    install_cargo_deny
+    ;;
   native)
     install_rust
     install_sccache
@@ -484,6 +493,10 @@ case "${PROFILE}" in
     install_node
     install_npm
     install_web_dependencies
+    ;;
+  npm-security)
+    install_node
+    install_npm
     ;;
   security)
     install_go

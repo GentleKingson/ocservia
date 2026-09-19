@@ -113,9 +113,25 @@ scan = security.fetch("jobs").fetch("scan")
 reject("security scans must not cancel siblings on failure") unless scan.fetch("strategy").fetch("fail-fast") == false
 checks = scan.fetch("strategy").fetch("matrix").fetch("include")
 reject("security scans must cover secrets and all three dependency ecosystems") unless
-  checks.map { |check| check.fetch("profile") }.sort == %w[g6-secret-scan go-quality rust-validation web]
+  checks.map { |check| check.fetch("profile") }.sort == %w[g6-secret-scan go-security npm-security rust-security]
 reject("secret scans need complete history") unless
-  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
+  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == "${{ matrix.profile != 'g6-secret-scan' && 1 || 0 }}" }
+bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
+dispatch = 'case "${PROFILE}" in' + bootstrap.split('case "${PROFILE}" in').last
+stubs = bootstrap.scan(/^(install_\w+|verify_\w+)\(\)/).flatten.map do |name|
+  "#{name}() { echo #{name}; }"
+end.join("\n")
+{
+  "go-security" => %w[install_go install_govulncheck],
+  "rust-security" => %w[install_rust install_cargo_audit install_cargo_deny],
+  "npm-security" => %w[install_node install_npm]
+}.each do |profile, expected|
+  output, status = Open3.capture2e({"PROFILE" => profile}, "bash", "-eu", "-c", stubs + "\n" + dispatch)
+  reject("#{profile} installs unrelated tools/dependencies: #{output}") unless status.success? && output.split == expected
+end
+rust_scan = checks.find { |check| check["profile"] == "rust-security" }.fetch("command")
+reject("both advisory scans must remain fresh and fail closed") unless
+  rust_scan.lines.map(&:strip) == ["cd rust", "cargo audit", "cargo deny --locked check advisories"]
 reject("release must call candidate security checks") unless
   release_jobs.fetch("security").fetch("uses") == "./.github/workflows/security.yml"
 reject("publishing must wait for security success") unless
