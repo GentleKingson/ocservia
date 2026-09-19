@@ -54,9 +54,6 @@ if [[ "${component}" == agent ]]; then
   bash scripts/build-release-agent.sh
 elif [[ "${component}" == controller ]]; then
   export BUILDX_BUILDER="upgrade-${component}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-  docker buildx create --driver docker-container \
-    --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 \
-    --name "${BUILDX_BUILDER}" --bootstrap --use
   bash scripts/build-release-controller.sh
 else exit 2; fi
 find "${OUTPUT_DIR}" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum | \

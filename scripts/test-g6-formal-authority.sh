@@ -19,7 +19,10 @@ jobs.select { |id, _| id.start_with?("g6-rd-") }.each do |id, job|
 end
 gate = jobs.fetch("g6-rd-gate")
 gate_text = Array(gate.fetch("steps")).map { |step| step.fetch("run", "") }.join("\n")
-abort("formal gate must bind the caller authority") unless gate_text.include?('--authority "${G6_AUTHORITY}"') && gate_text.include?("g6-pipeline.mjs gate")
+abort("formal gate must bind the caller authority through the shared pipeline") unless
+  gate.fetch("env").fetch("G6_PIPELINE_NEEDS") == '${{ toJSON(needs) }}' &&
+  core.fetch("env").fetch("G6_AUTHORITY") == '${{ inputs.authority }}' &&
+  gate_text.include?("g6-pipeline.mjs gate")
 abort("authority must be passed through the environment") unless core.fetch("env").fetch("G6_AUTHORITY") == '${{ inputs.authority }}'
 jobs.each do |id, job|
   job.fetch("steps").each do |step|
