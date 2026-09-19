@@ -262,7 +262,11 @@ version="$(basename -- "${package}")"
 case "${version}" in
   # dpkg reports the nfpm release component (X.Y.Z-1); rpm -q --qf '%{VERSION}'
   # reports the bare version because rpm keeps the release in %{RELEASE}.
-  *.deb) version="${version#ocservia-agent_}" ; version="${version%_*}" ;;
+  *.deb)
+    version="${version#ocservia-agent_}"
+    version="${version%_*}"
+    [[ "${version}" == *-1 ]] || version="${version}-1"
+    ;;
   *.rpm) version="${version#ocservia-agent-}" ; version="${version%-1.*}" ;;
 esac
 printf 'installed %s\n' "${version}" >"${OCSERV_MANAGED_NODE_SYSROOT}/.package-state"
@@ -466,22 +470,16 @@ if [[ "${1:-}" == "pkeyutl" && -s "${root}/tamper-after-verify" ]]; then
   if ((status == 0)); then
     # Regression seam for the signed-manifest TOCTOU: the moment signature
     # verification succeeds, a racing launcher-UID process replaces the
-    # launcher-writable manifest and package with internally consistent
-    # attacker artifacts (a manifest whose digest matches an attacker
-    # package). A correct installer froze its copies before verification and
-    # never reads the launcher staging again. The download staging template
+    # launcher-writable manifest before package selection/download. A correct
+    # installer keeps reading the copy frozen before verification, including
+    # when choosing between historical and revisioned DEB names.
+    # The download staging template
     # is ocservia-managed-node. (the privileged staging is -pkg. and is
     # already frozen here).
     for staging in /tmp/ocservia-managed-node.* "${TMPDIR:-/tmp}"/ocservia-managed-node.*; do
-      [[ -d "${staging}" ]] || continue
-      pkg=""
-      for candidate in "${staging}"/*.deb "${staging}"/*.rpm; do
-        [[ -f "${candidate}" ]] && pkg="${candidate}"
-      done
-      [[ -n "${pkg}" ]] || continue
-      printf 'attacker package bytes\n' >"${pkg}"
-      evil_digest="$(sha256sum -- "${pkg}" | awk '{print $1}')"
-      printf '%s  %s\n' "${evil_digest}" "$(basename -- "${pkg}")" >"${staging}/SHA256SUMS"
+      [[ -f "${staging}/SHA256SUMS" ]] || continue
+      printf 'attacker manifest bytes\n' >"${staging}/SHA256SUMS"
+      printf 'manifest swapped\n' >>"${root}/tamper-after-verify"
     done
   fi
   exit "${status}"
@@ -751,6 +749,68 @@ else
 fi
 echo "the single-file --version mode installs the pinned release without a checkout"
 
+# Real v0.6.1 asset spelling and a synthetic future release, on both DEB
+# architectures. These are signed naming fixtures, not historical payloads.
+for naming in legacy revisioned; do
+  for arch in amd64 arm64; do
+    (
+      scenario
+      case "${naming}" in
+        legacy) fixture_version=0.6.1; revision="" ;;
+        revisioned) fixture_version=1.0.0; revision=-1 ;;
+      esac
+      assets=("ocservia-agent_${fixture_version}${revision}_amd64.deb"
+        "ocservia-agent_${fixture_version}${revision}_arm64.deb")
+      build_serve
+      case "${arch}" in
+        amd64) printf 'x86_64\n' >"${arch_file}" ;;
+        arm64) printf 'aarch64\n' >"${arch_file}" ;;
+      esac
+      SCRIPT_UNDER_TEST="${standalone}/install.sh"
+      capture_from "${standalone}" --version "v${fixture_version}"
+      selected="ocservia-agent_${fixture_version}${revision}_${arch}.deb"
+      assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${fixture_version}/${selected}"
+      [[ "$(wc -l <"${curl_log}")" == 3 ]] || die "package selection must not probe alternative names"
+      assert_log_contains "${dpkg_log}" "${selected}"
+      [[ "$(cat "${sysroot}/.package-state")" == "installed ${fixture_version}-1" ]] ||
+        die "both DEB spellings must retain the same package revision"
+      if ((EUID == 0)); then
+        assert_status 0
+        assert_output "ENROLLMENT_READY"
+      else
+        assert_status 1
+        assert_output "unsafe metadata"
+      fi
+      echo "standalone --version v${fixture_version}: ${selected} selected from signed checksums"
+    )
+  done
+done
+
+# A signed manifest must select exactly one canonical package, not a choice
+# between spellings, duplicate entries or a filename outside this contract.
+for invalid in missing duplicate ambiguous suffix malformed; do
+  scenario
+  selected="ocservia-agent_${VERSION}-1_amd64.deb"
+  entry="$(grep -F "  ${selected}" "${serve}/SHA256SUMS")"
+  case "${invalid}" in
+    missing) printf '%s\n' "${entry/amd64/arm64}" >"${serve}/SHA256SUMS" ;;
+    duplicate) printf '%s\n%s\n' "${entry}" "${entry}" >"${serve}/SHA256SUMS" ;;
+    ambiguous) printf '%s\n%s\n' "${entry}" "${entry/-1_/_}" >"${serve}/SHA256SUMS" ;;
+    suffix) printf '%s.extra\n' "${entry}" >"${serve}/SHA256SUMS" ;;
+    malformed) printf '%s extra\n' "${entry}" >"${serve}/SHA256SUMS" ;;
+  esac
+  openssl pkeyutl -sign -rawin -inkey "${trusted}/release-signing.key" \
+    -in "${serve}/SHA256SUMS" -out "${serve}/SHA256SUMS.sig"
+  printf 'x86_64\n' >"${arch_file}"
+  SCRIPT_UNDER_TEST="${standalone}/install.sh"
+  capture_from "${standalone}" --version "v${VERSION}"
+  assert_status 1
+  assert_output "signed checksum"
+  [[ "$(wc -l <"${curl_log}")" == 2 ]] || die "${invalid} manifest must fail before package download"
+  assert_log_empty "${dpkg_log}"
+done
+echo "invalid signed package selections fail before any package download"
+
 # 2f. install.env supplies the node configuration to the single-file mode
 # from the invocation directory: the embedded loader replaces the
 # repository sibling deploy/lib/install-env.sh.
@@ -853,12 +913,13 @@ assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "a missing or mismatched trust anchor fails before any download"
 
-# 6. a bad release manifest signature fails before the package manager.
+# 6. a bad release manifest signature fails before package selection/download.
 scenario
 printf '\ntampered\n' >>"${serve}/SHA256SUMS"
 capture
 assert_status 1 "a tampered checksum manifest must fail closed"
 assert_output "signature verification failed"
+[[ "$(wc -l <"${curl_log}")" == 2 ]] || die "an unverified manifest must not trigger a package download"
 assert_log_empty "${dpkg_log}"
 echo "a bad release signature is rejected before the package manager"
 
@@ -1204,9 +1265,9 @@ echo "the root bootstrap flow reaches ENROLLMENT_READY"
 # 11a. a launcher-UID race cannot swap the signed manifest after signature
 # verification succeeds: the manifest parse and the package digest must read
 # the frozen root-owned staging, never the launcher-writable download
-# directory. The openssl mock rewrites the launcher staging with an
-# internally consistent attacker manifest + package the instant verification
-# returns success; the installer must still install the frozen signed bytes
+# directory. The openssl mock replaces the launcher manifest the instant
+# verification returns success; the installer must still select the signed
+# package name and install the bytes matching the frozen signed digest
 # (the native-install simulator rejects any package whose digest does not
 # match the signed manifest).
 scenario
@@ -1215,6 +1276,7 @@ capture_root
 assert_status 0 "a post-verification launcher staging swap must not affect the install"
 assert_output "ENROLLMENT_READY"
 assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
+grep -q 'manifest swapped' "${tamper_after_verify_file}" || die "the manifest race fixture did not run"
 echo "a post-verification manifest swap in the launcher staging is ignored"
 
 # 11b. the release key is frozen before its fingerprint is verified: a
