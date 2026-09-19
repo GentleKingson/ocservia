@@ -21,8 +21,8 @@ version=0.2.0
 package_files=(
   "ocservia-agent-${version}-linux-amd64.tar.gz"
   "ocservia-agent-${version}-linux-arm64.tar.gz"
-  "ocservia-agent_${version}_amd64.deb"
-  "ocservia-agent_${version}_arm64.deb"
+  "ocservia-agent_${version}-1_amd64.deb"
+  "ocservia-agent_${version}-1_arm64.deb"
   "ocservia-agent-${version}-1.x86_64.rpm"
   "ocservia-agent-${version}-1.aarch64.rpm"
 )

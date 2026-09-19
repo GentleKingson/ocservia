@@ -125,8 +125,8 @@ controller_id="$(printf 'c%.0s' $(seq 1 64))"
 assets=(
   "ocservia-agent-${VERSION}-linux-amd64.tar.gz"
   "ocservia-agent-${VERSION}-linux-arm64.tar.gz"
-  "ocservia-agent_${VERSION}_amd64.deb"
-  "ocservia-agent_${VERSION}_arm64.deb"
+  "ocservia-agent_${VERSION}-1_amd64.deb"
+  "ocservia-agent_${VERSION}-1_arm64.deb"
   "ocservia-agent-${VERSION}-1.x86_64.rpm"
   "ocservia-agent-${VERSION}-1.aarch64.rpm"
 )
@@ -262,7 +262,7 @@ version="$(basename -- "${package}")"
 case "${version}" in
   # dpkg reports the nfpm release component (X.Y.Z-1); rpm -q --qf '%{VERSION}'
   # reports the bare version because rpm keeps the release in %{RELEASE}.
-  *.deb) version="${version#ocservia-agent_}" ; version="${version%_*}-1" ;;
+  *.deb) version="${version#ocservia-agent_}" ; version="${version%_*}" ;;
   *.rpm) version="${version#ocservia-agent-}" ; version="${version%-1.*}" ;;
 esac
 printf 'installed %s\n' "${version}" >"${OCSERV_MANAGED_NODE_SYSROOT}/.package-state"
@@ -733,9 +733,9 @@ assert_output "release identity: v${VERSION} (pinned by --version)"
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS"
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS.sig"
 case "$(uname -m)" in
-  x86_64) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
-  aarch64 | arm64) selected="ocservia-agent_${VERSION}_arm64.deb" ;;
-  *) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
+  x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
+  aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
+  *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
 esac
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
 [[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 3 ]] ||
@@ -866,8 +866,8 @@ echo "a bad release signature is rejected before the package manager"
 scenario
 zeros="$(printf '0%.0s' $(seq 1 64))"
 sed -i.bak \
-  -e "s/^[0-9a-f]\{64\}  \(ocservia-agent_${VERSION}_amd64\.deb\)$/${zeros}  \1/" \
-  -e "s/^[0-9a-f]\{64\}  \(ocservia-agent_${VERSION}_arm64\.deb\)$/${zeros}  \1/" \
+  -e "s/^[0-9a-f]\{64\}  \(ocservia-agent_${VERSION}-1_amd64\.deb\)$/${zeros}  \1/" \
+  -e "s/^[0-9a-f]\{64\}  \(ocservia-agent_${VERSION}-1_arm64\.deb\)$/${zeros}  \1/" \
   "${serve}/SHA256SUMS"
 rm -f -- "${serve}/SHA256SUMS.bak"
 openssl pkeyutl -sign -rawin -inkey "${trusted}/release-signing.key" \
@@ -885,9 +885,9 @@ capture
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS"
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS.sig"
 case "$(uname -m)" in
-  x86_64) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
-  aarch64 | arm64) selected="ocservia-agent_${VERSION}_arm64.deb" ;;
-  *) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
+  x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
+  aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
+  *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
 esac
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
 [[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 3 ]] ||
@@ -912,7 +912,7 @@ echo "the amd64/arm64 DEB selection installs the matching package"
 scenario
 printf 'aarch64\n' >"${arch_file}"
 capture
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/ocservia-agent_${VERSION}_arm64.deb"
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/ocservia-agent_${VERSION}-1_arm64.deb"
 if grep -q "amd64" "${curl_log}"; then
   die "an arm64 host must not download the amd64 package: $(cat -- "${curl_log}")"
 fi
@@ -980,9 +980,9 @@ EXPECTED_RELEASE_KEY_SHA256=${fingerprint}
 EOF
 capture_from "${repo}"
 case "$(uname -m)" in
-  x86_64) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
-  aarch64 | arm64) selected="ocservia-agent_${VERSION}_arm64.deb" ;;
-  *) selected="ocservia-agent_${VERSION}_amd64.deb" ;;
+  x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
+  aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
+  *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
 esac
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
 assert_log_contains "${dpkg_log}" "${selected}"

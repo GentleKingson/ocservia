@@ -513,7 +513,7 @@ detect_platform() {
   case "${os_id} ${os_version_id}" in
     "ubuntu 22.04" | "ubuntu 24.04" | "ubuntu 26.04" | "debian 12" | "debian 13")
       PACKAGE_FAMILY=deb
-      PACKAGE_FILE="ocservia-agent_${RELEASE_VERSION}_${ARCH_WORD}.deb"
+      PACKAGE_FILE="ocservia-agent_${RELEASE_VERSION}-1_${ARCH_WORD}.deb"
       ;;
     "rocky 9" | "rocky 9."*)
       PACKAGE_FAMILY=rpm

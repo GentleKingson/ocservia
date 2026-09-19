@@ -65,7 +65,7 @@ find "${OUTPUT_DIR}" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum 
 stage=upgrade
 if [[ "${component}" == agent ]]; then
   case "${arch}" in amd64) rpm_arch=x86_64 ;; arm64) rpm_arch=aarch64 ;; esac
-  export CANDIDATE_DEB="${OUTPUT_DIR}/ocservia-agent_${VERSION}_${arch}.deb"
+  export CANDIDATE_DEB="${OUTPUT_DIR}/ocservia-agent_${VERSION}-1_${arch}.deb"
   export CANDIDATE_RPM="${OUTPUT_DIR}/ocservia-agent-${VERSION}-1.${rpm_arch}.rpm"
   bash scripts/release-baseline-upgrade-smoke.sh
 else

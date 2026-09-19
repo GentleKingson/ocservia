@@ -149,8 +149,8 @@ build_packages() {
 }
 build_packages 1.0.0
 build_packages 1.0.1
-deb_old="${pkg_dir}/ocservia-agent_1.0.0_${PACKAGE_ARCH}.deb"
-deb_new="${pkg_dir}/ocservia-agent_1.0.1_${PACKAGE_ARCH}.deb"
+deb_old="${pkg_dir}/ocservia-agent_1.0.0-1_${PACKAGE_ARCH}.deb"
+deb_new="${pkg_dir}/ocservia-agent_1.0.1-1_${PACKAGE_ARCH}.deb"
 rpm_old="${pkg_dir}/ocservia-agent-1.0.0-1.${rpm_arch}.rpm"
 rpm_new="${pkg_dir}/ocservia-agent-1.0.1-1.${rpm_arch}.rpm"
 

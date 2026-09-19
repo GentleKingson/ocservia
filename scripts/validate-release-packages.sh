@@ -29,8 +29,8 @@ ASSET_DIR="$(cd -- "${ASSET_DIR}" && pwd)"
 
 tar_amd64="ocservia-agent-${VERSION}-linux-amd64.tar.gz"
 tar_arm64="ocservia-agent-${VERSION}-linux-arm64.tar.gz"
-deb_amd64="ocservia-agent_${VERSION}_amd64.deb"
-deb_arm64="ocservia-agent_${VERSION}_arm64.deb"
+deb_amd64="ocservia-agent_${VERSION}-1_amd64.deb"
+deb_arm64="ocservia-agent_${VERSION}-1_arm64.deb"
 rpm_amd64="ocservia-agent-${VERSION}-1.x86_64.rpm"
 rpm_arm64="ocservia-agent-${VERSION}-1.aarch64.rpm"
 package_files=(
