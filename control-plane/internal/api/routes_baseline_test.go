@@ -104,6 +104,18 @@ POST /api/v1/audit:verify|s.requireOperationAuth(s.verifyAudit)|POST|audit.verif
 GET /api/v1/workspaces|s.requireOperationAuth(s.listWorkspaces)|GET|session
 POST /api/v1/role-bindings|s.requireOperationAuth(s.createRoleBinding)|POST|role_binding.manage`
 
+const compatibilityBaseline = `POST /api/v1/local-users/{local_user_action}
+GET /api/v1/operations/{operation_id}
+POST /api/v1/nodes/{node_id}/sessions/{session_action}
+POST /api/v1/nodes/{node_id}/ip-bans/{ip_action}
+POST /api/v1/nodes/{node_id}/users/{user_action}
+GET /api/v1/certificates/{certificate_id}
+POST /api/v1/certificates/{certificate_action}
+GET /api/v1/secret-provider-refs/{secret_ref_id}
+POST /api/v1/secret-provider-refs/{secret_ref_action}
+GET /api/v1/approval-requests/{approval_id}
+POST /api/v1/approval-requests/{approval_id}`
+
 func baselineServer(t *testing.T, dev bool) *Server {
 	t.Helper()
 	s := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "baseline", Commit: "fixture", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, dev, "", 36)
@@ -119,6 +131,19 @@ func baselineRequest(method, path string, body io.Reader) *http.Request {
 	tid, _ := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
 	sid, _ := trace.SpanIDFromHex("0123456789abcdef")
 	return r.WithContext(trace.ContextWithSpanContext(r.Context(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid})))
+}
+
+func baselineRoutePath(pattern, handler string) (method, path string) {
+	method, path, _ = strings.Cut(pattern, " ")
+	path = strings.NewReplacer("{local_user_action}", baselineID+":disable", "{session_action}", "42:disconnect", "{ip_action}", "192.0.2.9:remove", "{user_action}", "alice:disable", "{certificate_action}", baselineID+":issue", "{secret_ref_action}", baselineID+":rotate", "{group_name}", "operators", "{username}", "alice").Replace(path)
+	for strings.Contains(path, "{") {
+		start, end := strings.Index(path, "{"), strings.Index(path, "}")
+		path = path[:start] + baselineID + path[end+1:]
+	}
+	if handler == "s.requireOperationAuth(s.approveRequest)" {
+		path += ":approve"
+	}
+	return method, path
 }
 
 func assertBaselineProblem(t *testing.T, w *httptest.ResponseRecorder, path string, status int, kind, title, detail string) {
@@ -138,7 +163,7 @@ func assertBaselineProblem(t *testing.T, w *httptest.ResponseRecorder, path stri
 
 // Recognize only the single, direct, unchanged forwarding call in the exact
 // construction registrar method. Other nonliteral route declarations fail.
-func isModuleMethodForwarder(fset *token.FileSet, name string, file *ast.File, call *ast.CallExpr) bool {
+func isMethodForwarder(fset *token.FileSet, name string, file *ast.File, call *ast.CallExpr) bool {
 	if name != "routing.go" {
 		return false
 	}
@@ -155,7 +180,7 @@ func isModuleMethodForwarder(fset *token.FileSet, name string, file *ast.File, c
 		if format.Node(&receiver, fset, field.Type) != nil || format.Node(&signature, fset, fn.Type) != nil || format.Node(&expression, fset, call) != nil {
 			return false
 		}
-		if receiver.String() != "*moduleRegistrar" || signature.String() != "func(pattern string, handler func(http.ResponseWriter, *http.Request))" || expression.String() != "r.mux.HandleFunc(pattern, handler)" {
+		if receiver.String() != "*methodRegistrar" || signature.String() != "func(pattern string, handler func(http.ResponseWriter, *http.Request))" || expression.String() != "r.mux.HandleFunc(pattern, handler)" {
 			continue
 		}
 		for _, stmt := range fn.Body.List {
@@ -172,6 +197,11 @@ func TestHTTPRouteInventory(t *testing.T) {
 	// No production metadata or second runtime permission map is introduced.
 	registered := map[string]string{}
 	explicitActions := map[string]string{}
+	compatibility := map[string]bool{}
+	for _, pattern := range strings.Split(compatibilityBaseline, "\n") {
+		compatibility[pattern] = true
+	}
+	compatibilityRegistrations := 0
 	forwarders := 0
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -204,7 +234,7 @@ func TestHTTPRouteInventory(t *testing.T) {
 			}
 			literal, ok := call.Args[0].(*ast.BasicLit)
 			if !ok {
-				if isModuleMethodForwarder(fset, name, file, call) {
+				if isMethodForwarder(fset, name, file, call) {
 					forwarders++
 					return true
 				}
@@ -222,6 +252,12 @@ func TestHTTPRouteInventory(t *testing.T) {
 				t.Fatalf("duplicate %s", pattern)
 			}
 			registered[pattern] = handler.String()
+			if receiver, ok := sel.X.(*ast.Ident); ok && receiver.Name == "compat" {
+				if !compatibility[pattern] {
+					t.Fatalf("unexpected compatibility registration: %s", pattern)
+				}
+				compatibilityRegistrations++
+			}
 			guard, wrapped := call.Args[1].(*ast.CallExpr)
 			var wrapper bytes.Buffer
 			if wrapped {
@@ -259,11 +295,11 @@ func TestHTTPRouteInventory(t *testing.T) {
 	}
 	s := baselineServer(t, false)
 	derived := 0
-	for _, rule := range s.moduleMethods {
+	for _, rule := range s.registeredMethods {
 		derived += len(rule.methods)
 	}
-	if derived != 13 || len(s.moduleMethods) != 12 {
-		t.Fatalf("derived registrations/shapes = %d/%d, want 13/12", derived, len(s.moduleMethods))
+	if derived != 61 || len(s.registeredMethods) != 57 || compatibilityRegistrations != 11 {
+		t.Fatalf("derived registrations/shapes/compatibility = %d/%d/%d, want 61/57/11", derived, len(s.registeredMethods), compatibilityRegistrations)
 	}
 	for _, line := range strings.Split(routeBaseline, "\n") {
 		fields := strings.Split(line, "|")
@@ -273,25 +309,26 @@ func TestHTTPRouteInventory(t *testing.T) {
 				t.Fatalf("registration = %q, want %q", registered[pattern], handler)
 			}
 			delete(registered, pattern)
-			method, path, _ := strings.Cut(pattern, " ")
-			path = strings.NewReplacer("{local_user_action}", baselineID+":disable", "{session_action}", "42:disconnect", "{ip_action}", "192.0.2.9:remove", "{user_action}", "alice:disable", "{certificate_action}", baselineID+":issue", "{secret_ref_action}", baselineID+":rotate", "{group_name}", "operators", "{username}", "alice").Replace(path)
-			for strings.Contains(path, "{") {
-				start, end := strings.Index(path, "{"), strings.Index(path, "}")
-				path = path[:start] + baselineID + path[end+1:]
-			}
-			if handler == "s.requireOperationAuth(s.approveRequest)" {
-				path += ":approve"
-			}
+			method, path := baselineRoutePath(pattern, handler)
 			r := baselineRequest(method, path, nil)
 			if rule, ok := s.routeMethods(path); !ok || rule.allow() != allow {
 				t.Fatalf("registered route is unreachable: %s (%q)", pattern, rule)
 			}
-			if _, explicit := explicitActions[pattern]; explicit {
-				if rule, ok := moduleRouteMethods(s.moduleMethods, path); !ok || rule.allow() != allow {
-					t.Fatalf("module route not derived: %s (%q)", pattern, rule)
+			if compatibility[pattern] {
+				if _, ok := registeredRouteMethods(s.registeredMethods, path); ok {
+					t.Fatalf("compatibility route incorrectly derived: %s", pattern)
 				}
-				if rule, ok := legacyRouteMethod(path); ok {
-					t.Fatalf("module route still duplicated in legacy rules: %s (%q)", pattern, rule)
+				if rule, ok := compatibilityRouteMethod(path); !ok || rule != allow {
+					t.Fatalf("compatibility route lost: %s (%q)", pattern, rule)
+				}
+			} else {
+				if rule, ok := registeredRouteMethods(s.registeredMethods, path); !ok || rule.allow() != allow {
+					t.Fatalf("ordinary route not derived: %s (%q)", pattern, rule)
+				}
+				// The detail rule can interpret these two static names as IDs. All
+				// other ordinary paths (including the original 13) must be absent.
+				if rule, ok := compatibilityRouteMethod(path); ok && path != "/api/v1/operations/summary" && path != "/api/v1/operations/queue-metrics" {
+					t.Fatalf("ordinary route still duplicated in compatibility rules: %s (%q)", pattern, rule)
 				}
 			}
 			w := httptest.NewRecorder()

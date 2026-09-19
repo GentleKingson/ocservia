@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -289,6 +290,42 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 			}
 			unchanged(t, before)
 		}
+	})
+	t.Run("ordinary-methods-and-adjacent-actions", func(t *testing.T) {
+		before := counts(t)
+		for _, line := range strings.Split(routeBaseline, "\n") {
+			fields := strings.Split(line, "|")
+			_, path := baselineRoutePath(fields[0], fields[1])
+			for _, method := range []string{"GET", "POST", "PUT", "HEAD", "OPTIONS", "BREW"} {
+				if slices.Contains(strings.Split(fields[2], ", "), method) {
+					continue
+				}
+				w := f.call(method, path, "{", uuid.NewString(), f.requester.cookie, func(r *http.Request) { r.Header.Set("Origin", "https://untrusted.example") })
+				assertBaselineProblem(t, w, path, 405, "method-not-allowed", "Method not allowed", "the requested method is not supported")
+				if w.Header().Get("Allow") != fields[2] || w.Header().Get("WWW-Authenticate") != "" {
+					t.Fatalf("%s %s: method headers %v", method, path, w.Header())
+				}
+			}
+		}
+		// Legal methods still traverse the original public, resource and Origin checks.
+		assertStatus(t, f.call("GET", "/livez", "", "", nil, nil), 200)
+		w := f.call("GET", "/api/v1/auth/methods", "", "", nil, nil)
+		if w.Code != 200 || w.Body.String() != "{\"local\":true,\"oidc\":false}\n" || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("authentication methods: %d %v %s", w.Code, w.Header(), w.Body)
+		}
+		assertStatus(t, f.call("GET", nodePath+"/certificates", "", "", f.requester.cookie, nil), 200)
+		assertApplyHTTPProblem(t, f.call("POST", nodePath+"/certificates", "{", "", f.requester.cookie, nil), 400, "idempotency-key-required")
+		assertApplyHTTPProblem(t, f.call("POST", nodePath+"/certificates", "{", "", f.requester.cookie, func(r *http.Request) { r.Header.Del("Origin") }), 403, "cross-origin-request")
+		for _, path := range []string{nodePath + "/users/alice:unknown", nodePath + "/sessions/42:unknown", nodePath + "/ip-bans/192.0.2.9:unknown"} {
+			assertApplyHTTPProblem(t, f.call("POST", path, "{", "", f.requester.cookie, nil), 404, "not-found")
+		}
+		for _, suffix := range []string{"/users/alice:disable", "/sessions/42:terminate", "/ip-bans/192.0.2.9:remove"} {
+			assertApplyHTTPProblem(t, f.call("POST", nodePath+suffix, "{", "", f.reader.cookie, nil), 403, "forbidden")
+		}
+		if _, err := f.s.auth.Authenticate(t.Context(), f.requester.cookie); err != nil {
+			t.Fatal("method rejection changed the Local session", err)
+		}
+		unchanged(t, before)
 	})
 	t.Run("legacy-dynamic-and-sse", func(t *testing.T) {
 		before := counts(t)
