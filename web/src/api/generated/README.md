@@ -138,7 +138,6 @@ All URIs are relative to _/api/v1_
 
 - [AgentRollout](docs/AgentRollout.md)
 - [AgentRolloutCreateRequest](docs/AgentRolloutCreateRequest.md)
-- [AgentRolloutExclusion](docs/AgentRolloutExclusion.md)
 - [AgentRolloutNode](docs/AgentRolloutNode.md)
 - [AgentRolloutPage](docs/AgentRolloutPage.md)
 - [AgentUpgradeRequest](docs/AgentUpgradeRequest.md)
@@ -216,6 +215,7 @@ All URIs are relative to _/api/v1_
 - [QueueMetrics](docs/QueueMetrics.md)
 - [Readiness](docs/Readiness.md)
 - [ResetLocalUserPasswordRequest](docs/ResetLocalUserPasswordRequest.md)
+- [ResourceMemberDimensionsInner](docs/ResourceMemberDimensionsInner.md)
 - [RoleBinding](docs/RoleBinding.md)
 - [RoleBindingRequest](docs/RoleBindingRequest.md)
 - [SecretProviderRef](docs/SecretProviderRef.md)

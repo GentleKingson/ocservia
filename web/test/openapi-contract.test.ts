@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { NodeObservedStateFromJSON } from "@ocservia/api-client";
 
 interface OpenApiDocument {
   openapi?: unknown;
@@ -54,6 +55,11 @@ interface OpenApiDocument {
       NodeObservedState?: {
         required?: unknown;
         properties?: {
+          config_revision?: {
+            type?: unknown;
+            format?: unknown;
+            minimum?: unknown;
+          };
           agent_version_state?: { enum?: unknown };
           recommended_agent_version?: { maxLength?: unknown };
         };
@@ -97,6 +103,30 @@ interface OpenApiDocument {
 }
 
 describe("OpenAPI invariants", () => {
+  it("keeps configuration revision optional and distinguishes unknown from zero", async () => {
+    const document = parse(
+      await readFile(
+        resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+        "utf8",
+      ),
+    ) as OpenApiDocument;
+    const schema = document.components?.schemas?.NodeObservedState;
+    expect(schema?.properties?.config_revision).toMatchObject({
+      type: "integer",
+      format: "int64",
+      minimum: 0,
+    });
+    expect(schema?.required).not.toContain("config_revision");
+    for (const revision of [undefined, 0, 7, Number.MAX_SAFE_INTEGER]) {
+      const node = NodeObservedStateFromJSON({
+        version: 31,
+        config_revision: revision,
+      });
+      expect(node.configRevision).toBe(revision);
+      expect(node.version).toBe(31);
+    }
+  });
+
   it("publishes the shared Local and OIDC authentication contract", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),

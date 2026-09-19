@@ -47,6 +47,7 @@ func TestPlanRoutesBackendHTTPIntegration(t *testing.T) {
 	}{
 		{"TestConfigPlanLookupBackendHTTPIntegration", testConfigPlanLookupBackendHTTPIntegration},
 		{"TestConfigPlanModuleBackendHTTPIntegration", testConfigPlanModuleBackendHTTPIntegration},
+		{"TestConfigRevisionBackendHTTPIntegration", testConfigRevisionBackendHTTPIntegration},
 		{"TestBusinessRouteActionsBackendHTTPIntegration", testBusinessRouteActionsBackendHTTPIntegration},
 	} {
 		if !t.Run(scenario.name, func(t *testing.T) {
