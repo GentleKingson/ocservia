@@ -37,7 +37,16 @@ worker_flags = {
 reject("Basic CI triggers drifted") unless workflow.fetch(true).keys.sort == %w[pull_request push workflow_dispatch]
 reject("Basic CI permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read"}
 worker_flags.each do |id, flag|
-  reject("#{id} must follow routing") unless jobs.fetch(id).fetch("if") == "needs.ci-relevance.outputs.#{flag} == 'true'"
+  condition = "needs.ci-relevance.outputs.#{flag} == 'true'"
+  condition += " || needs.ci-relevance.outputs.run_ci_tools == 'true'" if id == "go"
+  condition += " || needs.ci-relevance.outputs.run_installers == 'true'" if id == "rust"
+  reject("#{id} must follow routing") unless jobs.fetch(id).fetch("if") == condition
+end
+%w[go rust].each do |id|
+  steps = jobs.fetch(id).fetch("steps")
+  heavy = steps.select { |s| s.fetch("run", "").match?(/scripts\/(go-check|rust-check)\.sh|bootstrap.sh rust-basic/) }
+  reject("#{id} heavy steps must not run for tools/installers alone") unless
+    !heavy.empty? && heavy.all? { |s| s["if"] == "needs.ci-relevance.outputs.run_#{id} == 'true'" }
 end
 database = jobs.fetch("database-smoke")
 reject("matrix must use the router's Quick/Full selection") unless
@@ -68,9 +77,14 @@ require "json"
 require "open3"
 summary = result.fetch("steps").first.fetch("run")
 %w[quick full].each do |profile|
-  selections = profile == "full" ? [worker_flags.keys] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], worker_flags.keys]
+  selections = profile == "full" ? [worker_flags.keys] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], %w[ci_tools], %w[installers], %w[ci_tools installers], worker_flags.keys]
   selections.each do |selected|
     flags = worker_flags.to_h { |id, flag| [flag, selected.include?(id).to_s] }
+    flags["run_ci_tools"] = selected.include?("ci_tools").to_s
+    flags["run_installers"] = selected.include?("installers").to_s
+    selected = selected.dup
+    selected << "go" if flags["run_ci_tools"] == "true"
+    selected << "rust" if flags["run_installers"] == "true"
     needs = {"ci-relevance" => {"result" => "success", "outputs" => flags.merge("profile" => profile)}}
     worker_flags.each_key { |id| needs[id] = {"result" => selected.include?(id) ? "success" : "skipped"} }
     needs["database-recovery-full"] = {"result" => profile == "full" ? "success" : "skipped"}
