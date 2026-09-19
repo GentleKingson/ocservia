@@ -116,6 +116,8 @@ jobs:
         env:
           RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
+          CANDIDATE_DIR: ${{ runner.temp }}/packages
+          VERSION: ${{ env.version }}
         run: scripts/release-native-package-smoke.sh
       - name: Validate published v0.6.0 upgrade (${{ matrix.package_arch }})
         env:
@@ -187,7 +189,6 @@ jobs:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
       - name: Resolve release identity
         env:
@@ -217,15 +218,8 @@ jobs:
             echo "version=${version}"
             echo "source_commit=${source_commit}"
           } >>"${GITHUB_ENV}"
-      - name: Prepare pinned BuildKit builder
-        run: |
-          set -euo pipefail
-          docker buildx create \
-            --driver docker-container \
-            --driver-opt "image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8" \
-            --name "${BUILDX_BUILDER}" \
-            --bootstrap \
-            --use
+      - name: Relay optional BuildKit cache credentials
+        uses: ./.github/actions/g6-cache-credentials
       # Each leg builds natively (no QEMU) and exports one Docker image
       # archive per image. Nothing is written to GHCR here: the legs hold
       # only source read, and every production registry write happens inside
@@ -271,7 +265,7 @@ jobs:
       - name: Collect built packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
-          pattern: agent-packages-*
+          pattern: agent-packages-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/assets
           merge-multiple: true
       - name: Resolve package version
@@ -323,13 +317,13 @@ jobs:
       - name: Collect built packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
-          pattern: agent-packages-*
+          pattern: agent-packages-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/assets
           merge-multiple: true
       - name: Collect Controller image archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
-          pattern: controller-images-*
+          pattern: controller-images-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/controller-images
           merge-multiple: true
       - name: Resolve package version & source epoch
@@ -356,15 +350,8 @@ jobs:
             echo "tag ${release_tag} must point directly at the release commit ${source_commit}" >&2
             exit 1
           fi
-      - name: Restore native-package tool cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap pinned nfpm tool
-        run: scripts/bootstrap.sh native-packages
+        run: scripts/bootstrap.sh package-tools
       - name: Prepare versioned bootstrap assets
         run: scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"
       - name: Login to GitHub Container Registry
@@ -527,6 +514,7 @@ jobs:
           AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
         run: |
           CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 WRITE_SHA256SUMS=1 \
+            PAYLOAD_RECEIPT="${RUNNER_TEMP}/release-payload-validated.sha256" \
             ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
             scripts/validate-release-packages.sh
       - name: Sign unified checksum manifest
@@ -547,8 +535,9 @@ jobs:
             exit 1
           }
           CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 ASSET_DIR="${RUNNER_TEMP}/assets" \
+            PAYLOAD_RECEIPT="${RUNNER_TEMP}/release-payload-validated.sha256" \
             VERSION="${version}" \
-            scripts/validate-release-packages.sh
+            scripts/validate-release-packages.sh manifest
       - name: Prepare draft release
         # Upload the complete asset set before publication. Only leftover
         # drafts may be recreated; published releases are never modified.

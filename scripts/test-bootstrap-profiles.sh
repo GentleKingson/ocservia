@@ -37,7 +37,16 @@ worker_flags = {
 reject("Basic CI triggers drifted") unless workflow.fetch(true).keys.sort == %w[pull_request push workflow_dispatch]
 reject("Basic CI permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read"}
 worker_flags.each do |id, flag|
-  reject("#{id} must follow routing") unless jobs.fetch(id).fetch("if") == "needs.ci-relevance.outputs.#{flag} == 'true'"
+  condition = "needs.ci-relevance.outputs.#{flag} == 'true'"
+  condition += " || needs.ci-relevance.outputs.run_ci_tools == 'true'" if id == "go"
+  condition += " || needs.ci-relevance.outputs.run_installers == 'true'" if id == "rust"
+  reject("#{id} must follow routing") unless jobs.fetch(id).fetch("if") == condition
+end
+%w[go rust].each do |id|
+  steps = jobs.fetch(id).fetch("steps")
+  heavy = steps.select { |s| s.fetch("run", "").match?(/scripts\/(go-check|rust-check)\.sh|bootstrap.sh rust-basic/) }
+  reject("#{id} heavy steps must not run for tools/installers alone") unless
+    !heavy.empty? && heavy.all? { |s| s["if"] == "needs.ci-relevance.outputs.run_#{id} == 'true'" }
 end
 database = jobs.fetch("database-smoke")
 reject("matrix must use the router's Quick/Full selection") unless
@@ -68,9 +77,14 @@ require "json"
 require "open3"
 summary = result.fetch("steps").first.fetch("run")
 %w[quick full].each do |profile|
-  selections = profile == "full" ? [worker_flags.keys] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], worker_flags.keys]
+  selections = profile == "full" ? [worker_flags.keys] : [%w[docs], %w[web], %w[rust], %w[go database-smoke], %w[ci_tools], %w[installers], %w[ci_tools installers], worker_flags.keys]
   selections.each do |selected|
     flags = worker_flags.to_h { |id, flag| [flag, selected.include?(id).to_s] }
+    flags["run_ci_tools"] = selected.include?("ci_tools").to_s
+    flags["run_installers"] = selected.include?("installers").to_s
+    selected = selected.dup
+    selected << "go" if flags["run_ci_tools"] == "true"
+    selected << "rust" if flags["run_installers"] == "true"
     needs = {"ci-relevance" => {"result" => "success", "outputs" => flags.merge("profile" => profile)}}
     worker_flags.each_key { |id| needs[id] = {"result" => selected.include?(id) ? "success" : "skipped"} }
     needs["database-recovery-full"] = {"result" => profile == "full" ? "success" : "skipped"}
@@ -90,6 +104,105 @@ summary = result.fetch("steps").first.fetch("run")
   end
 end
 
+# Exercise the selected entrypoints, with only unrelated tests and Go commands
+# replaced by recording stubs. The Release upgrade contract itself stays real.
+require "tmpdir"
+require "fileutils"
+standard = jobs.fetch("go").fetch("steps").find { |step| step["run"] == "scripts/go-check.sh standard" }
+reject("standard Go checks must follow run_go") unless standard && standard["if"] == "needs.ci-relevance.outputs.run_go == 'true'"
+reject("tool checks must receive the same Go selection") unless
+  guard.fetch("env") == {"CI_SUITES" => "${{ needs.ci-relevance.outputs.ci_suites }}", "CI_RUN_GO" => "${{ needs.ci-relevance.outputs.run_go }}"}
+Dir.mktmpdir("ci-entrypoints-") do |tmp|
+  work = File.join(tmp, "work")
+  files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
+  files += %w[.github/workflows/release.yml .github/workflows/release-upgrade.yml rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
+  files.each do |source|
+    target = File.join(work, source.delete_prefix(root + "/"))
+    FileUtils.mkdir_p(File.dirname(target))
+    FileUtils.cp(source, target)
+  end
+  Dir.glob(File.join(work, "scripts", "test-*.{sh,mjs}")).each do |path|
+    next if %w[test-release-upgrade.sh test-release-upgrade.mjs].include?(File.basename(path))
+    stub = if path.end_with?(".sh")
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"${0##*/}\" >> \"${CI_TRACE}\"\n"
+    else
+      "import fs from 'node:fs'; fs.appendFileSync(process.env.CI_TRACE, #{(File.basename(path) + "\n").to_json});\n"
+    end
+    File.write(path, stub)
+  end
+  %w[bin control-plane tools/g6-harness].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
+  %w[go gofmt].each do |name|
+    path = File.join(work, "bin", name)
+    File.write(path, "#!/usr/bin/env bash\nprintf '%s|%s|%s\\n' \"${0##*/}\" \"${PWD}\" \"$*\" >> \"${CI_TRACE}\"\n")
+    FileUtils.chmod(0755, path)
+  end
+  route = File.join(tmp, "route")
+  FileUtils.mkdir_p(route)
+  run = lambda do |env, *command, **options|
+    output, status = Open3.capture2e(env, *command, **options)
+    reject("#{command.join(' ')} failed: #{output}") unless status.success?
+    output
+  end
+  git = ->(*args) { run.call({}, "git", "-C", route, *args).strip }
+  git.call("init", "-q")
+  git.call("config", "user.name", "test")
+  git.call("config", "user.email", "test@example.invalid")
+  git.call("commit", "--allow-empty", "-qm", "base")
+  base = git.call("rev-parse", "HEAD")
+  g6_path = "tools/g6-harness/internal/runtime/runtime.go"
+  {
+    "Release-only" => [".github/workflows/release.yml"],
+    "G6-only" => [g6_path],
+    "Controller+G6" => ["control-plane/internal/platform/app/run.go", g6_path],
+    "shared bootstrap" => ["scripts/bootstrap.sh"]
+  }.each do |name, paths|
+    git.call("checkout", "-q", "--detach", base)
+    paths.each do |path|
+      target = File.join(route, path)
+      FileUtils.mkdir_p(File.dirname(target))
+      File.write(target, "change\n")
+    end
+    git.call("add", ".")
+    git.call("commit", "-qm", name)
+    out = File.join(tmp, "routing")
+    File.write(out, "")
+    run.call({}, "bash", File.join(root, "scripts/ci-relevance.sh"), "pull_request", base, git.call("rev-parse", "HEAD"), out, chdir: route)
+    routing = File.readlines(out, chomp: true).to_h { |line| line.split("=", 2) }
+    reject("#{name} selected the wrong Go owner") unless
+      routing.fetch("run_go") == (!%w[Release-only G6-only].include?(name)).to_s
+    trace = File.join(tmp, "trace")
+    File.write(trace, "")
+    env = guard.fetch("env").transform_values do |value|
+      routing.fetch(value.delete_prefix("${{ needs.ci-relevance.outputs.").delete_suffix(" }}"))
+    end.merge("CI_TRACE" => trace, "PATH" => File.join(work, "bin") + ":" + ENV.fetch("PATH"))
+    reject("#{name} omitted tool contracts") unless routing.fetch("run_ci_tools") == "true"
+    output = run.call(env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
+    reject("#{name} tool suite duplicated standard Go checks") if
+      routing.fetch("run_go") == "true" && File.readlines(trace).any? { |line| line.match?(/^go(fmt)?\|/) }
+    run.call(env, "bash", "-eo", "pipefail", "-c", standard.fetch("run"), chdir: work) if routing.fetch("run_go") == "true"
+    calls = File.readlines(trace, chomp: true)
+    expected = name == "Release-only" ? 0 : 1
+    reject("#{name} must format harness #{expected} times") unless calls.count { |line| line.start_with?("gofmt|") && line.include?("tools/g6-harness") } == expected
+    ["vet ./...", "test -count=1 ./..."].each do |command|
+      reject("#{name} must run harness #{command} #{expected} times") unless calls.count("go|#{work}/tools/g6-harness|#{command}") == expected
+    end
+    if expected == 1
+      reject("#{name} lost G6 contract/evidence checks") unless calls.grep(/^test-g6-/).length == 12 &&
+        %w[test-g6-workflow-contract.sh test-g6-evidence-pipeline.sh test-g6-evidence-verifier.mjs].all? { |test| calls.count(test) == 1 }
+    else
+      reject("Release-only must run the publishing contract without guards") unless
+        output.include?("Shared release build and publishing boundary contracts passed") && !calls.include?("test-bootstrap-profiles.sh")
+      path = File.join(work, ".github/workflows/release.yml")
+      original = File.read(path)
+      File.write(path, original.sub("uses: ./.github/workflows/security.yml", "uses: ./.github/workflows/ci.yml"))
+      output, status = Open3.capture2e(env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
+      reject("Release-only accepted a substituted security entrypoint") unless !status.success? && output.include?("release must call candidate security checks")
+      File.write(path, original)
+    end
+    puts "#{name}: selected entrypoints and harness command counts passed"
+  end
+end
+
 release_jobs = release_workflow.fetch("jobs")
 security = YAML.safe_load(File.read(File.join(root, ".github/workflows/security.yml")), aliases: true)
 reject("security checks must support scheduled, manual, and release runs") unless
@@ -99,11 +212,26 @@ scan = security.fetch("jobs").fetch("scan")
 reject("security scans must not cancel siblings on failure") unless scan.fetch("strategy").fetch("fail-fast") == false
 checks = scan.fetch("strategy").fetch("matrix").fetch("include")
 reject("security scans must cover secrets and all three dependency ecosystems") unless
-  checks.map { |check| check.fetch("profile") }.sort == %w[g6-secret-scan go-quality rust-validation web]
+  checks.map { |check| check.fetch("profile") }.sort == %w[g6-secret-scan go-security npm-security rust-security]
 reject("secret scans need complete history") unless
-  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == 0 }
-reject("release must call candidate security checks") unless
-  release_jobs.fetch("security").fetch("uses") == "./.github/workflows/security.yml"
+  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == "${{ matrix.profile != 'g6-secret-scan' && 1 || 0 }}" }
+bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
+dispatch = 'case "${PROFILE}" in' + bootstrap.split('case "${PROFILE}" in').last
+stubs = bootstrap.scan(/^(install_\w+|verify_\w+)\(\)/).flatten.map do |name|
+  "#{name}() { echo #{name}; }"
+end.join("\n")
+{
+  "go-security" => %w[install_go install_govulncheck],
+  "rust-security" => %w[install_rust install_cargo_audit install_cargo_deny],
+  "npm-security" => %w[install_node install_npm],
+  "package-tools" => %w[install_nfpm]
+}.each do |profile, expected|
+  output, status = Open3.capture2e({"PROFILE" => profile}, "bash", "-eu", "-c", stubs + "\n" + dispatch)
+  reject("#{profile} installs unrelated tools/dependencies: #{output}") unless status.success? && output.split == expected
+end
+rust_scan = checks.find { |check| check["profile"] == "rust-security" }.fetch("command")
+reject("both advisory scans must remain fresh and fail closed") unless
+  rust_scan.lines.map(&:strip) == ["cd rust", "cargo audit", "cargo deny --locked check advisories"]
 reject("publishing must wait for security success") unless
   release_jobs.fetch("publish-release-packages").fetch("needs").include?("security")
 build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")

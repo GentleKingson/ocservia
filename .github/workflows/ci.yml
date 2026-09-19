@@ -30,6 +30,7 @@ jobs:
       database_scope: ${{ steps.relevance.outputs.database_scope }}
       database_matrix: ${{ steps.relevance.outputs.database_matrix }}
       run_ci_tools: ${{ steps.relevance.outputs.run_ci_tools }}
+      ci_suites: ${{ steps.relevance.outputs.ci_suites }}
       run_installers: ${{ steps.relevance.outputs.run_installers }}
       run_docs: ${{ steps.relevance.outputs.run_docs }}
       run_go: ${{ steps.relevance.outputs.run_go }}
@@ -62,43 +63,50 @@ jobs:
 
   go:
     needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_go == 'true'
+    if: needs.ci-relevance.outputs.run_go == 'true' || needs.ci-relevance.outputs.run_ci_tools == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - run: scripts/bootstrap.sh go-test
+      - if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards') || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
+        run: scripts/bootstrap.sh go-test
       - id: cache-key
+        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
         run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
       - id: go-mod-cache
+        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
           key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}
       - id: go-build-cache
+        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
           key: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
           restore-keys: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
+      - name: Bootstrap G6 contract dependencies
+        if: contains(needs.ci-relevance.outputs.ci_suites, 'g6')
+        run: scripts/bootstrap.sh g6-runtime
       - name: CI guard and workflow contracts
         if: needs.ci-relevance.outputs.run_ci_tools == 'true'
-        run: |
-          source scripts/env.sh
-          bash scripts/test-ci-relevance.sh
-          bash scripts/test-required-go-tests.sh
-          bash scripts/test-bootstrap-profiles.sh
-      - run: scripts/go-check.sh standard
+        env:
+          CI_SUITES: ${{ needs.ci-relevance.outputs.ci_suites }}
+          CI_RUN_GO: ${{ needs.ci-relevance.outputs.run_go }}
+        run: bash scripts/ci-tools-check.sh
+      - if: needs.ci-relevance.outputs.run_go == 'true'
+        run: scripts/go-check.sh standard
       - name: Save Go modules (main only)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && steps.cache-key.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
           key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
       - name: Save ordinary Go objects (main only)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && steps.cache-key.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
@@ -106,15 +114,17 @@ jobs:
 
   rust:
     needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_rust == 'true'
+    if: needs.ci-relevance.outputs.run_rust == 'true' || needs.ci-relevance.outputs.run_installers == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - run: scripts/bootstrap.sh rust-basic
-      - run: scripts/rust-check.sh
+      - if: needs.ci-relevance.outputs.run_rust == 'true'
+        run: scripts/bootstrap.sh rust-basic
+      - if: needs.ci-relevance.outputs.run_rust == 'true'
+        run: scripts/rust-check.sh
       - name: Relay launcher and installer contracts
         if: needs.ci-relevance.outputs.run_installers == 'true'
         run: |
@@ -219,13 +229,18 @@ jobs:
             . as $results | .["ci-relevance"].outputs as $routing |
             .["ci-relevance"].result == "success" and
             ($routing.profile == "quick" or $routing.profile == "full") and
+            all(["run_docs", "run_go", "run_rust", "run_web", "run_database", "run_ci_tools", "run_installers"][];
+              $routing[.] == "true" or $routing[.] == "false") and
             (if $routing.profile == "full" then
               all(["run_docs", "run_go", "run_rust", "run_web", "run_database"][]; $routing[.] == "true")
             else true end) and
             all(["docs", "go", "rust", "web", "database-smoke"][];
-              . as $job | (if $job == "database-smoke" then "run_database" else "run_" + $job end) as $flag |
-              ($routing[$flag] == "true" and $results[$job].result == "success") or
-              ($routing[$flag] == "false" and $results[$job].result == "skipped")) and
+              . as $job | (if $job == "go" then ($routing.run_go == "true" or $routing.run_ci_tools == "true")
+                elif $job == "rust" then ($routing.run_rust == "true" or $routing.run_installers == "true")
+                elif $job == "database-smoke" then $routing.run_database == "true"
+                else $routing["run_" + $job] == "true" end) as $selected |
+              ($selected and $results[$job].result == "success") or
+              ($selected == false and $results[$job].result == "skipped")) and
             (if $routing.profile == "full" then
               .["database-recovery-full"].result == "success"
             else .["database-recovery-full"].result == "skipped" end)'

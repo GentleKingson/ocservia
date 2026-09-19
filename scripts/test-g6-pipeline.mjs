@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import {
   ASSEMBLY_SCHEMA,
   SECRET_SCAN_SCHEMA,
@@ -13,6 +14,9 @@ import {
   gate,
   runtimeResult,
   verifySource,
+  workflowOptions,
+  failureResult,
+  secretScanResult,
 } from "./g6-pipeline.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "ocservia-g6-pipeline-"));
@@ -418,6 +422,65 @@ try {
   json(mismatchedInputs["secret-scan-result"], scan);
   assert.throws(() => gate(mismatchedInputs), /secret scan run_attempt mismatch/);
 
+  const needs = {
+    "g6-rd-fd-a": { result: "success", outputs: {
+      "release-manifest-digest": binding["release-manifest-digest"],
+      "raw-artifact-id": "3001", "raw-artifact-digest": "1".repeat(64),
+    } },
+    "g6-rd-fd-b": { result: "success", outputs: {
+      "raw-artifact-id": "3002", "raw-artifact-digest": "2".repeat(64),
+    } },
+    "g6-rd-assemble": { result: "success", outputs: {
+      ...artifactOptions,
+      "release-manifest-digest": binding["release-manifest-digest"],
+    } },
+  };
+  const env = { ...process.env, GITHUB_SHA: binding["candidate-sha"],
+    GITHUB_RUN_ID: binding["run-id"], GITHUB_RUN_ATTEMPT: binding["run-attempt"],
+    G6_AUTHORITY: binding.authority, G6_PIPELINE_NEEDS: JSON.stringify(needs) };
+  const options = workflowOptions(env);
+  for (const [key, value] of Object.entries(artifactOptions)) assert.equal(options[key], value);
+  assert.equal(options["candidate-sha"], binding["candidate-sha"]);
+  assert.equal(options.authority, binding.authority);
+  assert.match(options["environment-id"], /^g6-[0-9a-f]{16}$/);
+  assert.notEqual(workflowOptions({ ...env, GITHUB_RUN_ATTEMPT: "4" })["environment-id"], options["environment-id"]);
+  const verifierOptions = workflowOptions({ ...env,
+    G6_PIPELINE_NEEDS: JSON.stringify({ "g6-rd-assemble": needs["g6-rd-assemble"] }) });
+  assert.deepEqual({ ...verifierOptions, "job-results": null }, { ...options, "job-results": null });
+  for (const phase of ["assembly", "verification", "gate"]) {
+    const output = join(root, `fallback-${phase}`, "result.json");
+    failureResult({ ...options, phase, output, "release-manifest-digest": "" });
+    const result = JSON.parse(readFileSync(output));
+    assert.equal(result.status ?? result.final_status, "failed");
+    assert.equal(result.release_manifest_digest, null);
+    assert.deepEqual(result.artifacts, artifactBindings);
+    const bytes = readFileSync(output, "utf8");
+    failureResult({ ...options, phase, output });
+    assert.equal(readFileSync(output, "utf8"), bytes);
+  }
+  for (const outcome of ["success", "failure", "cancelled", "skipped", "", "passed"]) {
+    const output = join(root, `scan-${outcome}.json`);
+    secretScanResult({ ...options, outcome, output });
+    assert.equal(JSON.parse(readFileSync(output)).status, outcome === "success" ? "passed" : "failed");
+  }
+  const cli = (...args) => spawnSync(process.execPath,
+    [join(import.meta.dirname, "g6-pipeline.mjs"), ...args], { env, encoding: "utf8" });
+  for (const command of ["finalize-assembly", "bind-verification"]) {
+    const output = join(root, `${command}-missing.json`);
+    const result = cli(command, "--input", join(root, "absent.json"), "--output", output);
+    assert.equal(result.status, 1, result.stderr);
+    const failure = JSON.parse(readFileSync(output));
+    assert.equal(failure.status, "failed");
+    assert.equal(failure.candidate_sha, env.GITHUB_SHA);
+    assert.deepEqual(failure.artifacts, artifactBindings);
+  }
+  const runtimeRoot = join(root, "cli-runtime");
+  mkdirSync(runtimeRoot);
+  runtimeResult({ ...options, root: runtimeRoot, domain: "fd-a", status: "passed" });
+  assert.equal(cli("check-runtime", "--root", runtimeRoot, "--domain", "fd-a").status, 0);
+  assert.equal(cli("check-runtime", "--root", runtimeRoot, "--domain", "fd-b").status, 1);
+  writeFileSync(join(runtimeRoot, "runtime-result.json"), "{}");
+  assert.equal(cli("check-runtime", "--root", runtimeRoot, "--domain", "fd-a").status, 1);
   console.log("G6 pipeline tests passed");
 } finally {
   rmSync(root, { recursive: true, force: true });

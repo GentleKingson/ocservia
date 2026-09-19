@@ -66,14 +66,14 @@ function walkFiles(root, current = root) {
   return files.sort();
 }
 
-function bindingFromOptions(values) {
+function bindingFromOptions(values, allowMissingRelease = false) {
   const binding = {
     candidate_sha: values["candidate-sha"],
     run_id: values["run-id"],
     run_attempt: Number(values["run-attempt"]),
     environment_id: values["environment-id"],
     authority: values.authority,
-    release_manifest_digest: values["release-manifest-digest"],
+    release_manifest_digest: values["release-manifest-digest"] || null,
   };
   if (!/^[0-9a-f]{40}$/.test(binding.candidate_sha ?? "")) {
     fail("candidate-sha must be a lowercase 40-character Git SHA");
@@ -88,10 +88,83 @@ function bindingFromOptions(values) {
   if (!["engineering", "production_readiness"].includes(binding.authority)) {
     fail("authority is invalid");
   }
-  if (!/^[0-9a-f]{64}$/.test(binding.release_manifest_digest ?? "")) {
+  if (!(allowMissingRelease && binding.release_manifest_digest === null) &&
+      !/^[0-9a-f]{64}$/.test(binding.release_manifest_digest ?? "")) {
     fail("release-manifest-digest must be a lowercase SHA-256 digest");
   }
   return binding;
+}
+
+function workflowOptions(env = process.env) {
+  if (!env.G6_PIPELINE_NEEDS) return {};
+  const needs = JSON.parse(env.G6_PIPELINE_NEEDS);
+  const assembly = needs["g6-rd-assemble"]?.outputs ?? {};
+  const fdA = needs["g6-rd-fd-a"]?.outputs;
+  const fdB = needs["g6-rd-fd-b"]?.outputs;
+  return {
+    "candidate-sha": env.GITHUB_SHA,
+    "run-id": env.GITHUB_RUN_ID,
+    "run-attempt": env.GITHUB_RUN_ATTEMPT,
+    "environment-id": `g6-${createHash("sha256").update(`${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`).digest("hex").slice(0, 16)}`,
+    authority: env.G6_AUTHORITY,
+    "release-manifest-digest": fdA?.["release-manifest-digest"] ?? assembly["release-manifest-digest"],
+    "fd-a-artifact-id": fdA?.["raw-artifact-id"] ?? assembly["fd-a-artifact-id"],
+    "fd-a-artifact-digest": fdA?.["raw-artifact-digest"] ?? assembly["fd-a-artifact-digest"],
+    "fd-b-artifact-id": fdB?.["raw-artifact-id"] ?? assembly["fd-b-artifact-id"],
+    "fd-b-artifact-digest": fdB?.["raw-artifact-digest"] ?? assembly["fd-b-artifact-digest"],
+    "bundle-artifact-id": env.G6_BUNDLE_ARTIFACT_ID ?? assembly["bundle-artifact-id"],
+    "bundle-artifact-digest": env.G6_BUNDLE_ARTIFACT_DIGEST ?? assembly["bundle-artifact-digest"],
+    "job-results": needs,
+  };
+}
+
+function normalizedOutcome(outcome) {
+  return outcome === "success" ? "passed" : "failed";
+}
+
+function failureResult(values) {
+  if (!values.overwrite && existsSync(values.output) && statSync(values.output).size > 0) return;
+  mkdirSync(dirname(values.output), { recursive: true });
+  const binding = bindingFromOptions(values, true);
+  const artifacts = emptyArtifactBindings();
+  for (const [source, prefix] of [["fd_a", "fd-a"], ["fd_b", "fd-b"], ["bundle", "bundle"]]) {
+    const id = values[`${prefix}-artifact-id`] || null;
+    const digest = values[`${prefix}-artifact-digest`] || null;
+    if (id && !/^[1-9][0-9]*$/.test(id)) fail(`${prefix} artifact ID is invalid`);
+    if (digest && !/^[0-9a-f]{64}$/.test(digest)) fail(`${prefix} artifact digest is invalid`);
+    artifacts[source] = { artifact_id: id, artifact_digest: digest };
+  }
+  const reason = values.reason || `${values.phase} did not produce a result`;
+  let result;
+  if (values.phase === "assembly") {
+    result = assemblyResultBase(binding, "failed", 1, reason, artifacts);
+    writeFileSync(join(dirname(values.output), "build.stderr.log"), `${reason}\n`, { flag: "a" });
+    writeFileSync(join(dirname(values.output), "evidence-build-exit-code.txt"), "1\n");
+  } else if (values.phase === "verification") {
+    result = { schema_version: PHASE_SCHEMA, phase: "verify", ...binding, artifacts,
+      status: "failed", exit_code: 1, reason };
+  } else if (values.phase === "gate") {
+    const needs = values["job-results"] ?? {};
+    const outcome = (job) => normalizedOutcome(needs[job]?.result);
+    result = {
+      schema_version: GATE_SCHEMA, ...binding, artifacts,
+      runtime: { fd_a: outcome("g6-rd-fd-a"), fd_b: outcome("g6-rd-fd-b") },
+      assembly: outcome("g6-rd-assemble"), secret_scan: outcome("g6-rd-secret-scan"),
+      independent_verification: outcome("g6-rd-verifier"), final_status: "failed",
+    };
+  } else {
+    fail("fallback phase must be assembly, verification or gate");
+  }
+  writeJson(values.output, result);
+}
+
+function secretScanResult(values) {
+  const status = normalizedOutcome(values.outcome);
+  writeJson(values.output, {
+    schema_version: SECRET_SCAN_SCHEMA,
+    ...bindingFromOptions(values, status !== "passed"),
+    status,
+  });
 }
 
 function assertBinding(actual, expected, label) {
@@ -503,6 +576,21 @@ function parse(command, args) {
     "release-manifest-digest": { type: "string" },
   };
   const commandOptions = {
+    fallback: {
+      ...common,
+      phase: { type: "string" },
+      output: { type: "string" },
+    },
+    "secret-scan-result": {
+      ...common,
+      output: { type: "string" },
+      outcome: { type: "string" },
+    },
+    "check-runtime": {
+      ...common,
+      root: { type: "string" },
+      domain: { type: "string" },
+    },
     "runtime-result": {
       ...common,
       root: { type: "string" },
@@ -583,13 +671,23 @@ export {
   runtimeResult,
   sourceManifest,
   verifySource,
+  workflowOptions,
+  failureResult,
+  secretScanResult,
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const command = process.argv[2];
+  let values;
   try {
-    const command = process.argv[2];
-    const values = parse(command, process.argv.slice(3));
-    const status = command === "runtime-result"
+    values = { ...workflowOptions(), ...parse(command, process.argv.slice(3)) };
+    const status = command === "fallback"
+      ? (mkdirSync(dirname(values.output), { recursive: true }), failureResult(values), 0)
+      : command === "secret-scan-result"
+        ? (secretScanResult(values), 0)
+      : command === "check-runtime"
+        ? (validateRuntime(values.root, bindingFromOptions(values), values.domain), 0)
+      : command === "runtime-result"
       ? (runtimeResult(values), 0)
       : command === "assemble"
         ? assemble(values)
@@ -601,6 +699,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exitCode = status;
   } catch (error) {
     console.error(error.stack || error.message);
+    const phase = { "finalize-assembly": "assembly", "bind-verification": "verification" }[command];
+    if (phase && values?.output) {
+      mkdirSync(dirname(values.output), { recursive: true });
+      failureResult({ ...values, phase, reason: error.message, overwrite: true });
+    }
     process.exitCode = 1;
   }
 }

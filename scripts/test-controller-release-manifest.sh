@@ -150,7 +150,7 @@ abort("Controller image legs must export Docker image archives") unless
   build_script.include?("type=docker,dest=") &&
   !build_script.include?("type=oci,dest=")
 abort("Controller image legs must build each image once") unless
-  build_script.scan("docker buildx build").length == 1
+  build_script.scan("scripts/g6-buildx-cache.sh").length == 1
 abort("Controller image legs must smoke the built images on the native runner") unless
   run_steps.include?("scripts/release-controller-image-smoke.sh")
 abort("Controller image smoke must load the persisted Docker archive") unless
@@ -194,6 +194,8 @@ Dir.mktmpdir("ocservia-final-signature-gate") do |dir|
     test "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" = 1
     test "${AGENT_TRUSTED_KEY_SHA256}" = "#{'a' * 64}"
     test -s "${ASSET_DIR}/SHA256SUMS.sig"
+    test "$1" = manifest
+    test -n "${PAYLOAD_RECEIPT}"
     touch validation-called
   SH
   File.chmod(0755, validator)

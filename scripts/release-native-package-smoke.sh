@@ -17,6 +17,19 @@ ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 # scriptlet matrix without a release build, while the release workflow always
 # runs the default real-binary mode.
 STUB_BINARIES="${STUB_BINARIES:-false}"
+CANDIDATE_DIR="${CANDIDATE_DIR:-}"
+old_version=1.0.0
+new_version=1.0.1
+rpm_upgrade_args=(-Uvh)
+if [[ -n "${CANDIDATE_DIR}" ]]; then
+  [[ "${STUB_BINARIES}" == false && "${VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "candidate lifecycle requires real packages and their exact VERSION" >&2
+    exit 2
+  }
+  old_version="${VERSION}"
+  new_version="${VERSION}"
+  rpm_upgrade_args+=(--replacepkgs)
+fi
 case "${STUB_BINARIES}" in
   true | false) ;;
   *)
@@ -77,6 +90,7 @@ cleanup() {
   sudo systemctl daemon-reload >/dev/null 2>&1 || true
   docker rm -f -- "${container}" >/dev/null 2>&1 || true
   docker rmi -f -- "${container_image}" >/dev/null 2>&1 || true
+  sudo rm -rf -- "${work}/verified" || status=1
   rm -rf -- "${work}" || status=1
   exit "${status}"
 }
@@ -92,25 +106,6 @@ write_stub_binaries() {
     chmod 0755 "${ROOT}/rust/target/release/${binary}"
   done
 }
-
-if [[ "${STUB_BINARIES}" == true ]]; then
-  write_stub_binaries 1.0.0
-else
-  VERSION=1.0.0 PACKAGE_ARCH="${PACKAGE_ARCH}" bash "${ROOT}/scripts/build-agent-binaries.sh"
-  for binary in ocservia-agent ocservia-privd; do
-    file_output="$(file -b "${ROOT}/rust/target/release/${binary}")"
-    if [[ "${PACKAGE_ARCH}" == amd64 && "${file_output}" != *"x86-64"* ]] ||
-      [[ "${PACKAGE_ARCH}" == arm64 && "${file_output}" != *"aarch64"* ]]; then
-      echo "built ${binary} is not a native ${PACKAGE_ARCH} ELF binary: ${file_output}" >&2
-      exit 1
-    fi
-  done
-fi
-if [[ "${STUB_BINARIES}" == true ]]; then
-  echo "native ${PACKAGE_ARCH} stub release build passed"
-else
-  echo "native ${PACKAGE_ARCH} release build passed"
-fi
 
 openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
 chmod 0600 "${work}/signing.key"
@@ -137,6 +132,7 @@ build_packages() {
     write_stub_binaries "${version}"
   else
     VERSION="${version}" PACKAGE_ARCH="${PACKAGE_ARCH}" bash "${ROOT}/scripts/build-agent-binaries.sh"
+    check_native_binaries "${ROOT}/rust/target/release" "${version}"
   fi
   sha256sum "${ROOT}/rust/target/release/ocservia-agent" | awk '{print $1}' \
     >"${work}/binary-sha-${version}"
@@ -147,18 +143,47 @@ build_packages() {
     SOURCE_DATE_EPOCH=1786147200 AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
     "${ROOT}/scripts/package-native-agent.sh" >/dev/null
 }
-build_packages 1.0.0
-build_packages 1.0.1
-deb_old="${pkg_dir}/ocservia-agent_1.0.0-1_${PACKAGE_ARCH}.deb"
-deb_new="${pkg_dir}/ocservia-agent_1.0.1-1_${PACKAGE_ARCH}.deb"
-rpm_old="${pkg_dir}/ocservia-agent-1.0.0-1.${rpm_arch}.rpm"
-rpm_new="${pkg_dir}/ocservia-agent-1.0.1-1.${rpm_arch}.rpm"
+check_native_binaries() {
+  local directory="$1" version="$2" binary file_output
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    file_output="$(sudo file -b "${directory}/${binary}")"
+    if [[ "${PACKAGE_ARCH}" == amd64 && "${file_output}" != *"x86-64"* ]] ||
+      [[ "${PACKAGE_ARCH}" == arm64 && "${file_output}" != *"aarch64"* ]]; then
+      echo "${binary} is not a native ${PACKAGE_ARCH} ELF binary: ${file_output}" >&2
+      exit 1
+    fi
+    [[ "$(sudo "${directory}/${binary}" --version)" == "${binary} ${version}" ]]
+  done
+}
+if [[ -n "${CANDIDATE_DIR}" ]]; then
+  # Reinstall the real candidate to cover scriptlets, fresh production intent,
+  # removal and corruption. Cross-version upgrades use the published baseline
+  # in the next workflow step; no synthetic release versions are built here.
+  archive="${CANDIDATE_DIR}/ocservia-agent-${VERSION}-linux-${PACKAGE_ARCH}.tar.gz"
+  fingerprint="$(openssl pkey -pubin -in "${archive}.sha256.pub.pem" -outform DER | sha256sum | awk '{print $1}')"
+  sudo install -d -m 0700 "${work}/verified" "${work}/verified/var/lib"
+  candidate_root="$(sudo env DESTDIR="${work}/verified" AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
+    "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" \
+    "${archive}.sha256.sig" "${archive}.sha256.pub.pem")"
+  check_native_binaries "${candidate_root}/rust/target/release" "${VERSION}"
+  sudo sha256sum "${candidate_root}/rust/target/release/ocservia-agent" | awk '{print $1}' \
+    >"${work}/binary-sha-${VERSION}"
+  cp "${CANDIDATE_DIR}/ocservia-agent_${VERSION}-1_${PACKAGE_ARCH}.deb" \
+    "${CANDIDATE_DIR}/ocservia-agent-${VERSION}-1.${rpm_arch}.rpm" "${pkg_dir}/"
+else
+  build_packages "${old_version}"
+  build_packages "${new_version}"
+fi
+deb_old="${pkg_dir}/ocservia-agent_${old_version}-1_${PACKAGE_ARCH}.deb"
+deb_new="${pkg_dir}/ocservia-agent_${new_version}-1_${PACKAGE_ARCH}.deb"
+rpm_old="${pkg_dir}/ocservia-agent-${old_version}-1.${rpm_arch}.rpm"
+rpm_new="${pkg_dir}/ocservia-agent-${new_version}-1.${rpm_arch}.rpm"
 
 for field in Package Version Architecture; do
   value="$(dpkg-deb -f "${deb_old}" "${field}")"
   # nfpm appends the release component to the deb version (1.0.0-1).
   case "${field}:${value}" in
-    Package:ocservia-agent | Version:1.0.0-1 | Architecture:"${PACKAGE_ARCH}") ;;
+    Package:ocservia-agent | Version:"${old_version}-1" | Architecture:"${PACKAGE_ARCH}") ;;
     *)
       echo "deb metadata field ${field} has unexpected value ${value}" >&2
       exit 1
@@ -205,7 +230,7 @@ assert_installed_state() {
 }
 
 { sudo dpkg -i "${deb_old}"; } >"${ARTIFACT_DIR}/deb-install.log" 2>&1
-assert_installed_state "deb install" 1.0.0
+assert_installed_state "deb install" "${old_version}"
 sudo test ! -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
   || { echo "deb install: production relay drop-in installed without a production request" >&2; exit 1; }
 sudo test ! -e /etc/ocservia-agent/relays.env \
@@ -245,7 +270,7 @@ assert_upgraded_state() {
 
 provision_upgrade_fixtures
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-upgrade.log" 2>&1
-assert_upgraded_state "deb upgrade" 1.0.1
+assert_upgraded_state "deb upgrade" "${new_version}"
 echo "deb upgrade lifecycle passed"
 
 { sudo apt-get remove -y ocservia-agent; } >"${ARTIFACT_DIR}/deb-remove.log" 2>&1
@@ -285,7 +310,7 @@ assert_production_relays() {
 sudo install -d -o root -g root -m 0755 /etc/ocservia
 sudo touch /etc/ocservia/agent-install-production-relays
 { sudo dpkg -i "${deb_old}"; } >"${ARTIFACT_DIR}/deb-production-install.log" 2>&1
-assert_installed_state "deb production install" 1.0.0
+assert_installed_state "deb production install" "${old_version}"
 assert_production_relays "deb production install"
 sudo grep -Fq 'RELAY_URL_A=https://relay-a.example.com' /etc/ocservia-agent/relays.env \
   || { echo "deb production install did not install the relays.env example" >&2; exit 1; }
@@ -302,7 +327,7 @@ echo "deb production install lifecycle passed"
 
 provision_upgrade_fixtures
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-production-upgrade.log" 2>&1
-assert_upgraded_state "deb production upgrade" 1.0.1
+assert_upgraded_state "deb production upgrade" "${new_version}"
 assert_production_relays "deb production upgrade"
 sudo cmp -s "${work}/operator-relays.env" /etc/ocservia-agent/relays.env \
   || { echo "deb production upgrade replaced the operator relays.env" >&2; exit 1; }
@@ -327,7 +352,7 @@ echo "deb production removal state preservation passed"
 
 sudo touch /etc/ocservia/agent-install-production-relays
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-production-reinstall.log" 2>&1
-assert_installed_state "deb production reinstall" 1.0.1
+assert_installed_state "deb production reinstall" "${new_version}"
 assert_production_relays "deb production reinstall"
 sudo test -f /var/lib/ocservia-agent/identity/identity-sentinel \
   || { echo "deb production reinstall discarded the preserved identity state" >&2; exit 1; }
@@ -356,7 +381,7 @@ sudo install -d -o root -g root -m 0755 /etc/ocservia
 sudo touch /etc/ocservia/agent-install-production-relays
 corrupt_stage="${work}/corrupt-package"
 dpkg-deb -R "${deb_old}" "${corrupt_stage}"
-printf 'tampered archive' >"${corrupt_stage}/usr/share/ocservia-agent/ocservia-agent-1.0.0-linux-${PACKAGE_ARCH}.tar.gz"
+printf 'tampered archive' >"${corrupt_stage}/usr/share/ocservia-agent/ocservia-agent-${old_version}-linux-${PACKAGE_ARCH}.tar.gz"
 dpkg-deb --build "${corrupt_stage}" "${work}/corrupt.deb" >/dev/null
 corrupt_install_status=0
 { sudo dpkg -i "${work}/corrupt.deb"; } >"${ARTIFACT_DIR}/deb-corrupt-install.log" 2>&1 || corrupt_install_status=$?
@@ -385,7 +410,7 @@ sudo groupdel ocserv-agent 2>/dev/null || true
 sudo systemctl daemon-reload
 
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-retirement-install.log" 2>&1
-assert_installed_state "deb post-retirement install" 1.0.1
+assert_installed_state "deb post-retirement install" "${new_version}"
 sudo test ! -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
   || { echo "plain install after request retirement installed the relay drop-in" >&2; exit 1; }
 sudo test ! -e /etc/ocservia-agent/relays.env \
@@ -462,7 +487,7 @@ container_assert_installed() {
   [[ "${binary_sha}" == "$(cat "${work}/binary-sha-${expected_version}")" ]] \
     || { echo "${context}: installed Agent binary does not match the built binary" >&2; exit 1; }
 }
-container_assert_installed "rpm install" 1.0.0
+container_assert_installed "rpm install" "${old_version}"
 container_assert_production_relays() {
   local context="$1"
   docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
@@ -507,9 +532,9 @@ EOF
 }
 
 container_provision_upgrade_fixtures
-docker exec "${container}" rpm -Uvh "/packages/$(basename "${rpm_new}")" \
+docker exec "${container}" rpm "${rpm_upgrade_args[@]}" "/packages/$(basename "${rpm_new}")" \
   >"${ARTIFACT_DIR}/rpm-upgrade.log" 2>&1
-container_assert_installed "rpm upgrade" 1.0.1
+container_assert_installed "rpm upgrade" "${new_version}"
 container_assert_production_relays "rpm upgrade"
 docker exec "${container}" grep -Fq 'RELAY_URL_A=https://relay-one.example.net' /etc/ocservia-agent/relays.env \
   || { echo "rpm upgrade replaced the operator relays.env" >&2; exit 1; }
@@ -551,3 +576,5 @@ echo "rpm removal state preservation passed"
 docker rm -f -- "${container}" >/dev/null
 printf 'arch=%s\nelf_check=pass\ndeb_metadata=pass\ndeb_install=pass\ndeb_upgrade=pass\ndeb_remove_preserves_state=pass\ndeb_production_install=pass\ndeb_production_upgrade=pass\ndeb_production_remove_preserves_state=pass\ndeb_production_reinstall_identity_reuse=pass\ndeb_corrupt_payload_fail_closed=pass\ndeb_stale_request_retirement=pass\ndeb_plain_install_after_retirement=pass\nrpm_metadata=pass\nrpm_production_install=pass\nrpm_upgrade_preserves_production=pass\nrpm_erase_retires_stale_request=pass\nrpm_erase_preserves_state=pass\n' \
   "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-package-summary.txt"
+printf 'old_version=%s\nnew_version=%s\ncandidate_reuse=%s\n' \
+  "${old_version}" "${new_version}" "${CANDIDATE_DIR:+true}" >>"${ARTIFACT_DIR}/native-package-summary.txt"
