@@ -2,85 +2,70 @@
 
 > **CI reference.** Contributors should start with [Validate a change](testing.md).
 
-The primary workflow, `.github/workflows/ci.yml`, runs Basic CI on
-`pull_request`, pushes to `main`, and `workflow_dispatch`. It uses
-GitHub-hosted `ubuntu-24.04` runners, `contents: read`, SHA-pinned checkout,
-and no production secrets. A new commit cancels an older run of the same PR.
-Main pushes and manual dispatches have run-specific concurrency groups and
-do not cancel earlier runs.
+One `.github/workflows/ci.yml` runs on PRs, main pushes and manual dispatch.
+Automatic runs use **Quick**. Manual dispatch accepts `quick|full`, defaulting
+to **Full**. Full means **key compatibility checks on all supported units**,
+not comprehensive acceptance. Product database support has not changed.
 
-PR/main pushes always use the path-selected **Quick CI** profile. Manual
-dispatch accepts `profile=quick|full` (default `full`); either manual profile
-runs all five basic components. Quick targets 10 minutes and Full targets
-30 minutes from workflow creation through Basic CI Result, including queues
-and cleanup. These are performance goals, not job kill deadlines or guarantees.
-Full means the existing manual Basic CI coverage, not every acceptance command.
-
-## Retained workflows
-
-| File | Workflow | Trigger |
-| --- | --- | --- |
-| `ci.yml` | Basic CI | PRs, pushes to `main`, manual dispatch |
-| `security.yml` | Security Checks | Weekly schedule, manual dispatch, reusable release prerequisite |
-| `g6-readiness.yml` | G6 Formal Readiness | Manual dispatch only |
-| `g6-harness-core.yml` | G6 Readiness Core (Reusable) | Reusable workflow called by formal G6 |
-| `release.yml` | Agent Release Packages | Version tag pushes and manual dry runs |
-| `release-upgrade.yml` | Native Release Upgrade Validation | Manual dispatch only |
+Warm-cache goals are 3-5 minutes for Quick and 8-10 minutes for Full, excluding
+queue time. They are goals, not measured results or relaxed failure criteria.
+Record queue, cold setup, execution wall time and summed job runner-minutes
+separately. New Quick runs cancel obsolete Quick runs on the same PR/branch.
+Full has a separate concurrency group and cannot cancel Quick.
 
 ## Basic checks
 
-One small routing job selects up to five independent checks. Manual full also
-starts the complementary database history matrix. There is no runtime-artifact
-dependency between workers.
+| Job | Retained checks |
+| --- | --- |
+| docs | Line endings, nonempty Markdown and documentation links/policy text |
+| go | gofmt, vet and ordinary fast tests in both Go modules; no full-package race |
+| rust | Format, clippy and workspace tests |
+| web | Format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
+| database-smoke | Quick: PostgreSQL 17.10 (project default), MySQL 8.4.10. Full: also PostgreSQL 18.6 and MariaDB 12.3.2 |
+| database-recovery-full | Existing short MySQL/MariaDB logical backup/restore loop, Full only |
+| Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
 
-| Job | Command | Bootstrap profile | Coverage |
-| --- | --- | --- | --- |
-| `docs` | `scripts/docs-check.sh` | none | Line endings, nonempty Markdown, bootstrap documentation and isolated bootstrap/preflight fixtures |
-| `go` | `scripts/go-check.sh standard` | `go-test` | gofmt, go vet, ordinary Go tests, required-wrapper/workflow self-tests and I14/I15/I16 script contracts |
-| `rust` | `scripts/rust-check.sh` | `rust-basic` | Format, clippy (all targets/features), and workspace tests |
-| `web` | `scripts/web-check.sh` | `web` | Format, lint, types, unit tests, builds, generated-client authentication tests, and 12 required authentication browser regressions on desktop Chromium |
-| `database-smoke` | `scripts/database-integration.sh` / `scripts/database-foundation-integration.sh` | `go-test` | Pinned PostgreSQL 17.10/18.6, MySQL 8.4.10 and MariaDB 12.3.2 critical regression in Quick; PostgreSQL full and MySQL/MariaDB current in Full |
-| `database-history-full` | `scripts/database-foundation-integration.sh` | `go-test` | MySQL/MariaDB complementary history, Full only |
-| `database-recovery-full` | `scripts/test-database-deployment-config.sh` / `scripts/i18-mysql-backup-restore-smoke.sh` | none | External descriptor and isolated logical backup/restore acceptance for candidate MySQL 8.4.10 and MariaDB 12.3.2, Full only |
+All database images retain their exact patch/digest pins. Each core job starts
+one database service and initializes one schema for `TestDatabaseCoreSmoke`.
+That flow migrates an empty database with the owner account, starts the real
+Controller CLI with the runtime account, bootstraps and logs in a local
+administrator, and reads the written workspace through the authenticated API.
+Real transactions check commit, rollback and isolation from a second pooled
+connection; a repeated migration must preserve the committed workspace.
+Runtime DDL denial is the small retained failure path: it verifies the
+Controller is not accidentally tested with owner credentials. MySQL/MariaDB
+retain production configuration and verified TLS in this same flow.
 
-Go checks retain both existing Go modules, including unit tests for the G6
-harness; they do not run G6 acceptance. Rust checks do not run cargo audit,
-license policy, native integration, or separate boundary scripts. License
-validation remains available through `scripts/license-check.sh`.
+Full adds **one direct upgrade per unit** in a separate schema on the same
+service: PostgreSQL schema 35 -> current 36; MySQL/MariaDB immutable revision
+25 -> current 26. These use the real migration runners and preserve seeded
+business data. They are schema compatibility checks, not native release
+upgrade certification. There is no separate history job or exhaustive revision
+matrix, and no second Controller build. Core tests use `-count=1`, never
+cached test results, and do not use `-race`.
 
-Bootstrap versions come from `toolchains.lock`; downloads are verified
-against `scripts/checksums.txt`. The Go profile installs only Go and verifies
-host jq. The Rust profile installs only Rust, rustfmt, and clippy. Web
-bootstrap installs pinned Node/npm and dependencies, with
-`npm_config_audit=false` and `npm_config_fund=false` for the entire job,
-including npm installation. Ordinary CI does not run `go-race`, `npm audit`,
-`cargo audit`, `cargo deny`, or `govulncheck`, nor repository secret scans,
-license scans, native ocserv integration, P1 smoke, the full browser E2E matrix,
-or G6 smoke. The Web job does run the required authentication browser subset:
-12 desktop Chromium regressions from `web/e2e/login.spec.ts` and
-`web/e2e/auth-workspace.spec.ts`. It installs Playwright Chromium and its system
-dependencies after Web bootstrap and before `scripts/web-check.sh`.
+`required-go-tests.sh --smoke <package> <test>` checks only the explicit
+top-level test's run/final-pass events. A missing or skipped entry fails.
+Basic CI has no per-subtest inventory, cumulative JSONL or matrix success
+outputs. The old manifest/checker remains only for independent manual deep
+acceptance callers; its redundant ordinary-unit inventory has been removed.
 
-For native Linux ARM64 Go bootstrap, per-entrypoint system dependencies and the
-tested isolated BuildServer environment, see
-[Linux ARM64 Go validation](testing.md#linux-arm64-go-validation-on-buildserver).
-The docs entrypoint runs the same lightweight platform/preflight fixtures as
-`test-bootstrap-profiles.sh`; these use disposable command substitutes, not
-downloads, real Go tests or database acceptance. Basic CI's runner architecture,
-Quick/Full routing and database matrix are unchanged.
+CI router/wrapper/bootstrap self-tests run only for their implementation or
+shared CI/toolchain changes. Installer self-tests run only for installer
+changes. Manual dispatch does not add these unrelated self-tests.
+No role lifecycle matrix, restart, outbox/fencing/disconnect, exhaustive
+authentication/API/policy suite, checksum/drift/invalid-configuration matrix,
+or deep historical repair suite is moved from Quick into Full.
 
-The database matrix retains PostgreSQL 17/18, MySQL and MariaDB. This test
-matrix is not the [production support matrix](../operations/production-deployment.md#database-support).
-The PostgreSQL script builds `ocserv-control` itself; only full scope builds its historical
-Controller, and only PostgreSQL 18/all runs the additional legacy upgrade leg.
-Its startup test reuses only the ordinary CLI built in that same invocation;
-the script alone supplies `OCSERVIA_TEST_STARTUP_BIN` for that reuse. When this
-test-only variable is unset or empty, standalone startup tests build their own
-CLI, regardless of `OCSERVIA_CONTROL_BIN`. An external script binary override
-is not forwarded as a fresh startup-test build. Historical and race
-artifacts are never substituted for the current ordinary CLI.
-All database matrices need only the router and run alongside language checks.
-Neither needs a Rust build or a shared binary artifact.
+## Retained workflows
+
+| File | Trigger / purpose |
+| --- | --- |
+| `ci.yml` | PR/main Quick; manual Quick/Full key checks |
+| `security.yml` | Weekly/manual checks and reusable release prerequisite |
+| `g6-readiness.yml`, `g6-harness-core.yml` | Independent manual formal readiness |
+| `release.yml` | Tag/manual release packaging |
+| `release-upgrade.yml` | Independent manual native release upgrades |
 
 ## Independent security checks
 
@@ -97,160 +82,52 @@ not every possible vulnerability or the state of a deployed service.
 
 ## Path routing
 
-`scripts/ci-relevance.sh` emits five execution flags:
-`run_docs`, `run_go`, `run_rust`, `run_web`, and `run_database`.
-The same router resolves `profile` and `database_scope` once. Workers and the
-summary consume these outputs, not independent dispatch/full predicates.
-Reason and changed-file count are diagnostic metadata.
+`scripts/ci-relevance.sh` uses directory rules, not function dependency analysis:
 
-| Changed paths | Selected checks |
+| Paths | Quick checks |
 | --- | --- |
-| Documentation, Markdown, license text | docs |
-| G6 workflows, actions, scripts, harness, deployment fixtures, and dedicated Rust runtime files | docs |
-| Manual P1/security acceptance scripts, real-E2E scripts and their checks, `deploy/real-e2e` | docs |
-| Web | web + docs |
-| Go sources, module/workspace files, control-plane code and migrations | go + database-smoke (except the pure `internal/domain/operation/operation_test.go`: go only) |
-| Rust workspace | rust |
-| `scripts/web-check.sh` | docs + web |
-| `scripts/rust-check.sh`, managed-node/Controller install/bootstrap and Relay launcher/release-state contract tests | docs + rust |
-| `scripts/go-check.sh` | docs + go |
-| Database integration, required-Go guard/manifest and I14 scripts | docs + go + database-smoke |
-| I15/I16 scripts | docs + go + rust + database-smoke |
-| Protocol/OpenAPI definitions and generated clients/contracts | All five basic checks |
-| Other workflows/scripts, shared toolchain files, Makefile | All five basic checks |
-| Unrecognized paths | All five basic checks |
+| Documentation / Markdown | docs only |
+| Web (including its generated client) | web only |
+| Rust | rust only |
+| Controller commands, internal modules, storage, API, migrations, Go locks | go + core database smoke |
+| Other Go sources / harness | go |
+| Installer implementation/tests | rust + installer self-tests |
+| Shared contracts, CI/toolchain infrastructure or unknown paths | all Quick checks |
 
-Mixed changes use the union of their checks. Documentation-only PRs do
-not activate language or database checks. Infrastructure changes, unknown
-paths, and unclassifiable diffs conservatively run all five, never acceptance.
-G6-specific and script-level manual acceptance paths are the exceptions: they
-select only the basic docs check, not acceptance or additional contract checks.
+Mixed changes take the union. PRs use `base...head`; pushes use `before..head`.
+Deletions/renames retain both affected paths. Invalid/empty/unresolvable diffs
+fall back to Quick, never Full. Manual Full selects all basic domains and all
+four database units. Manual Quick selects all domains but only its two units.
 
-PR routing uses `base...head`, excluding base-only changes after the branch
-point. Main pushes use `before..head`. Deletions and both sides of renames
-retain their path impact. Manual dispatch, empty diffs, invalid/all-zero or
-unresolvable SHAs, and diff failures select all basic checks.
+## Go caches
 
-Database jobs retain PostgreSQL 17/18, MySQL, MariaDB, and their existing race,
-TLS and permission checks. PR and main pushes use the same path routing and
-always select `regression` when database checks are needed. Recognized pure
-docs/Web/Rust changes do not start database jobs; mixed changes take the union.
-Unknown automatic changes run all basic checks, still with database regression.
-Database implementations, migrations, dependencies, tests and CI scripts do not
-upgrade scope. Such changes also need focused validation of their direct impact.
+Keep the existing module/build caches and locked bootstrap downloads.
+The database smoke key uses ordinary (non-race) objects and can fall back to
+the existing unit build cache. Only successful main pushes save: Go writes
+module/unit caches and one MySQL unit writes smoke build objects. PR/manual
+runs restore only. No history job remains to need its own cache.
+Cache hits never bypass real database tests.
 
-Manual `profile=full` selects database `full`; manual `profile=quick` selects
-`regression` for all four backends. Both database scripts default to `full`
-when `DATABASE_TEST_SCOPE` is unset; invalid values fail. Regression is an
-explicit selection from the `regression-*` groups in
-`scripts/required-go-tests.txt`, not a whole package minus a history blacklist.
+## Manual deep checks
 
-| Critical group | Coverage and initialization |
-| --- | --- |
-| `regression-mysql` | Empty/current migration, repeat migration and checksum refusal; trusted/untrusted TLS; runtime/maintenance permissions; transaction cancellation, rollback and panic cleanup; logical values, identity profiles and audit/RBAC. Each test keeps its own fixture; logical values/transaction probes need only small tables. The snapshot-abort test is MariaDB-only. |
-| `regression-postgres` | Transaction cancellation and recovery, cross-store commit/rollback, logical values, identity profiles and audit/RBAC on current structure. The script separately checks current migration, idempotence, privileges, incompatible Controller rejection and checksum corruption. |
-| `regression-auth` | Local HTTP login/logout, password changes, session revocation, denied management/self-approval, OIDC identity-store boundaries, and audit/business rollback; complete route suites including the three-scenario `TestPlanRoutesBackendHTTPIntegration`. Safety remains intact, including assertions outside its children. |
-| `regression-oidc` | PostgreSQL authorization-code/PKCE, issuer identity boundaries, invalid-token rejection and session behavior. MySQL/MariaDB retain their backend identity-store coverage, not this PostgreSQL-specific protocol fixture. |
-| `regression-outbox` | Atomic intent and ambiguous commit, two workers with durable claim/readback, early and duplicate results. Each selected child owns a disposable current-schema database. |
-| `regression-fencing` | Owner expiry while waiting to assert; competing controllers, retained epochs and rejected stale owners. Parent initialization is retained; these children create independent nodes. |
-| `regression-disconnect` | MySQL/MariaDB real COMMIT request/response loss during claim, readback and connection discard. Both selected children initialize independently. |
-| `regression-telemetry` | Current ingestion, duplicate rejection, rollback, queries, rollups and fenced maintenance; current telemetry tables/months are prepared by the existing fixture. |
+The original independent entrypoints remain available, but are **not Full CI**:
 
-The existing required-test guard checks exact run/final-pass events, including
-selected children; missing, renamed, failed or skipped required cases fail.
-New critical regressions must be added to this manifest. Selection escapes
-regex literals and supports either top-level sets or children of one parent,
-avoiding cross-product matches between unrelated parents.
-See [Go subtest matching](https://go.dev/blog/subtests) for the slash-separated
-matching rules. Child-only groups use separate invocations; top-level sets are
-batched by package.
+```bash
+# On BuildServer; expensive opt-in checks:
+DATABASE_TEST_SCOPE=full PG_MAJOR=all scripts/database-integration.sh
+DATABASE_TEST_SCOPE=full ENGINE=mysql bash scripts/database-foundation-integration.sh
+DATABASE_TEST_SCOPE=full ENGINE=mariadb bash scripts/database-foundation-integration.sh
+scripts/go-check.sh race
+scripts/web-check.sh full
+```
 
-Only the four simple enforcement cleanup scenarios share one lazily initialized
-database, sequentially. Each restores permissions and clears its own data with
-a bounded background context; any failed child/cleanup stops reuse. Fencing
-and bounded scans retain separate fixtures, with no extra shared database when
-selected alone. The three plan-route scenarios (Lookup, Module, BusinessRouteActions)
-share a parent-owned database but retain separate workspaces, actors and HTTP
-fixtures. ControllerReads and NodeReads remain independent: telemetry maintenance
-can affect data outside a workspace. Migration, privilege and global-state tests
-retain real initialization. Role `all` retains real permission-failure recovery;
-`scheduler` retains normal maintenance and complete shutdown. No production
-interval is shortened, and a fixture lease expires only after its runner exits.
-
-Full retains whole-package MySQL/MariaDB tests, the original required inventory
-(`backend-mysql-current`, `backend-mysql-history` and audit groups), complete
-coordination/authentication combinations, historical upgrades/data conversions
-and PostgreSQL pre-34 rollback/upgrade fixtures. PostgreSQL 17 still omits the
-additional PostgreSQL 18 upgrade leg. Full coverage has not become an alias for
-regression. Critical CI success is not full acceptance or release readiness.
-
-Manual Full runs MySQL/MariaDB as complementary `current` and `history`
-jobs on independent runners. The existing four-backend `database-smoke` matrix
-runs PostgreSQL 17/18 unchanged and MySQL/MariaDB current; the Full-only
-`database-history-full` matrix runs MySQL/MariaDB history, while
-`database-recovery-full` independently exercises each candidate MySQL-compatible
-backup and restore path. Automatic PR/main
-regression selection and runner counts are unchanged. `Basic CI Result` requires
-all three matrices to succeed in Full, and both Full-only matrices to be skipped
-in Quick.
-Every selected database unit must also emit its own completion output after
-its script succeeds. Missing outputs fail even if a matrix result says success.
-Unknown/missing profiles, inconsistent scope, missing routing flags and
-unexpected job failure/cancellation/skip all fail the always-running summary.
-Selecting any database also requires `run_go=true` and a successful Go job,
-where the database-independent required-wrapper self-test runs once rather than
-once per PostgreSQL unit. Legal partial selections are tested separately from
-all-selected/all-skipped cases; four successful database outputs alone cannot
-hide an incorrectly skipped Go guard.
-
-`DATABASE_FULL_PART=all|current|history` is an internal full-only control for
-`database-foundation-integration.sh`; setting it with regression is rejected,
-including an empty value. Quick explicitly unsets it; Full sets current/history.
-Unset means `all`: current complement, history, coordination, authentication,
-telemetry and final configuration checks, in that order. History runs only the
-existing `backend-mysql-history` manifest selection. Current runs the whole
-package with exactly those top-level tests excluded, not a positive inventory;
-new unregistered tests therefore remain in full. The current guard combines
-current and audit requirements; the unchanged full guard remains their union
-with history. Business acceptance runs only in current/all, never history.
-Each package shard retains race detection, count 1 and its 60-minute timeout;
-each Actions database job retains 75 minutes. JSON streams live through the
-required-test guard. Failed full shards print bounded database diagnostics.
-Parallelization can reduce wall time without reducing total runner minutes.
-Earlier measured timings and failures are historical evidence, not a current
-performance guarantee; record new measurements against their exact source SHA.
-
-Before release, run both scripts with `DATABASE_TEST_SCOPE=full` for all four
-backends on BuildServer, or manually dispatch the existing Basic CI workflow.
-GitHub requires that workflow to exist on the default branch before dispatch;
-then select the candidate branch using the UI or
-`gh workflow run ci.yml --ref <candidate-branch> -f profile=full` (or
-`-f profile=quick`). A branch-only workflow is not
-a workaround for this prerequisite. See [GitHub manual workflow documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
-
-## Go cache trial
-
-Basic CI restores only `.cache/go-mod` and `.cache/go-build`, the paths in
-`scripts/env.sh`. `ci-go-cache-key.sh` includes the OS/image, Go and C compiler
-identity, CGO/GOFLAGS, locks and bootstrap/build-policy files. Ordinary and
-database/race objects have separate keys; build keys append the source SHA and
-restore only within the same compatibility prefix. Tool downloads still use
-locked versions and checksums; cache misses take the normal cold path.
-
-Only successful main-push jobs save: Go writes modules/ordinary objects, and
-the MySQL current unit alone writes database objects. PRs and manual runs are
-restore-only; history/recovery jobs are unchanged. No test command is skipped
-on a hit. Required and real database tests retain `-count=1`, so cached PASS
-results cannot substitute for current execution.
-
-Configuration validation is not performance acceptance. A new schema has no
-main cache until a normal authorized main push saves it; restore-only PR runs
-cannot create their own subsequent hit evidence. Branch/PR caches and main
-caches have distinct [access scopes](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache).
-Record actual miss/hit, restore/save, total wall time and runner-minutes before
-claiming a net speedup. Until then, Actions benefit is **unverified**. Remove
-the trial entries if two comparable rounds show no net benefit or cold fallback
-becomes unreliable. This trial adds no scheduled runs or workflow dependencies.
+The database scripts still default to legacy `full` when invoked without a
+scope, preserving existing release/deep callers. `regression` and MySQL
+`DATABASE_FULL_PART=all|current|history` also remain manual-only. Normal CI
+explicitly passes `smoke` (Quick) or `compatibility` (Full).
+Browser checks require Playwright Chromium installed separately. Disaster
+recovery, complex races and fault injection remain in their existing manual
+G6/deep scripts; no scheduled workflow was added.
 
 ## Required check migration
 
@@ -289,8 +166,7 @@ warmup, a cold formal build may take longer, but its acceptance checks remain
 unchanged.
 
 Basic CI does not claim production readiness, capacity, native package,
-cross-VM, full browser E2E matrix, security, or license acceptance. Its required
-authentication browser subset is not full browser E2E acceptance. Those scripts
+cross-VM, browser E2E, security, or license acceptance. Those scripts
 and manual entry points remain available; `make verify` is a broader local
 command, not an alias for Basic CI.
 
@@ -313,30 +189,25 @@ does not read workflow files or run live acceptance, and Basic CI does not call 
 
 ## Reproduction
 
-Use the same commit and run these commands on `BuildServer`:
+Run on `BuildServer` against the same candidate source:
 
 ```bash
-scripts/test-ci-relevance.sh
-scripts/test-bootstrap-profiles.sh
-scripts/docs-check.sh
 scripts/bootstrap.sh go-test
 scripts/go-check.sh standard
-scripts/bootstrap.sh rust-basic
-scripts/rust-check.sh
-npm_config_audit=false npm_config_fund=false scripts/bootstrap.sh web
-(
-  source scripts/env.sh
-  cd web
-  npx playwright install --with-deps chromium
-)
-npm_config_audit=false npm_config_fund=false scripts/web-check.sh
-DATABASE_TEST_SCOPE=regression PG_MAJOR=all scripts/database-integration.sh
-DATABASE_TEST_SCOPE=regression ENGINE=mysql bash scripts/database-foundation-integration.sh
-DATABASE_TEST_SCOPE=regression ENGINE=mariadb bash scripts/database-foundation-integration.sh
+DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh
+DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh
+# Full: use compatibility for PG_MAJOR=17 and 18, ENGINE=mysql and mariadb.
+DATABASE_TEST_SCOPE=compatibility PG_MAJOR=18 scripts/database-integration.sh
+DATABASE_TEST_SCOPE=compatibility ENGINE=mariadb bash scripts/database-foundation-integration.sh
+RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash scripts/i18-mysql-backup-restore-smoke.sh
+RUN_ID=local-mariadb ARTIFACT_DIR="$PWD/.cache/recovery-mariadb" ENGINE=mariadb bash scripts/i18-mysql-backup-restore-smoke.sh
 ```
 
-Job logs contain diagnostics; Basic CI has no artifact upload/download graph.
-GitHub checks for the exact candidate commit remain the merge-time authority.
+With push/remote-run authorization, select the candidate branch in Actions or
+run `gh workflow run ci.yml --ref <candidate-branch> -f profile=full`.
+Use `profile=quick` for the other profile. Record the actual candidate SHA,
+cache state and job/step timings. Local BuildServer results are not GitHub CI
+acceptance. See [the implementation measurements](ci-core-smoke-2026-09-19.md).
 
 ## Release packages workflow
 

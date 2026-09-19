@@ -3,12 +3,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 group="${1:?required test group}"
 shift
+smoke_test=""
+if [[ "${group}" == --smoke ]]; then
+  [[ $# == 2 && "$2" =~ ^Test[A-Za-z0-9_]+$ ]] || { echo 'usage: required-go-tests.sh --smoke <package> <test>' >&2; exit 2; }
+  smoke_test="$2"
+  set -- "$1" -run "^${smoke_test}$"
+fi
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid tee mktemp
-for argument in "$@"; do
-  case "${argument}" in -race|-race=true) require_go_race; break ;; esac
-done
 if [[ "${1:-}" == --select ]]; then
   shift
   selection="$(jq -nr --arg group "${group}" --arg mode select \
@@ -47,12 +50,21 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # A private process group also stops compiler/test children on interruption.
+# shellcheck disable=SC2016 # These variables expand in the child shell.
 setsid bash -o pipefail -c 'go test -json -count=1 -timeout=10m "$@" | tee "$RESULT_FILE"' \
   required-go-tests "$@" &
 pid=$!
 status=0
 wait "${pid}" || status=$?
 if ((status != 0)); then exit "${status}"; fi
+if [[ -n "${smoke_test}" ]]; then
+  # One explicit entrypoint, no nested case inventory or cumulative JSONL.
+  jq -se --arg test "${smoke_test}" '
+    [.[] | select(.Test == $test) | .Action] as $actions |
+    ($actions | index("run")) != null and ($actions | last) == "pass"
+  ' "${result}" >/dev/null || { echo "Core test did not run and pass: ${smoke_test}" >&2; exit 1; }
+  exit 0
+fi
 summary="$(jq -cse --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
   -f "${ROOT}/scripts/check-required-go-tests.jq" "${result}")"
 printf '%s\n' "${summary}"

@@ -162,7 +162,7 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
   script("#{bin}/docker", '[[ "${FIXTURE_DOCKER:-0}" == 0 ]]')
   script("#{bin}/cc", 'exit 1')
   env = {'PATH' => bin, 'FIXTURE_LAUNCHED' => "#{work}/launched", 'DATABASE_TEST_SCOPE' => 'regression', 'ENGINE' => 'mysql', 'DATABASE_FULL_PART' => nil}
-  [ ['go-check.sh', 'standard', 'go'], ['go-check.sh', 'standard', 'jq'], ['go-check.sh', 'standard', 'setsid'],
+  [ ['go-check.sh', 'standard', 'go'], ['go-check.sh', 'standard', 'gofmt'],
     ['required-go-tests.sh', 'unit', 'setsid'], ['test-required-go-tests.sh', nil, 'ruby'],
     ['test-bootstrap-profiles.sh', nil, 'ruby'], ['database-integration.sh', nil, 'ruby'],
     ['database-integration.sh', nil, 'python3'], ['database-foundation-integration.sh', nil, 'openssl'],

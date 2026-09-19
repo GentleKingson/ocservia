@@ -136,7 +136,7 @@ for script in database-integration.sh database-foundation-integration.sh; do
   if DATABASE_TEST_SCOPE="${scope}" bash "${ROOT}/scripts/${script}" >"${tmp}/scope.log" 2>&1; then
     echo 'invalid scope accepted' >&2; exit 1
   fi
-  grep -Fq 'DATABASE_TEST_SCOPE must be full or regression' "${tmp}/scope.log"
+  grep -Fq 'DATABASE_TEST_SCOPE must be smoke, compatibility, full or regression' "${tmp}/scope.log"
   done
 done
 # PostgreSQL full acceptance keeps each package's complete Integration suite;
@@ -301,8 +301,12 @@ SH
 cat >"${tmp}/wrapper/bin/go" <<'SH'
 #!/usr/bin/env bash
 if [[ "$*" == 'env CGO_ENABLED' ]]; then echo 1; exit 0; fi
-if [[ "$*" == 'env CC' ]]; then echo true; exit 0; fi
+if [[ "$*" == 'env CC' ]]; then echo fixture-cc; exit 0; fi
 printf '%s\n' "$*" >>"${ROUTE_LOG}"
+SH
+cat >"${tmp}/wrapper/bin/fixture-cc" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
 SH
 chmod +x "${tmp}/wrapper/bin/"*
 for part in unset all current history; do
@@ -327,3 +331,30 @@ grep -q '^backend-policy-userstate --select -race -timeout=10m$' "${tmp}/current
 grep -q '^backend-policy-useroperations --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route"
 echo 'Full all/current/history routing passed'
+
+# Basic CI has one explicit entry, not the deep acceptance manifest above.
+mkdir "${tmp}/smoke"
+printf 'module smoke\n\ngo 1.26.6\n' >"${tmp}/smoke/go.mod"
+cat >"${tmp}/smoke/smoke_test.go" <<'GO'
+package smoke
+import ("os"; "testing")
+func TestPass(t *testing.T) {
+  f, err := os.OpenFile(os.Getenv("SMOKE_COUNT"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+  if err != nil { t.Fatal(err) }
+  defer f.Close()
+  if _, err := f.WriteString("ran\n"); err != nil { t.Fatal(err) }
+}
+func TestSkipped(t *testing.T) { t.Skip("missing database fixture") }
+func TestFailure(t *testing.T) { t.Fatal("injected core failure") }
+GO
+for attempt in 1 2; do
+  (cd "${tmp}/smoke" && GOWORK=off SMOKE_COUNT="${tmp}/count" \
+    bash "${ROOT}/scripts/required-go-tests.sh" --smoke . TestPass) >"${tmp}/smoke.log" 2>&1
+done
+test "$(wc -l <"${tmp}/count")" -eq 2
+for entry in TestSkipped TestFailure TestMissing; do
+  if (cd "${tmp}/smoke" && GOWORK=off bash "${ROOT}/scripts/required-go-tests.sh" --smoke . "${entry}") >"${tmp}/smoke.log" 2>&1; then
+    echo "core guard accepted ${entry}" >&2; exit 1
+  fi
+done
+echo 'Core guard: fresh execution, failure, skipped and absent entry checks passed'

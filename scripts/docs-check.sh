@@ -37,6 +37,3 @@ require_text README.md 'docs/getting-started/production.md'
 reject_text README.md '| bash -s'
 reject_text docs/getting-started/production.md '| bash -s'
 reject_text docs/getting-started/managed-node.md '| bash -s'
-
-# Keep the lightweight bootstrap/preflight fixtures in the existing Basic CI.
-bash "${ROOT}/scripts/test-bootstrap-platforms.sh"

@@ -21,7 +21,7 @@ esac
 source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go
 if [[ "${MODE}" != race ]]; then
-  require_test_commands gofmt jq setsid
+  require_test_commands gofmt
 fi
 if [[ "${MODE}" != standard ]]; then
   require_go_race
@@ -33,11 +33,7 @@ if [[ "${MODE}" != "race" ]]; then
   test -z "$(gofmt -l "${ROOT}/control-plane" "${ROOT}/tools/g6-harness")"
   for module in "${GO_MODULES[@]}"; do
     (cd "${ROOT}/${module}" && go vet ./...)
-    if [[ "${module}" == control-plane ]]; then
-      (cd "${ROOT}/${module}" && bash "${ROOT}/scripts/required-go-tests.sh" unit ./...)
-    else
-      (cd "${ROOT}/${module}" && go test -count=1 ./...)
-    fi
+    (cd "${ROOT}/${module}" && go test -count=1 ./...)
   done
 fi
 

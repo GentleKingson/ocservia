@@ -35,7 +35,7 @@ cleanup() {
   local status=$?
   docker logs "${source_container}" >"${ARTIFACT_DIR}/${source_container}.log" 2>&1 || true
   docker logs "${target_container}" >"${ARTIFACT_DIR}/${target_container}.log" 2>&1 || true
-  docker rm -f "${source_container}" "${target_container}" "${backup_container}" >/dev/null 2>&1 || true
+  docker rm -fv "${source_container}" "${target_container}" "${backup_container}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || status=1
   docker image rm -f "${backup_image}" >/dev/null 2>&1 || status=1
   if declare -F set_backup_owner >/dev/null; then
