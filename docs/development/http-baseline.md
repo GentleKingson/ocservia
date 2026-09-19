@@ -422,7 +422,8 @@ are unchanged. `routeErrors` first finds a path, then checks the method; a pilot
 hit cannot fall back to legacy rules after a method denial. `legacyRouteMethod`
 still serves the unmigrated routes and value-dependent dynamic actions,
 including user-group-state, Session/IP Ban actions, user management, Groups,
-certificates, Secret Rotation and approval actions. S-03 is not implemented.
+certificates, Secret Rotation and approval actions. S-03 below supersedes this
+method-source boundary without changing the matching language.
 
 Path matching deliberately preserves full-string comparison for static paths
 and the old Trim/Split semantics for parameter paths, using `URL.Path` without
@@ -451,3 +452,87 @@ three-module, F-1/F-2 and restricted-runtime four-backend HTTP/Controller
 regressions remain selected by the existing required-test mechanism. Exact
 candidate SHA, execution results and CI status belong in the Draft PR evidence;
 ordinary database skips are not database acceptance.
+
+## Ordinary registration-derived methods (S-03)
+
+Base: `b4f0f78c0cf13d87c4e0f3b4e046e725892bca5e` (#231).
+The same construction-only registrar now receives 48 additional ordinary
+registrations. Their actual `HandleFunc` declarations are the sole production
+method source; no second route table, prefix ownership or general precedence
+algorithm is introduced. The inventory separates method source from permission
+source: 72 registrations, 61 derived registrations, 57 derived path shapes,
+11 compatibility registrations and the same 13 explicit RBAC actions.
+
+| Registration group | Newly derived |
+| --- | ---: |
+| Health/version | 6 |
+| Authentication | 8 |
+| Development | 2 |
+| Operations/events/rollouts | 13 |
+| Enrollment/trust | 7 |
+| Ordinary users/groups | 3 |
+| Node certificates/artifacts/SecretRef creation | 4 |
+| Approval creation/audit/workspaces/role bindings | 5 |
+
+`methodRegistrar` replaces the module-only name, and still forwards each
+original pattern, handler and wrapper to the root ServeMux exactly once before
+publishing methods. Authentication admission objects are not reconstructed by
+a metadata pass. Dispatch and named path binding still use that mux's
+`ServeHTTP`; public and self-validating routes do not acquire an RBAC Guard.
+Login, rollout collections, node certificate collections and user policy paths
+merge their two registered methods. The old ordinary definitions and runtime
+`GET_OR_POST`/`_OR_` conversion are removed.
+
+`compatibilityRouteMethod` deliberately retains these eleven registrations:
+
+| Pattern | Reason |
+| --- | --- |
+| `POST /api/v1/local-users/{local_user_action}` | Disable/reset-password action validation |
+| `GET /api/v1/operations/{operation_id}` | Exact prefix with no slash in the remaining ID |
+| `POST /api/v1/nodes/{node_id}/sessions/{session_action}` | Disconnect/terminate suffixes |
+| `POST /api/v1/nodes/{node_id}/ip-bans/{ip_action}` | Remove suffix |
+| `POST /api/v1/nodes/{node_id}/users/{user_action}` | Disable/enable/rotate-password suffixes |
+| `GET /api/v1/certificates/{certificate_id}` | Read versus action-dependent method |
+| `POST /api/v1/certificates/{certificate_action}` | Issue/revoke/p12 suffixes |
+| `GET /api/v1/secret-provider-refs/{secret_ref_id}` | Read versus rotate action |
+| `POST /api/v1/secret-provider-refs/{secret_ref_action}` | Rotate suffix |
+| `GET /api/v1/approval-requests/{approval_id}` | Read versus approve action |
+| `POST /api/v1/approval-requests/{approval_id}` | Approve suffix |
+
+Derived path lookup always precedes compatibility lookup, including method
+denials. Operations `summary` and `queue-metrics` have exact derived paths, not
+dedicated compatibility definitions. The detail rule may still recognize these
+strings as candidate IDs when called alone; counterfactual-method tests prove
+that it cannot override a derived denial. Detail trailing/leading slashes keep
+their original errors rather than adopting parameter Trim/Split semantics.
+
+The expanded independent corpus includes representatives of all 72 declarations,
+each method, static/parameter boundaries, encoded separators/colon/dot segments,
+double encoding and noncanonical slashes. It compares the unchanged frozen
+precheck's complete responses without running real handlers or spending shared
+authentication budgets twice. Inventory and fixed expected HTTP boundary tests
+exercise the real Server chain separately, including disabled features, Problem
+versus plain-text 404, redirect bodies, Allow and authentication challenges.
+Registration tests retain failure atomicity, same-path merging, per-Server
+isolation, group ordering and concurrent read checks.
+
+The existing `TestPlanRoutesBackendHTTPIntegration` parent and its three child
+scenarios keep the #229 isolated shared fixture and stop-on-failure behavior.
+Its business-action scenario additionally checks ordinary methods and adjacent
+actions using real Local sessions and restricted runtime: rejected methods
+precede Origin, do not change business intent or revoke the session, and legal
+certificate methods still reach the original resource/handler checks. Existing
+required-test groups select this child on all four backends; no parallel test
+manifest or CI workflow is added. The method-only benchmark compares ordinary,
+compatibility and missing paths, not database or end-to-end throughput.
+After the larger linear scan showed a regression, two allocation-free rejection
+checks exclude mismatched segment counts and literal suffixes before walking
+parameter segments. They preserve the existing matching language and order;
+there is no request-path cache or additional index.
+
+S-01 assembly, SSE budgets and shutdown, the three HTTP modules, authorization,
+domain transactions, F-1/F-2 and deployment behavior are unchanged. Exact
+candidate SHA, four-backend results, benchmark conditions and final Basic CI Full
+evidence belong in the Draft PR. The eleven compatibility declarations, other
+concrete service fields and shared transactions remain intentional boundaries,
+not automatic follow-up architecture work or a claim of release readiness.

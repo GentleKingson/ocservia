@@ -44,48 +44,48 @@ type BuildInfo struct {
 }
 
 type Server struct {
-	http             *http.Server
-	backend          database.Backend
-	build            BuildInfo
-	logger           *slog.Logger
-	bodyLimit        int64
-	requestTimeout   time.Duration
-	devAuth          bool
-	devAuthToken     string
-	browserOrigin    string
-	expectedSchema   int64
-	localSlice       *localslice.Service
-	localSliceMu     sync.RWMutex
-	localSimulator   bool
-	operations       *operationstore.Service
-	enrollment       *enrollment.Service
-	transport        *transportclient.Client
-	fences           ownersession.FencedExecutor
-	nodeHTTP         *nodehttp.Handler
-	moduleMethods    []moduleMethodRule
-	releaseCatalog   *releasecatalog.Catalog
-	auth             *auth.Service
-	authProxies      []netip.Prefix
-	breakGlassBudget *authAdmission
-	localLoginBudget *authAdmission
-	authLogs         authLogState
-	rbac             *rbac.Service
-	approvals        *approvals.Service
-	audit            *audit.Manager
-	userstate        *userstate.Service
-	userOpsHTTP      *useroperationshttp.Handler
-	configPlanHTTP   *configplanhttp.Handler
-	configPlanLookup configPlanLookup
-	certificates     *certificates.Service
-	privdAttestation *privdattestation.Service
-	eventStreamsMu   sync.Mutex
-	eventConfig      eventstream.Config
-	eventAdmission   *eventstream.Manager
-	platformEvents   *eventstream.Hub
-	operationEvents  *eventstream.Hub
-	requestsMu       sync.Mutex
-	requests         sync.WaitGroup
-	stopping         bool
+	http              *http.Server
+	backend           database.Backend
+	build             BuildInfo
+	logger            *slog.Logger
+	bodyLimit         int64
+	requestTimeout    time.Duration
+	devAuth           bool
+	devAuthToken      string
+	browserOrigin     string
+	expectedSchema    int64
+	localSlice        *localslice.Service
+	localSliceMu      sync.RWMutex
+	localSimulator    bool
+	operations        *operationstore.Service
+	enrollment        *enrollment.Service
+	transport         *transportclient.Client
+	fences            ownersession.FencedExecutor
+	nodeHTTP          *nodehttp.Handler
+	registeredMethods []routeMethodRule
+	releaseCatalog    *releasecatalog.Catalog
+	auth              *auth.Service
+	authProxies       []netip.Prefix
+	breakGlassBudget  *authAdmission
+	localLoginBudget  *authAdmission
+	authLogs          authLogState
+	rbac              *rbac.Service
+	approvals         *approvals.Service
+	audit             *audit.Manager
+	userstate         *userstate.Service
+	userOpsHTTP       *useroperationshttp.Handler
+	configPlanHTTP    *configplanhttp.Handler
+	configPlanLookup  configPlanLookup
+	certificates      *certificates.Service
+	privdAttestation  *privdattestation.Service
+	eventStreamsMu    sync.Mutex
+	eventConfig       eventstream.Config
+	eventAdmission    *eventstream.Manager
+	platformEvents    *eventstream.Hub
+	operationEvents   *eventstream.Hub
+	requestsMu        sync.Mutex
+	requests          sync.WaitGroup
+	stopping          bool
 }
 
 // HTTPConfig contains final HTTP values. EventStreams must be explicitly valid;
@@ -158,7 +158,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
 	mux := http.NewServeMux()
-	s.moduleMethods = s.registerRoutes(mux)
+	s.registeredMethods = s.registerRoutes(mux)
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	// Bound request reads without a global write deadline that would end SSE streams.
 	s.http = &http.Server{Addr: config.Address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
