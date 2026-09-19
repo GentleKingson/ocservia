@@ -32,8 +32,11 @@ for suite in ${CI_SUITES}; do
       node scripts/test-g6-pipeline.mjs
       node scripts/test-g6-evidence-builder.mjs
       node scripts/test-g6-evidence-verifier.mjs
-      test -z "$(gofmt -l tools/g6-harness)"
-      (cd tools/g6-harness && go vet ./... && go test -count=1 ./...)
+      # The selected standard Go step owns these checks for combined changes.
+      if [[ "${CI_RUN_GO:-false}" != true ]]; then
+        test -z "$(gofmt -l tools/g6-harness)"
+        (cd tools/g6-harness && go vet ./... && go test -count=1 ./...)
+      fi
       ;;
     *) echo "unknown CI tool suite: ${suite}" >&2; exit 2 ;;
   esac

@@ -76,6 +76,8 @@ abort 'published upgrade baseline drift' unless baseline_steps.length == 1 &&
   baseline_steps[0]['name'] == 'Validate published v0.6.0 upgrade (${{ matrix.package_arch }})' &&
   baseline_steps[0].dig('env','BASELINE_RELEASE') == 'v0.6.0'
 abort 'release dispatch can publish' unless jobs['publish-release-packages']['if'] == "github.event_name == 'push'"
+abort 'release must call candidate security checks' unless
+  jobs.fetch('security').fetch('uses') == './.github/workflows/security.yml'
 abort 'publication guard changed' unless jobs['publish-release-packages']['environment'] == 'release-publishing' &&
   jobs['publish-release-packages']['needs'].sort == %w[build-controller-images security validate-release-packages]
 %w[agent controller].each do |component|

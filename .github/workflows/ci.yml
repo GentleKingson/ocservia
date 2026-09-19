@@ -95,6 +95,7 @@ jobs:
         if: needs.ci-relevance.outputs.run_ci_tools == 'true'
         env:
           CI_SUITES: ${{ needs.ci-relevance.outputs.ci_suites }}
+          CI_RUN_GO: ${{ needs.ci-relevance.outputs.run_go }}
         run: bash scripts/ci-tools-check.sh
       - if: needs.ci-relevance.outputs.run_go == 'true'
         run: scripts/go-check.sh standard
