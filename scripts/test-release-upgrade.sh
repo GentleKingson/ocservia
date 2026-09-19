@@ -5,6 +5,7 @@ cd "${ROOT}"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 # Exercise the same local clone/check-out path from a genuinely shallow repo.
+# shellcheck disable=SC1090
 source <(sed -n '/^checkout_baseline_source() {/,/^}/p' scripts/release-controller-upgrade-smoke.sh)
 git init -q "${fixture}/origin"
 git -C "${fixture}/origin" config user.name test
@@ -18,10 +19,10 @@ candidate_commit="$(git -C "${fixture}/origin" rev-parse HEAD)"
 git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
 (
   cd "${fixture}/candidate"
-  ! git cat-file -e "${baseline_commit}^{commit}" 2>/dev/null
+  if git cat-file -e "${baseline_commit}^{commit}" 2>/dev/null; then exit 1; fi
   checkout_baseline_source . "${fixture}/baseline" "${baseline_commit}"
   [[ "$(git rev-parse HEAD)" == "${candidate_commit}" ]]
-  ! git -C "${fixture}/baseline" cat-file -e "${parent}^{commit}" 2>/dev/null
+  if git -C "${fixture}/baseline" cat-file -e "${parent}^{commit}" 2>/dev/null; then exit 1; fi
   [[ "$(git -C "${fixture}/baseline" rev-parse HEAD)" == "${baseline_commit}" ]]
   if checkout_baseline_source . "${fixture}/invalid" invalid; then exit 1; fi
 )
