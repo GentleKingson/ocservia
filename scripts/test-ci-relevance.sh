@@ -57,7 +57,35 @@ control-plane/migrations/000036.up.sql run_go run_database
 scripts/database-foundation-integration.sh run_go run_database
 scripts/go-check.sh run_go
 scripts/web-check.sh run_web
+deploy/managed-node/install.sh run_rust run_installers
+deploy/production/install.sh run_rust run_installers
+deploy/production/controller-bootstrap.sh run_rust run_installers
+deploy/lib/install-env.sh run_rust run_installers
+deploy/production/transportd-relays.sh run_rust run_installers
+deploy/production/systemd/agent-relays.sh run_rust run_installers
+deploy/production/systemd/ocservia-agent-relays.conf run_rust run_installers
+scripts/prepare-bootstrap-release-assets.sh run_rust run_installers
+scripts/release-agent-state-check.sh run_rust run_installers
+scripts/package-agent.sh run_rust run_installers
+scripts/verify-agent-package.sh run_rust run_installers
+scripts/test-managed-node-install.sh run_rust run_installers
 scripts/test-controller-install.sh run_rust run_installers
+scripts/test-controller-bootstrap.sh run_rust run_installers
+scripts/test-relay-launchers.py run_rust run_installers
+scripts/test-release-agent-state-check.sh run_rust run_installers
+.gitignore run_rust run_installers
+deploy/managed-node/install.env.example run_docs run_go run_rust run_web run_database
+deploy/production/Caddyfile run_docs run_go run_rust run_web run_database
+deploy/production/compose.yaml run_docs run_go run_rust run_web run_database
+deploy/production/backup-entrypoint.sh run_docs run_go run_rust run_web run_database
+deploy/real-e2e/compose.yaml run_docs
+scripts/upgrade-agent.sh run_docs run_go run_rust run_web run_database
+scripts/rollback-agent.sh run_docs run_go run_rust run_web run_database
+scripts/uninstall-agent.sh run_docs run_go run_rust run_web run_database
+.github/workflows/ci.yml run_docs run_go run_rust run_web run_database run_ci_tools
+.github/workflows/release.yml run_go run_ci_tools
+.github/workflows/security.yml run_go run_ci_tools
+.github/workflows/g6-build.yml run_docs
 scripts/ci-relevance.sh run_docs run_go run_rust run_web run_database run_ci_tools
 unclassified.conf run_docs run_go run_rust run_web run_database
 CASES
@@ -77,4 +105,4 @@ out="${fixture}/invalid.output"
 expect "${out}" profile quick
 check_matrix "${out}" quick
 for flag in run_docs run_go run_rust run_web run_database; do expect "${out}" "${flag}" true; done
-echo 'CI routing: docs/Web/Rust isolation, Controller Quick, Full matrix and fallback passed'
+echo 'CI routing: domain isolation, exact installer/workflow contracts, Controller Quick, Full matrix and fallback passed'

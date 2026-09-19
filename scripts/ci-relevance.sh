@@ -36,12 +36,21 @@ classify_path() {
     proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
     web/*|scripts/web-check.sh) run_web=true ;;
     rust/*|scripts/rust-check.sh) run_rust=true ;;
-    deploy/managed-node/*|scripts/test-managed-node-install.sh|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh)
+    deploy/managed-node/install.sh|deploy/production/install.sh|deploy/production/controller-bootstrap.sh|\
+    deploy/lib/install-env.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
+    deploy/production/systemd/ocservia-agent-relays.conf|scripts/prepare-bootstrap-release-assets.sh|\
+    scripts/release-agent-state-check.sh|scripts/package-agent.sh|scripts/verify-agent-package.sh|\
+    scripts/test-managed-node-install.sh|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
+    scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh|.gitignore)
       run_rust=true; run_installers=true ;;
     control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*|go.work*)
       run_go=true; run_database=true ;;
     control-plane/*|tools/g6-harness/*|scripts/go-check.sh) run_go=true ;;
-    .github/workflows/ci.yml|scripts/ci-*|scripts/test-ci-*|scripts/*required-go-tests*|scripts/*bootstrap*|scripts/go-test-environment.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
+    .github/workflows/ci.yml)
+      fail_closed ci_tools_changed; run_ci_tools=true ;;
+    .github/workflows/release.yml|.github/workflows/security.yml)
+      run_go=true; run_ci_tools=true ;;
+    scripts/ci-*|scripts/test-ci-*|scripts/*required-go-tests*|scripts/*bootstrap*|scripts/go-test-environment.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
       fail_closed ci_tools_changed; run_ci_tools=true ;;
     scripts/database-*.sh) run_go=true; run_database=true ;;
     .github/workflows/g6-*|.github/actions/g6-*/*|deploy/g6-*/*|deploy/real-e2e/*|scripts/*g6*|scripts/real-e2e-*|scripts/test-real-e2e-*|scripts/p1-*|scripts/test-p1-*|scripts/security-acceptance-*)
