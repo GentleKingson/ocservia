@@ -16,7 +16,7 @@ export const scenarios = {
 export const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 export const readJSON = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 export function candidateArtifacts(component, arch, version) {
-  return component === "agent" ? [`ocservia-agent_${version}_${arch}.deb`,
+  return component === "agent" ? [`ocservia-agent_${version}-1_${arch}.deb`,
     `ocservia-agent-${version}-1.${architectures[arch].rpm}.rpm`, `ocservia-agent-${version}-linux-${arch}.tar.gz`] :
     ["gateway", "control", "transport", "backup"].map(name => `${name}-linux-${arch}.tar`);
 }
@@ -40,11 +40,18 @@ export function validateInputs(version, tag, sha, dispatchSHA, head, baselines) 
     /^[0-9a-f]{64}$/.test(baseline.key_der_sha256), "baseline lacks registered full upgrade capabilities");
   return baseline;
 }
-export function requiredAssets(tag) {
+export function baselineDebAsset(tag, arch, baseline) {
+  const release = baseline.deb_asset_release;
+  requireThat(!Object.hasOwn(baseline, "deb_asset_release") || (Number.isSafeInteger(release) && release >= 1),
+    "baseline deb_asset_release must be a positive integer when present");
+  const revision = release === undefined ? "" : `-${release}`;
+  return `ocservia-agent_${tag.slice(1)}${revision}_${arch}.deb`;
+}
+export function requiredAssets(tag, baseline) {
   const v = tag.slice(1);
   return ["SHA256SUMS", "SHA256SUMS.sig", "release-signing.pub.pem",
     ...Object.entries(architectures).flatMap(([arch, { rpm }]) => [
-      `ocservia-agent_${v}_${arch}.deb`, `ocservia-agent-${v}-1.${rpm}.rpm`,
+      baselineDebAsset(tag, arch, baseline), `ocservia-agent-${v}-1.${rpm}.rpm`,
       `controller-release-${arch}.json`, `controller-release-${arch}.json.sha256`,
     ])];
 }
@@ -52,7 +59,7 @@ export function validateRelease(release, tag, ref, baseline) {
   requireThat(release.tag_name === tag && release.draft === false && release.prerelease === false && release.published_at,
     "baseline is not a published stable Release");
   requireThat(ref.object?.type === "commit" && ref.object.sha === baseline.commit, "baseline tag commit changed");
-  for (const name of requiredAssets(tag)) {
+  for (const name of requiredAssets(tag, baseline)) {
     requireThat(release.assets.filter((a) => a.name === name && a.state === "uploaded").length === 1, `missing or duplicate baseline asset: ${name}`);
   }
 }
@@ -88,7 +95,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const [mode, directory] = process.argv.slice(2);
     const env = process.env;
-    if (mode === "prepare") {
+    if (mode === "baseline-deb") {
+      console.log(baselineDebAsset(directory, process.argv[4], readJSON(0)));
+    } else if (mode === "prepare") {
       const raw = fs.readFileSync("scripts/release-upgrade-baselines.json");
       const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
       const baseline = validateInputs(env.VERSION, env.BASELINE_RELEASE, env.CANDIDATE_SHA, env.GITHUB_SHA, head, JSON.parse(raw));
@@ -100,7 +109,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         baseline_commit: baseline.commit, baseline_lock_sha256: digest(raw), baseline,
         run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT,
         prepared_at: new Date().toISOString(), release_id: release.id,
-        assets: release.assets.filter((a) => requiredAssets(env.BASELINE_RELEASE).includes(a.name)).map((a) => ({ name: a.name, url: a.browser_download_url, digest: a.digest })) };
+        assets: release.assets.filter((a) => requiredAssets(env.BASELINE_RELEASE, baseline).includes(a.name)).map((a) => ({ name: a.name, url: a.browser_download_url, digest: a.digest })) };
       fs.writeFileSync(`${directory}/frozen.json`, JSON.stringify(frozen, null, 2) + "\n");
       fs.appendFileSync(env.GITHUB_OUTPUT, `baseline_commit=${baseline.commit}\n`);
     } else if (mode === "aggregate") {
@@ -112,7 +121,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       walk(directory);
       const summary = validateResults(readJSON(`${directory}/frozen/frozen.json`), results, JSON.parse(env.NEEDS), env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT);
       fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Native Upgrade Result: PASS\n\n${JSON.stringify(summary)}\n`);
-    } else throw new Error("expected prepare or aggregate");
+    } else throw new Error("expected baseline-deb, prepare or aggregate");
   } catch (error) {
     console.error(error.message);
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Native Upgrade Result: NOT PASS (${error.message})\n`);

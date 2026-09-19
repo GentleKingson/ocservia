@@ -68,7 +68,7 @@ rejects a foreign-architecture package — `x86_64` ↔ `amd64`, `aarch64` ↔
 
 Each release publishes the verified archive plus native installers for both
 architectures: `ocservia-agent-<version>-linux-{amd64,arm64}.tar.gz` with its
-`.sha256`/`.sha256.sig` sidecars, `ocservia-agent_<version>_{amd64,arm64}.deb`,
+`.sha256`/`.sha256.sig` sidecars, `ocservia-agent_<version>-1_{amd64,arm64}.deb`,
 `ocservia-agent-<version>-1.{x86_64,aarch64}.rpm`, one `SHA256SUMS` covering
 the six packages, and, on formal Controller releases, the Controller manifests
 `controller-release.json`, `controller-release-amd64.json`, and
