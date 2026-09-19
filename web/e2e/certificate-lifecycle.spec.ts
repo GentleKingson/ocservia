@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 const workspaceId = "019fde50-1111-7111-8111-111111111111";
 const nodeId = "019fde50-2222-7222-8222-222222222222";
@@ -66,12 +67,31 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
     );
   }
   let csrRequest: Record<string, unknown> | undefined;
+  let certificateState: "csr_ready" | "issued" | undefined;
   await page.route(`**/api/v1/nodes/${nodeId}/certificates`, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: '{"items":[]}',
+        body: JSON.stringify({
+          items: certificateState
+            ? [
+                {
+                  id: certificateId,
+                  workspace_id: workspaceId,
+                  node_id: nodeId,
+                  operation_id: operationId,
+                  common_name: "vpn.example.test",
+                  dns_names: ["alt.example.test"],
+                  key_bits: 3072,
+                  state: certificateState,
+                  version: certificateState === "issued" ? 2 : 1,
+                  created_at: "2026-08-08T01:00:00Z",
+                  updated_at: "2026-08-08T01:00:02Z",
+                },
+              ]
+            : [],
+        }),
       });
       return;
     }
@@ -79,6 +99,7 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
       string,
       unknown
     >;
+    certificateState = "csr_ready";
     await route.fulfill({
       status: 202,
       contentType: "application/json",
@@ -104,6 +125,7 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
         approval_id: approvalId,
         reason: "issue approved certificate",
       });
+      certificateState = "issued";
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -124,25 +146,35 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
       });
     },
   );
-  await page.route(`**/api/v1/certificates/${certificateId}:p12`, (route) =>
-    route.fulfill({
-      status: 202,
-      contentType: "application/json",
-      body: JSON.stringify({
-        artifact_id: artifactId,
-        operation: {
-          id: operationId,
-          state: "succeeded",
-          node_id: nodeId,
-          version: 1,
-          created_at: "2026-08-08T01:00:03Z",
-          updated_at: "2026-08-08T01:00:04Z",
-        },
-        download_token: "t".repeat(43),
-        password: "one-time-password",
-        expires_at: "2026-08-08T01:10:03Z",
-      }),
-    }),
+  let releaseGrant!: () => void;
+  const grantResponse = new Promise<void>((resolve) => {
+    releaseGrant = resolve;
+  });
+  let p12Requests = 0;
+  await page.route(
+    `**/api/v1/certificates/${certificateId}:p12`,
+    async (route) => {
+      p12Requests += 1;
+      await grantResponse;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          artifact_id: artifactId,
+          operation: {
+            id: operationId,
+            state: "succeeded",
+            node_id: nodeId,
+            version: 1,
+            created_at: "2026-08-08T01:00:03Z",
+            updated_at: "2026-08-08T01:00:04Z",
+          },
+          download_token: "t".repeat(43),
+          password: "one-time-password",
+          expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+        }),
+      });
+    },
   );
   await page.route(`**/api/v1/operations/${operationId}`, (route) =>
     route.fulfill({
@@ -159,8 +191,15 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
     }),
   );
   let artifactToken = "";
+  let releaseDownload!: () => void;
+  const artifactResponse = new Promise<void>((resolve) => {
+    releaseDownload = resolve;
+  });
+  let artifactRequests = 0;
   await page.route(`**/api/v1/artifacts/${artifactId}`, async (route) => {
+    artifactRequests += 1;
     artifactToken = route.request().headers()["x-artifact-token"] ?? "";
+    await artifactResponse;
     await route.fulfill({
       status: 200,
       contentType: "application/x-pkcs12",
@@ -188,12 +227,37 @@ test("issues a node-local CSR and downloads a one-time P12", async ({
   await expect(page.getByText("issued", { exact: true })).toBeVisible();
   await page.getByLabel("Reason").fill("create support export");
   await page.getByRole("button", { name: "Create P12" }).click();
+  await expect.poll(() => p12Requests).toBe(1);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByTitle("Certificate lifecycle").click();
+  await expect(
+    page.getByRole("button", { name: "Request CSR" }),
+  ).toBeDisabled();
+  releaseGrant();
   await expect(page.getByLabel("P12 password")).toHaveValue(
     "one-time-password",
   );
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download" }).click();
-  await download;
+  await expect.poll(() => artifactRequests).toBe(1);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  releaseDownload();
+  const file = await download;
+  expect(await file.failure()).toBeNull();
+  const path = await file.path();
+  expect(path).not.toBeNull();
+  if (path) expect(await readFile(path, "utf8")).toBe("encrypted-p12");
   expect(artifactToken).toBe("t".repeat(43));
+  await page.getByTitle("Certificate lifecycle").click();
+  await expect(page.getByLabel("P12 password")).toHaveValue(
+    "one-time-password",
+  );
   await expect(page.getByRole("button", { name: "Download" })).toHaveCount(0);
+  expect(p12Requests).toBe(1);
+  expect(artifactRequests).toBe(1);
+  const persisted = await page.evaluate(() =>
+    Object.values(sessionStorage).join("|"),
+  );
+  expect(persisted).not.toContain("one-time-password");
+  expect(persisted).not.toContain("t".repeat(43));
 });

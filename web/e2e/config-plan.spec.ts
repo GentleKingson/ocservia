@@ -11,6 +11,7 @@ const node = {
   id: nodeId,
   name: "Config node",
   version: 1,
+  config_revision: 7,
   trust_status: "active",
   connection_state: "online",
   freshness: "fresh",
@@ -86,7 +87,7 @@ test("submits a typed configuration plan and renders a safe diff", async ({
     node_id: nodeId,
     operation_id: planId,
     template_name: "node-baseline",
-    expected_revision: 0,
+    expected_revision: 7,
     candidate_hash: "a".repeat(64),
     current_hash: "b".repeat(64),
     state: "succeeded",
@@ -99,7 +100,16 @@ test("submits a typed configuration plan and renders a safe diff", async ({
     expires_at: "2026-08-08T01:00:00Z",
     created_at: "2026-08-08T00:45:00Z",
   };
+  let planRequests = 0;
+  await page.route(`**/api/v1/config-plans/${planId}`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(plan),
+    }),
+  );
   await page.route(`**/api/v1/nodes/${nodeId}/config-plans`, async (route) => {
+    planRequests += 1;
     submitted = (await route.request().postDataJSON()) as Record<
       string,
       unknown
@@ -155,7 +165,7 @@ test("submits a typed configuration plan and renders a safe diff", async ({
   await expect(page.locator("pre")).toContainText("tcp-port = 443");
   await expect(page.locator("pre")).not.toContainText("tls/server-private-key");
   expect(submitted).toMatchObject({
-    expected_revision: 0,
+    expected_revision: 7,
     ttl_seconds: 900,
     reason: "review edge configuration",
     template: {
@@ -182,6 +192,12 @@ test("submits a typed configuration plan and renders a safe diff", async ({
     },
   });
   expect(JSON.stringify(submitted)).not.toContain("target_path");
+
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByTitle("Configuration plan").click();
+  await expect(page.getByText("valid", { exact: true })).toBeVisible();
+  await expect(page.getByText(planId, { exact: true })).toBeVisible();
+  expect(planRequests).toBe(1);
 
   await page.locator("#config-apply-approval").fill(approvalId);
   await page
