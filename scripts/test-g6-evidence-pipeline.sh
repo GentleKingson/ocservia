@@ -13,6 +13,14 @@ verifier = jobs.fetch("g6-rd-verifier")
 abort("verifier must be independent of runtime") unless verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if").include?("always()")
 gate = jobs.fetch("g6-rd-gate")
 abort("gate must aggregate every evidence layer") unless gate.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-verifier] && gate.fetch("if").include?("always()")
+[assemble, scan, verifier, gate].each do |job|
+  abort("pipeline identity must come from this invocation's needs") unless
+    job.fetch("env").fetch("G6_PIPELINE_NEEDS") == '${{ toJSON(needs) }}'
+end
+%w[assembly gate].zip([assemble, gate]).each do |phase, job|
+  fallback = job.fetch("steps").find { |step| step.fetch("run", "").include?("fallback --phase #{phase}") }
+  abort("#{phase} must preserve a shared failed result even when upstream fails") unless fallback && fallback["if"] == "always()"
+end
 %w[g6-rd-fd-a g6-rd-fd-b].each do |id|
   steps = Array(jobs.fetch(id).fetch("steps"))
   abort("#{id} must upload raw evidence even on failure") unless steps.any? { |step| step.fetch("name", "").include?("raw evidence") && step.fetch("if", "") == "always()" && step.fetch("uses", "").start_with?("actions/upload-artifact@") }
