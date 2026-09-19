@@ -121,6 +121,19 @@ func baselineRequest(method, path string, body io.Reader) *http.Request {
 	return r.WithContext(trace.ContextWithSpanContext(r.Context(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid})))
 }
 
+func baselineRoutePath(pattern, handler string) (method, path string) {
+	method, path, _ = strings.Cut(pattern, " ")
+	path = strings.NewReplacer("{local_user_action}", baselineID+":disable", "{session_action}", "42:disconnect", "{ip_action}", "192.0.2.9:remove", "{user_action}", "alice:disable", "{certificate_action}", baselineID+":issue", "{secret_ref_action}", baselineID+":rotate", "{group_name}", "operators", "{username}", "alice").Replace(path)
+	for strings.Contains(path, "{") {
+		start, end := strings.Index(path, "{"), strings.Index(path, "}")
+		path = path[:start] + baselineID + path[end+1:]
+	}
+	if handler == "s.requireOperationAuth(s.approveRequest)" {
+		path += ":approve"
+	}
+	return method, path
+}
+
 func assertBaselineProblem(t *testing.T, w *httptest.ResponseRecorder, path string, status int, kind, title, detail string) {
 	t.Helper()
 	if w.Code != status || w.Header().Get("Content-Type") != "application/problem+json" || w.Header().Get("X-Request-ID") != "baseline-request" {
@@ -273,15 +286,7 @@ func TestHTTPRouteInventory(t *testing.T) {
 				t.Fatalf("registration = %q, want %q", registered[pattern], handler)
 			}
 			delete(registered, pattern)
-			method, path, _ := strings.Cut(pattern, " ")
-			path = strings.NewReplacer("{local_user_action}", baselineID+":disable", "{session_action}", "42:disconnect", "{ip_action}", "192.0.2.9:remove", "{user_action}", "alice:disable", "{certificate_action}", baselineID+":issue", "{secret_ref_action}", baselineID+":rotate", "{group_name}", "operators", "{username}", "alice").Replace(path)
-			for strings.Contains(path, "{") {
-				start, end := strings.Index(path, "{"), strings.Index(path, "}")
-				path = path[:start] + baselineID + path[end+1:]
-			}
-			if handler == "s.requireOperationAuth(s.approveRequest)" {
-				path += ":approve"
-			}
+			method, path := baselineRoutePath(pattern, handler)
 			r := baselineRequest(method, path, nil)
 			if rule, ok := s.routeMethods(path); !ok || rule.allow() != allow {
 				t.Fatalf("registered route is unreachable: %s (%q)", pattern, rule)
