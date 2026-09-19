@@ -59,9 +59,15 @@ import { useFleetStore } from "../shared/fleet";
 import { operationStatusKey } from "../shared/operation-status";
 import { workspaceChangedEvent } from "../api/client";
 import {
+  beginNodeMutation,
+  consumeCertificateGrant,
   createNodeWorkflow,
+  finishNodeMutation,
+  readCertificateGrant,
   readNodeReceipt,
+  rememberCertificateGrant,
   rememberNodeReceipt,
+  waitForNodeMutation,
   waitForNodePoll,
   type NodeWorkflowContext,
 } from "./node-workflow";
@@ -455,10 +461,16 @@ async function openConfigPlan(): Promise<void> {
   configReason.value = "";
   configApplyApproval.value = "";
   configApplyReason.value = "";
-  const receipt = readNodeReceipt(context, "config");
-  if (!receipt.resourceId) return;
-  configLoading.value = true;
   try {
+    const pending = waitForNodeMutation(context, "config");
+    if (pending) {
+      configLoading.value = true;
+      await pending;
+      if (!configWorkflow.isCurrent(context)) return;
+    }
+    const receipt = readNodeReceipt(context, "config");
+    if (!receipt.resourceId) return;
+    configLoading.value = true;
     const plan = await getConfigPlan(receipt.resourceId, context.signal);
     if (!configWorkflow.isCurrent(context)) return;
     if (
@@ -474,7 +486,11 @@ async function openConfigPlan(): Promise<void> {
     )
       return;
     const operation = await getOperation(receipt.operationId, context.signal);
-    if (configWorkflow.isCurrent(context)) configOperation.value = operation;
+    if (
+      configWorkflow.isCurrent(context) &&
+      operation.nodeId === context.nodeId
+    )
+      configOperation.value = operation;
   } catch (error) {
     if (configWorkflow.isCurrent(context))
       configError.value =
@@ -521,6 +537,8 @@ async function submitConfigPlan(): Promise<void> {
     source.workspace.generation !== workspace.generation
   )
     return;
+  const ticket = beginNodeMutation(context, "config");
+  if (!ticket) return;
   configLoading.value = true;
   configError.value = "";
   try {
@@ -553,7 +571,7 @@ async function submitConfigPlan(): Promise<void> {
       ttlSeconds: 900,
       reason: configReason.value.trim(),
     });
-    rememberNodeReceipt(context, "config", {
+    rememberNodeReceipt(ticket, {
       resourceId: plan.id,
       operationId: plan.operationId,
     });
@@ -563,6 +581,7 @@ async function submitConfigPlan(): Promise<void> {
     configError.value =
       error instanceof Error ? error.message : t("configPlanFailed");
   } finally {
+    finishNodeMutation(ticket);
     if (configWorkflow.isCurrent(context)) configLoading.value = false;
   }
 }
@@ -580,6 +599,8 @@ async function submitConfigApply(): Promise<void> {
     !configApplyReason.value.trim()
   )
     return;
+  const ticket = beginNodeMutation(context, "config");
+  if (!ticket) return;
   configLoading.value = true;
   configError.value = "";
   try {
@@ -587,7 +608,7 @@ async function submitConfigApply(): Promise<void> {
       approvalId: configApplyApproval.value.trim(),
       reason: configApplyReason.value.trim(),
     });
-    rememberNodeReceipt(context, "config", {
+    rememberNodeReceipt(ticket, {
       resourceId: plan.id,
       operationId: operation.id,
     });
@@ -599,6 +620,7 @@ async function submitConfigApply(): Promise<void> {
     configError.value =
       error instanceof Error ? error.message : t("configApplyFailed");
   } finally {
+    finishNodeMutation(ticket);
     if (configWorkflow.isCurrent(context)) configLoading.value = false;
   }
 }
@@ -620,6 +642,9 @@ async function openCertificate(): Promise<void> {
   certificateError.value = "";
   certificateLoading.value = true;
   try {
+    const pending = waitForNodeMutation(context, "certificate");
+    if (pending) await pending;
+    if (!certificateWorkflow.isCurrent(context)) return;
     const receipt = readNodeReceipt(context, "certificate");
     const records = await listNodeCertificates(node.id, context.signal);
     if (!certificateWorkflow.isCurrent(context)) return;
@@ -628,10 +653,22 @@ async function openCertificate(): Promise<void> {
         (record) =>
           record.id === receipt.resourceId && record.state !== "revoked",
       ) ?? records.find((record) => record.state !== "revoked");
-    if (record) await pollCertificate(context, record);
+    if (record) {
+      if (
+        record.nodeId !== context.nodeId ||
+        record.workspaceId !== context.workspace.id
+      )
+        return;
+      await pollCertificate(context, record);
+      if (!certificateWorkflow.isCurrent(context)) return;
+      certificateGrant.value = readCertificateGrant(context, record.id);
+    }
     if (!certificateWorkflow.isCurrent(context) || !receipt.operationId) return;
     const operation = await getOperation(receipt.operationId, context.signal);
-    if (certificateWorkflow.isCurrent(context))
+    if (
+      certificateWorkflow.isCurrent(context) &&
+      operation.nodeId === context.nodeId
+    )
       certificateOperation.value = operation;
   } catch (error) {
     if (!certificateWorkflow.isCurrent(context)) return;
@@ -674,6 +711,8 @@ async function submitCertificateRequest(): Promise<void> {
     !certificateReason.value.trim()
   )
     return;
+  const ticket = beginNodeMutation(context, "certificate");
+  if (!ticket) return;
   certificateLoading.value = true;
   certificateError.value = "";
   try {
@@ -689,7 +728,7 @@ async function submitCertificateRequest(): Promise<void> {
       keyBits: 3072,
       reason: certificateReason.value.trim(),
     });
-    rememberNodeReceipt(context, "certificate", {
+    rememberNodeReceipt(ticket, {
       resourceId: value.id,
       operationId: value.operationId,
     });
@@ -699,6 +738,7 @@ async function submitCertificateRequest(): Promise<void> {
     certificateError.value =
       error instanceof Error ? error.message : t("certificateRequestFailed");
   } finally {
+    finishNodeMutation(ticket);
     if (certificateWorkflow.isCurrent(context))
       certificateLoading.value = false;
   }
@@ -716,6 +756,8 @@ async function submitCertificateIssue(): Promise<void> {
     !certificateReason.value.trim()
   )
     return;
+  const ticket = beginNodeMutation(context, "certificate");
+  if (!ticket) return;
   certificateLoading.value = true;
   certificateError.value = "";
   try {
@@ -723,7 +765,7 @@ async function submitCertificateIssue(): Promise<void> {
       approvalId: certificateApproval.value.trim(),
       reason: certificateReason.value.trim(),
     });
-    rememberNodeReceipt(context, "certificate", {
+    rememberNodeReceipt(ticket, {
       resourceId: issued.id,
       operationId: issued.operationId,
     });
@@ -733,6 +775,7 @@ async function submitCertificateIssue(): Promise<void> {
     certificateError.value =
       error instanceof Error ? error.message : t("certificateIssueFailed");
   } finally {
+    finishNodeMutation(ticket);
     if (certificateWorkflow.isCurrent(context))
       certificateLoading.value = false;
   }
@@ -752,6 +795,9 @@ async function createP12(): Promise<void> {
     !certificateApproval.value.trim()
   )
     return;
+  if (readCertificateGrant(context, current.id)?.downloadToken) return;
+  const ticket = beginNodeMutation(context, "certificate");
+  if (!ticket) return;
   certificateLoading.value = true;
   certificateError.value = "";
   try {
@@ -761,12 +807,13 @@ async function createP12(): Promise<void> {
       approvalId: certificateApproval.value.trim(),
       reason: certificateReason.value.trim(),
     });
-    rememberNodeReceipt(context, "certificate", {
+    rememberCertificateGrant(context, current.id, grant);
+    rememberNodeReceipt(ticket, {
       resourceId: current.id,
       operationId: grant.operation.id,
     });
     if (!certificateWorkflow.isCurrent(context)) return;
-    certificateGrant.value = grant;
+    certificateGrant.value = readCertificateGrant(context, current.id);
     certificateOperation.value = grant.operation;
     await fleet.trackOperation(grant.operation.id);
   } catch (error) {
@@ -774,6 +821,7 @@ async function createP12(): Promise<void> {
     certificateError.value =
       error instanceof Error ? error.message : t("p12CreationFailed");
   } finally {
+    finishNodeMutation(ticket);
     if (certificateWorkflow.isCurrent(context))
       certificateLoading.value = false;
   }
@@ -782,13 +830,17 @@ async function createP12(): Promise<void> {
 async function downloadP12(): Promise<void> {
   const grant = certificateGrant.value;
   const context = certificateContext;
+  const certificateId = certificate.value?.id;
   if (
     !context ||
+    !certificateId ||
     !certificateWorkflow.isCurrent(context) ||
     certificateLoading.value ||
     !grant?.downloadToken
   )
     return;
+  const ticket = beginNodeMutation(context, "certificate");
+  if (!ticket) return;
   certificateLoading.value = true;
   certificateError.value = "";
   try {
@@ -796,19 +848,23 @@ async function downloadP12(): Promise<void> {
       grant.artifactId,
       grant.downloadToken,
     );
-    if (!certificateWorkflow.isCurrent(context)) return;
+    // The Controller consumes the artifact before sending its bytes. Finish
+    // this user-initiated download even if its originating dialog has closed.
+    consumeCertificateGrant(context, certificateId, grant.artifactId);
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = "certificate.p12";
-    link.click();
-    URL.revokeObjectURL(link.href);
-    const { downloadToken: _consumed, ...consumedGrant } = grant;
-    certificateGrant.value = consumedGrant;
+    try {
+      link.click();
+    } finally {
+      URL.revokeObjectURL(link.href);
+    }
   } catch (error) {
     if (!certificateWorkflow.isCurrent(context)) return;
     certificateError.value =
       error instanceof Error ? error.message : t("p12DownloadFailed");
   } finally {
+    finishNodeMutation(ticket);
     if (certificateWorkflow.isCurrent(context))
       certificateLoading.value = false;
   }
@@ -828,6 +884,8 @@ async function revokeCurrentCertificate(): Promise<void> {
     !certificateApproval.value.trim()
   )
     return;
+  const ticket = beginNodeMutation(context, "certificate");
+  if (!ticket) return;
   certificateLoading.value = true;
   certificateError.value = "";
   try {
@@ -837,7 +895,7 @@ async function revokeCurrentCertificate(): Promise<void> {
       approvalId: certificateApproval.value.trim(),
       reason: certificateReason.value.trim(),
     });
-    rememberNodeReceipt(context, "certificate", {
+    rememberNodeReceipt(ticket, {
       resourceId: current.id,
       operationId: operation.id,
     });
@@ -852,6 +910,7 @@ async function revokeCurrentCertificate(): Promise<void> {
     certificateError.value =
       error instanceof Error ? error.message : t("certificateRevokeFailed");
   } finally {
+    finishNodeMutation(ticket);
     if (certificateWorkflow.isCurrent(context))
       certificateLoading.value = false;
   }
@@ -1374,7 +1433,7 @@ async function revokeCurrentCertificate(): Promise<void> {
               required
             />
           </template>
-          <template v-if="certificateGrant">
+          <template v-if="certificateGrant?.password">
             <label for="certificate-password">{{ $t("p12Password") }}</label>
             <input
               id="certificate-password"
@@ -1439,7 +1498,11 @@ async function revokeCurrentCertificate(): Promise<void> {
           >
             <button
               type="button"
-              :disabled="certificateLoading || !certificateReason.trim()"
+              :disabled="
+                certificateLoading ||
+                Boolean(certificateGrant?.downloadToken) ||
+                !certificateReason.trim()
+              "
               @click="createP12"
             >
               <KeyRound :size="15" />{{ $t("createP12") }}

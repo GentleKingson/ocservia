@@ -1,3 +1,5 @@
+import type { ArtifactGrant } from "@ocservia/api-client";
+import { shallowReactive } from "vue";
 import { workspaceContext, type WorkspaceContext } from "../api/client";
 
 export interface NodeWorkflowContext {
@@ -70,7 +72,7 @@ function receiptKey(
   return `ocservia.node-workflow.${JSON.stringify([context.workspace.id, context.nodeId, kind])}`;
 }
 
-// Only identifiers survive a dialog/unmount. Reopening must read the server;
+// Persistent receipts contain only identifiers. Reopening must read the server;
 // a receipt is not cached authorization, a Plan result or an artifact secret.
 export function readNodeReceipt(
   context: NodeWorkflowContext,
@@ -92,14 +94,139 @@ export function readNodeReceipt(
   }
 }
 
-export function rememberNodeReceipt(
+interface NodeMutation {
+  key: string;
+  settled: Promise<void>;
+  resolve(): void;
+}
+
+// Ownership outlives the dialog, but only until the request acknowledges or
+// fails. A reopened view waits for it instead of sending a new idempotency key.
+const pendingMutations = new Map<string, NodeMutation>();
+
+export function beginNodeMutation(
   context: NodeWorkflowContext,
   kind: "config" | "certificate",
+): NodeMutation | undefined {
+  const key = receiptKey(context, kind);
+  if (pendingMutations.has(key)) return undefined;
+  let resolve!: () => void;
+  const settled = new Promise<void>((done) => {
+    resolve = done;
+  });
+  const ticket = { key, settled, resolve };
+  pendingMutations.set(key, ticket);
+  return ticket;
+}
+
+export function finishNodeMutation(ticket: NodeMutation): void {
+  if (pendingMutations.get(ticket.key) !== ticket) return;
+  pendingMutations.delete(ticket.key);
+  ticket.resolve();
+}
+
+export function waitForNodeMutation(
+  context: NodeWorkflowContext,
+  kind: "config" | "certificate",
+): Promise<void> | undefined {
+  const ticket = pendingMutations.get(receiptKey(context, kind));
+  if (!ticket) return undefined;
+  return new Promise((resolve, reject) => {
+    function finish(): void {
+      context.signal.removeEventListener("abort", abort);
+      resolve();
+    }
+    function abort(): void {
+      context.signal.removeEventListener("abort", abort);
+      reject(new DOMException("Node workflow detached", "AbortError"));
+    }
+    if (context.signal.aborted) abort();
+    else context.signal.addEventListener("abort", abort, { once: true });
+    void ticket.settled.then(finish);
+  });
+}
+
+export function rememberNodeReceipt(
+  ticket: NodeMutation,
   receipt: Receipt,
 ): void {
+  if (pendingMutations.get(ticket.key) !== ticket) return;
   try {
-    sessionStorage.setItem(receiptKey(context, kind), JSON.stringify(receipt));
+    sessionStorage.setItem(ticket.key, JSON.stringify(receipt));
   } catch {
     // Storage can be disabled; the accepted operation still exists server-side.
+  } finally {
+    finishNodeMutation(ticket);
+  }
+}
+
+interface CachedGrant {
+  grant: ArtifactGrant;
+  timer: ReturnType<typeof setTimeout>;
+  expiresAt: number;
+}
+const certificateGrants = new Map<string, CachedGrant>();
+
+function grantKey(context: NodeWorkflowContext, certificateId: string): string {
+  return JSON.stringify([context.workspace.id, context.nodeId, certificateId]);
+}
+
+function expireGrant(key: string): void {
+  const cached = certificateGrants.get(key);
+  if (!cached) return;
+  clearTimeout(cached.timer);
+  delete cached.grant.downloadToken;
+  delete cached.grant.password;
+  certificateGrants.delete(key);
+}
+
+// These one-time credentials cannot be replayed. Keep them only in this SPA's
+// memory until the server deadline (at most the Controller's ten-minute TTL).
+export function rememberCertificateGrant(
+  context: NodeWorkflowContext,
+  certificateId: string,
+  grant: ArtifactGrant,
+): void {
+  const ttl = Math.min(Date.parse(grant.expiresAt) - Date.now(), 10 * 60_000);
+  if (
+    !Number.isFinite(ttl) ||
+    ttl <= 0 ||
+    grant.operation.nodeId !== context.nodeId
+  )
+    return;
+  const key = grantKey(context, certificateId);
+  expireGrant(key);
+  certificateGrants.set(key, {
+    grant: shallowReactive(grant),
+    timer: setTimeout(() => {
+      expireGrant(key);
+    }, ttl),
+    expiresAt: Date.now() + ttl,
+  });
+}
+
+export function readCertificateGrant(
+  context: NodeWorkflowContext,
+  certificateId: string,
+): ArtifactGrant | undefined {
+  const key = grantKey(context, certificateId);
+  const cached = certificateGrants.get(key);
+  if (cached && cached.expiresAt <= Date.now()) {
+    expireGrant(key);
+    return undefined;
+  }
+  return cached?.grant;
+}
+
+export function consumeCertificateGrant(
+  context: NodeWorkflowContext,
+  certificateId: string,
+  artifactId: string,
+): void {
+  const grant = readCertificateGrant(context, certificateId);
+  if (grant?.artifactId === artifactId) {
+    delete grant.downloadToken;
+    // Retain the password until expiry so a download completed after closing
+    // the dialog is still usable when the user reopens it.
   }
 }
