@@ -13,6 +13,7 @@ type Node struct {
 	ID                                                                       uuid.UUID
 	Name, Status                                                             string
 	Version                                                                  int64
+	ConfigRevision                                                           int64
 	ObservedAt, Heartbeat                                                    value.Timestamp
 	BootID, InstanceID, AgentVersion, OcservVersion, OSRelease, Architecture string
 	Ocserv, System, Path                                                     value.JSONB
