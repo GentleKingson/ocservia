@@ -7,6 +7,8 @@ trap 'rm -rf -- "${fixture}"' EXIT
 # Exercise the same local clone/check-out path from a genuinely shallow repo.
 # shellcheck disable=SC1090
 source <(sed -n '/^checkout_baseline_source() {/,/^}/p' scripts/release-controller-upgrade-smoke.sh)
+# shellcheck disable=SC1090
+source <(sed -n '/^require_changed_descriptor() {/,/^}/p' scripts/release-controller-upgrade-smoke.sh)
 git init -q "${fixture}/origin"
 git -C "${fixture}/origin" config user.name test
 git -C "${fixture}/origin" config user.email test@example.invalid
@@ -14,7 +16,10 @@ git -C "${fixture}/origin" commit --allow-empty -qm parent
 parent="$(git -C "${fixture}/origin" rev-parse HEAD)"
 git -C "${fixture}/origin" commit --allow-empty -qm baseline
 baseline_commit="$(git -C "${fixture}/origin" rev-parse HEAD)"
-git -C "${fixture}/origin" commit --allow-empty -qm candidate
+mkdir -p "${fixture}/origin/deploy/production"
+printf 'changed\n' >"${fixture}/origin/deploy/production/compose.yaml"
+git -C "${fixture}/origin" add deploy/production/compose.yaml
+git -C "${fixture}/origin" commit -qm candidate
 candidate_commit="$(git -C "${fixture}/origin" rev-parse HEAD)"
 git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
 (
@@ -24,6 +29,13 @@ git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
   [[ "$(git rev-parse HEAD)" == "${candidate_commit}" ]]
   if git -C "${fixture}/baseline" cat-file -e "${parent}^{commit}" 2>/dev/null; then exit 1; fi
   [[ "$(git -C "${fixture}/baseline" rev-parse HEAD)" == "${baseline_commit}" ]]
+  require_changed_descriptor "${fixture}/baseline" "${baseline_commit}" "${candidate_commit}" deploy/production/compose.yaml
+  if require_changed_descriptor "${fixture}/baseline" "${baseline_commit}" "${candidate_commit}" unchanged; then exit 1; fi
+  if require_changed_descriptor . "${baseline_commit}" "${candidate_commit}" deploy/production/compose.yaml 2>/dev/null; then exit 1; fi
+  git clone -q --no-hardlinks . "${fixture}/active-candidate"
+  git -C "${fixture}/active-candidate" fetch --quiet --no-tags --depth=1 "${fixture}/baseline" "${baseline_commit}"
+  [[ "$(git -C "${fixture}/active-candidate" rev-parse HEAD)" == "${candidate_commit}" ]]
+  require_changed_descriptor "${fixture}/active-candidate" "${baseline_commit}" "${candidate_commit}" deploy/production/compose.yaml
   if checkout_baseline_source . "${fixture}/invalid" invalid; then exit 1; fi
 )
 node scripts/test-release-upgrade.mjs
@@ -81,6 +93,9 @@ abi = File.read('scripts/build-agent-binaries.sh')
 controller_upgrade = File.read('scripts/release-controller-upgrade-smoke.sh')
 abort 'Controller smoke must check out the frozen baseline source' unless
   controller_upgrade.include?('checkout_baseline_source "${ROOT}" "${work}/baseline" "${baseline_commit}"')
+abort 'rollback evidence must compare the verified trees and reject Git errors' unless
+  controller_upgrade.include?('require_changed_descriptor "${work}/baseline" "${baseline_commit}" "${candidate_commit}" "${descriptor}"') &&
+  controller_upgrade.include?('git -C "${work}/candidate" fetch --quiet --no-tags --depth=1 "${work}/baseline" "${baseline_commit}"')
 abort 'Agent release contract changed' unless abi.include?('OCSERV_AGENT_RELEASE_VERSION="${VERSION}" cargo build --locked --release') &&
   abi.include?('--package ocservia-agent --package ocservia-privd --package ocservia-upgrader') &&
   abi.include?('CARGO_TARGET_DIR="${OCSERVIA_ROOT}/rust/target/agent-${BUILD_CACHE_KEY}"') &&
