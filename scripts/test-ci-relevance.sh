@@ -43,6 +43,17 @@ while read -r path selected; do
     expect "${out}" database_scope smoke
     if [[ " ${selected} " == *' run_ci_tools '* ]]; then
       grep -Eq '^ci_suites=(guards|release|g6)( (guards|release|g6))*$' "${out}"
+      case "${path}" in
+        scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release g6' ;;
+        scripts/g6-buildx-cache.sh|.github/actions/g6-cache-credentials/index.js)
+          expect "${out}" ci_suites 'release g6' ;;
+        .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
+          expect "${out}" ci_suites guards ;;
+        .github/workflows/release*.yml|scripts/release-upgrade-baselines.json)
+          expect "${out}" ci_suites release ;;
+        .github/workflows/g6-harness-core.yml|scripts/g6-pipeline.mjs|docs/acceptance/g6-*)
+          expect "${out}" ci_suites g6 ;;
+      esac
     else
       expect "${out}" ci_suites ''
     fi
@@ -93,6 +104,7 @@ scripts/uninstall-agent.sh run_ci_tools run_installers
 .github/workflows/security.yml run_ci_tools
 .github/workflows/g6-harness-core.yml run_ci_tools
 scripts/ci-relevance.sh run_ci_tools
+scripts/ci-tools-check.sh run_ci_tools
 scripts/bootstrap.sh run_docs run_go run_rust run_web run_database run_ci_tools run_installers
 docs/acceptance/g6-slo.yaml run_ci_tools
 docs/acceptance/g6-runtime-result-schema.json run_ci_tools

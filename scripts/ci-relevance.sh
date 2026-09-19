@@ -44,6 +44,8 @@ classify_path() {
   local path="$1"
   case "${path}" in
     # Executable/configuration contracts must precede documentation suffixes.
+    scripts/ci-tools-check.sh)
+      tools_suite guards; tools_suite release; tools_suite g6 ;;
     scripts/g6-buildx-cache.sh|scripts/test-g6-buildx-cache-fallback.sh|.github/actions/g6-cache-credentials/*)
       tools_suite release; tools_suite g6 ;;
     docs/acceptance/g6-*.json|docs/acceptance/g6-slo.yaml|\
