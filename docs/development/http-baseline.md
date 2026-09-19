@@ -561,3 +561,33 @@ candidate SHA, four-backend results, benchmark conditions and final Basic CI Ful
 evidence belong in the Draft PR. The eleven compatibility declarations, other
 concrete service fields and shared transactions remain intentional boundaries,
 not automatic follow-up architecture work or a claim of release readiness.
+
+## Upgrade preparation (roadmap PR-03)
+
+Baseline: `665edcee702195ef2258f03571004e8078d403cf` (#237).
+Both single-node upgrade and upgrade-approval HTTP handlers delegate trusted
+target preparation to Operations. Routes, session/resource RBAC, strict JSON,
+request headers and successful response headers remain unchanged.
+
+The adapters intentionally retain different problem mappings: unknown node
+architecture is `release-not-trusted` for execution and `node-not-ready` for
+approval. Node read failures/workspace mismatch remain `404 not-found` versus
+`409 node-not-ready`. Invalid target syntax precedes the node read; missing
+architecture precedes catalog lookup, which precedes the newer-version check.
+Approval creation does not require a newer observed version. Single-node
+execution may queue for offline nodes, unlike rollout admission.
+
+Replay still passes through preparation before `CreateSynthetic`: node version
+drift alone does not change the original request's idempotency identity, but an
+observed agent already at the target is rejected as `target-not-newer` even on
+an HTTP replay. This structural change does not repair or redefine that existing
+behavior. Transactional version, capability, approval and active-upgrade checks
+are unchanged. A Server without Operations now explicitly disables upgrade
+approval preparation instead of constructing targets inside HTTP; production
+assembly supplies the existing configured Operations instance.
+
+`TestAgentUpgradeBackendHTTPIntegration` freezes these paths, canonical binding,
+cross-workspace denial, approval rollback and command identity using the shared
+restricted-runtime fixture on each supported database. Domain unit goldens and
+the existing HTTP route/method/auth baselines complement it. No package install,
+database schema or runtime grant changes are involved.
