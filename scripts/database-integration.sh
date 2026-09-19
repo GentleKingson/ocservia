@@ -6,8 +6,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 scope="${DATABASE_TEST_SCOPE-full}"
 case "${scope}" in
+  smoke|compatibility) exec bash "${ROOT}/scripts/database-postgres-smoke.sh" ;;
   full|regression) ;;
-  *) echo 'DATABASE_TEST_SCOPE must be full or regression' >&2; exit 2 ;;
+  *) echo 'DATABASE_TEST_SCOPE must be smoke, compatibility, full or regression' >&2; exit 2 ;;
 esac
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"

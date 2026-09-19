@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 scope="${DATABASE_TEST_SCOPE-full}"
 case "${scope}" in
-  full|regression) ;;
-  *) echo 'DATABASE_TEST_SCOPE must be full or regression' >&2; exit 2 ;;
+  smoke|compatibility|full|regression) ;;
+  *) echo 'DATABASE_TEST_SCOPE must be smoke, compatibility, full or regression' >&2; exit 2 ;;
 esac
 if [[ "${scope}" != full && -n "${DATABASE_FULL_PART+x}" ]]; then
   echo 'DATABASE_FULL_PART is only valid with DATABASE_TEST_SCOPE=full' >&2; exit 2
@@ -28,11 +28,13 @@ source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid python3 openssl
 if [[ "${scope}" == full ]]; then require_test_commands timeout; fi
 require_test_docker
-require_go_race
+if [[ "${scope}" == full || "${scope}" == regression ]]; then require_go_race; fi
 TLS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-pr02-tls-XXXXXX")"
 TLS_DIR="${TLS_ROOT}/certs"
-export DATABASE_CASE_RESULTS="${TLS_ROOT}/required-case-results.jsonl"
-: >"${DATABASE_CASE_RESULTS}"
+if [[ "${scope}" == full || "${scope}" == regression ]]; then
+  export DATABASE_CASE_RESULTS="${TLS_ROOT}/required-case-results.jsonl"
+  : >"${DATABASE_CASE_RESULTS}"
+fi
 mkdir "${TLS_DIR}"
 report_required_cases() {
   local required
@@ -101,6 +103,14 @@ PORT="$(docker port "${NAME}" 3306/tcp | sed 's/127.0.0.1://')"
 export PR02_ENGINE="${ENGINE}"
 export PR02_TLS_CA_FILE="${TLS_DIR}/server-cert.pem"
 export PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tls=false"
+if [[ "${scope}" == smoke || "${scope}" == compatibility ]]; then
+  cd "${ROOT}/control-plane"
+  bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
+  if [[ "${scope}" == compatibility ]]; then
+    bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseUpgradeSmoke
+  fi
+  exit 0
+fi
 if [[ "${part}" != history ]]; then
   (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)
 fi

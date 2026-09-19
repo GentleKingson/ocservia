@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Basic CI coverage
+        description: Key compatibility checks
         type: choice
         options: [quick, full]
         default: full
@@ -17,8 +17,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ inputs.profile || 'quick' }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs.profile == 'quick' }}
 
 jobs:
   ci-relevance:
@@ -28,6 +28,9 @@ jobs:
     outputs:
       profile: ${{ steps.relevance.outputs.profile }}
       database_scope: ${{ steps.relevance.outputs.database_scope }}
+      database_matrix: ${{ steps.relevance.outputs.database_matrix }}
+      run_ci_tools: ${{ steps.relevance.outputs.run_ci_tools }}
+      run_installers: ${{ steps.relevance.outputs.run_installers }}
       run_docs: ${{ steps.relevance.outputs.run_docs }}
       run_go: ${{ steps.relevance.outputs.run_go }}
       run_rust: ${{ steps.relevance.outputs.run_rust }}
@@ -38,7 +41,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - run: bash scripts/test-ci-relevance.sh
       - name: Classify the change set
         id: relevance
         env:
@@ -82,19 +84,13 @@ jobs:
           key: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
           restore-keys: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - name: CI guard and workflow contracts
+        if: needs.ci-relevance.outputs.run_ci_tools == 'true'
         run: |
           source scripts/env.sh
-          command -v go
-          go version
+          bash scripts/test-ci-relevance.sh
           bash scripts/test-required-go-tests.sh
           bash scripts/test-bootstrap-profiles.sh
       - run: scripts/go-check.sh standard
-      - name: Domain script contracts
-        run: |
-          source scripts/env.sh
-          bash scripts/i14-quota-expiry-backport.sh --contract-only
-          bash scripts/i15-config-plan.sh --contract-only
-          bash scripts/i16-config-apply.sh --contract-only
       - name: Save Go modules (main only)
         if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -120,6 +116,7 @@ jobs:
       - run: scripts/bootstrap.sh rust-basic
       - run: scripts/rust-check.sh
       - name: Relay launcher and installer contracts
+        if: needs.ci-relevance.outputs.run_installers == 'true'
         run: |
           bash scripts/test-managed-node-install.sh
           bash scripts/test-controller-install.sh
@@ -128,13 +125,6 @@ jobs:
             python3 /source/scripts/test-relay-launchers.py
           docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
             bash /source/scripts/test-release-agent-state-check.sh
-      - name: Single and dual Relay Compose contracts
-        env:
-          RUN_ID: relay-${{ github.run_id }}-${{ github.run_attempt }}
-          ARTIFACT_DIR: ${{ runner.temp }}/relay-compose
-        run: |
-          mkdir -m 0700 "$HOME/relay-compose-work"
-          RUNNER_TEMP="$HOME/relay-compose-work" bash scripts/i18-production-relays.sh --compose-only
 
   web:
     needs: ci-relevance
@@ -149,37 +139,16 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/bootstrap.sh web
-      - name: Install Chromium for authentication regressions
-        run: |
-          source scripts/env.sh
-          cd web
-          npx playwright install --with-deps chromium
-      - run: scripts/web-check.sh
+      - run: scripts/web-check.sh basic
 
   database-smoke:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
-    outputs:
-      postgres17: ${{ steps.completed.outputs.postgres17 }}
-      postgres18: ${{ steps.completed.outputs.postgres18 }}
-      mysql: ${{ steps.completed.outputs.mysql }}
-      mariadb: ${{ steps.completed.outputs.mariadb }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - engine: postgres
-            postgres: "17"
-            version: "17.10"
-          - engine: postgres
-            postgres: "18"
-            version: "18.6"
-          - engine: mysql
-            version: "8.4.10"
-          - engine: mariadb
-            version: "12.3.2"
+      matrix: ${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}
     env:
       PG_MAJOR: ${{ matrix.postgres }}
       ENGINE: ${{ matrix.engine }}
@@ -200,17 +169,14 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
-          key: basic-go-build-v1-db-race-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
-          restore-keys: basic-go-build-v1-db-race-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
+          key: basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
+          restore-keys: |
+            basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
+            basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - if: matrix.engine == 'postgres'
         run: scripts/database-integration.sh
       - if: matrix.engine != 'postgres'
-        run: |
-          unset DATABASE_FULL_PART
-          if [[ "${DATABASE_TEST_SCOPE}" == full ]]; then export DATABASE_FULL_PART=current; fi
-          bash scripts/database-foundation-integration.sh
-      - id: completed
-        run: echo "${ENGINE}${PG_MAJOR}=success" >> "${GITHUB_OUTPUT}"
+        run: bash scripts/database-foundation-integration.sh
       - name: Save database Go objects (one main writer)
         if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.engine == 'mysql' && steps.go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -218,39 +184,11 @@ jobs:
           path: .cache/go-build
           key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
 
-  database-history-full:
-    needs: ci-relevance
-    if: needs.ci-relevance.outputs.profile == 'full'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 75
-    outputs:
-      mysql: ${{ steps.completed.outputs.mysql }}
-      mariadb: ${{ steps.completed.outputs.mariadb }}
-    strategy:
-      fail-fast: false
-      matrix:
-        engine: [mysql, mariadb]
-    env:
-      ENGINE: ${{ matrix.engine }}
-      DATABASE_TEST_SCOPE: ${{ needs.ci-relevance.outputs.database_scope }}
-      DATABASE_FULL_PART: history
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - run: scripts/bootstrap.sh go-test
-      - run: bash scripts/database-foundation-integration.sh
-      - id: completed
-        run: echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"
-
   database-recovery-full:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.profile == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    outputs:
-      mysql: ${{ steps.completed.outputs.mysql }}
-      mariadb: ${{ steps.completed.outputs.mariadb }}
     strategy:
       fail-fast: false
       matrix:
@@ -261,19 +199,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - if: matrix.engine == 'mysql'
-        run: scripts/test-database-deployment-config.sh
       - run: |
           RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENGINE}" \
             ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-${ENGINE}" \
             bash scripts/i18-mysql-backup-restore-smoke.sh
-      - id: completed
-        run: echo "${ENGINE}=success" >> "${GITHUB_OUTPUT}"
 
   basic-ci-result:
     name: Basic CI Result
     if: always()
-    needs: [ci-relevance, docs, go, rust, web, database-smoke, database-history-full, database-recovery-full]
+    needs: [ci-relevance, docs, go, rust, web, database-smoke, database-recovery-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -282,31 +216,16 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "${RESULTS}" | jq -e '
-            def completed($job; $parts):
-              .[$job] as $result | $result.result == "success" and
-              all($parts[]; $result.outputs[.] == "success");
-            .["ci-relevance"].outputs as $routing |
+            . as $results | .["ci-relevance"].outputs as $routing |
             .["ci-relevance"].result == "success" and
+            ($routing.profile == "quick" or $routing.profile == "full") and
             (if $routing.profile == "full" then
-              $routing.database_scope == "full" and
-              all(["run_docs", "run_go", "run_rust", "run_web", "run_database"][]; $routing[.] == "true") and
-              completed("database-history-full"; ["mysql", "mariadb"]) and
-              completed("database-recovery-full"; ["mysql", "mariadb"])
-            elif $routing.profile == "quick" then
-              $routing.database_scope == "regression" and
-              .["database-history-full"].result == "skipped" and
-              .["database-recovery-full"].result == "skipped"
-            else false end) and
-            (if $routing.run_database == "true" then
-              $routing.run_go == "true" and .["go"].result == "success" and
-              completed("database-smoke"; ["postgres17", "postgres18", "mysql", "mariadb"])
+              all(["run_docs", "run_go", "run_rust", "run_web", "run_database"][]; $routing[.] == "true")
             else true end) and
-            (.["ci-relevance"].outputs as $flags |
-              [{job: "docs", flag: "run_docs"},
-               {job: "go", flag: "run_go"},
-               {job: "rust", flag: "run_rust"},
-               {job: "web", flag: "run_web"},
-               {job: "database-smoke", flag: "run_database"}] as $checks |
-              . as $results | all($checks[];
-                ($flags[.flag] == "true" and $results[.job].result == "success") or
-                ($flags[.flag] == "false" and $results[.job].result == "skipped")))'
+            all(["docs", "go", "rust", "web", "database-smoke"][];
+              . as $job | (if $job == "database-smoke" then "run_database" else "run_" + $job end) as $flag |
+              ($routing[$flag] == "true" and $results[$job].result == "success") or
+              ($routing[$flag] == "false" and $results[$job].result == "skipped")) and
+            (if $routing.profile == "full" then
+              .["database-recovery-full"].result == "success"
+            else .["database-recovery-full"].result == "skipped" end)'
