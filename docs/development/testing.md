@@ -36,7 +36,9 @@ command alone, when assessing its benefit.
 `web`. The hook override applies only to that explicit lint command. Independent
 `npm run lint` and `npm run typecheck` still prepare their generated client.
 
-- Database migrations or database behavior: `make database-integration`
+- Quick database feedback on BuildServer: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
+- All supported database units: use `DATABASE_TEST_SCOPE=compatibility` for PostgreSQL 17/18, MySQL and MariaDB; this is Full CI's key compatibility scope, not comprehensive acceptance.
+- Deep database migrations or failure scenarios, explicitly opt-in: `make database-integration`
 - Go and transport local integration: `make integration`
 - Browser or runtime behavior: `make e2e`
 - Rust behavior or boundaries: `make rust-check`
@@ -82,12 +84,14 @@ the additional dependencies for the entrypoint being used:
 | Entrypoint | Additional host dependencies |
 | --- | --- |
 | `bootstrap.sh go-test` | curl with trusted CA certificates, tar, gzip, sed, awk, `sha256sum` or `shasum`, jq |
-| `go-check.sh standard` | Installed Go/gofmt, jq, `setsid` (util-linux); the required-test wrapper also uses tee and mktemp |
+| `go-check.sh standard` | Installed Go/gofmt |
 | `test-required-go-tests.sh` | Go, jq, setsid, Ruby, Python 3; includes real standalone `GOWORK=off` fixtures and signal/timeout tests |
-| `test-bootstrap-profiles.sh` / `docs-check.sh` | Ruby, tar, gzip and a SHA-256 utility for disposable platform/preflight fixtures; profile/workflow assertions also need jq |
+| `test-bootstrap-profiles.sh` | Ruby, tar, gzip, a SHA-256 utility and jq; disposable platform/preflight fixtures run only for CI/tooling changes |
+| `docs-check.sh` | Git; no toolchain or platform self-tests |
 | `go-check.sh race` (also the race part of `full`) | `CGO_ENABLED=1`, a C compiler selected by `go env CC`, linker and C development headers; no Docker requirement |
-| `database-integration.sh` | Go/race prerequisites, jq, setsid, Ruby, Python 3, curl, sha256sum, Docker CLI and daemon access; full scope also needs patch |
-| `database-foundation-integration.sh` | Go/race prerequisites, jq, setsid, Python 3, OpenSSL with `req -addext`, Docker CLI and daemon access; full-scope diagnostics also use timeout |
+| `database-integration.sh` smoke/compatibility | Go, jq, setsid, Docker CLI and daemon; no race/compiler probe |
+| `database-integration.sh` manual regression/full | Also needs race prerequisites, Ruby, Python 3, curl, sha256sum; legacy full also needs patch |
+| `database-foundation-integration.sh` | Go, jq, setsid, Python 3, OpenSSL with `req -addext`, Docker CLI and daemon; only manual regression/full need race prerequisites, legacy full diagnostics also use timeout |
 
 Missing commands, inaccessible Docker, disabled cgo and a compiler unable to
 compile/link fail with a nonzero status before expensive tests or database
@@ -103,7 +107,7 @@ owner/runtime credentials; do not supply production credentials. Calling the
 `OCSERV_TEST_DATABASE_URL` and `OCSERV_TEST_OWNER_DATABASE_URL`. MySQL-compatible
 fixtures prepare their existing `PR02_*` variables themselves. Do not print
 DSNs. Required-case summaries are acceptance evidence; synthetic selector JSON
-is not. PostgreSQL 17 and MySQL regression below do not certify PostgreSQL 18,
+is not. PostgreSQL 17 and MySQL smoke below do not certify PostgreSQL 18,
 MariaDB, full scope or release readiness.
 
 ### Native preparation and execution
@@ -171,12 +175,9 @@ docker run --rm --init --name "$(basename "$task")-validation" \
     gcc --version
     bash scripts/test-required-go-tests.sh
     bash scripts/test-bootstrap-profiles.sh
-    scripts/go-check.sh race
-    DATABASE_TEST_SCOPE=regression PG_MAJOR=17 scripts/database-integration.sh
-    ENGINE=mysql DATABASE_TEST_SCOPE=regression bash scripts/database-foundation-integration.sh
-    bash scripts/i14-quota-expiry-backport.sh --contract-only
-    bash scripts/i15-config-plan.sh --contract-only
-    bash scripts/i16-config-apply.sh --contract-only
+    scripts/go-check.sh standard
+    DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh
+    ENGINE=mysql DATABASE_TEST_SCOPE=smoke bash scripts/database-foundation-integration.sh
     scripts/docs-check.sh
     git diff --check
   '

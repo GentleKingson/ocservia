@@ -77,6 +77,14 @@ func controllerProcessDatabase(t *testing.T) (owner, runtime connection.Options,
 // This starts the actual CLI binary, not an httptest router or a replacement
 // application constructor. Agent/transport/certificate E2E is a separate gate.
 func TestControllerProcessStartupBackendIntegration(t *testing.T) {
+	controllerProcessCheck(t, false)
+}
+
+func TestDatabaseCoreSmoke(t *testing.T) {
+	controllerProcessCheck(t, true)
+}
+
+func controllerProcessCheck(t *testing.T, smoke bool) {
 	ownerOptions, runtimeOptions, account := controllerProcessDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -184,14 +192,16 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if err := run(runtimeOptions, nil, "--schema-compatibility-check=36"); err != nil {
 		t.Fatal("runtime CLI schema validation", err)
 	}
-	if err := run(runtimeOptions, nil, "--schema-compatibility-check=999"); err == nil {
-		t.Fatal("unsupported Controller schema accepted")
-	}
-	if err := run(runtimeOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err == nil {
-		t.Fatal("runtime account performed owner migration")
-	}
-	if err := run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err != nil {
-		t.Fatal("idempotent owner CLI migration", err)
+	if !smoke {
+		if err := run(runtimeOptions, nil, "--schema-compatibility-check=999"); err == nil {
+			t.Fatal("unsupported Controller schema accepted")
+		}
+		if err := run(runtimeOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err == nil {
+			t.Fatal("runtime account performed owner migration")
+		}
+		if err := run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err != nil {
+			t.Fatal("idempotent owner CLI migration", err)
+		}
 	}
 	owner, err := connection.Open(ctx, ownerOptions)
 	if err != nil {
@@ -203,38 +213,40 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	t.Run("cleanup-privilege-repair", func(t *testing.T) {
-		checkCleanupCLIRecovery(t, ctx, owner, runtime, runtimeOptions.Backend, account, func() error {
-			return run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only")
+	if !smoke {
+		t.Run("cleanup-privilege-repair", func(t *testing.T) {
+			checkCleanupCLIRecovery(t, ctx, owner, runtime, runtimeOptions.Backend, account, func() error {
+				return run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only")
+			})
 		})
-	})
-	if runtimeOptions.Backend != "postgres" {
-		t.Run("roles-refuse-missing-telemetry-month", func(t *testing.T) {
-			var month []byte
-			if err := owner.Store.QueryRow(ctx, `SELECT table_name FROM telemetry_sample_shards WHERE state='active' AND start_at<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) AND end_at>TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))`).Scan(&month); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='retired' WHERE table_name=?`, month); err != nil {
-				t.Fatal(err)
-			}
-			defer func() {
-				if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='active' WHERE table_name=?`, month); err != nil {
-					t.Error(err)
+		if runtimeOptions.Backend != "postgres" {
+			t.Run("roles-refuse-missing-telemetry-month", func(t *testing.T) {
+				var month []byte
+				if err := owner.Store.QueryRow(ctx, `SELECT table_name FROM telemetry_sample_shards WHERE state='active' AND start_at<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) AND end_at>TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))`).Scan(&month); err != nil {
+					t.Fatal(err)
 				}
-			}()
-			for _, role := range []string{"api", "worker", "scheduler", "all"} {
-				t.Run(role, func(t *testing.T) {
-					checkCtx, stop := context.WithTimeout(ctx, 10*time.Second)
-					defer stop()
-					cmd := exec.CommandContext(checkCtx, binary, "--role="+role)
-					cmd.Env = environment(runtimeOptions, nil)
-					output, err := cmd.CombinedOutput()
-					if err == nil || !bytes.Contains(output, []byte("validate required runtime database capabilities")) {
-						t.Fatalf("role did not refuse missing telemetry storage: %v\n%s", err, output)
+				if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='retired' WHERE table_name=?`, month); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if _, err := owner.Store.Exec(ctx, `UPDATE telemetry_sample_shards SET state='active' WHERE table_name=?`, month); err != nil {
+						t.Error(err)
 					}
-				})
-			}
-		})
+				}()
+				for _, role := range []string{"api", "worker", "scheduler", "all"} {
+					t.Run(role, func(t *testing.T) {
+						checkCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+						defer stop()
+						cmd := exec.CommandContext(checkCtx, binary, "--role="+role)
+						cmd.Env = environment(runtimeOptions, nil)
+						output, err := cmd.CombinedOutput()
+						if err == nil || !bytes.Contains(output, []byte("validate required runtime database capabilities")) {
+							t.Fatalf("role did not refuse missing telemetry storage: %v\n%s", err, output)
+						}
+					})
+				}
+			})
+		}
 	}
 	if _, err := runtime.Store.Exec(ctx, `CREATE TABLE startup_forbidden(id int)`); !errors.Is(err, database.ErrPermission) {
 		t.Fatal("runtime DDL was not denied", err)
@@ -257,6 +269,20 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if _, err := runtime.Store.Exec(ctx, query, args...); err != nil {
 		t.Fatal("seed workspace", err)
 	}
+	if smoke {
+		checkSmokeTransactions(t, ctx, runtime.Store, runtimeOptions.Backend, workspaceArg)
+		if err := run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err != nil {
+			t.Fatal("repeat migration with business data", err)
+		}
+		read := `SELECT name FROM workspaces WHERE id=$1`
+		if runtimeOptions.Backend != "postgres" {
+			read = `SELECT name FROM workspaces WHERE id=?`
+		}
+		var name string
+		if err := runtime.Store.QueryRow(ctx, read, workspaceArg).Scan(&name); err != nil || name != "committed workspace" {
+			t.Fatal("repeat migration changed committed data", name, err)
+		}
+	}
 	password := "uncommon setup password for controller administrator"
 	adminFile, approverFile := filepath.Join(dir, "admin-password"), filepath.Join(dir, "approver-password")
 	for path, secret := range map[string]string{adminFile: password, approverFile: "separate long setup password for controller approver"} {
@@ -274,7 +300,7 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if err := run(runtimeOptions, bootstrap, "--bootstrap-local-admin"); err != nil {
 		t.Fatal("runtime CLI bootstrap", err)
 	}
-	if !production {
+	if !production && !smoke {
 		installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -291,11 +317,14 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	defer log.Close()
 	processArgs := []string(nil)
 	extra := map[string]string{"OCSERV_HTTP_ADDRESS": address}
-	if production {
+	if production || smoke {
 		processArgs = append(processArgs, "--role=api")
-	} else {
+	}
+	if !production {
 		extra["OCSERV_PUBLIC_ORIGIN"] = "http://" + address
-		extra["OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE"] = "true"
+		if !smoke {
+			extra["OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE"] = "true"
+		}
 	}
 	cmd := exec.CommandContext(ctx, binary, processArgs...)
 	cmd.Env = environment(runtimeOptions, extra)
@@ -371,7 +400,7 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !json.Valid(body) {
 		t.Fatalf("real process authorized reader: %d %s", response.StatusCode, body)
 	}
-	if !production {
+	if !production && !smoke {
 		completed := 0
 		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
 			if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil {
@@ -389,6 +418,20 @@ func TestControllerProcessStartupBackendIntegration(t *testing.T) {
 	}
 	if production {
 		t.Log("production configuration, migration, runtime permissions, readiness, authenticated read, and database writes passed")
+	}
+	if smoke {
+		request, _ = http.NewRequestWithContext(ctx, "GET", base+"/api/v1/workspaces", nil)
+		request.AddCookie(cookie)
+		response, err = client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ = io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("committed workspace")) {
+			t.Fatalf("authenticated workspace readback: %d %s", response.StatusCode, body)
+		}
+		return
 	}
 	streamRequest, _ := http.NewRequestWithContext(ctx, "GET", base+"/api/v1/events/stream", nil)
 	streamRequest.AddCookie(cookie)

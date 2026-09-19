@@ -14,9 +14,9 @@ case "${profile}" in
   quick|full) ;;
   *) echo 'CI profile must be quick or full' >&2; exit 2 ;;
 esac
-database_scope=regression
-if [[ "${profile}" == full ]]; then database_scope=full; fi
-flags=(run_docs run_go run_rust run_web run_database)
+database_scope=smoke
+if [[ "${profile}" == full ]]; then database_scope=compatibility; fi
+flags=(run_docs run_go run_rust run_web run_database run_ci_tools run_installers)
 for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
 changed=()
@@ -24,7 +24,7 @@ changed=()
 fail_closed() {
   local flag
   reason="$1"
-  for flag in "${flags[@]}"; do printf -v "${flag}" true; done
+  for flag in run_docs run_go run_rust run_web run_database; do printf -v "${flag}" true; done
 }
 
 # Flags are read indirectly through ${!flag} when writing the outputs.
@@ -32,36 +32,30 @@ fail_closed() {
 classify_path() {
   local path="$1"
   case "${path}" in
-    docs/*|*.md|LICENSE|LICENSE.*)
-      run_docs=true ;;
-    .github/workflows/g6-*.yml|.github/actions/g6-*/*|scripts/*g6*|tools/g6-harness/*|deploy/g6-*/*|rust/g6-runtime.Dockerfile|rust/crates/g6-*/*)
-      run_docs=true ;;
-    deploy/real-e2e/*|scripts/real-e2e-*.sh|scripts/test-real-e2e-*.sh|scripts/p1-resilience-capacity.sh|scripts/test-p1-resilience-capacity.sh|scripts/security-acceptance-f[123].sh)
-      run_docs=true ;;
-    scripts/web-check.sh)
-      run_docs=true; run_web=true ;;
-    scripts/rust-check.sh|scripts/test-managed-node-install.sh|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh)
-      run_docs=true; run_rust=true ;;
-    scripts/go-check.sh)
-      run_docs=true; run_go=true ;;
-    scripts/required-go-tests.sh|scripts/required-go-tests.txt|scripts/check-required-go-tests.jq|scripts/test-required-go-tests.sh|scripts/go-test-environment.sh|scripts/database-integration.sh|scripts/database-foundation-integration.sh|scripts/i14-quota-expiry-backport.sh)
-      run_docs=true; run_go=true; run_database=true ;;
-    scripts/i15-config-plan.sh|scripts/i16-config-apply.sh)
-      run_docs=true; run_go=true; run_rust=true; run_database=true ;;
-    proto/*|openapi/*|control-plane/gen/proto/*|rust/crates/contracts/src/generated/*|web/src/api/generated/*)
-      fail_closed shared_contract_changed ;;
-    control-plane/internal/domain/operation/operation_test.go)
-      run_go=true ;;
-    .github/workflows/*|scripts/*|toolchains.lock|Makefile|.node-version|.nvmrc|.tool-versions)
-      fail_closed infrastructure_changed ;;
-    web/*)
-      run_web=true; run_docs=true ;;
-    control-plane/*|go.work|go.work.sum|*.go|*/go.mod|*/go.sum)
+    docs/*|*.md|LICENSE|LICENSE.*) run_docs=true ;;
+    proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
+    web/*|scripts/web-check.sh) run_web=true ;;
+    rust/*|scripts/rust-check.sh) run_rust=true ;;
+    deploy/managed-node/install.sh|deploy/production/install.sh|deploy/production/controller-bootstrap.sh|\
+    deploy/lib/install-env.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
+    deploy/production/systemd/ocservia-agent-relays.conf|scripts/prepare-bootstrap-release-assets.sh|\
+    scripts/release-agent-state-check.sh|scripts/package-agent.sh|scripts/verify-agent-package.sh|\
+    scripts/test-managed-node-install.sh|scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
+    scripts/test-relay-launchers.py|scripts/test-release-agent-state-check.sh|.gitignore)
+      run_rust=true; run_installers=true ;;
+    control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*|go.work*)
       run_go=true; run_database=true ;;
-    rust/*)
-      run_rust=true ;;
-    *)
-      fail_closed "unknown_path:${path}" ;;
+    control-plane/*|tools/g6-harness/*|scripts/go-check.sh) run_go=true ;;
+    .github/workflows/ci.yml)
+      fail_closed ci_tools_changed; run_ci_tools=true ;;
+    .github/workflows/release.yml|.github/workflows/security.yml)
+      run_go=true; run_ci_tools=true ;;
+    scripts/ci-*|scripts/test-ci-*|scripts/*required-go-tests*|scripts/*bootstrap*|scripts/go-test-environment.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
+      fail_closed ci_tools_changed; run_ci_tools=true ;;
+    scripts/database-*.sh) run_go=true; run_database=true ;;
+    .github/workflows/g6-*|.github/actions/g6-*/*|deploy/g6-*/*|deploy/real-e2e/*|scripts/*g6*|scripts/real-e2e-*|scripts/test-real-e2e-*|scripts/p1-*|scripts/test-p1-*|scripts/security-acceptance-*)
+      run_docs=true ;;
+    *) fail_closed "unknown_path:${path}" ;;
   esac
 }
 
@@ -100,7 +94,12 @@ else
   fi
 fi
 
+matrix='{"include":[{"engine":"postgres","postgres":"17","version":"17.10"},{"engine":"mysql","version":"8.4.10"}]}'
+if [[ "${profile}" == full ]]; then
+  matrix='{"include":[{"engine":"postgres","postgres":"17","version":"17.10"},{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"},{"engine":"mariadb","version":"12.3.2"}]}'
+fi
 {
+  printf 'database_matrix=%s\n' "${matrix}"
   printf 'profile=%s\n' "${profile}"
   printf 'database_scope=%s\n' "${database_scope}"
   printf 'reason=%s\n' "${reason}"
