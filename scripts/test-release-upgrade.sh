@@ -2,6 +2,29 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
+fixture="$(mktemp -d)"
+trap 'rm -rf -- "${fixture}"' EXIT
+# Exercise the same local clone/check-out path from a genuinely shallow repo.
+source <(sed -n '/^checkout_baseline_source() {/,/^}/p' scripts/release-controller-upgrade-smoke.sh)
+git init -q "${fixture}/origin"
+git -C "${fixture}/origin" config user.name test
+git -C "${fixture}/origin" config user.email test@example.invalid
+git -C "${fixture}/origin" commit --allow-empty -qm parent
+parent="$(git -C "${fixture}/origin" rev-parse HEAD)"
+git -C "${fixture}/origin" commit --allow-empty -qm baseline
+baseline_commit="$(git -C "${fixture}/origin" rev-parse HEAD)"
+git -C "${fixture}/origin" commit --allow-empty -qm candidate
+candidate_commit="$(git -C "${fixture}/origin" rev-parse HEAD)"
+git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
+(
+  cd "${fixture}/candidate"
+  ! git cat-file -e "${baseline_commit}^{commit}" 2>/dev/null
+  checkout_baseline_source . "${fixture}/baseline" "${baseline_commit}"
+  [[ "$(git rev-parse HEAD)" == "${candidate_commit}" ]]
+  ! git -C "${fixture}/baseline" cat-file -e "${parent}^{commit}" 2>/dev/null
+  [[ "$(git -C "${fixture}/baseline" rev-parse HEAD)" == "${baseline_commit}" ]]
+  if checkout_baseline_source . "${fixture}/invalid" invalid; then exit 1; fi
+)
 node scripts/test-release-upgrade.mjs
 ruby -r yaml - <<'RUBY'
 w = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
@@ -54,6 +77,9 @@ agent = File.read('scripts/build-release-agent.sh')
 abort 'shared Agent build must use the native ABI builder' unless
   agent.include?('bash "${ROOT}/scripts/build-agent-binaries.sh"') && !agent.include?('cargo build')
 abi = File.read('scripts/build-agent-binaries.sh')
+controller_upgrade = File.read('scripts/release-controller-upgrade-smoke.sh')
+abort 'Controller smoke must check out the frozen baseline source' unless
+  controller_upgrade.include?('checkout_baseline_source "${ROOT}" "${work}/baseline" "${baseline_commit}"')
 abort 'Agent release contract changed' unless abi.include?('OCSERV_AGENT_RELEASE_VERSION="${VERSION}" cargo build --locked --release') &&
   abi.include?('--package ocservia-agent --package ocservia-privd --package ocservia-upgrader') &&
   abi.include?('CARGO_TARGET_DIR="${OCSERVIA_ROOT}/rust/target/agent-${BUILD_CACHE_KEY}"') &&

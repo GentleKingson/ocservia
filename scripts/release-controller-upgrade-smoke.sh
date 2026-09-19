@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+checkout_baseline_source() {
+  local source="$1" destination="$2" commit="$3"
+  [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || return 2
+  git clone --quiet --no-hardlinks "${source}" "${destination}"
+  # A shallow candidate checkout does not carry the frozen baseline tree.
+  if ! git -C "${destination}" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+    git -C "${destination}" fetch --no-tags --depth=1 \
+      "$(git -C "${source}" remote get-url origin)" "${commit}"
+  fi
+  git -C "${destination}" checkout --quiet --detach "${commit}"
+}
 : "${FROZEN_FILE:?}" "${CONTROLLER_ARCH:?}" "${VERSION:?}" "${IMAGES_DIR:?}" "${ARTIFACT_DIR:?}" "${UPGRADE_SCENARIOS_FILE:?}"
 umask 077
 work="$(mktemp -d "${HOME}/.ocservia-controller-upgrade.XXXXXX")"
@@ -67,8 +78,7 @@ if [[ -n "$(docker ps -aq --filter label=com.docker.compose.project=ocservia-pro
   exit 2
 fi
 mkdir -m 700 "${work}/secrets" "${work}/backup" "${work}/state" "${work}/candidate-bundle" "${work}/restore"
-(umask 022; git clone --quiet --no-hardlinks "${ROOT}" "${work}/baseline")
-(umask 022; git -C "${work}/baseline" checkout --quiet --detach "${baseline_commit}")
+(umask 022; checkout_baseline_source "${ROOT}" "${work}/baseline" "${baseline_commit}")
 (umask 022; git clone --quiet --no-hardlinks "${ROOT}" "${work}/candidate")
 (umask 022; git -C "${work}/candidate" checkout --quiet --detach "${candidate_commit}")
 bash "${ROOT}/scripts/release-upgrade-fetch.sh" "${FROZEN_FILE}" "${work}/published"
