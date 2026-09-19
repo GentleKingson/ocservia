@@ -120,4 +120,44 @@ if openssl pkeyutl -verify -rawin -pubin -inkey "${fixture}/release-signing.pub.
   exit 1
 fi
 
-echo "Release checksum manifest tests passed"
+# Synthetic receipt fixture tests the final-signature phase, not ELF/package
+# acceptance. Every payload byte, sidecar and key must remain bound to it.
+for file in "${package_files[@]}" controller-release{,-amd64,-arm64}.json{,.sha256}; do
+  cp "${fixture}/${file}" "${prepared}/${file}"
+done
+payload_files=("${package_files[@]}")
+for arch in amd64 arm64; do
+  archive="ocservia-agent-${version}-linux-${arch}.tar.gz"
+  (cd "${prepared}" && sha256sum "${archive}" >"${archive}.sha256")
+  openssl pkeyutl -sign -rawin -inkey "${fixture}/release-signing.key" \
+    -in "${prepared}/${archive}.sha256" -out "${prepared}/${archive}.sha256.sig"
+  cp "${fixture}/release-signing.pub.pem" "${prepared}/${archive}.sha256.pub.pem"
+  payload_files+=("${archive}.sha256" "${archive}.sha256.sig" "${archive}.sha256.pub.pem")
+done
+cp "${fixture}/release-signing.pub.pem" "${prepared}/release-signing.pub.pem"
+"${CHECKSUM_MANIFEST}" "${prepared}" 1 "${package_files[@]}" "${bootstrap_files[@]}" >"${prepared}/SHA256SUMS"
+openssl pkeyutl -sign -rawin -inkey "${fixture}/release-signing.key" \
+  -in "${prepared}/SHA256SUMS" -out "${prepared}/SHA256SUMS.sig"
+"${CHECKSUM_MANIFEST}" "${prepared}" 1 "${payload_files[@]}" "${bootstrap_files[@]}" >"${fixture}/receipt"
+fingerprint="$(openssl pkey -pubin -in "${prepared}/release-signing.pub.pem" -outform DER | sha256sum | awk '{print $1}')"
+check_final() {
+  VERSION="${version}" ASSET_DIR="${prepared}" CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 \
+    PAYLOAD_RECEIPT="${fixture}/receipt" AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
+    bash "${ROOT}/scripts/validate-release-packages.sh" manifest
+}
+check_final
+for file in "${payload_files[@]}" "${bootstrap_files[@]}" controller-release.json SHA256SUMS SHA256SUMS.sig release-signing.pub.pem; do
+  cp "${prepared}/${file}" "${fixture}/original"
+  printf 'tampered\n' >"${prepared}/${file}"
+  if check_final >"${fixture}/error.log" 2>&1; then
+    echo "final manifest validation accepted changed ${file}" >&2; exit 1
+  fi
+  cp "${fixture}/original" "${prepared}/${file}"
+done
+saved_fingerprint="${fingerprint}"
+fingerprint="$(printf '0%.0s' {1..64})"
+if check_final >/dev/null 2>&1; then echo 'wrong trust anchor accepted' >&2; exit 1; fi
+fingerprint="${saved_fingerprint}"
+rm "${fixture}/receipt"
+if check_final >/dev/null 2>&1; then echo 'missing full validation receipt accepted' >&2; exit 1; fi
+echo "Release checksum manifest and unchanged-payload final signature tests passed"

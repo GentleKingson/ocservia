@@ -98,6 +98,8 @@ docs/acceptance/g6-slo.yaml run_ci_tools
 docs/acceptance/g6-runtime-result-schema.json run_ci_tools
 scripts/g6-runtime/package-lock.json run_ci_tools
 scripts/g6-pipeline.mjs run_ci_tools
+scripts/g6-buildx-cache.sh run_ci_tools
+.github/actions/g6-cache-credentials/index.js run_ci_tools
 tools/g6-harness/internal/runtime/runtime.go run_ci_tools
 deploy/g6-readiness/relay.toml run_ci_tools
 deploy/package/nfpm.yaml run_ci_tools run_installers

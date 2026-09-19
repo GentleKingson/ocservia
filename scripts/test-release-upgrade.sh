@@ -28,7 +28,7 @@ w['jobs'].each_value do |job|
   abort 'explicit timeout required' unless job['timeout-minutes'].is_a?(Integer)
   job['steps'].each do |step|
     abort 'continue-on-error hides failures' if step['continue-on-error']
-    abort 'action not pinned' if step['uses'] && !step['uses'].match?(/@[0-9a-f]{40}$/)
+    abort 'action not pinned' if step['uses'] && step['uses'] != './.github/actions/g6-cache-credentials' && !step['uses'].match?(/@[0-9a-f]{40}$/)
     abort 'checkout persists credentials' if step.fetch('uses','').start_with?('actions/checkout@') && step.dig('with','persist-credentials') != false
   end
 end
@@ -47,7 +47,8 @@ abort 'publication guard changed' unless jobs['publish-release-packages']['envir
   abort 'shared build path missing' unless job['steps'].any? {|s| s.fetch('run','').include?("bash scripts/build-release-#{component}.sh")}
 end
 build = File.read('scripts/build-release-controller.sh')
-abort 'Controller no longer builds once' unless build.scan('docker buildx build').length == 1
+abort 'Controller no longer builds once' unless build.scan('scripts/g6-buildx-cache.sh').length == 1
+abort 'Controller caches must isolate image and architecture' unless build.include?('controller-v1-${name}-linux-${CONTROLLER_ARCH}')
 abort 'Controller export changed' unless build.include?('type=docker,dest=') && build.include?('--platform "linux/${CONTROLLER_ARCH}"')
 agent = File.read('scripts/build-release-agent.sh')
 abort 'shared Agent build must use the native ABI builder' unless
@@ -63,6 +64,18 @@ abort 'Agent ABI builder must pin its Rocky 9 base' unless
 native = File.read('scripts/release-native-package-smoke.sh')
 abort 'real native lifecycle fixtures must use the ABI builder' unless
   native.include?('build-agent-binaries.sh') && !native.include?('cargo build')
+abort 'duplicate native build returned' unless native.scan('bash "${ROOT}/scripts/build-agent-binaries.sh"').length == 1
+lifecycle = jobs['build-agent-packages']['steps'].find { |step| step.fetch('name','').start_with?('Validate native package lifecycle') }
+abort 'release lifecycle must reuse the real candidate' unless
+  lifecycle.dig('env','CANDIDATE_DIR') == '${{ runner.temp }}/packages' && lifecycle.dig('env','VERSION') == '${{ env.version }}'
+jobs.each_value do |job|
+  job.fetch('steps', []).each do |step|
+    next unless step.fetch('uses','').start_with?('actions/download-artifact@')
+    pattern = step.fetch('with').fetch('pattern')
+    abort 'release download must bind both exact architectures and this attempt' unless
+      pattern.end_with?('-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}')
+  end
+end
 baseline = File.read('scripts/release-baseline-upgrade-smoke.sh')
 abort 'candidate package smoke must execute all three binaries in both runtimes' unless
   baseline.scan('for binary in ocservia-agent ocservia-privd ocservia-upgrader; do').length == 2 &&

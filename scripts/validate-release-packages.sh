@@ -7,6 +7,17 @@ VERSION="${VERSION:?VERSION is required}"
 AGENT_TRUSTED_KEY_SHA256="${AGENT_TRUSTED_KEY_SHA256:-}"
 WRITE_SHA256SUMS="${WRITE_SHA256SUMS:-}"
 CONTROLLER_RELEASE_MANIFEST_REQUIRED="${CONTROLLER_RELEASE_MANIFEST_REQUIRED:-}"
+MODE="${1:-full}"
+PAYLOAD_RECEIPT="${PAYLOAD_RECEIPT:-}"
+if (($# > 1)) || [[ "${MODE}" != full && "${MODE}" != manifest ]]; then
+  echo "usage: $0 [full|manifest]" >&2
+  exit 2
+fi
+if [[ "${MODE}" == manifest ]]; then
+  : "${PAYLOAD_RECEIPT:?manifest validation needs the same-job full payload receipt}"
+  : "${AGENT_TRUSTED_KEY_SHA256:?final manifest validation needs the pinned key}"
+  [[ "${WRITE_SHA256SUMS}" != 1 ]] || exit 2
+fi
 
 # shellcheck source=scripts/release-checksum-manifest.sh
 source "${ROOT}/scripts/release-checksum-manifest.sh"
@@ -19,7 +30,9 @@ if [[ -n "${AGENT_TRUSTED_KEY_SHA256}" && ! "${AGENT_TRUSTED_KEY_SHA256}" =~ ^[0
   echo "AGENT_TRUSTED_KEY_SHA256 must be 64 lowercase hexadecimal characters" >&2
   exit 2
 fi
-for tool in dpkg-deb file openssl rpm rpm2cpio cpio; do
+tools=(openssl)
+if [[ "${MODE}" == full ]]; then tools+=(dpkg-deb file rpm rpm2cpio cpio); fi
+for tool in "${tools[@]}"; do
   command -v "${tool}" >/dev/null 2>&1 || {
     echo "required tool is missing: ${tool}" >&2
     exit 1
@@ -57,9 +70,11 @@ cmp -s -- "${ASSET_DIR}/managed-node-bootstrap.sh" \
   "${ROOT}/deploy/managed-node/install.sh" \
   || { echo "managed-node-bootstrap.sh does not match the release source" >&2; exit 1; }
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-asset-validation.XXXXXX")"
-cleanup() { sudo rm -rf -- "${work}"; }
-trap cleanup EXIT INT TERM
+if [[ "${MODE}" == full ]]; then
+  work="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-asset-validation.XXXXXX")"
+  cleanup() { sudo rm -rf -- "${work}"; }
+  trap cleanup EXIT INT TERM
+fi
 
 der_fingerprint_of() {
   openssl pkey -pubin -in "$1" -outform DER 2>/dev/null | sha256sum | awk '{print $1}'
@@ -151,9 +166,28 @@ verify_arch_triple() {
   verify_embedded_payload "${package_arch}" "${archive}" "${pub}" "${fingerprint}"
 }
 
-verify_arch_triple amd64 "${tar_amd64}" "x86-64"
-verify_arch_triple arm64 "${tar_arm64}" "aarch64"
-echo "signed archive triples, package architectures, and embedded payloads validated"
+payload_manifest="$(release_checksum_manifest "${ASSET_DIR}" "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" \
+  "${package_files[@]}" "${bootstrap_files[@]}")"
+if [[ "${MODE}" == full ]]; then
+  verify_arch_triple amd64 "${tar_amd64}" "x86-64"
+  verify_arch_triple arm64 "${tar_arm64}" "aarch64"
+  echo "signed archive triples, package architectures, and embedded payloads validated"
+else
+  if [[ ! -f "${PAYLOAD_RECEIPT}" || -L "${PAYLOAD_RECEIPT}" || ! -s "${PAYLOAD_RECEIPT}" ]] ||
+    [[ "$(cat -- "${PAYLOAD_RECEIPT}")" != "${payload_manifest}" ]]; then
+    echo "payload changed or full validation receipt is missing; full validation is required" >&2
+    exit 1
+  fi
+  for file in SHA256SUMS SHA256SUMS.sig release-signing.pub.pem; do
+    [[ -f "${ASSET_DIR}/${file}" && ! -L "${ASSET_DIR}/${file}" && -s "${ASSET_DIR}/${file}" ]] || exit 1
+  done
+  [[ "$(der_fingerprint_of "${ASSET_DIR}/release-signing.pub.pem")" == "${AGENT_TRUSTED_KEY_SHA256}" ]] || {
+    echo "final manifest public key does not match the pinned release key" >&2; exit 1;
+  }
+  for archive in "${tar_amd64}" "${tar_arm64}"; do
+    cmp -s "${ASSET_DIR}/release-signing.pub.pem" "${ASSET_DIR}/${archive}.sha256.pub.pem" || exit 1
+  done
+fi
 
 canonical_manifest="$(release_checksum_manifest "${ASSET_DIR}" "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" \
   "${package_files[@]:0:6}" "${bootstrap_files[@]}")"
@@ -178,5 +212,8 @@ if [[ -f "${ASSET_DIR}/SHA256SUMS.sig" ]]; then
   [[ "${verified}" == true ]] \
     || { echo "SHA256SUMS.sig does not verify against any published signing key" >&2; exit 1; }
   echo "SHA256SUMS signature verified"
+fi
+if [[ "${MODE}" == full && -n "${PAYLOAD_RECEIPT}" ]]; then
+  printf '%s\n' "${payload_manifest}" >"${PAYLOAD_RECEIPT}"
 fi
 echo "release package set validation passed for version ${VERSION}"

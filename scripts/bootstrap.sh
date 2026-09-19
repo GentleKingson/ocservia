@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|package-tools|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
+  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | package-tools | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -127,7 +127,7 @@ case "${platform}" in
     rust_platform="aarch64-unknown-linux-gnu"
     nfpm_platform="Linux_arm64"
     case "${PROFILE}" in
-      go-test | rust-basic | native-packages) ;;
+      go-test | rust-basic | native-packages | package-tools) ;;
       *)
         echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, rustup and nfpm (no Node, quality tools or sccache)" >&2
         exit 1
@@ -487,6 +487,9 @@ case "${PROFILE}" in
     ;;
   native-packages)
     install_rust
+    install_nfpm
+    ;;
+  package-tools)
     install_nfpm
     ;;
   web)
