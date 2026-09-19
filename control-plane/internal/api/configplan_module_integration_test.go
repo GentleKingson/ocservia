@@ -16,9 +16,87 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
+
+func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
+	plan := f.plan(false)
+	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlanLookup.(*configplan.Service), Nodes: telemetry.NewBackend(f.b)})
+	f.exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES($1,$2,$3,'Viewer','workspace',$4)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,created_at) VALUES(?,?,?,'Viewer','workspace',?)`, uuid.Must(uuid.NewV7()), f.requester.principal.IdentityID, f.workspace, value.Timestamp{Valid: true})
+	path := "/api/v1/nodes/" + plan.NodeID.String()
+	read := func(want int64) int64 {
+		t.Helper()
+		w := f.call("GET", path, "", "", f.requester.cookie, nil)
+		var node struct {
+			Version        int64  `json:"version"`
+			ConfigRevision *int64 `json:"config_revision"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &node) != nil || node.ConfigRevision == nil || *node.ConfigRevision != want || node.Version != 3 {
+			t.Fatalf("configuration revision %d, independent of node version 3: %d %s", want, w.Code, w.Body)
+		}
+		w = f.call("GET", "/api/v1/nodes", "", "", f.requester.cookie, nil)
+		var page struct {
+			Items []struct {
+				ID             string `json:"id"`
+				ConfigRevision *int64 `json:"config_revision"`
+			} `json:"items"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatalf("node list: %d %s", w.Code, w.Body)
+		}
+		found := false
+		for _, item := range page.Items {
+			if item.ID == plan.NodeID.String() {
+				found = item.ConfigRevision != nil && *item.ConfigRevision == want
+			}
+		}
+		if !found {
+			t.Fatalf("node list lost configuration revision %d: %s", want, w.Body)
+		}
+		return *node.ConfigRevision
+	}
+	create := func(revision int64, status int) {
+		t.Helper()
+		before := f.counts(plan.NodeID)
+		body := fmt.Sprintf(`{"expected_revision":%d,"template":{"name":"revision","directives":[{"name":"tcp-port","value":"443"}]},"ttl_seconds":900,"reason":"revision regression"}`, revision)
+		w := f.call("POST", path+"/config-plans", body, uuid.NewString(), f.requester.cookie, nil)
+		if status != 202 {
+			assertApplyHTTPProblem(t, w, status, "stale-revision")
+			if f.counts(plan.NodeID) != before {
+				t.Fatal("stale Plan created mutation records")
+			}
+			return
+		}
+		var created configplan.Plan
+		if w.Code != status || json.Unmarshal(w.Body.Bytes(), &created) != nil || created.ExpectedRevision != revision {
+			t.Fatalf("create with revision %d: %d %s", revision, w.Code, w.Body)
+		}
+		var encoded []byte
+		if err := f.row(`SELECT envelope FROM commands WHERE operation_id=$1`, `SELECT envelope FROM commands WHERE operation_id=?`, created.OperationID).Scan(&encoded); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil || envelope.GetConfigPlan() == nil || envelope.GetConfigPlan().GetExpectedRevision() != uint64(revision) {
+			t.Fatalf("signed Plan revision: %v %v", &envelope, err)
+		}
+	}
+	create(read(0), 202)
+	f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,0,11,'',$2)`, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES(?,0,11,'',?)`, plan.NodeID, value.Timestamp{Valid: true})
+	create(read(0), 202)
+	f.exec(`UPDATE node_config_state SET revision=7 WHERE node_id=$1`, `UPDATE node_config_state SET revision=7 WHERE node_id=?`, plan.NodeID)
+	revision := read(7)
+	create(0, 409)
+	create(3, 409)  // node.Version is not the configuration revision.
+	create(11, 409) // desired_revision is not the configuration revision either.
+	create(revision, 202)
+	f.exec(`UPDATE node_config_state SET revision=8 WHERE node_id=$1`, `UPDATE node_config_state SET revision=8 WHERE node_id=?`, plan.NodeID)
+	create(revision, 409)
+	create(read(8), 202)
+	f.exec(`UPDATE node_config_state SET revision=$1,desired_revision=$2 WHERE node_id=$3`, `UPDATE node_config_state SET revision=?,desired_revision=? WHERE node_id=?`, int64(1<<63-1), int64(1<<63-1), plan.NodeID)
+	read(1<<63 - 1) // Preserve int64 on the wire; JavaScript must reject unsafe integers.
+}
 
 func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) {
 	plan := f.plan(true)

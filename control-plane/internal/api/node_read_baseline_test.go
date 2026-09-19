@@ -93,7 +93,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	}
 	nodePath := "/api/v1/nodes/" + ids[0].String()
 	nodeJSON := func(id uuid.UUID, sessions int) string {
-		return fmt.Sprintf(`{"id":%q,"name":%q,"version":7,"trust_status":"active","connection_state":"offline","freshness":"never","agent_version_state":"unknown","agent_upgrade_eligible":false,"dropped":{"security":0,"health":0,"aggregate":0,"raw":0},"session_count":%d}`, id, "node-"+id.String(), sessions)
+		return fmt.Sprintf(`{"id":%q,"name":%q,"version":7,"config_revision":0,"trust_status":"active","connection_state":"offline","freshness":"never","agent_version_state":"unknown","agent_upgrade_eligible":false,"dropped":{"security":0,"health":0,"aggregate":0,"raw":0},"session_count":%d}`, id, "node-"+id.String(), sessions)
 	}
 	// The routes already exist, and real authentication/resource errors must
 	// still precede the absent reader (including a typed-nil service).

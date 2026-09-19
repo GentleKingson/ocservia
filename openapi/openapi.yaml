@@ -2935,6 +2935,16 @@ components:
         id: { $ref: "#/components/schemas/UuidV7" }
         name: { type: string, minLength: 1, maxLength: 128 }
         version: { type: integer, format: int64, minimum: 1 }
+        config_revision:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >-
+            Current node_config_state.revision for ConfigPlan expected_revision,
+            not the node version or desired configuration revision. Zero means
+            no configuration state exists yet or its revision is zero. An absent
+            field means unknown, never zero. Clients must not submit a revision
+            they cannot represent exactly (for JavaScript, a safe integer).
         trust_status: { type: string, enum: [pending, active, revoked, offline] }
         connection_state: { type: string, enum: [online, offline] }
         freshness: { type: string, enum: [fresh, stale, never] }

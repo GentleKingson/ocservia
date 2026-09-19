@@ -146,6 +146,7 @@ type Node struct {
 	ID              string           `json:"id"`
 	Name            string           `json:"name"`
 	Version         int64            `json:"version"`
+	ConfigRevision  int64            `json:"config_revision"`
 	TrustStatus     string           `json:"trust_status"`
 	ConnectionState string           `json:"connection_state"`
 	Freshness       string           `json:"freshness"`
@@ -735,7 +736,7 @@ func upgradeResultCompletedAtMatches(proof *agentv1.AgentUpgradeResultProof, com
 }
 
 func readNode(v telemetryread.Node, now time.Time) Node {
-	n := Node{ID: v.ID.String(), Name: v.Name, Version: v.Version, TrustStatus: v.Status,
+	n := Node{ID: v.ID.String(), Name: v.Name, Version: v.Version, ConfigRevision: v.ConfigRevision, TrustStatus: v.Status,
 		BootID: v.BootID, AgentInstanceID: v.InstanceID, AgentVersion: v.AgentVersion,
 		OcservVersion: v.OcservVersion, OSRelease: v.OSRelease, Architecture: v.Architecture,
 		Ocserv: v.Ocserv.Bytes(), System: v.System.Bytes(), Path: v.Path.Bytes(), SessionCount: v.Sessions,

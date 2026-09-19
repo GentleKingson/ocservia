@@ -42,6 +42,8 @@ import {
   issueCertificate,
   listNodeCertificates,
   revokeCertificate,
+  workspaceContext,
+  type WorkspaceContext,
 } from "../api/client";
 import {
   loadUserPolicy,
@@ -93,6 +95,33 @@ const policyReason = ref("");
 const policyLoading = ref(false);
 const policyError = ref("");
 const configDialog = ref(false);
+const configPlanSource = ref<{
+  nodeId: string;
+  revision: number;
+  workspace: WorkspaceContext;
+}>();
+const currentConfigRevision = computed(() => {
+  if (detailLoading.value || fleet.selecting || fleet.selectionError)
+    return undefined;
+  const revision = currentNode.value?.configRevision;
+  return typeof revision === "number" &&
+    Number.isSafeInteger(revision) &&
+    revision >= 0
+    ? revision
+    : undefined;
+});
+const canSubmitConfigPlan = computed(() => {
+  const source = configPlanSource.value;
+  const workspace = workspaceContext();
+  return Boolean(
+    configDialog.value &&
+    source &&
+    currentConfigRevision.value !== undefined &&
+    source.nodeId === currentNode.value?.id &&
+    source.workspace.id === workspace.id &&
+    source.workspace.generation === workspace.generation,
+  );
+});
 const configPlan = ref<ConfigPlan>();
 const configError = ref("");
 const configLoading = ref(false);
@@ -122,6 +151,7 @@ const groupsState = computed(() =>
 const operationBusy = computed(() => fleet.operationTracking);
 
 async function selectRouteNode(): Promise<void> {
+  configPlanSource.value = undefined;
   const sequence = ++detailSequence;
   const nodeId = routeNodeId.value;
   detailLoading.value = true;
@@ -160,6 +190,7 @@ async function initialize(): Promise<void> {
 }
 
 function refreshForWorkspace(): void {
+  configPlanSource.value = undefined;
   void initialize();
 }
 
@@ -322,6 +353,14 @@ async function submitPolicy(): Promise<void> {
 }
 
 function openConfigPlan(): void {
+  const node = currentNode.value;
+  const revision = currentConfigRevision.value;
+  if (!node || revision === undefined) return;
+  configPlanSource.value = {
+    nodeId: node.id,
+    revision,
+    workspace: workspaceContext(),
+  };
   configDialog.value = true;
   configPlan.value = undefined;
   configError.value = "";
@@ -331,13 +370,21 @@ function openConfigPlan(): void {
 }
 
 async function submitConfigPlan(): Promise<void> {
-  const node = currentNode.value;
-  if (!node || !configReason.value.trim()) return;
+  const source = configPlanSource.value;
+  const workspace = workspaceContext();
+  if (
+    !source ||
+    !canSubmitConfigPlan.value ||
+    !configReason.value.trim() ||
+    source.workspace.id !== workspace.id ||
+    source.workspace.generation !== workspace.generation
+  )
+    return;
   configLoading.value = true;
   configError.value = "";
   try {
-    let plan = await createConfigPlan(node.id, {
-      expectedRevision: 0,
+    let plan = await createConfigPlan(source.nodeId, {
+      expectedRevision: source.revision,
       template: {
         name: "node-baseline",
         directives: [
@@ -1014,7 +1061,7 @@ async function revokeCurrentCertificate(): Promise<void> {
             <span>{{ $t("configPlan") }}</span>
             <button
               type="button"
-              :disabled="operationBusy"
+              :disabled="operationBusy || currentConfigRevision === undefined"
               :title="$t('configPlan')"
               @click="openConfigPlan"
             >
@@ -1467,7 +1514,9 @@ async function revokeCurrentCertificate(): Promise<void> {
           <button
             type="submit"
             class="primary"
-            :disabled="configLoading || !configReason.trim()"
+            :disabled="
+              configLoading || !canSubmitConfigPlan || !configReason.trim()
+            "
           >
             {{ $t("plan") }}
           </button>

@@ -53,6 +53,12 @@ export interface NodeObservedState {
    */
   version: number;
   /**
+   * Current node_config_state.revision for ConfigPlan expected_revision, not the node version or desired configuration revision. Zero means no configuration state exists yet or its revision is zero. An absent field means unknown, never zero. Clients must not submit a revision they cannot represent exactly (for JavaScript, a safe integer).
+   * @type {number}
+   * @memberof NodeObservedState
+   */
+  configRevision?: number;
+  /**
    *
    * @type {NodeObservedStateTrustStatusEnum}
    * @memberof NodeObservedState
@@ -275,6 +281,8 @@ export function NodeObservedStateFromJSONTyped(
     id: json["id"],
     name: json["name"],
     version: json["version"],
+    configRevision:
+      json["config_revision"] == null ? undefined : json["config_revision"],
     trustStatus: json["trust_status"],
     connectionState: json["connection_state"],
     freshness: json["freshness"],
@@ -330,6 +338,7 @@ export function NodeObservedStateToJSONTyped(
     id: value["id"],
     name: value["name"],
     version: value["version"],
+    config_revision: value["configRevision"],
     trust_status: value["trustStatus"],
     connection_state: value["connectionState"],
     freshness: value["freshness"],

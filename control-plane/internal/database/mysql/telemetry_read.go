@@ -12,12 +12,12 @@ type telemetryReadStore struct{ tx database.Tx }
 
 func (t *transaction) TelemetryReadStore() telemetryread.Store { return telemetryReadStore{t} }
 
-const telemetryNodeSelect = "SELECT n.id,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,COALESCE(o.boot_id,''),o.agent_instance_id,COALESCE(o.agent_version,''),COALESCE(o.ocserv_version,''),COALESCE(o.os_release,''),COALESCE(o.architecture,''),o.ocserv,o.`system`,o.path,COALESCE(o.dropped_security,0),COALESCE(o.dropped_health,0),COALESCE(o.dropped_aggregate,0),COALESCE(o.dropped_raw,0),(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id"
+const telemetryNodeSelect = "SELECT n.id,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,COALESCE(o.boot_id,''),o.agent_instance_id,COALESCE(o.agent_version,''),COALESCE(o.ocserv_version,''),COALESCE(o.os_release,''),COALESCE(o.architecture,''),o.ocserv,o.`system`,o.path,COALESCE(o.dropped_security,0),COALESCE(o.dropped_health,0),COALESCE(o.dropped_aggregate,0),COALESCE(o.dropped_raw,0),(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id),COALESCE(c.revision,0) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id LEFT JOIN node_config_state c ON c.node_id=n.id"
 
 func scanTelemetryNode(row database.Row) (telemetryread.Node, error) {
 	var n telemetryread.Node
 	var id, instance []byte
-	if err := row.Scan(&id, &n.Name, &n.Version, &n.Status, &n.ObservedAt, &n.Heartbeat, &n.BootID, &instance, &n.AgentVersion, &n.OcservVersion, &n.OSRelease, &n.Architecture, &n.Ocserv, &n.System, &n.Path, &n.Security, &n.Health, &n.Aggregate, &n.Raw, &n.Sessions); err != nil {
+	if err := row.Scan(&id, &n.Name, &n.Version, &n.Status, &n.ObservedAt, &n.Heartbeat, &n.BootID, &instance, &n.AgentVersion, &n.OcservVersion, &n.OSRelease, &n.Architecture, &n.Ocserv, &n.System, &n.Path, &n.Security, &n.Health, &n.Aggregate, &n.Raw, &n.Sessions, &n.ConfigRevision); err != nil {
 		return n, err
 	}
 	var err error

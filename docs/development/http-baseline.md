@@ -144,6 +144,31 @@ A 202 means an asynchronous operation intent was committed, not that a real
 Rust Agent applied configuration. F-2, broader architecture work and release
 readiness are not covered by this fix.
 
+## ConfigPlan revision reads (architecture PR-01)
+
+Base: `db5874ea69e5b5f1104e6adaf3cfe3aad0832fdb` (#235).
+The existing authorized node list/detail responses add `config_revision` from
+`node_config_state.revision` through the telemetry Store on PostgreSQL and
+MySQL/MariaDB. It is independent of `nodes.version` and `desired_revision`.
+A missing state row means revision zero, matching the existing ConfigPlan guard;
+a failed database read still fails the request rather than returning zero.
+
+OpenAPI keeps this additive int64 response field optional for older servers.
+The generated client preserves absence as unknown. The node detail view requires
+a successful current selection and a nonnegative JavaScript safe integer before
+opening/submitting a Plan. It captures the revision with the node and Workspace
+generation when the dialog opens, invalidates it on context changes, and never
+rebases or automatically retries a rejected request. Server-side stale revision
+checks, Plan/Apply signatures, approval, locking and replay are unchanged.
+
+`TestPlanRoutesBackendHTTPIntegration/TestConfigRevisionBackendHTTPIntegration`
+is required by the existing backend-policy-api and regression-auth groups. It
+covers list/detail zero and nonzero reads, node/desired version mixups, stale
+reads, signed Plan revision, unchanged mutation counts on rejection and lossless
+int64 JSON. Web tests cover the captured request, unknown/unsafe values, failed
+reads, node/Workspace changes and no automatic retry. These are read/intent
+regressions, not evidence of a real Agent execution or PR-02 async isolation.
+
 ## Explicit business route actions (R2-01)
 
 Base: `d8b9cdc3883896cc22dc1ccb9c47d00c1beecaf2` (#221).
