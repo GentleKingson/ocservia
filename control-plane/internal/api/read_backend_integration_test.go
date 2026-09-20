@@ -15,6 +15,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 )
@@ -127,14 +128,22 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 
 	node := uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'read node','active',now(),now())`, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES(?,?,'read node','active',TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))`, node, workspace)
-	if scope, architecture, version, err := server.upgradeNode(ctx, node); err != nil || scope != workspace || architecture != "" || version != "" {
+	store, err := rbacstore.From(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readUpgradeNode := func(id uuid.UUID) (scope uuid.UUID, architecture, version string, err error) {
+		err = store.UpgradeNode(ctx, id).Scan(&scope, &architecture, &version)
+		return
+	}
+	if scope, architecture, version, err := readUpgradeNode(node); err != nil || scope != workspace || architecture != "" || version != "" {
 		t.Fatalf("unobserved upgrade target: %s %q %q %v", scope, architecture, version, err)
 	}
-	if _, _, _, err := server.upgradeNode(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, database.ErrNotFound) {
+	if _, _, _, err := readUpgradeNode(uuid.Must(uuid.NewV7())); !errors.Is(err, database.ErrNotFound) {
 		t.Fatalf("missing upgrade target: %v", err)
 	}
 	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'read-api',$3,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$2)`, "INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,`system`,path,last_heartbeat_at) VALUES(?,? ,?,'read-api',?,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',?)", readSnapshotArgs(mysqlEngine, node, stamps[0])...)
-	if scope, architecture, version, err := server.upgradeNode(ctx, node); err != nil || scope != workspace || architecture != "amd64" || version != "1.0.0" {
+	if scope, architecture, version, err := readUpgradeNode(node); err != nil || scope != workspace || architecture != "amd64" || version != "1.0.0" {
 		t.Fatalf("observed upgrade target: %s %q %q %v", scope, architecture, version, err)
 	}
 	if err := telemetry.NewBackend(backend).Maintain(ctx); err != nil {

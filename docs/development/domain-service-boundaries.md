@@ -83,3 +83,30 @@ authentication or business dependencies. Other concrete Server services, shared
 domain models, route compatibility and centralized guards remain intentional.
 See [HTTP baseline](http-baseline.md#configplan-http-module-r2-02) for scope,
 the limited disabled-development-path nil fix and regression entry points.
+
+## Single-node upgrade preparation (roadmap PR-03)
+
+`operations.Service.PrepareAgentUpgrade` and `AgentUpgradeApprovalBinding`
+resolve the same value target through the existing `RBACStore.UpgradeNode`
+observation query and operator-provisioned release catalog. The HTTP adapters
+retain request decoding, resource/session authorization and their distinct
+error mappings, not package identity construction. Server catalog assembly
+configures the existing Operations instance regardless of enable-call order;
+an absent Operations service leaves upgrade approval preparation disabled.
+
+Preparation does not replace `CreateSynthetic`'s transaction. Node locking,
+caller-supplied expected version, replay ordering, capability/attestation checks,
+observed-version recheck, bound approval consumption and active-upgrade guard
+remain there unchanged. Approval binds a trusted target without promising that
+it is newer or executable. Single-node requests retain their existing ability
+to queue for offline nodes; rollout admission and scheduling are not reused or
+changed.
+
+`TestAgentUpgradePreparation` covers shared resolution and error precedence;
+the binding golden pins canonical summary bytes and the domain-separated hash.
+`TestAgentUpgradeBackendHTTPIntegration` exercises actual HTTP authentication,
+independent approval, exact command identity, rejection rollback, stale version,
+capability, offline queuing and replay with restricted runtime connections.
+It is registered in the existing `regression-auth` and `backend-policy-api`
+groups for PostgreSQL 17/18, MySQL and MariaDB, without replacing historical
+upgrade or rollout regressions. No schema, grants or signing contract changed.

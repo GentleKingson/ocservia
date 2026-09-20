@@ -12,6 +12,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
@@ -220,30 +221,25 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 		requestHash, requestSummary = hash, summary
 		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: workspaceID, Type: "node", ID: nodeID})
 	} else if action == "agent.upgrade" {
-		if resource.Type != "node" || body.AgentUpgrade == nil || s.releaseCatalog == nil {
+		if resource.Type != "node" || body.AgentUpgrade == nil || s.releaseCatalog == nil || s.operations == nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent upgrade approval requires a target version and a trusted release catalog")
 			return
 		}
-		target := strings.TrimSpace(body.AgentUpgrade.TargetVersion)
-		if !semanticpayload.ValidAgentUpgradeTargetVersion(target) {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent upgrade approval target version is invalid")
+		var bindingErr error
+		requestHash, requestSummary, bindingErr = s.operations.AgentUpgradeApprovalBinding(r.Context(), resource.WorkspaceID, resourceID, body.AgentUpgrade.TargetVersion)
+		if bindingErr != nil {
+			switch {
+			case errors.Is(bindingErr, operations.ErrInvalidRequest):
+				writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent upgrade approval target version is invalid")
+			case errors.Is(bindingErr, operations.ErrUpgradeArchitectureUnknown):
+				writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "the node has not reported its package architecture yet")
+			case errors.Is(bindingErr, operations.ErrUpgradeReleaseNotTrusted):
+				writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "no trusted release exists for the requested version and architecture")
+			default:
+				writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "agent upgrade approval requires an observed node in the selected workspace")
+			}
 			return
 		}
-		nodeWorkspace, architecture, _, err := s.upgradeNode(r.Context(), resourceID)
-		if err != nil || nodeWorkspace != resource.WorkspaceID {
-			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "agent upgrade approval requires an observed node in the selected workspace")
-			return
-		}
-		if architecture == "" {
-			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "the node has not reported its package architecture yet")
-			return
-		}
-		digest, trusted := s.releaseCatalog.Lookup(target, architecture)
-		if !trusted {
-			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "no trusted release exists for the requested version and architecture")
-			return
-		}
-		requestHash, requestSummary = approvals.AgentUpgradeBinding(resourceID, target, digest[:], architecture)
 		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: resource.WorkspaceID, Type: "node", ID: resourceID})
 		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, action, rbac.Resource{WorkspaceID: resource.WorkspaceID, Type: "node", ID: resourceID}, actor.BreakGlass) != nil {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)

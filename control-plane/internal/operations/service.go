@@ -184,8 +184,8 @@ func (s *Service) SetAgentUpgradeReconcileTimeout(value time.Duration) error {
 }
 
 // EnableReleaseCatalog installs the operator-provisioned trusted release
-// catalog used to resolve package digests for rollout-dispatched node
-// upgrades. Without it, rollout creation and advancement fail closed.
+// catalog used for single-node upgrade preparation and rollout-dispatched
+// upgrades. Without it, release resolution fails closed.
 func (s *Service) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
 	s.releaseCatalog = catalog
 }

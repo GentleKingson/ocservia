@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"net/http"
 
@@ -18,15 +17,6 @@ type roleBindingRequest struct {
 	ResourceID   string `json:"resource_id,omitempty"`
 	Reason       string `json:"reason"`
 	ApprovalID   string `json:"approval_id,omitempty"`
-}
-
-func (s *Server) upgradeNode(ctx context.Context, nodeID uuid.UUID) (workspaceID uuid.UUID, architecture, version string, err error) {
-	store, err := rbacstore.From(s.backend)
-	if err != nil {
-		return workspaceID, "", "", err
-	}
-	err = store.UpgradeNode(ctx, nodeID).Scan(&workspaceID, &architecture, &version)
-	return
 }
 
 func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {

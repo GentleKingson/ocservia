@@ -193,11 +193,21 @@ func (s *Server) EnableBrowserOrigin(origin string) {
 	s.browserOrigin = normalized
 }
 
-func (s *Server) EnableOperations(service *operationstore.Service) { s.operations = service }
+func (s *Server) EnableOperations(service *operationstore.Service) {
+	s.operations = service
+	if service != nil && s.releaseCatalog != nil {
+		service.EnableReleaseCatalog(s.releaseCatalog)
+	}
+}
 
 // EnableReleaseCatalog installs the operator-provisioned trusted agent
 // release catalog backing the single-node upgrade workflow.
-func (s *Server) EnableReleaseCatalog(catalog *releasecatalog.Catalog) { s.releaseCatalog = catalog }
+func (s *Server) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
+	s.releaseCatalog = catalog
+	if s.operations != nil {
+		s.operations.EnableReleaseCatalog(catalog)
+	}
+}
 
 func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
 

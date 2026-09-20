@@ -15,6 +15,7 @@ backend-policy-useroperations internal/useroperations TestEnforcementCleanupBack
 backend-policy-useroperations internal/useroperations TestEnforcementCleanupBackendIntegration/conditional-delete-and-fencing
 backend-policy-useroperations internal/useroperations TestEnforcementCleanupBackendIntegration/bounded-candidate-progress
 backend-policy-api internal/api TestControllerReadsBackendHTTPIntegration
+backend-policy-api internal/api TestAgentUpgradeBackendHTTPIntegration
 backend-policy-api internal/api TestConfigPlanApplyBackendHTTPIntegration
 backend-policy-api internal/api TestPlanRoutesBackendHTTPIntegration
 backend-policy-api internal/api TestPlanRoutesBackendHTTPIntegration/TestConfigPlanLookupBackendHTTPIntegration
@@ -80,6 +81,7 @@ regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/
 regression-oidc internal/auth TestOIDCAuthorizationCodePKCEIntegration/issuer=/tenant/
 regression-auth internal/api TestAuthenticationBackendHTTPIntegration
+regression-auth internal/api TestAgentUpgradeBackendHTTPIntegration
 regression-auth internal/api TestPlanRoutesBackendHTTPIntegration
 regression-auth internal/api TestPlanRoutesBackendHTTPIntegration/TestConfigPlanLookupBackendHTTPIntegration
 regression-auth internal/api TestPlanRoutesBackendHTTPIntegration/TestConfigPlanLookupBackendHTTPIntegration/authority-resources-before-legacy-fallback
