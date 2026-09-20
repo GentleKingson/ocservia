@@ -117,15 +117,20 @@ and transaction identity were retained. The manually reviewed exceptions are:
   integration fixture keeps its own explicit pool without changing runtime
   service ownership or cloning the shared service accidentally.
 
-`database-access-disposition.tsv` accounts for all 252 original candidate
-paths, including non-database keyword matches. The boundary test checks exact
-inventory coverage, rejects business driver imports and raw SQL calls, and no
-longer reads a temporary driver allowance file. Cross-package attestation and
+[The disposition ledger](archive/database-access/database-access-disposition.tsv)
+accounts for all 252 original candidate paths, including non-database keyword
+matches. The boundary test at closure checked exact inventory coverage,
+rejected business driver imports and raw SQL calls, and no
+longer read a temporary driver allowance file. Cross-package attestation and
 semantic test fixtures remain test-only and cannot be imported by business
 code. Driver-owned adapters, owner migrations and explicit PostgreSQL
 deployment/backup/restore tooling are intentional boundaries, not unresolved
 business leaks. Their retention does not claim MySQL production deployment
 support, which remains outside this phase.
+
+The ledgers are now [frozen historical records](database-boundary-pr01.md#access-inventory-and-removal-ownership),
+with the closure commit and later source snapshot recorded separately. Only the
+live inventory/path-existence check was retired; the production AST guard remains.
 
 The read/query entries resolve to the existing telemetry read/history,
 local-slice, operation, audit and RBAC stores. Verification uses actual prepared

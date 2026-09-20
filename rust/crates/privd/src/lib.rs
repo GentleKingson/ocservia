@@ -3003,7 +3003,8 @@ mod tests {
         for changed in [
             signed_service_reload(&signing, *Uuid::now_v7().as_bytes(), now, now + 60),
             signed_service_reload(&signing, node_id, now - 60, now - 1),
-            signed_service_reload(&signing, node_id, now + 301, now + 360),
+            // Stay beyond the 300-second skew even if socket I/O crosses a clock tick.
+            signed_service_reload(&signing, node_id, now + 3600, now + 3660),
         ] {
             variants.push(command_request(changed));
         }
