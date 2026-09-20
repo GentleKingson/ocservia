@@ -86,7 +86,7 @@ func TestConfigPlanHTTPBoundary(t *testing.T) {
 		methods []string
 	}{
 		{reflect.TypeOf((*configplanhttp.Plans)(nil)).Elem(), []string{"Apply", "Create", "Get"}},
-		{reflect.TypeOf((*configPlanLookup)(nil)).Elem(), []string{"Get", "Resource"}},
+		{reflect.TypeOf((*configPlanLookup)(nil)).Elem(), []string{"ApprovalBinding", "Resource"}},
 	} {
 		var got []string
 		for i := 0; i < tc.port.NumMethod(); i++ {

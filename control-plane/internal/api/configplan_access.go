@@ -12,7 +12,7 @@ import (
 
 // configPlanLookup is the read-only view used by authorization and approvals.
 type configPlanLookup interface {
-	Get(context.Context, uuid.UUID) (configplan.Plan, error)
+	ApprovalBinding(context.Context, uuid.UUID) (configplan.ApprovalBinding, error)
 	Resource(context.Context, uuid.UUID) (workspaceID, nodeID uuid.UUID, err error)
 }
 
