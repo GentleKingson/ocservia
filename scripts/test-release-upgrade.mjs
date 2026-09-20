@@ -31,8 +31,16 @@ assert.equal(latest.commit, "1805962fe1a98a22955b3105bfa8ebce7f2ea1eb");
 assert.equal(latest.sums_sha256, "d562822bfdc55c784bf950a21c746f380a1cb6a7a2c86c6c801cfa25121df53b");
 assert.equal(latest.key_der_sha256, valid().key_der_sha256);
 assert.deepEqual(latest.controller, { database: "postgres", migration: 36, authentication: "oidc" });
+const stable = validateInputs("1.0.0", "v0.6.2", sha, sha, sha, baselines);
+assert.equal(stable.commit, "518df6e9c488e58613c9cc194c896b4edfd57c2e");
+assert.equal(stable.sums_sha256, "a386f64d81f0ccb0b87482c3f4e4029d0a756b5e76c679b72d70d1afa23abc66");
+assert.equal(stable.key_der_sha256, valid().key_der_sha256);
+assert.deepEqual(stable.controller, { database: "postgres", migration: 36, authentication: "oidc" });
+assert(!Object.hasOwn(stable, "deb_asset_release"));
+for (const version of ["0.6.2", "0.6.1", "1.0.0-rc.1"])
+  assert.throws(() => validateInputs(version, "v0.6.2", sha, sha, sha, baselines));
 for (const arch of Object.keys(architectures)) {
-  for (const baselineTag of ["v0.1.1", "v0.3.0", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0", "v0.6.1"]) {
+  for (const baselineTag of ["v0.1.1", "v0.3.0", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0", "v0.6.1", "v0.6.2"]) {
     assert.equal(baselineDebAsset(baselineTag, arch, baselines[baselineTag]), `ocservia-agent_${baselineTag.slice(1)}_${arch}.deb`);
   }
   // Synthetic metadata, not a rewrite of any published release.
@@ -44,7 +52,8 @@ for (const arch of Object.keys(architectures)) {
   assert(!requiredAssets("v1.0.0", future).includes(`ocservia-agent_1.0.0_${arch}.deb`));
   assert.equal(baselineDebAsset("v1.0.0", arch, { deb_asset_release: 2 }), `ocservia-agent_1.0.0-2_${arch}.deb`);
   assert.equal(candidateArtifacts("agent", arch, "1.0.0")[0], futureName);
-  for (const [baselineTag, baseline, expected] of [["v0.6.1", latest, legacyName], ["v1.0.0", future, futureName]]) {
+  for (const [baselineTag, baseline, expected] of [["v0.6.1", latest, legacyName],
+    ["v0.6.2", stable, `ocservia-agent_0.6.2_${arch}.deb`], ["v1.0.0", future, futureName]]) {
     const actual = execFileSync(process.execPath, [new URL("./release-upgrade-contract.mjs", import.meta.url).pathname,
       "baseline-deb", baselineTag, arch], { input: JSON.stringify(baseline), encoding: "utf8" }).trim();
     assert.equal(actual, expected);
@@ -59,7 +68,7 @@ for (const arch of Object.keys(architectures)) {
 for (const release of [0, -1, 1.5, "1", null, true]) {
   assert.throws(() => requiredAssets("v1.0.0", { ...latest, deb_asset_release: release }), /deb_asset_release/);
 }
-console.log("Legacy v0.6.1 and revisioned baseline DEB naming, CLI and candidate separation passed");
+console.log("Legacy v0.6.1/v0.6.2 and revisioned baseline DEB naming, CLI and candidate separation passed");
 for (const version of ["0.6.1", "0.6.0"])
   assert.throws(() => validateInputs(version, "v0.6.1", sha, sha, sha, baselines));
 for (const tag of ["latest", "v0.4.0", "v99.0.0"])

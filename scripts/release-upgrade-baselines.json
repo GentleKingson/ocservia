@@ -104,5 +104,22 @@
       "key_source_package_sha256": "fc1118d87367d5842b7eaf29f5069ef4c8b65d7b2871ea6f549270c5a50a9587",
       "method": "Recover the historical key after checking its DEB digest; verify v0.6.1 SHA256SUMS.sig, both archive signatures and all 21 published asset digests, compare the published key, and verify both Controller bundles at schema 36 and anonymous dual-platform image indexes. Cross-check immutable Release 389674680, direct tag commit and successful publication run 35061703465. No TOFU, installation or baseline rebuild."
     }
+  },
+  "v0.6.2": {
+    "sums_sha256": "a386f64d81f0ccb0b87482c3f4e4029d0a756b5e76c679b72d70d1afa23abc66",
+    "commit": "518df6e9c488e58613c9cc194c896b4edfd57c2e",
+    "key_der_sha256": "b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369",
+    "upgrader": true,
+    "version_query": true,
+    "production_relays": true,
+    "rpm": true,
+    "controller": { "database": "postgres", "migration": 36, "authentication": "oidc" },
+    "verification": {
+      "date": "2026-09-20",
+      "anchor": "v0.4.0 SHA256SUMS pinned in e9016da71e5b447d3532e8981e5ca08844de88ff; historical package key, not the newly downloaded release key",
+      "key_source": "ocservia-agent_0.4.0_arm64.deb/usr/share/ocservia-agent/release-signing.pub.pem",
+      "key_source_package_sha256": "fc1118d87367d5842b7eaf29f5069ef4c8b65d7b2871ea6f549270c5a50a9587",
+      "method": "Verify the historical checksum pin and DEB digest before extracting its key; verify v0.6.2 SHA256SUMS.sig, both archive signatures and all 21 published asset digests, compare the published key, and verify both Controller bundles at schema 36 and anonymous dual-platform image indexes. Confirm legacy DEB asset names with package Version 0.6.2-1. Cross-check immutable Release 391876832, direct tag commit and successful tag publication run 35378980967 attempt 1. No TOFU, installation or baseline rebuild."
+    }
   }
 }
