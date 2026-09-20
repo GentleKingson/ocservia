@@ -48,6 +48,54 @@ command alone, when assessing its benefit.
 Do not run the formal G6 harness for an ordinary documentation change unless
 the change touches its acceptance contracts or execution paths.
 
+## Command wire contracts
+
+`testdata/command-strict-wire.json` is shared by Go's
+`commandauth.TestStrictWireCommandFixtures` and Rust's `contracts::strict_wire`
+tests. It retains the six historical vectors and adds all 18 payload variants
+with non-default fields. The full echo envelope covers authorization, owner
+fences, timestamps and envelope metadata. Go reflection requires every field
+reachable from `CommandEnvelope`, including every payload alternative, to be
+populated by at least one fixture. Rust independently asserts decoded values.
+
+The Rust tests compare the hand-maintained policy to the existing generated
+`FILE_DESCRIPTOR_SET`, starting only at `CommandEnvelope`. Its omitted imported
+`Timestamp` descriptor is supplied by Go in the same fixture file and checked
+against Go's generated descriptor on every run. The tests cover message
+edges, scalar wire types and holes within the reviewed tag range (1 through
+128), and reject unknown tags, all five incorrect wire types and truncated
+nested bodies along every reachable message path. Descriptor mutation tests
+prove that added/removed fields, changed wire types, changed nested message
+types and new payload alternatives do not silently pass. Descriptors never
+generate the production allowlist. New fields require explicit protocol
+version, capability and strict-policy compatibility review.
+
+Run focused checks on BuildServer in an isolated checkout:
+
+```bash
+(cd control-plane && go test -race -count=1 -skip Integration ./internal/commandauth ./internal/contractpolicy ./internal/privdattestation)
+(cd rust && cargo test --locked -p ocservia-contracts -p ocservia-command-authorization -p ocservia-privd-attestation)
+```
+
+For deliberate fixture updates, run the Go test with
+`UPDATE_STRICT_WIRE_FIXTURES=1`, then rerun both languages without that variable
+and inspect the diff. This is an explicit test-only generator, not an automatic
+golden update. Run the existing Buf generation/breaking checks and
+`scripts/generated-clean.sh --skip-generate` after protobuf generation. No Web
+generation is needed when HTTP schemas are unchanged.
+
+The focused Go command excludes database integration tests. The existing
+`scripts/test-g6-secret-scan-config-runtime.sh` checks that fixed public fixture
+values pass the exact-value allowlist while other values remain detectable.
+
+These are raw-wire vectors, not executable or authenticated requests: deprecated
+fields remain populated to exercise accepted wire tags, signatures are dummy
+bytes, and protocol 1.1 execution still rejects legacy password fields. The
+independent canonical signing, fence and receipt goldens remain authoritative
+for their own contracts and are not replaced by these fixtures. PR-05 changes
+test coverage and its fixture allowlist, not protocol version, ALPN, canonical
+bytes or runtime dependencies.
+
 ## Linux ARM64 Go validation on BuildServer
 
 Run local validation through `ssh BuildServer`. Bootstrap installs repository
