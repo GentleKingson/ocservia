@@ -5,7 +5,8 @@ node=24.18.1
 npm=11.19.0
 postgresql_17=17.10
 postgresql_18=18.6
-iroh=1.0.3
+# Standalone iroh-relay binary; endpoint dependency is pinned in rust/Cargo.toml.
+iroh=1.2.0
 buf=1.72.0
 protobuf=35.1
 openapi_generator=7.24.0

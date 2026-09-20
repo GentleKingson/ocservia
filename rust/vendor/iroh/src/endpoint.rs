@@ -74,8 +74,10 @@ use crate::{
     metrics::EndpointMetrics,
     socket::{
         self, EndpointInner, RemoteStateActorStoppedError, StaticConfig,
-        biased_rtt_path_selector::BiasedRttPathSelector, mapped_addrs::MappedAddr,
-        remote_map::PathSelector, transports::RelayConnectionState,
+        biased_rtt_path_selector::BiasedRttPathSelector,
+        mapped_addrs::MappedAddr,
+        remote_map::PathSelector,
+        transports::{RelayConnectionFailure, RelayConnectionState},
     },
     tls::{self, DEFAULT_MAX_TLS_TICKETS, misc::RustlsTokenKey},
 };
@@ -256,9 +258,6 @@ impl Builder {
         };
         let server_config = static_config.create_server_config(self.alpn_protocols);
 
-        #[cfg(not(wasm_browser))]
-        let dns_resolver = self.dns_resolver.unwrap_or_default();
-
         let metrics = EndpointMetrics::default();
 
         let tls_config = self
@@ -266,6 +265,14 @@ impl Builder {
             .unwrap_or_default()
             .client_config(crypto_provider)
             .map_err(|err| e!(BindError::InvalidCaRootConfig, err))?;
+
+        #[cfg(not(wasm_browser))]
+        let dns_resolver = self.dns_resolver.unwrap_or_else(|| {
+            DnsResolver::builder()
+                .with_system_defaults()
+                .tls_client_config(tls_config.clone())
+                .build()
+        });
 
         let sock_opts = socket::Options {
             transports: self.transports,
@@ -812,7 +819,9 @@ impl Builder {
 
     /// Configures the portmapper service (UPnP, PCP, NAT-PMP).
     ///
-    /// Defaults to [`PortmapperConfig::Enabled`].
+    /// Defaults to [`PortmapperConfig::Enabled`]. Pass
+    /// [`PortmapperConfig::Disabled`] to avoid gateway probing (e.g. if it
+    /// triggers firewall prompts).
     pub fn portmapper_config(mut self, config: PortmapperConfig) -> Self {
         self.portmapper_config = config;
         self
@@ -909,13 +918,22 @@ pub enum EndpointError {
 ///
 /// The endpoint's default [`DnsResolver`] reads the system DNS configuration
 /// through JNI, which needs a JVM context published to [`ndk_context`]. Apps
-/// must initialize that context before constructing the endpoint, or the
-/// resolver build panics. See [`DnsResolver`] for the supported
-/// initialization paths.
+/// should initialize that context before constructing the endpoint. See
+/// [`iroh_dns::install_android_jni_context`] for details (the function is also
+/// exported as `iroh::dns::install_android_jni_context`).
+///
+/// If no JNI context is installed, iroh relies on panic unwinding to detect
+/// the error, and will then use the fallback nameservers instead, subject to the
+/// resolver's [`FallbackMode`]. Note that if your compilation profile sets
+/// `panic = "abort"`, this can't work, and thus your app will panic if using a
+/// default `DnsResolver` without first initializing the JNI context.
 ///
 /// [QUIC]: https://quicwg.org
 /// [`DnsResolver`]: crate::dns::DnsResolver
+/// [`FallbackMode`]: crate::dns::FallbackMode
 /// [`ndk_context`]: https://docs.rs/ndk-context
+/// [`iroh_dns::install_android_jni_context`]: https://docs.rs/iroh-dns/latest/iroh_dns/fn.install_android_jni_context.html
+// The last link can't be a normal doclink, because #[cfg(doc)] can't cross crate boundaries unfortunately.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     inner: Arc<EndpointInner>,
@@ -944,6 +962,8 @@ pub enum ConnectWithOptsError {
     LocallyRejected,
     #[error("Endpoint is closed")]
     EndpointClosed,
+    #[error("Invalid ALPN")]
+    InvalidAlpn,
 }
 
 #[allow(missing_docs)]
@@ -1132,6 +1152,7 @@ impl Endpoint {
 
         // Connecting to ourselves is not supported.
         ensure!(endpoint_id != self.id(), ConnectWithOptsError::SelfConnect);
+        ensure!(!alpn.is_empty(), ConnectWithOptsError::InvalidAlpn);
 
         event!(
             target: "iroh::_events::conn::connecting",
@@ -1398,6 +1419,11 @@ impl Endpoint {
     /// selected a home relay from the list of configured relays.
     /// The watcher updates whenever any home relay's connection status changes.
     /// See [`RelayStatus`] for the information available on each entry.
+    ///
+    /// This may be used to observe connection failures to the home relay:
+    /// [`RelayStatus::last_error`] reports the most recent error, and
+    /// [`RelayStatus::auth_denied_reason`] singles out the case of the relay
+    /// server denying the endpoint's authentication.
     ///
     /// The returned watcher only becomes disconnected once the last clone of
     /// the [`Endpoint`] is dropped. Closing the endpoint does not disconnect
@@ -1768,9 +1794,11 @@ impl Endpoint {
 
     // # Remaining private methods
 
-    /// Translates a raw [`SocketAddr`] (which may be a synthetic mapped address) into
-    /// a transport address.
-    pub(crate) fn to_transport_addr(&self, addr: SocketAddr) -> crate::socket::transports::Addr {
+    /// Translates a possible IP-mapped [`SocketAddr`] into a transport address.
+    pub(crate) fn to_transport_addr(
+        &self,
+        addr: SocketAddr,
+    ) -> Option<crate::socket::transports::Addr> {
         self.inner.to_transport_addr(addr)
     }
 
@@ -1929,13 +1957,58 @@ impl RelayStatus {
         self.state.is_connected()
     }
 
-    /// Returns the most recent connection error, if the relay is currently
-    /// disconnected.
+    /// Returns the most recent connection error.
     ///
     /// Returns `None` when the relay is connected, or when the endpoint has
     /// not yet observed a failed connection attempt.
+    ///
+    /// The error is meant to be logged or displayed, not matched on: it is an
+    /// [`AnyError`] wrapping a chain of private error types, none of which are
+    /// covered by semver guarantees. Use [`Self::auth_denied_reason`] to
+    /// distinguish the one failure that usually calls for a different reaction
+    /// than retrying.
     pub fn last_error(&self) -> Option<&AnyError> {
-        self.state.last_error().map(Arc::as_ref)
+        self.state.last_failure().map(RelayConnectionFailure::error)
+    }
+
+    /// Returns the reason if the relay server denied our authentication.
+    ///
+    /// Unlike most connection failures, this one will not usually resolve
+    /// itself. The endpoint keeps retrying with a backoff, but it presents the
+    /// same credentials every time, so unless the relay's access policy
+    /// changes it will keep being denied and [`Endpoint::online`] will never
+    /// resolve. An application that configures a relay auth token should
+    /// surface this to the user rather than wait to come online.
+    ///
+    /// The returned string is the reason reported by the relay server. It is
+    /// meant to be human-readable, don't attempt to match on it.
+    ///
+    /// Returns `None` when the relay is connected, when no connection attempt
+    /// has failed yet, or when the last failure had another cause.
+    ///
+    /// ```no_run
+    /// # async fn wrapper() -> n0_error::Result<()> {
+    /// # #[cfg(with_crypto_provider)]
+    /// # {
+    /// use iroh::{Endpoint, Watcher, endpoint::presets};
+    /// use n0_future::StreamExt;
+    ///
+    /// let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
+    /// let mut status = endpoint.home_relay_status().stream();
+    /// while let Some(relays) = status.next().await {
+    ///     for relay in relays {
+    ///         if let Some(reason) = relay.auth_denied_reason() {
+    ///             println!("{}: authentication denied ({reason})", relay.url());
+    ///         }
+    ///     }
+    /// }
+    /// # }
+    /// # Ok(()) }
+    /// ```
+    pub fn auth_denied_reason(&self) -> Option<&str> {
+        self.state
+            .last_failure()
+            .and_then(RelayConnectionFailure::auth_denied_reason)
     }
 }
 
@@ -2024,9 +2097,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use assert_matches::assert_matches;
     use iroh_base::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
     use iroh_dns::endpoint_info::UserData;
-    use iroh_relay::{RelayConfig, server::Access, tls::CaTlsConfig};
+    use iroh_relay::{RelayConfig, RelayQuicConfig, server::Access, tls::CaTlsConfig};
     use n0_error::{AnyError as Error, Result, StdResultExt};
     use n0_future::{BufferedStreamExt, StreamExt, future::now_or_never, stream, time};
     use n0_tracing_test::traced_test;
@@ -2066,6 +2140,31 @@ mod tests {
         assert!(res.is_err());
         let err = res.err().unwrap();
         assert!(err.to_string().starts_with("Connecting to ourself"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_connect_empty_alpn() -> Result {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![TEST_ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let server_addr = server.addr();
+
+        let client = Endpoint::builder(presets::Minimal).bind().await.unwrap();
+        let res = client.connect(server_addr, b"").await;
+        assert!(res.is_err());
+        let err = res.err().unwrap();
+        assert_matches!(
+            err,
+            ConnectError::Connect {
+                source: ConnectWithOptsError::InvalidAlpn { .. },
+                ..
+            }
+        );
 
         Ok(())
     }
@@ -2943,6 +3042,81 @@ mod tests {
         p1_connect.await.anyerr()??;
         p2_connect.await.anyerr()??;
 
+        Ok(())
+    }
+
+    /// Regression test: Don't fail connections with dead relays on Windows.
+    ///
+    /// A single client connecting to a single server over a usable direct path
+    /// must succeed even when both are configured with an unreachable home relay
+    /// (`https://127.0.0.1:1`, nothing listening). The dead relay should be irrelevant:
+    /// the direct path works and the connection comes up in milliseconds.
+    ///
+    /// This was broken on Windows because QaD sends over the same socket to the dead
+    /// relay, and the socket would return recv errors on the next recv to report ICMP
+    /// errors for the previous send. We now skip over these errors, implemented in
+    /// https://github.com/n0-computer/net-tools/pull/166, so this no longer fails.
+    #[tokio::test]
+    async fn endpoint_unreachable_relay_direct_connect_succeeds() -> Result {
+        // The relay url and its QADv4 probe must both hit closed ports, so the relay is
+        // unreachable and the probe draws the ICMP port-unreachable the Windows socket
+        // reports on its next recv. Claim an ephemeral port, then close it: it's now free,
+        // so nothing answers. There's nothing stopping the kernel from reusing a port
+        // right away, but on most machines that's unlikely. The url is dialed over TCP
+        // (HTTPS), the probe over UDP, so claim each with the matching socket type.
+        let closed_tcp_port = {
+            let sock = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+            sock.local_addr().expect("local addr").port()
+        };
+        let closed_udp_port = {
+            let sock = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+            sock.local_addr().expect("local addr").port()
+        };
+        let dead_relay: RelayUrl = format!("https://127.0.0.1:{closed_tcp_port}")
+            .parse()
+            .expect("valid relay url");
+        let dead_relay_config = RelayConfig::new(
+            dead_relay.clone(),
+            Some(RelayQuicConfig::new(closed_udp_port)),
+        );
+
+        let bind_endpoint = async || {
+            Endpoint::builder(presets::Minimal)
+                // Use the broken relay to trigger the ICMP errors from the QaD sends.
+                .relay_mode(RelayMode::Custom(RelayMap::from_iter([
+                    dead_relay_config.clone()
+                ])))
+                .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+                .alpns(vec![TEST_ALPN.to_vec()])
+                // Bind on IPv4 only to ensure a single socket to not have spurious polls.
+                .bind_addr((Ipv4Addr::LOCALHOST, 0))
+                .expect("valid addr")
+                .bind()
+                .await
+        };
+
+        let server = bind_endpoint().await?;
+        let server_addr = server.addr().with_relay_url(dead_relay.clone());
+        let client = bind_endpoint().await?;
+
+        // Server accepts the incoming connection and holds it open until the test ends.
+        let accept = tokio::spawn(async move {
+            let incoming = server.accept().await.anyerr()?;
+            let conn = incoming.await.anyerr()?;
+            conn.closed().await;
+            server.close().await;
+            n0_error::Ok(())
+        });
+
+        // The connect must complete over the direct loopback path despite the dead relay.
+        let _conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.connect(server_addr, TEST_ALPN),
+        )
+        .await
+        .expect("connection should succeed")?;
+        client.close().await;
+        accept.await.anyerr()??;
         Ok(())
     }
 
@@ -4002,10 +4176,13 @@ mod tests {
     /// Verifies that an endpoint configured with [`RelayConfig::with_auth_token`]
     /// is admitted to a relay whose access control checks the token only when
     /// the token matches.
+    ///
+    /// Also verifies that [`RelayStatus::auth_denied_reason`] works correctly.
     #[tokio::test]
     #[traced_test]
     async fn test_endpoint_relay_auth_token() -> Result {
         const TOKEN: &str = "valid-token";
+        const DENIAL_REASON: &str = "this token is no good";
 
         /// Admits a connection only if it carries the expected auth token.
         #[derive(Debug)]
@@ -4016,7 +4193,9 @@ mod tests {
                 if request.auth_token().as_deref() == Some(self.0) {
                     Access::Allow
                 } else {
-                    Access::Deny { reason: None }
+                    Access::Deny {
+                        reason: Some(DENIAL_REASON.to_string()),
+                    }
                 }
             }
         }
@@ -4024,8 +4203,8 @@ mod tests {
         let access = Arc::new(TokenAccess(TOKEN));
         let (_relay_map, relay_url, _guard) = run_relay_server_with_access(false, access).await?;
 
-        // Wrong token: the connection attempt fails and last_error reports
-        // the relay-side denial.
+        // Wrong token: the connection attempt fails, and the status reports the
+        // relay-side denial both as an error and as an authentication failure.
         let bad_map: RelayMap = RelayConfig::new(relay_url.clone(), None)
             .with_auth_token("wrong-token")
             .into();
@@ -4035,10 +4214,14 @@ mod tests {
             .bind()
             .await?;
         let mut stream = bad_ep.home_relay_status().stream();
-        let auth_err: String = tokio::time::timeout(Duration::from_secs(5), async {
+        let (auth_err, auth_denied_reason) = tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(status) = stream.next().await {
-                if let Some(err) = status.iter().filter_map(|s| s.last_error()).next() {
-                    return format!("{err:#}");
+                if let Some(relay) = status.iter().find(|s| s.last_error().is_some()) {
+                    let err = relay.last_error().expect("checked above");
+                    return (
+                        format!("{err:#}"),
+                        relay.auth_denied_reason().map(ToOwned::to_owned),
+                    );
                 }
             }
             panic!("home relay stream ended");
@@ -4046,8 +4229,13 @@ mod tests {
         .await
         .std_context("waiting for auth error")?;
         assert!(
-            auth_err.contains("not authorized"),
-            "expected 'not authorized' in error, got: {auth_err}"
+            auth_err.contains(DENIAL_REASON),
+            "expected {DENIAL_REASON:?} in error, got: {auth_err}"
+        );
+        assert_eq!(
+            auth_denied_reason.as_deref(),
+            Some(DENIAL_REASON),
+            "auth_denied_reason did not recognise a relay-side denial (error was: {auth_err})"
         );
 
         // Correct token: the endpoint reaches the connected state.

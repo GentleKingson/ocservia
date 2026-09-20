@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.91"
 name = "iroh"
-version = "1.0.0"
+version = "1.2.0"
 authors = [
     "dignifiedquire <me@dignifiedquire.com>",
     "n0 team",
@@ -83,6 +83,7 @@ test-utils = [
     "iroh-relay/test-utils",
     "iroh-relay/server",
     "dep:axum",
+    "dep:simple-dns",
 ]
 tls-aws-lc-rs = [
     "noq/aws-lc-rs",
@@ -140,6 +141,11 @@ required-features = []
 [[example]]
 name = "echo-no-router"
 path = "examples/echo-no-router.rs"
+required-features = []
+
+[[example]]
+name = "home-relay-status"
+path = "examples/home-relay-status.rs"
 required-features = []
 
 [[example]]
@@ -231,7 +237,7 @@ features = [
 ]
 
 [dependencies.ed25519-dalek]
-version = "=3.0.0-rc.0"
+version = ">=3.0.0-rc.0,<4.0.0"
 features = [
     "serde",
     "rand_core",
@@ -250,7 +256,7 @@ version = "1"
 version = "2"
 
 [dependencies.iroh-base]
-version = "1.0.0"
+version = "1.2.0"
 features = [
     "key",
     "relay",
@@ -258,14 +264,14 @@ features = [
 default-features = false
 
 [dependencies.iroh-dns]
-version = "1.0.0"
+version = "1.3.0"
 
 [dependencies.iroh-metrics]
 version = "1.0.1"
 default-features = false
 
 [dependencies.iroh-relay]
-version = "1.0.0"
+version = "1.2.0"
 default-features = false
 
 [dependencies.n0-error]
@@ -278,19 +284,19 @@ version = "0.3"
 version = "1.0.0"
 
 [dependencies.netwatch]
-version = "0.19"
+version = "0.19.3"
 
 [dependencies.noq]
-version = "1.0.0"
+version = "1.3.0"
 features = ["rustls"]
 default-features = false
 
 [dependencies.noq-proto]
-version = "1.0.0"
+version = "1.3.0"
 default-features = false
 
 [dependencies.noq-udp]
-version = "1.0.0"
+version = "1.3.0"
 default-features = false
 
 [dependencies.papaya]
@@ -327,6 +333,10 @@ features = [
     "derive",
     "rc",
 ]
+
+[dependencies.simple-dns]
+version = "0.12"
+optional = true
 
 [dependencies.smallvec]
 version = "1.11.1"
@@ -384,12 +394,15 @@ features = ["use-std"]
 [dev-dependencies.rand_chacha]
 version = "0.10"
 
+[dev-dependencies.simple-dns]
+version = "0.12"
+
 [dev-dependencies.tracing-subscriber]
 version = "0.3"
 features = ["env-filter"]
 
 [build-dependencies.cfg_aliases]
-version = "0.2.1"
+version = "0.2.2"
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies.getrandom]
 version = "0.4"
@@ -408,12 +421,8 @@ version = "0.3.62"
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies.wasm-tracing]
 version = "2.1.0"
 
-[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies.hickory-resolver]
-version = "0.26.0"
-default-features = false
-
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies.noq]
-version = "1.0.0"
+version = "1.3.0"
 features = [
     "runtime-tokio",
     "rustls",
@@ -421,7 +430,7 @@ features = [
 default-features = false
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies.portmapper]
-version = "0.19"
+version = "0.19.3"
 optional = true
 default-features = false
 
@@ -436,6 +445,9 @@ features = [
     "fs",
     "io-std",
 ]
+
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.assert_matches]
+version = "1.5.0"
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.axum]
 version = "0.8"
@@ -452,7 +464,7 @@ version = "0.18"
 features = ["tokio"]
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.iroh-base]
-version = "1.0.0"
+version = "1.2.0"
 features = [
     "key",
     "relay",
@@ -460,7 +472,7 @@ features = [
 default-features = false
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dev-dependencies.iroh-relay]
-version = "1.0.0"
+version = "1.2.0"
 features = [
     "test-utils",
     "server",
@@ -489,6 +501,7 @@ features = [
     "io-util",
     "sync",
     "rt",
+    "rt-multi-thread",
     "net",
     "fs",
     "macros",
@@ -504,7 +517,7 @@ features = ["env-filter"]
 version = "1.0"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies.patchbay]
-version = "0.6"
+version = "0.7"
 features = ["iroh-metrics"]
 
 [target.'cfg(target_os = "linux")'.dev-dependencies.testdir]

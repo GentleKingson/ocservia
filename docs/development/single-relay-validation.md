@@ -65,7 +65,7 @@ No G6 threshold or database runtime matrix is relaxed or expanded.
 ## Network Probe
 
 Build the current transportd runtime image including its new launcher, and use
-the real authenticated iroh-relay 1.0.3 image. On BuildServer:
+the real authenticated iroh-relay image built by `deploy/production/relay.Dockerfile`. On BuildServer:
 
 ```sh
 python3 scripts/single-relay-network-smoke.py \
@@ -162,12 +162,12 @@ test packages and private temporary directories. Never use global Docker prune.
 
 ## Design References
 
-- [iroh-relay 1.0.3 RelayMap](https://docs.rs/iroh-relay/1.0.3/iroh_relay/struct.RelayMap.html)
+- [iroh-relay 1.2.0 RelayMap](https://docs.rs/iroh-relay/1.2.0/iroh_relay/struct.RelayMap.html)
 - [Compose services](https://docs.docker.com/reference/compose-file/services/)
 - [Compose networks](https://docs.docker.com/reference/compose-file/networks/)
 - [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 - [systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)
 
-The pinned iroh 1.0.0 vendor patch remains unchanged. Multi-Relay persistent
+The pinned iroh 1.2.0 vendor retains the local lifecycle patch. Multi-Relay persistent
 connections still require at least two distinct configured Relays; single-Relay
 reconnection reuses the existing Endpoint and supervision, not a new manager.

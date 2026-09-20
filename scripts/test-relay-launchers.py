@@ -5,9 +5,16 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 assert os.geteuid() == 0 and Path("/.dockerenv").exists(), "isolated root Docker container required"
+for relative in ("deploy/production/relay/relay.toml", "deploy/g6-readiness/relay.toml"):
+    with (ROOT / relative).open("rb") as source:
+        config = tomllib.load(source)
+    assert config["access"] == {"shared_token": ["replaced-by-entrypoint"]}, relative
+    assert "access" not in config["limits"]["client"]["rx"], relative
+    print(f"PASS {relative}: top-level Relay token authentication")
 agent = Path("/usr/libexec/ocservia/ocservia-agent")
 transport = Path("/usr/local/bin/ocservia-transportd")
 assert not agent.exists() and not transport.exists(), "refusing to replace installed binaries"

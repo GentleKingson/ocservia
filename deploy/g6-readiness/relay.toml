@@ -1,4 +1,4 @@
-# G6 readiness harness relay: the same iroh-relay 1.0.3 configuration shape
+# G6 readiness harness relay: the same iroh-relay 1.2.0 configuration shape
 # as the production deployment, with per-run Manual TLS material and access
 # token injected through the bind-mounted secret directory.
 enable_relay = true
@@ -18,4 +18,5 @@ manual_key_path = "/run/relay-secrets/relay.key"
 max_burst_bytes = 4194304
 bytes_per_second = 2097152
 
-access.shared_token = ["replaced-by-entrypoint"]
+[access]
+shared_token = ["replaced-by-entrypoint"]
