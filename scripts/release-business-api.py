@@ -62,7 +62,8 @@ def api(path, body=None, *, role='requester', status=200, headers=None, method=N
     except urllib.error.HTTPError as error:
         response = error
     raw = response.read()
-    if response.status != status:
+    expected = (status,) if isinstance(status, int) else status
+    if response.status not in expected:
         # Never include a response body: successful token/download endpoints
         # and auth errors must not accidentally export credential material.
         raise RuntimeError(f'{request.method} {path}: HTTP {response.status}, expected {status}')
@@ -138,11 +139,23 @@ def business():
     node = os.environ['T07_NODE']
     prefix = f'nodes/{node}'
     wait_for('online node', lambda: api(prefix).get('connection_state') == 'online')
-    record('node_online')
+    observed = api(prefix)
+    assert observed['agent_version'] == os.environ['VERSION']
+    pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
+    agent_argv = run('sudo', 'cat', f'/proc/{int(pid)}/cmdline').rstrip('\0').split('\0')
+    transport_argv = run('docker', 'exec', os.environ['T07_TRANSPORT_CONTAINER'], 'sh', '-c',
+                         'for exe in /proc/[0-9]*/exe; do '
+                         'if [ "$(readlink "$exe")" = /usr/local/bin/ocservia-transportd ]; then '
+                         'cat "${exe%/exe}/cmdline"; fi; done').rstrip('\0').split('\0')
+    for argv in (agent_argv, transport_argv):
+        assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [os.environ['RELAY_URL_A']]
+        assert argv[argv.index('--relay-mode') + 1] == 'custom'
+    record('node_online_single_relay_argv', agent_version=observed['agent_version'], relay=os.environ['RELAY_URL_A'])
     operations = []
 
     def completed(operation):
         result = api('operations/' + operation['id'])
+        (EVIDENCE / ('operation-' + operation['id'] + '.json')).write_text(json.dumps(result))
         if result['state'] in ('failed', 'expired', 'cancelled'):
             raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
         return result if result['state'] == 'succeeded' else None
@@ -214,6 +227,12 @@ def business():
         return result.returncode == 0 and vpn.poll() is None
 
     wait_for('real VPN ICMP', ping, 40)
+    def native_session():
+        rows = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
+        return next(row['ID'] for row in rows if row['Username'] == 't07-vpn')
+
+    live_session = native_session()
+    ocserv_started = run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
     session = wait_for('Controller session telemetry', lambda: api(prefix + '/sessions').get('items'))
     assert any(row.get('username') == 't07-vpn' for row in session)
     api(prefix + '/ip-bans')
@@ -226,44 +245,68 @@ def business():
         run('docker', 'pause', control)
         for _ in range(3):
             assert ping()
-        record('controller_pause_preserves_live_vpn')
+            assert native_session() == live_session
+        record('controller_pause_preserves_live_vpn', native_session_id=live_session)
     finally:
         run('docker', 'unpause', control)
     relay = os.environ['T07_RELAY_CONTAINER']
+    reload_approval = approval('service.reload', 'node', node)
+
+    def reload_count():
+        return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
+
+    reloads_before = reload_count()
     try:
         run('docker', 'stop', relay)
         for _ in range(3):
             assert ping()
-        # Queue an idempotent desired-state change while management is absent.
+            assert native_session() == live_session
+        # Retain the single-relay fixture's non-idempotent reload assertion;
+        # never substitute an invisible duplicate enable or force Unknown green.
         key = secrets.token_hex(16)
-        revision = user_revision()
-        headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"'}
-        body = {'reason': 'T07 outage pending enable', 'ttl_seconds': 300}
-        pending = api(prefix + '/users/t07-vpn:enable', body, headers=headers, status=202)
+        body = {'reason': 'T07 isolated validation', 'ttl_seconds': 300}
+        for _ in range(3):
+            revision = api(prefix)['version']
+            headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"',
+                       'X-Approval-ID': reload_approval}
+            pending = api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
+            if 'id' in pending:
+                break
+            assert pending.get('type') == 'https://ocservia.dev/problems/stale-revision'
+        assert 'id' in pending
         time.sleep(10)
         assert api('operations/' + pending['id'])['state'] != 'succeeded'
         record('single_relay_outage_preserves_live_vpn_and_queues_operation')
     finally:
         run('docker', 'start', relay)
     wait_for('same operation after relay recovery', lambda: completed(pending))
-    replay = api(prefix + '/users/t07-vpn:enable', body, headers=headers, status=202)
+    replay = api(prefix + '/service:reload', body, headers=headers, status=202)
     assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
     operations.append(pending)
     assert identity_before == run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
                                   '/var/lib/ocservia-agent/identity/controller.endpoint')
     assert started_before == run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
     assert ping()
-    record('single_relay_recovery_identity_and_idempotent_replay', operation_id=pending['id'])
+    assert native_session() == live_session
+    assert ocserv_started == run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    time.sleep(3)
+    assert reload_count() == reloads_before + 1
+    record('single_relay_recovery_identity_and_idempotent_replay', operation_id=pending['id'],
+           native_reload_delta=1, native_session_id=live_session)
+    cross_checks = []
     for operation in operations:
         command = operation['command_id']
         journal = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
                       "SELECT count(*),state,length(privileged_result_proof)>0 FROM command_journal "
                       f"WHERE hex(command_id)=upper('{command.replace('-', '')}');").strip()
         assert journal == '1|succeeded|1'
-        assert sql(f"SELECT state FROM operations WHERE id='{operation['id']}';") == 'succeeded'
+        db_state = sql(f"SELECT state FROM operations WHERE id='{operation['id']}';")
+        assert db_state == 'succeeded'
+        cross_checks.append({'operation_id': operation['id'], 'command_id': command,
+                             'database_state': db_state, 'journal_count_state_receipt': journal})
     audit = api('audit/events')
     assert audit.get('items')
-    record('api_database_agent_journal_root_receipt_and_audit', operations=operations)
+    record('api_database_agent_journal_root_receipt_and_audit', cross_checks=cross_checks)
     run('sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect')
     vpn.wait(timeout=15)
     client_log.close()

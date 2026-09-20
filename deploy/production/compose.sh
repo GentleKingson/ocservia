@@ -100,6 +100,11 @@ for secret in audit-event-key controller-command-signing-key.pem; do
     exit 2
   fi
 done
+path="${secret_dir}/controller-command-verification-key.pem"
+if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a:%h' "${path}")" != "0:65532:440:1" ]]; then
+  echo "${path} must be a one-link root:65532 regular file with mode 0440" >&2
+  exit 2
+fi
 for secret in relay-access-token controller-iroh.key; do
   path="${secret_dir}/${secret}"
   if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a' "${path}")" != "65532:65532:400" ]]; then

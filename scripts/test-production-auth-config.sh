@@ -18,6 +18,7 @@ for name in audit-event-key controller-command-signing-key.pem relay-access-toke
 done
 owner=()
 if (( EUID != 0 )); then owner=(sudo); fi
+"${owner[@]}" install -o 0 -g 65532 -m 440 /dev/null "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 "${owner[@]}" chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" \
   "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem"
 "${owner[@]}" chown 65532:65532 "${OCSERV_SECRET_DIR}/relay-access-token" \
@@ -85,6 +86,11 @@ for mode in 1 2 3; do
         $config.secrets.oidc_client_secret.file == ($dir + "/oidc-client-secret")
       end
     ) and .secrets.session_key.file == ($dir + "/session-key") and
+    (.services.transportd.command | index("--require-fencing") != null) and
+    (.services.transportd.command | index("--controller-verification-key-file") != null) and
+    any(.services.transportd.secrets[]; .source == "controller_command_verification_key" and .uid == "0" and .gid == "65532") and
+    all(.services.transportd.secrets[]; .source != "controller_command_signing_key") and
+    .secrets.controller_command_verification_key.file == ($dir + "/controller-command-verification-key.pem") and
     all(.services[].environment // {} | keys[]; endswith("_PASSWORD") | not)
   ' "${work}/mode-${mode}.json" >/dev/null
 done
@@ -109,6 +115,15 @@ expect_failure() {
 }
 expect_failure env OCSERV_LOCAL_AUTH_ENABLED=false "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_OIDC_CLIENT_ID=partial "${ROOT}/deploy/production/compose.sh" config --quiet
+"${owner[@]}" chmod 0444 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+"${owner[@]}" chmod 0440 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+mv "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" "${OCSERV_SECRET_DIR}/verification-saved.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+ln -s verification-saved.pem "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+rm "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+mv "${OCSERV_SECRET_DIR}/verification-saved.pem" "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 chmod 0600 "${OCSERV_SECRET_DIR}/oidc-client-secret"
 expect_failure env OCSERV_OIDC_ISSUER=https://id.example.test OCSERV_OIDC_CLIENT_ID=test \
   "${ROOT}/deploy/production/compose.sh" config --quiet

@@ -145,6 +145,7 @@ sudo chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_D
 sudo chown 65532:65532 "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
 sudo chmod 400 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" \
   "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
+sudo install -o root -g 65532 -m 440 "${work}/command.pub.pem" "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 sudo chown 999:999 "${work}/backup"
 docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 args=()

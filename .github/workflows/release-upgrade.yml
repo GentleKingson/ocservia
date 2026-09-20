@@ -285,7 +285,9 @@ jobs:
             .tools
             rust/target
           key: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
+          restore-keys: |
+            business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
+            native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
       - name: Signed production lifecycle and native business probe
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
@@ -298,3 +300,12 @@ jobs:
           path: ${{ runner.temp }}/business-evidence
           if-no-files-found: error
           retention-days: 7
+      - name: Retain native build cache even when a business assertion fails
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+            rust/target
+          key: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
