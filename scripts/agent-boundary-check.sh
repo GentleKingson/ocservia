@@ -27,6 +27,7 @@ fi
 grep -Fxq 'User=ocserv-agent' "${ROOT}/deploy/systemd/ocservia-agent.service"
 grep -Fxq 'CapabilityBoundingSet=' "${ROOT}/deploy/systemd/ocservia-agent.service"
 grep -Fxq 'CapabilityBoundingSet=CAP_DAC_OVERRIDE' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'SupplementaryGroups=root' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${ROOT}/deploy/systemd/ocservia-privd.service"
 # shellcheck disable=SC2016
 grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID --node-id $NODE_ID --controller-command-key-file $CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --attestation-key-file $PRIVD_ATTESTATION_KEY_FILE --user-password-seal-key-file $USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id $USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 $USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file $P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id $P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 $P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256' "${ROOT}/deploy/systemd/ocservia-privd.service"

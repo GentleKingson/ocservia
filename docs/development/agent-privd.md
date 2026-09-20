@@ -21,7 +21,9 @@ parsed into stable DTOs. Raw child output is never returned across the
 privilege boundary.
 The privd unit keeps only `CAP_DAC_OVERRIDE`, which packaged Ocserv requires to
 connect to its mode `0711` control socket, and blocks all IP traffic with
-`IPAddressDeny=any`.
+`IPAddressDeny=any`. Its primary group remains `ocserv-agent` for the Unix
+socket, with supplementary group `root` so newly staged password files can be
+published as `root:root` mode `0600` without granting general `CAP_CHOWN`.
 
 Privileged mutations use a root-only bounded SQLite store under
 `/var/lib/ocservia-privd`. The store is local only and is not a business

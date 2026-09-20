@@ -151,6 +151,11 @@ def business():
         assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [os.environ['RELAY_URL_A']]
         assert argv[argv.index('--relay-mode') + 1] == 'custom'
     record('node_online_single_relay_argv', agent_version=observed['agent_version'], relay=os.environ['RELAY_URL_A'])
+    privd_pid = run('systemctl', 'show', 'ocservia-privd', '-p', 'MainPID', '--value').strip()
+    process = dict(line.split(':', 1) for line in run('sudo', 'cat', f'/proc/{int(privd_pid)}/status').splitlines())
+    assert '0' in process['Groups'].split()
+    assert int(process['CapEff'].strip(), 16) == 2  # CAP_DAC_OVERRIDE only.
+    record('native_privd_permissions', groups=process['Groups'].split(), effective_capabilities=process['CapEff'].strip())
     operations = []
 
     def completed(operation):
@@ -165,7 +170,14 @@ def business():
         headers.update(extra_headers or {})
         operation = api(prefix + '/' + path, {**body, 'reason': 'T07 isolated validation'},
                         status=202, headers=headers, method=method)
-        wait_for('operation ' + operation['id'], lambda: completed(operation))
+        try:
+            wait_for('operation ' + operation['id'], lambda: completed(operation))
+        finally:
+            command = operation['command_id'].replace('-', '')
+            journal = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
+                          "SELECT state,error_code,length(privileged_result_proof)>0 FROM command_journal "
+                          f"WHERE hex(command_id)=upper('{command}');").strip()
+            (EVIDENCE / ('journal-' + operation['id'] + '.txt')).write_text(journal + '\n')
         operations.append(operation)
         return operation, headers
 
