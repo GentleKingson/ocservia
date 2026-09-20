@@ -86,7 +86,6 @@ for mode in 1 2 3; do
         $config.secrets.oidc_client_secret.file == ($dir + "/oidc-client-secret")
       end
     ) and .secrets.session_key.file == ($dir + "/session-key") and
-    (.services.transportd.command | index("--require-fencing") != null) and
     (.services.transportd.command | index("--controller-verification-key-file") != null) and
     any(.services.transportd.secrets[]; .source == "controller_command_verification_key" and .uid == "0" and .gid == "65532") and
     all(.services.transportd.secrets[]; .source != "controller_command_signing_key") and

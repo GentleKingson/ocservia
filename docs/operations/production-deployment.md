@@ -112,7 +112,7 @@ Generate the command key pair outside the checkout. Put the private key in
 `OCSERV_SECRET_DIR` and its Ed25519 SPKI public key in
 `controller-command-verification-key.pem` in the same directory. The public key
 must be a one-link regular file owned by `0:65532`, mode `0440`; transportd mounts
-only this public key and requires fencing for mutation-capable sessions. Provision
+only this public key to verify connection fences. Provision
 it before installing or upgrading to this descriptor, and rotate it with the
 matching signing key. Distribute the same public key to Agents through the node
 provisioning channel described in `docs/development/command-authorization-v1.md`.

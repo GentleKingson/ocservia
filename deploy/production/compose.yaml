@@ -199,7 +199,6 @@ services:
       - /run/secrets/relay_access_token
       - --controller-verification-key-file
       - /run/secrets/controller_command_verification_key
-      - --require-fencing
       - --known-agent-handshake-rate
       - "2400"
       - --known-agent-handshake-concurrency

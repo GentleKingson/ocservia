@@ -66,7 +66,7 @@ def api(path, body=None, *, role='requester', status=200, headers=None, method=N
     if response.status not in expected:
         # Never include a response body: successful token/download endpoints
         # and auth errors must not accidentally export credential material.
-        raise RuntimeError(f'{request.method} {path}: HTTP {response.status}, expected {status}')
+        raise RuntimeError(f'{request.get_method()} {path}: HTTP {response.status}, expected {status}')
     jar.save(ignore_discard=True)
     return json.loads(raw) if raw else None
 
