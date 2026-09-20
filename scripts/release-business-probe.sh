@@ -40,7 +40,7 @@ compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
 record() { printf '%s\n' "$1" >>"${ARTIFACT_DIR}/checkpoints.txt"; }
 cleanup() {
   local code=$?
-  trap - EXIT
+  trap - EXIT ERR
   set +e
   if [[ -f "${work}/private.log" ]]; then
     compose logs --no-color --tail 100 >>"${work}/private.log" 2>&1
@@ -93,7 +93,7 @@ bash "${ROOT}/scripts/bootstrap.sh" native-packages
 openssl genpkey -algorithm ED25519 -out "${AGENT_SIGNING_KEY}"
 openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${work}/trusted-release.pub.pem"
 export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${work}/trusted-release.pub.pem"
-bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
 bash "${ROOT}/scripts/g6-buildx-cache.sh" relay-business-amd64 true business-relay \
   --builder "${BUILDX_BUILDER}" --platform linux/amd64 --provenance=false --load \
@@ -166,6 +166,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${mani
   --migration-dir "${ROOT}/control-plane/migrations" --platform linux/amd64 \
   "${args[@]}" --image "postgres=${OCSERV_POSTGRES_IMAGE}" --image "otel=${OCSERV_OTEL_IMAGE}"
 (cd "${work}/bundle" && sha256sum controller-release-amd64.json >SHA256SUMS)
+cp "${work}/bundle/SHA256SUMS" "${manifest}.sha256"
 openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${work}/bundle/SHA256SUMS" -out "${work}/bundle/SHA256SUMS.sig"
 cp "${manifest}" "${ARTIFACT_DIR}/candidate-manifest.json"
 stage=controller_install
