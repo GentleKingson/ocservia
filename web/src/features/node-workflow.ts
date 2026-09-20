@@ -1,6 +1,6 @@
 import type { ArtifactGrant } from "@ocservia/api-client";
 import { shallowReactive } from "vue";
-import { workspaceContext, type WorkspaceContext } from "../api/workspace";
+import type { WorkspaceContext } from "../api/workspace";
 
 export interface NodeWorkflowContext {
   nodeId: string;
@@ -11,6 +11,7 @@ export interface NodeWorkflowContext {
 export function createNodeWorkflow(
   nodeId: () => string | undefined,
   isOpen: () => boolean,
+  workspaceContext: () => WorkspaceContext,
 ) {
   let current: NodeWorkflowContext | undefined;
   let controller: AbortController | undefined;
