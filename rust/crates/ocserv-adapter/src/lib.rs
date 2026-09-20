@@ -4238,7 +4238,7 @@ fn required_value(values: &HashMap<&str, &str>, key: &str) -> Result<String, Ada
     Ok((*value).to_owned())
 }
 
-/// Parses supported Ocserv 1.2 and 1.3 version output.
+/// Parses supported Ocserv version output.
 ///
 /// # Errors
 ///
