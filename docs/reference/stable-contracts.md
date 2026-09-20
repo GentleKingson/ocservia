@@ -84,6 +84,12 @@ successful reload. Before freezing a production candidate, either run the
 applicable configuration/certificate recovery workflows against these exact
 release pairs or explicitly review their exclusion from the rolling window.
 The existing same-source I15/I16/I17 checks do not fill that release-level gap.
+The private CA requires a test-only systemd drop-in. For v0.6.0, which shipped
+a direct two-Relay ExecStart instead of the later launcher, it also omits the
+unused second Relay argument. Published binaries and installed units remain
+unchanged; this does not certify v0.6.0's original launcher for single-Relay
+production. The disposable image masks systemd-binfmt rather than changing the
+host's native-admission policy; admission is checked again after the chain.
 
 ### Execute one application cell
 
@@ -94,6 +100,9 @@ optional application jobs build once per native architecture and run both
 published baselines, retaining all four cells in that run/attempt. They do not
 publish images, run on ordinary PRs or replace the native upgrade jobs. Dispatch
 the other native-upgrade baseline separately on the same candidate.
+For application-fixture iteration, `session_only=true` runs those four cells
+without rebuilding native upgrade products. Its result cannot satisfy the
+separate native-upgrade requirements; the default remains native upgrades.
 
 On BuildServer, `fetch` and `verify` perform only bounded artifact download and
 checksum/signature verification, without extraction, installation or execution:

@@ -95,4 +95,5 @@ export SINGLE_AGENT_KEY_SHA256
 export SINGLE_EXPECTED_AGENT_VERSION="${BASELINE_RELEASE#v}"
 # Install only inside the existing dedicated, disposable systemd node fixture.
 bash "${ROOT}/scripts/single-relay-integration.sh"
+bash "${ROOT}/scripts/release-upgrade-native.sh" "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-after.json"
 jq -e --arg version "${SINGLE_EXPECTED_AGENT_VERSION}" '.agent_version == $version' "${ARTIFACT_DIR}/final-node-read.json" >/dev/null

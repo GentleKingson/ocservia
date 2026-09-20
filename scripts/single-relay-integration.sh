@@ -122,12 +122,22 @@ docker exec -e "ARCHIVE=/payload/$archive_name" -e "KEY_SHA=$SINGLE_AGENT_KEY_SH
   install -o root -g ocserv-agent -m 0640 /test-secrets/relay-ca.pem /etc/ocservia-agent/test-relay-ca.pem
   # The runtime uses WebPKI roots, not the OS trust store. This test-only
   # copy adds the existing explicit CA option; it never disables TLS checks.
-  sed '\''s|exec /usr/libexec/ocservia/ocservia-agent "\$@"|exec /usr/libexec/ocservia/ocservia-agent "$@" --relay-ca-file /etc/ocservia-agent/test-relay-ca.pem|'\'' \
-    /usr/libexec/ocservia/ocservia-agent-relays >/usr/libexec/ocservia/test-agent-relays
-  chmod 0755 /usr/libexec/ocservia/test-agent-relays
   install -d /etc/systemd/system/ocservia-agent.service.d
-  printf "[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/test-agent-relays\n" \
-    >/etc/systemd/system/ocservia-agent.service.d/99-test-ca.conf
+  if [[ -x /usr/libexec/ocservia/ocservia-agent-relays ]]; then
+    sed '\''s|exec /usr/libexec/ocservia/ocservia-agent "\$@"|exec /usr/libexec/ocservia/ocservia-agent "$@" --relay-ca-file /etc/ocservia-agent/test-relay-ca.pem|'\'' \
+      /usr/libexec/ocservia/ocservia-agent-relays >/usr/libexec/ocservia/test-agent-relays
+    chmod 0755 /usr/libexec/ocservia/test-agent-relays
+    printf "[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/test-agent-relays\n" \
+      >/etc/systemd/system/ocservia-agent.service.d/99-test-ca.conf
+  else
+    # v0.6.0 shipped a direct ExecStart, not the later launcher. Preserve
+    # that installed unit; a test-only drop-in selects one Relay and its CA.
+    [[ "$(/usr/libexec/ocservia/ocservia-agent --version)" == "ocservia-agent 0.6.0" ]]
+    sed -e '\''s/ --relay-url \$RELAY_URL_B//'\'' \
+      -e '\''/^ExecStart=\/usr\/libexec\/ocservia\/ocservia-agent / s|$| --relay-ca-file /etc/ocservia-agent/test-relay-ca.pem|'\'' \
+      /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
+      >/etc/systemd/system/ocservia-agent.service.d/99-test-ca.conf
+  fi
   openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ocserv.single.test \
     -keyout /etc/ocserv/test.key -out /etc/ocserv/test.crt >/dev/null 2>&1
   chmod 0600 /etc/ocserv/test.key

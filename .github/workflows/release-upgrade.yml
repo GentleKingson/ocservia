@@ -21,6 +21,10 @@ on:
         description: Also run published v0.6.0 and v0.6.1 nodes against this candidate on both native architectures
         type: boolean
         default: false
+      session_only:
+        description: Run only the four application cells, without native package or Controller upgrades
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -65,6 +69,7 @@ jobs:
 
   agent-upgrade:
     name: Agent Upgrade (${{ matrix.arch }})
+    if: ${{ !inputs.session_only }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -115,6 +120,7 @@ jobs:
 
   controller-upgrade:
     name: Controller Upgrade (${{ matrix.arch }})
+    if: ${{ !inputs.session_only }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -157,7 +163,7 @@ jobs:
 
   session-compatibility:
     name: Published Node Compatibility (${{ matrix.arch }})
-    if: inputs.session_compatibility
+    if: inputs.session_compatibility || inputs.session_only
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -222,7 +228,7 @@ jobs:
 
   upgrade-result:
     name: Native Upgrade Result
-    if: always()
+    if: ${{ always() && !inputs.session_only }}
     needs: [prepare, agent-upgrade, controller-upgrade]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
