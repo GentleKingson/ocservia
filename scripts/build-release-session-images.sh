@@ -8,6 +8,9 @@ mkdir -m 0700 -- "${SESSION_EVIDENCE}"
 printf 'SESSION_EVIDENCE=%s\n' "${SESSION_EVIDENCE}" >>"${GITHUB_ENV}"
 bash scripts/release-upgrade-native.sh "${PACKAGE_ARCH}" >"${SESSION_EVIDENCE}/native.json"
 exec > >(tee "${SESSION_EVIDENCE}/build.log") 2>&1
+# The existing fixture uses this image before Compose starts, with --pull=never.
+docker pull --platform "linux/${PACKAGE_ARCH}" postgres:17.10-bookworm
+docker image inspect postgres:17.10-bookworm >"${SESSION_EVIDENCE}/postgres.image.json"
 driver_opts=()
 if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
   driver_opts+=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")

@@ -87,6 +87,7 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+exec > >(tee "${ARTIFACT_DIR}/unit.log") 2>&1
 export SINGLE_AGENT_ARCHIVE="${RELEASE_ASSET_DIR}/${archive}"
 export SINGLE_AGENT_PUBLIC_KEY="${RELEASE_ASSET_DIR}/release-signing.pub.pem"
 SINGLE_AGENT_KEY_SHA256="$(jq -er '.key_der_sha256' <<<"${baseline}")"
