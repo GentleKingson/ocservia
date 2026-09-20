@@ -1,12 +1,15 @@
 # Candidate 1.0 contracts and compatibility
 
-Status: **proposed, not a declaration of 1.0 support**. This inventory freezes
-the review surface, not an unreleased version or an arbitrary `1.x` combination.
+Status: **proposed 1.0 inventory, not a declaration of 1.0 support**. This
+inventory freezes the review surface, not an unreleased version or an arbitrary `1.x` combination.
 An unchanged ALPN, SemVer major, generated schema, or green source test is not
 proof that two release artifacts interoperate. Existing production support is
 unchanged; additions and withdrawals require explicit review before candidate
 freeze. Exact candidate SHA, artifact identities and acceptance results belong
 in the delivery report, not in this maintenance document.
+The [reviewed rolling-window exclusions](#reviewed-rolling-window-exclusions)
+are adopted for T05, rather than pending decisions or runtime fixes. They do
+not declare an unreleased production candidate accepted.
 
 ## Contract owners
 
@@ -71,7 +74,9 @@ For **each** selected baseline and **each** native `amd64` / `arm64` architectur
 
 | Combination | Executable entry | Acceptance boundary |
 | --- | --- | --- |
-| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Four application cells total. The systemd chain uses two real Relays for v0.6.0 and one for v0.6.1: enrollment, grant/fence/receipt, telemetry, approved reload, replay and all-Relay recovery. The real-process PKI chain uses two TLS Relays: config revision/rejection, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. No historical rebuild. Must pass on actual artifacts before claiming the covered workflows. |
+| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Four application cells total. Required scope: enrollment, grant/fence/receipt, telemetry and approved reload; config revision/rejection and plan replay, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. The systemd chain uses two real Relays for v0.6.0 and one for v0.6.1; the real-process PKI chain uses two TLS Relays. No historical rebuild. Covered workflows require actual-artifact evidence; the two exclusions below are not positive acceptance. |
+| v0.6.0 node, either architecture: uncertain non-idempotent mutation across all-Relay outage / owner change | Same systemd chain, retaining its strict automatic-recovery assertion | **Excluded: guaranteed automatic mutation recovery.** Query-only `Unknown` requires manual reconciliation. Preserve evidence, reconcile before resuming writes, then upgrade the verified matched node package under the path below. A green run or a newer version alone does not restore this promise. |
+| v0.6.0 / v0.6.1 node, either architecture: positive ConfigPlan apply with candidate Controller | Same PKI chain checks rejection only | **Excluded: successful plan/apply/rollback.** Do not use positive configuration apply in this rolling window. Upgrade to a verified matched node package with a reviewed complete configuration contract and positive plan/apply/recovery acceptance before enabling it; no such qualifying release is established by this matrix. |
 | Published native package -> newer candidate package | Existing `release-upgrade.yml`, `baseline_release` set explicitly | DEB Ubuntu and RPM Rocky 9 on both architectures, unchanged rejection/state/retry/rollback requirements. |
 | Published Controller -> newer candidate Controller, PostgreSQL 17 | Same native workflow | Authenticated data/session retention, migration, same-target failure recovery and guarded rollback/base restore; not a live mixed-version Controller cluster. |
 | Candidate node -> historical Controller, or independently mixed Agent/privd | Not admitted to this candidate matrix | Upgrade Controller first; restore only a verified matched snapshot. No downgrade/security-equivalence promise. |
@@ -85,7 +90,18 @@ fixture and real OpenSSL/ocserv processes, not a production CA/HSM. Its fixed
 systemd chain covers service-manager lifecycle. The default database E2E route
 still uses its existing PostgreSQL 18 image; this does not expand production support.
 
-**Positive typed configuration apply is not supported by these release cells.**
+### Reviewed rolling-window exclusions
+
+**Decision: adopted for the finite T05 rolling window.** Ordinary session,
+approved reload, configuration-plan replay and certificate/P12 workflows remain
+in scope. The two explicit exclusions in the matrix apply on both architectures; an observed
+failure on amd64 does not establish an arm64 exemption. This narrows the
+candidate compatibility promise, not the strict diagnostic tests, root
+permissions or any already-supported deployment. The alternative of adding
+new configuration semantics or automatic mutation reconciliation is deferred
+to a separately reviewed matched-node contract and its runtime acceptance.
+
+**Positive typed configuration apply is excluded for v0.6.0 and v0.6.1 nodes.**
 The v1 allowlist cannot express a complete real ocserv configuration (`device`
 is absent), planning parses the candidate as a complete file, and apply refuses
 unresolved TLS SecretRefs. Do not bypass root validation or substitute a fake
@@ -93,10 +109,14 @@ parser. The matrix proves stale revision refusal, exact plan replay, real parser
 rejection, denied apply and unchanged configuration/revision, not successful
 apply or rollback. Historical adapter errors have no trusted root receipt;
 the Agent retains `Unknown` with `privd_receipt_missing_or_malformed`, never
-promoting it to success or a trusted final failure. Resolving this gap requires a reviewed matched-node contract
-and release, followed by positive plan/apply/recovery acceptance. Until then,
-exclude positive configuration apply from the proposed rolling window explicitly;
-this proposed limitation is not a silent withdrawal of any existing promise.
+promoting it to success or a trusted final failure. Upgrade Controller/transportd
+first, then the signed matched Agent/privd/upgrader package using the existing
+[Agent lifecycle](../operations/agent-lifecycle.md) path. Enable positive apply
+only after that exact combination has a reviewed complete configuration/TLS
+SecretRef contract and passing positive plan/apply/recovery evidence. Neither
+matching binary versions, negotiated capability names nor package-upgrade
+success proves this. Until then, leave this workflow unused; this document
+does not add or claim a version-based API/UI gate.
 The existing same-source I15/I16/I17 checks do not fill that release-level gap.
 
 Pending non-idempotent mutations have another explicit boundary: after an
@@ -107,8 +127,33 @@ after an all-Relay outage. Do not resend an uncertain mutation, clear journals
 or extend the deadline to call this a pass. The strict reload-recovery test
 retains its failure; the independent PKI phase still runs and records its own
 exit code. A later green run does not erase the earlier demonstrated boundary.
-Before admitting that recovery promise, review the manual-reconciliation path
-and matching durable evidence, or explicitly exclude it from the proposed window.
+**Guaranteed automatic recovery in that v0.6.0 scenario is excluded.** Follow
+[incident recovery](../operations/incident-recovery.md#transport-and-credentials):
+stop new privileged writes, preserve the exact command ID, semantic hash,
+owner/fence history, Agent journal and root effect/receipt evidence, and
+restore the configured Relays without resetting endpoint identities. Compare
+the operation result with trusted durable evidence for that exact command;
+an online node or currently healthy ocserv is not proof of the earlier effect.
+If evidence remains missing or conflicting, keep the operation `Unknown` and
+the affected writes paused for operator reconciliation. Do not invent a
+terminal result, edit durable state or issue a fresh mutation as a retry.
+Upgrade through the verified matched-package lifecycle only after resolving
+the outstanding uncertainty; upgrading is not itself reconciliation. A future
+automatic-recovery promise needs exact-artifact fault/recovery evidence and
+explicit contract review, not just a numerically newer node package.
+
+The runner still exercises the broader all-Relay recovery scenario and
+returns failure when its automatic-success assertion fails. Preserve that
+cell's status, both phase exit codes and the original run/attempt unchanged.
+For scoped contract acceptance, identify the exact excluded failure and
+verify the required workflow checkpoints independently from the retained logs
+and results. Do not relabel a failed aggregate as PASS or waive any other
+failure. A missing required checkpoint still blocks the covered promise.
+If the chain stops at the excluded uncertain-mutation failure, its later
+replay and cold-start checkpoints are not run, not PASS; independent PKI
+restart evidence does not establish those systemd recovery paths.
+
+### Fixture boundaries
 
 The private CA requires a test-only systemd drop-in, derived from v0.6.0's
 direct ExecStart or v0.6.1's launcher. Published binaries and installed units
@@ -216,13 +261,17 @@ do not reset journals to make an upgrade pass.
    and [matched Agent rollback](../how-to/agent-rollback.md). Changed descriptors
    or incompatible schema require forward recovery or isolated backend restore,
    not down-migration or forced state edits. Reconcile Unknown before resuming.
-4. Before production-candidate freeze: resolve all four application cells and
-   both native-upgrade runs on the exact candidate; resolve or explicitly review
-   the positive config-apply exclusion, certificate/P12 rolling window, database
-   patch set, actual ocserv/distro/crypto versions and recovery
-   evidence. T03 transport probes and T04 native ocserv 1.5.0 tests remain
-   evidence for their original artifacts, not this candidate's release gate.
+4. Before production-candidate freeze: collect all four application cells and
+   both native-upgrade baselines on the exact candidate, review required
+   checkpoints against the adopted exclusions, and accept only the covered
+   workflows. The two excluded promises do not require positive PASS to close
+   T05; they remain unavailable until their stated reevaluation conditions are
+   met. Review the database patch set, actual ocserv/distro/crypto versions and
+   recovery evidence separately. T03 transport probes and T04 native ocserv
+   1.5.0 tests remain evidence for their original artifacts, not this candidate's release gate.
 
-These are candidate decisions for review. Unrun, failed, skipped and
-not-applicable checks must stay distinct. A pending cell blocks that promise,
-not preparation of the next task or unrelated already-authorized work.
+T05's two compatibility decisions are settled within this finite scope, not
+waivers for final-candidate acceptance. Unrun, failed, skipped and excluded
+checks must stay distinct. A pending required check blocks its promise, not
+preparation of the next task. Documentation-only convergence does not transfer
+earlier runtime results to the documentation commit or a later freeze candidate.
