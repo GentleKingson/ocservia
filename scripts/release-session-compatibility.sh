@@ -80,6 +80,7 @@ finish() {
     --argjson code "${code}" --argjson images "${images}" --argjson native "${native}" \
     '. + {candidate_sha:$sha,started_at:$started,finished_at:$finished,run_id:$run,
       ci_run_id:$ci_run,ci_run_attempt:$attempt,images:$images,native:$native,
+      topology:{hosts:1,relays:(if .baseline_tag == "v0.6.0" then 2 else 1 end)},
       scope:"published-node-session-reload-recovery",exit_code:$code,
       status:(if $code == 0 then "pass" else "fail" end)}' <<<"${identity}" >"${ARTIFACT_DIR}/compatibility-result.json"
   exit "${code}"
@@ -93,6 +94,8 @@ export SINGLE_AGENT_PUBLIC_KEY="${RELEASE_ASSET_DIR}/release-signing.pub.pem"
 SINGLE_AGENT_KEY_SHA256="$(jq -er '.key_der_sha256' <<<"${baseline}")"
 export SINGLE_AGENT_KEY_SHA256
 export SINGLE_EXPECTED_AGENT_VERSION="${BASELINE_RELEASE#v}"
+export SINGLE_LEGACY_SECOND_RELAY=false
+[[ "${BASELINE_RELEASE}" != v0.6.0 ]] || export SINGLE_LEGACY_SECOND_RELAY=true
 # Install only inside the existing dedicated, disposable systemd node fixture.
 bash "${ROOT}/scripts/single-relay-integration.sh"
 bash "${ROOT}/scripts/release-upgrade-native.sh" "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-after.json"

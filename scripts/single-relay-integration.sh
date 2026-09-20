@@ -19,16 +19,33 @@ NODE_NETWORK="ocservia-single-node-$RUN_ID"
 GATEWAY="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 RELAY_PORT=23443
 RELAY_URL="https://relay-a:$RELAY_PORT"
+RELAY_URL_B=""
+RELAYS=(relay)
+relay_args=(--relay-url "$RELAY_URL")
+relay_endpoints=("relay-a:$RELAY_PORT")
+node_hosts=(--add-host "relay-a:$GATEWAY")
+transport_hosts="[\"relay-a:$GATEWAY\"]"
+extra_compose=()
+chain_name=Single-relay
+if [[ "${SINGLE_LEGACY_SECOND_RELAY:-false}" == true ]]; then
+  RELAY_URL_B=https://relay-b:23444
+  RELAYS+=(legacy-relay)
+  relay_args+=(--relay-url "$RELAY_URL_B")
+  relay_endpoints+=(relay-b:23444)
+  node_hosts+=(--add-host "relay-b:$GATEWAY")
+  transport_hosts="[\"relay-a:$GATEWAY\",\"relay-b:$GATEWAY\"]"
+  chain_name='Legacy two-Relay'
+fi
 g6rd_compose() {
   timeout --signal=TERM --kill-after=5s "${G6RD_COMPOSE_TIMEOUT_SECONDS:-120}s" docker compose -p "$COMPOSE_PROJECT" \
-    -f "$COMPOSE_FILE" -f "$G6RD_RELEASE_COMPOSE" -f "$OVERRIDE" "$@"
+    -f "$COMPOSE_FILE" -f "$G6RD_RELEASE_COMPOSE" -f "$OVERRIDE" "${extra_compose[@]}" "$@"
 }
 finish() {
   local status=$?
   trap - EXIT
   set +e
   printf '%s\n' "$status" >"$ARTIFACT_DIR/exit-status"
-  for role in transportd worker api relay; do
+  for role in transportd worker api "${RELAYS[@]}"; do
     g6rd_compose logs --no-color "$role" >"$ARTIFACT_DIR/$role.log" 2>&1
   done
   g6rd_psql -c 'SELECT id,attempts,last_error FROM outbox_events; SELECT id,state FROM commands;' \
@@ -61,9 +78,9 @@ services:
     entrypoint: [/usr/local/libexec/ocservia-transportd-relays]
     environment:
       OCSERV_RELAY_URL_A: "$RELAY_URL"
-      OCSERV_RELAY_URL_B: ""
+      OCSERV_RELAY_URL_B: "$RELAY_URL_B"
     networks: !override [application, observability, relay-egress]
-    extra_hosts: !override ["relay-a:$GATEWAY"]
+    extra_hosts: !override $transport_hosts
     command: !override
       - --socket
       - /run/ocserv-platform/transportd.sock
@@ -93,7 +110,25 @@ networks:
   relay-egress: {}
   relay-boundary: {}
 EOF
+if [[ -n "$RELAY_URL_B" ]]; then
+  # Preserve v0.6.0's two-Relay requirement with two real authenticated
+  # services, not duplicate URLs. Both still share this one disposable host.
+  cat >"$G6RD_WORK/legacy-relay.yaml" <<EOF
+services:
+  legacy-relay:
+    extends:
+      file: "$COMPOSE_FILE"
+      service: relay
+    image: "$G6RD_RELAY_IMAGE"
+    ports: !override ["$GATEWAY:23444:3443"]
+    networks: !override [relay-boundary]
+EOF
+  extra_compose=(-f "$G6RD_WORK/legacy-relay.yaml")
+fi
 phase_primary_up
+if [[ -n "$RELAY_URL_B" ]]; then
+  g6rd_compose up -d --no-build --no-deps legacy-relay
+fi
 for role in requester approver; do
   identity="$(g6rd_secret "$role-identity-id")"
   binding="$(g6rd_uuidv7)"
@@ -104,7 +139,7 @@ g6rd_compose config --format json | jq '{transportd:.services.transportd,network
   >"$ARTIFACT_DIR/transport-topology.json"
 docker network create "$NODE_NETWORK" >/dev/null
 docker run -d --name "$NODE_CONTAINER" --privileged --cgroupns private \
-  --network "$NODE_NETWORK" --add-host "relay-a:$GATEWAY" \
+  --network "$NODE_NETWORK" "${node_hosts[@]}" \
   --tmpfs /run --tmpfs /run/lock \
   -v "$ROOT:/source:ro" -v "$G6RD_SECRETS:/test-secrets:ro" \
   -v "$(dirname "$SINGLE_AGENT_ARCHIVE"):/payload:ro" \
@@ -131,10 +166,9 @@ docker exec -e "ARCHIVE=/payload/$archive_name" -e "KEY_SHA=$SINGLE_AGENT_KEY_SH
       >/etc/systemd/system/ocservia-agent.service.d/99-test-ca.conf
   else
     # v0.6.0 shipped a direct ExecStart, not the later launcher. Preserve
-    # that installed unit; a test-only drop-in selects one Relay and its CA.
+    # that installed unit; a test-only drop-in adds the private CA.
     [[ "$(/usr/libexec/ocservia/ocservia-agent --version)" == "ocservia-agent 0.6.0" ]]
-    sed -e '\''s/ --relay-url \$RELAY_URL_B//'\'' \
-      -e '\''/^ExecStart=\/usr\/libexec\/ocservia\/ocservia-agent / s|$| --relay-ca-file /etc/ocservia-agent/test-relay-ca.pem|'\'' \
+    sed '\''/^ExecStart=\/usr\/libexec\/ocservia\/ocservia-agent / s|$| --relay-ca-file /etc/ocservia-agent/test-relay-ca.pem|'\'' \
       /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf \
       >/etc/systemd/system/ocservia-agent.service.d/99-test-ca.conf
   fi
@@ -167,7 +201,7 @@ g6rd_mint_enrollment_token single-relay-node "$endpoint" >"$G6RD_SECRETS/enrollm
 docker exec "$NODE_CONTAINER" install -o root -g ocserv-agent -m 0640 \
   /test-secrets/enrollment-token /etc/ocservia-agent/enrollment-token
 docker exec -u ocserv-agent "$NODE_CONTAINER" /usr/libexec/ocservia/ocservia-agent \
-  --controller "$OCSERV_CONTROLLER_ENDPOINT_ID" --relay-mode custom --relay-url "$RELAY_URL" \
+  --controller "$OCSERV_CONTROLLER_ENDPOINT_ID" --relay-mode custom "${relay_args[@]}" \
   --relay-token-file /etc/ocservia-agent/relay-access-token \
   --relay-ca-file /etc/ocservia-agent/test-relay-ca.pem \
   --enrollment-token-file /etc/ocservia-agent/enrollment-token --enrollment-environment development \
@@ -190,7 +224,7 @@ P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=$(g6rd_secret seal-p12-sha256)
 EOF
 docker exec -i "$NODE_CONTAINER" bash -euo pipefail -c 'cat >/etc/ocservia-agent/relays.env; chown root:ocserv-agent /etc/ocservia-agent/relays.env; chmod 0640 /etc/ocservia-agent/relays.env' <<EOF
 RELAY_URL_A=$RELAY_URL
-RELAY_URL_B=
+RELAY_URL_B=$RELAY_URL_B
 EOF
 docker exec "$NODE_CONTAINER" systemctl daemon-reload
 docker exec "$NODE_CONTAINER" systemctl start ocserv ocservia-privd
@@ -226,18 +260,18 @@ docker exec "$(g6rd_compose ps -q transportd)" sh -c '
   done' >"$ARTIFACT_DIR/transport-argv.nul"
 docker exec "$NODE_CONTAINER" sh -c 'cat /proc/$(systemctl show ocservia-agent -p MainPID --value)/cmdline' \
   >"$ARTIFACT_DIR/agent-argv.nul"
-python3 - "$ARTIFACT_DIR" "$RELAY_URL" <<'PY'
+python3 - "$ARTIFACT_DIR" "$RELAY_URL" "$RELAY_URL_B" <<'PY'
 import json
 from pathlib import Path
 import sys
 for role in ('transport', 'agent'):
     argv = (Path(sys.argv[1]) / f'{role}-argv.nul').read_bytes().rstrip(b'\0').decode().split('\0')
-    assert argv.count('--relay-url') == 1
-    assert argv[argv.index('--relay-url') + 1] == sys.argv[2]
+    expected = [url for url in sys.argv[2:] if url]
+    assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == expected
     assert argv[argv.index('--relay-mode') + 1] == 'custom'
     (Path(sys.argv[1]) / f'{role}-argv.json').write_text(json.dumps(argv, indent=2) + '\n')
 PY
-echo 'Single-relay enrollment, independent approval and real Agent session passed'
+echo "$chain_name enrollment, independent approval and real Agent session passed"
 
 approve_reload() {
   local approval hash
@@ -280,13 +314,15 @@ agent_started="$(docker exec "$NODE_CONTAINER" systemctl show ocservia-agent -p 
 identity_before="$(docker exec "$NODE_CONTAINER" sha256sum /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint)"
 approval="$(approve_reload)"
 revision="$(g6rd_node_revision "$node")"
-g6rd_compose stop relay
+g6rd_compose stop "${RELAYS[@]}"
 docker exec "$NODE_CONTAINER" python3 -c 'import socket,sys
-try:
-    socket.create_connection(("relay-a",23443),timeout=5)
-except OSError:
-    sys.exit(0)
-sys.exit("Relay remained reachable during the fault")'
+for endpoint in sys.argv[1:]:
+    host, port = endpoint.split(":")
+    try:
+        socket.create_connection((host,int(port)),timeout=5)
+    except OSError:
+        continue
+    sys.exit("Relay remained reachable during the fault")' "${relay_endpoints[@]}"
 key="single-pending-reload-$RUN_ID"
 g6rd_api_session_curl requester "/api/v1/nodes/$node/service:reload" --fail-with-body -X POST \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $key" \
@@ -299,7 +335,7 @@ sleep 10
 g6rd_api_session_curl requester "/api/v1/operations/$operation" >"$ARTIFACT_DIR/during-outage.json"
 jq -e '.state != "succeeded"' "$ARTIFACT_DIR/during-outage.json" >/dev/null
 restore_start=$SECONDS
-g6rd_compose start relay
+g6rd_compose start "${RELAYS[@]}"
 g6rd_wait_until_deadline "$RECOVERY_SECONDS" 2 'pending ocserv command after Relay recovery' operation_succeeded
 printf '%s\n' "$((SECONDS - restore_start))" >"$ARTIFACT_DIR/recovery-seconds"
 g6rd_probe_node_connection relay "$node" >"$ARTIFACT_DIR/recovered-session.json"
@@ -322,10 +358,10 @@ sleep 3
 docker exec "$NODE_CONTAINER" journalctl --no-pager -u ocserv >"$ARTIFACT_DIR/ocserv-final.log"
 [[ "$(grep -c 'Reloaded ocserv.service' "$ARTIFACT_DIR/ocserv-final.log")" == 2 ]]
 [[ "$(grep -c 'main: reloading configuration' "$ARTIFACT_DIR/ocserv-final.log")" == 2 ]]
-echo 'Single-relay pending real command recovery and stable identities passed'
+echo "$chain_name pending real command recovery and stable identities passed"
 
 # Cold start both communication processes while their sole Relay is absent.
-g6rd_compose stop relay transportd
+g6rd_compose stop "${RELAYS[@]}" transportd
 docker exec "$NODE_CONTAINER" systemctl stop ocservia-agent
 g6rd_compose start transportd
 docker exec "$NODE_CONTAINER" systemctl start ocservia-agent
@@ -338,7 +374,7 @@ fi
 transport_started="$(docker inspect --format '{{.State.StartedAt}}' "$transport")"
 agent_started="$(docker exec "$NODE_CONTAINER" systemctl show ocservia-agent -p ExecMainStartTimestampMonotonic --value)"
 restore_start=$SECONDS
-g6rd_compose start relay
+g6rd_compose start "${RELAYS[@]}"
 G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 g6rd_wait_until_deadline "$RECOVERY_SECONDS" 2 'cold-start Relay recovery' \
   g6rd_probe_node_connection relay "$node"
 printf '%s\n' "$((SECONDS - restore_start))" >"$ARTIFACT_DIR/cold-recovery-seconds"
@@ -351,8 +387,8 @@ jq -e '.trust_status == "active" and .connection_state == "online" and .freshnes
   "$ARTIFACT_DIR/final-node-read.json" >/dev/null
 printf '%s\n' "$identity_before" >"$ARTIFACT_DIR/identity-hashes.txt"
 docker exec "$NODE_CONTAINER" journalctl --no-pager -u ocservia-agent >"$ARTIFACT_DIR/final-agent.log"
-if grep -Fq 'redialing over the healthy standby' "$ARTIFACT_DIR/final-agent.log"; then
+if [[ -z "$RELAY_URL_B" ]] && grep -Fq 'redialing over the healthy standby' "$ARTIFACT_DIR/final-agent.log"; then
   echo 'Single Relay falsely reported an alternate-Relay failover' >&2
   exit 1
 fi
-echo 'Single-relay cold start and automatic recovery passed without process restart'
+echo "$chain_name cold start and automatic recovery passed without process restart"

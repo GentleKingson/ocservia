@@ -71,7 +71,7 @@ For **each** selected baseline and **each** native `amd64` / `arm64` architectur
 
 | Combination | Executable entry | Acceptance boundary |
 | --- | --- | --- |
-| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relay | `scripts/release-session-compatibility.sh run` | Four application cells total. Real enrollment, grant/fence/receipt, telemetry, approved reload, replay and Relay recovery. Candidate-only probe/setup; no historical rebuild. Must pass on actual artifacts before claiming this pair. |
+| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Four application cells total. v0.6.0 uses two real Relays; v0.6.1 uses one. Real enrollment, grant/fence/receipt, telemetry, approved reload, replay and recovery after all configured Relays stop. Candidate-only probe/setup; no historical rebuild. Must pass on actual artifacts before claiming this pair. |
 | Published native package -> newer candidate package | Existing `release-upgrade.yml`, `baseline_release` set explicitly | DEB Ubuntu and RPM Rocky 9 on both architectures, unchanged rejection/state/retry/rollback requirements. |
 | Published Controller -> newer candidate Controller, PostgreSQL 17 | Same native workflow | Authenticated data/session retention, migration, same-target failure recovery and guarded rollback/base restore; not a live mixed-version Controller cluster. |
 | Candidate node -> historical Controller, or independently mixed Agent/privd | Not admitted to this candidate matrix | Upgrade Controller first; restore only a verified matched snapshot. No downgrade/security-equivalence promise. |
@@ -84,11 +84,12 @@ successful reload. Before freezing a production candidate, either run the
 applicable configuration/certificate recovery workflows against these exact
 release pairs or explicitly review their exclusion from the rolling window.
 The existing same-source I15/I16/I17 checks do not fill that release-level gap.
-The private CA requires a test-only systemd drop-in. For v0.6.0, which shipped
-a direct two-Relay ExecStart instead of the later launcher, it also omits the
-unused second Relay argument. Published binaries and installed units remain
-unchanged; this does not certify v0.6.0's original launcher for single-Relay
-production. The disposable image masks systemd-binfmt rather than changing the
+The private CA requires a test-only systemd drop-in, derived from v0.6.0's
+direct ExecStart or v0.6.1's launcher. Published binaries and installed units
+remain unchanged. v0.6.0 rejects single-Relay custom mode (requires 2..8 URLs):
+retain its two-Relay deployment, or upgrade the matched node package to v0.6.1
+before selecting one Relay. Do not substitute duplicate URLs or weaken that
+admission check. The disposable image masks systemd-binfmt rather than changing the
 host's native-admission policy; admission is checked again after the chain.
 
 ### Execute one application cell
