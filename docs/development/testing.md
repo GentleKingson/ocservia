@@ -1,14 +1,16 @@
 # Validate a change
 
 Use the smallest validation that covers the code or documentation you changed.
-GitHub Actions remains authoritative for the exact pull request commit.
+Run local compilation, lint, static checks and tests through `ssh BuildServer`,
+in a task-isolated checkout. Do not substitute another host if it is unavailable;
+report the blocked checks. GitHub Actions remains authoritative for the exact
+pull request commit; local results are not CI results.
 
-## Most changes
+## Choose the validation scope
 
-```bash
-make bootstrap
-make verify
-```
+Start with the changed behavior and its direct contracts, not a full-repository
+command. Documentation checks, module iteration, cross-module validation,
+database regression, real E2E and release acceptance serve different needs.
 
 For documentation-only changes, the focused checks are:
 
@@ -18,11 +20,26 @@ make policy-check
 git diff --check
 ```
 
-## Choose a broader check when needed
+Also inspect changed links and anchors: `docs-check` is not a link checker and
+only checks tracked Markdown. New public files need separate inspection until
+they are included in the candidate index. Keep local-only material out of that
+index and preserve the user's staging state.
+
+For first-time environment preparation, use the supported bootstrap profile
+for the selected check and host, with versions from `toolchains.lock`.
+`make bootstrap` selects `all`; it is not required for every edit and is not
+supported on every architecture. See the [Linux ARM64 dependencies and supported profiles](#linux-arm64-go-validation-on-buildserver)
+before preparing BuildServer. Reuse a correctly prepared environment instead
+of reinstalling it for each change.
 
 For module-local iteration, keep using `make test-go`, `make test-rust` or
 `make test-web`. `make test` intentionally runs all three modules; it is not
 the shortest feedback loop for a one-module edit.
+
+## Choose a broader check when needed
+
+Use `make verify` for a complete baseline when the change needs cross-module
+validation, not as the default first step for ordinary edits.
 
 `make verify` runs `scripts/lint.sh common` for shared repository/protocol
 checks, then the existing Go/Rust/Web checks. Equivalent vet, Clippy and Web
@@ -43,6 +60,7 @@ command alone, when assessing its benefit.
 - Browser or runtime behavior: `make e2e`
 - Rust behavior or boundaries: `make rust-check`
 - Web behavior: `make web-check`
+- Real cross-VM behavior: follow [real E2E validation](real-e2e.md); module checks and browser fixtures are not substitutes
 - Formal release/readiness: use the G6 workflow and read [G6 readiness](g6-readiness.md)
 
 Do not run the formal G6 harness for an ordinary documentation change unless

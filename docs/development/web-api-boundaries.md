@@ -27,6 +27,35 @@ decide operation terminal states.
   listeners and timers. Moving imports adds no module-load subscriptions and
   does not unify their intentionally different terminal-state definitions.
 
+## Static import boundaries
+
+The existing [`eslint.config.ts`](../../web/eslint.config.ts) uses ESLint's core
+`no-restricted-imports` rule for handwritten `src/api/**/*.ts` and the
+configuration/certificate feature directories. These modules must not directly
+import views, `vue-router`, `shared/router` or the concrete `shared/fleet` and
+`shared/localSlice` stores. API modules must not import feature workflows either.
+Relative imports at different depths, static re-exports and type-only imports
+are subject to the same restrictions. There are currently no source aliases in
+the Web TypeScript/Vite configuration.
+
+Generated clients/types, domain APIs and Workspace remain legitimate
+dependencies. In particular, `api/transport.ts` may call `shared/session.ts`;
+this is not a ban on `shared/**`. Features may use Vue and `features/node-workflow.ts`
+while receiving context getters and tracking callbacks from their caller.
+
+Run `npm run lint` from `web` on BuildServer; its existing prelint builds the
+generated client. For a configuration-only edit, also run
+`npx --no-install prettier --check eslint.config.ts`. Other changes should select
+checks from [Validate a change](testing.md), rather than running every command
+below by default.
+
+This is a static import/re-export check, not dynamic-import or constructed-string
+analysis, a transitive dependency graph, runtime state-ownership enforcement or
+a complete security proof. Generated sources retain their existing lint ignore;
+tests/fixtures outside these source directories and other features receive no
+new restriction. Vue SFC parsing is unchanged, so this does not claim equivalent
+coverage for every `.vue` file.
+
 ## Export And Caller Inventory
 
 Paths in this table are relative to `web/src`. It records every former
