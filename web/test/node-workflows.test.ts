@@ -70,7 +70,7 @@ import {
   readNodeReceipt,
   rememberNodeReceipt,
   type NodeWorkflowContext,
-} from "../src/views/node-workflow";
+} from "../src/features/node-workflow";
 
 const renderer = createRenderer<object, object>({
   createElement: () => ({}),

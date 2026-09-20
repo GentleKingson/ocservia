@@ -20,34 +20,15 @@ import {
   UserX,
   Users,
 } from "@lucide/vue";
-import type {
-  ArtifactGrant,
-  Certificate,
-  ConfigPlan,
-  NodeObservedState,
-  Operation,
-} from "@ocservia/api-client";
+import type { NodeObservedState } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { formatTimestamp } from "../shared/timestamp";
 
-import {
-  applyConfigPlan,
-  createConfigPlan,
-  getConfigPlan,
-} from "../api/configuration";
-import {
-  createCertificate,
-  createCertificateP12,
-  downloadCertificateArtifact,
-  getCertificate,
-  issueCertificate,
-  listNodeCertificates,
-  revokeCertificate,
-} from "../api/certificates";
-import { getOperation } from "../api/operations";
-import { workspaceContext, type WorkspaceContext } from "../api/workspace";
+import { workspaceContext } from "../api/workspace";
+import { useNodeConfiguration } from "../features/configuration/useNodeConfiguration";
+import { useNodeCertificates } from "../features/certificates/useNodeCertificates";
 import {
   loadUserPolicy,
   policyToForm,
@@ -60,18 +41,9 @@ import { useFleetStore } from "../shared/fleet";
 import { operationStatusKey } from "../shared/operation-status";
 import { workspaceChangedEvent } from "../api/workspace";
 import {
-  beginNodeMutation,
-  consumeCertificateGrant,
   createNodeWorkflow,
-  finishNodeMutation,
-  readCertificateGrant,
-  readNodeReceipt,
-  rememberCertificateGrant,
-  rememberNodeReceipt,
-  waitForNodeMutation,
-  waitForNodePoll,
   type NodeWorkflowContext,
-} from "./node-workflow";
+} from "../features/node-workflow";
 
 const route = useRoute();
 const fleet = useFleetStore();
@@ -110,56 +82,59 @@ const policyForm = ref<UserPolicyForm>(policyToForm());
 const policyReason = ref("");
 const policyLoading = ref(false);
 const policyError = ref("");
-const configDialog = ref(false);
-const configPlanSource = ref<{
-  nodeId: string;
-  revision: number;
-  workspace: WorkspaceContext;
-}>();
-const currentConfigRevision = computed(() => {
-  if (detailLoading.value || fleet.selecting || fleet.selectionError)
-    return undefined;
-  const revision = currentNode.value?.configRevision;
-  return typeof revision === "number" &&
-    Number.isSafeInteger(revision) &&
-    revision >= 0
-    ? revision
-    : undefined;
+const readReady = computed(
+  () => !detailLoading.value && !fleet.selecting && !fleet.selectionError,
+);
+const {
+  configDialog,
+  currentConfigRevision,
+  canSubmitConfigPlan,
+  configPlan,
+  configOperation,
+  configError,
+  configLoading,
+  configPort,
+  configMaxClients,
+  configRoute,
+  configCertificateSecretRefId,
+  configPrivateKeySecretRefId,
+  configReason,
+  configApplyApproval,
+  configApplyReason,
+  openConfigPlan,
+  submitConfigPlan,
+  submitConfigApply,
+} = useNodeConfiguration({
+  currentNode,
+  readReady,
+  workspaceContext,
+  trackOperation: (id) => fleet.trackOperation(id),
+  t,
 });
-const canSubmitConfigPlan = computed(() => {
-  const source = configPlanSource.value;
-  const workspace = workspaceContext();
-  return Boolean(
-    configDialog.value &&
-    source &&
-    currentConfigRevision.value !== undefined &&
-    source.nodeId === currentNode.value?.id &&
-    source.workspace.id === workspace.id &&
-    source.workspace.generation === workspace.generation,
-  );
+const {
+  certificateDialog,
+  certificate,
+  certificateGrant,
+  certificateOperation,
+  certificateCommonName,
+  certificateDnsNames,
+  certificateReason,
+  certificateApproval,
+  certificateError,
+  certificateLoading,
+  openCertificate,
+  submitCertificateRequest,
+  submitCertificateIssue,
+  createP12,
+  downloadP12,
+  revokeCurrentCertificate,
+} = useNodeCertificates({
+  currentNode,
+  readReady,
+  workspaceContext,
+  trackOperation: (id) => fleet.trackOperation(id),
+  t,
 });
-const configPlan = ref<ConfigPlan>();
-const configOperation = ref<Operation>();
-const configError = ref("");
-const configLoading = ref(false);
-const configPort = ref(443);
-const configMaxClients = ref(128);
-const configRoute = ref("default");
-const configCertificateSecretRefId = ref("");
-const configPrivateKeySecretRefId = ref("");
-const configReason = ref("");
-const configApplyApproval = ref("");
-const configApplyReason = ref("");
-const certificateDialog = ref(false);
-const certificate = ref<Certificate>();
-const certificateGrant = ref<ArtifactGrant>();
-const certificateOperation = ref<Operation>();
-const certificateCommonName = ref("");
-const certificateDnsNames = ref("");
-const certificateReason = ref("");
-const certificateApproval = ref("");
-const certificateError = ref("");
-const certificateLoading = ref(false);
 const usersState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "user"),
 );
@@ -167,50 +142,13 @@ const groupsState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "group"),
 );
 const operationBusy = computed(() => fleet.operationTracking);
-const configWorkflow = createNodeWorkflow(
-  () => currentNode.value?.id,
-  () => configDialog.value,
-);
-const certificateWorkflow = createNodeWorkflow(
-  () => currentNode.value?.id,
-  () => certificateDialog.value,
-);
 const policyWorkflow = createNodeWorkflow(
   () => currentNode.value?.id,
   () => Boolean(policyDialog.value),
+  workspaceContext,
 );
-let configContext: NodeWorkflowContext | undefined;
-let certificateContext: NodeWorkflowContext | undefined;
 let policyContext: NodeWorkflowContext | undefined;
 
-watch(
-  configDialog,
-  (open) => {
-    if (open) return;
-    configWorkflow.cancel();
-    configContext = undefined;
-    configPlanSource.value = undefined;
-    configPlan.value = undefined;
-    configOperation.value = undefined;
-    configError.value = "";
-    configLoading.value = false;
-  },
-  { flush: "sync" },
-);
-watch(
-  certificateDialog,
-  (open) => {
-    if (open) return;
-    certificateWorkflow.cancel();
-    certificateContext = undefined;
-    certificate.value = undefined;
-    certificateGrant.value = undefined;
-    certificateOperation.value = undefined;
-    certificateError.value = "";
-    certificateLoading.value = false;
-  },
-  { flush: "sync" },
-);
 watch(
   policyDialog,
   (dialog) => {
@@ -440,480 +378,6 @@ async function submitPolicy(): Promise<void> {
       error instanceof Error ? error.message : t("policyUpdateFailed");
   } finally {
     if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
-  }
-}
-
-async function openConfigPlan(): Promise<void> {
-  const node = currentNode.value;
-  const revision = currentConfigRevision.value;
-  if (!node || revision === undefined) return;
-  const context = configWorkflow.begin(node.id);
-  configContext = context;
-  configPlanSource.value = {
-    nodeId: node.id,
-    revision,
-    workspace: context.workspace,
-  };
-  configDialog.value = true;
-  configPlan.value = undefined;
-  configOperation.value = undefined;
-  configLoading.value = false;
-  configError.value = "";
-  configReason.value = "";
-  configApplyApproval.value = "";
-  configApplyReason.value = "";
-  try {
-    const pending = waitForNodeMutation(context, "config");
-    if (pending) {
-      configLoading.value = true;
-      await pending;
-      if (!configWorkflow.isCurrent(context)) return;
-    }
-    const receipt = readNodeReceipt(context, "config");
-    if (!receipt.resourceId) return;
-    configLoading.value = true;
-    const plan = await getConfigPlan(receipt.resourceId, context.signal);
-    if (!configWorkflow.isCurrent(context)) return;
-    if (
-      plan.nodeId !== context.nodeId ||
-      plan.workspaceId !== context.workspace.id
-    )
-      return;
-    await pollConfigPlan(context, plan);
-    if (
-      !configWorkflow.isCurrent(context) ||
-      !receipt.operationId ||
-      receipt.operationId === plan.operationId
-    )
-      return;
-    const operation = await getOperation(receipt.operationId, context.signal);
-    if (
-      configWorkflow.isCurrent(context) &&
-      operation.nodeId === context.nodeId
-    )
-      configOperation.value = operation;
-  } catch (error) {
-    if (configWorkflow.isCurrent(context))
-      configError.value =
-        error instanceof Error ? error.message : t("configPlanFailed");
-  } finally {
-    if (configWorkflow.isCurrent(context)) configLoading.value = false;
-  }
-}
-
-async function pollConfigPlan(
-  context: NodeWorkflowContext,
-  plan: ConfigPlan,
-): Promise<void> {
-  if (!configWorkflow.isCurrent(context)) return;
-  configPlan.value = plan;
-  for (
-    let attempt = 0;
-    attempt < 30 &&
-    !["succeeded", "failed", "rejected", "unknown", "expired"].includes(
-      plan.state,
-    );
-    attempt += 1
-  ) {
-    await waitForNodePoll(context.signal);
-    if (!configWorkflow.isCurrent(context)) return;
-    plan = await getConfigPlan(plan.id, context.signal);
-    if (!configWorkflow.isCurrent(context)) return;
-    configPlan.value = plan;
-  }
-}
-
-async function submitConfigPlan(): Promise<void> {
-  const source = configPlanSource.value;
-  const context = configContext;
-  const workspace = workspaceContext();
-  if (
-    !source ||
-    !context ||
-    !configWorkflow.isCurrent(context) ||
-    configLoading.value ||
-    !canSubmitConfigPlan.value ||
-    !configReason.value.trim() ||
-    source.workspace.id !== workspace.id ||
-    source.workspace.generation !== workspace.generation
-  )
-    return;
-  const ticket = beginNodeMutation(context, "config");
-  if (!ticket) return;
-  configLoading.value = true;
-  configError.value = "";
-  try {
-    // Do not abort mutations on UI teardown: retain the server's accepted IDs,
-    // then fence all UI updates and subsequent reads by the captured context.
-    const plan = await createConfigPlan(source.nodeId, {
-      expectedRevision: source.revision,
-      template: {
-        name: "node-baseline",
-        directives: [
-          { name: "auth", value: "plain[passwd=/etc/ocserv/ocpasswd]" },
-          { name: "max-clients", value: String(configMaxClients.value) },
-          { name: "route", value: configRoute.value.trim() },
-          {
-            name: "server-cert",
-            secretRef: {
-              secretRefId: configCertificateSecretRefId.value.trim(),
-            },
-          },
-          {
-            name: "server-key",
-            secretRef: {
-              secretRefId: configPrivateKeySecretRefId.value.trim(),
-            },
-          },
-          { name: "socket-file", value: "/run/ocserv.socket" },
-          { name: "tcp-port", value: String(configPort.value) },
-        ],
-      },
-      ttlSeconds: 900,
-      reason: configReason.value.trim(),
-    });
-    rememberNodeReceipt(ticket, {
-      resourceId: plan.id,
-      operationId: plan.operationId,
-    });
-    await pollConfigPlan(context, plan);
-  } catch (error) {
-    if (!configWorkflow.isCurrent(context)) return;
-    configError.value =
-      error instanceof Error ? error.message : t("configPlanFailed");
-  } finally {
-    finishNodeMutation(ticket);
-    if (configWorkflow.isCurrent(context)) configLoading.value = false;
-  }
-}
-
-async function submitConfigApply(): Promise<void> {
-  const context = configContext;
-  const plan = configPlan.value;
-  if (
-    !context ||
-    !configWorkflow.isCurrent(context) ||
-    configLoading.value ||
-    !canSubmitConfigPlan.value ||
-    !plan ||
-    !configApplyApproval.value.trim() ||
-    !configApplyReason.value.trim()
-  )
-    return;
-  const ticket = beginNodeMutation(context, "config");
-  if (!ticket) return;
-  configLoading.value = true;
-  configError.value = "";
-  try {
-    const operation = await applyConfigPlan(plan.id, {
-      approvalId: configApplyApproval.value.trim(),
-      reason: configApplyReason.value.trim(),
-    });
-    rememberNodeReceipt(ticket, {
-      resourceId: plan.id,
-      operationId: operation.id,
-    });
-    if (!configWorkflow.isCurrent(context)) return;
-    configDialog.value = false;
-    await fleet.trackOperation(operation.id);
-  } catch (error) {
-    if (!configWorkflow.isCurrent(context)) return;
-    configError.value =
-      error instanceof Error ? error.message : t("configApplyFailed");
-  } finally {
-    finishNodeMutation(ticket);
-    if (configWorkflow.isCurrent(context)) configLoading.value = false;
-  }
-}
-
-async function openCertificate(): Promise<void> {
-  const node = currentNode.value;
-  if (!node || detailLoading.value || fleet.selecting || fleet.selectionError)
-    return;
-  const context = certificateWorkflow.begin(node.id);
-  certificateContext = context;
-  certificateDialog.value = true;
-  certificate.value = undefined;
-  certificateGrant.value = undefined;
-  certificateOperation.value = undefined;
-  certificateCommonName.value = currentNode.value?.name ?? "";
-  certificateDnsNames.value = "";
-  certificateReason.value = "";
-  certificateApproval.value = "";
-  certificateError.value = "";
-  certificateLoading.value = true;
-  try {
-    const pending = waitForNodeMutation(context, "certificate");
-    if (pending) await pending;
-    if (!certificateWorkflow.isCurrent(context)) return;
-    const receipt = readNodeReceipt(context, "certificate");
-    const records = await listNodeCertificates(node.id, context.signal);
-    if (!certificateWorkflow.isCurrent(context)) return;
-    const record =
-      records.find(
-        (record) =>
-          record.id === receipt.resourceId && record.state !== "revoked",
-      ) ?? records.find((record) => record.state !== "revoked");
-    if (record) {
-      if (
-        record.nodeId !== context.nodeId ||
-        record.workspaceId !== context.workspace.id
-      )
-        return;
-      await pollCertificate(context, record);
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateGrant.value = readCertificateGrant(context, record.id);
-    }
-    if (!certificateWorkflow.isCurrent(context) || !receipt.operationId) return;
-    const operation = await getOperation(receipt.operationId, context.signal);
-    if (
-      certificateWorkflow.isCurrent(context) &&
-      operation.nodeId === context.nodeId
-    )
-      certificateOperation.value = operation;
-  } catch (error) {
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateError.value =
-      error instanceof Error ? error.message : t("certificateRecordsFailed");
-  } finally {
-    if (certificateWorkflow.isCurrent(context))
-      certificateLoading.value = false;
-  }
-}
-
-async function pollCertificate(
-  context: NodeWorkflowContext,
-  value: Certificate,
-): Promise<void> {
-  if (!certificateWorkflow.isCurrent(context)) return;
-  certificate.value = value;
-  for (
-    let attempt = 0;
-    attempt < 30 && value.state === "csr_pending";
-    attempt += 1
-  ) {
-    await waitForNodePoll(context.signal);
-    if (!certificateWorkflow.isCurrent(context)) return;
-    value = await getCertificate(value.id, context.signal);
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificate.value = value;
-  }
-}
-
-async function submitCertificateRequest(): Promise<void> {
-  const node = currentNode.value;
-  const context = certificateContext;
-  if (
-    !node ||
-    !context ||
-    !certificateWorkflow.isCurrent(context) ||
-    certificateLoading.value ||
-    !certificateCommonName.value.trim() ||
-    !certificateReason.value.trim()
-  )
-    return;
-  const ticket = beginNodeMutation(context, "certificate");
-  if (!ticket) return;
-  certificateLoading.value = true;
-  certificateError.value = "";
-  try {
-    const value = await createCertificate(node.id, {
-      expectedVersion: node.version,
-      commonName: certificateCommonName.value.trim(),
-      dnsNames: new Set(
-        certificateDnsNames.value
-          .split(",")
-          .map((name) => name.trim())
-          .filter(Boolean),
-      ),
-      keyBits: 3072,
-      reason: certificateReason.value.trim(),
-    });
-    rememberNodeReceipt(ticket, {
-      resourceId: value.id,
-      operationId: value.operationId,
-    });
-    await pollCertificate(context, value);
-  } catch (error) {
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateError.value =
-      error instanceof Error ? error.message : t("certificateRequestFailed");
-  } finally {
-    finishNodeMutation(ticket);
-    if (certificateWorkflow.isCurrent(context))
-      certificateLoading.value = false;
-  }
-}
-
-async function submitCertificateIssue(): Promise<void> {
-  const context = certificateContext;
-  const current = certificate.value;
-  if (
-    !context ||
-    !certificateWorkflow.isCurrent(context) ||
-    certificateLoading.value ||
-    !current ||
-    !certificateApproval.value.trim() ||
-    !certificateReason.value.trim()
-  )
-    return;
-  const ticket = beginNodeMutation(context, "certificate");
-  if (!ticket) return;
-  certificateLoading.value = true;
-  certificateError.value = "";
-  try {
-    const issued = await issueCertificate(current.id, {
-      approvalId: certificateApproval.value.trim(),
-      reason: certificateReason.value.trim(),
-    });
-    rememberNodeReceipt(ticket, {
-      resourceId: issued.id,
-      operationId: issued.operationId,
-    });
-    if (certificateWorkflow.isCurrent(context)) certificate.value = issued;
-  } catch (error) {
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateError.value =
-      error instanceof Error ? error.message : t("certificateIssueFailed");
-  } finally {
-    finishNodeMutation(ticket);
-    if (certificateWorkflow.isCurrent(context))
-      certificateLoading.value = false;
-  }
-}
-
-async function createP12(): Promise<void> {
-  const node = currentNode.value;
-  const context = certificateContext;
-  const current = certificate.value;
-  if (
-    !context ||
-    !certificateWorkflow.isCurrent(context) ||
-    certificateLoading.value ||
-    !current ||
-    !node ||
-    !certificateReason.value.trim() ||
-    !certificateApproval.value.trim()
-  )
-    return;
-  if (readCertificateGrant(context, current.id)?.downloadToken) return;
-  const ticket = beginNodeMutation(context, "certificate");
-  if (!ticket) return;
-  certificateLoading.value = true;
-  certificateError.value = "";
-  try {
-    const grant = await createCertificateP12(current.id, {
-      expectedVersion: node.version,
-      certificateVersion: current.version,
-      approvalId: certificateApproval.value.trim(),
-      reason: certificateReason.value.trim(),
-    });
-    rememberCertificateGrant(context, current.id, grant);
-    rememberNodeReceipt(ticket, {
-      resourceId: current.id,
-      operationId: grant.operation.id,
-    });
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateGrant.value = readCertificateGrant(context, current.id);
-    certificateOperation.value = grant.operation;
-    await fleet.trackOperation(grant.operation.id);
-  } catch (error) {
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateError.value =
-      error instanceof Error ? error.message : t("p12CreationFailed");
-  } finally {
-    finishNodeMutation(ticket);
-    if (certificateWorkflow.isCurrent(context))
-      certificateLoading.value = false;
-  }
-}
-
-async function downloadP12(): Promise<void> {
-  const grant = certificateGrant.value;
-  const context = certificateContext;
-  const certificateId = certificate.value?.id;
-  if (
-    !context ||
-    !certificateId ||
-    !certificateWorkflow.isCurrent(context) ||
-    certificateLoading.value ||
-    !grant?.downloadToken
-  )
-    return;
-  const ticket = beginNodeMutation(context, "certificate");
-  if (!ticket) return;
-  certificateLoading.value = true;
-  certificateError.value = "";
-  try {
-    const blob = await downloadCertificateArtifact(
-      grant.artifactId,
-      grant.downloadToken,
-    );
-    // The Controller consumes the artifact before sending its bytes. Finish
-    // this user-initiated download even if its originating dialog has closed.
-    consumeCertificateGrant(context, certificateId, grant.artifactId);
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = "certificate.p12";
-    try {
-      link.click();
-    } finally {
-      URL.revokeObjectURL(link.href);
-    }
-  } catch (error) {
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateError.value =
-      error instanceof Error ? error.message : t("p12DownloadFailed");
-  } finally {
-    finishNodeMutation(ticket);
-    if (certificateWorkflow.isCurrent(context))
-      certificateLoading.value = false;
-  }
-}
-
-async function revokeCurrentCertificate(): Promise<void> {
-  const node = currentNode.value;
-  const context = certificateContext;
-  const current = certificate.value;
-  if (
-    !context ||
-    !certificateWorkflow.isCurrent(context) ||
-    certificateLoading.value ||
-    !current ||
-    !node ||
-    !certificateReason.value.trim() ||
-    !certificateApproval.value.trim()
-  )
-    return;
-  const ticket = beginNodeMutation(context, "certificate");
-  if (!ticket) return;
-  certificateLoading.value = true;
-  certificateError.value = "";
-  try {
-    const operation = await revokeCertificate(current.id, {
-      expectedVersion: node.version,
-      certificateVersion: current.version,
-      approvalId: certificateApproval.value.trim(),
-      reason: certificateReason.value.trim(),
-    });
-    rememberNodeReceipt(ticket, {
-      resourceId: current.id,
-      operationId: operation.id,
-    });
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateOperation.value = operation;
-    await fleet.trackOperation(operation.id);
-    if (!certificateWorkflow.isCurrent(context)) return;
-    const value = await getCertificate(current.id, context.signal);
-    if (certificateWorkflow.isCurrent(context)) certificate.value = value;
-  } catch (error) {
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificateError.value =
-      error instanceof Error ? error.message : t("certificateRevokeFailed");
-  } finally {
-    finishNodeMutation(ticket);
-    if (certificateWorkflow.isCurrent(context))
-      certificateLoading.value = false;
   }
 }
 </script>

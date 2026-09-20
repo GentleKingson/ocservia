@@ -30,7 +30,7 @@ decide operation terminal states.
 ## Export And Caller Inventory
 
 Paths in this table are relative to `web/src`. It records every former
-`api/client.ts` export and its production callers after PR-06. Existing wrappers
+`api/client.ts` export and its production callers after PR-06/07. Existing wrappers
 are retained because these callers use them; they are domain entry points, not
 compatibility aliases. Remove an entry point if its last consumer disappears,
 rather than retaining an unused forwarding export.
@@ -41,7 +41,7 @@ rather than retaining an unused forwarding export.
 | `api/workspace.ts` | `listAuthorizedWorkspaces` | `App.vue`, `shared/localSlice.ts` | Cache and coalesce discovery; explicit refresh; remembered selection |
 | `api/workspace.ts` | `getWorkspace` | `App.vue`, `shared/{fleet,localSlice,overview}.ts`, `views/{OperationsView,SettingsView}.vue` | Use selected Workspace, otherwise discover; fail on empty authorization |
 | `api/workspace.ts` | `selectWorkspace` | `App.vue` | Authorized selection only; persist and notify only on changed ID |
-| `api/workspace.ts` | `workspaceContext`, `WorkspaceContext` | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView}.vue`, `views/node-workflow.ts` | Snapshot of ID and generation; type used where context is captured |
+| `api/workspace.ts` | `workspaceContext`, `WorkspaceContext` | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView}.vue`; type-only in `features/node-workflow.ts` and configuration/certificate features | Snapshot of ID and generation; features receive the page's getter |
 | `api/workspace.ts` | `workspaceChangedEvent` | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView,SettingsView}.vue` | Existing event name and ID detail |
 | `api/platform.ts` | `getReadiness`, `getVersion` | `shared/readiness.ts`, `views/SettingsView.vue`, respectively | Same generated requests through shared transport |
 | `api/platform.ts` | `probeAuthentication` | `shared/{fleet,localSlice}.ts` | Coalesce only concurrent probes; keep Workspace state independent |
@@ -51,14 +51,14 @@ rather than retaining an unused forwarding export.
 | `api/nodes.ts` | `listNodes`, `getNode`, `listNodeSessions`, `listNodeIpBans`, `listNodeUserGroupState` | `shared/fleet.ts` | Workspace-scoped list; node-specific reads; pagination and signals |
 | `api/operations.ts` | `listOperations` | `shared/{localSlice,overview}.ts`, `views/OperationsView.vue` | Workspace header, page size 200, optional cursor/signal |
 | `api/operations.ts` | `operationSummary` | `shared/overview.ts` | Workspace header and signal |
-| `api/operations.ts` | `getOperation` | `shared/{fleet,localSlice}.ts`, `views/{NodeDetailView,OperationsView}.vue` | Operation ID and signal; no terminal-state interpretation |
+| `api/operations.ts` | `getOperation` | `shared/{fleet,localSlice}.ts`, `views/OperationsView.vue`, configuration/certificate features | Operation ID and signal; no terminal-state interpretation |
 | `api/operations.ts` | `createLocalSimulation` | `shared/localSlice.ts` | Existing development endpoint, scenario and signal |
 | `api/operations.ts` | `disconnectSession`, `terminateSession`, `removeIpBan`, `reloadService` | `shared/fleet.ts` | Revision If-Match, unique idempotency key, 60-second TTL; session boot binding; reload approval header |
 | `api/users.ts` | `createUser`, `disableUser`, `enableUser`, `rotateUserPassword`, `applyGroup` | `shared/fleet.ts` | Revision If-Match, unique idempotency key, 86400-second TTL; sealed-password envelope; member deduplication |
 | `api/users.ts` | `getUserPolicy`, `setUserPolicy` | `adapters/user-policy.ts` | Node/username and signals; mutation idempotency; no added If-Match |
-| `api/configuration.ts` | `createConfigPlan`, `getConfigPlan`, `applyConfigPlan` | `views/NodeDetailView.vue` | Request revision/approval unchanged; idempotency on create/apply; signals |
-| `api/certificates.ts` | `createCertificate`, `getCertificate`, `listNodeCertificates`, `issueCertificate`, `createCertificateP12`, `revokeCertificate` | `views/NodeDetailView.vue` | List item extraction; signals; idempotency on create/P12/revoke, not issue |
-| `api/certificates.ts` | `downloadCertificateArtifact` | `views/NodeDetailView.vue` | Encoded artifact ID; grant token plus optional development bearer; same-origin credentials; no Workspace header; Blob/error handling |
+| `api/configuration.ts` | `createConfigPlan`, `getConfigPlan`, `applyConfigPlan` | `features/configuration/useNodeConfiguration.ts` | Request revision/approval unchanged; idempotency on create/apply; signals |
+| `api/certificates.ts` | `createCertificate`, `getCertificate`, `listNodeCertificates`, `issueCertificate`, `createCertificateP12`, `revokeCertificate` | `features/certificates/useNodeCertificates.ts` | List item extraction; signals; idempotency on create/P12/revoke, not issue |
+| `api/certificates.ts` | `downloadCertificateArtifact` | `features/certificates/useNodeCertificates.ts` | Encoded artifact ID; grant token plus optional development bearer; same-origin credentials; no Workspace header; Blob/error handling |
 | `api/agents.ts` | `upgradeNodeAgent` | `shared/fleet.ts` | Trusted target version only; revision If-Match, idempotency, approval in body |
 | `api/agents.ts` | `createAgentRollout` | `views/NodesView.vue` | Workspace header, idempotency and unchanged target/node/batch/approval body |
 | `api/agents.ts` | `listAgentRollouts` | `views/OperationsView.vue` | Workspace header and optional limit/signal |
