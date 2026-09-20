@@ -58,6 +58,8 @@ done
 # Exercise run admission and result status without Docker, networking or install.
 printf '#!/usr/bin/env bash\nprintf "{\\"fixture\\":true}\\n"\n' >"${fixture}/repo/scripts/release-upgrade-native.sh"
 # shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\nexit "${FIXTURE_WORKFLOW_EXIT:-0}"\n' >"${fixture}/repo/scripts/database-controller-e2e.sh"
+# shellcheck disable=SC2016
 printf '#!/usr/bin/env bash\nif [[ "${FIXTURE_WRITE_RESULT:-false}" == true ]]; then\n  jq -n --arg version "${FIXTURE_VERSION:-$SINGLE_EXPECTED_AGENT_VERSION}" '\''{agent_version:$version}'\'' >"$ARTIFACT_DIR/final-node-read.json"\nfi\nexit "${FIXTURE_CHAIN_EXIT:-0}"\n' >"${fixture}/repo/scripts/single-relay-integration.sh"
 git -C "${fixture}/repo" init -q
 git -C "${fixture}/repo" add scripts
@@ -69,6 +71,7 @@ G6RD_CONTROL_PLANE_IMAGE="sha256:$(printf '%064d' 1)"
 export G6RD_CONTROL_PLANE_IMAGE
 export G6RD_TRANSPORTD_IMAGE="${G6RD_CONTROL_PLANE_IMAGE}" G6RD_RELAY_IMAGE="${G6RD_CONTROL_PLANE_IMAGE}"
 export G6RD_PROBE_IMAGE="${G6RD_CONTROL_PLANE_IMAGE}" SINGLE_NODE_IMAGE="${G6RD_CONTROL_PLANE_IMAGE}"
+export RELEASE_WORKFLOW_IMAGE="${G6RD_CONTROL_PLANE_IMAGE}"
 # shellcheck disable=SC2016
 printf '#!/usr/bin/env bash\njq -n --arg ref "$3" --arg sha "${FIXTURE_IMAGE_SHA:-$CANDIDATE_SHA}" '\''[{Id:$ref,Os:"linux",Architecture:"arm64",Config:{Labels:{"org.opencontainers.image.revision":$sha}}}]'\''\n' >"${fixture}/bin/docker"
 chmod +x "${fixture}/bin/docker"
@@ -90,6 +93,52 @@ reject env FIXTURE_WRITE_RESULT=true FIXTURE_VERSION=0.6.2 bash "${runner}" run
 jq -e '.status == "fail" and .exit_code != 0' "${ARTIFACT_DIR}/compatibility-result.json" >/dev/null
 export ARTIFACT_DIR="${fixture}/passed"
 FIXTURE_WRITE_RESULT=true bash "${runner}" run
-jq -e --arg sha "${CANDIDATE_SHA}" '.status == "pass" and .exit_code == 0 and .candidate_sha == $sha and (.images | length) == 5' "${ARTIFACT_DIR}/compatibility-result.json" >/dev/null
+jq -e --arg sha "${CANDIDATE_SHA}" '.status == "pass" and .exit_code == 0 and .candidate_sha == $sha and (.images | length) == 6' "${ARTIFACT_DIR}/compatibility-result.json" >/dev/null
 reject bash "${runner}" run
+export ARTIFACT_DIR="${fixture}/workflow-failed"
+reject env FIXTURE_WRITE_RESULT=true FIXTURE_WORKFLOW_EXIT=8 bash "${runner}" run
+jq -e '.status == "fail" and .exit_code == 8' "${ARTIFACT_DIR}/compatibility-result.json" >/dev/null
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced production helper.
+(
+  # Reuse the real HTTP client helper; only exact pre-effect revision failures
+  # may retry, never another 409, a server error or an uncertain network write.
+  # shellcheck disable=SC1090
+  source <(sed -n '/^enqueue_reload() {/,/^}/p' "${ROOT}/scripts/single-relay-integration.sh")
+  export node=fixture approval=fixture
+  revision=0
+  sleep() { :; }
+  g6rd_node_revision() { printf '%s\n' "$(($(cat "${fixture}/requests") + 1))"; }
+  g6rd_api_session_curl() {
+    local output count
+    while (( $# )); do
+      if [[ "$1" == --output ]]; then output="$2"; shift; fi
+      shift
+    done
+    count="$(($(cat "${fixture}/requests") + 1))"
+    printf '%s\n' "$count" >"${fixture}/requests"
+    [[ "$response_case" != network ]] || return 7
+    if [[ "$response_case" == recover && "$count" == 2 ]]; then
+      printf '{}\n' >"$output"; printf 202
+    else
+      jq -n --arg type "$response_type" '{type:$type}' >"$output"
+      printf '%s' "$response_status"
+    fi
+  }
+  response_type=https://ocservia.dev/problems/stale-revision response_status=409
+  response_case=recover
+  printf '0\n' >"${fixture}/requests"
+  enqueue_reload fixed-key reason "${fixture}/enqueue.json"
+  [[ "$revision" == 2 && -f "${fixture}/enqueue.json.attempt-1" ]]
+  for response_case in stale forbidden server network; do
+    response_status=409 response_type=https://ocservia.dev/problems/stale-revision expected=1
+    case "$response_case" in
+      stale) expected=3 ;;
+      forbidden) response_type=https://ocservia.dev/problems/approval-required ;;
+      server) response_status=500 ;;
+    esac
+    printf '0\n' >"${fixture}/requests"
+    reject enqueue_reload fixed-key reason "${fixture}/enqueue.json"
+    [[ "$(cat "${fixture}/requests")" == "$expected" ]]
+  done
+)
 echo 'Published session matrix integrity and admission contracts passed (fixtures, not runtime acceptance)'

@@ -49,7 +49,7 @@ if [[ "${mode}" != run ]]; then
 fi
 
 : "${CANDIDATE_SHA:?}" "${RUN_ID:?}" "${RUNNER_TEMP:?}" "${ARTIFACT_DIR:?}"
-: "${G6RD_CONTROL_PLANE_IMAGE:?}" "${G6RD_TRANSPORTD_IMAGE:?}" "${G6RD_RELAY_IMAGE:?}" "${G6RD_PROBE_IMAGE:?}" "${SINGLE_NODE_IMAGE:?}"
+: "${G6RD_CONTROL_PLANE_IMAGE:?}" "${G6RD_TRANSPORTD_IMAGE:?}" "${G6RD_RELAY_IMAGE:?}" "${G6RD_PROBE_IMAGE:?}" "${SINGLE_NODE_IMAGE:?}" "${RELEASE_WORKFLOW_IMAGE:?}"
 [[ "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ && "$(git -C "${ROOT}" rev-parse HEAD)" == "${CANDIDATE_SHA}" ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" ]]
 [[ "${RUN_ID}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,39}$ ]]
@@ -58,14 +58,14 @@ fi
 # This audit refuses emulation and remote Docker; it does not change binfmt.
 native="$(bash "${ROOT}/scripts/release-upgrade-native.sh" "${PACKAGE_ARCH}")"
 images='[]'
-for variable in G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE SINGLE_NODE_IMAGE; do
+for variable in G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE SINGLE_NODE_IMAGE RELEASE_WORKFLOW_IMAGE; do
   ref="${!variable}"
   [[ "${ref}" =~ ^sha256:[0-9a-f]{64}$ ]]
   inspected="$(docker image inspect "${ref}")"
   jq -e --arg arch "${PACKAGE_ARCH}" --arg ref "${ref}" \
     'length == 1 and .[0].Id == $ref and .[0].Os == "linux" and .[0].Architecture == $arch' <<<"${inspected}" >/dev/null
   case "${variable}" in
-    G6RD_CONTROL_PLANE_IMAGE|G6RD_TRANSPORTD_IMAGE|G6RD_PROBE_IMAGE)
+    G6RD_CONTROL_PLANE_IMAGE|G6RD_TRANSPORTD_IMAGE|G6RD_PROBE_IMAGE|RELEASE_WORKFLOW_IMAGE)
       jq -e --arg sha "${CANDIDATE_SHA}" '.[0].Config.Labels["org.opencontainers.image.revision"] == $sha' <<<"${inspected}" >/dev/null ;;
   esac
   images="$(jq --arg role "${variable}" --arg id "${ref}" '. + [{role:$role,image_id:$id}]' <<<"${images}")"
@@ -80,8 +80,9 @@ finish() {
     --argjson code "${code}" --argjson images "${images}" --argjson native "${native}" \
     '. + {candidate_sha:$sha,started_at:$started,finished_at:$finished,run_id:$run,
       ci_run_id:$ci_run,ci_run_attempt:$attempt,images:$images,native:$native,
-      topology:{hosts:1,relays:(if .baseline_tag == "v0.6.0" then 2 else 1 end)},
-      scope:"published-node-session-reload-recovery",exit_code:$code,
+      topology:{hosts:1,relays:(if .baseline_tag == "v0.6.0" then 2 else 1 end),pki_workflow_relays:2},
+      configuration_apply:"unsupported; rejection tested, not positive apply",
+      scope:"published-node-session-reload-config-rejection-certificate-p12-recovery",exit_code:$code,
       status:(if $code == 0 then "pass" else "fail" end)}' <<<"${identity}" >"${ARTIFACT_DIR}/compatibility-result.json"
   exit "${code}"
 }
@@ -98,5 +99,6 @@ export SINGLE_LEGACY_SECOND_RELAY=false
 [[ "${BASELINE_RELEASE}" != v0.6.0 ]] || export SINGLE_LEGACY_SECOND_RELAY=true
 # Install only inside the existing dedicated, disposable systemd node fixture.
 bash "${ROOT}/scripts/single-relay-integration.sh"
-bash "${ROOT}/scripts/release-upgrade-native.sh" "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-after.json"
 jq -e --arg version "${SINGLE_EXPECTED_AGENT_VERSION}" '.agent_version == $version' "${ARTIFACT_DIR}/final-node-read.json" >/dev/null
+ARTIFACT_DIR="${ARTIFACT_DIR}/workflow" bash "${ROOT}/scripts/database-controller-e2e.sh" postgres all
+bash "${ROOT}/scripts/release-upgrade-native.sh" "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-after.json"

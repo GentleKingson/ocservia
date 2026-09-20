@@ -47,6 +47,16 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal("container root is required to launch the distinct runtime principals")
 	}
 	f := newControllerE2E(t)
+	if version := os.Getenv("PUBLISHED_AGENT_VERSION"); version != "" {
+		if version != "0.6.0" && version != "0.6.1" {
+			t.Fatal("unregistered published node version")
+		}
+		for _, binary := range []string{"ocservia-agent", "ocservia-privd", "ocservia-upgrader"} {
+			if got := strings.TrimSpace(string(f.run(0, 0, nil, "/usr/local/bin/"+binary, "--version"))); got != binary+" "+version {
+				t.Fatalf("published binary version mismatch: %s", got)
+			}
+		}
+	}
 	ownerOptions, runtimeOptions, account := controllerProcessDatabase(t)
 	f.run(0, 0, nil, "go", "build", "-buildvcs=false", "-o", f.root+"/ocserv-control", "../../../cmd/ocserv-control")
 	f.run(0, 0, f.environment(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}), f.root+"/ocserv-control", "--migrate-only")
@@ -167,6 +177,9 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	}
 	nodePath := "/api/v1/nodes/" + nodeID
 	capabilities := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read", "ocserv.fencing.v2", "command.semantic-hash.v1", "command.strict-wire.v1", "privd_result_attestation_v1", "ocserv.certificate.issue", "ocserv.certificate.revoke", "ocserv.users.write", "ocserv.groups.write", "ocserv.config.plan", "ocserv.config.apply", "ocserv.service.reload"}
+	if os.Getenv("PUBLISHED_AGENT_VERSION") != "" {
+		capabilities = append(capabilities, "config.network")
+	}
 	trust := map[string]any{"labels": map[string]string{"fixture": "real-process"}, "policy": "default", "capabilities": capabilities}
 	approval := f.approve("node.approve", "node", nodeID, map[string]any{"node_approval": trust})
 	trust["reason"] = "activate authenticated real Agent"
@@ -192,6 +205,35 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		return node["trust_status"] == "active" && node["connection_state"] == "online" && node["observed_at"] != nil
 	})
 	f.requireFencedSession()
+	if version := os.Getenv("PUBLISHED_AGENT_VERSION"); version != "" {
+		if node := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK); node["agent_version"] != version {
+			t.Fatal("Controller did not observe the published Agent version")
+		}
+		f.configRejectionWorkflow(nodePath)
+		generation, agentName, privdName := 0, "agent", "privd"
+		f.recoverNode = func() {
+			observedBefore := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK)["observed_at"]
+			f.stop(agentName)
+			f.stop(privdName)
+			generation++
+			privdName, agentName = fmt.Sprintf("privd-recovered-%d", generation), fmt.Sprintf("agent-recovered-%d", generation)
+			f.start(privdName, 0, 65533, nil, "/usr/local/bin/ocservia-privd", privdArgs...)
+			f.wait("restarted root socket", func() bool {
+				conn, err := net.DialTimeout("unix", f.root+"/privd/privd.sock", time.Second)
+				if err != nil {
+					return false
+				}
+				_ = conn.Close()
+				return true
+			})
+			f.start(agentName, 65533, 65533, nil, "/usr/local/bin/ocservia-agent", agentArgs...)
+			f.wait("published node recovered from durable state", func() bool {
+				node := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK)
+				return node["connection_state"] == "online" && node["observed_at"] != nil && node["observed_at"] != observedBefore
+			})
+			t.Logf("published Agent/privd restart %d, persistent identities, root keys and journals retained", generation)
+		}
+	}
 	f.certificateWorkflow(nodePath)
 	f.userWorkflow(nodePath)
 	for _, path := range []string{nodePath + "/sessions", nodePath + "/ip-bans", "/api/v1/operations", "/api/v1/operations/summary", "/api/v1/operations/queue-metrics", "/api/v1/events", "/api/v1/audit/events"} {
@@ -245,6 +287,7 @@ type controllerE2E struct {
 	relays                           []string
 	sealKeys                         map[string]*rsa.PrivateKey
 	processes                        []*e2eProcess
+	recoverNode                      func()
 }
 
 type e2eProcess struct {
@@ -377,6 +420,26 @@ func (f *controllerE2E) wait(description string, ready func() bool) {
 		}
 	}
 	f.t.Fatalf("timed out waiting for %s (see process logs)", description)
+}
+
+func (f *controllerE2E) stop(name string) {
+	f.t.Helper()
+	for index, process := range f.processes {
+		if process.name != name {
+			continue
+		}
+		if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			f.t.Fatal(err)
+		}
+		select {
+		case <-process.done:
+		case <-time.After(15 * time.Second):
+			f.t.Fatalf("%s did not stop for recovery", name)
+		}
+		f.processes = append(f.processes[:index], f.processes[index+1:]...)
+		return
+	}
+	f.t.Fatalf("recovery process not found: %s", name)
 }
 
 func (f *controllerE2E) requireFencedSession() {
@@ -695,6 +758,9 @@ func (f *controllerE2E) certificateWorkflow(nodePath string) {
 		certificate = f.api(f.admin, "GET", path, nil, nil, 200)
 		return certificate["state"] == "csr_ready"
 	})
+	if f.recoverNode != nil {
+		f.recoverNode()
+	}
 	approval := f.approve("certificate.issue", "certificate", id, nil)
 	certificate = f.api(f.admin, "POST", path+":issue", map[string]any{"approval_id": approval, "reason": "sign verified root CSR"}, nil, 200)
 	if certificate["state"] != "issued" {
@@ -716,6 +782,9 @@ func (f *controllerE2E) certificateWorkflow(nodePath string) {
 		}
 		return op["state"] == "succeeded"
 	})
+	if f.recoverNode != nil {
+		f.recoverNode()
+	}
 	artifactPath := "/api/v1/artifacts/" + e2eString(f.t, grant, "artifact_id")
 	downloadHeaders := map[string]string{"X-Artifact-Token": e2eString(f.t, grant, "download_token")}
 	response, blob := f.request(f.admin, "GET", artifactPath, nil, downloadHeaders)

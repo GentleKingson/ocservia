@@ -43,6 +43,19 @@ docker run --rm --entrypoint /bin/sh session-g6rd_transportd_image:candidate \
 build_image G6RD_PROBE_IMAGE rust rust/g6-runtime.Dockerfile --target g6-probe-runtime
 build_image G6RD_RELAY_IMAGE relay deploy/production/relay.Dockerfile --no-cache-filter relay-runtime
 build_image SINGLE_NODE_IMAGE node scripts/single-relay-node.Dockerfile
+# Reuse the real-process TLS PKI fixture without any candidate node binaries.
+# The default builder can resolve these job-local images; no registry push.
+docker tag session-g6rd_transportd_image:candidate ocservia-pr02-transport:e2e
+docker tag session-g6rd_relay_image:candidate ocservia-pr02-relay:e2e
+docker build --builder default --target workflow-base \
+  --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
+  -f deploy/database-e2e/Dockerfile -t session-workflow:candidate .
+workflow_image="$(docker image inspect --format '{{.Id}}' session-workflow:candidate)"
+printf 'RELEASE_WORKFLOW_IMAGE=%s\n' "${workflow_image}" >>"${GITHUB_ENV}"
+docker image inspect "${workflow_image}" >"${SESSION_EVIDENCE}/RELEASE_WORKFLOW_IMAGE.image.json"
+mkdir -p .cache/go-mod .cache/go-build
+docker run --rm -v "$PWD:/workspace:ro" -v "$PWD/.cache/go-mod:/go-mod" \
+  -e GOMODCACHE=/go-mod -e GOTOOLCHAIN=local "${workflow_image}" go mod download
 docker run --rm --entrypoint /usr/local/bin/iroh-relay session-g6rd_relay_image:candidate --version \
   >"${SESSION_EVIDENCE}/relay-version.txt"
 docker version >"${SESSION_EVIDENCE}/docker-version.txt"

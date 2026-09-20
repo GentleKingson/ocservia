@@ -287,13 +287,30 @@ approve_reload() {
     >"$ARTIFACT_DIR/reload-approval-decision.json" || return
   printf '%s\n' "$approval"
 }
+enqueue_reload() {
+  local key="$1" reason="$2" output="$3" attempt status
+  for attempt in 1 2 3; do
+    revision="$(g6rd_node_revision "$node")" || return
+    status="$(g6rd_api_session_curl requester "/api/v1/nodes/$node/service:reload" -X POST \
+      -H 'Content-Type: application/json' -H "Idempotency-Key: $key" \
+      -H "If-Match: \"revision-$revision\"" -H "X-Approval-ID: $approval" \
+      --data "$(jq -cn --arg reason "$reason" '{reason:$reason,ttl_seconds:300}')" \
+      --output "$output" --write-out '%{http_code}')" || return
+    [[ "$status" != 202 ]] || return 0
+    cp "$output" "$output.attempt-$attempt"
+    # A session-owner transition can advance the revision during initial
+    # admission. Refresh only this explicit pre-effect rejection, same key.
+    if [[ "$status" != 409 ]] || ! jq -e '.type == "https://ocservia.dev/problems/stale-revision"' "$output" >/dev/null; then
+      cat "$output" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo 'reload revision remained stale after three attempts' >&2
+  return 1
+}
 approval="$(approve_reload)"
-revision="$(g6rd_node_revision "$node")"
-g6rd_api_session_curl requester "/api/v1/nodes/$node/service:reload" --fail-with-body -X POST \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: single-reload-$RUN_ID" \
-  -H "If-Match: \"revision-$revision\"" -H "X-Approval-ID: $approval" \
-  --data '{"reason":"single Relay test ocserv reload","ttl_seconds":300}' \
-  >"$ARTIFACT_DIR/reload-operation.json"
+enqueue_reload "single-reload-$RUN_ID" 'single Relay test ocserv reload' "$ARTIFACT_DIR/reload-operation.json"
 operation="$(jq -er .id "$ARTIFACT_DIR/reload-operation.json")"
 operation_succeeded() {
   g6rd_api_session_curl requester "/api/v1/operations/$operation" >"$ARTIFACT_DIR/reload-result.json"
@@ -313,7 +330,6 @@ transport_started="$(docker inspect --format '{{.State.StartedAt}}' "$transport"
 agent_started="$(docker exec "$NODE_CONTAINER" systemctl show ocservia-agent -p ExecMainStartTimestampMonotonic --value)"
 identity_before="$(docker exec "$NODE_CONTAINER" sha256sum /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint)"
 approval="$(approve_reload)"
-revision="$(g6rd_node_revision "$node")"
 g6rd_compose stop "${RELAYS[@]}"
 docker exec "$NODE_CONTAINER" python3 -c 'import socket,sys
 for endpoint in sys.argv[1:]:
@@ -324,11 +340,7 @@ for endpoint in sys.argv[1:]:
         continue
     sys.exit("Relay remained reachable during the fault")' "${relay_endpoints[@]}"
 key="single-pending-reload-$RUN_ID"
-g6rd_api_session_curl requester "/api/v1/nodes/$node/service:reload" --fail-with-body -X POST \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: $key" \
-  -H "If-Match: \"revision-$revision\"" -H "X-Approval-ID: $approval" \
-  --data '{"reason":"single Relay outage ocserv reload","ttl_seconds":300}' \
-  >"$ARTIFACT_DIR/pending-operation.json"
+enqueue_reload "$key" 'single Relay outage ocserv reload' "$ARTIFACT_DIR/pending-operation.json"
 operation="$(jq -er .id "$ARTIFACT_DIR/pending-operation.json")"
 command_id="$(jq -er .command_id "$ARTIFACT_DIR/pending-operation.json")"
 sleep 10
@@ -360,7 +372,7 @@ docker exec "$NODE_CONTAINER" journalctl --no-pager -u ocserv >"$ARTIFACT_DIR/oc
 [[ "$(grep -c 'main: reloading configuration' "$ARTIFACT_DIR/ocserv-final.log")" == 2 ]]
 echo "$chain_name pending real command recovery and stable identities passed"
 
-# Cold start both communication processes while their sole Relay is absent.
+# Cold start both communication processes while every configured Relay is absent.
 g6rd_compose stop "${RELAYS[@]}" transportd
 docker exec "$NODE_CONTAINER" systemctl stop ocservia-agent
 g6rd_compose start transportd

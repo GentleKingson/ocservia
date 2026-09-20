@@ -71,18 +71,32 @@ For **each** selected baseline and **each** native `amd64` / `arm64` architectur
 
 | Combination | Executable entry | Acceptance boundary |
 | --- | --- | --- |
-| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Four application cells total. v0.6.0 uses two real Relays; v0.6.1 uses one. Real enrollment, grant/fence/receipt, telemetry, approved reload, replay and recovery after all configured Relays stop. Candidate-only probe/setup; no historical rebuild. Must pass on actual artifacts before claiming this pair. |
+| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Four application cells total. The systemd chain uses two real Relays for v0.6.0 and one for v0.6.1: enrollment, grant/fence/receipt, telemetry, approved reload, replay and all-Relay recovery. The real-process PKI chain uses two TLS Relays: config revision/rejection, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. No historical rebuild. Must pass on actual artifacts before claiming the covered workflows. |
 | Published native package -> newer candidate package | Existing `release-upgrade.yml`, `baseline_release` set explicitly | DEB Ubuntu and RPM Rocky 9 on both architectures, unchanged rejection/state/retry/rollback requirements. |
 | Published Controller -> newer candidate Controller, PostgreSQL 17 | Same native workflow | Authenticated data/session retention, migration, same-target failure recovery and guarded rollback/base restore; not a live mixed-version Controller cluster. |
 | Candidate node -> historical Controller, or independently mixed Agent/privd | Not admitted to this candidate matrix | Upgrade Controller first; restore only a verified matched snapshot. No downgrade/security-equivalence promise. |
 
-The application cells use a single-host disposable systemd node fixture. They
-are not cross-fault-domain, native package-manager upgrade, all-distro, real
-production OIDC, configuration/P12 cross-release or formal G6 evidence. Those
-last workflow combinations remain **unverified**, not implicitly included by a
-successful reload. Before freezing a production candidate, either run the
-applicable configuration/certificate recovery workflows against these exact
-release pairs or explicitly review their exclusion from the rolling window.
+The application cells are single-host fixtures, not cross-fault-domain, native
+package-manager upgrade, all-distro, production OIDC or formal G6 evidence.
+The PKI chain reuses `scripts/database-controller-e2e.sh` on PostgreSQL 17.10
+with verified published node binaries. It has a real authenticated TLS signer
+fixture and real OpenSSL/ocserv processes, not a production CA/HSM. Its fixed
+`systemctl` facade probes real ocserv and sends real signals; only the separate
+systemd chain covers service-manager lifecycle. The default database E2E route
+still uses its existing PostgreSQL 18 image; this does not expand production support.
+
+**Positive typed configuration apply is not supported by these release cells.**
+The v1 allowlist cannot express a complete real ocserv configuration (`device`
+is absent), planning parses the candidate as a complete file, and apply refuses
+unresolved TLS SecretRefs. Do not bypass root validation or substitute a fake
+parser. The matrix proves stale revision refusal, exact plan replay, real parser
+rejection, denied apply and unchanged configuration/revision, not successful
+apply or rollback. Historical adapter errors have no trusted root receipt;
+the Agent retains `Unknown` with `privd_receipt_missing_or_malformed`, never
+promoting it to success or a trusted final failure. Resolving this gap requires a reviewed matched-node contract
+and release, followed by positive plan/apply/recovery acceptance. Until then,
+exclude positive configuration apply from the proposed rolling window explicitly;
+this proposed limitation is not a silent withdrawal of any existing promise.
 The existing same-source I15/I16/I17 checks do not fill that release-level gap.
 The private CA requires a test-only systemd drop-in, derived from v0.6.0's
 direct ExecStart or v0.6.1's launcher. Published binaries and installed units
@@ -124,9 +138,10 @@ with a local Docker daemon and no emulation handlers. Never unregister binfmt
 or run host installers on shared BuildServer. Use a clean exact candidate
 checkout and [the existing single-Relay setup](../development/single-relay-validation.md#real-agent-chain).
 Set `CANDIDATE_SHA`, `RUNNER_ARCH` (`X64` or `ARM64`), unique `RUN_ID`, private
-`RUNNER_TEMP` and a new `ARTIFACT_DIR`. Supply all five existing image variables
-as full local `sha256:` image IDs, with native architecture. Control, transport
-and probe images must carry `org.opencontainers.image.revision=CANDIDATE_SHA`
+`RUNNER_TEMP` and a new `ARTIFACT_DIR`. Supply the five existing image variables
+and `RELEASE_WORKFLOW_IMAGE` as full local `sha256:` image IDs, with native
+architecture. Control, transport, probe and workflow images must carry
+`org.opencontainers.image.revision=CANDIDATE_SHA`
 from their build, not a post-build relabel. Retain their build records and
 registry manifest digests separately; a label alone is not build provenance.
 
@@ -190,8 +205,9 @@ do not reset journals to make an upgrade pass.
    or incompatible schema require forward recovery or isolated backend restore,
    not down-migration or forced state edits. Reconcile Unknown before resuming.
 4. Before production-candidate freeze: resolve all four application cells and
-   both native-upgrade runs on the exact candidate; decide the config/P12 rolling
-   window, database patch set, actual ocserv/distro/crypto versions and recovery
+   both native-upgrade runs on the exact candidate; resolve or explicitly review
+   the positive config-apply exclusion, certificate/P12 rolling window, database
+   patch set, actual ocserv/distro/crypto versions and recovery
    evidence. T03 transport probes and T04 native ocserv 1.5.0 tests remain
    evidence for their original artifacts, not this candidate's release gate.
 
