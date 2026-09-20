@@ -39,15 +39,22 @@ git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
   if checkout_baseline_source . "${fixture}/invalid" invalid; then exit 1; fi
 )
 node scripts/test-release-upgrade.mjs
+bash scripts/test-release-session-compatibility.sh
 ruby -r yaml - <<'RUBY'
 w = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 triggers = w['on'] || w[true]
 abort 'manual-only entrypoint required' unless triggers.keys == ['workflow_dispatch']
-abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release candidate_sha version]
+abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release candidate_sha session_compatibility session_only version]
+abort 'session matrix must be opt-in' unless triggers['workflow_dispatch']['inputs']['session_compatibility'] == {
+  'description'=>'Also run published v0.6.0 and v0.6.1 nodes against this candidate on both native architectures',
+  'type'=>'boolean', 'default'=>false}
+abort 'native upgrades must remain the default' unless
+  triggers['workflow_dispatch']['inputs']['session_only']['default'] == false
 abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v0.6.0'
 abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
 %w[agent-upgrade controller-upgrade].each do |name|
   job = w['jobs'][name]
+  abort 'native upgrade scope drift' unless job['if'] == '${{ !inputs.session_only }}'
   abort 'matrix must not fail fast' unless job['strategy']['fail-fast'] == false
   abort 'incomplete native matrix' unless job['strategy']['matrix']['include'] == [
     {'arch'=>'amd64','runner'=>'ubuntu-24.04'}, {'arch'=>'arm64','runner'=>'ubuntu-24.04-arm'}]
@@ -57,7 +64,18 @@ abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
   abort 'hosted binfmt handlers must be removed before strict native checks' unless
     execution.include?(removal) && execution.index(removal) < execution.index('bash scripts/release-upgrade-unit.sh')
 end
-abort 'summary must always run' unless w['jobs']['upgrade-result']['if'] == 'always()'
+session = w['jobs'].fetch('session-compatibility')
+abort 'session matrix must be explicit and native' unless session['if'] == 'inputs.session_compatibility || inputs.session_only' &&
+  session['needs'] == 'prepare' && session['strategy'] == w['jobs']['agent-upgrade']['strategy']
+cells = session['steps'].select { |step| step.fetch('run','').include?('scripts/release-session-compatibility.sh run') }
+abort 'published application baselines drift' unless cells.map { |step| step.dig('env','BASELINE_RELEASE') } == %w[v0.6.0 v0.6.1]
+abort 'second cell must survive first cell failure, not build failure' unless
+  cells[1]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
+abort 'session matrix must use the shipped transport launcher' unless
+  File.read('scripts/build-release-session-images.sh').include?('build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile')
+abort 'disposable node must not register host binfmt handlers' unless
+  File.read('scripts/single-relay-node.Dockerfile').include?('systemctl mask systemd-binfmt.service')
+abort 'native summary must always run in upgrade scope' unless w['jobs']['upgrade-result']['if'] == '${{ always() && !inputs.session_only }}'
 abort 'summary graph incomplete' unless w['jobs']['upgrade-result']['needs'].sort == %w[agent-upgrade controller-upgrade prepare]
 w['jobs'].each_value do |job|
   abort 'unsafe job' if job['environment'] || job['permissions'] || job['continue-on-error']
