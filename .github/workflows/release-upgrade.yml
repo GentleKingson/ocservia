@@ -17,6 +17,10 @@ on:
         description: Exact 40-character SHA of the selected dispatch branch
         type: string
         required: true
+      session_compatibility:
+        description: Also run published v0.6.0 and v0.6.1 nodes against this candidate on both native architectures
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -150,6 +154,71 @@ jobs:
           path: ${{ runner.temp }}/controller-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 7
+
+  session-compatibility:
+    name: Published Node Compatibility (${{ matrix.arch }})
+    if: inputs.session_compatibility
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      PACKAGE_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Relay optional BuildKit cache credentials
+        uses: ./.github/actions/g6-cache-credentials
+      - name: Build native candidate application images once
+        id: build
+        env:
+          SESSION_EVIDENCE: ${{ runner.temp }}/session-${{ matrix.arch }}
+        run: |
+          # Only this disposable hosted runner, never shared BuildServer.
+          if [[ -f /proc/sys/fs/binfmt_misc/status ]]; then
+            printf '%s\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null
+          fi
+          bash scripts/build-release-session-images.sh
+      - name: Published v0.6.0 node against candidate
+        env:
+          BASELINE_RELEASE: v0.6.0
+          RUN_ID: sc-${{ github.run_id }}-${{ github.run_attempt }}-060-${{ matrix.arch }}
+          RELEASE_ASSET_DIR: ${{ runner.temp }}/baseline-v060
+          ARTIFACT_DIR: ${{ runner.temp }}/session-${{ matrix.arch }}/v0.6.0
+        run: |
+          bash scripts/release-session-compatibility.sh fetch >"${SESSION_EVIDENCE}/v060-artifact.json"
+          bash scripts/release-session-compatibility.sh run
+      - name: Published v0.6.1 node against candidate
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          BASELINE_RELEASE: v0.6.1
+          RUN_ID: sc-${{ github.run_id }}-${{ github.run_attempt }}-061-${{ matrix.arch }}
+          RELEASE_ASSET_DIR: ${{ runner.temp }}/baseline-v061
+          ARTIFACT_DIR: ${{ runner.temp }}/session-${{ matrix.arch }}/v0.6.1
+        run: |
+          bash scripts/release-session-compatibility.sh fetch >"${SESSION_EVIDENCE}/v061-artifact.json"
+          bash scripts/release-session-compatibility.sh run
+      - name: Preserve application evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: session-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove only this job's builder
+        if: always()
+        run: docker buildx rm "session-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
 
   upgrade-result:
     name: Native Upgrade Result

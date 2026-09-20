@@ -39,11 +39,15 @@ git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
   if checkout_baseline_source . "${fixture}/invalid" invalid; then exit 1; fi
 )
 node scripts/test-release-upgrade.mjs
+bash scripts/test-release-session-compatibility.sh
 ruby -r yaml - <<'RUBY'
 w = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 triggers = w['on'] || w[true]
 abort 'manual-only entrypoint required' unless triggers.keys == ['workflow_dispatch']
-abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release candidate_sha version]
+abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release candidate_sha session_compatibility version]
+abort 'session matrix must be opt-in' unless triggers['workflow_dispatch']['inputs']['session_compatibility'] == {
+  'description'=>'Also run published v0.6.0 and v0.6.1 nodes against this candidate on both native architectures',
+  'type'=>'boolean', 'default'=>false}
 abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v0.6.0'
 abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
 %w[agent-upgrade controller-upgrade].each do |name|
@@ -57,6 +61,13 @@ abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
   abort 'hosted binfmt handlers must be removed before strict native checks' unless
     execution.include?(removal) && execution.index(removal) < execution.index('bash scripts/release-upgrade-unit.sh')
 end
+session = w['jobs'].fetch('session-compatibility')
+abort 'session matrix must be explicit and native' unless session['if'] == 'inputs.session_compatibility' &&
+  session['needs'] == 'prepare' && session['strategy'] == w['jobs']['agent-upgrade']['strategy']
+cells = session['steps'].select { |step| step.fetch('run','').include?('scripts/release-session-compatibility.sh run') }
+abort 'published application baselines drift' unless cells.map { |step| step.dig('env','BASELINE_RELEASE') } == %w[v0.6.0 v0.6.1]
+abort 'second cell must survive first cell failure, not build failure' unless
+  cells[1]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
 abort 'summary must always run' unless w['jobs']['upgrade-result']['if'] == 'always()'
 abort 'summary graph incomplete' unless w['jobs']['upgrade-result']['needs'].sort == %w[agent-upgrade controller-upgrade prepare]
 w['jobs'].each_value do |job|

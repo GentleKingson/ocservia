@@ -35,6 +35,14 @@ finish() {
     >"$ARTIFACT_DIR/dispatch-state.txt" 2>&1
   docker exec "$NODE_CONTAINER" journalctl --no-pager -u ocservia-agent -u ocservia-privd -u ocserv \
     >"$ARTIFACT_DIR/node.log" 2>&1
+  docker exec "$NODE_CONTAINER" bash -c '
+    dpkg-query -W ocserv systemd openssl
+    /usr/sbin/ocserv --version
+    for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+      "/usr/libexec/ocservia/$binary" --version
+    done
+  ' >"$ARTIFACT_DIR/node-versions.txt" 2>&1
+  g6rd_psql -c 'SELECT version();' >"$ARTIFACT_DIR/postgres-version.txt" 2>&1
   docker rm -f "$NODE_CONTAINER" >"$ARTIFACT_DIR/cleanup-node.log" 2>&1
   docker network rm "$NODE_NETWORK" >>"$ARTIFACT_DIR/cleanup-node.log" 2>&1
   g6rd_compose down --volumes --remove-orphans >"$ARTIFACT_DIR/cleanup-compose.log" 2>&1
