@@ -46,10 +46,13 @@ re-export or duplicate receipt, grant, mutation or Workspace singleton.
   feature only detaches its own reads, not accepted server work.
 - Artifact credentials remain memory-only, scoped to Workspace/node/certificate
   and bounded by expiry. An already requested one-time download still completes
-  after dialog closure. No credential is added to persistent receipts.
+  after dialog closure. No credential is added to persistent receipts; a full
+  browser refresh, page termination or another tab cannot recover these secrets.
 - API bodies, approvals, idempotency policies, operation counts and UI bindings
-  are unchanged. The known same-node fallback-certificate/receipt operation
-  display mismatch is not changed by this structural extraction.
+  are unchanged.
+- A certificate receipt's operation is restored only when its resource ID matches
+  the selected certificate. Falling back to another certificate, or finding no
+  active certificate, does not fetch or display the old receipt's operation.
 
 ## Verification
 
