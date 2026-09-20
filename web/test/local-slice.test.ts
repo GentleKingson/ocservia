@@ -10,18 +10,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createLocalSimulation,
   getOperation,
-  listEvents,
   listOperations,
-} from "../src/api/client";
+} from "../src/api/operations";
+import { listEvents } from "../src/api/events";
 import { useLocalSliceStore } from "../src/shared/localSlice";
 
-vi.mock("../src/api/client", () => ({
+vi.mock("../src/api/operations", () => ({
   createLocalSimulation: vi.fn(),
-  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   getOperation: vi.fn(),
-  listEvents: vi.fn(),
   listOperations: vi.fn(),
+}));
+vi.mock("../src/api/workspace", () => ({
+  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
+}));
+vi.mock("../src/api/events", () => ({
+  listEvents: vi.fn(),
 }));
 
 const operation = (

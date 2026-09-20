@@ -5,7 +5,7 @@ import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 
-import { createAgentRollout } from "../api/client";
+import { createAgentRollout } from "../api/agents";
 import { useFleetStore } from "../shared/fleet";
 import { formatTimestamp } from "../shared/timestamp";
 

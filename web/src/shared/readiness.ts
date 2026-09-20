@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
-import { getReadiness } from "../api/client";
+import { getReadiness } from "../api/platform";
 
 export const useReadinessStore = defineStore("readiness", () => {
   const state = ref<"loading" | "ready" | "unavailable">("loading");

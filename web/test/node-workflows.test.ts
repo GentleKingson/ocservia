@@ -31,13 +31,38 @@ const mocks = vi.hoisted(() => {
 vi.mock("../src/shared/fleet", () => ({ useFleetStore: () => mocks.fleet }));
 vi.mock("vue-router", () => ({ useRoute: () => mocks.route }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
-vi.mock("../src/api/client", async (original) => ({
-  ...(await original<typeof import("../src/api/client")>()),
-  ...mocks,
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
+  workspaceContext: mocks.workspaceContext,
+}));
+vi.mock("../src/api/configuration", async (original) => ({
+  ...(await original<typeof import("../src/api/configuration")>()),
+  createConfigPlan: mocks.createConfigPlan,
+  getConfigPlan: mocks.getConfigPlan,
+  applyConfigPlan: mocks.applyConfigPlan,
+}));
+vi.mock("../src/api/certificates", async (original) => ({
+  ...(await original<typeof import("../src/api/certificates")>()),
+  listNodeCertificates: mocks.listNodeCertificates,
+  createCertificate: mocks.createCertificate,
+  getCertificate: mocks.getCertificate,
+  issueCertificate: mocks.issueCertificate,
+  createCertificateP12: mocks.createCertificateP12,
+  revokeCertificate: mocks.revokeCertificate,
+  downloadCertificateArtifact: mocks.downloadCertificateArtifact,
+}));
+vi.mock("../src/api/operations", async (original) => ({
+  ...(await original<typeof import("../src/api/operations")>()),
+  getOperation: mocks.getOperation,
+}));
+vi.mock("../src/api/users", async (original) => ({
+  ...(await original<typeof import("../src/api/users")>()),
+  getUserPolicy: mocks.getUserPolicy,
+  setUserPolicy: mocks.setUserPolicy,
 }));
 
 import NodeDetailView from "../src/views/NodeDetailView.vue";
-import { workspaceChangedEvent } from "../src/api/client";
+import { workspaceChangedEvent } from "../src/api/workspace";
 import {
   beginNodeMutation,
   finishNodeMutation,
