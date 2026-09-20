@@ -11,8 +11,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
-	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 )
 
@@ -101,33 +99,30 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		ttl = *body.TTLSeconds
 	}
 	reason := strings.TrimSpace(body.Reason)
-	target := strings.TrimSpace(body.TargetVersion)
 	approval, approvalErr := uuid.Parse(strings.TrimSpace(body.ApprovalID))
-	if ttl < 60 || ttl > 3600 || reason == "" || len(reason) > 512 || !semanticpayload.ValidAgentUpgradeTargetVersion(target) || approvalErr != nil || approval.Version() != 7 {
+	if ttl < 60 || ttl > 3600 || reason == "" || len(reason) > 512 || approvalErr != nil || approval.Version() != 7 {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version, approval_id, and reason are required and ttl_seconds must be between 60 and 3600")
 		return
 	}
-	workspaceID, architecture, observedVersion, err := s.upgradeNode(r.Context(), nodeID)
-	if err != nil || workspaceID != workspace(r) {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node does not exist")
-		return
-	}
-	if architecture == "" {
-		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "the node has not reported its package architecture yet")
-		return
-	}
-	digest, trusted := s.releaseCatalog.Lookup(target, architecture)
-	if !trusted {
-		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "no trusted release exists for the requested version and architecture")
-		return
-	}
-	if observedVersion == "" || telemetrystore.ClassifyAgentVersion(observedVersion, target) != "upgrade_available" {
-		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/target-not-newer", "Target is not an upgrade", "the requested target version must be newer than the observed agent version")
+	target, err := s.operations.PrepareAgentUpgrade(r.Context(), workspace(r), nodeID, body.TargetVersion)
+	if err != nil {
+		switch {
+		case errors.Is(err, operationstore.ErrInvalidRequest):
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "target_version, approval_id, and reason are required and ttl_seconds must be between 60 and 3600")
+		case errors.Is(err, operationstore.ErrUpgradeArchitectureUnknown):
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "the node has not reported its package architecture yet")
+		case errors.Is(err, operationstore.ErrUpgradeReleaseNotTrusted):
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "no trusted release exists for the requested version and architecture")
+		case errors.Is(err, operationstore.ErrUpgradeTargetNotNewer):
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/target-not-newer", "Target is not an upgrade", "the requested target version must be newer than the observed agent version")
+		default:
+			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node does not exist")
+		}
 		return
 	}
 	operation, replayed, err := s.operations.CreateSynthetic(r.Context(), operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
-		Kind: operationstore.AgentUpgrade, TargetVersion: target, PackageSHA256: digest[:], Architecture: architecture,
+		Kind: operationstore.AgentUpgrade, TargetVersion: target.Version, PackageSHA256: target.PackageSHA256[:], Architecture: target.Architecture,
 		ApprovalID: approval, Action: "agent.upgrade", Reason: reason,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
 		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID,
