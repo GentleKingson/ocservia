@@ -72,16 +72,20 @@ for variable in G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE 
 done
 mkdir -m 0700 -- "${ARTIFACT_DIR}"
 started="$(date -u +%FT%TZ)"
+session_code=null workflow_code=null
+# shellcheck disable=SC2329 # Invoked by EXIT, including the explicit phase exits.
 finish() {
   local code=$?
   trap - EXIT
   jq --arg sha "${CANDIDATE_SHA}" --arg started "${started}" --arg finished "$(date -u +%FT%TZ)" \
     --arg run "${RUN_ID}" --arg ci_run "${GITHUB_RUN_ID:-}" --arg attempt "${GITHUB_RUN_ATTEMPT:-}" \
     --argjson code "${code}" --argjson images "${images}" --argjson native "${native}" \
+    --argjson session_code "${session_code}" --argjson workflow_code "${workflow_code}" \
     '. + {candidate_sha:$sha,started_at:$started,finished_at:$finished,run_id:$run,
       ci_run_id:$ci_run,ci_run_attempt:$attempt,images:$images,native:$native,
       topology:{hosts:1,relays:(if .baseline_tag == "v0.6.0" then 2 else 1 end),pki_workflow_relays:2},
       configuration_apply:"unsupported; rejection tested, not positive apply",
+      phases:{session_exit_code:$session_code,workflow_exit_code:$workflow_code},
       scope:"published-node-session-reload-config-rejection-certificate-p12-recovery",exit_code:$code,
       status:(if $code == 0 then "pass" else "fail" end)}' <<<"${identity}" >"${ARTIFACT_DIR}/compatibility-result.json"
   exit "${code}"
@@ -98,7 +102,16 @@ export SINGLE_EXPECTED_AGENT_VERSION="${BASELINE_RELEASE#v}"
 export SINGLE_LEGACY_SECOND_RELAY=false
 [[ "${BASELINE_RELEASE}" != v0.6.0 ]] || export SINGLE_LEGACY_SECOND_RELAY=true
 # Install only inside the existing dedicated, disposable systemd node fixture.
-bash "${ROOT}/scripts/single-relay-integration.sh"
-jq -e --arg version "${SINGLE_EXPECTED_AGENT_VERSION}" '.agent_version == $version' "${ARTIFACT_DIR}/final-node-read.json" >/dev/null
-ARTIFACT_DIR="${ARTIFACT_DIR}/workflow" bash "${ROOT}/scripts/database-controller-e2e.sh" postgres all
+session_code=0
+bash "${ROOT}/scripts/single-relay-integration.sh" || session_code=$?
+if (( session_code == 0 )); then
+  jq -e --arg version "${SINGLE_EXPECTED_AGENT_VERSION}" '.agent_version == $version' "${ARTIFACT_DIR}/final-node-read.json" >/dev/null || session_code=$?
+fi
+# Keep the recovery failure, but collect the independent PKI workflow as well.
+# A failed native audit still stops execution rather than bypassing admission.
+bash "${ROOT}/scripts/release-upgrade-native.sh" "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-after-session.json"
+workflow_code=0
+ARTIFACT_DIR="${ARTIFACT_DIR}/workflow" bash "${ROOT}/scripts/database-controller-e2e.sh" postgres all || workflow_code=$?
 bash "${ROOT}/scripts/release-upgrade-native.sh" "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-after.json"
+(( session_code == 0 )) || exit "${session_code}"
+exit "${workflow_code}"

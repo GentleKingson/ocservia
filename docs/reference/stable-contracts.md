@@ -98,6 +98,18 @@ and release, followed by positive plan/apply/recovery acceptance. Until then,
 exclude positive configuration apply from the proposed rolling window explicitly;
 this proposed limitation is not a silent withdrawal of any existing promise.
 The existing same-source I15/I16/I17 checks do not fill that release-level gap.
+
+Pending non-idempotent mutations have another explicit boundary: after an
+uncertain dispatch and owner change, recovery may be query-only and retain
+`Unknown` / `manual_reconciliation_required`. In particular, the v0.6.0
+two-Relay cell cannot promise every queued reload will complete automatically
+after an all-Relay outage. Do not resend an uncertain mutation, clear journals
+or extend the deadline to call this a pass. The strict reload-recovery test
+retains its failure; the independent PKI phase still runs and records its own
+exit code. A later green run does not erase the earlier demonstrated boundary.
+Before admitting that recovery promise, review the manual-reconciliation path
+and matching durable evidence, or explicitly exclude it from the proposed window.
+
 The private CA requires a test-only systemd drop-in, derived from v0.6.0's
 direct ExecStart or v0.6.1's launcher. Published binaries and installed units
 remain unchanged. v0.6.0 rejects single-Relay custom mode (requires 2..8 URLs):

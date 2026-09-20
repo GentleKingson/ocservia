@@ -84,7 +84,7 @@ printf 'dirty\n' >"${fixture}/repo/dirty"
 reject bash "${runner}" run
 rm "${fixture}/repo/dirty"
 reject env FIXTURE_CHAIN_EXIT=7 bash "${runner}" run
-jq -e '.status == "fail" and .exit_code == 7' "${fixture}/run/compatibility-result.json" >/dev/null
+jq -e '.status == "fail" and .exit_code == 7 and .phases.session_exit_code == 7 and .phases.workflow_exit_code == 0' "${fixture}/run/compatibility-result.json" >/dev/null
 export ARTIFACT_DIR="${fixture}/missing-result"
 reject bash "${runner}" run
 jq -e '.status == "fail" and .exit_code != 0' "${ARTIFACT_DIR}/compatibility-result.json" >/dev/null
@@ -97,7 +97,7 @@ jq -e --arg sha "${CANDIDATE_SHA}" '.status == "pass" and .exit_code == 0 and .c
 reject bash "${runner}" run
 export ARTIFACT_DIR="${fixture}/workflow-failed"
 reject env FIXTURE_WRITE_RESULT=true FIXTURE_WORKFLOW_EXIT=8 bash "${runner}" run
-jq -e '.status == "fail" and .exit_code == 8' "${ARTIFACT_DIR}/compatibility-result.json" >/dev/null
+jq -e '.status == "fail" and .exit_code == 8 and .phases.session_exit_code == 0 and .phases.workflow_exit_code == 8' "${ARTIFACT_DIR}/compatibility-result.json" >/dev/null
 # shellcheck disable=SC2329 # Invoked by the dynamically sourced production helper.
 (
   # Reuse the real HTTP client helper; only exact pre-effect revision failures
