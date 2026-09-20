@@ -22,7 +22,9 @@ use crate::endpoint::RelayStatus;
 
 mod actor;
 
-pub(crate) use self::actor::{Config as RelayActorConfig, HomeRelayWatch, RelayConnectionState};
+pub(crate) use self::actor::{
+    Config as RelayActorConfig, HomeRelayWatch, RelayConnectionFailure, RelayConnectionState,
+};
 use self::actor::{
     RelayActor, RelayActorMessage, RelayRecvDatagram, RelaySendItem, RelayStatusesWatch,
 };
@@ -43,6 +45,12 @@ pub(crate) struct RelayTransport {
     my_relay: HomeRelayWatch,
     relay_statuses: RelayStatusesWatch,
     my_endpoint_id: EndpointId,
+}
+
+impl std::fmt::Display for RelayTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RelayTransport")
+    }
 }
 
 impl RelayTransport {
@@ -124,15 +132,32 @@ impl RelayTransport {
                 .segment_size
                 .map_or(1, |ss| buf_out.len() / u16::from(ss) as usize);
             let datagrams = dm.datagrams.take_segments(num_segments);
+            let empty_now = datagrams.contents.is_empty();
             let empty_after = dm.datagrams.contents.is_empty();
+
             let dm = RelayRecvDatagram {
                 datagrams,
                 src: dm.src,
                 url: dm.url.clone(),
             };
-            // take_segments can leave `self.pending_item` empty, in that case we clear it
-            if empty_after {
+
+            // If `take_segments` processed the whole contents (empty_after) or none at all
+            // (empty_now) we shouldn't process what's left in `self.pending_item`.
+            // In the first case the remaining `pending_item` is empty and can be dropped.
+            // In the second case a single segment could not fit into the buffer, future
+            // calls to `poll_recv` would not change this so drop the `pending_item` with
+            // the oversized segment size.
+            if empty_after || empty_now {
                 self.pending_item = None;
+            }
+            if empty_now {
+                warn!(
+                    noq_buf_len = buf_out.len(),
+                    segment_size = ?dm.datagrams.segment_size,
+                    "dropping received datagram: segment_size too large");
+                // Keep completed receive slots contiguous and retry any queued traffic.
+                cx.waker().wake_by_ref();
+                break;
             }
 
             if buf_out.len() < dm.datagrams.contents.len() {
@@ -144,6 +169,7 @@ impl RelayTransport {
                     segment_size = ?dm.datagrams.segment_size,
                     "dropping received datagram: noq buffer too small"
                 );
+                cx.waker().wake_by_ref();
                 break;
                 // In theory we could put some logic in here to fragment the datagram in case
                 // we still have enough room in our `buf_out` left to fit a couple of
@@ -335,16 +361,119 @@ fn datagrams_from_transmit(transmit: &Transmit<'_>) -> Datagrams {
     }
 }
 
+/// Exercises the real receive boundary with the consuming workspace's lockfile.
+#[cfg(feature = "test-utils")]
+pub(crate) async fn assert_receive_progress() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::{Wake, Waker};
+
+    struct WakeFlag(AtomicBool);
+    impl Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    // Batched, maximum encoded segment size, and oversized unbatched input.
+    for segment_size in [NonZeroU16::new(2000), NonZeroU16::new(u16::MAX), None] {
+        for bad_first in [true, false] {
+            let config = RelayActorConfig {
+                my_relay: Default::default(),
+                relay_statuses: Default::default(),
+                secret_key: iroh_base::SecretKey::from_bytes(&[7; 32]),
+                dns_resolver: crate::dns::DnsResolver::new(),
+                proxy_url: None,
+                ipv6_reported: Arc::new(AtomicBool::new(false)),
+                tls_config: iroh_relay::tls::CaTlsConfig::default()
+                    .client_config(iroh_relay::tls::default_provider())
+                    .unwrap(),
+                metrics: Default::default(),
+                relay_map: iroh_relay::RelayMap::empty(),
+                keep_relays_connected: false,
+                relay_inactive_cleanup_time: std::time::Duration::from_secs(60),
+            };
+            let mut transport = RelayTransport::new(config, CancellationToken::new());
+            let (tx, rx) = mpsc::channel(3);
+            transport.relay_datagram_recv_queue = rx;
+            let datagram = |contents, segment_size| RelayRecvDatagram {
+                url: "https://relay.invalid".parse().unwrap(),
+                src: iroh_base::SecretKey::from_bytes(&[3; 32]).public(),
+                datagrams: Datagrams {
+                    ecn: None,
+                    segment_size,
+                    contents,
+                },
+            };
+            let bad = datagram(Bytes::from(vec![0; 4000]), segment_size);
+            let first = datagram(Bytes::from_static(b"first"), None);
+            for item in if bad_first {
+                [bad, first]
+            } else {
+                [first, bad]
+            } {
+                tx.try_send(item).unwrap();
+            }
+            tx.try_send(datagram(Bytes::from_static(b"next"), None))
+                .unwrap();
+            let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let waker = Waker::from(flag.clone());
+            let mut cx = Context::from_waker(&waker);
+            let mut delivered = Vec::new();
+            for _ in 0..8 {
+                flag.0.store(false, Ordering::SeqCst);
+                let mut storage = [[0; 1472]; 2];
+                let mut bufs: Vec<_> = storage
+                    .iter_mut()
+                    .map(|buf| io::IoSliceMut::new(buf))
+                    .collect();
+                let mut metas = [noq_udp::RecvMeta::default(); 2];
+                let mut infos = [RecvInfo::default(), RecvInfo::default()];
+                match transport.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos) {
+                    Poll::Ready(Ok(count)) => {
+                        assert!(count > 0);
+                        for i in 0..count {
+                            assert!(metas[i].len > 0, "receive slots must be contiguous");
+                            delivered.push(bufs[i][..metas[i].len].to_vec());
+                        }
+                    }
+                    Poll::Pending => assert!(
+                        flag.0.load(Ordering::SeqCst),
+                        "discard must schedule queued traffic"
+                    ),
+                    Poll::Ready(Err(err)) => panic!("receive failed: {err}"),
+                }
+                if delivered.len() == 2 {
+                    break;
+                }
+            }
+            assert_eq!(delivered, [b"first".to_vec(), b"next".to_vec()]);
+            assert!(transport.pending_item.is_none());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, time::Duration};
+    use std::{
+        collections::BTreeSet,
+        num::NonZeroU16,
+        sync::{Arc, atomic::AtomicBool},
+        time::Duration,
+    };
 
-    use iroh_base::EndpointId;
+    use iroh_base::{EndpointId, SecretKey};
+    use iroh_relay::{
+        RelayMap,
+        tls::{CaTlsConfig, default_provider},
+    };
     use tokio::task::JoinSet;
     use tracing::debug;
 
     use super::*;
-    use crate::defaults::staging;
+    use crate::{defaults::staging, dns::DnsResolver};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_relay_datagram_queue() {
@@ -393,5 +522,71 @@ mod tests {
         {
             panic!("Timeout - not all messages between 0 and {capacity} received.");
         }
+    }
+
+    /// Builds a [`RelayTransport`] that never actually dials a relay (its home
+    /// relay watcher is left unset), just so we get a real `poll_recv` to exercise.
+    fn test_relay_transport() -> RelayTransport {
+        let config = RelayActorConfig {
+            my_relay: HomeRelayWatch::default(),
+            relay_statuses: Default::default(),
+            secret_key: SecretKey::from_bytes(&[7u8; 32]),
+            dns_resolver: DnsResolver::new(),
+            proxy_url: None,
+            ipv6_reported: Arc::new(AtomicBool::new(false)),
+            tls_config: CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            metrics: Default::default(),
+            relay_map: RelayMap::empty(),
+            keep_relays_connected: false,
+            relay_inactive_cleanup_time: Duration::from_secs(60),
+        };
+        RelayTransport::new(config, CancellationToken::new())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn progress_is_made_for_large_segment_size_datagram_batch() {
+        let mut transport = test_relay_transport();
+
+        let url = staging::default_na_east_relay().url;
+        let src = EndpointId::from_bytes(&[3u8; 32]).unwrap();
+
+        // Fat datagram batch with segment size larger than the buffer
+        let datagrams = Datagrams {
+            ecn: None,
+            segment_size: NonZeroU16::new(2000),
+            contents: Bytes::from(vec![0u8; 4000]),
+        };
+
+        transport.pending_item = Some(RelayRecvDatagram {
+            url,
+            src,
+            datagrams,
+        });
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        // Deliberately smaller than the 2000-byte segment size above
+        let mut storage = [0u8; 1500];
+        let mut metas = [noq_udp::RecvMeta::default()];
+        let mut recv_infos = [RecvInfo::default()];
+
+        let mut progressed = false;
+        // progress does not need to be immediate but within a reasonable number of iterations
+        for _ in 0..10 {
+            let mut bufs = [io::IoSliceMut::new(&mut storage)];
+            match transport.poll_recv(&mut cx, &mut bufs, &mut metas, &mut recv_infos) {
+                Poll::Ready(Ok(_)) | Poll::Pending => {}
+                Poll::Ready(Err(err)) => panic!("poll_recv failed: {err}"),
+            }
+            if transport.pending_item.is_none() {
+                progressed = true;
+                break;
+            }
+        }
+
+        assert!(progressed, "poll_recv made no progress on batch too large");
     }
 }

@@ -230,8 +230,13 @@ end.join("\n")
   reject("#{profile} installs unrelated tools/dependencies: #{output}") unless status.success? && output.split == expected
 end
 rust_scan = checks.find { |check| check["profile"] == "rust-security" }.fetch("command")
-reject("both advisory scans must remain fresh and fail closed") unless
-  rust_scan.lines.map(&:strip) == ["cd rust", "cargo audit", "cargo deny --locked check advisories"]
+reject("workspace and Relay advisory scans must remain fresh and fail closed") unless
+  rust_scan.lines.map(&:strip) == [
+    "cd rust",
+    "cargo audit",
+    "cargo audit --file ../deploy/production/relay.Cargo.lock",
+    "cargo deny --locked check advisories",
+  ]
 reject("publishing must wait for security success") unless
   release_jobs.fetch("publish-release-packages").fetch("needs").include?("security")
 build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")
