@@ -15,4 +15,5 @@ manual_key_path = "/run/secrets/relay_tls_private_key"
 max_burst_bytes = 4194304
 bytes_per_second = 2097152
 
-access.shared_token = ["replaced-by-entrypoint"]
+[access]
+shared_token = ["replaced-by-entrypoint"]

@@ -42,12 +42,15 @@ use iroh_base::{EndpointId, RelayUrl, SecretKey};
 use iroh_relay::{
     self as relay, PingTracker, RelayConfig, RelayMap,
     client::{Client, ConnectError, RecvError, SendError},
-    protos::relay::{ClientToRelayMsg, Datagrams, RelayToClientMsg, Status},
+    protos::{
+        handshake,
+        relay::{ClientToRelayMsg, Datagrams, RelayToClientMsg, Status},
+    },
 };
 use n0_error::{AnyError, e, stack_error};
 use n0_future::{
     FuturesUnorderedBounded, MaybeFuture, SinkExt, StreamExt,
-    task::{AbortHandle, JoinSet},
+    task::{AbortHandle, JoinError, JoinSet},
     time::{self, Duration, Instant, MissedTickBehavior},
 };
 use n0_watcher::{Watchable, Watcher as _};
@@ -361,8 +364,8 @@ impl ActiveRelayActor {
                 "{err:#}"
             );
             let was_established = matches!(err, RelayConnectionError::Established { .. });
-            let last_error = Some(Arc::new(AnyError::from(err)));
-            self.publish_status(RelayConnectionState::Disconnected { last_error });
+            let last_failure = Some(Arc::new(RelayConnectionFailure::new(err)));
+            self.publish_status(RelayConnectionState::Disconnected { last_failure });
             if !was_established {
                 // If dialing failed, or if the relay connection failed before we received a pong,
                 // we wait an exponentially increasing time until we attempt to reconnect again.
@@ -371,9 +374,8 @@ impl ActiveRelayActor {
                     break;
                 };
                 debug!("retry in {delay:?}");
-                tokio::select! {
-                    _ = self.stop_token.cancelled() => break,
-                    _ = time::sleep(delay) => {}
+                if !self.sleep_backoff(delay).await {
+                    break;
                 }
             } else {
                 // If the relay connection remained established long enough so that we received a pong
@@ -382,6 +384,41 @@ impl ActiveRelayActor {
             }
         }
         debug!("exiting");
+    }
+
+    /// Waits out a reconnect backoff delay while still answering priority messages.
+    ///
+    /// Other active relays may query [`ActiveRelayPrioMessage::HasEndpointRoute`] on this
+    /// relay while it is backing off, e.g. when [`RelayActor`] is looking for an existing
+    /// relay connection to an endpoint. Answering immediately (with `false`, since a
+    /// disconnected relay cannot have an endpoint route) keeps that lookup from stalling
+    /// for however long is left of this relay's own unrelated backoff.
+    ///
+    /// Returns `false` if the actor should shut down instead of retrying.
+    async fn sleep_backoff(&mut self, delay: Duration) -> bool {
+        let sleep = time::sleep(delay);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.stop_token.cancelled() => {
+                    debug!("Shutdown.");
+                    return false;
+                }
+                msg = self.prio_inbox.recv() => {
+                    let Some(msg) = msg else {
+                        warn!("Priority inbox closed, shutdown.");
+                        return false;
+                    };
+                    match msg {
+                        ActiveRelayPrioMessage::HasEndpointRoute(_peer, sender) => {
+                            sender.send(false).ok();
+                        }
+                    }
+                }
+                _ = &mut sleep => return true,
+            }
+        }
     }
 
     fn build_backoff(keep_connected: bool) -> impl Backoff {
@@ -403,10 +440,15 @@ impl ActiveRelayActor {
     /// Returns `Ok(())` if the actor loop should shut down. Returns an error if dialing failed,
     /// or if the relay connection failed while connected. In both cases, the connection should
     /// be retried with a backoff.
+    #[allow(clippy::result_large_err)]
     async fn run_once(&mut self) -> Result<(), RelayConnectionError> {
         self.publish_status(RelayConnectionState::Connecting);
         let client = match self.run_dialing().instrument(info_span!("dialing")).await {
-            Some(client_res) => client_res.map_err(|err| e!(RelayConnectionError::Dial, err))?,
+            Some(Ok(client)) => client,
+            Some(Err(err)) => {
+                self.metrics.relay_conns_failed.inc();
+                return Err(e!(RelayConnectionError::Dial, err));
+            }
             None => return Ok(()),
         };
         self.publish_status(RelayConnectionState::Connected);
@@ -417,9 +459,13 @@ impl ActiveRelayActor {
                 "persistent relay connection established"
             );
         }
-        self.run_connected(client)
+        self.metrics.relay_conns_success.inc();
+        let res = self
+            .run_connected(client)
             .instrument(info_span!("connected"))
-            .await
+            .await;
+        self.metrics.relay_conns_closed.inc();
+        res
     }
 
     fn reset_inactive_timeout(&mut self) {
@@ -556,6 +602,7 @@ impl ActiveRelayActor {
     ///
     /// Returns `Ok` if the actor needs to shut down.  `Err` is returned if the connection
     /// to the relay server is lost.
+    #[allow(clippy::result_large_err)]
     async fn run_connected(
         &mut self,
         client: iroh_relay::client::Client,
@@ -577,6 +624,7 @@ impl ActiveRelayActor {
             last_packet_src: None,
             pong_pending: None,
             established: false,
+            rate_limited: false,
             #[cfg(test)]
             test_pong: None,
         };
@@ -766,6 +814,15 @@ impl ActiveRelayActor {
             }
             RelayToClientMsg::Status(status) => match status {
                 Status::Healthy => info!("Relay server reports: {status}"),
+                Status::RateLimited => {
+                    warn!("{status}");
+                    // The relay sends this at most once per connection, but do not rely
+                    // on the remote for the metric to count connections.
+                    if !state.rate_limited {
+                        state.rate_limited = true;
+                        self.metrics.relay_conns_ratelimited.inc();
+                    }
+                }
                 _ => warn!("Relay server reports problem: {status}"),
             },
             RelayToClientMsg::Restarting { .. } => {
@@ -792,6 +849,7 @@ impl ActiveRelayActor {
     /// the actor should shut down, consult the [`ActiveRelayActor::stop_token`] and
     /// [`ActiveRelayActor::inactive_timeout`] for this, or the send was successful.
     #[instrument(name = "tx", skip_all)]
+    #[allow(clippy::result_large_err)]
     async fn run_sending<T>(
         &mut self,
         sending_fut: impl Future<Output = Result<T, RunError>>,
@@ -874,6 +932,10 @@ struct ConnectedRelayState {
     ///
     /// This is set to `true` once a pong was received from the server.
     established: bool,
+    /// Whether the relay reported that it is rate-limiting this connection.
+    ///
+    /// Used to count each affected connection only once.
+    rate_limited: bool,
     #[cfg(test)]
     test_pong: Option<([u8; 8], oneshot::Sender<()>)>,
 }
@@ -967,13 +1029,15 @@ pub(crate) enum RelayConnectionState {
     /// Not connected. Either the connection was lost after having been
     /// established, or an attempt to connect failed.
     ///
-    /// `last_error` carries the most recent connection error, if any. The
+    /// `last_failure` carries the most recent connection failure, if any. The
     /// initial transition into this state (before any attempt has produced
     /// an error) carries `None`.
     ///
     /// The `Arc` is compared by pointer identity: each new failure produces
     /// a fresh allocation, so the watcher fires on every new error.
-    Disconnected { last_error: Option<Arc<AnyError>> },
+    Disconnected {
+        last_failure: Option<Arc<RelayConnectionFailure>>,
+    },
 }
 
 impl RelayConnectionState {
@@ -981,9 +1045,9 @@ impl RelayConnectionState {
         matches!(self, Self::Connected)
     }
 
-    pub(crate) fn last_error(&self) -> Option<&Arc<AnyError>> {
+    pub(crate) fn last_failure(&self) -> Option<&RelayConnectionFailure> {
         match self {
-            Self::Disconnected { last_error } => last_error.as_ref(),
+            Self::Disconnected { last_failure } => last_failure.as_deref(),
             _ => None,
         }
     }
@@ -993,7 +1057,7 @@ impl PartialEq for RelayConnectionState {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Connecting, Self::Connecting) | (Self::Connected, Self::Connected) => true,
-            (Self::Disconnected { last_error: a }, Self::Disconnected { last_error: b }) => {
+            (Self::Disconnected { last_failure: a }, Self::Disconnected { last_failure: b }) => {
                 match (a, b) {
                     (None, None) => true,
                     (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -1006,6 +1070,54 @@ impl PartialEq for RelayConnectionState {
 }
 
 impl Eq for RelayConnectionState {}
+
+/// A failed attempt to connect to a relay server, or a lost connection.
+///
+/// Contains the type-erased error, together with whatever we could classify from it
+/// while the concrete error type was still at hand.
+#[derive(Debug)]
+pub(crate) struct RelayConnectionFailure {
+    error: AnyError,
+    auth_denied_reason: Option<String>,
+}
+
+impl RelayConnectionFailure {
+    fn new(error: RelayConnectionError) -> Self {
+        Self {
+            auth_denied_reason: auth_denied_reason(&error).map(ToOwned::to_owned),
+            error: AnyError::from(error),
+        }
+    }
+
+    /// Returns the type-erased error.
+    pub(crate) fn error(&self) -> &AnyError {
+        &self.error
+    }
+
+    /// Returns the reason if the relay server denied our authentication.
+    pub(crate) fn auth_denied_reason(&self) -> Option<&str> {
+        self.auth_denied_reason.as_deref()
+    }
+}
+
+/// Returns the reason if `error` was caused by the relay server denying our authentication.
+fn auth_denied_reason(error: &RelayConnectionError) -> Option<&str> {
+    match error {
+        RelayConnectionError::Dial {
+            source:
+                DialError::Connect {
+                    source:
+                        ConnectError::Handshake {
+                            source: handshake::Error::ServerDeniedAuth { reason, .. },
+                            ..
+                        },
+                    ..
+                },
+            ..
+        } => Some(reason),
+        _ => None,
+    }
+}
 
 /// Shared watchable for the home relay URL and connection status.
 ///
@@ -1171,16 +1283,7 @@ impl RelayActor {
                     break;
                 }
                 Some(res) = self.active_relay_tasks.join_next() => {
-                    match res {
-                        Ok(()) => (),
-                        Err(err) if err.is_panic() => {
-                            error!("ActiveRelayActor task panicked: {err:#?}");
-                        }
-                        Err(err) if err.is_cancelled() => {
-                            error!("ActiveRelayActor cancelled: {err:#?}");
-                        }
-                        Err(err) => error!("ActiveRelayActor failed: {err:#?}"),
-                    }
+                    log_active_relay_task_result(res);
                     self.reap_active_relays().await;
                 }
                 msg = receiver.recv() => {
@@ -1684,8 +1787,11 @@ impl RelayActor {
     /// Stops all [`ActiveRelayActor`]s and awaits for them to finish.
     async fn close_all_active_relays(&mut self) {
         self.cancel_token.cancel();
-        let tasks = std::mem::take(&mut self.active_relay_tasks);
-        tasks.join_all().await;
+        let mut tasks = std::mem::take(&mut self.active_relay_tasks);
+        // Drain instead of `join_all`, which panics on any `JoinError`.
+        while let Some(res) = tasks.join_next().await {
+            log_active_relay_task_result(res);
+        }
 
         self.log_active_relay();
     }
@@ -1708,6 +1814,16 @@ impl RelayActor {
         ids.sort();
 
         ids.into_iter()
+    }
+}
+
+/// Reports how one [`ActiveRelayActor`] task ended, in the run loop and on shutdown.
+fn log_active_relay_task_result(res: Result<(), JoinError>) {
+    match res {
+        Ok(()) => (),
+        Err(err) if err.is_panic() => error!("ActiveRelayActor task panicked: {err:#?}"),
+        Err(err) if err.is_cancelled() => error!("ActiveRelayActor cancelled: {err:#?}"),
+        Err(err) => error!("ActiveRelayActor failed: {err:#?}"),
     }
 }
 
@@ -1779,8 +1895,42 @@ mod tests {
         RelayRecvDatagram, RelaySendItem, RelayStatusesWatch, UNDELIVERABLE_DATAGRAM_TIMEOUT,
         connected_standby,
     };
-    use crate::{dns::DnsResolver, test_utils};
+    use crate::{dns::DnsResolver, metrics::SocketMetrics, test_utils};
     use iroh_relay::{RelayConfig, RelayMap};
+
+    /// Abort stands in for the runtime drop that triggers this in the wild:
+    /// `join_next` yields a cancelled `JoinError` either way.
+    #[tokio::test]
+    #[traced_test]
+    async fn close_all_active_relays_survives_a_cancelled_task() {
+        let (relay_datagram_recv_queue, _recv_rx) = mpsc::channel(1);
+        let config = Config {
+            my_relay: Default::default(),
+            relay_statuses: Default::default(),
+            secret_key: SecretKey::from_bytes(&[0u8; 32]),
+            dns_resolver: DnsResolver::new(),
+            proxy_url: None,
+            ipv6_reported: Arc::new(AtomicBool::new(false)),
+            tls_config: CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            metrics: Default::default(),
+            relay_map: RelayMap::empty(),
+            keep_relays_connected: false,
+            relay_inactive_cleanup_time: RELAY_INACTIVE_CLEANUP_TIME,
+        };
+        let mut actor =
+            RelayActor::new(config, relay_datagram_recv_queue, CancellationToken::new());
+
+        let handle = actor.active_relay_tasks.spawn(std::future::pending::<()>());
+        handle.abort();
+
+        // Panicked with `join_all`.
+        actor.close_all_active_relays().await;
+
+        assert!(actor.active_relay_tasks.is_empty());
+        assert!(logs_contain("ActiveRelayActor cancelled"));
+    }
 
     /// Starts a new [`ActiveRelayActor`].
     #[allow(clippy::too_many_arguments)]
@@ -1792,6 +1942,7 @@ mod tests {
         inbox_rx: mpsc::Receiver<ActiveRelayMessage>,
         relay_datagrams_send: mpsc::Receiver<RelaySendItem>,
         relay_datagrams_recv: mpsc::Sender<RelayRecvDatagram>,
+        metrics: Arc<SocketMetrics>,
         span: tracing::Span,
     ) -> AbortOnDropHandle<()> {
         let opts = ActiveRelayActorOptions {
@@ -1811,7 +1962,7 @@ mod tests {
                 auth_token: None,
             },
             stop_token,
-            metrics: Default::default(),
+            metrics,
             my_relay: Default::default(),
             relay_statuses: Default::default(),
             keep_connected: false,
@@ -1841,6 +1992,7 @@ mod tests {
             inbox_rx,
             send_datagram_rx,
             recv_datagram_tx,
+            Default::default(),
             info_span!("echo-endpoint"),
         );
         let echo_task = tokio::spawn({
@@ -1929,6 +2081,7 @@ mod tests {
         let (_prio_inbox_tx, prio_inbox_rx) = mpsc::channel(8);
         let (inbox_tx, inbox_rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
+        let metrics = Arc::new(SocketMetrics::default());
         let task = start_active_relay_actor(
             secret_key,
             cancel_token.clone(),
@@ -1937,6 +2090,7 @@ mod tests {
             inbox_rx,
             send_datagram_rx,
             datagram_recv_tx.clone(),
+            metrics.clone(),
             info_span!("actor-under-test"),
         );
 
@@ -2017,6 +2171,15 @@ mod tests {
         cancel_token.cancel();
         task.await.std_context("wait for task to finish")?;
 
+        // The actor connected once at startup and once more after the connection check
+        // failed.
+        assert_eq!(metrics.relay_conns_success.get(), 2);
+        assert_eq!(
+            metrics.relay_conns_closed.get(),
+            2,
+            "the connections are counted as closed once the actor stops"
+        );
+
         Ok(())
     }
 
@@ -2031,6 +2194,7 @@ mod tests {
         let (_prio_inbox_tx, prio_inbox_rx) = mpsc::channel(8);
         let (inbox_tx, inbox_rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
+        let metrics = Arc::new(SocketMetrics::default());
         let mut task = start_active_relay_actor(
             secret_key,
             cancel_token.clone(),
@@ -2039,6 +2203,7 @@ mod tests {
             inbox_rx,
             send_datagram_rx,
             datagram_recv_tx,
+            metrics.clone(),
             info_span!("actor-under-test"),
         );
 
@@ -2058,6 +2223,13 @@ mod tests {
         })
         .await
         .std_context("timeout")?;
+
+        assert_eq!(metrics.relay_conns_success.get(), 1);
+        assert_eq!(
+            metrics.relay_conns_closed.get(),
+            0,
+            "the connection is only counted as closed once it is gone"
+        );
 
         // We now have an idling ActiveRelayActor.  If we advance time just a little it
         // should stay alive.
@@ -2087,6 +2259,14 @@ mod tests {
                 .await
                 .is_ok(),
             "actor task still running"
+        );
+
+        // The actor may have reconnected while we advanced time, because a ping to the relay
+        // server can time out while time is frozen, so we do not assert an exact count here.
+        assert_eq!(
+            metrics.relay_conns_closed.get(),
+            metrics.relay_conns_success.get(),
+            "all connections are counted as closed once the actor stops"
         );
 
         cancel_token.cancel();
@@ -2122,6 +2302,67 @@ mod tests {
         assert!(res.is_err(), "ping timeout should only happen once");
     }
 
+    #[tokio::test]
+    #[traced_test]
+    async fn test_prio_inbox_answered_during_backoff() {
+        tokio::time::pause();
+        let secret_key = SecretKey::from_bytes(&[1u8; 32]);
+        let peer = SecretKey::from_bytes(&[2u8; 32]).public();
+        let url: RelayUrl = "https://relay.invalid".parse().unwrap();
+        let (prio_inbox_tx, prio_inbox_rx) = mpsc::channel(8);
+        let (_inbox_tx, inbox_rx) = mpsc::channel(16);
+        let (_send_datagram_tx, send_datagram_rx) = mpsc::channel(16);
+        let (recv_datagram_tx, _recv_datagram_rx) = mpsc::channel(16);
+        let opts = ActiveRelayActorOptions {
+            url,
+            prio_inbox_: prio_inbox_rx,
+            inbox: inbox_rx,
+            relay_datagrams_send: send_datagram_rx,
+            relay_datagrams_recv: recv_datagram_tx,
+            connection_opts: RelayConnectionOptions {
+                secret_key,
+                dns_resolver: DnsResolver::new(),
+                proxy_url: None,
+                prefer_ipv6: Arc::new(AtomicBool::new(true)),
+                tls_config: CaTlsConfig::insecure_skip_verify()
+                    .client_config(default_provider())
+                    .expect("infallible"),
+                auth_token: None,
+            },
+            stop_token: CancellationToken::new(),
+            metrics: Default::default(),
+            my_relay: Default::default(),
+            relay_statuses: Default::default(),
+            keep_connected: false,
+            inactive_cleanup_time: RELAY_INACTIVE_CLEANUP_TIME,
+        };
+        let mut actor = ActiveRelayActor::new(opts);
+
+        let backoff = tokio::spawn(async move {
+            let keep_running = actor.sleep_backoff(Duration::from_secs(10)).await;
+            (actor, keep_running)
+        });
+
+        // Query the actor while it waits out the backoff delay. The reply must
+        // arrive well before the delay elapses; before the backoff wait
+        // serviced the priority inbox, this reply only arrived after the
+        // remaining backoff delay (up to 16s).
+        let (tx, rx) = oneshot::channel();
+        prio_inbox_tx
+            .send(ActiveRelayPrioMessage::HasEndpointRoute(peer, tx))
+            .await
+            .expect("actor alive");
+        let reply = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("no reply within 1s of a 10s backoff")
+            .expect("sender dropped");
+        assert!(!reply, "a disconnected relay has no endpoint routes");
+
+        // The backoff itself still runs to completion.
+        let (_actor, keep_running) = backoff.await.expect("backoff task panicked");
+        assert!(keep_running, "backoff should complete normally");
+    }
+
     #[test]
     fn test_home_relay_watch_url_guard() {
         use super::{HomeRelayWatch, RelayConnectionState};
@@ -2143,7 +2384,10 @@ mod tests {
         watch.set(b.clone(), RelayConnectionState::Connecting);
 
         // Old actor A tries to write -- rejected because URL changed
-        watch.set_status(&a, RelayConnectionState::Disconnected { last_error: None });
+        watch.set_status(
+            &a,
+            RelayConnectionState::Disconnected { last_failure: None },
+        );
         assert_eq!(
             watch.get(),
             Some(RelayStatus::new(
@@ -2255,7 +2499,7 @@ mod tests {
         let relay_statuses = RelayStatusesWatch::default();
         relay_statuses.update(
             &dead_url,
-            RelayConnectionState::Disconnected { last_error: None },
+            RelayConnectionState::Disconnected { last_failure: None },
         );
         relay_statuses.update(&live_url, RelayConnectionState::Connected);
         let config = Config {

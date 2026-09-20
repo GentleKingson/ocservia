@@ -3413,6 +3413,29 @@ mod tests {
 
     const RELAYED_AUTHORIZATION_SIGNATURE: &[u8] = &[0xa5; 64];
 
+    async fn private_tls_relay() -> (
+        RelayMap,
+        Vec<rustls_pki_types::CertificateDer<'static>>,
+        iroh_relay::server::Server,
+    ) {
+        use iroh_relay::server::{CertConfig, RelayConfig, Server, ServerConfig, TlsConfig};
+        let (certs, server_config) =
+            iroh_relay::server::testing::self_signed_tls_certs_and_config();
+        let mut relay = RelayConfig::new(([127, 0, 0, 1], 0));
+        relay.tls = Some(TlsConfig::new(
+            ([127, 0, 0, 1], 0),
+            CertConfig::Manual { server_config },
+        ));
+        let mut config = ServerConfig::default();
+        config.relay = Some(relay);
+        let server = Server::spawn(config)
+            .await
+            .expect("start private TLS relay");
+        let url = format!("https://{}", server.https_addr().expect("TLS listener"));
+        let map = RelayMap::try_from_iter([url.as_str()]).expect("private relay map");
+        (map, certs, server)
+    }
+
     struct RestartableTcpProxy {
         addr: SocketAddr,
         stop: oneshot::Sender<()>,
@@ -4841,19 +4864,19 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires access to the configured public Iroh relay"]
     async fn relay_only_connection_and_disabled_relay_failure() {
+        let (relay_map, relay_roots, relay) = private_tls_relay().await;
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
         let service = IrohTransportService::new(8);
         let router = build_router_with_direct(
             SecretKey::generate(),
-            RelayMode::Default,
+            RelayMode::Custom(relay_map.clone()),
             identity_policy(&agent_key, &handshake),
             None,
             &service,
             false,
-            Vec::new(),
+            relay_roots.clone(),
         )
         .await
         .expect("build router");
@@ -4883,6 +4906,8 @@ mod tests {
 
         let client = Endpoint::builder(presets::N0)
             .secret_key(agent_key.clone())
+            .relay_mode(RelayMode::Custom(relay_map))
+            .ca_tls_config(CaTlsConfig::default().with_extra_roots(relay_roots))
             .clear_address_lookup()
             .clear_ip_transports()
             .bind()
@@ -4918,6 +4943,7 @@ mod tests {
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
+        relay.shutdown().await.expect("stop private relay");
     }
 
     #[test]
@@ -4935,6 +4961,81 @@ mod tests {
         )));
         assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(one)));
         assert!(keep_dedicated_relays_connected(&RelayMode::Custom(two)));
+    }
+
+    #[tokio::test]
+    async fn malformed_relay_batches_preserve_receive_progress() {
+        iroh::test_utils::assert_relay_receive_progress().await;
+    }
+
+    #[tokio::test]
+    async fn single_relay_recovers_without_replacing_endpoint() {
+        let (_, roots, relay) = private_tls_relay().await;
+        let relay_addr = relay.https_addr().expect("TLS listener");
+        let proxy = RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_addr).await;
+        let url: iroh::RelayUrl = format!("https://{}", proxy.addr).parse().unwrap();
+        let map = RelayMap::from_iter([iroh_relay::RelayConfig::from(url.clone())]);
+        let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
+        let service = IrohTransportService::new(16);
+        let router = build_router_with_direct(
+            SecretKey::generate(),
+            RelayMode::Custom(map.clone()),
+            identity_policy(&agent_key, &handshake),
+            None,
+            &service,
+            false,
+            roots.clone(),
+        )
+        .await
+        .expect("single relay router");
+        let identity = router.endpoint().id();
+        let mut proxy = Some(proxy);
+        for recovering in [false, true] {
+            if recovering {
+                let addr = proxy.take().unwrap().stop().await;
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while router
+                        .endpoint()
+                        .home_relay_status()
+                        .get()
+                        .iter()
+                        .any(iroh::endpoint::RelayStatus::is_connected)
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("observe disconnected Relay");
+                proxy = Some(RestartableTcpProxy::start(addr, relay_addr).await);
+            }
+            tokio::time::timeout(Duration::from_secs(90), router.endpoint().online())
+                .await
+                .expect("single relay online without endpoint restart");
+            let client = Endpoint::builder(presets::Minimal)
+                .secret_key(agent_key.clone())
+                .relay_mode(RelayMode::Custom(map.clone()))
+                .ca_tls_config(CaTlsConfig::default().with_extra_roots(roots.clone()))
+                .clear_ip_transports()
+                .bind()
+                .await
+                .expect("relay-only agent");
+            let target = iroh::EndpointAddr::new(identity).with_relay_url(url.clone());
+            let connection =
+                tokio::time::timeout(Duration::from_secs(15), client.connect(target, AGENT_ALPN))
+                    .await
+                    .expect("connection deadline")
+                    .expect("authenticated ALPN connection");
+            assert_eq!(
+                send_handshake(&connection, &handshake).await.result,
+                i32::from(HandshakeResult::Accepted)
+            );
+            assert_eq!(router.endpoint().id(), identity);
+            client.close().await;
+        }
+        shutdown(&service, router).await.expect("shutdown router");
+        proxy.unwrap().stop().await;
+        relay.shutdown().await.expect("stop private relay");
     }
 
     #[tokio::test]
@@ -5773,15 +5874,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires access to the configured public Iroh relay"]
     async fn relay_and_direct_paths_converge_to_direct() {
+        let (relay_map, relay_roots, relay) = private_tls_relay().await;
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
         let service = IrohTransportService::new(16);
-        let router = build_router(
+        let router = build_router_with_tls_roots(
             SecretKey::generate(),
-            RelayMode::Default,
+            RelayMode::Custom(relay_map.clone()),
             identity_policy(&agent_key, &handshake),
+            relay_roots.clone(),
             &service,
         )
         .await
@@ -5791,6 +5893,9 @@ mod tests {
             .expect("controller endpoint online");
         let client = Endpoint::builder(presets::N0)
             .secret_key(agent_key.clone())
+            .relay_mode(RelayMode::Custom(relay_map))
+            .ca_tls_config(CaTlsConfig::default().with_extra_roots(relay_roots))
+            .clear_address_lookup()
             .bind()
             .await
             .expect("build client");
@@ -5828,6 +5933,7 @@ mod tests {
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
+        relay.shutdown().await.expect("stop private relay");
     }
 
     // ---------------------------------------------------------------------------

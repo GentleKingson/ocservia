@@ -1,4 +1,5 @@
 # sha256  artifact
+beb2294a9749d6a25fd7cd8bcf0fccd932f20716d4f967d85d3f23c7135ae6a2  iroh-relay-1.2.0.crate
 2dc95ce4675829f2df0e86b28bcef3283635902062a5f0580ca659bf570f3204  go1.26.6.darwin-arm64.tar.gz
 708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89  go1.26.6.linux-amd64.tar.gz
 d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e  go1.26.6.linux-arm64.tar.gz

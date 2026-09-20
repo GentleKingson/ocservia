@@ -13,7 +13,7 @@ cp "$ROOT/rust/target/debug/ocservia-transportd" "$OUT/bin/"
 for binary in ocservia-agent ocservia-privd ocservia-g6-probe; do
   cp "$ROOT/rust/target/debug/$binary" "$OUT/bin/"
 done
-cargo install --locked --version 1.0.3 --features server iroh-relay --debug --root "$OUT/relay"
+bash "$ROOT/scripts/build-relay.sh" "$OUT/relay" debug
 cp "$OUT/relay/bin/iroh-relay" "$OUT/bin/"
 cp "$ROOT/deploy/prepare-transport-runtime.sh" "$OUT/deploy/"
 cp -R "$ROOT/deploy/production" "$OUT/deploy/"

@@ -105,17 +105,35 @@ original node binding: neither a stale nor a higher-revision ordinary Active
 update can reactivate or rebind them. Connection side effects occur only after
 the exact authoritative transition advances the retained state.
 
-Iroh is pinned to `1.0.0` in `Cargo.toml`; the workspace carries a provenance-bound
+Iroh is pinned to `1.2.0` in `Cargo.toml`; the workspace carries a provenance-bound
 patch of that exact crates.io release, and `Cargo.lock` pins the complete resolved
-graph. Transportd opts into persistent connections to every member only for a
+graph. Transportd and Agent opt into persistent connections to every member only for a
 custom dedicated relay set containing at least two relays. One preferred relay
 remains the sole published home address, while already-authenticated standby
 connections allow an incoming Agent to reach the same live Controller endpoint
-after the home relay fails. Agents and endpoints using default, disabled, or a
+after the home relay fails. Endpoints using default, disabled, or a
 single custom relay retain upstream idle-connection behavior. Patch upgrades
-within 1.0.x still require direct, relay, ALPN rejection, path-event, shutdown,
+still require direct, relay, ALPN rejection, path-event, shutdown,
 dependency, audit, and license tests because transport and relay internals may
 change without affecting the Go contract.
+
+The standalone `iroh-relay` binary is separately pinned by `iroh` in
+`toolchains.lock`. `scripts/build-relay.sh` verifies its registry archive and
+builds the unchanged upstream CLI with `deploy/production/relay.Cargo.lock`.
+Both production images and recovery builds use this entry point. The Rust image
+tag is the compiler version, not an endpoint or Relay protocol version. Do not
+replace this with `cargo install --version`: upstream Relay 1.2.0's archive lock
+still has rustls 0.23.41, while the reviewed build lock uses 0.23.45.
+
+For a rolling upgrade, replace Relays one at a time, retaining a healthy member,
+then upgrade transportd and Agents without changing keys, ALPNs, grants, or
+authorization revisions. A protocol-compatible old binary is not necessarily a
+security-safe rollback: Iroh 1.0.0 reintroduces the oversized Relay batch and
+predictable mapped-address issues, and Relay's old registry lock reintroduces
+the rustls advisory. Prefer a previous build containing the same security fixes;
+otherwise isolate the affected service rather than disabling authentication or
+resetting journals/revisions. Production upgrades still require deployment-specific
+version inventory, authorization, and a maintenance window.
 
 The side-effect-free `ocservia-transportd-stub` remains the default development
 stack and rollback mode. To roll back an unshipped Iroh deployment, stop the real
