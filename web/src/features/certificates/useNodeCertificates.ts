@@ -121,7 +121,12 @@ export function useNodeCertificates({
         if (!certificateWorkflow.isCurrent(context)) return;
         certificateGrant.value = readCertificateGrant(context, record.id);
       }
-      if (!certificateWorkflow.isCurrent(context) || !receipt.operationId)
+      if (
+        !certificateWorkflow.isCurrent(context) ||
+        !record ||
+        receipt.resourceId !== record.id ||
+        !receipt.operationId
+      )
         return;
       const operation = await getOperation(receipt.operationId, context.signal);
       if (

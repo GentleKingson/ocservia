@@ -1,6 +1,11 @@
 import { effectScope, ref, type EffectScope } from "vue";
-import type { Certificate, NodeObservedState } from "@ocservia/api-client";
+import type {
+  Certificate,
+  NodeObservedState,
+  Operation,
+} from "@ocservia/api-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getOperation } from "../src/api/operations";
 import { useNodeCertificates } from "../src/features/certificates/useNodeCertificates";
 
 const api = vi.hoisted(() => ({
@@ -24,6 +29,11 @@ const certificate = {
   version: 3,
   state: "csr_ready",
 } as Certificate;
+const otherCertificate = {
+  ...certificate,
+  id: "certificate-b",
+  operationId: "other-csr-operation",
+};
 
 function setup() {
   const currentNode = ref({
@@ -129,6 +139,66 @@ describe("certificate feature without a page or store", () => {
     expect(feature.certificateDialog.value).toBe(false);
     expect(api.listNodeCertificates).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      scenario: "the receipt certificate is still active",
+      records: [otherCertificate, certificate],
+      selectedId: certificate.id,
+      restoresOperation: true,
+    },
+    {
+      scenario: "the receipt certificate is revoked",
+      records: [{ ...certificate, state: "revoked" }, otherCertificate],
+      selectedId: "certificate-b",
+      restoresOperation: false,
+    },
+    {
+      scenario: "the receipt certificate is missing",
+      records: [otherCertificate],
+      selectedId: "certificate-b",
+      restoresOperation: false,
+    },
+    {
+      scenario: "no active certificate remains",
+      records: [{ ...certificate, state: "revoked" }],
+      selectedId: undefined,
+      restoresOperation: false,
+    },
+  ])(
+    "binds the restored operation to the selected certificate when $scenario",
+    async ({ records, selectedId, restoresOperation }) => {
+      const { feature, trackOperation } = setup();
+      await feature.openCertificate();
+      feature.certificateReason.value = "certificate";
+      await feature.submitCertificateRequest();
+      feature.certificateDialog.value = false;
+
+      const operation = {
+        id: "csr-operation",
+        nodeId: "node-a",
+        state: "succeeded",
+      } as Operation;
+      api.listNodeCertificates.mockResolvedValueOnce(records);
+      vi.mocked(getOperation).mockResolvedValue(operation);
+      await feature.openCertificate();
+
+      expect(feature.certificate.value?.id).toBe(selectedId);
+      expect(feature.certificateOperation.value).toEqual(
+        restoresOperation ? operation : undefined,
+      );
+      if (restoresOperation)
+        expect(getOperation).toHaveBeenCalledExactlyOnceWith(
+          operation.id,
+          expect.any(AbortSignal),
+        );
+      else expect(getOperation).not.toHaveBeenCalled();
+      expect(api.createCertificate).toHaveBeenCalledTimes(1);
+      expect(trackOperation).not.toHaveBeenCalled();
+      expect(feature.certificateLoading.value).toBe(false);
+      expect(feature.certificateError.value).toBe("");
+    },
+  );
 
   it.each(["node", "workspace"])(
     "fences mutations with the supplied %s context",
