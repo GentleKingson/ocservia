@@ -1,12 +1,24 @@
 # Native release upgrade validation
 
 `Native Release Upgrade Validation` is an independent `workflow_dispatch`
-workflow, not a publisher and not part of Basic CI. Only `version`,
-`baseline_release` (default `v0.6.0`), and `candidate_sha` are accepted.
+workflow, not a publisher and not part of Basic CI. It accepts exactly these
+five inputs:
+
+| Input | Type / default | Meaning |
+| --- | --- | --- |
+| `version` | Required string | Candidate numeric X.Y.Z, strictly newer than the selected baseline |
+| `baseline_release` | Required string; `v0.6.0` | Registered published baseline for prepare and native upgrades |
+| `candidate_sha` | Required string | Exact full lowercase SHA of the dispatch branch |
+| `session_compatibility` | Boolean; `false` | Also run both published v0.6.0/v0.6.1 application pairs on both architectures |
+| `session_only` | Boolean; `false` | Run the four application cells instead of native upgrades, even when `session_compatibility=false` |
+
 Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
 must be the complete lowercase commit SHA of that branch and must equal
 both the dispatch SHA and checkout HEAD. The candidate's numeric X.Y.Z
 version must be strictly newer than the baseline.
+These three identity inputs remain required in application-only mode: prepare
+still freezes and verifies the selected registered baseline. The application
+jobs always select both v0.6.0 and v0.6.1, independently of `baseline_release`.
 
 The maintained `.github/workflows/release-upgrade.yml` is the complete manual
 workflow. Dispatch only after the candidate edits are committed and pushed to
@@ -27,12 +39,20 @@ gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
 
 Quick/Full Basic CI checks change regressions. `release.yml` builds packages
 and images, runs its release smoke checks, and publishes only through its
-tag/approval path. This workflow validates the registered old release to exact
-candidate upgrade on four native units without publishing. Formal G6 is the
+tag/approval path. In default mode this workflow validates the registered old
+release to exact candidate upgrade on four native units without publishing. Formal G6 is the
 separate production-readiness/HA/PITR acceptance harness. None of these gates
 substitutes for another or extends a backend's production support.
 
-Four mandatory cells run with fail-fast disabled:
+Dispatch modes are:
+
+| `session_compatibility` | `session_only` | Jobs after prepare |
+| --- | --- | --- |
+| `false` | `false` | Four native upgrade units and `Native Upgrade Result` (default) |
+| `true` | `false` | Native units/result plus four application cells |
+| Either value | `true` | Four application cells only; both native matrices and `Native Upgrade Result` are skipped |
+
+In native-upgrade mode, four mandatory cells run with fail-fast disabled:
 
 | Cell | Native runner | Required upgrade path |
 | --- | --- | --- |
@@ -46,7 +66,8 @@ must agree. Active binfmt handlers and remote Docker daemons are refused.
 Each disposable hosted runner first unregisters all preinstalled binfmt
 handlers, including LLVM's runtime handler, then executes the unchanged
 strict audit. This preparation is not run on shared BuildServer.
-There is no component/architecture skip input. RPM names use x86_64/aarch64;
+Within native-upgrade mode there is no component/architecture skip input.
+RPM names use x86_64/aarch64;
 DEB metadata includes nfpm's `-1` revision, separate from the binary X.Y.Z.
 
 Agent tests retain the old package's own production-relay installer. They
@@ -94,14 +115,31 @@ refusals. The old production backup worker creates a physical base backup
 after old data exists; a separate PostgreSQL instance verifies and restores it.
 This focused restore is not the full G6 PITR/failover matrix.
 
-Excluded: database engine/major changes, MySQL/MariaDB historical upgrades,
+Excluded from native-upgrade evidence: database engine/major changes, MySQL/MariaDB historical upgrades,
 all historical releases, all distributions, online Agent batches, cross-VM
 or relay end-to-end behavior, full database regression/security/G6 acceptance.
+
+### Optional published-node application matrix
+
+Append `-f session_compatibility=true` to include application evidence with
+the native gate, or `-f session_only=true` for application-fixture iteration.
+Each native architecture builds candidate application images once and runs
+both published node baselines without rebuilding their binaries. The second
+baseline still runs after a first-baseline failure if the build succeeded and
+the job was not cancelled. The independent PKI/config-rejection phase retains
+its own exit code without hiding a session/reload/recovery failure.
+
+See the [finite release matrix and adopted exclusions](../reference/stable-contracts.md#finite-release-matrix)
+for topology, required workflows, the v0.6.0 uncertain-mutation recovery
+boundary and excluded positive ConfigPlan apply for old nodes. The broader
+strict recovery check is retained; a documented exclusion does not turn its
+failed cell into PASS. Application-only success cannot satisfy native upgrade
+requirements, and `Native Upgrade Result` does not aggregate application jobs.
 
 ## Build and trust boundaries
 
 `build-release-agent.sh` and `build-release-controller.sh` are shared with
-`release.yml`. Every cell builds one candidate package set or four production
+`release.yml`. Every native unit builds one candidate package set or four production
 image archives. Tests consume those exact files and retain their digests.
 Agent builds use `build-agent-binaries.sh` and the digest-pinned native
 Rocky 9 build container for all three common tar/DEB/RPM payload binaries.
@@ -163,11 +201,23 @@ v0.4.0 package key. Immutable Release 389674680 and publication run 35061703465
 were cross-checked. This metadata verification did not install or rebuild the
 baseline and is not upgrade acceptance.
 
-The existing v0.6.0 release smoke and manual default remain unchanged. Before
-releasing v0.6.2, additionally dispatch this workflow with
-`-f baseline_release=v0.6.1 -f version=0.6.2` and the exact candidate branch/SHA.
+The existing v0.6.0 release smoke and manual default remain unchanged. To
+cover the supplemental baseline, additionally dispatch this workflow with
+`-f baseline_release=v0.6.1` and the exact candidate version/branch/SHA.
 Require all four native units and the result gate on that same SHA. A v0.6.0
 run cannot be reported as v0.6.1 upgrade evidence.
+
+### Final-candidate identity
+
+The published [v0.6.2 release](https://github.com/GentleKingson/ocservia/releases/tag/v0.6.2)
+is commit `518df6e9c488e58613c9cc194c896b4edfd57c2e`; it is not registered in
+the baseline file yet. A disposable T05 build labeled `version=0.6.2` from a
+different source SHA is not that published release or a final T06 candidate.
+For T06, independently verify and register the genuine v0.6.2 signed artifacts
+under the process below, then upgrade from those artifacts to the final frozen
+candidate's actual numeric version and exact source SHA. Require fresh
+Agent/Controller x amd64/arm64 evidence; T05's earlier eight native units do
+not replace this gate. Do not infer artifact identity from a version string.
 
 To register another baseline, independently establish its key, verify its
 signed checksum manifest and both architectures' native packages and
@@ -178,16 +228,19 @@ rebuild old sources or silently fall back to a different release.
 
 ## Evidence and reproduction
 
-Artifacts are `upgrade-frozen-RUN-ATTEMPT` and one
-`upgrade-COMPONENT-ARCH-RUN-ATTEMPT` per cell. The workflow requests seven days,
-but repository policy currently caps retention at one day; download evidence
-promptly. Each
-cell includes `result.json`, scenario names, architecture proof, tested-file
+Artifacts are `upgrade-frozen-RUN-ATTEMPT`, one
+`upgrade-COMPONENT-ARCH-RUN-ATTEMPT` per native unit, and optional
+`session-ARCH-RUN-ATTEMPT` per application architecture, containing both
+baseline directories and their `compatibility-result.json` phase outcomes.
+The workflow requests seven days, but actual artifact expiry may be shorter;
+check the API's `expires_at` and download evidence promptly. Keep structured
+summaries, digests and a controlled archive, not just expiring artifact URLs.
+Each native unit includes `result.json`, scenario names, architecture proof, tested-file
 hashes and small logs. Controller bundles, version responses and lifecycle
 states contain no private key or database credential. No image archives or
 database contents are uploaded by this workflow.
 
-`Native Upgrade Result` requires successful prepare and both matrices plus
+When `session_only=false`, `Native Upgrade Result` requires successful prepare and both native matrices plus
 four unique, complete, matching result documents. Missing, failed, skipped,
 cancelled, foreign-SHA/baseline/architecture or mixed-attempt evidence cannot
 pass. Use **Re-run all jobs**: re-running only failed jobs cannot combine old

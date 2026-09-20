@@ -874,7 +874,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 			continue
 		}
 		mutationCapable := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback
-		if _, ok := approved[capability]; ok && (mutationCapable || strings.HasSuffix(capability, ".read")) {
+		if _, ok := approved[capability]; ok && (mutationCapable || legacyReadOnlyCapability(capability)) {
 			negotiated = append(negotiated, capability)
 		}
 	}
@@ -1034,6 +1034,18 @@ func normalizedCapabilities(values []string) []string {
 	}
 	slices.Sort(result)
 	return result
+}
+
+// Keep grantless/legacy sessions within the reviewed Rust contracts::session
+// allowlist; a newly advertised .read capability is not implicitly compatible.
+func legacyReadOnlyCapability(capability string) bool {
+	switch capability {
+	case "ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read",
+		"ocserv.status.read", "ocserv.version.read":
+		return true
+	default:
+		return false
+	}
 }
 
 func validCapabilities(values []string) bool {

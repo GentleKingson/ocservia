@@ -1,5 +1,10 @@
 # Contracts and toolchains
 
+The [candidate 1.0 contract inventory and finite release matrix](../reference/stable-contracts.md)
+separates user-facing stability, internal matched-version interfaces, source
+checks and actual published-artifact acceptance. It does not expand production
+database or cross-version support.
+
 Runtime and generator versions are pinned in `toolchains.lock`. A supported
 macOS arm64 or Linux x86-64 host with `curl`, `tar`, `unzip`, `xz`, Java 17,
 `jq`, and ShellCheck can prepare the remaining tools with:

@@ -112,7 +112,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	s := NewBackend(b, "", "test", signer)
 	endpoint := endpointFixture(101)
-	capabilities := []string{"ocserv.status.read", "ocserv.user.manage", ownersession.FencingCapability}
+	readOnly := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read"}
+	capabilities := append(slices.Clone(readOnly), "ocserv.user.manage", "future.feature.read", ownersession.FencingCapability)
 	token := createToken(t, s, workspace, endpoint)
 	request := enrollmentRequestCapabilities(token.Value, endpoint, capabilities)
 	if err := s.ValidateEnrollment(ctx, request); err != nil {
@@ -205,6 +206,29 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	if _, _, _, err := s.ApprovalBinding(ctx, node, nil, "standard", capabilities); !errors.Is(err, database.ErrNotFound) {
 		t.Fatal("active approval binding")
 	}
+	t.Run("legacy-capability-policy", func(t *testing.T) {
+		for _, test := range []struct {
+			name    string
+			minor   uint32
+			sealing bool
+			want    []string
+		}{
+			{"grantless-1.0", 0, true, readOnly},
+			{"unsealed-1.1", 1, false, readOnly},
+			{"authorized-1.1", 1, true, normalizedCapabilities(capabilities)},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: test.minor, AgentVersion: "compatibility-fixture", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now()}
+				if test.sealing {
+					handshake.SealingKeys = enrollmentSealingKeys()
+				}
+				response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+				if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !slices.Equal(response.GetNegotiatedCapabilities(), test.want) || (response.GetSessionGrant() != nil) != (test.minor == 1) {
+					t.Fatalf("compatibility authorization = %v, %v; want capabilities %v", response, err, test.want)
+				}
+			})
+		}
+	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	manager, err := ownersession.NewManagerBackend(b, signer, &recordingRegistrar{}, 30*time.Second, logger)
 	if err != nil {

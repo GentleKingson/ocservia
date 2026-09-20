@@ -65,7 +65,7 @@ or deep historical repair suite is moved from Quick into Full.
 | `security.yml` | Weekly/manual checks and reusable release prerequisite |
 | `g6-readiness.yml`, `g6-harness-core.yml` | Independent manual formal readiness |
 | `release.yml` | Tag/manual release packaging |
-| `release-upgrade.yml` | Independent manual native release upgrades |
+| `release-upgrade.yml` | Independent manual native release upgrades; optional published-node application matrix |
 
 ## Independent security checks
 
@@ -270,10 +270,21 @@ to GHCR, or loads the production signing key.
 ## Manual native upgrade validation
 
 `.github/workflows/release-upgrade.yml` is a separate, manual-only workflow.
-It always requires Agent and Controller upgrade results on both native
-`ubuntu-24.04` and `ubuntu-24.04-arm` runners. It neither publishes a release
-nor becomes a Basic CI required check. Candidate version, baseline tag, and
-exact dispatch SHA are frozen once before either matrix runs.
+By default it requires Agent and Controller upgrade results on both native
+`ubuntu-24.04` and `ubuntu-24.04-arm` runners. `session_compatibility=true`
+adds four published-node application cells (v0.6.0/v0.6.1 x amd64/arm64).
+`session_only=true` runs those application cells even without the other flag,
+and skips both native upgrade matrices and `Native Upgrade Result`. Both
+flags default to `false`. Prepare still requires and freezes candidate
+version, baseline tag and exact dispatch SHA in every mode; application jobs
+always test both node baselines. The workflow neither publishes a release
+nor becomes a Basic CI required check.
+
+Application-only evidence does not satisfy native upgrade acceptance.
+`Native Upgrade Result` covers only native units, not application outcomes.
+The [finite compatibility contract](../reference/stable-contracts.md#finite-release-matrix)
+defines required application workflows and the adopted exclusions; phase
+failures remain failures even when they document an excluded promise.
 
 See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
 trust anchors, evidence, reproduction, and the limits of this gate. Select the
