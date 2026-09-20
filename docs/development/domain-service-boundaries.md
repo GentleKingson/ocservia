@@ -68,7 +68,7 @@ ConfigPlan routes live in `internal/api/configplanhttp`, not on `api.Server`.
 | Consumer | Consumer-owned capability | Assembly and retained behavior |
 | --- | --- | --- |
 | `configplanhttp.Handler` | `Plans.Create/Get/Apply`, original domain values/errors | A stable Handler receives the existing ConfigPlan instance before HTTP starts; the original request context reaches the domain methods unchanged |
-| Parent authorization and approval creation | `configPlanLookup.Get/Resource` | S-01 `NewServer` derives both views from one ConfigPlans input and normalizes concrete typed nil; no duplicate Service or Plan state |
+| Parent authorization and approval creation | `configPlanLookup.ApprovalBinding/Resource` | S-01 `NewServer` derives both views from one ConfigPlans input and normalizes concrete typed nil; no duplicate Service or Plan state |
 | ConfigPlan request parsing | Authenticated actor/identity/session/request/trace values and a single-reference Secret-use function | Existing parent context conversion and authorized workspace checks; S-01 fixes Certificates/RBAC before binding the adapter, while resource/permission queries remain live |
 
 The parent still owns centralized resource authorization, all saved approval
@@ -110,3 +110,21 @@ capability, offline queuing and replay with restricted runtime connections.
 It is registered in the existing `regression-auth` and `backend-policy-api`
 groups for PostgreSQL 17/18, MySQL and MariaDB, without replacing historical
 upgrade or rollout regressions. No schema, grants or signing contract changed.
+
+## ConfigPlan approval binding (roadmap PR-04)
+
+`configplan.Service.ApprovalBinding` uses the existing interpreted `Get` result,
+not Store `Proof`, and checks validity and expiry with the service clock. It
+returns workspace/node identity, the unchanged candidate hash and the same
+safe summary bytes. HTTP no longer interprets Plan validation or constructs
+the summary; it still checks the selected workspace and current principal's
+`config.apply` permission before persisting the node authority resource.
+Approval detail/decision authorization still checks every saved authority,
+with the existing `Resource` fallback for legacy approvals.
+
+The parent capability replaces `Get` with `ApprovalBinding`; the ConfigPlan
+HTTP module still has `Create/Get/Apply`, supplied from the same instance.
+No store query, Apply precheck, desired-revision allocation, Operations
+transaction, approval consumption or persisted hash contract changes.
+Domain goldens cover exact summary bytes and expiry; the existing backend
+lookup and Apply HTTP regressions retain their multi-backend registration.
