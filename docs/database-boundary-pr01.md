@@ -64,10 +64,27 @@ inside that callback. Do not replace a transaction with multiple callbacks.
 
 ## Access inventory and removal ownership
 
-`database-access-files.txt` is the broad candidate inventory, including SQL
-and external operations, not just imports. The temporary driver baseline was
-removed in PR-07; the AST boundary test now allows no business driver imports.
-See `database-access-disposition.tsv` for the per-file PR-07 disposition.
+The [archived candidate inventory](archive/database-access/database-access-files.txt)
+includes SQL and external operations, not just imports. The temporary driver
+baseline was removed in the database migration's PR-07, merged as
+[`8c04e5df7851c57740dc0d5e231ce726001e4287`](https://github.com/GentleKingson/ocservia/commit/8c04e5df7851c57740dc0d5e231ce726001e4287)
+(GitHub PR #201). Its [closure record](database-pr07-telemetry-runtime.md#pr-01-inventory-closure)
+and [original disposition](https://github.com/GentleKingson/ocservia/blob/8c04e5df7851c57740dc0d5e231ce726001e4287/docs/database-access-disposition.tsv)
+remain historical evidence, not fresh runtime validation.
+
+The [archived disposition](archive/database-access/database-access-disposition.tsv)
+and candidate inventory retain their exact bytes from source snapshot
+`6c610c6d2d900327cfa875f327d44501be4d47f4` (2026-09-20), including the later
+path updates from GitHub PRs #218, #223 and #224. They are frozen records of
+252 candidates, not current source-path manifests: future file moves do not
+update either file or require the historical paths to exist. The snapshot SHA
+identifies the archived source, not the revision tested in earlier reports.
+
+The retired `TestAccessInventoryDispositionComplete` only checked these two
+lists and path existence. The unchanged live
+[`TestNoNewBusinessDriverLeaks`](../control-plane/internal/database/boundary_test.go)
+scans current production source independently of the archive and rejects
+business driver imports, raw SQL calls and production imports of test fixtures.
 Test fixtures remain PostgreSQL-specific and are not business driver leakage.
 The following PR identifiers are the proposed follow-up sequence for this
 refactor, not claims that GitHub PRs with those numbers already exist.
