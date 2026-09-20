@@ -4,7 +4,7 @@ import type { AgentRollout, AgentRolloutNode } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { getAgentRollout, resumeAgentRollout } from "../api/client";
+import { getAgentRollout, resumeAgentRollout } from "../api/agents";
 
 const route = useRoute();
 const router = useRouter();

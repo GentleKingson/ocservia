@@ -10,29 +10,34 @@ import { computed, onScopeDispose, ref } from "vue";
 
 import {
   disconnectSession,
-  getWorkspace,
-  getNode,
   getOperation,
-  eventStreamPath,
-  listNodeIpBans,
-  listNodes,
-  listNodeSessions,
-  platformEventsEvent,
   reloadService,
   removeIpBan,
   terminateSession,
-  probeAuthentication,
-  upgradeNodeAgent,
+} from "../api/operations";
+import {
+  getWorkspace,
   workspaceContext,
   workspaceChangedEvent,
+  type WorkspaceContext,
+} from "../api/workspace";
+import {
+  getNode,
+  listNodeIpBans,
+  listNodes,
+  listNodeSessions,
   listNodeUserGroupState,
+} from "../api/nodes";
+import { eventStreamPath, platformEventsEvent } from "../api/events";
+import { probeAuthentication } from "../api/platform";
+import { upgradeNodeAgent } from "../api/agents";
+import {
   createUser,
   disableUser,
   enableUser,
   rotateUserPassword,
   applyGroup,
-  type WorkspaceContext,
-} from "../api/client";
+} from "../api/users";
 
 const terminalStates = new Set([
   "succeeded",
