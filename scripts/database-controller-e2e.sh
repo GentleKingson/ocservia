@@ -57,7 +57,7 @@ POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
   POSTGRES_IMAGE=postgres:17.10-bookworm
   MOUNTS=(-v "$(dirname "${SINGLE_AGENT_ARCHIVE}"):/published:ro" -v "${SINGLE_AGENT_PUBLIC_KEY}:/release-key.pem:ro")
-  ENVIRONMENT+=(-e "PUBLISHED_AGENT_ARCHIVE=/published/$(basename "${SINGLE_AGENT_ARCHIVE}")" \
+  ENVIRONMENT+=(-e GOWORK=off -e "PUBLISHED_AGENT_ARCHIVE=/published/$(basename "${SINGLE_AGENT_ARCHIVE}")" \
     -e "AGENT_TRUSTED_KEY_SHA256=${SINGLE_AGENT_KEY_SHA256}" -e "PUBLISHED_AGENT_VERSION=${SINGLE_EXPECTED_AGENT_VERSION}")
   # shellcheck disable=SC2016 # Expanded only inside the disposable container.
   COMMAND=(bash -euo pipefail -c '

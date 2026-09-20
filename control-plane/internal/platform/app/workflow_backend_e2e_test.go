@@ -357,6 +357,9 @@ func (f *controllerE2E) command(uid, gid int, env []string, binary string, args 
 	cmd := exec.CommandContext(f.ctx, "/usr/bin/setpriv", command...)
 	// Do not inherit owner/admin database credentials into any child process.
 	cmd.Env = []string{"PATH=/usr/local/go/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp", "GOCACHE=" + os.Getenv("GOCACHE"), "GOMODCACHE=" + os.Getenv("GOMODCACHE"), "GOPROXY=off", "GOTOOLCHAIN=local", "RUST_LOG=info"}
+	if os.Getenv("PUBLISHED_AGENT_VERSION") != "" {
+		cmd.Env = append(cmd.Env, "GOWORK=off")
+	}
 	cmd.Env = append(cmd.Env, env...)
 	return cmd
 }

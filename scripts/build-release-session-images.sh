@@ -55,7 +55,7 @@ printf 'RELEASE_WORKFLOW_IMAGE=%s\n' "${workflow_image}" >>"${GITHUB_ENV}"
 docker image inspect "${workflow_image}" >"${SESSION_EVIDENCE}/RELEASE_WORKFLOW_IMAGE.image.json"
 mkdir -p .cache/go-mod .cache/go-build
 docker run --rm -v "$PWD:/workspace:ro" -v "$PWD/.cache/go-mod:/go-mod" \
-  -e GOMODCACHE=/go-mod -e GOTOOLCHAIN=local "${workflow_image}" go mod download
+  -e GOMODCACHE=/go-mod -e GOTOOLCHAIN=local -e GOWORK=off "${workflow_image}" go mod download
 docker run --rm --entrypoint /usr/local/bin/iroh-relay session-g6rd_relay_image:candidate --version \
   >"${SESSION_EVIDENCE}/relay-version.txt"
 docker version >"${SESSION_EVIDENCE}/docker-version.txt"
