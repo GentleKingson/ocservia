@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -156,24 +154,22 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "configuration approval requires an existing validated plan")
 			return
 		}
-		plan, planErr := s.configPlanLookup.Get(r.Context(), resourceID)
-		now, clockErr := value.FromTime(time.Now().UTC())
-		if planErr != nil || clockErr != nil || plan.Validation != "valid" || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= now.Micros {
+		binding, bindingErr := s.configPlanLookup.ApprovalBinding(r.Context(), resourceID)
+		if bindingErr != nil {
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-plan-not-ready", "Configuration plan is not ready", "the plan must be valid and unexpired before approval")
 			return
 		}
-		if plan.WorkspaceID != resource.WorkspaceID {
+		if binding.WorkspaceID != resource.WorkspaceID {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the plan is outside the selected workspace")
 			return
 		}
-		node := rbac.Resource{WorkspaceID: plan.WorkspaceID, Type: "node", ID: plan.NodeID}
-		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: plan.WorkspaceID, Type: "node", ID: plan.NodeID})
+		node := rbac.Resource{WorkspaceID: binding.WorkspaceID, Type: "node", ID: binding.NodeID}
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: binding.WorkspaceID, Type: "node", ID: binding.NodeID})
 		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "config.apply", node, actor.BreakGlass) != nil {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
 			return
 		}
-		requestHash, _ = hex.DecodeString(plan.CandidateHash)
-		requestSummary, _ = json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "current_hash": plan.CurrentHash, "diff_redacted": plan.DiffRedacted, "expires_at": plan.ExpiresAt})
+		requestHash, requestSummary = binding.RequestHash, binding.RequestSummary
 	} else if action == "certificate.issue" {
 		if resource.Type != "certificate" || s.certificates == nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "certificate approval requires a ready CSR")

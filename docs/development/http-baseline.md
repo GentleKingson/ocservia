@@ -591,3 +591,30 @@ cross-workspace denial, approval rollback and command identity using the shared
 restricted-runtime fixture on each supported database. Domain unit goldens and
 the existing HTTP route/method/auth baselines complement it. No package install,
 database schema or runtime grant changes are involved.
+
+## ConfigPlan approval binding (roadmap PR-04)
+
+Baseline: `9cac08a52344e150e069d4ca8bdd5d0482a19c4b` (#238).
+The `config.apply` approval branch now calls ConfigPlan `ApprovalBinding`
+through the parent's narrow read-only capability instead of interpreting `Get`
+in HTTP. Validated content and expiry are domain concerns; selected-workspace
+and node permission checks remain in HTTP, in the same order.
+
+Missing service/wrong resource type still returns `400 invalid-request`.
+Read errors and invalid/expired Plans still return `409 config-plan-not-ready`
+before the foreign-workspace `400 invalid-request` and node RBAC `403 forbidden`.
+Successful approval still binds the candidate hash, not a new summary hash.
+The summary retains `node_id`, `expected_revision`, `candidate_hash`,
+`current_hash`, `diff_redacted` and the existing `expires_at` encoding.
+The response still uses `config_plan_summary`, and actor/reason, independent
+approval, authority scopes and Apply replay are unchanged.
+
+`TestApprovalBindingUsesInterpretedPlan` and `TestApprovalBindingGoldenAndExpiry`
+cover interpreted validity, unsafe result rejection, exact binding bytes,
+NULL/equal/expired/infinite expiry and read errors. The existing
+`TestConfigPlanLookupBackendHTTPIntegration` scenario additionally reads
+owner-injected invalid states/results through the restricted runtime and
+checks cross-workspace/error precedence. Its saved-authority/legacy fallback
+coverage and `TestConfigPlanApplyBackendHTTPIntegration` remain selected by
+the existing multi-backend groups. No storage semantics or migration changes
+require expanding this task's targeted PostgreSQL validation to a new matrix.
