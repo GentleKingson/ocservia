@@ -1,6 +1,6 @@
 # Iroh transport development
 
-`ocservia-transportd` owns one Iroh 1.0.x endpoint and routes only
+`ocservia-transportd` owns one Iroh 1.2.0 endpoint and routes only
 `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`. The Go boundary remains
 the versioned gRPC service on a `0660` Unix socket; Go code does not import Iroh
 types. The process has no database client or database credentials. Both the
