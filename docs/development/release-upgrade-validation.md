@@ -162,8 +162,8 @@ Its optional `deb_asset_release` must be a positive integer (not a string).
 Omitting it selects the legacy `ocservia-agent_<version>_<arch>.deb` asset;
 setting it to `1` selects `ocservia-agent_<version>-1_<arch>.deb`. Add it only
 when registering a release actually published with the revisioned filename.
-Existing baselines, including v0.6.1, retain their original metadata and asset
-names, such as `ocservia-agent_0.6.1_amd64.deb`. Candidate packages always use
+Existing baselines, including v0.6.1 and v0.6.2, retain their original metadata and asset
+names, such as `ocservia-agent_0.6.2_amd64.deb`. Candidate packages always use
 `-1`; their naming never determines the historical baseline filename.
 The baseline smoke uses Node to share this resolver with upgrade prepare.
 
@@ -210,12 +210,19 @@ run cannot be reported as v0.6.1 upgrade evidence.
 ### Final-candidate identity
 
 The published [v0.6.2 release](https://github.com/GentleKingson/ocservia/releases/tag/v0.6.2)
-is commit `518df6e9c488e58613c9cc194c896b4edfd57c2e`; it is not registered in
-the baseline file yet. A disposable T05 build labeled `version=0.6.2` from a
+is registered at commit `518df6e9c488e58613c9cc194c896b4edfd57c2e`, PostgreSQL
+schema 36 and OIDC authentication. Its checksum-manifest SHA-256 is
+`a386f64d81f0ccb0b87482c3f4e4029d0a756b5e76c679b72d70d1afa23abc66`;
+the signing key retains the independently anchored historical fingerprint above.
+The baseline registry records its verification provenance. This registration
+establishes artifact identity, not successful installation or upgrade.
+
+A disposable T05 build labeled `version=0.6.2` from a
 different source SHA is not that published release or a final T06 candidate.
-For T06, independently verify and register the genuine v0.6.2 signed artifacts
-under the process below, then upgrade from those artifacts to the final frozen
-candidate's actual numeric version and exact source SHA. Require fresh
+For T06, explicitly select `-f baseline_release=v0.6.2` rather than the historical
+manual default, then upgrade from those signed artifacts to the final frozen
+candidate's actual numeric version (strictly newer than 0.6.2) and exact source SHA.
+Prerelease strings such as `1.0.0-rc.1` are not accepted version inputs. Require fresh
 Agent/Controller x amd64/arm64 evidence; T05's earlier eight native units do
 not replace this gate. Do not infer artifact identity from a version string.
 
