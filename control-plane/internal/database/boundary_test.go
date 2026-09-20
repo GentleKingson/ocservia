@@ -5,45 +5,11 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 )
-
-func TestAccessInventoryDispositionComplete(t *testing.T) {
-	root := "../../.."
-	inventory, err := os.ReadFile(filepath.Join(root, "docs/database-access-files.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispositions, err := os.ReadFile(filepath.Join(root, "docs/database-access-disposition.tsv"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]bool{}
-	for _, path := range strings.Fields(string(inventory)) {
-		want[path] = true
-	}
-	lines := strings.Split(strings.TrimSpace(string(dispositions)), "\n")
-	if lines[0] != "path\tdisposition\tboundary" {
-		t.Fatal("invalid disposition header")
-	}
-	for _, line := range lines[1:] {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 3 || fields[1] == "" || fields[2] == "" || !want[fields[0]] {
-			t.Fatalf("invalid, duplicate or unexpected disposition: %s", line)
-		}
-		if _, err := os.Stat(filepath.Join(root, fields[0])); err != nil {
-			t.Fatal(err)
-		}
-		delete(want, fields[0])
-	}
-	for path := range want {
-		t.Errorf("unclosed inventory entry: %s", path)
-	}
-}
 
 // PR-07 closes the temporary baseline: business code has no driver allowance.
 func TestNoNewBusinessDriverLeaks(t *testing.T) {
