@@ -86,7 +86,7 @@ start_privd() {
     --property=IPAddressDeny=any \
     --property=CapabilityBoundingSet=CAP_DAC_OVERRIDE \
     --property=ReadWritePaths='-/etc/ocserv /var/lib/ocservia-privd /var/lib/ocservia-upgrade' \
-    --property=UMask=0007 \
+    --property=UMask=0077 \
     --property=TasksMax=32 \
     --property=LimitNOFILE=128 \
     "${binary}" \

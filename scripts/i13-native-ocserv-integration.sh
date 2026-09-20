@@ -20,6 +20,7 @@ RUN_AS_GROUP="$(id -gn "${RUN_AS_USER}")"
 P1=""
 P2=""
 P3=""
+client_pid=""
 
 server_ready() {
   [[ -f "${NATIVE_ROOT}/launcher.pid" ]] || return 1
@@ -47,7 +48,7 @@ scan_artifacts() {
       return 1
     fi
   done
-  if grep -rIEq -- 'BEGIN (RSA )?PRIVATE KEY|(^|:)!?[$]6[$]' "${ARTIFACT_DIR}"; then
+  if grep -rIEq -- 'BEGIN (RSA )?PRIVATE KEY|(^|:)!?[$][156][$]' "${ARTIFACT_DIR}"; then
     echo "native artifact contains private-key or ocpasswd hash material" >&2
     rm -rf "${ARTIFACT_DIR}"
     return 1
@@ -59,6 +60,10 @@ cleanup() {
   local status=$? cleanup_status=0
   trap - EXIT INT TERM
   set +e
+  if [[ -n "${client_pid}" ]]; then
+    kill "${client_pid}" 2>/dev/null || true
+    wait "${client_pid}" 2>/dev/null || true
+  fi
   if [[ -f "${NATIVE_ROOT}/launcher.pid" ]]; then
     kill "$(<"${NATIVE_ROOT}/launcher.pid")" 2>/dev/null || true
     wait "$(<"${NATIVE_ROOT}/launcher.pid")" 2>/dev/null || true
@@ -131,6 +136,7 @@ unset password
 run_native_phase() {
   local phase=$1
   OCSERVIA_I13_NATIVE_ROOT="${NATIVE_ROOT}" OCSERVIA_I13_NATIVE_PHASE="${phase}" cargo test \
+    --locked \
     --manifest-path "${ROOT}/rust/Cargo.toml" \
     -p ocservia-ocserv-adapter tests::native_user_and_group_operations \
     -- --ignored --exact
@@ -151,7 +157,7 @@ if setpriv --reuid="$(id -u "${RUN_AS_USER}")" --regid="$(id -g "${RUN_AS_USER}"
 fi
 echo "native ocpasswd root-only metadata passed"
 
-printf '%s\n' '#!/bin/sh' "env >\"${NATIVE_ROOT}/client.env\"" 'exit 0' >"${NATIVE_ROOT}/capture.sh"
+printf '%s\n' '#!/bin/sh' "env >\"${NATIVE_ROOT}/client.env\"" 'sleep 10' >"${NATIVE_ROOT}/capture.sh"
 chmod 700 "${NATIVE_ROOT}/capture.sh"
 printf '%s\n' 'route = 203.0.113.0/24' 'banner = I13_STAFF_GROUP_APPLIED' >"${NATIVE_ROOT}/groups/staff"
 printf '%s\n' \
@@ -191,6 +197,13 @@ printf '%s\n' \
   >"${NATIVE_ROOT}/ocserv.conf"
 
 ocserv --test-config -c "${NATIVE_ROOT}/ocserv.conf"
+cp "${NATIVE_ROOT}/ocserv.conf" "${NATIVE_ROOT}/invalid.conf"
+printf '\nauth = "invalid-auth-backend"\n' >>"${NATIVE_ROOT}/invalid.conf"
+if ocserv --test-config -c "${NATIVE_ROOT}/invalid.conf" >/dev/null 2>&1; then
+  echo "native Ocserv accepted an invalid authentication configuration" >&2
+  exit 1
+fi
+rm "${NATIVE_ROOT}/invalid.conf"
 ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f -d 2 >"${NATIVE_ROOT}/server.log" 2>&1 &
 printf '%s' "$!" >"${NATIVE_ROOT}/launcher.pid"
 for _ in $(seq 1 50); do
@@ -255,20 +268,31 @@ authenticate enabled-current-p3 "${P3}" success
 run_native_phase group-apply
 
 rm -f "${NATIVE_ROOT}/client.env"
-set +e
 printf '%s\n' "${P3}" | timeout 12 openconnect \
   --protocol=anyconnect --user=alice --passwd-on-stdin \
   --servercert "pin-sha256:${PIN}" --script-tun \
   --script "${NATIVE_ROOT}/capture.sh" \
   "https://127.0.0.1:${PORT}" \
-  >"${NATIVE_ROOT}/route.log" 2>&1
-route_status=$?
-set -e
+  >"${NATIVE_ROOT}/route.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 100); do
+  [[ -f "${NATIVE_ROOT}/client.env" ]] && break
+  sleep 0.1
+done
 server_ready
 test -f "${NATIVE_ROOT}/client.env"
 grep -q '^CISCO_SPLIT_INC_0_ADDR=203.0.113.0$' "${NATIVE_ROOT}/client.env"
 grep -q '^CISCO_SPLIT_INC_0_MASKLEN=24$' "${NATIVE_ROOT}/client.env"
 grep -q 'Configured as 10.250.0.' "${NATIVE_ROOT}/route.log"
+occtl -s "${NATIVE_ROOT}/occtl.sock" --json show users >"${NATIVE_ROOT}/sessions.json"
+occtl -s "${NATIVE_ROOT}/occtl.sock" --json show ip bans >"${NATIVE_ROOT}/bans.json"
+run_native_phase occtl
+set +e
+wait "${client_pid}"
+route_status=$?
+set -e
+client_pid=""
+run_native_phase concurrency
 
 printf '%s\n' \
   'create_p1_login=PASS' \
@@ -281,6 +305,10 @@ printf '%s\n' \
   'old_p2_rejected=PASS' \
   'group_apply=PASS' \
   'config_per_group=PASS' \
+  'invalid_config_rejected=PASS' \
+  'occtl_output_parse=PASS' \
+  'session_terminate=PASS' \
+  'concurrent_user_group_password_replay=PASS' \
   "config_per_group_client_exit=${route_status}" \
   >"${NATIVE_ROOT}/lifecycle-summary.txt"
 persist_artifacts

@@ -1283,6 +1283,8 @@ impl Adapter {
             .to_str()
             .ok_or(AdapterError::InvalidResource)?
             .to_owned();
+        // ocpasswd owns a second file until rename; cancellation must remove it too.
+        let _scratch = StagingFile::new(PathBuf::from(format!("{staging_text}.tmp")));
         async {
             let mut args = vec!["-c", staging_text.as_str()];
             if let Some((groups, _)) = metadata.as_ref() {
@@ -1364,6 +1366,7 @@ impl Adapter {
             .to_str()
             .ok_or(AdapterError::InvalidResource)?
             .to_owned();
+        let _scratch = StagingFile::new(PathBuf::from(format!("{staging_text}.tmp")));
         let action = if locked { "-l" } else { "-u" };
         async {
             self.execute(
@@ -1606,6 +1609,7 @@ impl Adapter {
             let Some(suffix) = candidate.strip_prefix(&prefix) else {
                 continue;
             };
+            let suffix = suffix.strip_suffix(".tmp").unwrap_or(suffix);
             let Ok(id) = Uuid::parse_str(suffix) else {
                 continue;
             };
@@ -1620,7 +1624,14 @@ impl Adapter {
                 )
                 .map(File::from)
                 .map_err(|error| AdapterError::Io(error.into()))?;
-                validate_authoritative_user_file(&stale, uid, gid)?;
+                // A crash can leave the child's group on either .tmp or its
+                // renamed staging file, before root:root normalization.
+                let expected_gid = if stale.metadata().map_err(AdapterError::Io)?.gid() == gid {
+                    gid
+                } else {
+                    rustix::process::getegid().as_raw()
+                };
+                validate_authoritative_user_file(&stale, uid, expected_gid)?;
                 rustix::fs::unlinkat(&directory, candidate.as_str(), rustix::fs::AtFlags::empty())
                     .map_err(|error| AdapterError::Io(error.into()))?;
             }
@@ -1810,27 +1821,35 @@ impl Adapter {
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(AdapterError::Io)?;
         let mut process_group = ProcessGroupGuard::new(&child);
-        if !input.is_empty() {
-            let mut stdin = child.stdin.take().ok_or(AdapterError::Unavailable)?;
-            stdin.write_all(input).await.map_err(AdapterError::Io)?;
-            stdin.shutdown().await.map_err(AdapterError::Io)?;
-        }
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or(AdapterError::Unavailable)?;
         let stderr = child.stderr.take().ok_or(AdapterError::Unavailable)?;
-        let stdout_task = tokio::spawn(read_bounded(stdout, self.limits.output_bytes));
-        let stderr_task = tokio::spawn(read_bounded(stderr, self.limits.output_bytes));
-        let status =
-            if let Ok(result) = tokio::time::timeout(self.limits.timeout, child.wait()).await {
-                result.map_err(AdapterError::Io)?
-            } else {
-                kill_process_group(&child);
-                let _ = child.wait().await;
-                process_group.disarm();
-                return Err(AdapterError::DeadlineExceeded);
-            };
+        // One deadline covers stdin, process exit and inherited output pipes.
+        // Borrowed futures are dropped on cancellation instead of detached readers.
+        let completed = tokio::time::timeout(self.limits.timeout, async {
+            tokio::try_join!(
+                async {
+                    if let Some(mut stdin) = stdin {
+                        stdin.write_all(input).await.map_err(AdapterError::Io)?;
+                        stdin.shutdown().await.map_err(AdapterError::Io)?;
+                    }
+                    Ok::<(), AdapterError>(())
+                },
+                async { child.wait().await.map_err(AdapterError::Io) },
+                read_bounded(stdout, self.limits.output_bytes),
+                read_bounded(stderr, self.limits.output_bytes),
+            )
+        })
+        .await;
+        let ((), status, stdout, stderr) = if let Ok(result) = completed {
+            result?
+        } else {
+            // child.id() is already None if the parent exited before its pipes.
+            drop(process_group);
+            let _ = child.wait().await;
+            return Err(AdapterError::DeadlineExceeded);
+        };
         process_group.disarm();
-        let stdout = stdout_task.await.map_err(|_| AdapterError::Unavailable)??;
-        let stderr = stderr_task.await.map_err(|_| AdapterError::Unavailable)??;
         if stdout.exceeded || stderr.exceeded {
             return Err(AdapterError::OutputLimit);
         }
@@ -4061,6 +4080,9 @@ async fn write_new_synced(
         Some(rustix::fs::Gid::from_raw(identity.gid)),
     )
     .map_err(|error| AdapterError::Io(error.into()))?;
+    file.set_permissions(std::fs::Permissions::from_mode(identity.mode))
+        .await
+        .map_err(AdapterError::Io)?;
     file.write_all(bytes).await.map_err(AdapterError::Io)?;
     file.sync_all().await.map_err(AdapterError::Io)
 }
@@ -4070,16 +4092,6 @@ async fn sync_directory(parent: &Path) -> Result<(), AdapterError> {
         .await
         .map_err(AdapterError::Io)?;
     directory.sync_all().await.map_err(AdapterError::Io)
-}
-
-fn kill_process_group(child: &tokio::process::Child) {
-    let Some(raw_pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
-        return;
-    };
-    let Some(pid) = rustix::process::Pid::from_raw(raw_pid) else {
-        return;
-    };
-    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
 }
 
 #[derive(Debug)]
@@ -4226,7 +4238,7 @@ fn required_value(values: &HashMap<&str, &str>, key: &str) -> Result<String, Ada
     Ok((*value).to_owned())
 }
 
-/// Parses supported Ocserv 1.2 and 1.3 version output.
+/// Parses supported Ocserv version output.
 ///
 /// # Errors
 ///
@@ -4241,7 +4253,10 @@ pub fn parse_version(bytes: &[u8]) -> Result<OcservVersion, AdapterError> {
         .strip_prefix("ocserv ")
         .or_else(|| first_line.strip_prefix("OpenConnect VPN Server "))
         .ok_or(AdapterError::MalformedOutput)?;
-    if !(version.starts_with("1.2.") || version.starts_with("1.3.") || version.starts_with("1.4."))
+    if !(version.starts_with("1.2.")
+        || version.starts_with("1.3.")
+        || version.starts_with("1.4.")
+        || version == "1.5.0")
         || version.len() > 32
         || !version
             .bytes()
@@ -4409,6 +4424,13 @@ mod tests {
                 .version,
             "1.4.1"
         );
+        assert_eq!(
+            parse_version(b"OpenConnect VPN Server 1.5.0\n")
+                .expect("1.5.0 fixture")
+                .version,
+            "1.5.0"
+        );
+        assert!(parse_version(b"ocserv 1.5.1\n").is_err());
         assert!(parse_version(b"ocserv development\n").is_err());
         assert!(parse_version(&[0xff]).is_err());
     }
@@ -5503,7 +5525,10 @@ mod tests {
         write_user_fixture(&users, original);
         let openssl = executable("openssl-fast", "cat >/dev/null; printf rotated-password");
         let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-        let slow_ocpasswd = executable("ocpasswd-slow", "cat >/dev/null; sleep 5");
+        let slow_ocpasswd = executable(
+            "ocpasswd-slow",
+            "cat >/dev/null; cp \"$2\" \"$2.tmp\"; sleep 5",
+        );
         let slow_directory = slow_ocpasswd
             .parent()
             .expect("slow ocpasswd parent")
@@ -5528,6 +5553,21 @@ mod tests {
                 timeout: Duration::from_millis(500),
                 output_bytes: DEFAULT_OUTPUT_BYTES,
             },
+        );
+        let guard = adapter.user_file_lock.lock().await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                adapter.user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect()),
+            )
+            .await
+            .is_err()
+        );
+        drop(guard);
+        assert!(staging_files(&directory).is_empty());
+        assert_eq!(
+            std::fs::read(&users).expect("queued cancellation"),
+            original
         );
         let timeout_result = adapter
             .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
@@ -5580,7 +5620,10 @@ mod tests {
         let cancellation_marker = directory.join("cancellation-started");
         let cancellation_ocpasswd = executable(
             "ocpasswd-cancel",
-            &format!("touch '{}'\nsleep 10", cancellation_marker.display()),
+            &format!(
+                "cp \"$2\" \"$2.tmp\"\ntouch '{}'\nsleep 10",
+                cancellation_marker.display()
+            ),
         );
         let cancellation_directory = cancellation_ocpasswd
             .parent()
@@ -5661,14 +5704,17 @@ mod tests {
         );
 
         let stale = directory.join(format!(".ocpasswd.ocservia-{}", Uuid::now_v7()));
+        let stale_scratch = directory.join(format!(".ocpasswd.ocservia-{}.tmp", Uuid::now_v7()));
         let lookalike = directory.join(".ocpasswd.ocservia-not-a-uuid");
         write_user_fixture(&stale, b"secret hash staging");
+        write_user_fixture(&stale_scratch, b"incomplete child scratch");
         std::fs::write(&lookalike, b"preserve").expect("lookalike");
         lock_adapter
             .cleanup_stale_user_staging()
             .await
             .expect("startup cleanup");
         assert!(!stale.exists());
+        assert!(!stale_scratch.exists());
         assert!(lookalike.exists());
 
         std::fs::remove_dir_all(directory).expect("cleanup directory");
@@ -5677,6 +5723,38 @@ mod tests {
         std::fs::remove_dir_all(slow_directory).expect("cleanup slow ocpasswd");
         std::fs::remove_dir_all(cancellation_directory).expect("cleanup cancellation ocpasswd");
         std::fs::remove_dir_all(lock_directory).expect("cleanup lock ocpasswd");
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_accepts_private_child_group_before_normalization() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-child-group-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let users = directory.join("ocpasswd");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/usr/bin/ocpasswd"),
+                users,
+                PathBuf::from("/usr/bin/openssl"),
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources");
+        let staging = directory.join(format!(".ocpasswd.ocservia-{}", Uuid::now_v7()));
+        let scratch = directory.join(format!(".ocpasswd.ocservia-{}.tmp", Uuid::now_v7()));
+        for path in [&staging, &scratch] {
+            write_user_fixture(path, b"incomplete child output");
+            assert_eq!(
+                std::fs::metadata(path).expect("child metadata").gid(),
+                rustix::process::getegid().as_raw()
+            );
+        }
+        Adapter::new(resources, Limits::default())
+            .cleanup_stale_user_staging()
+            .await
+            .expect("cleanup before normalization");
+        assert!(!staging.exists() && !scratch.exists());
+        std::fs::remove_dir_all(directory).expect("cleanup fixture");
     }
 
     #[tokio::test]
@@ -6598,6 +6676,104 @@ mod tests {
             (records[0].groups.clone(), records[0].hash.to_string())
         };
         match phase.as_str() {
+            "occtl" => {
+                adapter.ocserv_version().await.expect("native version");
+                let sessions = parse_sessions(
+                    &std::fs::read(root.join("sessions.json")).expect("occtl users"),
+                )
+                .expect("parse native occtl users");
+                assert_eq!(sessions.sessions.len(), 1);
+                assert_eq!(sessions.sessions[0].username, "alice");
+                assert_eq!(sessions.sessions[0].remote_ip, "127.0.0.1");
+                parse_ip_bans(&std::fs::read(root.join("bans.json")).expect("occtl bans"))
+                    .expect("parse native occtl bans");
+                let socket = root.join("occtl.sock");
+                let socket = socket.to_str().expect("native socket path");
+                adapter
+                    .execute(
+                        &adapter.resources.occtl,
+                        &["-s", socket, "terminate", "id", &sessions.sessions[0].id],
+                    )
+                    .await
+                    .expect("terminate native session");
+                let mut empty = false;
+                for _ in 0..100 {
+                    let output = adapter
+                        .execute(
+                            &adapter.resources.occtl,
+                            &["-s", socket, "--json", "show", "users"],
+                        )
+                        .await
+                        .expect("native users after terminate");
+                    empty = parse_sessions(&output.stdout)
+                        .expect("empty native users")
+                        .sessions
+                        .is_empty();
+                    if empty {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(empty, "terminated session must disappear");
+            }
+            "concurrency" => {
+                let sealed = std::fs::read(root.join("sealed-p3.bin")).expect("sealed password");
+                let (first, second) = tokio::join!(
+                    adapter.user_create("bob", "i13-native", &sealed, 1, test_effect()),
+                    adapter.user_create("carol", "i13-native", &sealed, 1, test_effect()),
+                );
+                first.expect("concurrent bob");
+                second.expect("concurrent carol");
+                let (first, second) = tokio::join!(
+                    adapter.user_create("dave", "i13-native", &sealed, 1, test_effect()),
+                    adapter.user_create("dave", "i13-native", &sealed, 1, test_effect()),
+                );
+                assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+                let (locked, rotated) = tokio::join!(
+                    adapter.user_disable("alice", 6, test_effect()),
+                    adapter.user_password_rotate("alice", "i13-native", &sealed, 7, test_effect()),
+                );
+                locked.expect("concurrent disable");
+                rotated.expect("concurrent rotation");
+                let members = vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()];
+                let (group, rotated) = tokio::join!(
+                    adapter.group_apply("staff", &members, 2, test_effect()),
+                    adapter.user_password_rotate("alice", "i13-native", &sealed, 8, test_effect()),
+                );
+                group.expect("interleaved group");
+                rotated.expect("interleaved password");
+                let before = std::fs::read(&users).expect("before replay");
+                adapter
+                    .user_password_rotate("alice", "i13-native", &sealed, 8, test_effect())
+                    .await
+                    .expect("replay rotation");
+                assert!(before.eq(&std::fs::read(&users).expect("after replay")));
+                let records = parse_secret_user_records(&before).expect("concurrent records");
+                assert_eq!(records.len(), 4);
+                for record in &records {
+                    assert!(!record.hash.is_empty());
+                    assert_eq!(record.hash.starts_with('!'), record.username == "alice");
+                    assert_eq!(
+                        record.groups,
+                        if record.username == "dave" {
+                            "*"
+                        } else {
+                            "staff"
+                        }
+                    );
+                }
+                let metadata = std::fs::metadata(&users).expect("authoritative metadata");
+                assert_eq!(
+                    (
+                        metadata.uid(),
+                        metadata.gid(),
+                        metadata.mode() & 0o777,
+                        metadata.nlink()
+                    ),
+                    (0, 0, 0o600, 1)
+                );
+                assert!(staging_files(&root).is_empty());
+            }
             "create-p1" => {
                 let sealed = std::fs::read(root.join("sealed-p1.bin")).expect("sealed P1");
                 adapter
@@ -6771,6 +6947,32 @@ mod tests {
             "unexpected child output-limit result: {output_result:?}"
         );
         std::fs::remove_dir_all(noisy_directory).expect("remove noisy fixture");
+    }
+
+    #[tokio::test]
+    async fn child_deadline_covers_blocked_input_and_inherited_output() {
+        let adapter = Adapter::new(
+            FixedResources::default(),
+            Limits {
+                timeout: Duration::from_millis(100),
+                output_bytes: 1024,
+            },
+        );
+        for (body, input) in [
+            ("sleep 5", vec![b'x'; 1024 * 1024]),
+            ("sleep 5 & exit 0", Vec::new()),
+        ] {
+            let program = executable("blocked-io", body);
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                adapter.execute_with_input(&program, &[], &input),
+            )
+            .await
+            .expect("child IO must obey the adapter deadline");
+            assert!(matches!(result, Err(AdapterError::DeadlineExceeded)));
+            std::fs::remove_dir_all(program.parent().expect("fixture parent"))
+                .expect("remove IO fixture");
+        }
     }
 
     #[tokio::test]

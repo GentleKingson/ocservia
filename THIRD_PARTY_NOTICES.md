@@ -28,3 +28,7 @@ Quota, expiry, and related user-form behavior were reviewed against
 `4d25478580d899b77460bdf0cf0a590cfdd26030`, licensed under the MIT License.
 No upstream source file is copied verbatim; provenance and the A/B/C/D decision
 record are documented in `docs/upstream/v4.9-post1.md`.
+
+The subsequent restore/write behavior review through dashboard commit
+`f7e01eb3c4058635989c49dbd68bbd9a70d443f2` is recorded in
+`docs/upstream/v4.9-post2.md`, also without verbatim source imports.

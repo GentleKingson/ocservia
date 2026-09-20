@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/mmtaee/ocserv-dashboard",
+  "branch": "master",
+  "reviewed_at": "2026-09-20",
+  "local_baseline": "dbd8e1e123cbb91ba7007a1b11e0be7743adbcfd",
+  "license": "MIT",
+  "license_blob": "ce7caf5a71c20fd589b9e5c251554afc6efa3681",
+  "old": {"ref": "v4.9-post1", "commit": "4d25478580d899b77460bdf0cf0a590cfdd26030"},
+  "new": {"ref": "master", "commit": "f7e01eb3c4058635989c49dbd68bbd9a70d443f2"},
+  "diff": {
+    "total_commits": 4,
+    "commits": [
+      "eca080f9df02d23dfb1bf569f2c9775d27814171",
+      "517f82a164ea43d9fccc75c00e9db676e874d6bc",
+      "890c12d20fb0424dd7f1c7389b2b27145a87fc3f",
+      "f7e01eb3c4058635989c49dbd68bbd9a70d443f2"
+    ],
+    "files": [
+      "README.md",
+      "scripts/legacy-migrate/.gitignore",
+      "scripts/legacy-migrate/README.md",
+      "scripts/legacy-migrate/convert_legacy.py",
+      "scripts/legacy-migrate/fill_ocpasswd.py",
+      "scripts/legacy-migrate/sequential_restore.py",
+      "scripts/legacy-migrate/tests/__init__.py",
+      "scripts/legacy-migrate/tests/test_legacy_migrate.py",
+      "services/api/internal/repository/backup.go",
+      "services/api/pkg/routing/middlewares/request_timeout.go",
+      "services/common/ocserv/group/group.go",
+      "services/common/ocserv/user/user.go",
+      "services/common/pkg/utils/utils.go"
+    ],
+    "dependencies": [],
+    "migrations": []
+  },
+  "classification": {
+    "A": [],
+    "B": [
+      "services/common/ocserv/group/group.go",
+      "services/common/ocserv/user/user.go",
+      "services/common/pkg/utils/utils.go"
+    ],
+    "C": ["services/api/internal/repository/backup.go"],
+    "D": [
+      "README.md",
+      "scripts/legacy-migrate/.gitignore",
+      "scripts/legacy-migrate/README.md",
+      "scripts/legacy-migrate/convert_legacy.py",
+      "scripts/legacy-migrate/fill_ocpasswd.py",
+      "scripts/legacy-migrate/sequential_restore.py",
+      "scripts/legacy-migrate/tests/__init__.py",
+      "scripts/legacy-migrate/tests/test_legacy_migrate.py",
+      "services/api/pkg/routing/middlewares/request_timeout.go"
+    ]
+  },
+  "adaptation": {
+    "adapter": "rust/crates/ocserv-adapter/src/lib.rs",
+    "batch_service": "control-plane/internal/useroperations/service.go",
+    "verbatim_upstream_files": [],
+    "additional_global_lock": false,
+    "http_timeout_exemption": false,
+    "legacy_importer": false
+  }
+}
