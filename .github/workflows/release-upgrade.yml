@@ -213,6 +213,14 @@ jobs:
         run: |
           bash scripts/release-session-compatibility.sh fetch >"${SESSION_EVIDENCE}/v061-artifact.json"
           bash scripts/release-session-compatibility.sh run
+      - name: Return root-created fixture evidence to the runner
+        if: always()
+        env:
+          EVIDENCE: ${{ runner.temp }}/session-${{ matrix.arch }}
+        run: |
+          if [[ -d "${EVIDENCE}" && ! -L "${EVIDENCE}" ]]; then
+            sudo chown -R -- "$(id -u):$(id -g)" "${EVIDENCE}"
+          fi
       - name: Preserve application evidence
         if: always()
         timeout-minutes: 5
