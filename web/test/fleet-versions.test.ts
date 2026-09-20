@@ -5,13 +5,16 @@ import type { NodeObservedState } from "@ocservia/api-client";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getWorkspace, listNodes, workspaceContext } from "../src/api/client";
+import { getWorkspace, workspaceContext } from "../src/api/workspace";
+import { listNodes } from "../src/api/nodes";
 import { useFleetStore } from "../src/shared/fleet";
 
-vi.mock("../src/api/client", () => ({
+vi.mock("../src/api/workspace", () => ({
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
-  listNodes: vi.fn(),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
+}));
+vi.mock("../src/api/nodes", () => ({
+  listNodes: vi.fn(),
 }));
 
 const versionNode = (

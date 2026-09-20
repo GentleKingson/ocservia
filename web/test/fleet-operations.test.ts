@@ -6,41 +6,47 @@ import type {
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createUser } from "../src/api/users";
+import { disconnectSession, getOperation } from "../src/api/operations";
+import { upgradeNodeAgent } from "../src/api/agents";
 import {
-  createUser,
-  disconnectSession,
-  upgradeNodeAgent,
   getNode,
-  getOperation,
   listNodeIpBans,
   listNodeUserGroupState,
   listNodes,
   listNodeSessions,
-  workspaceContext,
-  workspaceChangedEvent,
-} from "../src/api/client";
+} from "../src/api/nodes";
+import { workspaceContext, workspaceChangedEvent } from "../src/api/workspace";
 import { useFleetStore } from "../src/shared/fleet";
 
-vi.mock("../src/api/client", () => ({
+vi.mock("../src/api/users", () => ({
   applyGroup: vi.fn(),
   createUser: vi.fn(),
   disableUser: vi.fn(),
-  disconnectSession: vi.fn(),
   enableUser: vi.fn(),
-  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
-  getNode: vi.fn(),
+  rotateUserPassword: vi.fn(),
+}));
+vi.mock("../src/api/operations", () => ({
+  disconnectSession: vi.fn(),
   getOperation: vi.fn(),
+  reloadService: vi.fn(),
+  removeIpBan: vi.fn(),
+  terminateSession: vi.fn(),
+}));
+vi.mock("../src/api/workspace", () => ({
+  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
+  workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
+  workspaceChangedEvent: "ocservia:workspace-changed",
+}));
+vi.mock("../src/api/nodes", () => ({
+  getNode: vi.fn(),
   listNodeIpBans: vi.fn(),
   listNodeUserGroupState: vi.fn(),
   listNodeSessions: vi.fn(),
   listNodes: vi.fn(),
-  reloadService: vi.fn(),
-  removeIpBan: vi.fn(),
-  rotateUserPassword: vi.fn(),
-  terminateSession: vi.fn(),
+}));
+vi.mock("../src/api/agents", () => ({
   upgradeNodeAgent: vi.fn(),
-  workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
-  workspaceChangedEvent: "ocservia:workspace-changed",
 }));
 
 const node: NodeObservedState = {

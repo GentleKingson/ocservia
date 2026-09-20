@@ -34,19 +34,20 @@ import { formatTimestamp } from "../shared/timestamp";
 
 import {
   applyConfigPlan,
+  createConfigPlan,
+  getConfigPlan,
+} from "../api/configuration";
+import {
   createCertificate,
   createCertificateP12,
-  createConfigPlan,
   downloadCertificateArtifact,
   getCertificate,
-  getConfigPlan,
-  getOperation,
   issueCertificate,
   listNodeCertificates,
   revokeCertificate,
-  workspaceContext,
-  type WorkspaceContext,
-} from "../api/client";
+} from "../api/certificates";
+import { getOperation } from "../api/operations";
+import { workspaceContext, type WorkspaceContext } from "../api/workspace";
 import {
   loadUserPolicy,
   policyToForm,
@@ -57,7 +58,7 @@ import UserPolicyFields from "../upstream/UserPolicyFields.vue";
 import { recoveryDialogKind } from "../shared/desired-recovery";
 import { useFleetStore } from "../shared/fleet";
 import { operationStatusKey } from "../shared/operation-status";
-import { workspaceChangedEvent } from "../api/client";
+import { workspaceChangedEvent } from "../api/workspace";
 import {
   beginNodeMutation,
   consumeCertificateGrant,

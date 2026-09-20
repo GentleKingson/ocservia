@@ -8,14 +8,12 @@ import { computed, ref } from "vue";
 
 import {
   getWorkspace,
-  listEvents,
-  listOperations,
-  operationSummary,
-  platformEventsEvent,
   workspaceContext,
   workspaceChangedEvent,
   type WorkspaceContext,
-} from "../api/client";
+} from "../api/workspace";
+import { listEvents, platformEventsEvent } from "../api/events";
+import { listOperations, operationSummary } from "../api/operations";
 
 const recentOperationWindow = 20;
 const recentEventLimit = 12;

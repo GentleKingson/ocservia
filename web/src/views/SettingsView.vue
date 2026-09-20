@@ -3,7 +3,8 @@ import { CheckCircle2, CircleAlert, Settings2 } from "@lucide/vue";
 import type { BuildInfo, Workspace } from "@ocservia/api-client";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
-import { getWorkspace, getVersion, workspaceChangedEvent } from "../api/client";
+import { getWorkspace, workspaceChangedEvent } from "../api/workspace";
+import { getVersion } from "../api/platform";
 import { useReadinessStore } from "../shared/readiness";
 
 const readiness = useReadinessStore();

@@ -13,26 +13,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getWorkspace,
-  listEvents,
-  listNodes,
-  listOperations,
-  operationSummary,
-  platformEventsEvent,
   workspaceContext,
   workspaceChangedEvent,
-} from "../src/api/client";
+} from "../src/api/workspace";
+import { listEvents, platformEventsEvent } from "../src/api/events";
+import { listNodes } from "../src/api/nodes";
+import { listOperations, operationSummary } from "../src/api/operations";
 import { useFleetStore } from "../src/shared/fleet";
 import { useOverviewStore } from "../src/shared/overview";
 
-vi.mock("../src/api/client", () => ({
+vi.mock("../src/api/workspace", () => ({
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
-  listEvents: vi.fn(),
-  listNodes: vi.fn(),
-  listOperations: vi.fn(),
-  operationSummary: vi.fn(),
-  platformEventsEvent: "ocservia:platform-events",
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
   workspaceChangedEvent: "ocservia:workspace-changed",
+}));
+vi.mock("../src/api/events", () => ({
+  listEvents: vi.fn(),
+  platformEventsEvent: "ocservia:platform-events",
+}));
+vi.mock("../src/api/nodes", () => ({
+  listNodes: vi.fn(),
+}));
+vi.mock("../src/api/operations", () => ({
+  listOperations: vi.fn(),
+  operationSummary: vi.fn(),
 }));
 
 const operation = (id: string, state: Operation["state"]): Operation => ({

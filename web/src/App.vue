@@ -12,12 +12,12 @@ import type { Workspace } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
+import { consumeLoginReturnPath } from "./shared/session";
 import {
-  consumeLoginReturnPath,
   getWorkspace,
   listAuthorizedWorkspaces,
   selectWorkspace,
-} from "./api/client";
+} from "./api/workspace";
 import { useReadinessStore } from "./shared/readiness";
 import { developmentRuntime } from "./shared/routes";
 

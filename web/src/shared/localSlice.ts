@@ -9,17 +9,18 @@ import { computed, onScopeDispose, ref } from "vue";
 
 import {
   createLocalSimulation,
-  eventStreamPath,
-  getWorkspace,
   getOperation,
-  listAuthorizedWorkspaces,
-  listEvents,
   listOperations,
-  probeAuthentication,
+} from "../api/operations";
+import { eventStreamPath, listEvents } from "../api/events";
+import {
+  getWorkspace,
+  listAuthorizedWorkspaces,
   workspaceContext,
   workspaceChangedEvent,
   type WorkspaceContext,
-} from "../api/client";
+} from "../api/workspace";
+import { probeAuthentication } from "../api/platform";
 
 const terminalStates = new Set([
   "succeeded",

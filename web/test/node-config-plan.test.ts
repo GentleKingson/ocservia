@@ -15,14 +15,17 @@ const mocks = vi.hoisted(() => {
 vi.mock("../src/shared/fleet", () => ({ useFleetStore: () => mocks.fleet }));
 vi.mock("vue-router", () => ({ useRoute: () => mocks.route }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
-vi.mock("../src/api/client", async (original) => ({
-  ...(await original<typeof import("../src/api/client")>()),
+vi.mock("../src/api/configuration", async (original) => ({
+  ...(await original<typeof import("../src/api/configuration")>()),
   createConfigPlan: mocks.createConfigPlan,
+}));
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
   workspaceContext: mocks.workspaceContext,
 }));
 
 import NodeDetailView from "../src/views/NodeDetailView.vue";
-import { workspaceChangedEvent } from "../src/api/client";
+import { workspaceChangedEvent } from "../src/api/workspace";
 
 // Exercise the actual SFC setup without adding a DOM or another test framework.
 const renderer = createRenderer<object, object>({

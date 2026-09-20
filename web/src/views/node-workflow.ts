@@ -1,6 +1,6 @@
 import type { ArtifactGrant } from "@ocservia/api-client";
 import { shallowReactive } from "vue";
-import { workspaceContext, type WorkspaceContext } from "../api/client";
+import { workspaceContext, type WorkspaceContext } from "../api/workspace";
 
 export interface NodeWorkflowContext {
   nodeId: string;

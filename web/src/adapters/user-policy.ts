@@ -1,6 +1,6 @@
 import type { UserPolicy, UserPolicyRequest } from "@ocservia/api-client";
 
-import { getUserPolicy, setUserPolicy } from "../api/client";
+import { getUserPolicy, setUserPolicy } from "../api/users";
 
 export type QuotaUnit = "MiB" | "GiB";
 

@@ -5,14 +5,13 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 
+import { getOperation, listOperations } from "../api/operations";
 import {
-  getOperation,
   getWorkspace,
-  listAgentRollouts,
-  listOperations,
   workspaceChangedEvent,
   workspaceContext,
-} from "../api/client";
+} from "../api/workspace";
+import { listAgentRollouts } from "../api/agents";
 import {
   completeOperationDetail,
   failOperationDetail,
