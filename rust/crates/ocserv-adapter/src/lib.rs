@@ -5620,9 +5620,10 @@ mod tests {
         let _ = task.await;
         assert!(staging_files(&directory).is_empty());
 
+        // Consume password input before exiting; only the subsequent lock command times out.
         let lock_ocpasswd = executable(
             "ocpasswd-lock-slow",
-            "if [ \"$3\" = \"-l\" ]; then sleep 5; exit 0; fi\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
+            "if [ \"$3\" = \"-l\" ]; then sleep 5; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
         );
         let lock_directory = lock_ocpasswd
             .parent()
