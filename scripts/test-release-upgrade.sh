@@ -68,6 +68,8 @@ cells = session['steps'].select { |step| step.fetch('run','').include?('scripts/
 abort 'published application baselines drift' unless cells.map { |step| step.dig('env','BASELINE_RELEASE') } == %w[v0.6.0 v0.6.1]
 abort 'second cell must survive first cell failure, not build failure' unless
   cells[1]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
+abort 'session matrix must use the shipped transport launcher' unless
+  File.read('scripts/build-release-session-images.sh').include?('build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile')
 abort 'summary must always run' unless w['jobs']['upgrade-result']['if'] == 'always()'
 abort 'summary graph incomplete' unless w['jobs']['upgrade-result']['needs'].sort == %w[agent-upgrade controller-upgrade prepare]
 w['jobs'].each_value do |job|

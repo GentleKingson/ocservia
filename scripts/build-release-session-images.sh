@@ -36,8 +36,10 @@ build_image() {
 }
 build_image G6RD_CONTROL_PLANE_IMAGE control control-plane/Dockerfile \
   --build-arg "COMMIT=${CANDIDATE_SHA}" --no-cache-filter runtime-base
-# Reuse the existing separate Cargo feature partitions and production runtime.
-build_image G6RD_TRANSPORTD_IMAGE rust rust/g6-runtime.Dockerfile --target transportd-runtime
+# The single-Relay chain needs the launcher shipped in the production image.
+build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile
+docker run --rm --entrypoint /bin/sh session-g6rd_transportd_image:candidate \
+  -ec 'test -x /usr/local/libexec/ocservia-transportd-relays'
 build_image G6RD_PROBE_IMAGE rust rust/g6-runtime.Dockerfile --target g6-probe-runtime
 build_image G6RD_RELAY_IMAGE relay deploy/production/relay.Dockerfile --no-cache-filter relay-runtime
 build_image SINGLE_NODE_IMAGE node scripts/single-relay-node.Dockerfile
