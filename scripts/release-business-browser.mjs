@@ -92,9 +92,18 @@ try {
   await page.getByRole("button", { name: "Issue certificate", exact: true }).click();
   const issueResponse = await issuing;
   expect(issueResponse.status()).toBe(200);
-  const issued = await issueResponse.json();
+  let issued = await issueResponse.json();
   await expect(page.getByText("issued", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Approval ID")).toBeVisible();
+  await expect.poll(async () => {
+    const current = await context.request.get(`/api/v1/certificates/${certificate.id}`, { headers });
+    expect(current.status()).toBe(200);
+    issued = await current.json();
+    return issued.state;
+  }, { timeout: 120000 }).toBe("expiring");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByTitle("Certificate lifecycle", { exact: true }).click();
+  await expect(page.getByText("expiring", { exact: true })).toBeVisible();
   const id = BigInt(Date.now()) << 80n | 7n << 76n | BigInt(`0x${crypto.randomBytes(2).toString("hex")}`) % 4096n << 64n | 2n << 62n | BigInt(`0x${crypto.randomBytes(8).toString("hex")}`) % (1n << 62n);
   const artifact = id.toString(16).padStart(32, "0").replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
   const reason = "T07 browser export";

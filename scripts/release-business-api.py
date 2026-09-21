@@ -297,6 +297,11 @@ def certificate():
     cert = api(cert_path + ':issue', {'approval_id': issue_approval, 'reason': 'T07 signed CSR'})
     assert cert['state'] == 'issued'
     record('certificate_issued', certificate_id=cert['id'], version=cert['version'])
+    # The one-day fixture leaf enters expiring through normal maintenance.
+    # Approve its current revision, not the already superseded issued revision.
+    cert = wait_for('short-lived certificate maintenance',
+                    lambda: (value if (value := api(cert_path))['state'] == 'expiring' else None))
+    record('certificate_expiring_revision', certificate_id=cert['id'], version=cert['version'])
     reason = 'T07 one-use P12 export'
     artifact = str(uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76) |
                             (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)))
@@ -316,7 +321,17 @@ def certificate():
     record('certificate_p12_ready', certificate_id=cert['id'], operation_id=operation_ids[-1])
     restart_node()
     download_headers = {'X-Artifact-Token': grant['download_token']}
-    blob = api('artifacts/' + grant['artifact_id'], headers=download_headers, raw=True)
+    def artifact_state():
+        return json.loads(sql("SELECT row_to_json(s) FROM (SELECT a.id,a.state,a.certificate_version,a.content_size,"
+                              "a.expires_at,a.consumed_at,c.state certificate_state,c.version current_certificate_version "
+                              "FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id "
+                              f"WHERE a.id='{grant['artifact_id']}') s;"))
+    download_evidence = {'before': artifact_state()}
+    try:
+        blob = api('artifacts/' + grant['artifact_id'], headers=download_headers, raw=True)
+    finally:
+        download_evidence['after'] = artifact_state()
+        (EVIDENCE / 'p12-download-state.json').write_text(json.dumps(download_evidence))
     (WORK / 'private/download.p12').write_bytes(blob)
     run('openssl', 'pkcs12', '-in', str(WORK / 'private/download.p12'),
         '-passin', 'file:' + str(WORK / 'private/p12-password'), '-noout')
