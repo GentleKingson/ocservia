@@ -88,6 +88,15 @@ applied. Controller ingress independently verifies the event's node and
 EndpointID against active database trust, so an event from a lingering revoked
 session is rejected during convergence.
 
+Trust claims measure their deadline with a fresh database wall clock after the
+claim lock, and the retained attempt counter fences late calls even when the
+same worker reclaims the same revision; equal or older revisions cannot reset
+newer intent. The worker holds a ten-second lease, renewed before each external
+mutation and every third of the lease while transport is in flight. Lost
+renewal cancels transport, and renewal finishes before completion bookkeeping,
+so a late result cannot overwrite superseding intent; a failed close retries
+without replaying an acknowledged trust update.
+
 The Agent handshake advertises supported capabilities. The Controller computes
 the sorted intersection with the approved database set and returns only that
 negotiated subset. Supporting extra capabilities does not prevent enrollment or
