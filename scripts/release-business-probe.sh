@@ -28,6 +28,8 @@ SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
 export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
 registry="${BUILDX_BUILDER}-registry"
 export T07_RELAY_CONTAINER="${BUILDX_BUILDER}-relay"
+oidc_container="${BUILDX_BUILDER}-oidc"
+signer_pid=
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backup"
 export OCSERV_CONTROLLER_STATE_ROOT="${work}/state"
 export OCSERV_PUBLIC_HOST=localhost OCSERV_HTTPS_ADDRESS=127.0.0.1
@@ -43,8 +45,8 @@ cleanup() {
   trap - EXIT ERR
   set +e
   if [[ -f "${work}/private.log" ]]; then
-    compose logs --no-color --tail 100 >>"${work}/private.log" 2>&1
-    sudo journalctl --no-pager -n 100 -u ocservia-agent -u ocservia-privd -u ocserv >>"${work}/private.log" 2>&1
+    compose logs --no-color >>"${work}/private.log" 2>&1
+    sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv >>"${work}/private.log" 2>&1
   fi
   # Never export environment, cookies, raw databases, passwords or raw logs.
   if [[ -f "${work}/private.log" ]]; then
@@ -59,18 +61,17 @@ cleanup() {
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),t07_status:"BLOCKED",
       planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
-      blockers:["unpublished candidate: Release download/bootstrap path not exercised",
-        "private Relay CA adaptations are not unchanged production launchers",
+      blockers:["private Relay CA adaptations are not unchanged production launchers",
         "independent human operators not provisioned; separate real Local identities only",
-        "external OIDC and certificate signer/CA unavailable",
-        "positive configuration apply and certificate/P12 lifecycle not exercised",
-        "browser UI not exercised; HTTPS API evidence only"],
+        "positive configuration apply lacks reviewed complete matched-node contract"],
+      deferred:["T09/formal release: immutable published Release download/bootstrap"],
       not_applicable:["T08 independent failure domains and formal SLO"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
   sudo ip netns pids t07-client 2>/dev/null | xargs -r sudo kill
   sudo ip netns del t07-client >/dev/null 2>&1
   compose down --volumes --remove-orphans >/dev/null 2>&1
-  docker rm -f "${registry}" "${T07_RELAY_CONTAINER}" >/dev/null 2>&1
+  docker rm -f "${registry}" "${T07_RELAY_CONTAINER}" "${oidc_container}" >/dev/null 2>&1
+  if [[ -n "${signer_pid}" ]]; then kill "${signer_pid}" 2>/dev/null; wait "${signer_pid}" 2>/dev/null; fi
   docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1
   # Host installation is confined to this ephemeral GitHub runner, destroyed
   # by Actions after the job. Remove this task's private material now.
@@ -118,13 +119,13 @@ chmod 444 "${work}/ca.crt"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
   -keyout "${work}/private/tls.key" -out "${work}/tls.csr"
-printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:%s,IP:10.207.0.1\nextendedKeyUsage=serverAuth\n' "${gateway}" >"${work}/leaf.ext"
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:%s,IP:10.207.0.1,IP:172.30.240.1,IP:172.30.240.3\nextendedKeyUsage=serverAuth\n' "${gateway}" >"${work}/leaf.ext"
 openssl x509 -req -days 1 -in "${work}/tls.csr" -CA "${work}/ca.crt" -CAkey "${work}/private/ca.key" \
   -CAcreateserial -extfile "${work}/leaf.ext" -out "${OCSERV_SECRET_DIR}/tls.crt"
 cp "${work}/private/tls.key" "${OCSERV_SECRET_DIR}/tls.key"
 export CURL_CA_BUNDLE="${work}/ca.crt" OCSERV_RELAY_URL_A="https://${gateway}:3443" OCSERV_RELAY_URL_B=
 for name in postgres-owner-password postgres-app-password postgres-backup-password session-key audit-checkpoint-key \
-  audit-event-key certificate-signer-token relay-access-token; do
+  audit-event-key certificate-signer-token relay-access-token oidc-client-secret; do
   openssl rand -hex 32 >"${work}/private/${name}"
   cp "${work}/private/${name}" "${OCSERV_SECRET_DIR}/${name}"
 done
@@ -196,6 +197,35 @@ compose run --rm --no-deps -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=t07-requester \
 stage=local_auth
 python3 "${ROOT}/scripts/release-business-api.py" local
 record real_local_auth
+stage=external_auth
+mkdir -m 700 "${work}/oidc-fault"
+printf '\n' >"${work}/oidc-fault/mode"
+export OCSERV_OIDC_ISSUER=https://172.30.240.3:19443 OCSERV_OIDC_CLIENT_ID=upgrade
+export OCSERV_OIDC_REDIRECT_URL=https://localhost/api/v1/auth/callback
+export OCSERV_CERTIFICATE_SIGNER_URL=https://172.30.240.1:19444/sign
+docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --network ocservia-production_application --ip 172.30.240.3 \
+  -v "${ROOT}/scripts/release-upgrade-oidc-fixture.mjs:/fixture.mjs:ro" \
+  -v "${OCSERV_SECRET_DIR}/tls.key:/fixture/tls.key:ro" \
+  -v "${OCSERV_SECRET_DIR}/tls.crt:/fixture/tls.crt:ro" \
+  -v "${OCSERV_SECRET_DIR}/oidc-client-secret:/fixture/oidc-client-secret:ro" \
+  -v "${work}/oidc-fault:/fault:ro" \
+  node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 \
+  node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode
+python3 "${ROOT}/scripts/release-business-signer.py" "${work}" 172.30.240.1 &
+signer_pid=$!
+compose up -d --no-deps --wait control-plane
+python3 "${ROOT}/scripts/release-business-api.py" trust_controller
+python3 "${ROOT}/scripts/release-business-api.py" oidc
+export OCSERV_LOCAL_AUTH_ENABLED=false
+compose up -d --no-deps --wait control-plane
+python3 "${ROOT}/scripts/release-business-api.py" trust_controller
+python3 "${ROOT}/scripts/release-business-api.py" oidc
+export OCSERV_LOCAL_AUTH_ENABLED=true
+compose up -d --no-deps --wait control-plane
+python3 "${ROOT}/scripts/release-business-api.py" trust_controller
+compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c 'SHOW server_version' >>"${ARTIFACT_DIR}/environment.txt"
+record real_external_oidc
 stage=native_node
 # The candidate is not a published Release. Verify the real signed package
 # locally, then exercise the official managed-node convergence/preparation.
@@ -258,6 +288,11 @@ PY
 docker compose -f "${work}/relay-compose.json" up -d --no-deps transportd
 export T07_TRANSPORT_CONTAINER
 T07_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
+sudo openssl pkey -pubin -in "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" -noout
+[[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem")" == 0:65532:440:1 ]]
+docker inspect "${T07_TRANSPORT_CONTAINER}" | jq -e '.[0].Mounts | all(.[]; .Destination != "/run/secrets/controller_command_signing_key")' >/dev/null
+docker exec "${T07_TRANSPORT_CONTAINER}" test ! -e /run/secrets/controller_command_signing_key
+printf 'SPKI public key, regular one-link root:65532 0440; no Controller signing-key mount\n' >"${ARTIFACT_DIR}/transport-key-boundary.txt"
 sudo install -m 644 "${work}/ca.crt" /etc/ocservia-agent/t07-relay-ca.crt
 sudo openssl pkey -in /etc/ocservia-agent/user-password-seal-private.pem -pubout >"${work}/user.pub.pem"
 export T07_ENDPOINT T07_USER_HASH T07_P12_HASH
@@ -275,6 +310,8 @@ sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTRO
 export T07_NODE
 T07_NODE="$(sed -nE '/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/p' "${work}/enrollment.log")"
 [[ "${T07_NODE}" =~ ^[0-9a-f-]{36}$ ]]
+printf '%s\n' "${T07_NODE}" >"${work}/signer-node"
+sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout >"${work}/p12.pub.pem"
 sudo rm /etc/ocservia-agent/enrollment-token
 cat >"${work}/agent.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${CONTROLLER_ENDPOINT_ID}
@@ -326,6 +363,22 @@ sudo systemctl enable --now ocservia-privd ocservia-agent
 bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
 record native_node_services
+stage=certificate
+python3 "${ROOT}/scripts/release-business-api.py" certificate
+record real_certificate_lifecycle
+stage=browser
+npm --prefix "${ROOT}/web" ci --ignore-scripts
+(cd "${ROOT}/web" && npx playwright install --with-deps chromium)
+sudo apt-get install -y --no-install-recommends libnss3-tools
+sudo install -m 644 "${work}/ca.crt" /usr/local/share/ca-certificates/t07.crt
+sudo update-ca-certificates
+mkdir -p "${HOME}/.pki/nssdb"
+if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
+certutil -A -d "sql:${HOME}/.pki/nssdb" -n t07 -t C,, -i "${work}/ca.crt"
+python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
+node "${ROOT}/scripts/release-business-browser.mjs"
+python3 "${ROOT}/scripts/release-business-api.py" browser_verify
+record real_browser_subset
 sudo ip netns add t07-client
 sudo ip link add t07-host type veth peer name t07-peer
 sudo ip link set t07-peer netns t07-client

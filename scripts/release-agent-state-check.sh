@@ -35,6 +35,15 @@ relay_runtime() {
     stat -c '%n %U:%G %a' "${path}"
   done
 }
+package_units() {
+  local unit path
+  for unit in ocservia-agent.service ocservia-privd.service; do
+    path="/usr/lib/systemd/system/${unit}"
+    [[ -f "${path}" && ! -L "${path}" ]]
+    [[ "$(stat -c '%u:%g:%a' "${path}")" == 0:0:644 ]]
+    sha256sum "${path}"
+  done
+}
 verify_candidate_relays() (
   package=/usr/share/ocservia-agent
   archive="${package}/ocservia-agent-${version}-linux-${arch}.tar.gz"
@@ -46,6 +55,9 @@ verify_candidate_relays() (
     /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf
   cmp "${verified}/deploy/production/systemd/agent-relays.sh" \
     /usr/libexec/ocservia/ocservia-agent-relays
+  for unit in ocservia-agent.service ocservia-privd.service; do
+    cmp "${verified}/deploy/systemd/${unit}" "/usr/lib/systemd/system/${unit}"
+  done
 )
 binaries() {
   local name machine
@@ -66,6 +78,8 @@ case "${mode}" in
       --identity-dir /var/lib/ocservia-agent/identity --controller "${controller}" --prepare-enrollment >"${evidence}/endpoint-id"
     state >"${evidence}/state.before"
     relay_runtime >"${evidence}/relay-runtime.before"
+    package_units >"${evidence}/units.before"
+    cp /usr/lib/systemd/system/ocservia-privd.service "${evidence}/privd.before"
     sha256sum /usr/libexec/ocservia/ocservia-{agent,privd,upgrader} >"${evidence}/binaries.before"
     binaries
     ;;
@@ -74,6 +88,9 @@ case "${mode}" in
     cmp "${evidence}/state.before" "${evidence}/state.after"
     verify_candidate_relays
     relay_runtime >"${evidence}/relay-runtime.after"
+    package_units >"${evidence}/units.after"
+    cp /usr/lib/systemd/system/ocservia-privd.service "${evidence}/privd.after"
+    cmp "${evidence}/privd.before" /var/lib/ocservia-upgrade/upgrade-backup/ocservia-privd.service.previous
     binaries
     sha256sum /var/lib/ocservia-upgrade/upgrade-backup/* >"${evidence}/snapshot.before-retry"
     ;;
@@ -82,6 +99,8 @@ case "${mode}" in
     cmp "${evidence}/state.before" "${evidence}/state.retry"
     relay_runtime >"${evidence}/relay-runtime.retry"
     cmp "${evidence}/relay-runtime.after" "${evidence}/relay-runtime.retry"
+    package_units >"${evidence}/units.retry"
+    cmp "${evidence}/units.after" "${evidence}/units.retry"
     sha256sum -c "${evidence}/snapshot.before-retry"
     binaries
     ;;
@@ -126,6 +145,8 @@ case "${mode}" in
     cmp "${evidence}/state.before" "${evidence}/state.rollback"
     relay_runtime >"${evidence}/relay-runtime.rollback"
     cmp "${evidence}/relay-runtime.before" "${evidence}/relay-runtime.rollback"
+    package_units >"${evidence}/units.rollback"
+    cmp "${evidence}/units.before" "${evidence}/units.rollback"
     # Rollback requests restarts; this fixture does not prove online reporting.
     systemctl stop ocservia-agent.service ocservia-privd.service
     ;;

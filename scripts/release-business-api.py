@@ -12,6 +12,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = Path(os.environ['T07_WORK'])
@@ -50,7 +52,7 @@ def client(role):
     return CLIENTS[role]
 
 
-def api(path, body=None, *, role='requester', status=200, headers=None, method=None):
+def api(path, body=None, *, role='requester', status=200, headers=None, method=None, raw=False):
     opener, jar = client(role)
     effective = {'Origin': ORIGIN, 'X-Workspace-ID': WORKSPACE, 'Content-Type': 'application/json'}
     effective.update(headers or {})
@@ -61,14 +63,14 @@ def api(path, body=None, *, role='requester', status=200, headers=None, method=N
         response = opener.open(request, timeout=15)
     except urllib.error.HTTPError as error:
         response = error
-    raw = response.read()
+    payload = response.read()
     expected = (status,) if isinstance(status, int) else status
     if response.status not in expected:
         # Never include a response body: successful token/download endpoints
         # and auth errors must not accidentally export credential material.
         raise RuntimeError(f'{request.get_method()} {path}: HTTP {response.status}, expected {status}')
     jar.save(ignore_discard=True)
-    return json.loads(raw) if raw else None
+    return payload if raw else (json.loads(payload) if payload else None)
 
 
 def wait_for(description, fn, seconds=120):
@@ -88,6 +90,8 @@ def approval(action, resource_type, resource_id, extra=None):
     decision = {'reason': 'T07 independent identity', 'expected_request_hash': request['request_hash']}
     api(f"approval-requests/{request['id']}:approve", decision, status=403)
     api(f"approval-requests/{request['id']}:approve", decision, role='approver')
+    approved = api(f"approval-requests/{request['id']}")
+    assert approved['request_hash'] == request['request_hash']
     record('self_approval_rejected', approval_id=request['id'])
     return request['id']
 
@@ -106,6 +110,92 @@ def local():
     ids = sql("SELECT string_agg(id::text, ',' ORDER BY id) FROM identities WHERE issuer='local';").split(',')
     assert len(ids) == 2 and len(set(ids)) == 2
     record('local_auth_and_workspace_isolation', identity_ids=ids)
+
+
+def trust_controller():
+    container = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
+    pid = run('docker', 'inspect', '--format', '{{.State.Pid}}', container).strip()
+    run('docker', 'exec', '--user', '0', '-i', container, 'sh', '-c',
+        'cat > /tmp/t07-ca.crt; chmod 444 /tmp/t07-ca.crt', data=(WORK / 'ca.crt').read_bytes())
+    run('sudo', 'nsenter', '--target', pid, '--mount', '--root', '--wd=/',
+        'mount', '--bind', '/tmp/t07-ca.crt', '/etc/ssl/certs/ca-certificates.crt')
+
+
+def oidc():
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args):
+            return None
+
+    issuer = os.environ['OCSERV_OIDC_ISSUER']
+
+    def login(role, fault=''):
+        jar = client(role)[1]
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=CONTEXT),
+                                            urllib.request.HTTPCookieProcessor(jar), NoRedirect())
+
+        def request(url, headers=None):
+            try:
+                return opener.open(urllib.request.Request(url, headers=headers or {}), timeout=15)
+            except urllib.error.HTTPError as error:
+                return error
+
+        (WORK / 'oidc-fault/mode').write_text(fault)
+        start = request(ORIGIN + '/api/v1/auth/login')
+        assert start.status == 302
+        location = start.headers['Location']
+        assert location.startswith(issuer + '/authorize?')
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+        assert query['code_challenge_method'] == ['S256'] and query['state'][0] and query['nonce'][0]
+        secret = (WORK / 'private/oidc-client-secret').read_text().strip()
+        authorized = request(location, {'Authorization': 'Basic ' + base64.b64encode(('upgrade:' + secret).encode()).decode()})
+        assert authorized.status == 302
+        callback = authorized.headers['Location']
+        if fault in ('code', 'state'):
+            parts = urllib.parse.urlparse(callback)
+            values = urllib.parse.parse_qs(parts.query)
+            values[fault] = ['invalid-t07-value']
+            callback = parts._replace(query=urllib.parse.urlencode(values, doseq=True)).geturl()
+        response = request(callback)
+        assert response.status == (401 if fault else 302)
+        if fault:
+            assert not any(c.name == '__Host-ocservia_session' for c in jar)
+        else:
+            assert any(c.name == '__Host-ocservia_session' and c.secure for c in jar)
+            assert request(callback).status == 401  # one-use code/state
+        jar.save(ignore_discard=True)
+
+    local_enabled = os.environ['OCSERV_LOCAL_AUTH_ENABLED'] == 'true'
+    assert api('auth/methods', role='anonymous') == {'local': local_enabled, 'oidc': True}
+    if not local_enabled:
+        login('oidc-only')
+        api('nodes', role='oidc-only')
+        api('auth/login', {'username': 't07-requester', 'password': 'disabled'}, role='disabled-local', status=404)
+        record('external_oidc_only_and_local_disabled')
+        return
+    for fault in ('issuer', 'signature', 'nonce', 'code', 'state'):
+        login('oidc-' + fault, fault)
+        api('nodes', role='oidc-' + fault, status=401)
+        record('oidc_reject_' + fault)
+    login('oidc')
+    api('nodes', role='oidc', status=403)
+    identity = sql("SELECT id FROM identities WHERE issuer='" + issuer + "' AND subject='upgrade-operator';")
+    uuid.UUID(identity)
+    api('role-bindings', {'identity_id': identity, 'workspace_id': WORKSPACE, 'role': 'Viewer',
+                          'resource_type': 'workspace', 'reason': 'T07 OIDC scope'}, status=201)
+    api('nodes', role='oidc')
+    api('nodes', role='oidc', headers={'X-Workspace-ID': '00000000-0000-7000-8000-000000000072'}, status=403)
+    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
+    trust_controller()
+    def ready():
+        try:
+            return api('readyz', role='anonymous').get('status') == 'ok'
+        except (RuntimeError, urllib.error.URLError):
+            return False
+    wait_for('Controller after restart', ready)
+    api('nodes', role='oidc')
+    api('auth/logout', {}, role='oidc', status=204)
+    api('nodes', role='oidc', status=401)
+    record('external_https_oidc_pkce_callback_workspace_restart_logout', identity_id=identity)
 
 
 def token():
@@ -135,6 +225,118 @@ def approve():
     record('pending_approve_active_and_receipt_authority', node_id=node)
 
 
+def cross_check(operation):
+    command = operation['command_id'].replace('-', '')
+    journal = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
+                  "SELECT count(*),state,error_code,length(privileged_result_proof)>0 FROM command_journal "
+                  f"WHERE hex(command_id)=upper('{command}');").strip()
+    root_effect = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
+                      "SELECT count(*),state,length(response)>0 FROM authorized_effects "
+                      f"WHERE hex(command_id)=upper('{command}');").strip()
+    snapshot = {'operation_id': operation['id'], 'command_id': operation['command_id'],
+                'database_state': sql(f"SELECT state FROM operations WHERE id='{operation['id']}';"),
+                'journal_count_state_error_receipt': journal, 'root_count_state_response': root_effect}
+    snapshot['operation'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT id,state,version,created_at,updated_at,completed_at "
+                                          f"FROM operations WHERE id='{operation['id']}') s;"))
+    snapshot['outbox'] = json.loads(sql("SELECT coalesce(json_agg(s),'[]') FROM (SELECT id,attempts,last_error,published_at,available_at "
+                                       f"FROM outbox_events WHERE command_id='{operation['command_id']}') s;"))
+    snapshot['attempts'] = json.loads(sql("SELECT coalesce(json_agg(s),'[]') FROM (SELECT attempt_number,state,started_at,finished_at,error_code "
+                                         f"FROM command_attempts WHERE command_id='{operation['command_id']}' ORDER BY attempt_number) s;"))
+    snapshot['journal'] = json.loads(run('sudo', 'sqlite3', '-readonly', '-json', '/var/lib/ocservia-agent/agent.db',
+                                        "SELECT hex(command_id) command_id,hex(payload_sha256) semantic_hash,payload_hash_version,state,error_code,"
+                                        "accepted_at,updated_at,hex(privileged_result_proof) receipt_hex FROM command_journal "
+                                        f"WHERE hex(command_id)=upper('{command}');") or '[]')
+    snapshot['root'] = json.loads(run('sudo', 'sqlite3', '-readonly', '-json', '/var/lib/ocservia-privd/desired-effects.sqlite3',
+                                     "SELECT hex(command_id) command_id,hex(payload_sha256) semantic_hash,state,authorization_revision,"
+                                     "effect_kind,resource_key,effect_revision,delivery_mode,updated_at,length(response) response_bytes "
+                                     f"FROM authorized_effects WHERE hex(command_id)=upper('{command}');") or '[]')
+    (EVIDENCE / ('cross-check-' + operation['id'] + '.json')).write_text(json.dumps(snapshot))
+    return snapshot
+
+
+def certificate():
+    node = os.environ['T07_NODE']
+    node_path = 'nodes/' + node
+    wait_for('online before PKI', lambda: api(node_path)['connection_state'] == 'online')
+    body = {'expected_version': api(node_path)['version'], 'common_name': 't07-client',
+            'dns_names': ['client.example.test'], 'key_bits': 2048, 'reason': 'T07 node-local CSR'}
+    headers = {'Idempotency-Key': secrets.token_hex(16)}
+    cert = api(node_path + '/certificates', body, headers=headers, status=202)
+    assert api(node_path + '/certificates', body, headers=headers, status=202)['id'] == cert['id']
+    cert_path = 'certificates/' + cert['id']
+    operation_ids = [cert['operation_id']]
+    wait_for('root CSR', lambda: api(cert_path)['state'] == 'csr_ready')
+    key_path = '/var/lib/ocservia-privd/certificates/' + cert['id'] + '.key.pem'
+    key_stat = run('sudo', 'stat', '-c', '%u:%g:%a:%h', key_path).strip()
+    assert key_stat.split(':')[0] == '0' and key_stat.split(':')[2:] == ['600', '1']
+    # Compare only a public-key digest; never export the unwrapped node key.
+    public_before = run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
+    run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
+    wait_for('node after CSR restart', lambda: api(node_path)['connection_state'] == 'online')
+    assert public_before == run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
+    issue_approval = approval('certificate.issue', 'certificate', cert['id'])
+    cert = api(cert_path + ':issue', {'approval_id': issue_approval, 'reason': 'T07 signed CSR'})
+    assert cert['state'] == 'issued'
+    reason = 'T07 one-use P12 export'
+    artifact = str(uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76) |
+                            (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)))
+    export_approval = approval('certificate.private_key.export', 'certificate', cert['id'],
+                              {'certificate': {'expected_version': cert['version'], 'purpose': 'certificate_p12',
+                                               'artifact_request_id': artifact, 'reason': reason}})
+    grant = api(cert_path + ':p12', {'expected_version': api(node_path)['version'],
+                                   'certificate_version': cert['version'], 'approval_id': export_approval,
+                                   'reason': reason}, headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+    operation_ids.append(grant['operation']['id'])
+    # Credentials stay in the private redaction input, never in the artifact.
+    (WORK / 'private/p12-grant').write_text(json.dumps(grant))
+    (WORK / 'private/p12-password').write_text(grant['password'])
+    (WORK / 'private/p12-token').write_text(grant['download_token'])
+    wait_for('P12 root export', lambda: api('operations/' + operation_ids[-1])['state'] == 'succeeded')
+    run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
+    wait_for('node after P12 restart', lambda: api(node_path)['connection_state'] == 'online')
+    download_headers = {'X-Artifact-Token': grant['download_token']}
+    blob = api('artifacts/' + grant['artifact_id'], headers=download_headers, raw=True)
+    (WORK / 'private/download.p12').write_bytes(blob)
+    run('openssl', 'pkcs12', '-in', str(WORK / 'private/download.p12'),
+        '-passin', 'file:' + str(WORK / 'private/p12-password'), '-noout')
+    api('artifacts/' + grant['artifact_id'], headers=download_headers, status=403, raw=True)
+    reason = 'T07 revoke issued certificate'
+    revoke_approval = approval('certificate.revoke', 'certificate', cert['id'],
+                              {'certificate': {'expected_version': cert['version'], 'reason': reason}})
+    revoked = api(cert_path + ':revoke', {'expected_version': api(node_path)['version'],
+                                        'certificate_version': cert['version'], 'approval_id': revoke_approval,
+                                        'reason': reason}, headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+    wait_for('certificate revoked', lambda: api(cert_path)['state'] == 'revoked')
+    assert (WORK / 'signer-revoked').read_text() == cert['id']
+    assert run('sudo', 'test', '!', '-e', key_path) == ''
+    # Revoke returns its operation, unlike the CSR certificate resource.
+    operation_ids.append(revoked['id'])
+    for operation_id in operation_ids:
+        snapshot = cross_check(api('operations/' + operation_id))
+        assert snapshot['database_state'] == 'succeeded'
+        assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
+        assert snapshot['root_count_state_response'] == '1|applied|1'
+    record('certificate_csr_issue_p12_one_use_revoke_restart', certificate_id=cert['id'],
+           operation_ids=operation_ids, node_key_stat=key_stat)
+
+
+def browser_prepare():
+    (WORK / 'browser-approval').write_text(approval('service.reload', 'node', os.environ['T07_NODE']))
+
+
+def browser_verify():
+    for entry in json.loads((EVIDENCE / 'browser-checkpoints.json').read_text()):
+        operation_id = entry.get('operation_id') or entry.get('operation', {}).get('id')
+        if not operation_id:
+            continue
+        operation = wait_for('browser operation', lambda: (value if (value := api('operations/' + operation_id))['state'] == 'succeeded' else None))
+        snapshot = cross_check(operation)
+        assert snapshot['database_state'] == 'succeeded'
+        assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
+        assert snapshot['root_count_state_response'] == '1|applied|1'
+    record('browser_operations_durable_cross_check')
+
+
 def business():
     node = os.environ['T07_NODE']
     prefix = f'nodes/{node}'
@@ -153,9 +355,18 @@ def business():
     record('node_online_single_relay_argv', agent_version=observed['agent_version'], relay=os.environ['RELAY_URL_A'])
     privd_pid = run('systemctl', 'show', 'ocservia-privd', '-p', 'MainPID', '--value').strip()
     process = dict(line.split(':', 1) for line in run('sudo', 'cat', f'/proc/{int(privd_pid)}/status').splitlines())
-    assert '0' in process['Groups'].split()
+    agent_group = run('id', '-g', 'ocserv-agent').strip()
+    assert process['Uid'].split() == ['0'] * 4
+    assert process['Gid'].split() == [agent_group] * 4
+    assert set(process['Groups'].split()) == {'0', agent_group}
     assert int(process['CapEff'].strip(), 16) == 2  # CAP_DAC_OVERRIDE only.
-    record('native_privd_permissions', groups=process['Groups'].split(), effective_capabilities=process['CapEff'].strip())
+    agent_process = dict(line.split(':', 1) for line in run('sudo', 'cat', f'/proc/{int(pid)}/status').splitlines())
+    assert '0' not in agent_process['Uid'].split() + agent_process['Groups'].split()
+    assert int(agent_process['CapEff'].strip(), 16) == 0
+    socket_stat = run('sudo', 'stat', '-c', '%u:%g:%a', '/run/ocserv-platform/privd.sock').strip()
+    assert socket_stat == '0:' + agent_group + ':660'
+    record('native_privd_permissions', privd={key: process[key].split() for key in ('Uid', 'Gid', 'Groups', 'CapEff')},
+           agent={key: agent_process[key].split() for key in ('Uid', 'Gid', 'Groups', 'CapEff')}, socket=socket_stat)
     operations = []
 
     def completed(operation):
@@ -164,20 +375,6 @@ def business():
         if result['state'] in ('failed', 'expired', 'cancelled'):
             raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
         return result if result['state'] == 'succeeded' else None
-
-    def cross_check(operation):
-        command = operation['command_id'].replace('-', '')
-        journal = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
-                      "SELECT count(*),state,error_code,length(privileged_result_proof)>0 FROM command_journal "
-                      f"WHERE hex(command_id)=upper('{command}');").strip()
-        root_effect = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
-                          "SELECT count(*),state,length(response)>0 FROM authorized_effects "
-                          f"WHERE hex(command_id)=upper('{command}');").strip()
-        snapshot = {'operation_id': operation['id'], 'command_id': operation['command_id'],
-                    'database_state': sql(f"SELECT state FROM operations WHERE id='{operation['id']}';"),
-                    'journal_count_state_error_receipt': journal, 'root_count_state_response': root_effect}
-        (EVIDENCE / ('cross-check-' + operation['id'] + '.json')).write_text(json.dumps(snapshot))
-        return snapshot
 
     def verify_completed_operations():
         for operation in operations:
@@ -246,6 +443,9 @@ def business():
     mutation('users/t07-vpn:enable', {}, user_revision())
     authenticate(password2, True)
     record('vpn_disable_restore')
+    password_stat = run('sudo', 'stat', '-c', '%u:%g:%a:%h', '/etc/ocserv/ocpasswd').strip()
+    assert password_stat == '0:0:600:1'
+    record('password_file_ownership', stat=password_stat)
     verify_completed_operations()
     audit = api('audit/events?page_size=200')['items']
     assert audit
@@ -280,6 +480,10 @@ def business():
     identity_before = run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
                           '/var/lib/ocservia-agent/identity/controller.endpoint')
     started_before = run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    (EVIDENCE / 'identity-before-fault.json').write_text(json.dumps({
+        'agent_endpoint': os.environ['T07_ENDPOINT'], 'controller_endpoint': os.environ['OCSERV_CONTROLLER_ENDPOINT_ID'],
+        'identity_file_digests': identity_before, 'agent_start_monotonic': started_before.strip(),
+        'ocserv_start_monotonic': ocserv_started.strip(), 'native_session_id': live_session}))
     control = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
     try:
         run('docker', 'pause', control)
@@ -296,6 +500,7 @@ def business():
         return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
 
     reloads_before = reload_count()
+    record('reload_before_fault', native_reload_count=reloads_before)
     try:
         run('docker', 'stop', relay)
         for _ in range(3):
@@ -328,6 +533,12 @@ def business():
         # Query-only diagnostics also survive Unknown. Never retry a mutation
         # or invent a receipt to make the strict recovery assertion green.
         recovery_snapshot = cross_check(pending)
+        recovery_snapshot['node'] = api(prefix)
+        recovery_snapshot['owner'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
+                                                   "owner_epoch,lease_until,updated_at FROM connection_owner_fencing "
+                                                   f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
+        recovery_snapshot['native_reload_count'] = reload_count()
+        (EVIDENCE / 'recovery-final.json').write_text(json.dumps(recovery_snapshot))
     assert identity_before == run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
                                   '/var/lib/ocservia-agent/identity/controller.endpoint')
     assert started_before == run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
@@ -354,6 +565,7 @@ def business():
 
 if __name__ == '__main__':
     phase = sys.argv[1]
-    if phase not in ('local', 'token', 'approve', 'business'):
+    if phase not in ('local', 'oidc', 'trust_controller', 'token', 'approve', 'certificate',
+                     'browser_prepare', 'browser_verify', 'business'):
         raise SystemExit('unknown phase')
     globals()[phase]()

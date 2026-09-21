@@ -39,10 +39,19 @@ The following limitations are deliberately retained, not scored as PASS:
   no database-inserted sessions or devAuth are used. This verifies self-approval
   rejection, not independent custody by two people. Database writes are limited
   to documented initial workspace provisioning before normal Local bootstrap.
-- External OIDC, mixed-mode login, external signer/CA, certificate/P12 lifecycle,
-  positive configuration plan/apply and browser interaction need their own real
-  environment and evidence. A deliberately unreachable signer URL is not a
-  working signer and must not receive a certificate success result.
+- The dedicated HTTPS OIDC fixture exercises discovery, PKCE, callback and
+  issuer/signature/nonce/code/state rejection in mixed mode, plus OIDC-only
+  login, workspace authorization and restart/logout behavior. The signer uses
+  actual OpenSSL CSR verification, signing, public-key sealing and revocation
+  acknowledgement over authenticated TLS. These are task-controlled external
+  service fixtures, not production IdP/CA/HSM certification or independent
+  operator custody. The Controller container trust store is provisioned with
+  the task CA; TLS verification stays enabled.
+- Native certificate/P12 checks include node restarts and one-use download.
+  The real browser uses the signed gateway and Controller API without route
+  mocks, simulator or TLS exceptions. Missing phase checkpoints remain NOT RUN;
+  source implementation is not proof of runtime success. Positive configuration
+  plan/apply still needs its complete reviewed matched-node contract.
 - One host, one architecture and one Relay provide no Relay redundancy or T08
   fault-domain/SLO proof. The client namespace protects host routes; it is not
   another host. The probe checks test VPN traffic, never real user traffic.

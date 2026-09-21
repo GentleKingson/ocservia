@@ -17,8 +17,9 @@ if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.rs' \
   exit 1
 fi
 
+# Check the program argument, not later test arguments such as TestCrashChild.
 if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.go' --include='*.rs' \
-  'Command::new\([^)]*(sh|bash)|exec\.Command\([^)]*(sh|bash)|docker\.sock' \
+  'Command::new\([^)]*(sh|bash)|exec\.Command\([^,)]*(sh|bash)|docker\.sock' \
   "${ROOT}/control-plane" "${ROOT}/rust"; then
   echo "forbidden generic shell or Docker socket surface found" >&2
   exit 1

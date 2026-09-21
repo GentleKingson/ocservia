@@ -123,6 +123,12 @@ ln -s verification-saved.pem "${OCSERV_SECRET_DIR}/controller-command-verificati
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 rm "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 mv "${OCSERV_SECRET_DIR}/verification-saved.pem" "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+ln "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" "${OCSERV_SECRET_DIR}/verification-hardlink.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+rm "${OCSERV_SECRET_DIR}/verification-hardlink.pem"
+chmod 0770 "${work}"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+chmod 0700 "${work}"
 chmod 0600 "${OCSERV_SECRET_DIR}/oidc-client-secret"
 expect_failure env OCSERV_OIDC_ISSUER=https://id.example.test OCSERV_OIDC_CLIENT_ID=test \
   "${ROOT}/deploy/production/compose.sh" config --quiet
