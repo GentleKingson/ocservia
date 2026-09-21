@@ -20,7 +20,7 @@ func (s configurationStore) Node(ctx context.Context, id uuid.UUID) (v configura
 }
 
 func (s configurationStore) Capabilities(ctx context.Context, id uuid.UUID) ([]string, error) {
-	rows, err := s.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=? AND approved=true AND (capability='ocserv.config.plan' OR capability LIKE 'config.%') ORDER BY BINARY capability`, UUIDBytes(id))
+	rows, err := s.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=? AND approved=true AND (capability IN ('ocserv.config.plan','ocserv.config.complete.plan') OR capability LIKE 'config.%') ORDER BY BINARY capability`, UUIDBytes(id))
 	if err != nil {
 		return nil, err
 	}

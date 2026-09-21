@@ -230,8 +230,23 @@ func normalizeCertificateArtifactResult(envelope *agentv1.CommandEnvelope, state
 	return &result, nil
 }
 
+type configApplyIdentity struct {
+	candidateHash, currentHash, materializedHash []byte
+	desiredRevision                              uint64
+}
+
+func configApplyBinding(envelope *agentv1.CommandEnvelope) *configApplyIdentity {
+	if apply := envelope.GetConfigApply(); apply != nil {
+		return &configApplyIdentity{apply.GetCandidateHash(), apply.GetExpectedCurrentHash(), apply.GetCandidateHash(), apply.GetDesiredRevision()}
+	}
+	if apply := envelope.GetCompleteConfigApply(); apply != nil {
+		return &configApplyIdentity{apply.GetCandidateHash(), apply.GetExpectedCurrentHash(), apply.GetMaterializedHash(), apply.GetDesiredRevision()}
+	}
+	return nil
+}
+
 func normalizeConfigApplyResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (string, *agentv1.ConfigApplyResult, error) {
-	apply := envelope.GetConfigApply()
+	apply := configApplyBinding(envelope)
 	if apply == nil || state != "succeeded" {
 		return state, nil, nil
 	}
@@ -239,15 +254,15 @@ func normalizeConfigApplyResult(envelope *agentv1.CommandEnvelope, state string,
 	if len(resultBytes) == 0 || proto.Unmarshal(resultBytes, &result) != nil {
 		return "", nil, errors.New("configuration apply result is malformed")
 	}
-	if !bytes.Equal(result.GetCandidateHash(), apply.GetCandidateHash()) || !bytes.Equal(result.GetPreviousHash(), apply.GetExpectedCurrentHash()) {
+	if !bytes.Equal(result.GetCandidateHash(), apply.candidateHash) || !bytes.Equal(result.GetPreviousHash(), apply.currentHash) {
 		return "", nil, errors.New("configuration apply result hash mismatch")
 	}
 	switch {
 	case result.GetHealthy() && !result.GetRolledBack() && !result.GetFailedCritical() && result.GetFailureCode() == "" &&
-		bytes.Equal(result.GetObservedHash(), apply.GetCandidateHash()) && result.GetAppliedRevision() == apply.GetDesiredRevision():
+		bytes.Equal(result.GetObservedHash(), apply.materializedHash) && result.GetAppliedRevision() == apply.desiredRevision:
 		return "succeeded", &result, nil
 	case result.GetHealthy() && result.GetRolledBack() && !result.GetFailedCritical() && result.GetAppliedRevision() == 0 &&
-		bytes.Equal(result.GetObservedHash(), apply.GetExpectedCurrentHash()) &&
+		bytes.Equal(result.GetObservedHash(), apply.currentHash) &&
 		(result.GetFailureCode() == "health_check_failed" || result.GetFailureCode() == "recovered_health_check_failed"):
 		return "rolled_back", &result, nil
 	case !result.GetHealthy() && !result.GetRolledBack() && result.GetFailedCritical() && result.GetAppliedRevision() == 0 && len(result.GetObservedHash()) == 0 &&
@@ -296,9 +311,9 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 		return "user.password.rotate"
 	case *agentv1.CommandEnvelope_GroupApply:
 		return "group.apply"
-	case *agentv1.CommandEnvelope_ConfigPlan:
+	case *agentv1.CommandEnvelope_ConfigPlan, *agentv1.CommandEnvelope_CompleteConfigPlan:
 		return "config.plan"
-	case *agentv1.CommandEnvelope_ConfigApply:
+	case *agentv1.CommandEnvelope_ConfigApply, *agentv1.CommandEnvelope_CompleteConfigApply:
 		return "config.apply"
 	case *agentv1.CommandEnvelope_CertificateCsr:
 		return "certificate.csr.generate"

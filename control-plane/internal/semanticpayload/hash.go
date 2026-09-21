@@ -3,6 +3,7 @@
 package semanticpayload
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 )
 
 // ValidateVersion rejects hash algorithms that this binary cannot verify.
@@ -90,6 +92,30 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 		var desired [8]byte
 		binary.BigEndian.PutUint64(desired[:], payload.GetDesiredRevision())
 		canonicalPayload = append(canonicalPayload, desired[:]...)
+	case *agentv1.CommandEnvelope_CompleteConfigPlan:
+		payload := envelope.GetCompleteConfigPlan()
+		digest, err := configprofile.Hash(payload.GetCandidate())
+		if version != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || err != nil || !bytes.Equal(digest[:], payload.GetCandidateHash()) || !bytes.Equal(payload.GetCandidate().GetNodeId(), envelope.GetNodeId()) {
+			return [sha256.Size]byte{}, errors.New("complete config plan identity is malformed")
+		}
+		payloadKind, canonicalPayload = 129, append([]byte(nil), digest[:]...)
+	case *agentv1.CommandEnvelope_CompleteConfigApply:
+		payload := envelope.GetCompleteConfigApply()
+		digest, err := configprofile.Hash(payload.GetCandidate())
+		expires := payload.GetPlanExpiresAt()
+		if version != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || err != nil || !bytes.Equal(digest[:], payload.GetCandidateHash()) || !bytes.Equal(payload.GetCandidate().GetNodeId(), envelope.GetNodeId()) || len(payload.GetMaterializedHash()) != 32 || len(payload.GetExpectedCurrentHash()) != 32 || payload.GetDesiredRevision() <= payload.GetCandidate().GetExpectedRevision() || len(payload.GetPlanId()) != 16 || expires == nil || !expires.IsValid() || len(envelope.GetApprovalId()) != 16 || len(envelope.GetApprovalRequestSha256()) != 32 {
+			return [sha256.Size]byte{}, errors.New("complete config apply identity is malformed")
+		}
+		payloadKind = 130
+		canonicalPayload = append(canonicalPayload, digest[:]...)
+		canonicalPayload = append(canonicalPayload, payload.GetMaterializedHash()...)
+		canonicalPayload = append(canonicalPayload, payload.GetExpectedCurrentHash()...)
+		canonicalPayload = binary.BigEndian.AppendUint64(canonicalPayload, payload.GetDesiredRevision())
+		canonicalPayload = append(canonicalPayload, payload.GetPlanId()...)
+		canonicalPayload = binary.BigEndian.AppendUint64(canonicalPayload, uint64(expires.GetSeconds()))
+		canonicalPayload = binary.BigEndian.AppendUint32(canonicalPayload, uint32(expires.GetNanos()))
+		canonicalPayload = append(canonicalPayload, envelope.GetApprovalId()...)
+		canonicalPayload = append(canonicalPayload, envelope.GetApprovalRequestSha256()...)
 	case *agentv1.CommandEnvelope_SessionTerminate:
 		payloadKind = 112
 		canonicalPayload = canonicalStrings(envelope.GetSessionTerminate().GetSessionId(), envelope.GetSessionTerminate().GetBootId())

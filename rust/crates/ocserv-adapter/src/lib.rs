@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+mod complete_config;
+
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions as StdOpenOptions};
@@ -268,6 +270,7 @@ pub struct FixedResources {
     effect_store: PathBuf,
     effect_store_key: PathBuf,
     certificate_key_dir: PathBuf,
+    config_tls_root: PathBuf,
 }
 
 impl Default for FixedResources {
@@ -288,6 +291,7 @@ impl Default for FixedResources {
             effect_store: PathBuf::from("/var/lib/ocservia-privd/desired-effects.sqlite3"),
             effect_store_key: PathBuf::from("/var/lib/ocservia-privd/desired-effects.key"),
             certificate_key_dir: PathBuf::from("/var/lib/ocservia-privd/certificates"),
+            config_tls_root: PathBuf::from("/etc/ocservia-agent/config-tls"),
         }
     }
 }
@@ -732,6 +736,7 @@ impl Adapter {
             current_unchanged,
             staging_cleaned: !staging_path.exists(),
             current_hash: hex::decode(before.sha256).map_err(|_| AdapterError::MalformedOutput)?,
+            materialized_hash: Vec::new(),
         })
     }
 
@@ -768,6 +773,28 @@ impl Adapter {
         if text.lines().any(|line| line.contains("${secret:")) {
             return Err(AdapterError::InvalidRequest);
         }
+        self.apply_validated_config(
+            candidate,
+            candidate_hash,
+            expected_current_hash,
+            desired_revision,
+            effect,
+            false,
+        )
+        .await
+    }
+
+    // Only the legacy validator or the complete TLS materializer can reach this.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    async fn apply_validated_config(
+        &self,
+        candidate: &[u8],
+        candidate_hash: &[u8],
+        expected_current_hash: &[u8],
+        desired_revision: u64,
+        effect: EffectIdentity<'_>,
+        complete: bool,
+    ) -> Result<ConfigApplyResult, AdapterError> {
         let _guard = self.config_plan_lock.lock().await;
         let _file_lock = lock_config_file(&self.resources.config)?;
         let before = self.config_fingerprint().await?;
@@ -906,6 +933,17 @@ impl Adapter {
         }
         write_new_synced(&stage_path, candidate, identity).await?;
         sync_directory(parent).await?;
+        if complete {
+            self.execute(
+                &self.resources.ocserv,
+                &[
+                    "-t",
+                    "-c",
+                    stage_path.to_str().ok_or(AdapterError::InvalidResource)?,
+                ],
+            )
+            .await?;
+        }
         #[cfg(test)]
         if self.take_config_apply_fault(3) {
             return Err(AdapterError::Unavailable);
@@ -4376,7 +4414,7 @@ mod tests {
         [16, 15, 14, 13, 12, 11, 0x70, 9, 0x80, 7, 6, 5, 4, 3, 2, 1];
     const TEST_PAYLOAD_HASH: [u8; 32] = [9; 32];
 
-    fn test_effect() -> EffectIdentity<'static> {
+    pub(super) fn test_effect() -> EffectIdentity<'static> {
         EffectIdentity {
             command_id: &TEST_COMMAND_ID,
             idempotency_key: &TEST_IDEMPOTENCY_KEY,

@@ -70,6 +70,12 @@ export interface ConfigPlan {
    */
   candidateHash: string;
   /**
+   * Exact root-attested configuration file hash for the complete node-local TLS profile.
+   * @type {string}
+   * @memberof ConfigPlan
+   */
+  materializedHash?: string;
+  /**
    *
    * @type {OperationState}
    * @memberof ConfigPlan
@@ -272,6 +278,8 @@ export function ConfigPlanFromJSONTyped(
     templateName: json["template_name"],
     expectedRevision: json["expected_revision"],
     candidateHash: json["candidate_hash"],
+    materializedHash:
+      json["materialized_hash"] == null ? undefined : json["materialized_hash"],
     state: OperationStateFromJSON(json["state"]),
     validation: json["validation"],
     diffRedacted: json["diff_redacted"],
@@ -308,6 +316,7 @@ export function ConfigPlanToJSONTyped(
     template_name: value["templateName"],
     expected_revision: value["expectedRevision"],
     candidate_hash: value["candidateHash"],
+    materialized_hash: value["materializedHash"],
     state: OperationStateToJSON(value["state"]),
     validation: value["validation"],
     diff_redacted: value["diffRedacted"],

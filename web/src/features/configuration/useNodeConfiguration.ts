@@ -69,6 +69,12 @@ export function useNodeConfiguration({
   const configError = ref("");
   const configLoading = ref(false);
   const configPort = ref(443);
+  const configUdpPort = ref(0);
+  const configDevice = ref("vpns");
+  const configNetwork = ref("10.42.0.0/24");
+  const configDns = ref("1.1.1.1");
+  const configCookieTimeout = ref(300);
+  const configMaxSameClients = ref(2);
   const configMaxClients = ref(128);
   const configRoute = ref("default");
   const configCertificateSecretRefId = ref("");
@@ -212,7 +218,18 @@ export function useNodeConfiguration({
           name: "node-baseline",
           directives: [
             { name: "auth", value: "plain[passwd=/etc/ocserv/ocpasswd]" },
+            {
+              name: "cookie-timeout",
+              value: String(configCookieTimeout.value),
+            },
+            { name: "device", value: configDevice.value.trim() },
+            { name: "dns", value: configDns.value.trim() },
+            { name: "ipv4-network", value: configNetwork.value.trim() },
             { name: "max-clients", value: String(configMaxClients.value) },
+            {
+              name: "max-same-clients",
+              value: String(configMaxSameClients.value),
+            },
             { name: "route", value: configRoute.value.trim() },
             {
               name: "server-cert",
@@ -228,6 +245,7 @@ export function useNodeConfiguration({
             },
             { name: "socket-file", value: "/run/ocserv.socket" },
             { name: "tcp-port", value: String(configPort.value) },
+            { name: "udp-port", value: String(configUdpPort.value) },
           ],
         },
         ttlSeconds: 900,
@@ -296,6 +314,12 @@ export function useNodeConfiguration({
     configError,
     configLoading,
     configPort,
+    configUdpPort,
+    configDevice,
+    configNetwork,
+    configDns,
+    configCookieTimeout,
+    configMaxSameClients,
     configMaxClients,
     configRoute,
     configCertificateSecretRefId,

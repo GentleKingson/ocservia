@@ -1,6 +1,6 @@
 # Complete ConfigPlan Contract
 
-Status: reviewed scope, implementation and native acceptance pending. The
+Status: reviewed scope, implementation present, native acceptance pending. The
 maintainer accepted the T07 finite plain-auth / node-local TLS proposal in the
 task conversation on 2026-09-21. This acceptance is not independent business
 approval custody and does not make the existing positive-apply exclusion PASS.
@@ -8,8 +8,8 @@ approval custody and does not make the existing positive-apply exclusion PASS.
 The existing v1 plan/apply payloads, semantic hashes and historical receipts
 remain unchanged. The complete profile requires a separately negotiated
 capability and new typed command payloads; it must never fall back to v1 on an
-older node. No capability is advertised until the complete path is implemented
-and verified.
+older node. Matched nodes advertise the new capabilities only with the complete
+implementation; advertisement alone is not production acceptance evidence.
 
 ## Finite Profile
 

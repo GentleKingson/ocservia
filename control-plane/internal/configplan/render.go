@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"regexp"
 	"sort"
 	"strconv"
@@ -50,6 +51,7 @@ type RenderInput struct {
 }
 
 type Rendered struct {
+	CompleteCandidate    *agentv1.CompleteConfigCandidate
 	Candidate            []byte
 	Redacted             string
 	Hash                 [32]byte

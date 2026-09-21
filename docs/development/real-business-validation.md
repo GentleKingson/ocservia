@@ -52,8 +52,10 @@ The following limitations are deliberately retained, not scored as PASS:
 - Native certificate/P12 checks include node restarts and one-use download.
   The real browser uses the signed gateway and Controller API without route
   mocks, simulator or TLS exceptions. Missing phase checkpoints remain NOT RUN;
-  source implementation is not proof of runtime success. Positive configuration
-  plan/apply still needs its complete reviewed matched-node contract.
+  source implementation is not proof of runtime success. The reviewed complete
+  node-local TLS profile is exercised through browser plan/approval/apply and
+  native exact-byte rollback/restart checks; only their checkpoints prove that
+  a particular candidate passed.
 - One host, one architecture and one Relay provide no Relay redundancy or T08
   fault-domain/SLO proof. The client namespace protects host routes; it is not
   another host. The probe checks test VPN traffic, never real user traffic.
@@ -62,6 +64,14 @@ The following limitations are deliberately retained, not scored as PASS:
 probe passes. A green Actions job is not T07 closure. Per-phase checkpoints are
 written only after assertions pass. Missing checkpoints are NOT RUN; preserve
 failures, original run/attempt and exact SHA across retries.
+
+The strict reload recovery probe still fails if automatic completion does not
+occur. A separate `recovery-boundary.json` can classify that exact command as
+`EXPECTED-UNKNOWN` under the stable exclusion only after read-only evidence
+checks: unique matching journal, no authenticated terminal receipt/root result,
+unchanged reload count, query-only recovery frames, fresh owner fence and no
+subsequent conflicting writes. It never changes the failed strict result,
+replays the mutation, edits durable state or upgrades missing evidence to PASS.
 
 Retain the artifact and its GitHub digest before expiry, with product digests,
 manifest, environment inventory, timestamps, exit status and API/DB/journal/root
@@ -75,9 +85,9 @@ To close T07, cover the prepublication production installation paths with the
 reviewed signed candidate, independently controlled operators and provisioned
 external services; obtain real positive and critical rejection evidence for
 every promised workflow. Publication-dependent immutable download paths belong
-to T09/formal release. Positive configuration apply remains unavailable until
-the complete matched-node configuration/TLS SecretRef contract is reviewed and
-accepted; if promised for 1.0, this still blocks T07/readiness. Preserve the
+to T09/formal release. Positive configuration apply requires native acceptance
+of the [reviewed complete contract](complete-config-contract.md), not just
+contract approval or unit tests; missing acceptance still blocks readiness. Preserve the
 finite compatibility exclusions and matched-release recovery boundary in
 [stable contracts](../reference/stable-contracts.md). Do not import earlier T03,
 T04, T05 or T06 results as runtime acceptance of the new candidate.

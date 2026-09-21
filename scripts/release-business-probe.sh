@@ -64,8 +64,7 @@ cleanup() {
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),t07_status:"BLOCKED",
       planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
-      blockers:["independent human operators not provisioned; separate real Local identities only",
-        "positive configuration apply lacks reviewed complete matched-node contract"],
+      blockers:["independent human operators not provisioned; separate real Local identities only"],
       deferred:["T09/formal release: immutable published Release download/bootstrap"],
       not_applicable:["T08 independent failure domains and formal SLO"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
@@ -361,6 +360,8 @@ record native_node_services
 stage=certificate
 python3 "${ROOT}/scripts/release-business-api.py" certificate
 record real_certificate_lifecycle
+stage=config_tls
+python3 "${ROOT}/scripts/release-business-api.py" config_prepare
 stage=browser
 npm --prefix "${ROOT}/web" ci --ignore-scripts
 (cd "${ROOT}/web" && npx playwright install --with-deps chromium)
@@ -374,6 +375,9 @@ python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
 NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
 python3 "${ROOT}/scripts/release-business-api.py" browser_verify
 record real_browser_subset
+stage=configuration
+python3 "${ROOT}/scripts/release-business-api.py" configuration
+record complete_config_plan_apply_rollback_restart
 sudo ip netns add t07-client
 sudo ip link add t07-host type veth peer name t07-peer
 sudo ip link set t07-peer netns t07-client

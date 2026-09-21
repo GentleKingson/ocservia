@@ -94,6 +94,12 @@ const {
   configError,
   configLoading,
   configPort,
+  configUdpPort,
+  configDevice,
+  configNetwork,
+  configDns,
+  configCookieTimeout,
+  configMaxSameClients,
   configMaxClients,
   configRoute,
   configCertificateSecretRefId,
@@ -1207,7 +1213,50 @@ async function submitPolicy(): Promise<void> {
           v-model.number="configMaxClients"
           type="number"
           min="1"
-          max="100000"
+          max="65535"
+          required
+        />
+        <label for="config-udp-port">{{ $t("udpPort") }}</label>
+        <input
+          id="config-udp-port"
+          v-model.number="configUdpPort"
+          type="number"
+          min="0"
+          max="65535"
+          required
+        />
+        <label for="config-device">{{ $t("vpnDevice") }}</label>
+        <input
+          id="config-device"
+          v-model="configDevice"
+          maxlength="15"
+          required
+        />
+        <label for="config-network">{{ $t("ipv4Network") }}</label>
+        <input
+          id="config-network"
+          v-model="configNetwork"
+          maxlength="18"
+          required
+        />
+        <label for="config-dns">{{ $t("dnsServer") }}</label>
+        <input id="config-dns" v-model="configDns" maxlength="15" required />
+        <label for="config-same-clients">{{ $t("maxSameClients") }}</label>
+        <input
+          id="config-same-clients"
+          v-model.number="configMaxSameClients"
+          type="number"
+          min="1"
+          :max="configMaxClients"
+          required
+        />
+        <label for="config-cookie-timeout">{{ $t("cookieTimeout") }}</label>
+        <input
+          id="config-cookie-timeout"
+          v-model.number="configCookieTimeout"
+          type="number"
+          min="60"
+          max="86400"
           required
         />
         <label for="config-route">{{ $t("route") }}</label>
@@ -1242,7 +1291,14 @@ async function submitPolicy(): Promise<void> {
           <span class="freshness-badge" :class="configPlan.validation">{{
             configPlan.validation
           }}</span>
+          <label>{{ $t("configPlanId") }}</label>
+          <code>{{ configPlan.id }}</code>
+          <label>{{ $t("candidateHash") }}</label>
           <code>{{ configPlan.candidateHash }}</code>
+          <template v-if="configPlan.materializedHash">
+            <label>{{ $t("materializedHash") }}</label>
+            <code>{{ configPlan.materializedHash }}</code>
+          </template>
           <pre v-if="configPlan.diffRedacted">{{
             configPlan.diffRedacted
           }}</pre>

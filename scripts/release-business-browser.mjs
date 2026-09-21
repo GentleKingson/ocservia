@@ -116,6 +116,46 @@ try {
   await expect(page.locator("strong.succeeded")).toBeVisible({ timeout: 120000 });
   observations.push({ name: "browser_approved_reload", operation: reload });
 
+  const reference = JSON.parse(fs.readFileSync(`${work}/config-reference.json`, "utf8"));
+  await page.getByTitle("Configuration plan", { exact: true }).click();
+  await page.getByLabel("TCP port", { exact: true }).fill("44443");
+  await page.getByLabel("IPv4 network (CIDR)", { exact: true }).fill("10.208.0.0/24");
+  await page.getByLabel("Certificate reference", { exact: true }).fill(reference.id);
+  await page.getByLabel("Private key reference", { exact: true }).fill(reference.id);
+  await page.getByLabel("Reason", { exact: true }).fill("T07 browser complete configuration");
+  const planning = page.waitForResponse(response => response.url().endsWith(`/nodes/${node}/config-plans`) && response.request().method() === "POST");
+  await page.locator(".config-plan-dialog").getByRole("button", { name: "Plan", exact: true }).click();
+  const planResponse = await planning;
+  expect(planResponse.status()).toBe(202);
+  let plan = await planResponse.json();
+  await expect(page.locator(".config-plan-result .freshness-badge")).toHaveText("valid", { timeout: 120000 });
+  plan = await (await context.request.get(`/api/v1/config-plans/${plan.id}`, { headers })).json();
+  expect(plan.materialized_hash).toMatch(/^[0-9a-f]{64}$/);
+  expect(plan.materialized_hash).not.toBe(plan.candidate_hash);
+  expect(plan.warnings).toEqual([]);
+  expect(plan.current_unchanged && plan.staging_cleaned).toBe(true);
+  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan-mobile.png`, fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const configApproval = await context.request.post("/api/v1/approval-requests", { headers, data: {
+    action: "config.apply", resource_type: "config_plan", resource_id: plan.id, reason: "T07 browser complete plan review", ttl_seconds: 600,
+  } });
+  expect(configApproval.status()).toBe(201);
+  const configApprovalId = await reviewInBrowser(await configApproval.json());
+  await page.getByLabel("Approval ID", { exact: true }).fill(configApprovalId);
+  await page.locator("#config-apply-reason").fill("T07 browser exact materialization");
+  const applying = page.waitForResponse(response => response.url().endsWith(`/config-plans/${plan.id}:apply`));
+  await page.locator(".config-plan-dialog").getByRole("button", { name: "Apply", exact: true }).click();
+  const applyResponse = await applying;
+  expect(applyResponse.status()).toBe(202);
+  const configOperation = await applyResponse.json();
+  await expect(page.locator("strong.succeeded")).toBeVisible({ timeout: 120000 });
+  await expect.poll(async () => (await (await context.request.get(`/api/v1/nodes/${node}`, { headers })).json()).config_revision, { timeout: 120000 }).toBe(1);
+  observations.push({ name: "browser_complete_config_apply", operation: configOperation, plan_id: plan.id, candidate_hash: plan.candidate_hash, materialized_hash: plan.materialized_hash });
+  await page.reload();
+
   await page.getByTitle("Certificate lifecycle", { exact: true }).click();
   await page.getByLabel("Common name").fill("t07-browser-client");
   await page.getByLabel("Reason", { exact: true }).fill("T07 browser CSR");

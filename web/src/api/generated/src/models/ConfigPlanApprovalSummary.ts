@@ -24,6 +24,12 @@ export interface ConfigPlanApprovalSummary {
    * @type {string}
    * @memberof ConfigPlanApprovalSummary
    */
+  planId?: string;
+  /**
+   *
+   * @type {string}
+   * @memberof ConfigPlanApprovalSummary
+   */
   nodeId: string;
   /**
    *
@@ -37,6 +43,12 @@ export interface ConfigPlanApprovalSummary {
    * @memberof ConfigPlanApprovalSummary
    */
   candidateHash: string;
+  /**
+   *
+   * @type {string}
+   * @memberof ConfigPlanApprovalSummary
+   */
+  materializedHash?: string;
   /**
    *
    * @type {string}
@@ -122,9 +134,12 @@ export function ConfigPlanApprovalSummaryFromJSONTyped(
     return json;
   }
   return {
+    planId: json["plan_id"] == null ? undefined : json["plan_id"],
     nodeId: json["node_id"],
     expectedRevision: json["expected_revision"],
     candidateHash: json["candidate_hash"],
+    materializedHash:
+      json["materialized_hash"] == null ? undefined : json["materialized_hash"],
     currentHash: json["current_hash"],
     diffRedacted: json["diff_redacted"],
     expiresAt: json["expires_at"],
@@ -146,9 +161,11 @@ export function ConfigPlanApprovalSummaryToJSONTyped(
   }
 
   return {
+    plan_id: value["planId"],
     node_id: value["nodeId"],
     expected_revision: value["expectedRevision"],
     candidate_hash: value["candidateHash"],
+    materialized_hash: value["materializedHash"],
     current_hash: value["currentHash"],
     diff_redacted: value["diffRedacted"],
     expires_at: value["expiresAt"],

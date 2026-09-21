@@ -192,9 +192,9 @@ func commandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKin
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_USER_PASSWORD_ROTATE
 	case *agentv1.CommandEnvelope_GroupApply:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_GROUP_APPLY
-	case *agentv1.CommandEnvelope_ConfigPlan:
+	case *agentv1.CommandEnvelope_ConfigPlan, *agentv1.CommandEnvelope_CompleteConfigPlan:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_PLAN
-	case *agentv1.CommandEnvelope_ConfigApply:
+	case *agentv1.CommandEnvelope_ConfigApply, *agentv1.CommandEnvelope_CompleteConfigApply:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_APPLY
 	case *agentv1.CommandEnvelope_CertificateCsr:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR

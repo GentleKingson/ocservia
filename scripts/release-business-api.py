@@ -2,6 +2,8 @@
 """Bounded HTTPS/real-node checks for release-business-probe.sh, not a simulator."""
 import base64
 import http.cookiejar
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -366,6 +368,98 @@ def browser_prepare():
     (WORK / 'browser-approval').write_text(approval('service.reload', 'node', os.environ['T07_NODE']))
 
 
+def config_prepare():
+    node = os.environ['T07_NODE']
+    certificate = subprocess.run(['openssl', 'x509', '-in', '/etc/ocserv/t07.crt', '-outform', 'DER'],
+                                 capture_output=True, check=True).stdout
+    public_pem = subprocess.run(['openssl', 'x509', '-in', '/etc/ocserv/t07.crt', '-pubkey', '-noout'],
+                                capture_output=True, check=True).stdout
+    public_der = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public_pem,
+                                capture_output=True, check=True).stdout
+    binding = node + '/' + hashlib.sha256(certificate).hexdigest() + '/' + hashlib.sha256(public_der).hexdigest() + '/none'
+    reference = api('secret-provider-refs', {'provider': 'node-local-tls-v1', 'key_path': binding,
+                                            'version': 'v1', 'reason': 'T07 operator-provisioned TLS'}, status=201)
+    run('sudo', 'groupadd', '--system', 'ocservia-vpn')
+    run('sudo', 'useradd', '--system', '--no-create-home', '--gid', 'ocservia-vpn', '--shell', '/usr/sbin/nologin', 'ocservia-vpn')
+    output = json.loads(run('sudo', 'bash', str(ROOT / 'deploy/managed-node/provision-config-tls.sh'),
+                            node, reference['id'], 'v1', '/etc/ocserv/t07.crt', '/etc/ocserv/t07.key'))
+    assert output['key'] == binding and output['secret_ref_id'] == reference['id']
+    bundle = '/etc/ocservia-agent/config-tls/' + reference['id'] + '/v1'
+    for name in ('server-cert.pem', 'server-key.pem', 'manifest.json'):
+        assert run('sudo', 'stat', '-c', '%u:%g:%a:%h', bundle + '/' + name).strip() == '0:0:400:1'
+    duplicate = subprocess.run(['sudo', 'bash', str(ROOT / 'deploy/managed-node/provision-config-tls.sh'),
+                                node, reference['id'], 'v1', '/etc/ocserv/t07.crt', '/etc/ocserv/t07.key'], capture_output=True)
+    assert duplicate.returncode != 0
+    (WORK / 'config-reference.json').write_text(json.dumps(reference))
+    record('complete_config_tls_provisioned', reference_id=reference['id'], version='v1', file_identity='0:0:400:1', overwrite_rejected=True)
+
+
+def configuration():
+    node = os.environ['T07_NODE']
+    prefix = 'nodes/' + node
+    browser = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
+    entry = next(item for item in browser if item['name'] == 'browser_complete_config_apply')
+    applied = api('operations/' + entry['operation']['id'])
+    assert applied['state'] == 'succeeded' and applied['config_apply_state'] == 'succeeded'
+    physical_before = run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0]
+    assert physical_before == entry['materialized_hash']
+    assert api(prefix)['config_revision'] == 1
+    # An approved new revision deliberately fails its native reload. The old
+    # config's real HUP still works, so rollback must restore exact bytes.
+    reference = json.loads((WORK / 'config-reference.json').read_text())['id']
+    values = {'auth': 'plain[passwd=/etc/ocserv/ocpasswd]', 'cookie-timeout': '300', 'device': 'vpns',
+              'dns': '1.1.1.1', 'ipv4-network': '10.208.0.0/24', 'max-clients': '129',
+              'max-same-clients': '2', 'socket-file': '/run/ocserv.socket', 'tcp-port': '44443', 'udp-port': '0'}
+    directives = [{'name': name, 'value': value} for name, value in values.items()]
+    directives += [{'name': name, 'secret_ref': {'secret_ref_id': reference}} for name in ('server-cert', 'server-key')]
+    planned = api(prefix + '/config-plans', {'expected_revision': 1, 'template': {'name': 'complete-rollback', 'directives': directives},
+                                           'ttl_seconds': 900, 'reason': 'T07 native rollback'},
+                  headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+    plan = wait_for('complete rollback plan', lambda: (value if (value := api('config-plans/' + planned['id']))['state'] == 'succeeded' else None))
+    assert plan['validation'] == 'valid' and plan['materialized_hash'] != physical_before
+    approval_id = approval('config.apply', 'config_plan', plan['id'])
+    script = WORK / 'reject-new-config-reload'
+    script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
+    dropin = WORK / 'config-reload-fault.conf'
+    dropin.write_text('[Service]\nExecReload=\nExecReload=/run/t07-config-reload $MAINPID\n')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/run/t07-config-reload')
+    run('sudo', 'mkdir', '-p', '/etc/systemd/system/ocserv.service.d')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin), '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf')
+    try:
+        run('sudo', 'systemctl', 'daemon-reload')
+        operation = api('config-plans/' + plan['id'] + ':apply', {'approval_id': approval_id, 'reason': 'T07 native rollback'},
+                        headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+        result = wait_for('exact configuration rollback', lambda: (value if (value := api('operations/' + operation['id'])).get('config_apply_state') == 'rolled_back' else None))
+        assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
+        assert api(prefix)['config_revision'] == 1
+        snapshot = cross_check(operation)
+        assert snapshot['root_count_state_response'] == '1|applied|1'
+        record('complete_config_native_rollback', operation_id=operation['id'], state=result['config_apply_state'], restored_hash=physical_before)
+    finally:
+        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/run/t07-config-reload')
+        run('sudo', 'systemctl', 'daemon-reload')
+    def owner():
+        return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
+                              "owner_epoch FROM connection_owner_fencing "
+                              f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
+    owner_before = owner()
+    run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
+    def fresh_session():
+        current = owner()
+        return current if (current['owner_epoch'] > owner_before['owner_epoch'] and
+                           current['connection_id'] != owner_before['connection_id'] and
+                           api(prefix)['connection_state'] == 'online') else None
+    owner_after = wait_for('configuration new fenced session', fresh_session)
+    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
+    assert api(prefix)['config_revision'] == 1
+    for operation in (applied, operation):
+        snapshot = cross_check(operation)
+        assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
+        assert snapshot['root_count_state_response'] == '1|applied|1'
+    record('complete_config_durable_restart', materialized_hash=physical_before, config_revision=1,
+           owner_before=owner_before, owner_after=owner_after)
+
+
 def browser_verify():
     for entry in json.loads((EVIDENCE / 'browser-checkpoints.json').read_text()):
         operation_id = entry.get('operation_id') or entry.get('operation', {}).get('id')
@@ -601,6 +695,32 @@ def business():
     record('single_relay_restored_same_identity_and_live_vpn', native_session_id=live_session,
            operation_state=recovery_snapshot['database_state'], native_reload_delta=reload_count() - reloads_before)
     if recovery_error is not None:
+        # Keep the strict assertion and its failing exit status. A separate
+        # assessment covers only the stable, evidence-preserving Unknown case.
+        assert recovery_snapshot['database_state'] == 'unknown'
+        time.sleep(3)
+        after = cross_check(pending)
+        after['node'] = api(prefix)
+        after['owner'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
+                                       "owner_epoch,lease_until,updated_at FROM connection_owner_fencing "
+                                       f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
+        after['native_reload_count'] = reload_count()
+        later = sql(f"SELECT id FROM commands WHERE node_id='{node}' AND created_at >= "
+                    f"(SELECT created_at FROM commands WHERE id='{pending['command_id']}') ORDER BY created_at;").splitlines()
+        logs = run('docker', 'logs', os.environ['T07_TRANSPORT_CONTAINER'])
+        frames = []
+        for line in logs.splitlines():
+            try:
+                fields = json.loads(line).get('fields', {})
+            except json.JSONDecodeError:
+                continue
+            if fields.get('event_type') == 'command_frame_written' and fields.get('command_id') == pending['command_id'].replace('-', ''):
+                frames.append(fields)
+        spec = importlib.util.spec_from_file_location('recovery', ROOT / 'scripts/release-business-recovery.py')
+        recovery = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recovery)
+        assessment = recovery.assess_unknown(recovery_snapshot, after, frames, later, reloads_before)
+        (EVIDENCE / 'recovery-boundary.json').write_text(json.dumps({'assessment': assessment, 'before': recovery_snapshot, 'after': after, 'frames': frames, 'later_commands': later}))
         raise recovery_error
     replay = api(prefix + '/service:reload', body, headers=headers, status=202)
     assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
@@ -624,7 +744,7 @@ def business():
 
 if __name__ == '__main__':
     phase = sys.argv[1]
-    if phase not in ('local', 'oidc', 'trust_controller', 'token', 'approve', 'certificate',
+    if phase not in ('local', 'oidc', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
                      'browser_prepare', 'browser_verify', 'business'):
         raise SystemExit('unknown phase')
     globals()[phase]()

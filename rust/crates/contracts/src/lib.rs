@@ -10,6 +10,7 @@
 pub mod generated;
 
 pub mod agent_upgrade;
+pub mod config_profile;
 pub mod session;
 pub mod strict_wire;
 
