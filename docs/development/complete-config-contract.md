@@ -22,6 +22,17 @@ duplicate directives, includes, scripts, arbitrary file paths and unresolved
 SecretRefs are rejected. Native parser validation sees the entire materialized
 configuration, including TLS, before a plan is apply-eligible.
 
+Apply is reload-only, never an implicit service restart. Authentication method,
+listener ports, worker user/group, control socket and TLS/CA paths must already
+match the running node's operator-provisioned startup configuration. Root
+rejects changed/missing/duplicate bindings, includes, vhosts and directives
+outside the finite profile before planning or effect preparation. Initial
+activation and TLS reference/version changes require a separately authorized
+node-operator maintenance restart; they are not hot-reload promises. Ocserv's
+[1.2.4 configuration contract](https://gitlab.com/openconnect/ocserv/-/raw/1.2.4/doc/sample.config)
+distinguishes these startup bindings from reloadable settings. A parser check
+and a healthy control socket alone cannot prove that new TLS paths took effect.
+
 ## Node-local TLS
 
 Each reference has an opaque UUID, immutable version, one allowed TLS slot,
@@ -48,8 +59,10 @@ materialized hash names exact file bytes, never private key contents.
 Approval binds the plan, node, both hashes, expected/current revision and
 expiry. Operations consumes it in the existing transaction that creates the
 command/outbox. Same-key replay returns the existing operation; a new key
-cannot reuse a consumed grant. Requester and approver must differ. T07's
-independent human custody requirement is additional to this principal check.
+cannot reuse a consumed grant. Requester and approver must differ. Independent
+human custody is additional to this principal check; simulated-operator
+acceptance must explicitly exclude it rather than claim it was established.
+Production personnel requirements remain unchanged.
 
 New required wire fields are generated from Proto/OpenAPI, not hand-edited in
 generated files. Canonical Go/Rust hash vectors and strict-wire negative cases

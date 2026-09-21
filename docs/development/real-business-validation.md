@@ -60,8 +60,14 @@ The following limitations are deliberately retained, not scored as PASS:
   fault-domain/SLO proof. The client namespace protects host routes; it is not
   another host. The probe checks test VPN traffic, never real user traffic.
 
-`result.json` therefore keeps `t07_status=BLOCKED`, even when the available
-probe passes. A green Actions job is not T07 closure. Per-phase checkpoints are
+`result.json` therefore keeps `t07_status=NOT_EVALUATED` and explicitly records
+`operator_mode=simulated_two_principals` and human custody `NOT_VERIFIED`, even
+when the probe passes. The final evidence must record the maintainer-approved
+acceptance scope: simulated dual-role mechanics can satisfy only an explicitly
+scoped automation acceptance. Real two-person custody remains BLOCKED when
+required, or EXCLUDED by that explicit scope decision, never PASS by simulation.
+Production bootstrap's different-responsible-people requirement is unchanged.
+A green Actions job is not T07 closure. Per-phase checkpoints are
 written only after assertions pass. Missing checkpoints are NOT RUN; preserve
 failures, original run/attempt and exact SHA across retries.
 
@@ -82,7 +88,7 @@ installation lives only on the disposable hosted runner. Do not generalize this
 cleanup to a shared host.
 
 To close T07, cover the prepublication production installation paths with the
-reviewed signed candidate, independently controlled operators and provisioned
+reviewed signed candidate, explicitly scoped operator mode and provisioned
 external services; obtain real positive and critical rejection evidence for
 every promised workflow. Publication-dependent immutable download paths belong
 to T09/formal release. Positive configuration apply requires native acceptance

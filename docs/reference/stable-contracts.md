@@ -120,6 +120,18 @@ success proves this. Until then, leave this workflow unused; this document
 does not add or claim a version-based API/UI gate.
 The existing same-source I15/I16/I17 checks do not fill that release-level gap.
 
+Matched nodes with the separately negotiated `ocserv.config.complete.plan` and
+`ocserv.config.complete.apply` capabilities use the
+[complete node-local TLS profile](../operations/node-local-config-tls.md).
+The profile does not widen historical-node support. Apply is reload-only:
+startup authentication/listener/worker/socket/TLS bindings must already match
+the node's protected active configuration, otherwise root rejects before
+preparing an effect. Initial activation and TLS version/path changes require
+an explicitly authorized operator maintenance restart, not an automatic
+restart or an apparently successful reload. Final acceptance must include
+actual VPN authentication after apply, exact rollback and durable recovery;
+native parser/occtl health alone is insufficient.
+
 Pending non-idempotent mutations have another explicit boundary: after an
 uncertain dispatch and owner change, recovery may be query-only and retain
 `Unknown` / `manual_reconciliation_required`. In particular, the v0.6.0

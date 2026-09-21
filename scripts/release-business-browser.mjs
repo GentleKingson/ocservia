@@ -115,6 +115,19 @@ try {
   const reload = await reloadResponse.json();
   await expect(page.locator("strong.succeeded")).toBeVisible({ timeout: 120000 });
   observations.push({ name: "browser_approved_reload", operation: reload });
+  const reloadRequest = reloadResponse.request();
+  const reloadHeaders = await reloadRequest.allHeaders();
+  const replayHeaders = { ...headers, "Idempotency-Key": reloadHeaders["idempotency-key"], "If-Match": reloadHeaders["if-match"], "X-Approval-ID": reloadApprovalId };
+  const knownReplay = await context.request.post(reloadRequest.url(), { headers: replayHeaders, data: reloadRequest.postDataJSON() });
+  expect(knownReplay.status()).toBe(202);
+  const replayed = await knownReplay.json();
+  expect(replayed.id).toBe(reload.id);
+  expect(replayed.command_id).toBe(reload.command_id);
+  const currentNode = await (await context.request.get(`/api/v1/nodes/${node}`, { headers })).json();
+  const spent = await context.request.post(reloadRequest.url(), { headers: { ...replayHeaders, "Idempotency-Key": crypto.randomUUID(), "If-Match": `"revision-${currentNode.version}"` }, data: reloadRequest.postDataJSON() });
+  expect(spent.status()).toBe(409);
+  expect((await spent.json()).type).toBe("https://ocservia.dev/problems/approval-required");
+  observations.push({ name: "browser_consumed_approval_cannot_authorize_new_operation", operation_id: reload.id, approval_id: reloadApprovalId });
 
   const reference = JSON.parse(fs.readFileSync(`${work}/config-reference.json`, "utf8"));
   await page.getByTitle("Configuration plan", { exact: true }).click();

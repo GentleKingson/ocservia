@@ -62,9 +62,10 @@ cleanup() {
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     '{candidate_sha:$sha,candidate_version:$version,run_id:$run,run_attempt:$attempt,
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
-      probe_status:(if $code == 0 then "PASS" else "FAIL" end),t07_status:"BLOCKED",
+      probe_status:(if $code == 0 then "PASS" else "FAIL" end),t07_status:"NOT_EVALUATED",
       planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
-      blockers:["independent human operators not provisioned; separate real Local identities only"],
+      operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
+      limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
       deferred:["T09/formal release: immutable published Release download/bootstrap"],
       not_applicable:["T08 independent failure domains and formal SLO"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
@@ -329,22 +330,25 @@ sudo iptables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --
 sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
 sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
 sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
-cat >"${work}/ocserv.conf" <<'EOF'
+stage=config_tls
+python3 "${ROOT}/scripts/release-business-api.py" config_prepare
+config_ref="$(jq -r .id "${work}/config-reference.json")"
+cat >"${work}/ocserv.conf" <<EOF
 auth = "plain[passwd=/etc/ocserv/ocpasswd]"
 tcp-port = 44443
 udp-port = 0
-run-as-user = nobody
-run-as-group = nogroup
+run-as-user = ocservia-vpn
+run-as-group = ocservia-vpn
 socket-file = /run/ocserv.socket
-server-cert = /etc/ocserv/t07.crt
-server-key = /etc/ocserv/t07.key
-isolate-workers = false
+server-cert = /etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.pem
+server-key = /etc/ocservia-agent/config-tls/${config_ref}/v1/server-key.pem
 max-clients = 4
 max-same-clients = 2
-max-ban-score = 1000
+cookie-timeout = 300
 device = vpns
-ipv4-network = 10.208.0.0
-ipv4-netmask = 255.255.255.0
+ipv4-network = 10.208.0.0/24
+dns = 1.1.1.1
+route = default
 use-occtl = true
 EOF
 sudo install -m 600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
@@ -360,8 +364,6 @@ record native_node_services
 stage=certificate
 python3 "${ROOT}/scripts/release-business-api.py" certificate
 record real_certificate_lifecycle
-stage=config_tls
-python3 "${ROOT}/scripts/release-business-api.py" config_prepare
 stage=browser
 npm --prefix "${ROOT}/web" ci --ignore-scripts
 (cd "${ROOT}/web" && npx playwright install --with-deps chromium)

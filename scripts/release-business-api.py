@@ -412,6 +412,15 @@ def configuration():
               'max-same-clients': '2', 'socket-file': '/run/ocserv.socket', 'tcp-port': '44443', 'udp-port': '0'}
     directives = [{'name': name, 'value': value} for name, value in values.items()]
     directives += [{'name': name, 'secret_ref': {'secret_ref_id': reference}} for name in ('server-cert', 'server-key')]
+    changed_port = [{**item, 'value': '44444'} if item['name'] == 'tcp-port' else item for item in directives]
+    rejected = api(prefix + '/config-plans', {'expected_revision': 1, 'template': {'name': 'reject-startup-change', 'directives': changed_port},
+                                            'ttl_seconds': 900, 'reason': 'T07 nonreloadable directive rejection'},
+                   headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+    wait_for('reject nonreloadable change', lambda: api('operations/' + rejected['operation_id'])['state'] == 'failed')
+    assert api('config-plans/' + rejected['id'])['validation'] == 'failed'
+    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
+    assert api(prefix)['config_revision'] == 1
+    record('complete_config_startup_binding_rejected', plan_id=rejected['id'], unchanged_hash=physical_before)
     planned = api(prefix + '/config-plans', {'expected_revision': 1, 'template': {'name': 'complete-rollback', 'directives': directives},
                                            'ttl_seconds': 900, 'reason': 'T07 native rollback'},
                   headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)

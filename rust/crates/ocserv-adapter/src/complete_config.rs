@@ -12,6 +12,7 @@ use ocservia_contracts::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -21,6 +22,71 @@ use uuid::Uuid;
 
 const FIXED_WORKER_CONFIG: &str =
     "run-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\nuse-occtl = true\n";
+
+// Ocserv keeps these bindings across HUP; changing their file representation
+// is not proof that the running daemon adopted them.
+const STARTUP_BINDINGS: &[&str] = &[
+    "auth",
+    "tcp-port",
+    "udp-port",
+    "run-as-user",
+    "run-as-group",
+    "socket-file",
+    "server-cert",
+    "server-key",
+    "ca-cert",
+];
+
+fn profile_values(bytes: &[u8]) -> Result<BTreeMap<&str, &str>, AdapterError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| AdapterError::InvalidResource)?;
+    if text.contains(['\r', '\0']) || bytes.len() > super::MAX_CONFIG_PLAN_BYTES {
+        return Err(AdapterError::InvalidResource);
+    }
+    let mut values = BTreeMap::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let (name, value) = line
+            .split_once(" = ")
+            .ok_or(AdapterError::InvalidResource)?;
+        if !STARTUP_BINDINGS.contains(&name)
+            && ![
+                "cookie-timeout",
+                "device",
+                "dns",
+                "ipv4-network",
+                "max-clients",
+                "max-same-clients",
+                "route",
+                "use-occtl",
+            ]
+            .contains(&name)
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        if value.is_empty() || values.insert(name, value).is_some() {
+            return Err(AdapterError::InvalidResource);
+        }
+    }
+    Ok(values)
+}
+
+pub(super) fn validate_reload_bindings(
+    current: &[u8],
+    candidate: &[u8],
+) -> Result<(), AdapterError> {
+    let current = profile_values(current)?;
+    let candidate = profile_values(candidate)?;
+    if STARTUP_BINDINGS
+        .iter()
+        .any(|name| current.get(name) != candidate.get(name))
+    {
+        return Err(AdapterError::InvalidResource);
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -348,6 +414,12 @@ impl Adapter {
         let _config_file = safe_file(&self.resources.config, 0o600)?;
         let _file_lock = lock_config_file(&self.resources.config)?;
         let before = self.config_fingerprint().await?;
+        validate_reload_bindings(
+            &tokio::fs::read(&self.resources.config)
+                .await
+                .map_err(AdapterError::Io)?,
+            &materialized.bytes,
+        )?;
         let parent = self
             .resources
             .config
@@ -454,6 +526,7 @@ mod tests {
         bundle: PathBuf,
         adapter: Adapter,
         plan: CompleteConfigPlan,
+        original: Vec<u8>,
     }
 
     fn write(path: &Path, bytes: impl AsRef<[u8]>, mode: u32) {
@@ -591,7 +664,11 @@ mod tests {
             let occtl = directory.join("occtl");
             write(&occtl, b"#!/bin/sh\nprintf '[]'\n", 0o700);
             let config = directory.join("ocserv.conf");
-            write(&config, b"# old config\n", 0o600);
+            let original = format!(
+                "# old config\nauth = \"plain[passwd=/etc/ocserv/ocpasswd]\"\ntcp-port = 443\nudp-port = 0\nrun-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\nsocket-file = /run/ocserv.socket\nserver-cert = {}\nserver-key = {}\nmax-clients = 32\n",
+                cert.display(), key.display()
+            ).into_bytes();
+            write(&config, &original, 0o600);
             let mut resources = FixedResources::new(
                 systemctl,
                 parser,
@@ -611,6 +688,7 @@ mod tests {
                 bundle,
                 adapter: Adapter::new(resources, Limits::default()),
                 plan,
+                original,
             }
         }
 
@@ -647,6 +725,74 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.directory).expect("remove owned fixture");
         }
+    }
+
+    #[tokio::test]
+    async fn complete_profile_rejects_startup_binding_changes_before_effect() {
+        let fixture = Fixture::new();
+        let apply = fixture.apply().await;
+        for (from, to) in [
+            ("tcp-port = 443", "tcp-port = 444"),
+            ("udp-port = 0", "udp-port = 443"),
+            ("run-as-user = ocservia-vpn", "run-as-user = nobody"),
+            ("run-as-group = ocservia-vpn", "run-as-group = nogroup"),
+            (
+                "auth = \"plain[passwd=/etc/ocserv/ocpasswd]\"",
+                "auth = \"pam\"",
+            ),
+            (
+                "socket-file = /run/ocserv.socket",
+                "socket-file = /run/other.socket",
+            ),
+            ("/v1/server-cert.pem", "/v2/server-cert.pem"),
+            ("/v1/server-key.pem", "/v2/server-key.pem"),
+        ] {
+            let changed = String::from_utf8(fixture.original.clone())
+                .expect("config")
+                .replace(from, to);
+            assert_ne!(changed.as_bytes(), fixture.original);
+            write(&fixture.adapter.resources.config, &changed, 0o600);
+            assert!(
+                fixture
+                    .adapter
+                    .complete_config_plan(&fixture.plan)
+                    .await
+                    .is_err()
+            );
+            let mut stale_binding = apply.clone();
+            stale_binding.expected_current_hash = Sha256::digest(changed.as_bytes()).to_vec();
+            assert!(
+                fixture
+                    .adapter
+                    .complete_config_apply(&stale_binding, super::super::tests::test_effect())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(&fixture.adapter.resources.config).expect("unchanged"),
+                changed.as_bytes()
+            );
+            assert!(!fixture.adapter.resources.effect_store.exists());
+        }
+        for extra in [
+            "ca-cert = /etc/ca.pem\n",
+            "include = /etc/other.conf\n",
+            "[vhost:other]\n",
+            "server-key = /etc/other.key\n",
+        ] {
+            let mut changed = fixture.original.clone();
+            changed.extend_from_slice(extra.as_bytes());
+            write(&fixture.adapter.resources.config, &changed, 0o600);
+            assert!(
+                fixture
+                    .adapter
+                    .complete_config_plan(&fixture.plan)
+                    .await
+                    .is_err()
+            );
+        }
+        write(&fixture.adapter.resources.config, &fixture.original, 0o600);
+        fixture.apply().await;
     }
 
     #[tokio::test]
@@ -741,7 +887,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(&fixture.adapter.resources.config).expect("unchanged"),
-            b"# old config\n"
+            fixture.original
         );
     }
 
@@ -898,7 +1044,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(&fixture.adapter.resources.config).expect("unchanged"),
-            b"# old config\n"
+            fixture.original
         );
         assert!(
             !std::fs::read_dir(&fixture.directory)
@@ -918,7 +1064,7 @@ mod tests {
         write(
             &fixture.adapter.resources.systemctl,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = reload ] && grep -q complete-config '{}' ; then exit 1; fi\nif [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi\n",
+                "#!/bin/sh\nif [ \"$1\" = reload ] && grep -qx '# generated by ocservia complete-config/v1' '{}' ; then exit 1; fi\nif [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi\n",
                 fixture.adapter.resources.config.display()
             ),
             0o700,
@@ -932,7 +1078,7 @@ mod tests {
         assert_eq!(outcome.observed_hash, apply.expected_current_hash);
         assert_eq!(
             std::fs::read(&fixture.adapter.resources.config).expect("restored"),
-            b"# old config\n"
+            fixture.original
         );
 
         let fixture = Fixture::new();

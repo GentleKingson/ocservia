@@ -41,12 +41,26 @@ the directory atomically and shares a resource lock with root plan/apply.
 Its output is public reference metadata only. Retain old versions for rollback;
 do not edit/delete version contents or bypass the provisioning lock.
 
+Before starting a newly provisioned ocserv, configure the finite profile with
+the bundle's exact `server-cert.pem`, `server-key.pem` and optional `ca-cert.pem`
+paths, the dedicated worker identity, plain authentication and chosen ports.
+Validate the complete config with `ocserv -t -c /etc/ocserv/ocserv.conf`, keeping
+that file `0600 root:root`. For an already running server, initial profile
+activation or changing TLS reference/version requires a separately authorized
+maintenance restart. Do not pretend a HUP changes startup-only settings. No
+Agent/privd command performs that restart. Retain the old config/TLS bundle and
+restore both under the same maintenance procedure if activation fails.
+
 ## Plan And Apply
 
 Use the same reference UUID for `server-cert`, `server-key` and optional
 `ca-cert`; the root resolver selects each fixed slot. The API resolves the
 current reference version and pins it in the command. An already created plan
-does not follow later SecretRef rotation.
+does not follow later SecretRef rotation. Plan/apply rejects a TLS path/version,
+listener port, authentication, worker identity or socket change relative to the
+protected active config. Includes, vhosts, duplicate directives and an active
+config outside the finite grammar fail closed. Operator changes to startup
+bindings require a verified restart before resuming automated config work.
 
 The finite profile requires `auth`, `cookie-timeout`, `device`, `dns`,
 `ipv4-network`, `max-clients`, `max-same-clients`, `server-cert`, `server-key`,
