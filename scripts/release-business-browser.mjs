@@ -35,6 +35,8 @@ try {
   await page.getByLabel("Username", { exact: true }).fill("t07-requester");
   await page.getByLabel("Password", { exact: true }).fill(fs.readFileSync(`${work}/private/requester-password`, "utf8").trim());
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.waitForURL("https://localhost/");
+  await page.goto(`/nodes/${node}`);
   await expect(page.getByRole("heading", { name: "t07-native", exact: true })).toBeVisible();
   await expect(page.getByLabel("Workspace")).toContainText("T07");
   const denied = await context.request.get("/api/v1/nodes", { headers: { "X-Workspace-ID": "00000000-0000-7000-8000-000000000072" } });
