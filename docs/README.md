@@ -55,10 +55,6 @@ Keep deployment guides, architecture and security contracts, operational
 runbooks, and instructions needed to maintain or validate the project here.
 Historical release verdicts and one-off task closeout reports do not belong
 in the maintained documentation; use Git history for removed records.
-Existing historical records retained for traceability carry a dated source
-snapshot notice and links to current guides. Their Draft status and original
-PASS/FAIL/NOT RUN results describe only their recorded revisions, not current
-support or release acceptance. They are not part of the operating-guide index.
 
 The machine-readable files in `acceptance/` are harness inputs, not disposable
 reports. The files in `upstream/` support attribution and backport validation

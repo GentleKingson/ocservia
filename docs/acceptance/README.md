@@ -189,6 +189,19 @@ Population semantics are part of the contract, not a harness choice:
 - evidence may not claim more authorized real agents than the topology
   binds.
 
+The relay-delivery proof is bounded, not a delivery-count waiver: pre-fault
+relay-a evidence still proves exactly one delivery. On relay-b at most two
+fully explained deliveries are accepted. The first must be EXECUTE_OR_REPLAY;
+a second is accepted only as RECONCILE_ONLY within the existing recovery
+bound, correlated with committed attempt/state evidence and the demonstrated
+sent-result-timeout recovery reason. Command, operation, node, idempotency
+key, semantic hash version/hash, sequence, expected revision and capability
+must be unchanged across both deliveries while the message identity changes,
+every delivery retains the command/node, relay path, session, owner-fence,
+connection and epoch checks, and the target's durable journal/effect and
+result consistency must be observed. Longer or unexplained sequences fail the
+proof; they are retained as evidence, not discarded log noise.
+
 The timeline artifact is parsed line by line with strict RFC 3339 timestamps,
 unique event identifiers, strictly increasing sequences, and non-decreasing
 timestamps; every observation must reference the timeline artifact, every

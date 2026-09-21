@@ -42,5 +42,8 @@ java -jar "${ROOT}/.tools/openapi-generator-cli-$(sed -n 's/^openapi_generator=/
 
 rm -rf "${ROOT}/web/src/api/generated/.openapi-generator"
 rm -f "${ROOT}/web/src/api/generated/.openapi-generator-ignore"
+# The default generator README only advertises an unpublished npm package and
+# links to per-model docs this configuration never generates.
+rm -f "${ROOT}/web/src/api/generated/README.md"
 (cd "${ROOT}/web" && \
   npx --no-install prettier --write src/api/generated >/dev/null)
