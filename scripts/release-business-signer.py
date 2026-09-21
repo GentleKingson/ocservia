@@ -81,7 +81,7 @@ class Signer(BaseHTTPRequestHandler):
 
 
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-context.load_cert_chain(work / 'signer.crt', work / 'private/signer.key')
+context.load_cert_chain(work / 'secrets/tls.crt', work / 'private/tls.key')
 server = HTTPServer((sys.argv[2], 19444), Signer)
 server.socket = context.wrap_socket(server.socket, server_side=True)
 server.serve_forever()

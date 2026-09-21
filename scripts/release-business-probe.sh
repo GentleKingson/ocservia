@@ -207,13 +207,8 @@ printf '\n' >"${work}/oidc-fault/mode"
 chmod 644 "${work}/oidc-fault/mode"
 export OCSERV_OIDC_ISSUER=https://172.30.240.3:19443 OCSERV_OIDC_CLIENT_ID=upgrade
 export OCSERV_OIDC_REDIRECT_URL=https://localhost/api/v1/auth/callback
-signer_address="$(docker network inspect ocservia-production_application --format '{{(index .IPAM.Config 0).Gateway}}')"
+signer_address=172.30.240.3
 export OCSERV_CERTIFICATE_SIGNER_URL="https://${signer_address}:19444/sign"
-openssl req -new -newkey rsa:2048 -nodes -subj /CN=t07-signer \
-  -keyout "${work}/private/signer.key" -out "${work}/signer.csr"
-printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:%s\nextendedKeyUsage=serverAuth\n' "${signer_address}" >"${work}/signer.ext"
-openssl x509 -req -days 1 -in "${work}/signer.csr" -CA "${work}/ca.crt" -CAkey "${work}/private/ca.key" \
-  -CAcreateserial -extfile "${work}/signer.ext" -out "${work}/signer.crt"
 docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --network ocservia-production_application --ip 172.30.240.3 \
   -v "${ROOT}/scripts/release-upgrade-oidc-fixture.mjs:/fixture.mjs:ro" \
@@ -223,7 +218,11 @@ docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-o
   -v "${work}/oidc-fault:/fault:ro" \
   node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 \
   node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode
-python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
+# The internal application network deliberately has no host gateway. Join only
+# the task provider's network namespace, then run the signer as the runner UID.
+provider_pid="$(docker inspect --format '{{.State.Pid}}' "${oidc_container}")"
+sudo nsenter --target "${provider_pid}" --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
+  python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
 signer_pid=$!
 compose up -d --no-deps --wait control-plane
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
