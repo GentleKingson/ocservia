@@ -29,6 +29,7 @@ Use these documents to deploy, operate, and understand ocservia. Start with the 
 
 - [Architecture](architecture.md)
 - [Security policy](../SECURITY.md)
+- [1.0 support and versioning policy](reference/support-policy.md)
 - [Technical reference](reference/README.md)
 
 ## Deployment reference
