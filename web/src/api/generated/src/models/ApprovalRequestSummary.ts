@@ -53,6 +53,9 @@ export function ApprovalRequestSummaryFromJSONTyped(
   if (Array.isArray(json)) {
     return json;
   }
+  if (typeof json === "object" && !Array.isArray(json)) {
+    return json;
+  }
   return {} as any;
 }
 
@@ -77,6 +80,9 @@ export function ApprovalRequestSummaryToJSONTyped(
     }
   }
   if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
     return value;
   }
   return {};
