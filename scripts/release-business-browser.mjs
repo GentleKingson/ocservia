@@ -37,7 +37,7 @@ try {
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL("https://localhost/");
   await page.goto(`/nodes/${node}`);
-  await expect(page.getByRole("heading", { name: "t07-native", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "t07-native", level: 1, exact: true })).toBeVisible();
   await expect(page.getByLabel("Workspace")).toContainText("T07");
   const denied = await context.request.get("/api/v1/nodes", { headers: { "X-Workspace-ID": "00000000-0000-7000-8000-000000000072" } });
   expect(denied.status()).toBe(403);
