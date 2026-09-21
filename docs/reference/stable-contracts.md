@@ -31,6 +31,26 @@ explicit historical security-migration allowlist. The breaking command compares
 with `origin/main`, not with every shipped release. Release-level behavioral
 evidence remains necessary even when it passes.
 
+## Approval principal boundary
+
+Baseline 1.0 and T07 require **independently controlled requester and approver
+principals**, not an organizational four-eyes or two-person rule. Each principal
+must authenticate with its own credential and session and satisfy workspace
+authorization and RBAC. Sensitive-operation approval remains bound to the exact
+request/hash and resource/revision context; self-approval returns 403 and replay
+must not expand or reuse consumed authority. Different identity IDs without
+independent authentication are not acceptance evidence. The
+[Local bootstrap procedure](../operations/authentication.md) provisions separate
+principals; it does not attest to the number of people controlling them.
+
+An automated run may exercise both principals through normal authentication
+and isolated sessions. Record this as simulated two-principal acceptance,
+never as verified human custody. Actual custody by two different people is an
+additional production-hardening or enterprise security profile, excluded from
+baseline T07 and requiring separate human evidence when a deployment selects it.
+This reviewed scope does not remove RBAC, approval binding, self-approval
+rejection, replay protection or approval requirements from runtime behavior.
+
 ## Session and command matrix
 
 This is a behavioral policy matrix, not a list of already accepted release
@@ -46,13 +66,15 @@ pairs. [`enrollment.Service.AuthorizeSession`](../../control-plane/internal/enro
 | 1.1 missing/invalid grant, wrong capabilities or stale owner fence | Reject; refresh authorized session/owner term. Fencing capability alone is not a grant or approval. | Existing session/fence signing goldens and Agent/transport authority tests. |
 | Privileged operation without registered receipt capability/key | No production legacy-success mode. Initialize/register root receipt key, upgrade the matched node package, then verify negotiated capability before dispatch. | Attestation safety and missing-root-receipt tests. |
 | Unknown command field, wrong wire type or truncated nested message | Reject before journal/effect, including when signature/hash otherwise looks valid. | Shared strict-wire corpus and descriptor-drift checks, not a second wire suite. |
+| Uncertain non-idempotent mutation, including matched releases | No guaranteed automatic recovery without exact authenticated durable evidence. Keep Unknown and pause conflicting writes for operator reconciliation; connectivity is not completion. | [Matched-release recovery boundary](#matched-release-recovery-boundary); strict recovery probes retain their original outcomes. |
 | Semantic hash v1/v2 | Recompute the declared known version; current Controller emits v2. Unknown/missing/mismatched hashes and same-id cross-version journal conflicts fail closed. Retain old history; never rewrite stored v1 to v2. | Shared semantic goldens and Agent v1/hash-version-conflict tests. |
 | Config revision drift | Authorization revision and applied config revision are independent. Plan binds actual `config_expected_revision`; Apply binds candidate/current hashes and desired revision. Reject stale/gapped effects; recover from exact durable evidence. | Existing ConfigPlan lookup/Apply tests and Agent/adapter revision, restart and recovery tests. |
 | Historical/unattested CSR or lost P12 credentials | No new signing from migration-legacy CSR; obtain a fresh attested CSR. P12 remains encrypted, bounded and one-use. Web credentials exist only in the current SPA memory/expiry window, not across refresh or another tab. | Certificate/secret integration, real OpenSSL adapter tests and Web certificate receipt/recovery tests. |
 
-The complete 18-payload strict-wire corpus, Go reflection, Rust descriptor
+The historical 18-payload strict-wire corpus, Go reflection, Rust descriptor
 mutation coverage, signing/fence/receipt goldens, and existing Go/Rust tests are
-retained unchanged. See [focused commands](../development/testing.md#command-wire-contracts).
+retained; complete configuration payloads add their own strict-wire cases.
+See [focused commands](../development/testing.md#command-wire-contracts).
 Do not interpret fixture success as execution of an old published Agent.
 
 ## Finite release matrix
@@ -119,6 +141,18 @@ success proves this. Until then, leave this workflow unused; this document
 does not add or claim a version-based API/UI gate.
 The existing same-source I15/I16/I17 checks do not fill that release-level gap.
 
+Matched nodes with the separately negotiated `ocserv.config.complete.plan` and
+`ocserv.config.complete.apply` capabilities use the
+[complete node-local TLS profile](../operations/node-local-config-tls.md).
+The profile does not widen historical-node support. Apply is reload-only:
+startup authentication/listener/worker/socket/TLS bindings must already match
+the node's protected active configuration, otherwise root rejects before
+preparing an effect. Initial activation and TLS version/path changes require
+an explicitly authorized operator maintenance restart, not an automatic
+restart or an apparently successful reload. Final acceptance must include
+actual VPN authentication after apply, exact rollback and durable recovery;
+native parser/occtl health alone is insufficient.
+
 Pending non-idempotent mutations have another explicit boundary: after an
 uncertain dispatch and owner change, recovery may be query-only and retain
 `Unknown` / `manual_reconciliation_required`. In particular, the v0.6.0
@@ -152,6 +186,42 @@ failure. A missing required checkpoint still blocks the covered promise.
 If the chain stops at the excluded uncertain-mutation failure, its later
 replay and cold-start checkpoints are not run, not PASS; independent PKI
 restart evidence does not establish those systemd recovery paths.
+
+### Matched-release recovery boundary
+
+**Guaranteed automatic recovery of an uncertain non-idempotent mutation is
+excluded for matched releases too**, not only the historical v0.6.0 rolling
+window. Matching Controller/transportd and Agent/privd/upgrader artifacts does
+not establish that an interrupted reload completed, or that it is safe to
+execute it again. Online node status, a new fenced session and healthy ocserv
+are not evidence of the historical command's outcome.
+
+Existing query-only reconciliation may recover an exact authenticated root
+response or an already terminal journal result. This is not permission to
+infer success from current service health, absence of a log line or the mere
+presence of a database row. Preserve and compare the exact command ID,
+semantic hash and hash version, operation/idempotency identity, authorization
+revision, owner/fence history, Agent journal and root effect/receipt. Verify
+the receipt authority and its bindings before accepting a terminal result;
+missing or conflicting evidence leaves the operation `Unknown`.
+
+Until operator reconciliation resolves the uncertainty, pause subsequent
+conflicting writes to the affected resource. This is an operational requirement,
+not a claim that the API implements a new resource-wide lock. Do not clear the
+journal or root effect store, edit durable state, reset endpoint identities,
+resend the original mutation, or use the same or a new idempotency key to guess
+the result. Read-only recovery queries are not mutation retries. A package
+upgrade is not reconciliation. Follow the existing
+[incident recovery procedure](../operations/incident-recovery.md#transport-and-credentials).
+
+Keep strict automatic-recovery probes unchanged. A green attempt does not
+erase an earlier Unknown, and a failed strict aggregate remains failed. A
+separate scoped `EXPECTED-UNKNOWN` assessment requires retained evidence of
+the exact unresolved command, query-only behavior, preserved identity/state,
+no duplicate mutation and paused conflicting writes. Missing observations are
+NOT RUN or BLOCKED, not an expected-result waiver. Restoring a guaranteed
+automatic-recovery promise requires reviewed durable-evidence semantics and
+exact-candidate fault/restart acceptance, not repeated runs or longer timeouts.
 
 ### Fixture boundaries
 

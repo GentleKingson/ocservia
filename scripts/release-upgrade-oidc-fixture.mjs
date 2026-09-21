@@ -6,6 +6,8 @@ import crypto from "node:crypto";
 const directory = process.argv[2];
 const issuer = process.argv[3];
 const secret = fs.readFileSync(`${directory}/oidc-client-secret`, "utf8").trim();
+// Optional task-owned fault input; the native upgrade fixture leaves it unset.
+const fault = () => process.argv[4] ? fs.readFileSync(process.argv[4], "utf8").trim() : "";
 const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: "jwk" }), kid: "upgrade", use: "sig", alg: "RS256" };
 const codes = new Map();
@@ -43,10 +45,12 @@ https.createServer({ key: fs.readFileSync(`${directory}/tls.key`), cert: fs.read
       p.get("redirect_uri") !== "https://localhost/api/v1/auth/callback" ||
       crypto.createHash("sha256").update(p.get("code_verifier") || "").digest("base64url") !== code.challenge) return json(400, { error: "invalid_grant" });
     const now = Math.floor(Date.now() / 1000);
-    const payload = `${encode({ alg: "RS256", kid: "upgrade" })}.${encode({ iss: issuer, aud: "upgrade", sub: "upgrade-operator", nonce: code.nonce,
+    const mode = fault();
+    console.log(JSON.stringify({ event: "fixture_token_issued", fault: mode || "none" }));
+    const payload = `${encode({ alg: "RS256", kid: "upgrade" })}.${encode({ iss: mode === "issuer" ? `${issuer}/wrong` : issuer, aud: "upgrade", sub: "upgrade-operator", nonce: mode === "nonce" ? "wrong" : code.nonce,
       iat: now, exp: now + 120, email: "upgrade@example.invalid", name: "Upgrade Operator" })}`;
     return json(200, { token_type: "Bearer", access_token: crypto.randomBytes(32).toString("hex"), expires_in: 120,
-      id_token: `${payload}.${crypto.sign("RSA-SHA256", Buffer.from(payload), privateKey).toString("base64url")}` });
+      id_token: `${payload}.${mode === "signature" ? crypto.randomBytes(256).toString("base64url") : crypto.sign("RSA-SHA256", Buffer.from(payload), privateKey).toString("base64url")}` });
   }
   return json(404, {});
 }).listen(19443, "0.0.0.0");

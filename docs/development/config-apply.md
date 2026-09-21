@@ -6,6 +6,13 @@ the node, rechecks the plan revision, validation fingerprint, capability, and
 automation lock, consumes the approval, and persists the operation, typed
 command, outbox event, audit intent, and apply record in one transaction.
 
+The matched [complete node-local TLS profile](../operations/node-local-config-tls.md)
+additionally pins the plan ID, logical candidate and materialized file hashes,
+previous file hash, revision and expiry. Root revalidates the immutable TLS
+bundle and full native parser input before publication. Logical configuration
+identity remains separate from the physical file fingerprint in results and
+Controller state. Legacy commands and receipt identities are unchanged.
+
 Privd accepts no path or executable from the Agent. It serializes planning and
 apply work for the fixed Ocserv configuration, verifies the current fingerprint,
 creates same-directory backup and staging files with preserved mode and ownership,

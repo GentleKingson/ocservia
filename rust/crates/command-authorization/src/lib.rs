@@ -1488,6 +1488,57 @@ fn canonical_semantic_payload_hash(
             out.extend_from_slice(&payload.desired_revision.to_be_bytes());
             (104_u32, out)
         }
+        Some(command_envelope::Payload::CompleteConfigPlan(payload)) => {
+            let candidate = payload
+                .candidate
+                .as_ref()
+                .ok_or_else(|| invalid_claim("complete_config_missing"))?;
+            let canonical = ocservia_contracts::config_profile::canonical(candidate)
+                .map_err(|_| invalid_claim("complete_config_invalid"))?;
+            if version != SemanticPayloadHashVersion::V2
+                || candidate.node_id != envelope.node_id
+                || Sha256::digest(&canonical).as_slice() != payload.candidate_hash
+            {
+                return Err(invalid_claim("complete_config_identity_invalid"));
+            }
+            (129_u32, payload.candidate_hash.clone())
+        }
+        Some(command_envelope::Payload::CompleteConfigApply(payload)) => {
+            let candidate = payload
+                .candidate
+                .as_ref()
+                .ok_or_else(|| invalid_claim("complete_config_missing"))?;
+            let canonical = ocservia_contracts::config_profile::canonical(candidate)
+                .map_err(|_| invalid_claim("complete_config_invalid"))?;
+            let expiry = payload
+                .plan_expires_at
+                .as_ref()
+                .ok_or_else(|| invalid_claim("complete_config_expiry_missing"))?;
+            if version != SemanticPayloadHashVersion::V2
+                || candidate.node_id != envelope.node_id
+                || Sha256::digest(&canonical).as_slice() != payload.candidate_hash
+                || payload.materialized_hash.len() != 32
+                || payload.expected_current_hash.len() != 32
+                || payload.desired_revision <= candidate.expected_revision
+                || payload.plan_id.len() != 16
+                || !(-62_135_596_800..=253_402_300_799).contains(&expiry.seconds)
+                || !(0..1_000_000_000).contains(&expiry.nanos)
+                || envelope.approval_id.len() != 16
+                || envelope.approval_request_sha256.len() != 32
+            {
+                return Err(invalid_claim("complete_config_identity_invalid"));
+            }
+            let mut out = payload.candidate_hash.clone();
+            out.extend_from_slice(&payload.materialized_hash);
+            out.extend_from_slice(&payload.expected_current_hash);
+            out.extend_from_slice(&payload.desired_revision.to_be_bytes());
+            out.extend_from_slice(&payload.plan_id);
+            out.extend_from_slice(&expiry.seconds.to_be_bytes());
+            out.extend_from_slice(&expiry.nanos.to_be_bytes());
+            out.extend_from_slice(&envelope.approval_id);
+            out.extend_from_slice(&envelope.approval_request_sha256);
+            (130_u32, out)
+        }
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
             if payload.certificate_id.len() != 16
                 || payload.common_name.is_empty()
@@ -1920,6 +1971,16 @@ fn payload_authorization(
         Some(command_envelope::Payload::ConfigApply(_)) => {
             (104, "config.apply", "ocserv.config.apply")
         }
+        Some(command_envelope::Payload::CompleteConfigPlan(_)) => (
+            129,
+            "config.plan",
+            ocservia_contracts::config_profile::PLAN_CAPABILITY,
+        ),
+        Some(command_envelope::Payload::CompleteConfigApply(_)) => (
+            130,
+            "config.apply",
+            ocservia_contracts::config_profile::APPLY_CAPABILITY,
+        ),
         Some(command_envelope::Payload::ServiceReload(_)) => {
             (105, "service.reload", "ocserv.service.reload")
         }
@@ -2014,6 +2075,54 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn complete_config_matches_go_identity_vectors() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../testdata/complete-config-v1.json"))
+                .unwrap();
+        let bytes = |name: &str| hex::decode(fixture[name].as_str().unwrap()).unwrap();
+        let plan =
+            ocservia_contracts::decode_strict_command_envelope(&bytes("plan_proto")).unwrap();
+        let Some(command_envelope::Payload::CompleteConfigPlan(plan)) = plan.payload else {
+            panic!("plan fixture");
+        };
+        let candidate = plan.candidate.unwrap();
+        let canonical = ocservia_contracts::config_profile::canonical(&candidate).unwrap();
+        assert_eq!(canonical, bytes("canonical"));
+        assert_eq!(
+            Sha256::digest(canonical).as_slice(),
+            bytes("candidate_hash")
+        );
+        for kind in ["plan", "apply"] {
+            let envelope = ocservia_contracts::decode_strict_command_envelope(&bytes(&format!(
+                "{kind}_proto"
+            )))
+            .unwrap();
+            assert_eq!(
+                semantic_payload_hash_v2(&envelope).unwrap().as_slice(),
+                bytes(&format!("{kind}_semantic_hash"))
+            );
+            assert!(semantic_payload_hash_v1(&envelope).is_err());
+            assert_eq!(
+                payload_authorization(&envelope).unwrap().2,
+                format!("ocserv.config.complete.{kind}")
+            );
+            let mut changed = envelope.clone();
+            changed.node_id[0] ^= 1;
+            assert!(semantic_payload_hash_v2(&changed).is_err());
+        }
+        let mut bad = candidate.clone();
+        bad.directives.swap(0, 1);
+        assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
+        bad = candidate.clone();
+        bad.directives.remove(2);
+        assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
+        bad = candidate;
+        if let Some(ocservia_contracts::generated::ocserv::platform::agent::v1::complete_config_directive::Value::Tls(value)) = bad.directives[7].value.as_mut() {
+            value.version = "../escape".into();
+        }
+        assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
+    }
     use std::fs;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::time::{SystemTime, UNIX_EPOCH};

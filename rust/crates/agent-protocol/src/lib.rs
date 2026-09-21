@@ -333,6 +333,8 @@ pub struct ConfigPlanResult {
     pub staging_cleaned: bool,
     #[prost(bytes = "vec", tag = "6")]
     pub current_hash: Vec<u8>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub materialized_hash: Vec<u8>,
 }
 
 /// Approved immutable configuration apply request. No caller-selected path is accepted.

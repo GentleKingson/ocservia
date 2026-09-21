@@ -57,6 +57,10 @@ for secret in tls.crt tls.key postgres-owner-password postgres-app-password post
   printf 'test-only\n' >"${work}/secrets/${secret}"
 done
 openssl genpkey -algorithm ED25519 -out "${work}/secrets/controller-command-signing-key.pem" >/dev/null 2>&1
+openssl pkey -in "${work}/secrets/controller-command-signing-key.pem" -pubout \
+  -out "${work}/secrets/controller-command-verification-key.pem"
+sudo chown 0:65532 "${work}/secrets/controller-command-verification-key.pem"
+sudo chmod 440 "${work}/secrets/controller-command-verification-key.pem"
 printf '%064d\n' 1 >"${work}/secrets/audit-event-key"
 for secret in relay-access-token tls.crt tls.key; do
   printf 'test-only\n' >"${work}/relay-secrets/${secret}"

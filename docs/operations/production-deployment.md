@@ -108,11 +108,29 @@ the guard or treat database compatibility as deployment compatibility.
 
 Use digest-pinned images for every `OCSERV_*_IMAGE` variable. Put referenced secret files in an absolute, canonical, launcher-owned, mode-`0700` `OCSERV_SECRET_DIR` outside the checkout; every ancestor must be root- or launcher-owned and not group/world writable. General secrets must be launcher-owned mode `0444`: the private parent directory prevents host traversal while the read-only file allows each explicitly mounted non-root service to read it. The Ed25519 Controller command private key, `controller-command-signing-key.pem`, and the 32-byte lowercase-hex audit event key, `audit-event-key`, must be owned by UID/GID `65534:65532` with mode `0400`, matching the non-root Controller process. Set a non-secret stable identifier such as `OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1`; the identifier is stored with each event. The audit event key is independent from `audit-checkpoint-key` and must never be reused for checkpoints or another purpose. File-backed Compose secrets are bind mounts on supported deployments, so the source ownership is required even though the Compose target also declares it. The Iroh Controller key and relay token must be owned by UID/GID 65532 with mode `0400`. The launcher rejects missing files, symbolic links, unsafe host ancestry, and ownership or mode mismatches; the Controller loader additionally rejects a hard-linked audit event key and unsafe in-container ancestry. Do not place credentials in Compose environment variables.
 
-Generate the command key pair outside the checkout. Put only the private key in
-`OCSERV_SECRET_DIR`; distribute the public key to Agents through the node
-provisioning channel described in
-`docs/development/command-authorization-v1.md`. `transportd` must never receive
-the private key.
+For a private Relay CA, provision the public PEM bundle as
+`${OCSERV_SECRET_DIR}/relay-ca.pem`: a nonempty one-link `root:root` regular
+file, mode `0444`, with the same safe ancestry. `compose.sh` selects the shipped
+`compose.relay-ca.yaml` overlay only when this file exists and mounts it only
+into transportd. Unsafe present files fail closed; invalid PEM makes transportd
+refuse startup. No CA file means the existing public roots, not disabled TLS.
+This is additional trust, not pinning. Provision the same CA through the
+[managed-node trust path](../getting-started/managed-node.md#1-prepare-the-node-configuration)
+for enrollment and the Agent service; do not patch launchers or rendered
+descriptors. Rotation/removal is an explicit operator trust change, not an
+automatic install/upgrade action.
+
+Generate the command key pair outside the checkout. Put the private key in
+`OCSERV_SECRET_DIR` and its Ed25519 SPKI public key in
+`controller-command-verification-key.pem` in the same directory. The public key
+must be a one-link regular file owned by `0:65532`, mode `0440`; transportd mounts
+only this public key to verify connection fences. Provision
+it before installing or upgrading to this descriptor, and rotate it with the
+matching signing key. Distribute the same public key to Agents through the node
+provisioning channel described in `docs/development/command-authorization-v1.md`.
+`transportd` must never receive the private key. Missing, unreadable or mismatched
+verification keys fail closed; do not remove fencing to make a node connect.
+The deployment descriptor rollback guard still applies to this added mount.
 
 Provision the backup bind mount for the non-root PostgreSQL UID before startup. The launcher rejects missing, symbolic-link, incorrectly owned, or overly permissive paths:
 

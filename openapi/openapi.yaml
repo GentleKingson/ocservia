@@ -2293,6 +2293,7 @@ components:
         template_name: { type: string, minLength: 1, maxLength: 128 }
         expected_revision: { type: integer, format: int64, minimum: 0 }
         candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        materialized_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: Exact root-attested configuration file hash for the complete node-local TLS profile. }
         state: { $ref: "#/components/schemas/OperationState" }
         validation: { type: string, enum: [pending, valid, failed, rejected, unknown, expired] }
         diff_redacted: { type: string, maxLength: 262144, description: Secret-safe line diff; secret keys and values are never included. }
@@ -2316,9 +2317,11 @@ components:
       additionalProperties: false
       required: [node_id, expected_revision, candidate_hash, current_hash, diff_redacted, expires_at]
       properties:
+        plan_id: { $ref: "#/components/schemas/UuidV7" }
         node_id: { $ref: "#/components/schemas/UuidV7" }
         expected_revision: { type: integer, format: int64, minimum: 0 }
         candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        materialized_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         diff_redacted: { type: string, maxLength: 262144, description: "Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values." }
         expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }

@@ -197,6 +197,8 @@ services:
       - /run/secrets/controller_iroh_key
       - --relay-token-file
       - /run/secrets/relay_access_token
+      - --controller-verification-key-file
+      - /run/secrets/controller_command_verification_key
       - --known-agent-handshake-rate
       - "2400"
       - --known-agent-handshake-concurrency
@@ -218,6 +220,11 @@ services:
       - --enrollment-completion-concurrency
       - "8"
     secrets:
+      - source: controller_command_verification_key
+        target: controller_command_verification_key
+        uid: "0"
+        gid: "65532"
+        mode: 0440
       - source: relay_access_token
         target: relay_access_token
         uid: "65532"
@@ -313,6 +320,8 @@ secrets:
     file: ${OCSERV_SECRET_DIR}/audit-event-key
   controller_command_signing_key:
     file: ${OCSERV_SECRET_DIR}/controller-command-signing-key.pem
+  controller_command_verification_key:
+    file: ${OCSERV_SECRET_DIR}/controller-command-verification-key.pem
   certificate_signer_token:
     file: ${OCSERV_SECRET_DIR}/certificate-signer-token
   relay_access_token:

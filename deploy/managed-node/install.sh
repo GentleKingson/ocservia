@@ -132,6 +132,7 @@ AGENT_CONF_DIR="${SYSROOT}/etc/ocservia-agent"
 AGENT_ENV_FILE="${AGENT_CONF_DIR}/agent.env"
 RELAYS_ENV_FILE="${AGENT_CONF_DIR}/relays.env"
 RELAY_TOKEN_FILE="${AGENT_CONF_DIR}/relay-access-token"
+RELAY_CA_FILE="${AGENT_CONF_DIR}/relay-ca.pem"
 COMMAND_KEY_FILE="${AGENT_CONF_DIR}/controller-command-verification-key.pem"
 ENROLLMENT_TOKEN_FILE="${AGENT_CONF_DIR}/enrollment-token"
 USER_SEAL_KEY_FILE="${AGENT_CONF_DIR}/user-password-seal-private.pem"
@@ -1156,6 +1157,19 @@ converge_enrollment() {
   local -a relay_args=(--relay-mode custom --relay-url "${RELAY_URL_A}")
   if [[ -n "${RELAY_URL_B}" ]]; then
     relay_args+=(--relay-url "${RELAY_URL_B}")
+  fi
+  # Additional public trust is provisioned by the operator, never downloaded
+  # from the Relay or replaced by an installer rerun.
+  if path_exists "${RELAY_CA_FILE}"; then
+    validate_enrolled_key_ancestry
+    if ! priv test -f "${RELAY_CA_FILE}" || priv test -L "${RELAY_CA_FILE}" \
+      || ! priv test -s "${RELAY_CA_FILE}" \
+      || [[ "$(stat_string "${RELAY_CA_FILE}")" != 0:0:444:1 ]]; then
+      fail "the Relay CA must be a nonempty one-link root:root regular file with mode 0444"
+    fi
+    priv openssl x509 -in "${RELAY_CA_FILE}" -noout >/dev/null 2>&1 ||
+      fail "the Relay CA must contain a readable PEM certificate"
+    relay_args+=(--relay-ca-file "${RELAY_CA_FILE}")
   fi
   local node_id staging metadata rerun_instruction
   # The single-file mode has no stable script path to print, and a rerun

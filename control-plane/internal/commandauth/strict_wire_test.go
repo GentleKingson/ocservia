@@ -92,25 +92,31 @@ func TestStrictWireCommandFixtures(t *testing.T) {
 // These are raw-wire fixtures, not executable commands: deprecated fields and
 // dummy signatures deliberately exercise all accepted tags without authorizing effects.
 func fullStrictWireCommands(secret, p12Secret *agentv1.SealedSecretV1) map[string]*agentv1.CommandEnvelope {
+	complete := &agentv1.CompleteConfigCandidate{NodeId: []byte("node"), ExpectedRevision: 42, Directives: []*agentv1.CompleteConfigDirective{
+		{Name: "device", Value: &agentv1.CompleteConfigDirective_Literal{Literal: "vpns"}},
+		{Name: "server-cert", Value: &agentv1.CompleteConfigDirective_Tls{Tls: &agentv1.NodeLocalTlsReference{SecretRefId: []byte("ref"), Version: "v1", CertificateSha256: []byte("certificate-hash"), SpkiSha256: []byte("spki-hash"), CaSha256: []byte("ca-hash")}}},
+	}}
 	commands := map[string]*agentv1.CommandEnvelope{
-		"session_disconnect": {Payload: &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: "session", BootId: "boot"}}},
-		"session_terminate":  {Payload: &agentv1.CommandEnvelope_SessionTerminate{SessionTerminate: &agentv1.SessionTerminate{SessionId: "session", BootId: "boot"}}},
-		"ip_ban_remove":      {Payload: &agentv1.CommandEnvelope_IpBanRemove{IpBanRemove: &agentv1.IpBanRemove{Ip: "192.0.2.1"}}},
-		"user_create":        {Payload: &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: "alice", SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", DesiredRevision: 42, SealedPasswordV1: secret}}},
-		"user_disable":       {Payload: &agentv1.CommandEnvelope_UserDisable{UserDisable: &agentv1.UserDisable{Username: "alice", DesiredRevision: 42}}},
-		"user_enable":        {Payload: &agentv1.CommandEnvelope_UserEnable{UserEnable: &agentv1.UserEnable{Username: "alice", DesiredRevision: 42}}},
-		"password_rotate":    {Payload: &agentv1.CommandEnvelope_UserPasswordRotate{UserPasswordRotate: &agentv1.UserPasswordRotate{Username: "alice", SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", DesiredRevision: 42, SealedPasswordV1: secret}}},
-		"group_apply":        {Payload: &agentv1.CommandEnvelope_GroupApply{GroupApply: &agentv1.GroupApply{GroupName: "admins", Members: []string{"alice", "bob"}, DesiredRevision: 42}}},
-		"config_plan":        {Payload: &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: []byte("config"), CandidateHash: []byte("hash"), ExpectedRevision: 42}}},
-		"config_apply":       {Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{CandidateHash: []byte("hash"), Candidate: []byte("config"), ExpectedCurrentHash: []byte("current"), DesiredRevision: 42}}},
-		"certificate_csr":    {Payload: &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: []byte("certificate"), CommonName: "vpn.example.test", DnsNames: []string{"vpn.example.test", "alt.example.test"}, KeyBits: 3072}}},
-		"certificate_p12":    {Payload: &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: []byte("certificate"), CertificateChainPem: []byte("chain"), SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", ArtifactId: []byte("artifact"), SealedPasswordV1: p12Secret, CertificateVersion: 42, ArtifactExpiresAt: &timestamppb.Timestamp{Seconds: 1700000060, Nanos: 123}}}},
-		"certificate_revoke": {Payload: &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: []byte("certificate"), Reason: "rotation", CertificateVersion: 42}}},
-		"agent_upgrade":      {Payload: &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: "1.2.3", PackageSha256: []byte("package-hash"), Architecture: "arm64"}}},
-		"service_reload":     {Payload: &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}},
-		"simulation_probe":   {Payload: &agentv1.CommandEnvelope_SimulationProbe{SimulationProbe: &agentv1.SimulationProbe{HeartbeatCount: 3, DelayMillis: 17, DuplicateEvent: true, ReturnError: true, DisconnectAfter: true}}},
-		"synthetic_noop":     {Payload: &agentv1.CommandEnvelope_SyntheticNoop{SyntheticNoop: &agentv1.SyntheticNoop{}}},
-		"synthetic_echo":     {Payload: &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}}},
+		"complete_config_plan":  {Payload: &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: complete, CandidateHash: []byte("logical")}}},
+		"complete_config_apply": {Payload: &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: complete, CandidateHash: []byte("logical"), ExpectedCurrentHash: []byte("current"), MaterializedHash: []byte("materialized"), DesiredRevision: 43, PlanId: []byte("plan"), PlanExpiresAt: &timestamppb.Timestamp{Seconds: 1700000060, Nanos: 123}}}},
+		"session_disconnect":    {Payload: &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: "session", BootId: "boot"}}},
+		"session_terminate":     {Payload: &agentv1.CommandEnvelope_SessionTerminate{SessionTerminate: &agentv1.SessionTerminate{SessionId: "session", BootId: "boot"}}},
+		"ip_ban_remove":         {Payload: &agentv1.CommandEnvelope_IpBanRemove{IpBanRemove: &agentv1.IpBanRemove{Ip: "192.0.2.1"}}},
+		"user_create":           {Payload: &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: "alice", SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", DesiredRevision: 42, SealedPasswordV1: secret}}},
+		"user_disable":          {Payload: &agentv1.CommandEnvelope_UserDisable{UserDisable: &agentv1.UserDisable{Username: "alice", DesiredRevision: 42}}},
+		"user_enable":           {Payload: &agentv1.CommandEnvelope_UserEnable{UserEnable: &agentv1.UserEnable{Username: "alice", DesiredRevision: 42}}},
+		"password_rotate":       {Payload: &agentv1.CommandEnvelope_UserPasswordRotate{UserPasswordRotate: &agentv1.UserPasswordRotate{Username: "alice", SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", DesiredRevision: 42, SealedPasswordV1: secret}}},
+		"group_apply":           {Payload: &agentv1.CommandEnvelope_GroupApply{GroupApply: &agentv1.GroupApply{GroupName: "admins", Members: []string{"alice", "bob"}, DesiredRevision: 42}}},
+		"config_plan":           {Payload: &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: []byte("config"), CandidateHash: []byte("hash"), ExpectedRevision: 42}}},
+		"config_apply":          {Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{CandidateHash: []byte("hash"), Candidate: []byte("config"), ExpectedCurrentHash: []byte("current"), DesiredRevision: 42}}},
+		"certificate_csr":       {Payload: &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: []byte("certificate"), CommonName: "vpn.example.test", DnsNames: []string{"vpn.example.test", "alt.example.test"}, KeyBits: 3072}}},
+		"certificate_p12":       {Payload: &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: []byte("certificate"), CertificateChainPem: []byte("chain"), SealedPassword: []byte("legacy"), SecretKeyId: "legacy-key", ArtifactId: []byte("artifact"), SealedPasswordV1: p12Secret, CertificateVersion: 42, ArtifactExpiresAt: &timestamppb.Timestamp{Seconds: 1700000060, Nanos: 123}}}},
+		"certificate_revoke":    {Payload: &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: []byte("certificate"), Reason: "rotation", CertificateVersion: 42}}},
+		"agent_upgrade":         {Payload: &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: "1.2.3", PackageSha256: []byte("package-hash"), Architecture: "arm64"}}},
+		"service_reload":        {Payload: &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}},
+		"simulation_probe":      {Payload: &agentv1.CommandEnvelope_SimulationProbe{SimulationProbe: &agentv1.SimulationProbe{HeartbeatCount: 3, DelayMillis: 17, DuplicateEvent: true, ReturnError: true, DisconnectAfter: true}}},
+		"synthetic_noop":        {Payload: &agentv1.CommandEnvelope_SyntheticNoop{SyntheticNoop: &agentv1.SyntheticNoop{}}},
+		"synthetic_echo":        {Payload: &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}}},
 	}
 	command := commands["synthetic_echo"]
 	command.MessageId = []byte("message")

@@ -32,6 +32,7 @@ mkdir -p "${ROOT}/web/src/api/generated"
 java -jar "${ROOT}/.tools/openapi-generator-cli-$(sed -n 's/^openapi_generator=//p' "${ROOT}/toolchains.lock").jar" \
   generate \
   --generator-name typescript-fetch \
+  --template-dir "${ROOT}/openapi/templates/typescript-fetch" \
   --input-spec "${ROOT}/openapi/openapi.yaml" \
   --output "${ROOT}/web/src/api/generated" \
   --config "${ROOT}/openapi/generator-config.yaml" \

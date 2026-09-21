@@ -11,7 +11,15 @@ objects; the API does not accept secret values or caller-selected target paths.
 Equivalent inputs produce identical canonical output and a SHA-256 candidate
 hash.
 
-Privd writes a validation candidate only to a generated file beside the fixed
+The matched [complete node-local TLS profile](../operations/node-local-config-tls.md)
+uses separate capabilities and typed payloads. It resolves immutable protected
+TLS bundles and validates the entire native configuration, without omitted
+directives or partial-validation warnings. Its result includes both the logical
+candidate hash and the exact materialized file hash. These and the plan ID,
+previous file hash, revision and expiry are bound into approval. Older nodes
+cannot accept this profile and there is no legacy fallback.
+
+For the legacy profile, privd writes a validation candidate only to a generated file beside the fixed
 Ocserv configuration, validates every directive with a bounded structural parser, and
 validates the non-secret directive set with the fixed Ocserv binary. Unresolved
 SecretRef lines are omitted only from the native-parser staging input and are

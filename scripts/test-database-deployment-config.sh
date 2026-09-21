@@ -16,6 +16,7 @@ for name in audit-event-key controller-command-signing-key.pem relay-access-toke
   chmod 0400 "${work}/secrets/${name}"
 done
 owner=(); ((EUID == 0)) || owner=(sudo)
+"${owner[@]}" install -o 0 -g 65532 -m 440 /dev/null "${work}/secrets/controller-command-verification-key.pem"
 "${owner[@]}" chown 65534:65532 "${work}/secrets/audit-event-key" "${work}/secrets/controller-command-signing-key.pem"
 "${owner[@]}" chown 65532:65532 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key"
 "${owner[@]}" chown 999:999 "${work}/backups"

@@ -1495,6 +1495,42 @@ for single_b in unset empty; do
   as_root grep -qx 'RELAY_URL_B=' "${sysroot}/etc/ocservia-agent/relays.env" || die 'rerun changed topology'
 done
 
+# The official enrollment path consumes only a protected additional Relay CA;
+# reruns validate it without changing trust material or enrolling again.
+scenario
+capture_root
+assert_status 0
+openssl req -new -x509 -key "${fixture}/command-verification.key" -days 1 \
+  -subj /CN=relay-test-ca -out "${fixture}/relay-ca.pem"
+ca="${sysroot}/etc/ocservia-agent/relay-ca.pem"
+as_root install -o root -g root -m 444 "${fixture}/relay-ca.pem" "${ca}"
+printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
+as_root install -o root -g ocserv-agent -m 640 "${fixture}/enrollment-token" "${sysroot}/etc/ocservia-agent/enrollment-token"
+capture_root
+assert_status 0
+assert_output PENDING_APPROVAL
+assert_log_contains "${agent_log}" "--relay-ca-file ${ca}"
+capture_root
+assert_status 0
+[[ "$(grep -c -- '--enrollment-token-file' "${agent_log}")" -eq 1 ]] || die 'Relay CA rerun re-enrolled node'
+as_root chmod 644 "${ca}"
+capture_root
+assert_status 1
+assert_output 'Relay CA must be'
+as_root chmod 444 "${ca}"
+as_root mv "${ca}" "${ca}.saved"
+as_root ln -s "${ca}.saved" "${ca}"
+capture_root
+assert_status 1
+assert_output 'Relay CA must be'
+as_root rm "${ca}"
+as_root mv "${ca}.saved" "${ca}"
+as_root install -o root -g root -m 444 "${fixture}/enrollment-token" "${ca}"
+capture_root
+assert_status 1
+assert_output 'readable PEM certificate'
+echo 'protected additional Relay CA enrollment and read-only rerun checks passed'
+
 # 16. a valid protected token completes enrollment: the exact CLI contract,
 # atomic agent.env finalization, token consumption, PENDING_APPROVAL.
 scenario

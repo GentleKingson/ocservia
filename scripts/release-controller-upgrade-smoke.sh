@@ -123,6 +123,8 @@ for name in postgres-owner-password postgres-app-password postgres-backup-passwo
   openssl rand -hex 32 >"${OCSERV_SECRET_DIR}/${name}"
 done
 openssl genpkey -algorithm ED25519 -out "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" >/dev/null 2>&1
+openssl pkey -in "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" -pubout \
+  -out "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 openssl pkey -in "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" -outform DER | tail -c 32 | \
   od -An -v -tx1 | tr -d ' \n' >"${OCSERV_SECRET_DIR}/controller-iroh.key"
 OCSERV_CONTROLLER_ENDPOINT_ID="$(openssl pkey -in "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" -pubout -outform DER | tail -c 32 | od -An -v -tx1 | tr -d ' \n')"
@@ -140,6 +142,8 @@ sudo chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_D
 sudo chown 65532:65532 "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
 sudo chmod 400 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" \
   "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
+sudo chown 0:65532 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+sudo chmod 440 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 sudo chown 999:999 "${work}/backup" "${work}/restore"
 oidc_image=node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7
 docker pull "${oidc_image}" >/dev/null

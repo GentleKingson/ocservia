@@ -419,6 +419,8 @@ fn supported_capabilities() -> Vec<String> {
             "ocserv.groups.write",
             "ocserv.config.plan",
             "ocserv.config.apply",
+            "ocserv.config.complete.plan",
+            "ocserv.config.complete.apply",
             "config.auth",
             "config.tls",
             "config.sessions",
@@ -1243,6 +1245,8 @@ async fn handle_command_stream(
                 | command_envelope::Payload::GroupApply(_)
                 | command_envelope::Payload::ConfigPlan(_)
                 | command_envelope::Payload::ConfigApply(_)
+                | command_envelope::Payload::CompleteConfigPlan(_)
+                | command_envelope::Payload::CompleteConfigApply(_)
                 | command_envelope::Payload::CertificateCsr(_)
                 | command_envelope::Payload::CertificateRevoke(_)
                 | command_envelope::Payload::CertificateP12(_)
@@ -1843,6 +1847,9 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String,
         command_envelope::Payload::ConfigApply(value) => {
             Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
         }
+        command_envelope::Payload::CompleteConfigApply(value) => {
+            Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
+        }
         command_envelope::Payload::CertificateCsr(value) => {
             Uuid::from_slice(&value.certificate_id).ok().map(|id| {
                 (
@@ -1882,7 +1889,10 @@ async fn observe_external_effect(
     // validation can always be retried from the immutable candidate.
     if matches!(
         envelope.payload,
-        Some(command_envelope::Payload::ConfigPlan(_))
+        Some(
+            command_envelope::Payload::ConfigPlan(_)
+                | command_envelope::Payload::CompleteConfigPlan(_)
+        )
     ) {
         return ExternalEffectObservation::Absent;
     }
@@ -2030,6 +2040,9 @@ fn desired_effect_identity(
             Some(("group_apply", &value.group_name, value.desired_revision))
         }
         command_envelope::Payload::ConfigApply(value) => {
+            Some(("config_apply", "ocserv.conf", value.desired_revision))
+        }
+        command_envelope::Payload::CompleteConfigApply(value) => {
             Some(("config_apply", "ocserv.conf", value.desired_revision))
         }
         _ => None,

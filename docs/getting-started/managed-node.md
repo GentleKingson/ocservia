@@ -46,6 +46,16 @@ Configure at least:
 
 The installer reads `./install.env` from the current directory. Shell variables override values from the file.
 
+For a private Relay CA, provision its public PEM certificate bundle separately
+at `/etc/ocservia-agent/relay-ca.pem` before enrollment. It must be a nonempty,
+single-link regular file owned by `root:root`, mode `0444`, under root-owned
+real directories without group/world write permission. The installer and
+shipped service launcher use the same additional trust file; neither downloads
+nor replaces it. An absent file retains public-root trust. An unsafe present
+file fails closed; malformed PEM is rejected rather than disabling TLS.
+This adds trusted roots, not a certificate pin. CA rotation/removal is a
+deliberate operator action, separate from package or installer reruns.
+
 ## 2. Run the installer
 
 Run the managed-node installer from the exact release checkout:
