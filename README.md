@@ -9,7 +9,7 @@
 ocservia does not replace ocserv and does not carry VPN traffic. Each VPN server still runs ocserv. ocservia gives operators one place to deploy managed nodes, watch their health, manage users and groups, review sessions and bans, prepare configuration changes, and run controlled upgrades.
 
 > [!NOTE]
-> ocservia is pre-1.0. Use it in controlled deployments, pin the release version you install, and read the linked deployment guides before production use.
+> Pin the exact release version you install and read the linked deployment guides before production use. Compatibility, deprecation, and platform support rules for the 1.0 release line are defined in the [1.0 support and versioning policy](docs/reference/support-policy.md).
 
 ## Core features
 
@@ -111,6 +111,7 @@ See [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a
 - [Install a managed node](docs/getting-started/managed-node.md)
 - [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/how-to/troubleshooting.md)
+- [1.0 support and versioning policy](docs/reference/support-policy.md)
 - [Technical reference](docs/reference/README.md)
 
 ## Developing
@@ -126,7 +127,7 @@ GitHub Actions remains the merge-time validation environment. See [Contributor v
 
 ## Status
 
-ocservia is pre-1.0. Minor release lines may introduce compatibility changes, and production validation remains the operator's responsibility. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets.
+The 1.0 release line follows the [1.0 support and versioning policy](docs/reference/support-policy.md): public contract surfaces are frozen for `1.x`, breaking changes require a new major version, and supported platforms are the validated set indexed by that policy. Until `1.0.0` is published, ocservia remains pre-1.0, minor release lines may still introduce compatibility changes, and production validation remains the operator's responsibility. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets.
 
 The P1 harness provides manual, single-host validation outside Basic CI, not a production capacity guarantee. See [P1 resilience and capacity](docs/development/p1-resilience-capacity.md) for details.
 

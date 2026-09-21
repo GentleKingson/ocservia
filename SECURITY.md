@@ -2,10 +2,14 @@
 
 ## Supported Versions
 
-ocservia is pre-1.0. Security fixes are provided for the latest published
-release line only. The latest published release line is the most recent
-formally published minor release line, not the default branch, unreleased
-commits, pull requests, release candidates, or draft releases.
+Security fixes are provided for the latest published release line only. The
+latest published release line is the most recent formally published minor
+release line, not the default branch, unreleased commits, pull requests,
+release candidates, or draft releases. Version compatibility, deprecation
+windows, and the supported platform set follow the
+[1.0 support and versioning policy](docs/reference/support-policy.md); from
+the 1.0 release line onward, public contract changes within `1.x` are
+additive.
 
 | Version | Supported |
 | --- | --- |
