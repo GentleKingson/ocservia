@@ -89,10 +89,16 @@ def approval(action, resource_type, resource_id, extra=None):
                                       'ttl_seconds': 600, **(extra or {})}, status=201)
     decision = {'reason': 'T07 independent identity', 'expected_request_hash': request['request_hash']}
     api(f"approval-requests/{request['id']}:approve", decision, status=403)
+    if request['request_hash']:
+        invalid_hash = ('0' if request['request_hash'][0] != '0' else '1') + request['request_hash'][1:]
+        api(f"approval-requests/{request['id']}:approve", {**decision, 'expected_request_hash': invalid_hash},
+            role='approver', status=409)
     api(f"approval-requests/{request['id']}:approve", decision, role='approver')
+    api(f"approval-requests/{request['id']}:approve", decision, role='approver', status=409)
     approved = api(f"approval-requests/{request['id']}")
     assert approved['request_hash'] == request['request_hash']
     record('self_approval_rejected', approval_id=request['id'])
+    record('approval_hash_and_duplicate_decision_rejection', approval_id=request['id'], bound=bool(request['request_hash']))
     return request['id']
 
 
@@ -532,6 +538,14 @@ def business():
     relay = os.environ['T07_RELAY_CONTAINER']
     reload_approval = approval('service.reload', 'node', node)
 
+    # A grant belongs to its requester, not to the account that approved it.
+    denied = api(prefix + '/service:reload', {'reason': 'T07 isolated validation', 'ttl_seconds': 300},
+                 role='approver', headers={'Idempotency-Key': secrets.token_hex(16),
+                                          'If-Match': f'"revision-{api(prefix)["version"]}"',
+                                          'X-Approval-ID': reload_approval}, status=409)
+    assert denied['type'] == 'https://ocservia.dev/problems/approval-required'
+    record('approval_cannot_transfer_to_approver', approval_id=reload_approval)
+
     def reload_count():
         return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
 
@@ -588,6 +602,13 @@ def business():
         raise recovery_error
     replay = api(prefix + '/service:reload', body, headers=headers, status=202)
     assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
+    assert api('approval-requests/' + reload_approval)['status'] == 'consumed'
+    denied = api(prefix + '/service:reload', body,
+                 headers={'Idempotency-Key': secrets.token_hex(16),
+                          'If-Match': f'"revision-{api(prefix)["version"]}"',
+                          'X-Approval-ID': reload_approval}, status=409)
+    assert denied['type'] == 'https://ocservia.dev/problems/approval-required'
+    record('consumed_approval_cannot_authorize_new_operation', approval_id=reload_approval)
     operations.append(pending)
     time.sleep(3)
     assert reload_count() == reloads_before + 1
