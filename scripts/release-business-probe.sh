@@ -45,8 +45,11 @@ cleanup() {
   trap - EXIT ERR
   set +e
   if [[ -f "${work}/private.log" ]]; then
-    compose logs --no-color >>"${work}/private.log" 2>&1
-    sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv >>"${work}/private.log" 2>&1
+    {
+      compose logs --no-color
+      docker logs "${oidc_container}"
+      sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv
+    } >>"${work}/private.log" 2>&1
   fi
   # Never export environment, cookies, raw databases, passwords or raw logs.
   if [[ -f "${work}/private.log" ]]; then
@@ -198,11 +201,19 @@ stage=local_auth
 python3 "${ROOT}/scripts/release-business-api.py" local
 record real_local_auth
 stage=external_auth
-mkdir -m 700 "${work}/oidc-fault"
+# This contains only public fault names; the capability-free fixture must read it.
+mkdir -m 755 "${work}/oidc-fault"
 printf '\n' >"${work}/oidc-fault/mode"
+chmod 644 "${work}/oidc-fault/mode"
 export OCSERV_OIDC_ISSUER=https://172.30.240.3:19443 OCSERV_OIDC_CLIENT_ID=upgrade
 export OCSERV_OIDC_REDIRECT_URL=https://localhost/api/v1/auth/callback
-export OCSERV_CERTIFICATE_SIGNER_URL=https://172.30.240.1:19444/sign
+signer_address="$(docker network inspect ocservia-production_application --format '{{(index .IPAM.Config 0).Gateway}}')"
+export OCSERV_CERTIFICATE_SIGNER_URL="https://${signer_address}:19444/sign"
+openssl req -new -newkey rsa:2048 -nodes -subj /CN=t07-signer \
+  -keyout "${work}/private/signer.key" -out "${work}/signer.csr"
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:%s\nextendedKeyUsage=serverAuth\n' "${signer_address}" >"${work}/signer.ext"
+openssl x509 -req -days 1 -in "${work}/signer.csr" -CA "${work}/ca.crt" -CAkey "${work}/private/ca.key" \
+  -CAcreateserial -extfile "${work}/signer.ext" -out "${work}/signer.crt"
 docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --network ocservia-production_application --ip 172.30.240.3 \
   -v "${ROOT}/scripts/release-upgrade-oidc-fixture.mjs:/fixture.mjs:ro" \
@@ -212,7 +223,7 @@ docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-o
   -v "${work}/oidc-fault:/fault:ro" \
   node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 \
   node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode
-python3 "${ROOT}/scripts/release-business-signer.py" "${work}" 172.30.240.1 &
+python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
 signer_pid=$!
 compose up -d --no-deps --wait control-plane
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller

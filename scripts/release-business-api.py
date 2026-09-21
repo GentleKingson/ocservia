@@ -157,6 +157,7 @@ def oidc():
             callback = parts._replace(query=urllib.parse.urlencode(values, doseq=True)).geturl()
         response = request(callback)
         assert response.status == (401 if fault else 302)
+        assert request(issuer + '/.well-known/openid-configuration').status == 200
         if fault:
             assert not any(c.name == '__Host-ocservia_session' for c in jar)
         else:

@@ -46,6 +46,7 @@ https.createServer({ key: fs.readFileSync(`${directory}/tls.key`), cert: fs.read
       crypto.createHash("sha256").update(p.get("code_verifier") || "").digest("base64url") !== code.challenge) return json(400, { error: "invalid_grant" });
     const now = Math.floor(Date.now() / 1000);
     const mode = fault();
+    console.log(JSON.stringify({ event: "fixture_token_issued", fault: mode || "none" }));
     const payload = `${encode({ alg: "RS256", kid: "upgrade" })}.${encode({ iss: mode === "issuer" ? `${issuer}/wrong` : issuer, aud: "upgrade", sub: "upgrade-operator", nonce: mode === "nonce" ? "wrong" : code.nonce,
       iat: now, exp: now + 120, email: "upgrade@example.invalid", name: "Upgrade Operator" })}`;
     return json(200, { token_type: "Bearer", access_token: crypto.randomBytes(32).toString("hex"), expires_in: 120,
