@@ -165,6 +165,28 @@ def business():
             raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
         return result if result['state'] == 'succeeded' else None
 
+    def cross_check(operation):
+        command = operation['command_id'].replace('-', '')
+        journal = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
+                      "SELECT count(*),state,error_code,length(privileged_result_proof)>0 FROM command_journal "
+                      f"WHERE hex(command_id)=upper('{command}');").strip()
+        root_effect = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
+                          "SELECT count(*),state,length(response)>0 FROM authorized_effects "
+                          f"WHERE hex(command_id)=upper('{command}');").strip()
+        snapshot = {'operation_id': operation['id'], 'command_id': operation['command_id'],
+                    'database_state': sql(f"SELECT state FROM operations WHERE id='{operation['id']}';"),
+                    'journal_count_state_error_receipt': journal, 'root_count_state_response': root_effect}
+        (EVIDENCE / ('cross-check-' + operation['id'] + '.json')).write_text(json.dumps(snapshot))
+        return snapshot
+
+    def verify_completed_operations():
+        for operation in operations:
+            snapshot = cross_check(operation)
+            assert snapshot['database_state'] == 'succeeded'
+            assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
+            assert snapshot['root_count_state_response'] == '1|applied|1'
+        record('api_database_agent_journal_root_receipt', operation_ids=[op['id'] for op in operations])
+
     def mutation(path, body, revision, method='POST', key=None, extra_headers=None):
         headers = {'Idempotency-Key': key or secrets.token_hex(16), 'If-Match': f'"revision-{revision}"'}
         headers.update(extra_headers or {})
@@ -224,6 +246,12 @@ def business():
     mutation('users/t07-vpn:enable', {}, user_revision())
     authenticate(password2, True)
     record('vpn_disable_restore')
+    verify_completed_operations()
+    audit = api('audit/events?page_size=200')['items']
+    assert audit
+    audit_ids = ','.join("'" + item['id'] + "'" for item in audit)
+    assert int(sql(f"SELECT count(*) FROM audit_events WHERE workspace_id='{WORKSPACE}' AND id IN ({audit_ids});")) == len(audit)
+    record('audit_api_database_readback', event_ids=[item['id'] for item in audit])
     # The network namespace confines tunnel addresses/routes to the test client.
     client_log = (WORK / 'private' / 'openconnect.log').open('wb')
     vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
@@ -291,34 +319,34 @@ def business():
         record('single_relay_outage_preserves_live_vpn_and_queues_operation')
     finally:
         run('docker', 'start', relay)
-    wait_for('same operation after relay recovery', lambda: completed(pending))
-    replay = api(prefix + '/service:reload', body, headers=headers, status=202)
-    assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
-    operations.append(pending)
+    recovery_error = None
+    try:
+        wait_for('same operation after relay recovery', lambda: completed(pending))
+    except RuntimeError as error:
+        recovery_error = error
+    finally:
+        # Query-only diagnostics also survive Unknown. Never retry a mutation
+        # or invent a receipt to make the strict recovery assertion green.
+        recovery_snapshot = cross_check(pending)
     assert identity_before == run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
                                   '/var/lib/ocservia-agent/identity/controller.endpoint')
     assert started_before == run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
     assert ping()
     assert native_session() == live_session
     assert ocserv_started == run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    assert api(prefix)['connection_state'] == 'online'
+    record('single_relay_restored_same_identity_and_live_vpn', native_session_id=live_session,
+           operation_state=recovery_snapshot['database_state'], native_reload_delta=reload_count() - reloads_before)
+    if recovery_error is not None:
+        raise recovery_error
+    replay = api(prefix + '/service:reload', body, headers=headers, status=202)
+    assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
+    operations.append(pending)
     time.sleep(3)
     assert reload_count() == reloads_before + 1
     record('single_relay_recovery_identity_and_idempotent_replay', operation_id=pending['id'],
            native_reload_delta=1, native_session_id=live_session)
-    cross_checks = []
-    for operation in operations:
-        command = operation['command_id']
-        journal = run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-agent/agent.db',
-                      "SELECT count(*),state,length(privileged_result_proof)>0 FROM command_journal "
-                      f"WHERE hex(command_id)=upper('{command.replace('-', '')}');").strip()
-        assert journal == '1|succeeded|1'
-        db_state = sql(f"SELECT state FROM operations WHERE id='{operation['id']}';")
-        assert db_state == 'succeeded'
-        cross_checks.append({'operation_id': operation['id'], 'command_id': command,
-                             'database_state': db_state, 'journal_count_state_receipt': journal})
-    audit = api('audit/events')
-    assert audit.get('items')
-    record('api_database_agent_journal_root_receipt_and_audit', cross_checks=cross_checks)
+    verify_completed_operations()
     run('sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect')
     vpn.wait(timeout=15)
     client_log.close()
