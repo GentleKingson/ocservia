@@ -258,6 +258,23 @@ def cross_check(operation):
 def certificate():
     node = os.environ['T07_NODE']
     node_path = 'nodes/' + node
+
+    def restart_node():
+        def owner():
+            return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
+                                  "owner_epoch,lease_until FROM connection_owner_fencing "
+                                  f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
+        before = owner()
+        run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
+        # A cached online flag can still describe the process we just stopped.
+        def fresh_session():
+            current = owner()
+            return current if (current['owner_epoch'] > before['owner_epoch'] and
+                               current['connection_id'] != before['connection_id'] and
+                               api(node_path)['connection_state'] == 'online') else None
+        after = wait_for('new fenced session after node restart', fresh_session)
+        record('certificate_restart_new_owner', before=before, after=after)
+
     wait_for('online before PKI', lambda: api(node_path)['connection_state'] == 'online')
     body = {'expected_version': api(node_path)['version'], 'common_name': 't07-client',
             'dns_names': ['client.example.test'], 'key_bits': 2048, 'reason': 'T07 node-local CSR'}
@@ -267,17 +284,19 @@ def certificate():
     cert_path = 'certificates/' + cert['id']
     operation_ids = [cert['operation_id']]
     wait_for('root CSR', lambda: api(cert_path)['state'] == 'csr_ready')
+    cross_check(api('operations/' + operation_ids[-1]))
+    record('certificate_csr_ready', certificate_id=cert['id'], operation_id=operation_ids[-1])
     key_path = '/var/lib/ocservia-privd/certificates/' + cert['id'] + '.key.pem'
     key_stat = run('sudo', 'stat', '-c', '%u:%g:%a:%h', key_path).strip()
     assert key_stat.split(':')[0] == '0' and key_stat.split(':')[2:] == ['600', '1']
     # Compare only a public-key digest; never export the unwrapped node key.
     public_before = run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
-    run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
-    wait_for('node after CSR restart', lambda: api(node_path)['connection_state'] == 'online')
+    restart_node()
     assert public_before == run('sudo', 'openssl', 'pkey', '-in', key_path, '-pubout')
     issue_approval = approval('certificate.issue', 'certificate', cert['id'])
     cert = api(cert_path + ':issue', {'approval_id': issue_approval, 'reason': 'T07 signed CSR'})
     assert cert['state'] == 'issued'
+    record('certificate_issued', certificate_id=cert['id'], version=cert['version'])
     reason = 'T07 one-use P12 export'
     artifact = str(uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76) |
                             (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)))
@@ -293,8 +312,9 @@ def certificate():
     (WORK / 'private/p12-password').write_text(grant['password'])
     (WORK / 'private/p12-token').write_text(grant['download_token'])
     wait_for('P12 root export', lambda: api('operations/' + operation_ids[-1])['state'] == 'succeeded')
-    run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
-    wait_for('node after P12 restart', lambda: api(node_path)['connection_state'] == 'online')
+    cross_check(api('operations/' + operation_ids[-1]))
+    record('certificate_p12_ready', certificate_id=cert['id'], operation_id=operation_ids[-1])
+    restart_node()
     download_headers = {'X-Artifact-Token': grant['download_token']}
     blob = api('artifacts/' + grant['artifact_id'], headers=download_headers, raw=True)
     (WORK / 'private/download.p12').write_bytes(blob)
