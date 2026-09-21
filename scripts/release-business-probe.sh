@@ -386,7 +386,7 @@ mkdir -p "${HOME}/.pki/nssdb"
 if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
 certutil -A -d "sql:${HOME}/.pki/nssdb" -n t07 -t C,, -i "${work}/ca.crt"
 python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
-node "${ROOT}/scripts/release-business-browser.mjs"
+NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
 python3 "${ROOT}/scripts/release-business-api.py" browser_verify
 record real_browser_subset
 sudo ip netns add t07-client
