@@ -887,7 +887,9 @@ async function submitPolicy(): Promise<void> {
           <template
             v-if="
               certificate.state === 'csr_ready' ||
-              certificate.state === 'signer_unavailable'
+              certificate.state === 'signer_unavailable' ||
+              certificate.state === 'issued' ||
+              certificate.state === 'expiring'
             "
           >
             <label for="certificate-approval">{{ $t("approvalId") }}</label>
