@@ -11,11 +11,14 @@ source <(sed -n '/^configure_auth_peers() {/,/^}/p' scripts/release-business-pro
 (
   # shellcheck disable=SC2317 # Called by the sourced configure_auth_peers.
   compose() { printf '%s\n' "$*" >>"${fixture}/auth-order"; }
+  # shellcheck disable=SC2317 # Called by the sourced configure_auth_peers.
+  python3() { printf '%s\n' "python3 $*" >>"${fixture}/auth-order"; }
   configure_auth_peers
 )
 [[ "$(sed -n '1p' "${fixture}/auth-order")" == 'up -d --no-deps --wait control-plane' ]]
-[[ "$(sed -n '2p' "${fixture}/auth-order")" == 'start --wait transportd' ]]
-[[ "$(wc -l <"${fixture}/auth-order")" == 2 ]]
+[[ "$(sed -n '2p' "${fixture}/auth-order")" == 'start transportd' ]]
+[[ "$(sed -n '3p' "${fixture}/auth-order")" == "python3 ${ROOT}/scripts/release-business-api.py transport_ready" ]]
+[[ "$(wc -l <"${fixture}/auth-order")" == 3 ]]
 set +e
 (
   set -e

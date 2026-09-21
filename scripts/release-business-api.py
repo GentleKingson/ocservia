@@ -120,6 +120,20 @@ def local():
     record('local_auth_and_workspace_isolation', identity_ids=ids)
 
 
+def transport_ready():
+    container = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'transportd').strip()
+    assert container
+
+    def healthy():
+        state = json.loads(run('docker', 'inspect', '--format', '{{json .State}}', container))
+        if state['Status'] != 'running' or state['Health']['Status'] == 'unhealthy':
+            raise RuntimeError('transport failed during ordered authentication startup: ' + json.dumps(state))
+        return state['Health']['Status'] == 'healthy'
+
+    wait_for('transport health after Controller readiness', healthy)
+    record('auth_transport_ready', container_id=container)
+
+
 def trust_controller():
     container = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
     pid = run('docker', 'inspect', '--format', '{{.State.Pid}}', container).strip()
@@ -753,7 +767,7 @@ def business():
 
 if __name__ == '__main__':
     phase = sys.argv[1]
-    if phase not in ('local', 'oidc', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
+    if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
                      'browser_prepare', 'browser_verify', 'business'):
         raise SystemExit('unknown phase')
     globals()[phase]()

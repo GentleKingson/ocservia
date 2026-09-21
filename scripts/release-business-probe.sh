@@ -44,7 +44,8 @@ configure_auth_peers() {
   # --no-deps makes ordering our responsibility. The launcher stops both peers;
   # wait for the trust backend before starting the unchanged transport container.
   compose up -d --no-deps --wait control-plane
-  compose start --wait transportd
+  compose start transportd
+  python3 "${ROOT}/scripts/release-business-api.py" transport_ready
 }
 cleanup() {
   local code=$?
