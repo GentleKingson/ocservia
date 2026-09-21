@@ -4,6 +4,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
+# The auth fixture changes only Controller settings. Never race the unchanged
+# transport container against its trust backend, or continue after failed health.
+# shellcheck disable=SC1090
+source <(sed -n '/^configure_auth_peers() {/,/^}/p' scripts/release-business-probe.sh)
+(
+  # shellcheck disable=SC2317 # Called by the sourced configure_auth_peers.
+  compose() { printf '%s\n' "$*" >>"${fixture}/auth-order"; }
+  configure_auth_peers
+)
+[[ "$(sed -n '1p' "${fixture}/auth-order")" == 'up -d --no-deps --wait control-plane' ]]
+[[ "$(sed -n '2p' "${fixture}/auth-order")" == 'start --wait transportd' ]]
+[[ "$(wc -l <"${fixture}/auth-order")" == 2 ]]
+set +e
+(
+  set -e
+  # shellcheck disable=SC2317 # Called by the sourced configure_auth_peers.
+  compose() { printf '%s\n' "$*" >>"${fixture}/auth-failed-order"; return 19; }
+  configure_auth_peers
+)
+auth_status=$?
+set -e
+[[ "${auth_status}" == 19 && "$(wc -l <"${fixture}/auth-failed-order")" == 1 ]]
 # Exercise the same local clone/check-out path from a genuinely shallow repo.
 # shellcheck disable=SC1090
 source <(sed -n '/^checkout_baseline_source() {/,/^}/p' scripts/release-controller-upgrade-smoke.sh)

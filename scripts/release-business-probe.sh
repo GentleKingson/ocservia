@@ -40,6 +40,12 @@ unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL OCSERV_O
 unset OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH OCSERV_MANAGED_NODE_SYSROOT OCSERV_MANAGED_NODE_OS_RELEASE
 compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
 record() { printf '%s\n' "$1" >>"${ARTIFACT_DIR}/checkpoints.txt"; }
+configure_auth_peers() {
+  # --no-deps makes ordering our responsibility. The launcher stops both peers;
+  # wait for the trust backend before starting the unchanged transport container.
+  compose up -d --no-deps --wait control-plane
+  compose start --wait transportd
+}
 cleanup() {
   local code=$?
   trap - EXIT ERR
@@ -47,6 +53,12 @@ cleanup() {
   if [[ -f "${work}/private.log" ]]; then
     {
       compose logs --no-color
+      for service in control-plane transportd; do
+        container="$(compose ps -a -q "${service}")"
+        if [[ -n "${container}" ]]; then
+          docker inspect --format '{{json .State}}' "${container}"
+        fi
+      done
       docker logs "${oidc_container}"
       sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv
     } >>"${work}/private.log" 2>&1
@@ -224,16 +236,15 @@ provider_pid="$(docker inspect --format '{{.State.Pid}}' "${oidc_container}")"
 sudo nsenter --target "${provider_pid}" --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
   python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
 signer_pid=$!
-# The official launcher stops both socket peers before preparing their runtime.
-compose up -d --no-deps --wait control-plane transportd
+configure_auth_peers
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 python3 "${ROOT}/scripts/release-business-api.py" oidc
 export OCSERV_LOCAL_AUTH_ENABLED=false
-compose up -d --no-deps --wait control-plane transportd
+configure_auth_peers
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 python3 "${ROOT}/scripts/release-business-api.py" oidc
 export OCSERV_LOCAL_AUTH_ENABLED=true
-compose up -d --no-deps --wait control-plane transportd
+configure_auth_peers
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c 'SHOW server_version' >>"${ARTIFACT_DIR}/environment.txt"
 record real_external_oidc
