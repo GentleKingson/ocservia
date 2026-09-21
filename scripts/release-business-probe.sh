@@ -224,15 +224,16 @@ provider_pid="$(docker inspect --format '{{.State.Pid}}' "${oidc_container}")"
 sudo nsenter --target "${provider_pid}" --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
   python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
 signer_pid=$!
-compose up -d --no-deps --wait control-plane
+# The official launcher stops both socket peers before preparing their runtime.
+compose up -d --no-deps --wait control-plane transportd
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 python3 "${ROOT}/scripts/release-business-api.py" oidc
 export OCSERV_LOCAL_AUTH_ENABLED=false
-compose up -d --no-deps --wait control-plane
+compose up -d --no-deps --wait control-plane transportd
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 python3 "${ROOT}/scripts/release-business-api.py" oidc
 export OCSERV_LOCAL_AUTH_ENABLED=true
-compose up -d --no-deps --wait control-plane
+compose up -d --no-deps --wait control-plane transportd
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c 'SHOW server_version' >>"${ARTIFACT_DIR}/environment.txt"
 record real_external_oidc
@@ -285,6 +286,7 @@ docker run -d --name "${T07_RELAY_CONTAINER}" --read-only --cap-drop ALL \
   "${BUILDX_BUILDER}-relay" --config-path /etc/iroh-relay/relay.toml
 export T07_TRANSPORT_CONTAINER
 T07_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
+[[ -n "${T07_TRANSPORT_CONTAINER}" ]]
 sudo openssl pkey -pubin -in "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" -noout
 [[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem")" == 0:65532:440:1 ]]
 docker inspect "${T07_TRANSPORT_CONTAINER}" | jq -e '.[0].Mounts | all(.[]; .Destination != "/run/secrets/controller_command_signing_key")' >/dev/null
