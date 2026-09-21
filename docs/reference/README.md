@@ -7,6 +7,7 @@ operating the system.
 ## System and security
 
 - [Architecture and trust boundaries](../architecture.md)
+- [1.0 support and versioning policy](support-policy.md)
 - [Production deployment and Controller lifecycle](../operations/production-deployment.md)
 - [Agent package lifecycle](../operations/agent-lifecycle.md)
 - [Bootstrap endpoint hosting and trust](../operations/bootstrap-hosting.md)
