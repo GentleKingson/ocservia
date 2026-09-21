@@ -126,6 +126,31 @@ mv "${OCSERV_SECRET_DIR}/verification-saved.pem" "${OCSERV_SECRET_DIR}/controlle
 ln "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" "${OCSERV_SECRET_DIR}/verification-hardlink.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 rm "${OCSERV_SECRET_DIR}/verification-hardlink.pem"
+"${ROOT}/deploy/production/compose.sh" config --format json |
+  jq -e '.secrets | has("relay_ca") | not' >/dev/null
+"${owner[@]}" install -o 0 -g 0 -m 444 "${OCSERV_SECRET_DIR}/tls.crt" "${OCSERV_SECRET_DIR}/relay-ca.pem"
+"${ROOT}/deploy/production/compose.sh" config --format json |
+  jq -e --arg dir "${OCSERV_SECRET_DIR}" '
+    .secrets.relay_ca.file == ($dir + "/relay-ca.pem") and
+    any(.services.transportd.secrets[]; .source == "relay_ca") and
+    all(.services | to_entries[] | select(.key != "transportd") | .value.secrets[]?; .source != "relay_ca")' >/dev/null
+"${owner[@]}" chmod 644 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+"${owner[@]}" chmod 444 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+"${owner[@]}" chown 65532:65532 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+"${owner[@]}" chown 0:0 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+mv "${OCSERV_SECRET_DIR}/relay-ca.pem" "${OCSERV_SECRET_DIR}/relay-ca.saved"
+ln -s relay-ca.saved "${OCSERV_SECRET_DIR}/relay-ca.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+rm "${OCSERV_SECRET_DIR}/relay-ca.pem"
+mv "${OCSERV_SECRET_DIR}/relay-ca.saved" "${OCSERV_SECRET_DIR}/relay-ca.pem"
+ln "${OCSERV_SECRET_DIR}/relay-ca.pem" "${OCSERV_SECRET_DIR}/relay-ca.link"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+rm "${OCSERV_SECRET_DIR}/relay-ca.link" "${OCSERV_SECRET_DIR}/relay-ca.pem"
+"${owner[@]}" install -o 0 -g 0 -m 444 /dev/null "${OCSERV_SECRET_DIR}/relay-ca.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+rm "${OCSERV_SECRET_DIR}/relay-ca.pem"
 chmod 0770 "${work}"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 chmod 0700 "${work}"

@@ -64,8 +64,7 @@ cleanup() {
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),t07_status:"BLOCKED",
       planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
-      blockers:["private Relay CA adaptations are not unchanged production launchers",
-        "independent human operators not provisioned; separate real Local identities only",
+      blockers:["independent human operators not provisioned; separate real Local identities only",
         "positive configuration apply lacks reviewed complete matched-node contract"],
       deferred:["T09/formal release: immutable published Release download/bootstrap"],
       not_applicable:["T08 independent failure domains and formal SLO"]}' >"${ARTIFACT_DIR}/result.json"
@@ -150,6 +149,7 @@ sudo chown 65532:65532 "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECR
 sudo chmod 400 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem" \
   "${OCSERV_SECRET_DIR}/controller-iroh.key" "${OCSERV_SECRET_DIR}/relay-access-token"
 sudo install -o root -g 65532 -m 440 "${work}/command.pub.pem" "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+sudo install -o root -g root -m 444 "${work}/ca.crt" "${OCSERV_SECRET_DIR}/relay-ca.pem"
 sudo chown 999:999 "${work}/backup"
 docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 args=()
@@ -261,6 +261,7 @@ printf '%s\n' "${EXPECTED_RELEASE_KEY_SHA256}" | sudo tee /etc/ocservia/trusted-
 sudo chmod 644 /etc/ocservia/trusted-release-key.sha256
 sudo touch /etc/ocservia/agent-install-production-relays
 sudo dpkg -i "${deb}"
+sudo install -o root -g root -m 444 "${work}/ca.crt" /etc/ocservia-agent/relay-ca.pem
 export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${OCSERV_RELAY_URL_A}" RELAY_URL_B=
 export RELAY_ACCESS_TOKEN_SOURCE="${OCSERV_SECRET_DIR}/relay-access-token"
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${work}/command.pub.pem"
@@ -282,20 +283,6 @@ docker run -d --name "${T07_RELAY_CONTAINER}" --read-only --cap-drop ALL \
   -v "${work}/relay:/run/relay-secrets:ro" \
   -v "${ROOT}/deploy/g6-readiness/relay.toml:/etc/iroh-relay/relay.toml:ro" \
   "${BUILDX_BUILDER}-relay" --config-path /etc/iroh-relay/relay.toml
-# Keep the original single-relay private-CA limitation explicit. Recreate only
-# transportd from the rendered production descriptor with its explicit CA flag;
-# do not change the checkout, signed images, authorization, or TLS verification.
-compose config --format json >"${work}/compose.json"
-python3 - "${work}" <<'PY'
-import json, pathlib, sys
-work = pathlib.Path(sys.argv[1])
-config = json.loads((work / 'compose.json').read_text())
-service = config['services']['transportd']
-service['command'] += ['--relay-ca-file', '/run/t07-ca.crt']
-service['volumes'].append({'type': 'bind', 'source': str(work / 'ca.crt'), 'target': '/run/t07-ca.crt', 'read_only': True})
-(work / 'relay-compose.json').write_text(json.dumps(config))
-PY
-docker compose -f "${work}/relay-compose.json" up -d --no-deps transportd
 export T07_TRANSPORT_CONTAINER
 T07_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
 sudo openssl pkey -pubin -in "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" -noout
@@ -303,7 +290,10 @@ sudo openssl pkey -pubin -in "${OCSERV_SECRET_DIR}/controller-command-verificati
 docker inspect "${T07_TRANSPORT_CONTAINER}" | jq -e '.[0].Mounts | all(.[]; .Destination != "/run/secrets/controller_command_signing_key")' >/dev/null
 docker exec "${T07_TRANSPORT_CONTAINER}" test ! -e /run/secrets/controller_command_signing_key
 printf 'SPKI public key, regular one-link root:65532 0440; no Controller signing-key mount\n' >"${ARTIFACT_DIR}/transport-key-boundary.txt"
-sudo install -m 644 "${work}/ca.crt" /etc/ocservia-agent/t07-relay-ca.crt
+[[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/relay-ca.pem")" == 0:0:444:1 ]]
+[[ "$(sudo stat -c '%u:%g:%a:%h' /etc/ocservia-agent/relay-ca.pem)" == 0:0:444:1 ]]
+docker exec "${T07_TRANSPORT_CONTAINER}" cat /proc/1/cmdline | tr '\0' '\n' | grep -Fx /run/secrets/relay_ca
+printf 'Additional public Relay CA: one-link root:root 0444 on Controller and node; official transport launcher flag present\n' >"${ARTIFACT_DIR}/relay-ca-boundary.txt"
 sudo openssl pkey -in /etc/ocservia-agent/user-password-seal-private.pem -pubout >"${work}/user.pub.pem"
 export T07_ENDPOINT T07_USER_HASH T07_P12_HASH
 T07_ENDPOINT="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTROLLER_ENDPOINT_ID}" --prepare-enrollment)"
@@ -311,35 +301,17 @@ T07_USER_HASH="$(openssl pkey -pubin -in "${work}/user.pub.pem" -outform DER | s
 T07_P12_HASH="$(sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout -outform DER | sha256sum | cut -d' ' -f1)"
 python3 "${ROOT}/scripts/release-business-api.py" token
 sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
-sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --controller "${CONTROLLER_ENDPOINT_ID}" \
-  --enrollment-token-file /etc/ocservia-agent/enrollment-token --enrollment-environment production \
-  --user-password-seal-key-id t07-user --user-password-seal-public-key-sha256 "${T07_USER_HASH}" \
-  --p12-password-seal-key-id t07-p12 --p12-password-seal-public-key-sha256 "${T07_P12_HASH}" \
-  --relay-mode custom --relay-url "${RELAY_URL_A}" --relay-token-file /etc/ocservia-agent/relay-access-token \
-  --relay-ca-file /etc/ocservia-agent/t07-relay-ca.crt >"${work}/enrollment.log"
+bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFACT_DIR}/managed-enrollment.log"
+grep -q '^PENDING_APPROVAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
 export T07_NODE
-T07_NODE="$(sed -nE '/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/p' "${work}/enrollment.log")"
+T07_NODE="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
 [[ "${T07_NODE}" =~ ^[0-9a-f-]{36}$ ]]
 printf '%s\n' "${T07_NODE}" >"${work}/signer-node"
 sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout >"${work}/p12.pub.pem"
-sudo rm /etc/ocservia-agent/enrollment-token
-cat >"${work}/agent.env" <<EOF
-CONTROLLER_ENDPOINT_ID=${CONTROLLER_ENDPOINT_ID}
-NODE_ID=${T07_NODE}
-AGENT_ENDPOINT_ID=${T07_ENDPOINT}
-CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=/etc/ocservia-agent/controller-command-verification-key.pem
-USER_PASSWORD_SEAL_KEY_ID=t07-user
-USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${T07_USER_HASH}
-P12_PASSWORD_SEAL_KEY_ID=t07-p12
-P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${T07_P12_HASH}
-EOF
-sudo install -o root -g ocserv-agent -m 640 "${work}/agent.env" /etc/ocservia-agent/agent.env
-sed 's|exec /usr/libexec/ocservia/ocservia-agent "\$@"|exec /usr/libexec/ocservia/ocservia-agent "$@" --relay-ca-file /etc/ocservia-agent/t07-relay-ca.crt|' \
-  "${ROOT}/deploy/production/systemd/agent-relays.sh" >"${work}/agent-relays"
-sudo install -m 755 "${work}/agent-relays" /usr/libexec/ocservia/t07-agent-relays
-sudo install -d -m 755 /etc/systemd/system/ocservia-agent.service.d
-printf '[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/t07-agent-relays\n' | \
-  sudo tee /etc/systemd/system/ocservia-agent.service.d/99-t07-ca.conf >/dev/null
+sudo test ! -e /etc/ocservia-agent/enrollment-token
+cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/ocservia-agent-relays
+[[ ! -e /etc/systemd/system/ocservia-agent.service.d/99-t07-ca.conf ]]
+record official_managed_enrollment_and_unchanged_launchers
 # Prevent direct UDP connectivity from masking the single-Relay outage.
 sudo iptables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
 sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key

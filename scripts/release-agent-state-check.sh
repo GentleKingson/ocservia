@@ -8,7 +8,7 @@ state() {
   for path in /etc/ocservia-agent/agent.env /etc/ocservia-agent/controller-command-verification-key.pem \
     /etc/ocservia/release-signing.pub.pem /etc/ocservia/trusted-release-key.sha256 \
     /etc/ocservia-agent/user-password-seal-private.pem /etc/ocservia-agent/p12-password-seal-private.pem \
-    /etc/ocservia-agent/relays.env /etc/ocservia-agent/relay-access-token \
+    /etc/ocservia-agent/relays.env /etc/ocservia-agent/relay-access-token /etc/ocservia-agent/relay-ca.pem \
     /var/lib/ocservia-agent/identity/identity-sentinel \
     /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint; do
     test -f "${path}"
@@ -73,6 +73,11 @@ case "${mode}" in
     install -d -o root -g root -m 755 /etc/ocservia
     install -o root -g root -m 644 /usr/share/ocservia-agent/release-signing.pub.pem /etc/ocservia/release-signing.pub.pem
     install -o root -g root -m 600 /usr/share/ocservia-agent/trusted-release-key.sha256 /etc/ocservia/trusted-release-key.sha256
+    test ! -e /etc/ocservia-agent/relay-ca.pem
+    test ! -L /etc/ocservia-agent/relay-ca.pem
+    openssl req -new -x509 -newkey ed25519 -nodes -days 1 -subj /CN=upgrade-relay-ca \
+      -addext basicConstraints=critical,CA:TRUE -keyout /dev/null -out /etc/ocservia-agent/relay-ca.pem
+    chmod 444 /etc/ocservia-agent/relay-ca.pem
     controller="$(sed -n 's/^CONTROLLER_ENDPOINT_ID=//p' /etc/ocservia-agent/agent.env)"
     runuser -u ocserv-agent -- /usr/libexec/ocservia/ocservia-agent \
       --identity-dir /var/lib/ocservia-agent/identity --controller "${controller}" --prepare-enrollment >"${evidence}/endpoint-id"

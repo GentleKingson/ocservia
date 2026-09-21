@@ -30,11 +30,13 @@ The following limitations are deliberately retained, not scored as PASS:
   Signed candidate lifecycle and managed-node preparation/convergence remain
   T07 requirements. No fabricated tag, download stub, unsigned substitution or
   published-release identity is used.
-- The private Relay CA uses the existing explicit binary CA option, a rendered
-  production transport descriptor and a test-only systemd launcher copy, as in
-  single-Relay validation. Enrollment uses the real CLI with that CA. This is
-  strict TLS but not unchanged production launchers or the complete one-command
-  managed-node enrollment path.
+- The private Relay CA is provisioned through the documented protected public
+  CA files. The shipped Compose overlay and native launcher use the existing
+  strict-TLS binary option without descriptor/launcher edits. Enrollment and
+  its final node configuration are produced by the managed-node installer;
+  preparation, PENDING_APPROVAL and SERVICES_ACTIVE checkpoints remain separate.
+  This does not turn the preinstalled signed candidate into a published Release
+  download test.
 - Local requester and approver authenticate normally as different identities;
   no database-inserted sessions or devAuth are used. This verifies self-approval
   rejection, not independent custody by two people. Database writes are limited
