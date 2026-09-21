@@ -14,21 +14,56 @@ try {
   const context = await browser.newContext({ baseURL: "https://localhost", locale: "en-US" });
   const page = await context.newPage();
   const approver = await browser.newContext({ baseURL: "https://localhost" });
+  const approvalPage = await approver.newPage();
+  const requesterApprovalPage = await context.newPage();
   const headers = { Origin: "https://localhost", "X-Workspace-ID": workspace };
-  const approverLogin = await approver.request.post("/api/v1/auth/login", { headers, data: {
-    username: "t07-approver", password: fs.readFileSync(`${work}/private/approver-password`, "utf8").trim(),
-  } });
-  expect(approverLogin.status()).toBe(204);
+  await approvalPage.goto("/approvals");
+  await expect(approvalPage).toHaveURL(/\/login$/);
+  await approvalPage.getByLabel("Username", { exact: true }).fill("t07-approver");
+  await approvalPage.getByLabel("Password", { exact: true }).fill(fs.readFileSync(`${work}/private/approver-password`, "utf8").trim());
+  await approvalPage.getByRole("button", { name: "Sign in", exact: true }).click();
+  await approvalPage.waitForURL("https://localhost/");
+  await expect(approvalPage.getByLabel("Workspace")).toContainText("T07");
+  if (await approvalPage.getByLabel("Workspace").inputValue() !== workspace)
+    await approvalPage.getByLabel("Workspace").selectOption(workspace);
+  async function reviewInBrowser(value) {
+    const path = `/approvals/${value.id}`;
+    await requesterApprovalPage.goto(path);
+    await expect(requesterApprovalPage.getByTestId("approval-hash")).toHaveText(value.request_hash);
+    await requesterApprovalPage.getByLabel("Decision reason").fill("T07 self-approval must fail");
+    await requesterApprovalPage.getByRole("checkbox").check();
+    const self = requesterApprovalPage.waitForResponse(response => response.url().endsWith(`/approval-requests/${value.id}:approve`));
+    await requesterApprovalPage.getByRole("button", { name: "Approve", exact: true }).click();
+    expect((await self).status()).toBe(403);
+    await expect(requesterApprovalPage.getByRole("alert")).toContainText("Approval denied");
+
+    await approvalPage.goto(path);
+    await expect(approvalPage.getByTestId("approval-hash")).toHaveText(value.request_hash);
+    const summary = value.config_plan_summary ?? value.certificate_summary ?? value.request_summary;
+    expect(JSON.parse(await approvalPage.getByTestId("approval-summary").innerText())).toEqual(summary);
+    await approvalPage.getByLabel("Decision reason").fill("T07 separate authenticated principal");
+    await approvalPage.getByRole("checkbox").check();
+    const decision = approvalPage.waitForResponse(response => response.url().endsWith(`/approval-requests/${value.id}:approve`));
+    await approvalPage.getByRole("button", { name: "Approve", exact: true }).click();
+    const response = await decision;
+    expect(response.status()).toBe(200);
+    expect(response.request().postDataJSON().expected_request_hash).toBe(value.request_hash);
+    const accepted = await response.json();
+    expect(accepted.requester_id).not.toBe(accepted.approver_id);
+    await expect(approvalPage.getByTestId("approval-status")).toHaveText("approved");
+    await approvalPage.reload();
+    await expect(approvalPage.getByTestId("approval-status")).toHaveText("approved");
+    await expect(approvalPage.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
+    observations.push({ name: "browser_bound_approval", approval_id: value.id, action: value.action, request_hash: value.request_hash, requester_id: accepted.requester_id, approver_id: accepted.approver_id, human_custody: "NOT_VERIFIED" });
+    return value.id;
+  }
   async function approval(action, cert, extra = {}) {
     const response = await context.request.post("/api/v1/approval-requests", { headers, data: {
       action, resource_type: "certificate", resource_id: cert.id, reason: "T07 browser approval", ttl_seconds: 600, ...extra,
     } });
     expect(response.status()).toBe(201);
     const value = await response.json();
-    const data = { expected_request_hash: value.request_hash, reason: "T07 separate principal" };
-    expect((await context.request.post(`/api/v1/approval-requests/${value.id}:approve`, { headers, data })).status()).toBe(403);
-    expect((await approver.request.post(`/api/v1/approval-requests/${value.id}:approve`, { headers, data })).status()).toBe(200);
-    return value.id;
+    return reviewInBrowser(value);
   }
   await page.goto(`/nodes/${node}`);
   await expect(page).toHaveURL(/\/login$/);
@@ -60,9 +95,19 @@ try {
   await expect(page.getByText("t07-browser", { exact: true })).toBeVisible();
   await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-node.png`, fullPage: true });
 
+  const reloadApprovalResponse = await context.request.post("/api/v1/approval-requests", { headers, data: {
+    action: "service.reload", resource_type: "node", resource_id: node, reason: "T07 browser reload review", ttl_seconds: 600,
+  } });
+  expect(reloadApprovalResponse.status()).toBe(201);
+  const reloadApprovalId = await reviewInBrowser(await reloadApprovalResponse.json());
+  await approvalPage.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-approval.png`, fullPage: true });
+  await approvalPage.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => approvalPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await approvalPage.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-approval-mobile.png`, fullPage: true });
+  await approvalPage.setViewportSize({ width: 1280, height: 720 });
   await page.getByTitle("Reload Ocserv", { exact: true }).click();
   await page.getByLabel("Reason", { exact: true }).fill("T07 browser approved reload");
-  await page.getByLabel("Approval ID").fill(fs.readFileSync(`${work}/browser-approval`, "utf8").trim());
+  await page.getByLabel("Approval ID").fill(reloadApprovalId);
   const reloaded = page.waitForResponse(response => response.url().endsWith(`/nodes/${node}/service:reload`) && response.request().method() === "POST");
   await page.getByRole("button", { name: "Confirm", exact: true }).click();
   const reloadResponse = await reloaded;
