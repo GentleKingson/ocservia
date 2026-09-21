@@ -538,13 +538,15 @@ def business():
     relay = os.environ['T07_RELAY_CONTAINER']
     reload_approval = approval('service.reload', 'node', node)
 
-    # A grant belongs to its requester, not to the account that approved it.
+    # The bootstrap SecurityAdmin can approve but cannot reload a service.
+    # An approval ID must not grant the approver that missing RBAC permission.
     denied = api(prefix + '/service:reload', {'reason': 'T07 isolated validation', 'ttl_seconds': 300},
                  role='approver', headers={'Idempotency-Key': secrets.token_hex(16),
                                           'If-Match': f'"revision-{api(prefix)["version"]}"',
-                                          'X-Approval-ID': reload_approval}, status=409)
-    assert denied['type'] == 'https://ocservia.dev/problems/approval-required'
-    record('approval_cannot_transfer_to_approver', approval_id=reload_approval)
+                                          'X-Approval-ID': reload_approval}, status=403)
+    assert denied['type'] == 'https://ocservia.dev/problems/forbidden'
+    assert api('approval-requests/' + reload_approval)['status'] == 'approved'
+    record('approval_does_not_override_approver_rbac', approval_id=reload_approval)
 
     def reload_count():
         return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
