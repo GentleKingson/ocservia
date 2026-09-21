@@ -25,8 +25,11 @@ and the final `SERVICES_ACTIVE` convergence use the shipped installer.
 The following limitations are deliberately retained, not scored as PASS:
 
 - An unpublished candidate cannot exercise the fixed GitHub Release download
-  and versioned Controller bootstrap. No fabricated tag, download stub, unsigned
-  substitution or published-release identity is used.
+  and versioned Controller bootstrap. This publication-dependent evidence is
+  deferred to T09/formal release, not a perpetual prepublication T07 blocker.
+  Signed candidate lifecycle and managed-node preparation/convergence remain
+  T07 requirements. No fabricated tag, download stub, unsigned substitution or
+  published-release identity is used.
 - The private Relay CA uses the existing explicit binary CA option, a rendered
   production transport descriptor and a test-only systemd launcher copy, as in
   single-Relay validation. Enrollment uses the real CLI with that CA. This is
@@ -57,12 +60,26 @@ task containers, network namespace, builder and private directory; the native
 installation lives only on the disposable hosted runner. Do not generalize this
 cleanup to a shared host.
 
-To close T07, repeat the missing official installation paths with the reviewed
-signed candidate, independently controlled operators and provisioned external
-services; obtain real positive and critical rejection evidence for every promised
-workflow. Preserve the finite compatibility exclusions in
+To close T07, cover the prepublication production installation paths with the
+reviewed signed candidate, independently controlled operators and provisioned
+external services; obtain real positive and critical rejection evidence for
+every promised workflow. Publication-dependent immutable download paths belong
+to T09/formal release. Positive configuration apply remains unavailable until
+the complete matched-node configuration/TLS SecretRef contract is reviewed and
+accepted; if promised for 1.0, this still blocks T07/readiness. Preserve the
+finite compatibility exclusions and matched-release recovery boundary in
 [stable contracts](../reference/stable-contracts.md). Do not import earlier T03,
 T04, T05 or T06 results as runtime acceptance of the new candidate.
+
+Freeze the final candidate SHA/tree only after product, deployment, contract
+and probe edits stop. Keep later evidence outside the repository. Every final
+result must name that SHA, never splice artifacts from earlier commits or
+attempts. Changes to Compose, the verification-key contract and native units
+require a fresh complete `release-upgrade.yml` run from v0.6.2 with
+`version=0.7.0`, `candidate_sha` equal to the frozen SHA and
+`session_compatibility=false`, `session_only=false`, `business_only=false`.
+All four native Agent/Controller architecture jobs and the aggregate must pass
+in the same run/attempt. Business success does not replace this gate.
 
 Existing [single-Relay](single-relay-validation.md) and
 [cross-VM enrollment](real-e2e.md) profiles retain their original scope.
