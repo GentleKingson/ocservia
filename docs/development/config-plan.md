@@ -34,6 +34,8 @@ validation state, warnings, and a secret-safe diff. The response never contains
 SecretRef keys or current secret values. A production apply approval can be
 requested only after the plan is valid and unexpired; its independent approval
 record is bound to the candidate hash, node, expected revision, and expiry.
+Planning and apply never turn a stale caller revision into success by rereading
+and substituting the current revision; a stale expected revision fails.
 
 Before rolling back configuration planning, stop new plan creation and reconcile
 or expire every nonterminal plan command. The down migration refuses to proceed

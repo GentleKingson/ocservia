@@ -18,7 +18,12 @@ shown offline after its latest heartbeat is more than 90 seconds old.
   owner-managed monthly shard tables and a durable shard catalog. Runtime
   writers do not create or drop these objects. Scheduler maintenance builds
   5-minute and 1-hour rollups and applies the 14-day, 90-day, and 13-month
-  retention periods idempotently.
+  retention periods idempotently. Rollups recompute the full accepted 14-day
+  lateness window starting at each resolution's complete UTC bucket, and each
+  retention invocation deletes at most 1,000 expired rows per rollup table and
+  retires at most one expired month. Retention cutoffs are checked against
+  server time and cannot move into the future; the oldest retirement candidate
+  is aggregated before its raw data becomes unavailable.
 - The Controller accepts snapshot, metric, and security-observation timestamps
   from the preceding 14 days through five minutes in the future. Events outside
   that window are rejected before backend partition/shard selection.

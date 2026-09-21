@@ -207,7 +207,7 @@ With push/remote-run authorization, select the candidate branch in Actions or
 run `gh workflow run ci.yml --ref <candidate-branch> -f profile=full`.
 Use `profile=quick` for the other profile. Record the actual candidate SHA,
 cache state and job/step timings. Local BuildServer results are not GitHub CI
-acceptance. See [the implementation measurements](ci-core-smoke-2026-09-19.md).
+acceptance.
 
 ## Release packages workflow
 

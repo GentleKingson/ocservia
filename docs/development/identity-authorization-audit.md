@@ -50,7 +50,12 @@ separate event. Every new row authenticates its canonical event hash with a
 domain-separated application HMAC; signed checkpoints use a separate key.
 Audit rows and checkpoints are append-only, and the verification endpoint checks
 the hash chain, every event MAC, and the latest checkpoint. A failed audit insert rolls back
-the business transaction.
+the business transaction. Chain hashing uses the persisted microsecond clock
+value, and summaries are parsed to their logical JSON representation before
+canonicalization, so writer and reader agree even for whitespace around a
+top-level JSON `null`; the historical v1 float64 numeric rounding is
+deliberately preserved rather than re-signed. Audit append retains its
+per-workspace transaction lock; verification reads at repeatable read.
 
 ## Local authentication core (P1)
 
@@ -220,57 +225,6 @@ it never reopens Bootstrap.
 
 R4 follows OWASP's [least privilege and deny-by-default authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)
 and [current-password verification for password changes](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
-
-### R4 verification (2026-09-08)
-
-This subsection is historical evidence for the starting SHA below, not current
-multi-backend or release acceptance. Use [Production authentication](../operations/authentication.md)
-for current operating steps; the original results and limits are retained.
-
-Starting SHA: `002a42c0ef1a5b14f352eec7c8427504fff953de`; clean worktree.
-Reference `7e463a34bc8363021daeae12101d3cbd215e24ae` is an ancestor. No commit,
-PR, deployment or real-deployment account creation/reset was performed.
-
-All runtime checks ran through `ssh BuildServer`, in the private directory
-`/tmp/ocservia-r4.OG6by4`, with a dedicated PostgreSQL 17 container and separate
-fresh, pre-R4 upgrade, existing-authority and Go-test databases. Migrations used
-the Owner connection; CLI, HTTP and integration mutations used `ocservia_app`.
-
-- Before the fix, an actual one-shot Bootstrap followed by HTTP Local creation
-  and elevation request succeeded, but both requester and unprivileged second
-  user received 403 on approval; binding creation failed. No elevated identity
-  was inserted as a shortcut to claim this path worked.
-- Fresh and legacy single-admin CLI runs each had exactly one success under
-  concurrent initialization. Real HTTP creation, independent approval and
-  PlatformAdmin binding then succeeded. Self-approval remained 403. Repeats,
-  including after loss of an administrator, were rejected.
-- Injected approver-audit failure rolled back legacy completion: pending stayed
-  true, approver remained null and no approver credential existed. Fresh
-  bootstrap and self-change audit rollback are covered by Go integration tests.
-- HTTP tests covered correct/incorrect current password, strict self-only body,
-  old-session revocation, reset without approval (409), reset/change/login and
-  disable/change/login races, mutual admin disable (one 204, one 401), and last
-  effective administrator rejection (409). Existing source admission 429 was
-  honored using Retry-After rather than weakening the limiter.
-- An explicitly pre-existing OIDC SecurityAdmin migration fixture closed the
-  exception without changing identity/credential/binding snapshots. This fixture
-  was only an upgrade compatibility test, not fresh-initialization evidence.
-- Runtime checks confirmed no Superuser/CreateDB/CreateRole/BypassRLS, no Owner
-  membership or table ownership, no marker DELETE or workspace-column UPDATE;
-  only the three completion columns gained UPDATE. Schema-33 compatibility was
-  rejected against schema 34.
-
-Passed on BuildServer: Controller build; config/app tests; targeted auth and API
-integration tests with `-race` (`TestLocal*`, `TestPassword*`), self-service issuer
-authorization test, RBAC/approvals tests; generated client build and web typecheck;
-10 OpenAPI contract tests and generated-client authentication/serialization test.
-The test staging initially needed macOS archive metadata removed and private,
-root-owned source ancestry for the existing strict-key tests; both environment
-issues were corrected without changing those security checks.
-
-Not exercised: production TLS/IdP infrastructure, personnel custody enforcement,
-or a destructive full backup/PITR restore. No complete frontend user-management
-screen, generic unlock command or broad IAM framework is part of R4.
 
 ## Break-glass
 

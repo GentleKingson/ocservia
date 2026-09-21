@@ -123,6 +123,33 @@ backend implementations of those semantics. Migration `GET_LOCK` is not the
 MySQL business-transaction lock. A commit acknowledgement error can mean an
 unknown outcome; do not blindly replay writes.
 
+Bind every domain Store participating in one business operation to the same
+`database.Tx` inside `database.Within`; never construct a store from a pool
+inside that callback, and do not split one transaction into multiple callbacks.
+`database.Within` never retries. `database.WithinRetry` is the separate opt-in
+form for database-only claim, completion, reaping and lease work: at most three
+attempts, retrying only a deadlock victim or a serialization error after an
+acknowledged rollback, while connection loss, lock timeout, ordinary constraint
+errors and unknown commits are returned rather than replayed. Its callback must
+not perform transport or other external mutations. Failures cross the Store
+boundary as neutral categories such as `database.ErrDeadlock` and
+`database.ErrSerialization`; business code does not inspect driver types or
+SQLSTATE values.
+
+Lease and fence checks read a fresh database wall clock after acquiring their
+locks, so waiting for a lock cannot revive an expired term; transaction-stable
+timestamps remain available for logical timestamps. Takeovers increment the
+retained epoch instead of deleting and recreating authority records, and old
+terms keep failing their exact owner/incarnation/connection/epoch predicates.
+MySQL/MariaDB sessions accept only the driver DSN with the `tls` parameter and
+set UTC, `READ COMMITTED`, strict SQL modes and `utf8mb4` with the backend's
+binary no-pad collation, truncating Go time values to microseconds. Their
+natural-key uniqueness uses owner-maintained exact-key side tables with guard
+rows, not prefix or digest indexes: natural-key upserts go through the domain
+Store's `LockExactKey`/`UpsertIdentity` sequence, never
+`ON DUPLICATE KEY UPDATE`, because a trigger conflict is not a native-index
+conflict.
+
 UUIDs and logical times cross the boundary through typed values. PostgreSQL
 uses native UUID/timestamp types; migrated MySQL/MariaDB domain tables use
 `VARBINARY(16)` UUIDs with exact 16-byte length constraints and unswapped RFC
