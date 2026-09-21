@@ -31,6 +31,26 @@ explicit historical security-migration allowlist. The breaking command compares
 with `origin/main`, not with every shipped release. Release-level behavioral
 evidence remains necessary even when it passes.
 
+## Approval principal boundary
+
+Baseline 1.0 and T07 require **independently controlled requester and approver
+principals**, not an organizational four-eyes or two-person rule. Each principal
+must authenticate with its own credential and session and satisfy workspace
+authorization and RBAC. Sensitive-operation approval remains bound to the exact
+request/hash and resource/revision context; self-approval returns 403 and replay
+must not expand or reuse consumed authority. Different identity IDs without
+independent authentication are not acceptance evidence. The
+[Local bootstrap procedure](../operations/authentication.md) provisions separate
+principals; it does not attest to the number of people controlling them.
+
+An automated run may exercise both principals through normal authentication
+and isolated sessions. Record this as simulated two-principal acceptance,
+never as verified human custody. Actual custody by two different people is an
+additional production-hardening or enterprise security profile, excluded from
+baseline T07 and requiring separate human evidence when a deployment selects it.
+This reviewed scope does not remove RBAC, approval binding, self-approval
+rejection, replay protection or approval requirements from runtime behavior.
+
 ## Session and command matrix
 
 This is a behavioral policy matrix, not a list of already accepted release
@@ -51,9 +71,10 @@ pairs. [`enrollment.Service.AuthorizeSession`](../../control-plane/internal/enro
 | Config revision drift | Authorization revision and applied config revision are independent. Plan binds actual `config_expected_revision`; Apply binds candidate/current hashes and desired revision. Reject stale/gapped effects; recover from exact durable evidence. | Existing ConfigPlan lookup/Apply tests and Agent/adapter revision, restart and recovery tests. |
 | Historical/unattested CSR or lost P12 credentials | No new signing from migration-legacy CSR; obtain a fresh attested CSR. P12 remains encrypted, bounded and one-use. Web credentials exist only in the current SPA memory/expiry window, not across refresh or another tab. | Certificate/secret integration, real OpenSSL adapter tests and Web certificate receipt/recovery tests. |
 
-The complete 18-payload strict-wire corpus, Go reflection, Rust descriptor
+The historical 18-payload strict-wire corpus, Go reflection, Rust descriptor
 mutation coverage, signing/fence/receipt goldens, and existing Go/Rust tests are
-retained unchanged. See [focused commands](../development/testing.md#command-wire-contracts).
+retained; complete configuration payloads add their own strict-wire cases.
+See [focused commands](../development/testing.md#command-wire-contracts).
 Do not interpret fixture success as execution of an old published Agent.
 
 ## Finite release matrix

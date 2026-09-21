@@ -1,9 +1,10 @@
 # Complete ConfigPlan Contract
 
-Status: reviewed scope, implementation present, native acceptance pending. The
+Status: reviewed scope, implementation present; exact-candidate native acceptance
+is required. The
 maintainer accepted the T07 finite plain-auth / node-local TLS proposal in the
-task conversation on 2026-09-21. This acceptance is not independent business
-approval custody and does not make the existing positive-apply exclusion PASS.
+task conversation on 2026-09-21. Contract review does not replace business
+approval or establish passing runtime acceptance.
 
 The existing v1 plan/apply payloads, semantic hashes and historical receipts
 remain unchanged. The complete profile requires a separately negotiated
@@ -59,10 +60,12 @@ materialized hash names exact file bytes, never private key contents.
 Approval binds the plan, node, both hashes, expected/current revision and
 expiry. Operations consumes it in the existing transaction that creates the
 command/outbox. Same-key replay returns the existing operation; a new key
-cannot reuse a consumed grant. Requester and approver must differ. Independent
-human custody is additional to this principal check; simulated-operator
-acceptance must explicitly exclude it rather than claim it was established.
-Production personnel requirements remain unchanged.
+cannot reuse a consumed grant. Requester and approver must be distinct,
+independently authenticated and authorized principals with separate credentials
+and sessions. Self-approval remains forbidden. Baseline 1.0/T07 does not require
+organizational custody by two people. That additional production-hardening or
+enterprise security profile needs human custody evidence; automated principal
+separation cannot establish it.
 
 New required wire fields are generated from Proto/OpenAPI, not hand-edited in
 generated files. Canonical Go/Rust hash vectors and strict-wire negative cases

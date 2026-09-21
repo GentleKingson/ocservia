@@ -37,9 +37,11 @@ The following limitations are deliberately retained, not scored as PASS:
   preparation, PENDING_APPROVAL and SERVICES_ACTIVE checkpoints remain separate.
   This does not turn the preinstalled signed candidate into a published Release
   download test.
-- Local requester and approver authenticate normally as different identities;
-  no database-inserted sessions or devAuth are used. This verifies self-approval
-  rejection, not independent custody by two people. Database writes are limited
+- Local requester and approver authenticate normally as different principals
+  with separate credentials and isolated sessions; no database-inserted sessions
+  or devAuth are used. Verify RBAC, workspace authorization, self-approval 403,
+  approval content binding and replay limits, not merely different identity IDs.
+  This does not prove independent custody by two people. Database writes are limited
   to documented initial workspace provisioning before normal Local bootstrap.
 - The dedicated HTTPS OIDC fixture exercises discovery, PKCE, callback and
   issuer/signature/nonce/code/state rejection in mixed mode, plus OIDC-only
@@ -62,11 +64,14 @@ The following limitations are deliberately retained, not scored as PASS:
 
 `result.json` therefore keeps `t07_status=NOT_EVALUATED` and explicitly records
 `operator_mode=simulated_two_principals` and human custody `NOT_VERIFIED`, even
-when the probe passes. The final evidence must record the maintainer-approved
-acceptance scope: simulated dual-role mechanics can satisfy only an explicitly
-scoped automation acceptance. Real two-person custody remains BLOCKED when
-required, or EXCLUDED by that explicit scope decision, never PASS by simulation.
-Production bootstrap's different-responsible-people requirement is unchanged.
+when the probe passes. Baseline 1.0 and T07 require independently controlled
+requester and approver principals, not an organizational two-person rule.
+Automated acceptance may authenticate and exercise both principals separately;
+it must preserve the RBAC, binding, self-approval and replay checks above.
+Actual two-person credential custody is EXCLUDED from baseline T07, never PASS
+by simulation. It is an additional production-hardening or enterprise security
+profile: a deployment selecting that profile needs independent human custody
+evidence before claiming it. Final evidence must distinguish these two scopes.
 A green Actions job is not T07 closure. Per-phase checkpoints are
 written only after assertions pass. Missing checkpoints are NOT RUN; preserve
 failures, original run/attempt and exact SHA across retries.
@@ -88,7 +93,7 @@ installation lives only on the disposable hosted runner. Do not generalize this
 cleanup to a shared host.
 
 To close T07, cover the prepublication production installation paths with the
-reviewed signed candidate, explicitly scoped operator mode and provisioned
+reviewed signed candidate, separately authenticated principals and provisioned
 external services; obtain real positive and critical rejection evidence for
 every promised workflow. Publication-dependent immutable download paths belong
 to T09/formal release. Positive configuration apply requires native acceptance
