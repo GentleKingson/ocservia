@@ -294,7 +294,18 @@ docker exec "${T07_TRANSPORT_CONTAINER}" test ! -e /run/secrets/controller_comma
 printf 'SPKI public key, regular one-link root:65532 0440; no Controller signing-key mount\n' >"${ARTIFACT_DIR}/transport-key-boundary.txt"
 [[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/relay-ca.pem")" == 0:0:444:1 ]]
 [[ "$(sudo stat -c '%u:%g:%a:%h' /etc/ocservia-agent/relay-ca.pem)" == 0:0:444:1 ]]
-docker exec "${T07_TRANSPORT_CONTAINER}" cat /proc/1/cmdline | tr '\0' '\n' | grep -Fx /run/secrets/relay_ca
+# Compose uses init:true, so PID 1 is Docker's init rather than transportd.
+docker exec "${T07_TRANSPORT_CONTAINER}" sh -c '
+  found=false
+  for executable in /proc/[0-9]*/exe; do
+    if [ "$(readlink "$executable")" = /usr/local/bin/ocservia-transportd ]; then
+      cat "${executable%exe}cmdline"
+      found=true
+    fi
+  done
+  [ "$found" = true ]
+' | tr '\0' '\n' >"${ARTIFACT_DIR}/transport-argv.txt"
+grep -Fx /run/secrets/relay_ca "${ARTIFACT_DIR}/transport-argv.txt"
 printf 'Additional public Relay CA: one-link root:root 0444 on Controller and node; official transport launcher flag present\n' >"${ARTIFACT_DIR}/relay-ca-boundary.txt"
 sudo openssl pkey -in /etc/ocservia-agent/user-password-seal-private.pem -pubout >"${work}/user.pub.pem"
 export T07_ENDPOINT T07_USER_HASH T07_P12_HASH
