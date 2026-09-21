@@ -134,10 +134,16 @@ try {
   expect(plan.materialized_hash).not.toBe(plan.candidate_hash);
   expect(plan.warnings).toEqual([]);
   expect(plan.current_unchanged && plan.staging_cleaned).toBe(true);
-  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan.png`, fullPage: true });
+  await page.locator(".config-plan-dialog").evaluate(dialog => { dialog.scrollTop = 0; });
+  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan.png` });
+  await page.locator(".config-plan-result").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-result.png` });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan-mobile.png`, fullPage: true });
+  await page.locator(".config-plan-dialog").evaluate(dialog => { dialog.scrollTop = 0; });
+  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan-mobile.png` });
+  await page.locator(".config-plan-result").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-result-mobile.png` });
   await page.setViewportSize({ width: 1280, height: 720 });
   const configApproval = await context.request.post("/api/v1/approval-requests", { headers, data: {
     action: "config.apply", resource_type: "config_plan", resource_id: plan.id, reason: "T07 browser complete plan review", ttl_seconds: 600,
@@ -146,7 +152,7 @@ try {
   const configApprovalId = await reviewInBrowser(await configApproval.json());
   await page.getByLabel("Approval ID", { exact: true }).fill(configApprovalId);
   await page.locator("#config-apply-reason").fill("T07 browser exact materialization");
-  const applying = page.waitForResponse(response => response.url().endsWith(`/config-plans/${plan.id}:apply`));
+  const applying = page.waitForResponse(response => response.url().endsWith(`/config-plans/${plan.id}/apply`) && response.request().method() === "POST");
   await page.locator(".config-plan-dialog").getByRole("button", { name: "Apply", exact: true }).click();
   const applyResponse = await applying;
   expect(applyResponse.status()).toBe(202);

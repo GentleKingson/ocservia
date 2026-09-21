@@ -427,7 +427,7 @@ def configuration():
     run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin), '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf')
     try:
         run('sudo', 'systemctl', 'daemon-reload')
-        operation = api('config-plans/' + plan['id'] + ':apply', {'approval_id': approval_id, 'reason': 'T07 native rollback'},
+        operation = api('config-plans/' + plan['id'] + '/apply', {'approval_id': approval_id, 'reason': 'T07 native rollback'},
                         headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
         result = wait_for('exact configuration rollback', lambda: (value if (value := api('operations/' + operation['id'])).get('config_apply_state') == 'rolled_back' else None))
         assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
