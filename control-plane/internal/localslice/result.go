@@ -318,7 +318,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 			return fmt.Errorf("close result-observed dispatch: %w", err)
 		}
 	}
-	if apply := envelope.GetConfigApply(); apply != nil {
+	if apply := configApplyBinding(&envelope); apply != nil {
 		applyState := operationState
 		failureCode := resultText("")
 		if result.GetErrorCode() != "" {
@@ -336,7 +336,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		}
 		matched, err := store.ConfigOutcome(ctx, resultstore.ConfigOutcome{
 			OperationID: operationID, NodeID: nodeID, WorkspaceID: workspaceID, AlertID: uuid.Must(uuid.NewV7()),
-			State: applyState, FailureCode: failureCode, Revision: apply.GetDesiredRevision(), CandidateHash: apply.GetCandidateHash(), At: at,
+			State: applyState, FailureCode: failureCode, Revision: apply.desiredRevision, CandidateHash: apply.candidateHash, At: at,
 		})
 		if err != nil {
 			return fmt.Errorf("update configuration apply outcome: %w", err)

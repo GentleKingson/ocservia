@@ -686,6 +686,33 @@ fi
 grep -Fq 'production deployment descriptor changed since previous release' "${descriptor_state}/output.log"
 test ! -e "${descriptor_state}/compose.log"
 
+# Isolate an overlay-only change so another descriptor cannot mask this guard.
+real_git="$(command -v git)"
+cat >"${bin}/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${3:-}" == diff && "${!#}" == deploy/production/compose.relay-ca.yaml ]]; then
+  exit 1
+fi
+exec "${CONTROLLER_TEST_REAL_GIT}" "$@"
+EOF
+chmod 755 "${bin}/git"
+relay_ca_state="${fixture}/rollback-relay-ca-descriptor"
+seed_upgrade_state "${relay_ca_state}"
+cp -- "${next_release_file}" "${relay_ca_state}/current-release.json"
+cp -- "${release_file}" "${relay_ca_state}/previous-release.json"
+chmod 600 "${relay_ca_state}/current-release.json" "${relay_ca_state}/previous-release.json"
+if run_controller_rollback "${relay_ca_state}" env CONTROLLER_TEST_REAL_GIT="${real_git}" >"${relay_ca_state}/output.log" 2>&1; then
+  echo "changed Relay CA deployment overlay was accepted" >&2
+  exit 1
+fi
+grep -Fq 'production deployment descriptor changed since previous release: deploy/production/compose.relay-ca.yaml' "${relay_ca_state}/output.log"
+cmp -s "${next_release_file}" "${relay_ca_state}/current-release.json"
+cmp -s "${release_file}" "${relay_ca_state}/previous-release.json"
+test ! -e "${relay_ca_state}/pending-release.json"
+test ! -e "${relay_ca_state}/compose.log"
+rm -- "${bin}/git"
+
 unresolvable_previous="${fixture}/release/controller-release-unresolvable-previous.json"
 jq --arg source "$(printf 'e%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${unresolvable_previous}"
 refresh_bundle_dir "${fixture}/release"

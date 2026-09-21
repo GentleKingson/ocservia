@@ -20,6 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
@@ -77,6 +78,9 @@ const (
 )
 
 type CreateRequest struct {
+	CompleteCandidate   *agentv1.CompleteConfigCandidate
+	MaterializedHash    []byte
+	PlanExpiresAt       *timestamppb.Timestamp
 	NodeID              uuid.UUID
 	IdempotencyKey      string
 	ExpectedVersion     int64
@@ -342,6 +346,19 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != request.PlanRevision || !bytes.Equal(plan.CandidateHash, request.CandidateHash) || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= created.Micros || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), request.ExpectedCurrentHash) {
 			return Operation{}, false, ErrStaleRevision
 		}
+		approvalHash := plan.CandidateHash
+		if request.CompleteCandidate != nil {
+			expires, expiryErr := plan.ExpiresAt.Time()
+			if expiryErr != nil || !proto.Equal(timestamppb.New(expires), request.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), request.MaterializedHash) || len(validation.GetWarnings()) != 0 {
+				return Operation{}, false, ErrStaleRevision
+			}
+			approvalHash, err = configprofile.ApprovalHash(request.ApplyMetadata.PlanID, request.NodeID, plan.CandidateHash, request.MaterializedHash, request.ExpectedCurrentHash, request.PlanRevision, request.PlanExpiresAt)
+			if err != nil {
+				return Operation{}, false, ErrInvalidRequest
+			}
+		} else if len(validation.GetMaterializedHash()) != 0 {
+			return Operation{}, false, ErrInvalidRequest
+		}
 		state, err := configStore.State(ctx, request.NodeID)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("read configuration apply fence: %w", err)
@@ -356,17 +373,17 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if applyActive {
 			return Operation{}, false, ErrConfigApplyActive
 		}
-		if err := approvals.ConsumeBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, "config.apply", "config_plan", request.ApplyMetadata.PlanID, plan.CandidateHash); err != nil {
+		if err := approvals.ConsumeBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, "config.apply", "config_plan", request.ApplyMetadata.PlanID, approvalHash); err != nil {
 			return Operation{}, false, err
 		}
-		request.ApprovalRequestHash = append([]byte(nil), plan.CandidateHash...)
+		request.ApprovalRequestHash = append([]byte(nil), approvalHash...)
 	}
 	if request.Kind == CertificateP12 || request.Kind == CertificateRevoke {
 		if err := approvals.ConsumeBoundTx(ctx, commonTx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "certificate", request.CertificateID, request.ApprovalRequestHash); err != nil {
 			return Operation{}, false, err
 		}
 	}
-	if capability := capabilityFor(request.Kind); capability != "" {
+	if capability := requestCapability(request); capability != "" {
 		approved, err := intentStore.HasCapability(ctx, request.NodeID, capability)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("check operation capability: %w", err)
@@ -700,6 +717,20 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
+	if r.CompleteCandidate != nil {
+		canonical, err := configprofile.Canonical(r.CompleteCandidate)
+		if err != nil || (r.Kind != ConfigPlan && r.Kind != ConfigApply) || !bytes.Equal(canonical, r.Candidate) || !bytes.Equal(r.CompleteCandidate.NodeId, r.NodeID[:]) || r.CompleteCandidate.ExpectedRevision != r.PlanRevision {
+			return ErrInvalidRequest
+		}
+		if r.Kind == ConfigApply && (len(r.MaterializedHash) != 32 || r.PlanExpiresAt == nil || !r.PlanExpiresAt.IsValid()) {
+			return ErrInvalidRequest
+		}
+		if r.Kind == ConfigPlan && (len(r.MaterializedHash) != 0 || r.PlanExpiresAt != nil) {
+			return ErrInvalidRequest
+		}
+	} else if len(r.MaterializedHash) != 0 || r.PlanExpiresAt != nil {
+		return ErrInvalidRequest
+	}
 	if r.Kind == ConfigApply && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || len(r.ExpectedCurrentHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1) || r.DesiredRevision <= r.PlanRevision || r.ApplyMetadata == nil || r.ApplyMetadata.PlanID == uuid.Nil) {
 		return ErrInvalidRequest
 	}
@@ -779,49 +810,52 @@ func requestHash(r CreateRequest) [32]byte {
 	// field that selects the target, effect, authorization action, actor, audit
 	// reason, revision, or delivery behavior is deliberately bound here.
 	intent := struct {
-		NodeID               uuid.UUID     `json:"node_id"`
-		Kind                 SyntheticKind `json:"kind"`
-		Message              string        `json:"message"`
-		SessionID            string        `json:"session_id"`
-		BootID               string        `json:"boot_id"`
-		IP                   string        `json:"ip"`
-		ExpectedVersion      int64         `json:"expected_version"`
-		SupersedePending     bool          `json:"supersede_pending"`
-		HoldDispatch         bool          `json:"hold_dispatch,omitempty"`
-		TTLSeconds           int64         `json:"ttl_seconds"`
-		ActorID              string        `json:"actor_id"`
-		Action               string        `json:"action"`
-		Reason               string        `json:"reason"`
-		ActorSessionID       uuid.UUID     `json:"actor_session_id"`
-		ActorIdentityID      uuid.UUID     `json:"actor_identity_id"`
-		ApprovalID           uuid.UUID     `json:"approval_id"`
-		CandidateHash        string        `json:"candidate_hash"`
-		ExpectedCurrentHash  string        `json:"expected_current_hash"`
-		DesiredRevision      uint64        `json:"desired_revision"`
-		PlanID               uuid.UUID     `json:"plan_id"`
-		PlanRevision         uint64        `json:"plan_revision"`
-		PlanTemplate         string        `json:"plan_template"`
-		OcservVersion        string        `json:"ocserv_version"`
-		PlanCapabilities     []string      `json:"plan_capabilities"`
-		CertificateID        uuid.UUID     `json:"certificate_id"`
-		CommonName           string        `json:"common_name"`
-		DNSNames             []string      `json:"dns_names"`
-		KeyBits              uint32        `json:"key_bits"`
-		ArtifactID           uuid.UUID     `json:"artifact_id"`
-		CertificateChainHash string        `json:"certificate_chain_hash"`
-		SealedPasswordHash   string        `json:"sealed_password_hash"`
-		SecretKeyID          string        `json:"secret_key_id"`
-		SecretVersion        int32         `json:"secret_version"`
-		SecretPurpose        int32         `json:"secret_purpose"`
-		CertificateVersion   uint64        `json:"certificate_version"`
-		ArtifactTokenHash    string        `json:"artifact_token_hash"`
-		ArtifactRequestHash  string        `json:"artifact_request_hash"`
-		ArtifactExpiresAt    string        `json:"artifact_expires_at"`
-		RevocationReason     string        `json:"revocation_reason"`
-		TargetVersion        string        `json:"target_version"`
-		PackageSHA256        string        `json:"package_sha256"`
-		Architecture         string        `json:"architecture"`
-	}{NodeID: r.NodeID, Kind: r.Kind, Message: r.Message, SessionID: r.SessionID, BootID: r.BootID, IP: r.IP,
+		CompleteProfile      bool                   `json:"complete_profile,omitempty"`
+		MaterializedHash     string                 `json:"materialized_hash,omitempty"`
+		PlanExpiresAt        *timestamppb.Timestamp `json:"plan_expires_at,omitempty"`
+		NodeID               uuid.UUID              `json:"node_id"`
+		Kind                 SyntheticKind          `json:"kind"`
+		Message              string                 `json:"message"`
+		SessionID            string                 `json:"session_id"`
+		BootID               string                 `json:"boot_id"`
+		IP                   string                 `json:"ip"`
+		ExpectedVersion      int64                  `json:"expected_version"`
+		SupersedePending     bool                   `json:"supersede_pending"`
+		HoldDispatch         bool                   `json:"hold_dispatch,omitempty"`
+		TTLSeconds           int64                  `json:"ttl_seconds"`
+		ActorID              string                 `json:"actor_id"`
+		Action               string                 `json:"action"`
+		Reason               string                 `json:"reason"`
+		ActorSessionID       uuid.UUID              `json:"actor_session_id"`
+		ActorIdentityID      uuid.UUID              `json:"actor_identity_id"`
+		ApprovalID           uuid.UUID              `json:"approval_id"`
+		CandidateHash        string                 `json:"candidate_hash"`
+		ExpectedCurrentHash  string                 `json:"expected_current_hash"`
+		DesiredRevision      uint64                 `json:"desired_revision"`
+		PlanID               uuid.UUID              `json:"plan_id"`
+		PlanRevision         uint64                 `json:"plan_revision"`
+		PlanTemplate         string                 `json:"plan_template"`
+		OcservVersion        string                 `json:"ocserv_version"`
+		PlanCapabilities     []string               `json:"plan_capabilities"`
+		CertificateID        uuid.UUID              `json:"certificate_id"`
+		CommonName           string                 `json:"common_name"`
+		DNSNames             []string               `json:"dns_names"`
+		KeyBits              uint32                 `json:"key_bits"`
+		ArtifactID           uuid.UUID              `json:"artifact_id"`
+		CertificateChainHash string                 `json:"certificate_chain_hash"`
+		SealedPasswordHash   string                 `json:"sealed_password_hash"`
+		SecretKeyID          string                 `json:"secret_key_id"`
+		SecretVersion        int32                  `json:"secret_version"`
+		SecretPurpose        int32                  `json:"secret_purpose"`
+		CertificateVersion   uint64                 `json:"certificate_version"`
+		ArtifactTokenHash    string                 `json:"artifact_token_hash"`
+		ArtifactRequestHash  string                 `json:"artifact_request_hash"`
+		ArtifactExpiresAt    string                 `json:"artifact_expires_at"`
+		RevocationReason     string                 `json:"revocation_reason"`
+		TargetVersion        string                 `json:"target_version"`
+		PackageSHA256        string                 `json:"package_sha256"`
+		Architecture         string                 `json:"architecture"`
+	}{CompleteProfile: r.CompleteCandidate != nil, MaterializedHash: hex.EncodeToString(r.MaterializedHash), PlanExpiresAt: r.PlanExpiresAt, NodeID: r.NodeID, Kind: r.Kind, Message: r.Message, SessionID: r.SessionID, BootID: r.BootID, IP: r.IP,
 		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, HoldDispatch: r.HoldDispatch, TTLSeconds: int64(r.TTL / time.Second),
 		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID, ActorIdentityID: r.ActorIdentityID,
 		ApprovalID: r.ApprovalID, CandidateHash: fmt.Sprintf("%x", r.CandidateHash), ExpectedCurrentHash: fmt.Sprintf("%x", r.ExpectedCurrentHash),
@@ -965,9 +999,15 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 	case ConfigPlan:
 		payloadType = "config_plan"
 		envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedRevision: r.PlanRevision}}
+		if r.CompleteCandidate != nil {
+			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: r.CompleteCandidate, CandidateHash: r.CandidateHash}}
+		}
 	case ConfigApply:
 		payloadType = "config_apply"
 		envelope.Payload = &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedCurrentHash: r.ExpectedCurrentHash, DesiredRevision: r.DesiredRevision}}
+		if r.CompleteCandidate != nil {
+			envelope.Payload = &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: r.CompleteCandidate, CandidateHash: r.CandidateHash, ExpectedCurrentHash: r.ExpectedCurrentHash, MaterializedHash: r.MaterializedHash, DesiredRevision: r.DesiredRevision, PlanId: r.ApplyMetadata.PlanID[:], PlanExpiresAt: r.PlanExpiresAt}}
+		}
 	case CertificateCSR:
 		payloadType = "certificate_csr"
 		envelope.Payload = &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: r.CertificateID[:], CommonName: r.CommonName, DnsNames: r.DNSNames, KeyBits: r.KeyBits}}
@@ -984,7 +1024,7 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 	if err := semanticpayload.PopulateV2(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
 	}
-	envelope.RequiredCapability = capabilityFor(r.Kind)
+	envelope.RequiredCapability = requestCapability(r)
 	if envelope.RequiredCapability == "" {
 		switch r.Kind {
 		case SyntheticNoop:
@@ -1001,6 +1041,18 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 		return nil, "", fmt.Errorf("marshal typed command: %w", err)
 	}
 	return data, payloadType, nil
+}
+
+func requestCapability(request CreateRequest) string {
+	if request.CompleteCandidate != nil {
+		if request.Kind == ConfigPlan {
+			return configprofile.PlanCapability
+		}
+		if request.Kind == ConfigApply {
+			return configprofile.ApplyCapability
+		}
+	}
+	return capabilityFor(request.Kind)
 }
 
 func capabilityFor(kind SyntheticKind) string {

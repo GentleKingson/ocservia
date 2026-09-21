@@ -6,7 +6,8 @@ set -euo pipefail
 }
 for path in /etc/ocservia /etc/ocservia-agent /usr/libexec/ocservia \
   /usr/share/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
-  /usr/lib/systemd/system/ocservia-agent.service.d; do
+  /usr/lib/systemd/system/ocservia-agent.service.d \
+  /usr/lib/systemd/system/ocservia-agent.service /usr/lib/systemd/system/ocservia-privd.service; do
   [[ ! -e "${path}" && ! -L "${path}" ]] || { echo "fixture path already exists: ${path}" >&2; exit 2; }
 done
 if getent passwd ocserv-agent >/dev/null; then echo 'fixture user already exists' >&2; exit 2; fi
@@ -50,6 +51,10 @@ for version in 0.6.0 0.6.1; do
 done
 printf '[Service]\nExecStart=/usr/libexec/ocservia/ocservia-agent --relay-url $RELAY_URL_A --relay-url $RELAY_URL_B\n' >"${work}/old/dropin"
 install -m 644 "${work}/old/dropin" "${dropin}"
+for unit in ocservia-agent.service ocservia-privd.service; do
+  printf '[Service]\nExecStart=/usr/libexec/ocservia/%s\n' "${unit%.service}" >"${work}/old/${unit}"
+  install -m 644 "${work}/old/${unit}" "/usr/lib/systemd/system/${unit}"
+done
 for name in agent.env controller-command-verification-key.pem user-password-seal-private.pem \
   p12-password-seal-private.pem relays.env relay-access-token; do
   printf 'fixture-%s\n' "${name}" >"/etc/ocservia-agent/${name}"
@@ -81,6 +86,10 @@ openssl pkey -pubin -in "${package}/release-signing.pub.pem" -outform DER | sha2
 install -m 755 "${work}/source/rust/target/release/"* "${libexec}/"
 install -m 644 "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" "${dropin}"
 install -m 755 "${ROOT}/deploy/production/systemd/agent-relays.sh" "${launcher}"
+for unit in ocservia-agent.service ocservia-privd.service; do
+  install -m 644 "${work}/old/${unit}" "/var/lib/ocservia-upgrade/upgrade-backup/${unit}.previous"
+  install -m 644 "${ROOT}/deploy/systemd/${unit}" "/usr/lib/systemd/system/${unit}"
+done
 printf 'fixture snapshot\n' >/var/lib/ocservia-upgrade/upgrade-backup/member
 bash "${checker}" after "${work}/evidence" 0.6.1 "${arch}"
 bash "${checker}" retry "${work}/evidence" 0.6.1 "${arch}"
@@ -91,7 +100,8 @@ expect_failure() {
     echo "state checker accepted ${label}" >&2; exit 1
   fi
 }
-for target in "${dropin}" "${launcher}"; do
+for target in "${dropin}" "${launcher}" /usr/lib/systemd/system/ocservia-agent.service \
+  /usr/lib/systemd/system/ocservia-privd.service; do
   cp -p "${target}" "${work}/saved"
   printf 'tampered\n' >>"${target}"
   expect_failure "changed ${target}"
@@ -128,6 +138,7 @@ cat >"${libexec}/ocservia-agent-rollback" <<SH
 set -euo pipefail
 install -m 755 '${work}/old/ocservia-agent' '${work}/old/ocservia-privd' '${work}/old/ocservia-upgrader' '${libexec}/'
 install -m 644 '${work}/old/dropin' '${dropin}'
+install -m 644 '${work}/old/ocservia-agent.service' '${work}/old/ocservia-privd.service' /usr/lib/systemd/system/
 if [[ "\${KEEP_LAUNCHER:-false}" != true ]]; then rm -f '${launcher}'; fi
 SH
 chmod 755 "${libexec}/ocservia-agent-rollback"
@@ -138,4 +149,4 @@ export KEEP_LAUNCHER=true
 expect_failure 'rollback leaving the candidate launcher' rollback 0.6.0
 unset KEEP_LAUNCHER
 bash "${checker}" rollback "${work}/evidence" 0.6.0 "${arch}"
-echo 'Relay runtime authenticity, state preservation, retry/rejection and legacy rollback contracts passed'
+echo 'Relay runtime and unit authenticity, state preservation, retry/rejection and legacy rollback contracts passed'

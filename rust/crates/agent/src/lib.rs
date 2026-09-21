@@ -976,6 +976,9 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u
         command_envelope::Payload::ConfigApply(value) => {
             Some(("config", "ocserv.conf", value.desired_revision))
         }
+        command_envelope::Payload::CompleteConfigApply(value) => {
+            Some(("config", "ocserv.conf", value.desired_revision))
+        }
         _ => None,
     }
 }
@@ -1255,6 +1258,22 @@ fn validate_payload(
                 return Err(CommandError::Rejected("config_apply_invalid"));
             }
             ("ocserv.config.apply", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::CompleteConfigPlan(_)) => {
+            semantic_payload_hash_v2(envelope)?;
+            (
+                ocservia_contracts::config_profile::PLAN_CAPABILITY,
+                Vec::new(),
+                true,
+            )
+        }
+        Some(command_envelope::Payload::CompleteConfigApply(_)) => {
+            semantic_payload_hash_v2(envelope)?;
+            (
+                ocservia_contracts::config_profile::APPLY_CAPABILITY,
+                Vec::new(),
+                true,
+            )
         }
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
             if payload.certificate_id.len() != 16

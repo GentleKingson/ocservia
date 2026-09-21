@@ -471,6 +471,8 @@ message CommandEnvelope {
     CertificateP12 certificate_p12 = 118;
     CertificateRevoke certificate_revoke = 119;
     AgentUpgrade agent_upgrade = 128;
+    CompleteConfigPlan complete_config_plan = 129;
+    CompleteConfigApply complete_config_apply = 130;
   }
   CommandDeliveryMode delivery_mode = 109;
   SemanticPayloadHashVersion semantic_payload_hash_version = 110;
@@ -552,6 +554,48 @@ message ConfigPlanResult {
   bool current_unchanged = 4;
   bool staging_cleaned = 5;
   bytes current_hash = 6;
+  // Present only for the complete profile: exact materialized config bytes.
+  bytes materialized_hash = 7;
+}
+
+// Public bindings only. Root derives paths from its immutable local manifest.
+message NodeLocalTlsReference {
+  bytes secret_ref_id = 1;
+  string version = 2;
+  bytes certificate_sha256 = 3;
+  bytes spki_sha256 = 4;
+  bytes ca_sha256 = 5;
+}
+
+message CompleteConfigDirective {
+  string name = 1;
+  oneof value {
+    string literal = 2;
+    NodeLocalTlsReference tls = 3;
+  }
+}
+
+// Sorted unique directives with a separately specified canonical hash preimage.
+message CompleteConfigCandidate {
+  bytes node_id = 1;
+  uint64 expected_revision = 2;
+  repeated CompleteConfigDirective directives = 3;
+}
+
+message CompleteConfigPlan {
+  CompleteConfigCandidate candidate = 1;
+  bytes candidate_hash = 2;
+}
+
+message CompleteConfigApply {
+  CompleteConfigCandidate candidate = 1;
+  bytes candidate_hash = 2;
+  bytes expected_current_hash = 3;
+  bytes materialized_hash = 4;
+  uint64 desired_revision = 5;
+  bytes plan_id = 6;
+  // Immutable plan expiry, unlike renewable command authorization expiry.
+  google.protobuf.Timestamp plan_expires_at = 7;
 }
 
 message ConfigApply {

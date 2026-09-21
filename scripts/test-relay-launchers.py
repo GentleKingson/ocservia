@@ -19,6 +19,9 @@ agent = Path("/usr/libexec/ocservia/ocservia-agent")
 transport = Path("/usr/local/bin/ocservia-transportd")
 assert not agent.exists() and not transport.exists(), "refusing to replace installed binaries"
 recorder = "#!/usr/bin/python3\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n"
+ca_paths = [Path("/etc/ocservia-agent/relay-ca.pem"), Path("/run/secrets/relay_ca")]
+assert all(not path.exists() and not path.is_symlink() for path in ca_paths)
+created_ca_dirs = []
 env = os.environ | {
     "CONTROLLER_ENDPOINT_ID": "c" * 64, "NODE_ID": "018f1e11-2222-7333-8444-555555555555",
     "CONTROLLER_COMMAND_VERIFICATION_KEY_FILE": "/protected/a key's $literal.pem",
@@ -60,6 +63,38 @@ try:
         current = env | {prefix + "RELAY_URL_B": "https://relay-b.example.test"}
         current.pop(prefix + "RELAY_URL_A", None)
         assert subprocess.run([str(ROOT / wrapper)], env=current, capture_output=True).returncode != 0
+        ca = ca_paths[1 if prefix else 0]
+        if not ca.parent.exists():
+            ca.parent.mkdir(parents=True)
+            created_ca_dirs.append(ca.parent)
+        ca.write_text("public CA fixture; PEM parsing belongs to the real binary\n")
+        ca.chmod(0o444)
+        current = env | {prefix + "RELAY_URL_A": "https://relay-a.example.test"}
+        argv = json.loads(subprocess.check_output([str(ROOT / wrapper)], env=current, text=True))
+        assert argv[argv.index("--relay-ca-file") + 1] == str(ca)
+        if not prefix:
+            def rejected():
+                assert subprocess.run([str(ROOT / wrapper)], env=current, capture_output=True).returncode != 0
+            ca.chmod(0o644)
+            rejected()
+            ca.chmod(0o444)
+            os.chown(ca, 1, 0)
+            rejected()
+            os.chown(ca, 0, 0)
+            saved = ca.with_suffix(".saved")
+            ca.rename(saved)
+            ca.symlink_to(saved)
+            rejected()
+            ca.unlink()
+            saved.rename(ca)
+            os.link(ca, saved)
+            rejected()
+            saved.unlink()
+            ca.parent.chmod(0o775)
+            rejected()
+            ca.parent.chmod(0o755)
+        ca.unlink()
+        print(f"PASS {wrapper}: optional protected Relay CA")
     with tempfile.TemporaryDirectory() as temporary:
         config = Path(temporary) / "install.env"
         for file_b, override in [(None, None), ("", None), ("https://relay-b.example.test", ""), ("https://relay-b.example.test", None)]:
@@ -79,5 +114,9 @@ try:
             assert argv.count("--relay-url") == (2 if file_b and override is None else 1)
     print("PASS literal argv and install.env unset/empty/override contracts")
 finally:
+    for ca in ca_paths:
+        ca.unlink(missing_ok=True)
+    for directory in reversed(created_ca_dirs):
+        directory.rmdir()
     agent.unlink(missing_ok=True)
     transport.unlink(missing_ok=True)

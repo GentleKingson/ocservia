@@ -1,0 +1,9 @@
+# Selected only for an operator-provisioned, protected additional Relay CA.
+services:
+  transportd:
+    secrets:
+      - relay_ca
+
+secrets:
+  relay_ca:
+    file: ${OCSERV_SECRET_DIR}/relay-ca.pem

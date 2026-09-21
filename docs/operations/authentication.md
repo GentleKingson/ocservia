@@ -184,9 +184,15 @@ operator-invoked **one-shot**, not part of normal install or restart.
    the PostgreSQL SQL is not portable to MySQL/MariaDB.
    Record that UUID: the Local identity management workspace is fixed at
    bootstrap, not selected later by an API header.
-3. Assign the administrator and approver to **different responsible people**.
-   Two identity IDs alone do not establish personnel independence. Deliver two
-   different passwords separately through the secret manager, in
+3. Establish **independently controlled requester and approver principals**:
+   distinct identities, credentials and authenticated sessions, with separate
+   RBAC authorization. Never share a credential or substitute a second identity
+   ID for authentication. Baseline 1.0 requires this principal separation, not
+   organizational custody by two people. Deployments requiring a two-person
+   rule must additionally assign the credentials to different responsible
+   people and validate custody under their production-hardening or enterprise
+   security profile; automated two-principal tests do not prove that property.
+   Deliver two different passwords separately through the secret manager, in
    `OCSERV_SECRET_DIR/local-bootstrap-password` and
    `OCSERV_SECRET_DIR/local-bootstrap-approver-password`. Both files must be
    owned by the one-shot process UID, mode `0400` or `0600`, within a private
@@ -260,7 +266,7 @@ FROM controller_schema_compatibility;
 
 The history must cover the installed release's `control-plane/migrations`
 and agree with the compatibility row. Migration `000034` is specifically the
-historical PostgreSQL two-person Local-bootstrap compatibility boundary; it
+historical PostgreSQL two-principal Local-bootstrap compatibility boundary; it
 is not the current migration target or a MySQL/MariaDB revision number.
 The normal migration/startup checks also verify history checksums; a maximum
 version alone is insufficient.
@@ -323,7 +329,7 @@ Disabled bindings also close eligibility. All other existing deployments are
 marked closed without changing identities, credentials or roles. No marker or
 no verifiable original admin means no automatic recovery exception.
 MySQL/MariaDB do not run that PostgreSQL migration; their initialized schema
-includes the two-person contract. Use the stored eligibility marker, not a
+includes the two-principal contract. Use the stored eligibility marker, not a
 backend revision number, to decide whether completion is allowed.
 
 Inspect the marker using the protected administrative database connection:

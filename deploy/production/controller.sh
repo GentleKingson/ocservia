@@ -633,6 +633,7 @@ production_descriptor_paths() {
     "deploy/production/compose.sh" \
     "deploy/production/transportd-relays.sh" \
     "deploy/production/compose.oidc.yaml" \
+    "deploy/production/compose.relay-ca.yaml" \
     "deploy/production/compose.external-mysql.yaml" \
     "deploy/production/compose.external-postgres.yaml" \
     "deploy/production/compose.postgres.yaml" \

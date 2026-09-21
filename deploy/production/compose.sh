@@ -100,6 +100,21 @@ for secret in audit-event-key controller-command-signing-key.pem; do
     exit 2
   fi
 done
+path="${secret_dir}/controller-command-verification-key.pem"
+if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a:%h' "${path}")" != "0:65532:440:1" ]]; then
+  echo "${path} must be a one-link root:65532 regular file with mode 0440" >&2
+  exit 2
+fi
+relay_ca=false
+path="${secret_dir}/relay-ca.pem"
+if [[ -e "${path}" || -L "${path}" ]]; then
+  if [[ ! -f "${path}" || -L "${path}" || ! -s "${path}" \
+    || "$(stat -c '%u:%g:%a:%h' "${path}")" != "0:0:444:1" ]]; then
+    echo "${path} must be a nonempty one-link root:root regular file with mode 0444" >&2
+    exit 2
+  fi
+  relay_ca=true
+fi
 for secret in relay-access-token controller-iroh.key; do
   path="${secret_dir}/${secret}"
   if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a' "${path}")" != "65532:65532:400" ]]; then
@@ -139,6 +154,9 @@ compose=(docker compose --env-file /dev/null -p ocservia-production
   -f "${ROOT}/deploy/production/${database_overlay}")
 if [[ "${oidc_enabled}" == true ]]; then
   compose+=(-f "${ROOT}/deploy/production/compose.oidc.yaml")
+fi
+if [[ "${relay_ca}" == true ]]; then
+  compose+=(-f "${ROOT}/deploy/production/compose.relay-ca.yaml")
 fi
 if [[ "${otel_enabled}" == true || "${teardown}" == true ]]; then
   compose+=(--profile observability)

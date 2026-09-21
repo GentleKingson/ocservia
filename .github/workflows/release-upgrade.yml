@@ -1,5 +1,5 @@
 name: Native Release Upgrade Validation
-run-name: Native upgrade ${{ inputs.baseline_release }} to ${{ inputs.version }} at ${{ inputs.candidate_sha }}
+run-name: ${{ inputs.business_only && 'Native business probe' || 'Native upgrade' }} ${{ inputs.baseline_release }} to ${{ inputs.version }} at ${{ inputs.candidate_sha }}
 
 on:
   workflow_dispatch:
@@ -25,6 +25,10 @@ on:
         description: Run only the four application cells, without native package or Controller upgrades
         type: boolean
         default: false
+      business_only:
+        description: Run the native candidate business probe only (partial T07, not release acceptance)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,6 +42,7 @@ env:
 
 jobs:
   prepare:
+    if: ${{ !inputs.business_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -69,7 +74,7 @@ jobs:
 
   agent-upgrade:
     name: Agent Upgrade (${{ matrix.arch }})
-    if: ${{ !inputs.session_only }}
+    if: ${{ !inputs.session_only && !inputs.business_only }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -120,7 +125,7 @@ jobs:
 
   controller-upgrade:
     name: Controller Upgrade (${{ matrix.arch }})
-    if: ${{ !inputs.session_only }}
+    if: ${{ !inputs.session_only && !inputs.business_only }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -163,7 +168,7 @@ jobs:
 
   session-compatibility:
     name: Published Node Compatibility (${{ matrix.arch }})
-    if: inputs.session_compatibility || inputs.session_only
+    if: ${{ !inputs.business_only && (inputs.session_compatibility || inputs.session_only) }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -236,7 +241,7 @@ jobs:
 
   upgrade-result:
     name: Native Upgrade Result
-    if: ${{ always() && !inputs.session_only }}
+    if: ${{ always() && !inputs.session_only && !inputs.business_only }}
     needs: [prepare, agent-upgrade, controller-upgrade]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -258,3 +263,49 @@ jobs:
           frozen="${RUNNER_TEMP}/results/upgrade-frozen-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/frozen.json"
           if [[ -f "${frozen}" ]]; then cp "${frozen}" "${RUNNER_TEMP}/results/frozen/frozen.json"; fi
           node scripts/release-upgrade-contract.mjs aggregate "${RUNNER_TEMP}/results"
+
+  business-probe:
+    name: Native Candidate Business Probe (amd64, partial T07)
+    if: inputs.business_only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ inputs.version }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Relay optional BuildKit cache credentials
+        uses: ./.github/actions/g6-cache-credentials
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+            rust/target
+          key: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
+            native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
+      - name: Signed production lifecycle and native business probe
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
+        run: bash scripts/release-business-probe.sh
+      - name: Preserve sanitized evidence, including blockers
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: business-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/business-evidence
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain native build cache even when a business assertion fails
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+            rust/target
+          key: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}

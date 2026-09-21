@@ -448,6 +448,10 @@ func payloadAuthorization(envelope *agentv1.CommandEnvelope) (uint32, string, st
 		return 103, "config.plan", "ocserv.config.plan", nil
 	case *agentv1.CommandEnvelope_ConfigApply:
 		return 104, "config.apply", "ocserv.config.apply", nil
+	case *agentv1.CommandEnvelope_CompleteConfigPlan:
+		return 129, "config.plan", "ocserv.config.complete.plan", nil
+	case *agentv1.CommandEnvelope_CompleteConfigApply:
+		return 130, "config.apply", "ocserv.config.complete.apply", nil
 	case *agentv1.CommandEnvelope_ServiceReload:
 		return 105, "service.reload", "ocserv.service.reload", nil
 	case *agentv1.CommandEnvelope_SyntheticNoop:

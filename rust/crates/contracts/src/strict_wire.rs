@@ -116,6 +116,11 @@ enum MessageKind {
     GroupApply,
     ConfigPlan,
     ConfigApply,
+    CompleteConfigPlan,
+    CompleteConfigApply,
+    CompleteConfigCandidate,
+    CompleteConfigDirective,
+    NodeLocalTlsReference,
     CertificateCsr,
     CertificateP12,
     CertificateRevoke,
@@ -145,6 +150,11 @@ impl MessageKind {
             Self::GroupApply => "GroupApply",
             Self::ConfigPlan => "ConfigPlan",
             Self::ConfigApply => "ConfigApply",
+            Self::CompleteConfigPlan => "CompleteConfigPlan",
+            Self::CompleteConfigApply => "CompleteConfigApply",
+            Self::CompleteConfigCandidate => "CompleteConfigCandidate",
+            Self::CompleteConfigDirective => "CompleteConfigDirective",
+            Self::NodeLocalTlsReference => "NodeLocalTlsReference",
             Self::CertificateCsr => "CertificateCsr",
             Self::CertificateP12 => "CertificateP12",
             Self::CertificateRevoke => "CertificateRevoke",
@@ -211,10 +221,11 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
     use FieldKind::{Nested, Scalar};
     use MessageKind::{
         AgentUpgrade, CertificateCsr, CertificateP12, CertificateRevoke, CommandAuthorizationProof,
-        CommandEnvelope, ConfigApply, ConfigPlan, ConnectionFenceV2, FenceBindingV2, GroupApply,
-        IpBanRemove, SealedSecretV1, ServiceReload, SessionDisconnect, SessionTerminate,
-        SimulationProbe, SyntheticEcho, SyntheticNoop, Timestamp, UserCreate, UserDisable,
-        UserEnable, UserPasswordRotate,
+        CommandEnvelope, CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective,
+        CompleteConfigPlan, ConfigApply, ConfigPlan, ConnectionFenceV2, FenceBindingV2, GroupApply,
+        IpBanRemove, NodeLocalTlsReference, SealedSecretV1, ServiceReload, SessionDisconnect,
+        SessionTerminate, SimulationProbe, SyntheticEcho, SyntheticNoop, Timestamp, UserCreate,
+        UserDisable, UserEnable, UserPasswordRotate,
     };
     use WireType::{LengthDelimited, Varint};
 
@@ -244,6 +255,8 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             118 => Some(Nested(CertificateP12)),
             119 => Some(Nested(CertificateRevoke)),
             128 => Some(Nested(AgentUpgrade)),
+            129 => Some(Nested(CompleteConfigPlan)),
+            130 => Some(Nested(CompleteConfigApply)),
             _ => None,
         },
         Timestamp => match tag {
@@ -304,6 +317,33 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
         ConfigPlan => match tag {
             1 | 2 => Some(Scalar(LengthDelimited)),
             3 => Some(Scalar(Varint)),
+            _ => None,
+        },
+        CompleteConfigPlan => match tag {
+            1 => Some(Nested(CompleteConfigCandidate)),
+            2 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        CompleteConfigApply => match tag {
+            1 => Some(Nested(CompleteConfigCandidate)),
+            2..=4 | 6 => Some(Scalar(LengthDelimited)),
+            5 => Some(Scalar(Varint)),
+            7 => Some(Nested(Timestamp)),
+            _ => None,
+        },
+        CompleteConfigCandidate => match tag {
+            1 => Some(Scalar(LengthDelimited)),
+            2 => Some(Scalar(Varint)),
+            3 => Some(Nested(CompleteConfigDirective)),
+            _ => None,
+        },
+        CompleteConfigDirective => match tag {
+            1 | 2 => Some(Scalar(LengthDelimited)),
+            3 => Some(Nested(NodeLocalTlsReference)),
+            _ => None,
+        },
+        NodeLocalTlsReference => match tag {
+            1..=5 => Some(Scalar(LengthDelimited)),
             _ => None,
         },
         CertificateP12 => match tag {
@@ -390,7 +430,7 @@ mod tests {
     fn accepts_go_encoded_command_fixtures() {
         use command_envelope::Payload;
         let fixtures = go_wire_commands();
-        assert_eq!(fixtures.len(), 24);
+        assert_eq!(fixtures.len(), 26);
         for (name, hex) in fixtures
             .iter()
             .filter(|(name, _)| !name.starts_with("full_"))
@@ -482,7 +522,53 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn full_payloads() -> BTreeMap<&'static str, command_envelope::Payload> {
         use command_envelope::Payload;
+        let complete = agent::CompleteConfigCandidate {
+            node_id: b"node".to_vec(),
+            expected_revision: 42,
+            directives: vec![
+                agent::CompleteConfigDirective {
+                    name: "device".into(),
+                    value: Some(agent::complete_config_directive::Value::Literal(
+                        "vpns".into(),
+                    )),
+                },
+                agent::CompleteConfigDirective {
+                    name: "server-cert".into(),
+                    value: Some(agent::complete_config_directive::Value::Tls(
+                        agent::NodeLocalTlsReference {
+                            secret_ref_id: b"ref".to_vec(),
+                            version: "v1".into(),
+                            certificate_sha256: b"certificate-hash".to_vec(),
+                            spki_sha256: b"spki-hash".to_vec(),
+                            ca_sha256: b"ca-hash".to_vec(),
+                        },
+                    )),
+                },
+            ],
+        };
         BTreeMap::from([
+            (
+                "complete_config_plan",
+                Payload::CompleteConfigPlan(agent::CompleteConfigPlan {
+                    candidate: Some(complete.clone()),
+                    candidate_hash: b"logical".to_vec(),
+                }),
+            ),
+            (
+                "complete_config_apply",
+                Payload::CompleteConfigApply(agent::CompleteConfigApply {
+                    candidate: Some(complete),
+                    candidate_hash: b"logical".to_vec(),
+                    expected_current_hash: b"current".to_vec(),
+                    materialized_hash: b"materialized".to_vec(),
+                    desired_revision: 43,
+                    plan_id: b"plan".to_vec(),
+                    plan_expires_at: Some(Timestamp {
+                        seconds: 1_700_000_060,
+                        nanos: 123,
+                    }),
+                }),
+            ),
             (
                 "session_disconnect",
                 Payload::SessionDisconnect(agent::SessionDisconnect {
@@ -779,7 +865,7 @@ mod tests {
     ) -> Result<Vec<(u32, MessageKind)>, String> {
         use prost_types::field_descriptor_proto::{Label, Type};
         // All currently reviewed command tags are in this range, including holes.
-        const REVIEWED_MAX_TAG: u32 = 128;
+        const REVIEWED_MAX_TAG: u32 = 130;
         let fields: BTreeMap<_, _> = descriptor
             .field
             .iter()
@@ -862,7 +948,7 @@ mod tests {
         let paths = schema_paths();
         let messages: std::collections::BTreeSet<_> =
             paths.iter().map(|(kind, _, _)| kind.name()).collect();
-        assert_eq!(messages.len(), 24);
+        assert_eq!(messages.len(), 29);
     }
 
     #[test]
@@ -898,7 +984,7 @@ mod tests {
             .find(|field| field.number() == 128)
             .unwrap()
             .clone();
-        field.number = Some(129);
+        field.number = Some(131);
         added_payload.field.push(field);
         assert!(compare_fields(MessageKind::CommandEnvelope, &added_payload).is_err());
     }

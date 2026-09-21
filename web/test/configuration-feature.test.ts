@@ -79,6 +79,18 @@ describe("configuration feature without a page or store", () => {
       name: "tcp-port",
       value: "444",
     });
+    for (const [name, value] of [
+      ["udp-port", "0"],
+      ["device", "vpns"],
+      ["dns", "1.1.1.1"],
+      ["ipv4-network", "10.42.0.0/24"],
+      ["cookie-timeout", "300"],
+      ["max-same-clients", "2"],
+    ])
+      expect(request.template.directives).toContainEqual({ name, value });
+    expect(
+      new Set(request.template.directives.map((item) => item.name)).size,
+    ).toBe(13);
     expect(other.configDialog.value).toBe(false);
     expect(other.configPort.value).toBe(443);
     expect(api.createConfigPlan).toHaveBeenCalledExactlyOnceWith(

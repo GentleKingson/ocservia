@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var ErrApprovalNotReady = errors.New("configuration plan is not ready for approval")
@@ -41,6 +43,28 @@ func (s *Service) ApprovalBinding(ctx context.Context, id uuid.UUID) (ApprovalBi
 	summary, err := json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "current_hash": plan.CurrentHash, "diff_redacted": plan.DiffRedacted, "expires_at": plan.ExpiresAt})
 	if err != nil {
 		return ApprovalBinding{}, err
+	}
+	if plan.MaterializedHash != "" {
+		materialized, err := hex.DecodeString(plan.MaterializedHash)
+		if err != nil {
+			return ApprovalBinding{}, err
+		}
+		current, err := hex.DecodeString(plan.CurrentHash)
+		if err != nil {
+			return ApprovalBinding{}, err
+		}
+		expires, err := plan.ExpiresAt.Time()
+		if err != nil {
+			return ApprovalBinding{}, err
+		}
+		hash, err = configprofile.ApprovalHash(plan.ID, plan.NodeID, hash, materialized, current, uint64(plan.ExpectedRevision), timestamppb.New(expires))
+		if err != nil {
+			return ApprovalBinding{}, err
+		}
+		summary, err = json.Marshal(map[string]any{"plan_id": plan.ID, "node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "materialized_hash": plan.MaterializedHash, "current_hash": plan.CurrentHash, "diff_redacted": plan.DiffRedacted, "expires_at": plan.ExpiresAt})
+		if err != nil {
+			return ApprovalBinding{}, err
+		}
 	}
 	return ApprovalBinding{WorkspaceID: plan.WorkspaceID, NodeID: plan.NodeID, RequestHash: hash, RequestSummary: summary}, nil
 }

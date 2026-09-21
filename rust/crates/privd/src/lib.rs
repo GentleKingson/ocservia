@@ -614,6 +614,13 @@ fn validate_privileged_payload(
         Some(command_envelope::Payload::ConfigApply(payload)) => {
             validate_candidate(&payload.candidate, &payload.candidate_hash)?;
         }
+        Some(
+            command_envelope::Payload::CompleteConfigPlan(_)
+            | command_envelope::Payload::CompleteConfigApply(_),
+        ) => {
+            ocservia_command_authorization::semantic_payload_hash_v2(command)
+                .map_err(|failure| authorization_error(&failure))?;
+        }
         Some(command_envelope::Payload::SessionDisconnect(payload)) => {
             validate_session(&payload.session_id, &payload.boot_id)?;
         }
@@ -964,6 +971,7 @@ struct CommandEffectBinding {
     effect_revision: u64,
 }
 
+#[allow(clippy::too_many_lines)]
 fn effect_binding(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
@@ -1019,7 +1027,17 @@ fn effect_binding(
             hex::encode(&payload.candidate_hash),
             claims.expected_revision,
         ),
+        command_envelope::Payload::CompleteConfigPlan(payload) => (
+            "config_plan",
+            hex::encode(&payload.candidate_hash),
+            claims.expected_revision,
+        ),
         command_envelope::Payload::ConfigApply(payload) => (
+            "config_apply",
+            "ocserv.conf".to_owned(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::CompleteConfigApply(payload) => (
             "config_apply",
             "ocserv.conf".to_owned(),
             payload.desired_revision,
@@ -1089,6 +1107,11 @@ fn desired_effect_binding(command: &CommandEnvelope) -> Option<CommandEffectBind
             payload.desired_revision,
         ),
         command_envelope::Payload::ConfigApply(payload) => (
+            "config_apply",
+            "ocserv.conf".to_owned(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::CompleteConfigApply(payload) => (
             "config_apply",
             "ocserv.conf".to_owned(),
             payload.desired_revision,
@@ -1389,6 +1412,20 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::ConfigPlan),
         ),
+        Some(command_envelope::Payload::CompleteConfigPlan(payload)) => (
+            "config_plan",
+            adapter
+                .complete_config_plan(payload)
+                .await
+                .map(privd_response::Result::ConfigPlan),
+        ),
+        Some(command_envelope::Payload::CompleteConfigApply(payload)) => (
+            "config_apply",
+            adapter
+                .complete_config_apply(payload, effect)
+                .await
+                .map(privd_response::Result::ConfigApply),
+        ),
         Some(command_envelope::Payload::ConfigApply(payload)) => (
             "config_apply",
             adapter
@@ -1634,8 +1671,14 @@ fn privileged_command_kind(command: &CommandEnvelope) -> Option<PrivilegedComman
             Some(PrivilegedCommandKind::UserPasswordRotate)
         }
         command_envelope::Payload::GroupApply(_) => Some(PrivilegedCommandKind::GroupApply),
-        command_envelope::Payload::ConfigPlan(_) => Some(PrivilegedCommandKind::ConfigPlan),
-        command_envelope::Payload::ConfigApply(_) => Some(PrivilegedCommandKind::ConfigApply),
+        command_envelope::Payload::ConfigPlan(_)
+        | command_envelope::Payload::CompleteConfigPlan(_) => {
+            Some(PrivilegedCommandKind::ConfigPlan)
+        }
+        command_envelope::Payload::ConfigApply(_)
+        | command_envelope::Payload::CompleteConfigApply(_) => {
+            Some(PrivilegedCommandKind::ConfigApply)
+        }
         command_envelope::Payload::CertificateCsr(_) => Some(PrivilegedCommandKind::CertificateCsr),
         command_envelope::Payload::CertificateP12(_) => Some(PrivilegedCommandKind::CertificateP12),
         command_envelope::Payload::CertificateRevoke(_) => {
