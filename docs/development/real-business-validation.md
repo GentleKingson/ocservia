@@ -109,9 +109,11 @@ result must name that SHA, never splice artifacts from earlier commits or
 attempts. Changes to Compose, the verification-key contract and native units
 require a fresh complete `release-upgrade.yml` run from transitional v1.0.0 with
 `version=1.0.1`, `candidate_sha` equal to the frozen SHA and
-`session_compatibility=false`, `session_only=false`, `business_only=false`.
-All four native Agent/Controller architecture jobs and the aggregate must pass
-in the same run/attempt. Business success does not replace this gate.
+`session_compatibility=true`, `session_only=false`, `business_only=false`.
+All four native Agent/Controller architecture jobs, the aggregate, and the two
+`v1.0.0` node against candidate Controller application cells (amd64/arm64) must
+pass in the same run/attempt; the mixed-version window has no other accepted
+evidence. Business success does not replace this gate.
 Pre-1.0 installations must redeploy into `1.x`; their historical diagnostic
 results are not upgrade support or acceptance of this production baseline.
 

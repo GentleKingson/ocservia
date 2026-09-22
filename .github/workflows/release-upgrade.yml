@@ -209,6 +209,7 @@ jobs:
           bash scripts/release-session-compatibility.sh fetch >"${SESSION_EVIDENCE}/v100-artifact.json"
           bash scripts/release-session-compatibility.sh run
       - name: Published v0.6.0 node against candidate
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           BASELINE_RELEASE: v0.6.0
           RUN_ID: sc-${{ github.run_id }}-${{ github.run_attempt }}-060-${{ matrix.arch }}

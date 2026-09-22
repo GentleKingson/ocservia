@@ -104,7 +104,8 @@ cells = session['steps'].select { |step| step.fetch('run','').include?('scripts/
 abort 'published application baselines drift' unless cells.map { |step| step.dig('env','BASELINE_RELEASE') } == %w[v1.0.0 v0.6.0 v0.6.1]
 abort 'the 1.x mixed-window pair must lead the matrix' unless cells[0]['if'].nil?
 abort 'diagnostics must survive the v1.0.0 pair failure, not build failure' unless
-  cells[1]['if'].nil? && cells[2]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
+  cells[1]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}" &&
+  cells[2]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
 abort 'session matrix must use the shipped transport launcher' unless
   File.read('scripts/build-release-session-images.sh').include?('build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile')
 abort 'disposable node must not register host binfmt handlers' unless
