@@ -17,6 +17,7 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-controller-release-manifest.sh
       bash scripts/test-controller-release-bundle.sh
       bash scripts/test-controller-release-smoke.sh
+      bash scripts/test-release-image-security.sh
       bash scripts/test-stage0-installers.sh
       ;;
     g6)

@@ -6,7 +6,7 @@ RUN npm install --global npm@11.19.0 && npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+FROM caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
 COPY deploy/production/Caddyfile /etc/caddy/Caddyfile
 COPY --from=web-build /src/web/dist /srv
 # The pinned upstream image runs as root and ships no caddy account, so the

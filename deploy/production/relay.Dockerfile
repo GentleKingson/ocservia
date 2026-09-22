@@ -5,7 +5,7 @@ COPY scripts/build-relay.sh scripts/checksums.txt ./scripts/
 COPY deploy/production/relay.Cargo.lock ./deploy/production/
 RUN bash scripts/build-relay.sh /usr/local/cargo
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS relay-runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS relay-runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 relay \

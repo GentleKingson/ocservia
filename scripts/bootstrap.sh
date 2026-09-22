@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | package-tools | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
+  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-security | go-rust-integration | native | native-packages | package-tools | image-security | rust-basic | rust-validation | rust-security | web | npm-security | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -107,6 +107,8 @@ case "${platform}" in
     cargo_deny_platform="aarch64-apple-darwin"
     sccache_platform="aarch64-apple-darwin"
     nfpm_platform="Darwin_arm64"
+    syft_platform="darwin_arm64"
+    grype_platform="darwin_arm64"
     ;;
   Linux-x86_64)
     go_platform="linux-amd64"
@@ -121,15 +123,19 @@ case "${platform}" in
     cargo_deny_platform="x86_64-unknown-linux-musl"
     sccache_platform="x86_64-unknown-linux-musl"
     nfpm_platform="Linux_x86_64"
+    syft_platform="linux_amd64"
+    grype_platform="linux_amd64"
     ;;
   Linux-aarch64)
     go_platform="linux-arm64"
     rust_platform="aarch64-unknown-linux-gnu"
     nfpm_platform="Linux_arm64"
+    syft_platform="linux_arm64"
+    grype_platform="linux_arm64"
     case "${PROFILE}" in
-      go-test | rust-basic | native-packages | package-tools) ;;
+      go-test | rust-basic | native-packages | package-tools | image-security) ;;
       *)
-        echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, rustup and nfpm (no Node, quality tools or sccache)" >&2
+        echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, rustup, nfpm, syft and grype (no Node, quality tools or sccache)" >&2
         exit 1
         ;;
     esac
@@ -261,6 +267,28 @@ install_gitleaks() {
     chmod 0755 "${TOOLS}/bin/gitleaks"
   fi
   [[ "$(gitleaks version)" == "$(version gitleaks)" ]]
+}
+
+install_syft() {
+  local artifact archive
+  artifact="syft_$(version syft)_${syft_platform}.tar.gz"
+  if ! version_output_contains "$(version syft)" "${TOOLS}/bin/syft" --version; then
+    archive="$(download "https://github.com/anchore/syft/releases/download/v$(version syft)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" -C "${TOOLS}/bin" syft
+    chmod 0755 "${TOOLS}/bin/syft"
+  fi
+  "${TOOLS}/bin/syft" --version >/dev/null
+}
+
+install_grype() {
+  local artifact archive
+  artifact="grype_$(version grype)_${grype_platform}.tar.gz"
+  if ! version_output_contains "$(version grype)" "${TOOLS}/bin/grype" --version; then
+    archive="$(download "https://github.com/anchore/grype/releases/download/v$(version grype)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" -C "${TOOLS}/bin" grype
+    chmod 0755 "${TOOLS}/bin/grype"
+  fi
+  "${TOOLS}/bin/grype" --version >/dev/null
 }
 
 install_oasdiff() {
@@ -491,6 +519,11 @@ case "${PROFILE}" in
     ;;
   package-tools)
     install_nfpm
+    ;;
+  image-security)
+    install_syft
+    install_grype
+    verify_host_command jq
     ;;
   web)
     install_node

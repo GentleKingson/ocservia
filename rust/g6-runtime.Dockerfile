@@ -85,7 +85,7 @@ RUN cargo build --locked --release \
     && cp target/release/ocservia-agent target/release/ocservia-privd /out/agent/
 
 # Mirrors the runtime-base stage of rust/transportd.Dockerfile.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS transportd-runtime-base
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS transportd-runtime-base
 RUN groupadd --system --gid 65532 ocservia \
     && useradd --system --uid 65532 --gid ocservia transportd \
     && install -d -o transportd -g ocservia -m 0750 /run/ocserv-platform \
@@ -102,7 +102,7 @@ CMD ["--socket", "/run/ocserv-platform/transportd.sock", "--key-file", "/run/sec
 # transport UDS and controller key material mounted at runtime. The probe
 # runs as the control-plane account so transportd's peer-credential check
 # accepts it exactly like a real worker dispatch.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS g6-probe-runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS g6-probe-runtime
 RUN groupadd --system --gid 65532 ocservia \
     && usermod --gid ocservia nobody
 COPY --from=g6-rust-builder /out/probe/ocservia-g6-probe /usr/local/bin/ocservia-g6-probe
@@ -120,7 +120,7 @@ COPY --from=g6-rust-builder /out/probe/ocservia-g6-tunnel /ocservia-g6-tunnel
 # managed node in the G6 topology; the supervisor starts privd as root and
 # the Agent as the unprivileged ocservia-agent account, exactly as the
 # deployed systemd units split the two principals.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS g6-agent-runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS g6-agent-runtime
 # sqlite3 lets the harness read the durable command journal live from inside
 # the container; the journal bind is owned by the agent uid, so the host
 # runner cannot read it directly.

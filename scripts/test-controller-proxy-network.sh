@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$(mktemp -d)"
 project="ocservia-proxy-network-$$"
-image="${CONTROLLER_PROXY_TEST_IMAGE:-caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d}"
+image="${CONTROLLER_PROXY_TEST_IMAGE:-caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e}"
 compose() { docker compose -p "${project}" -f "${fixture}/compose.json" "$@"; }
 cleanup() {
   compose down --remove-orphans >/dev/null 2>&1 || true

@@ -160,4 +160,44 @@ if check_final >/dev/null 2>&1; then echo 'wrong trust anchor accepted' >&2; exi
 fingerprint="${saved_fingerprint}"
 rm "${fixture}/receipt"
 if check_final >/dev/null 2>&1; then echo 'missing full validation receipt accepted' >&2; exit 1; fi
+
+# Release hardening evidence: an asset dir that carries the image security
+# assets must carry all of them, and the signed SHA256SUMS must cover them.
+security_files=(
+  controller-image-security.json
+  controller-image-security.tar.gz
+  controller-image-security-bindings.json
+)
+printf '{"security":"v%s"}\n' "${version}" >"${prepared}/controller-image-security.json"
+printf 'security-bundle\n' >"${prepared}/controller-image-security.tar.gz"
+printf '{"bindings":"v%s"}\n' "${version}" >"${prepared}/controller-image-security-bindings.json"
+for file in "${security_files[@]}"; do
+  (cd "${prepared}" && sha256sum "${file}" >"${file}.sha256")
+done
+"${CHECKSUM_MANIFEST}" "${prepared}" 1 \
+  "${package_files[@]}" "${bootstrap_files[@]}" "${security_files[@]}" >"${prepared}/SHA256SUMS"
+openssl pkeyutl -sign -rawin -inkey "${fixture}/release-signing.key" \
+  -in "${prepared}/SHA256SUMS" -out "${prepared}/SHA256SUMS.sig"
+"${CHECKSUM_MANIFEST}" "${prepared}" 1 "${payload_files[@]}" "${bootstrap_files[@]}" >"${fixture}/receipt"
+check_final
+security_checksums="$("${CHECKSUM_MANIFEST}" "${prepared}" 1 \
+  "${package_files[@]}" "${bootstrap_files[@]}" "${security_files[@]}")"
+for file in "${security_files[@]}"; do
+  grep -Fxq "$(cd "${prepared}" && sha256sum "${file}")" <<<"${security_checksums}" || {
+    echo "signed SHA256SUMS must cover ${file}" >&2; exit 1;
+  }
+done
+for file in "${security_files[@]}"; do
+  cp "${prepared}/${file}" "${fixture}/original"
+  printf 'tampered\n' >"${prepared}/${file}"
+  if check_final >"${fixture}/error.log" 2>&1; then
+    echo "final manifest validation accepted changed ${file}" >&2; exit 1
+  fi
+  cp "${fixture}/original" "${prepared}/${file}"
+done
+rm "${prepared}/controller-image-security-bindings.json.sha256"
+if check_final >/dev/null 2>&1; then
+  echo "a partial controller image security set must fail validation" >&2; exit 1
+fi
+(cd "${prepared}" && sha256sum controller-image-security-bindings.json >controller-image-security-bindings.json.sha256)
 echo "Release checksum manifest and unchanged-payload final signature tests passed"
