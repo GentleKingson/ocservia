@@ -132,7 +132,8 @@ abort 'release dispatch can publish' unless jobs['publish-release-packages']['if
 abort 'release must call candidate security checks' unless
   jobs.fetch('security').fetch('uses') == './.github/workflows/security.yml'
 abort 'publication guard changed' unless jobs['publish-release-packages']['environment'] == 'release-publishing' &&
-  jobs['publish-release-packages']['needs'].sort == %w[build-controller-images security validate-release-packages]
+  jobs['publish-release-packages']['needs'].sort ==
+  %w[build-controller-images controller-image-security security validate-release-packages]
 %w[agent controller].each do |component|
   job = jobs[component == 'agent' ? 'build-agent-packages' : 'build-controller-images']
   abort 'shared build path missing' unless job['steps'].any? {|s| s.fetch('run','').include?("bash scripts/build-release-#{component}.sh")}
@@ -170,7 +171,8 @@ jobs.each_value do |job|
     next unless step.fetch('uses','').start_with?('actions/download-artifact@')
     pattern = step.fetch('with').fetch('pattern')
     abort 'release download must bind both exact architectures and this attempt' unless
-      pattern.end_with?('-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}')
+      pattern.end_with?('-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}') ||
+      pattern.end_with?('-${{ github.run_id }}-${{ github.run_attempt }}')
   end
 end
 baseline = File.read('scripts/release-baseline-upgrade-smoke.sh')
