@@ -1593,6 +1593,89 @@ if (
   throw new Error("positive resource growth above the SLO must still fail");
 }
 
+function postgresConnectionSamples(nextValue) {
+  const lines = read("testdata/g6/artifacts/resource-samples.csv")
+    .trimEnd()
+    .split("\n");
+  const header = lines[0].split(",");
+  const componentColumn = header.indexOf("component");
+  const timestampColumn = header.indexOf("timestamp");
+  const dbColumn = header.indexOf("db_connections");
+  const postgresRows = lines
+    .slice(1)
+    .map((line) => line.split(","))
+    .filter((columns) => columns[componentColumn] === "postgres");
+  const windowStartMs = Date.parse(postgresRows[0][timestampColumn]);
+  const rows = lines.slice(1).map((line) => {
+    const columns = line.split(",");
+    if (columns[componentColumn] === "postgres") {
+      const seconds = (Date.parse(columns[timestampColumn]) - windowStartMs) / 1000;
+      columns[dbColumn] = String(nextValue(seconds));
+    }
+    return columns.join(",");
+  });
+  return `${[header, ...rows].join("\n")}\n`;
+}
+
+function connectionGrowthVerdict(samples, expectedActual) {
+  const evidence = clone(baseEvidence);
+  evidence.measurements.database_connection_growth.actual = expectedActual;
+  rebindOverriddenArtifacts(evidence, {
+    "resource-samples.csv": samples,
+  });
+  const verdict = verifyWithArtifactOverrides(evidence, {
+    "resource-samples.csv": samples,
+  });
+  if (verdict.measurement_results.database_connection_growth.actual !== expectedActual) {
+    throw new Error(
+      `connection growth must derive ${expectedActual} from the artifact, got ${verdict.measurement_results.database_connection_growth.actual}`,
+    );
+  }
+  return verdict;
+}
+
+// Pool warm-up inside the bounded prefix must not be reported as growth: a low
+// first sample with an in-prefix ramp measures against the prefix peak, and a
+// final value below that peak clamps to zero.
+const warmupConnectionSamples = postgresConnectionSamples(
+  (seconds) => (seconds === 0 ? 18 : seconds < 60 ? 36 : 35),
+);
+const warmupVerdict = connectionGrowthVerdict(warmupConnectionSamples, 0);
+if (!warmupVerdict.passed) {
+  throw new Error(
+    `in-prefix pool warm-up must not count as connection growth: ${warmupVerdict.failure_reasons.join("; ")}`,
+  );
+}
+
+// A leak that keeps growing past the warm-up prefix still counts against the
+// limit in full, measured from the prefix peak.
+const lateLeakSamples = postgresConnectionSamples(
+  (seconds) => (seconds <= 60 ? 40 : 40 + (seconds - 60) / 5),
+);
+const lateLeakVerdict = connectionGrowthVerdict(lateLeakSamples, 48);
+if (
+  lateLeakVerdict.passed ||
+  lateLeakVerdict.measurement_results.database_connection_growth.passed ||
+  !lateLeakVerdict.failure_reasons.includes(
+    "metric failed: database_connection_growth",
+  )
+) {
+  throw new Error("a leak past the warm-up prefix must still fail the SLO");
+}
+
+// A leak that starts inside the warm-up prefix and continues beyond it is
+// measured from the prefix peak, not from its in-prefix starting level.
+const throughLeakSamples = postgresConnectionSamples(
+  (seconds) => 18 + (seconds / 5) * 3,
+);
+const throughLeakVerdict = connectionGrowthVerdict(throughLeakSamples, 147);
+if (
+  throughLeakVerdict.passed ||
+  throughLeakVerdict.measurement_results.database_connection_growth.actual !== 147
+) {
+  throw new Error("a leak through the warm-up prefix must still fail the SLO");
+}
+
 const negativeMeasurementEvidence = clone(baseEvidence);
 negativeMeasurementEvidence.measurements.transportd_rss_growth_ratio.actual = -1;
 let negativeMeasurementRejected = false;
