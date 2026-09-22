@@ -11,6 +11,11 @@ windows, and the supported platform set follow the
 the 1.0 release line onward, public contract changes within `1.x` are
 additive.
 
+`v1.0.1` is the first recommended production stable baseline. The published
+`v1.0.0` is transitional and remains supported as an upgrade source, not as a
+recommendation for new deployments. Pre-1.0 installations must be redeployed
+to enter `1.x`; there is no supported in-place upgrade path.
+
 | Version | Supported |
 | --- | --- |
 | Latest published release line | Yes |

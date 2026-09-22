@@ -71,7 +71,7 @@ triggers = w['on'] || w[true]
 abort 'manual-only entrypoint required' unless triggers.keys == ['workflow_dispatch']
 abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release business_only candidate_sha session_compatibility session_only version]
 abort 'session matrix must be opt-in' unless triggers['workflow_dispatch']['inputs']['session_compatibility'] == {
-  'description'=>'Also run published v0.6.0 and v0.6.1 nodes against this candidate on both native architectures',
+  'description'=>'Run historical v0.6.0 and v0.6.1 node diagnostics on both native architectures (not 1.x support)',
   'type'=>'boolean', 'default'=>false}
 abort 'native upgrades must remain the default' unless
   triggers['workflow_dispatch']['inputs']['session_only']['default'] == false &&
@@ -83,7 +83,7 @@ abort 'business probe must be explicit and disposable' unless
   business['if'] == 'inputs.business_only' && business['runs-on'] == 'ubuntu-24.04' && !business.key?('needs')
 abort 'business probe must use its bounded entrypoint' unless
   business['steps'].any? { |step| step['run'] == 'bash scripts/release-business-probe.sh' }
-abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v0.6.0'
+abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v1.0.0'
 abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
 %w[agent-upgrade controller-upgrade].each do |name|
   job = w['jobs'][name]
@@ -124,8 +124,8 @@ release = YAML.safe_load(File.read('.github/workflows/release.yml'))
 jobs = release.fetch('jobs')
 baseline_steps = jobs['build-agent-packages']['steps'].select { |step| step.fetch('name','').start_with?('Validate published ') }
 abort 'published upgrade baseline drift' unless baseline_steps.length == 1 &&
-  baseline_steps[0]['name'] == 'Validate published v0.6.0 upgrade (${{ matrix.package_arch }})' &&
-  baseline_steps[0].dig('env','BASELINE_RELEASE') == 'v0.6.0'
+  baseline_steps[0]['name'] == 'Validate published v1.0.0 upgrade (${{ matrix.package_arch }})' &&
+  baseline_steps[0].dig('env','BASELINE_RELEASE') == 'v1.0.0'
 abort 'release dispatch can publish' unless jobs['publish-release-packages']['if'] == "github.event_name == 'push'"
 abort 'release must call candidate security checks' unless
   jobs.fetch('security').fetch('uses') == './.github/workflows/security.yml'
@@ -172,6 +172,7 @@ jobs.each_value do |job|
   end
 end
 baseline = File.read('scripts/release-baseline-upgrade-smoke.sh')
+abort 'standalone smoke baseline default drift' unless baseline.include?('BASELINE_RELEASE="${BASELINE_RELEASE:-v1.0.0}"')
 abort 'candidate package smoke must execute all three binaries in both runtimes' unless
   baseline.scan('for binary in ocservia-agent ocservia-privd ocservia-upgrader; do').length == 2 &&
   baseline.include?('sudo "/usr/libexec/ocservia/${binary}" --version') &&

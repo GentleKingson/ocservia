@@ -7,9 +7,9 @@ six inputs:
 | Input | Type / default | Meaning |
 | --- | --- | --- |
 | `version` | Required string; no default | Candidate numeric X.Y.Z; strictly newer than the selected baseline unless `business_only=true` |
-| `baseline_release` | Required string; `v0.6.0` | Registered published baseline for prepare and native upgrades |
+| `baseline_release` | Required string; `v1.0.0` | Registered published baseline for prepare and native upgrades |
 | `candidate_sha` | Required string; no default | Exact full lowercase SHA of the dispatch branch |
-| `session_compatibility` | Boolean; `false` | Also run both published v0.6.0/v0.6.1 application pairs on both architectures |
+| `session_compatibility` | Boolean; `false` | Also run historical v0.6.0/v0.6.1 application diagnostics on both architectures; not 1.x support |
 | `session_only` | Boolean; `false` | Run the four application cells instead of native upgrades, even when `session_compatibility=false` |
 | `business_only` | Boolean; `false` | Run only the current candidate's native amd64 business probe, regardless of the session flags |
 
@@ -19,6 +19,11 @@ both the dispatch SHA and checkout HEAD. When `business_only=false`, prepare
 requires the candidate's numeric X.Y.Z version to be strictly newer than the
 selected registered baseline. These three identity inputs remain required in
 application-only mode: prepare still freezes and verifies that baseline.
+For formal `1.x`, the earliest supported upgrade source is `v1.0.0`, the
+published transitional release; `v1.0.1` is the first recommended production
+stable baseline. Prepare rejects pre-1.0 upgrade sources for stable candidates
+before candidate builds; the standalone package smoke rejects them before host setup.
+Pre-1.0 users must redeploy, not upgrade through `v1.0.0`.
 `baseline_release` selects the native upgrade baseline; application jobs always
 select both v0.6.0 and v0.6.1, independently of this input. Business-only mode
 has its own candidate checks and does not use the baseline (see below).
@@ -34,7 +39,7 @@ branch='<candidate-branch>'
 version='<candidate-X.Y.Z>'
 sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
 gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version="$version" -f baseline_release=v0.6.0 \
+  --ref "$branch" -f version="$version" -f baseline_release=v1.0.0 \
   -f candidate_sha="$sha"
 ```
 
@@ -126,7 +131,12 @@ Excluded from native-upgrade evidence: database engine/major changes, MySQL/Mari
 all historical releases, all distributions, online Agent batches, cross-VM
 or relay end-to-end behavior, full database regression/security/G6 acceptance.
 
-### Optional published-node application matrix
+### Optional historical-node application matrix
+
+These pre-1.0 cells retain diagnostic coverage only. They do not establish a
+supported rolling window into `1.x`, are not formal 1.x release requirements,
+and cannot replace matched-candidate application acceptance. Keep
+`baseline_release=v1.0.0` for a 1.x candidate, even in application-only mode.
 
 Append `-f session_compatibility=true` to include application evidence with
 the native gate, or `-f session_only=true` for application-fixture iteration.
@@ -190,7 +200,11 @@ names, such as `ocservia-agent_0.6.2_amd64.deb`. Candidate packages always use
 `-1`; their naming never determines the historical baseline filename.
 The baseline smoke uses Node to share this resolver with upgrade prepare.
 
-The default v0.6.0 is bound to commit
+### Historical pre-1.0 baselines
+
+Historical entries and evidence remain immutable. They are not supported
+upgrade sources into `1.x`, fallback baselines, or production recommendations.
+The former default v0.6.0 is bound to commit
 `cc8399641dc32083466a9c77369fcb8debf1ee48`, schema 36, checksum-manifest SHA-256
 `26f4ab236630ff52777dabf5723cd3d5814022d4e08ab4079768117dd4e262df`, and DER key SHA-256
 `b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369`.
@@ -224,13 +238,11 @@ v0.4.0 package key. Immutable Release 389674680 and publication run 35061703465
 were cross-checked. This metadata verification did not install or rebuild the
 baseline and is not upgrade acceptance.
 
-The existing v0.6.0 release smoke and manual default remain unchanged. To
-cover the supplemental baseline, additionally dispatch this workflow with
-`-f baseline_release=v0.6.1` and the exact candidate version/branch/SHA.
-Require all four native units and the result gate on that same SHA. A v0.6.0
-run cannot be reported as v0.6.1 upgrade evidence.
+This supplemental baseline records historical pre-1.0 validation only. A
+v0.6.0 run cannot be reported as v0.6.1 upgrade evidence; neither is evidence
+for the supported `v1.0.0` to `v1.0.1` transition.
 
-### Final-candidate identity
+### Historical v0.6.2 identity
 
 The published [v0.6.2 release](https://github.com/GentleKingson/ocservia/releases/tag/v0.6.2)
 is registered at commit `518df6e9c488e58613c9cc194c896b4edfd57c2e`, PostgreSQL
@@ -240,23 +252,35 @@ the signing key retains the independently anchored historical fingerprint above.
 The baseline registry records its verification provenance. This registration
 establishes artifact identity, not successful installation or upgrade.
 
-A disposable T05 build labeled `version=0.6.2` from a
-different source SHA is not that published release or a final T06 candidate.
-For T06, explicitly select `-f baseline_release=v0.6.2` rather than the historical
-manual default, then upgrade from those signed artifacts to the final frozen
-candidate's actual numeric version (strictly newer than 0.6.2) and exact source SHA.
-Prerelease strings such as `1.0.0-rc.1` are not accepted version inputs. Require fresh
-Agent/Controller x amd64/arm64 evidence; T05's earlier eight native units do
-not replace this gate. Do not infer artifact identity from a version string.
+A disposable T05 build labeled `version=0.6.2` from a different source SHA is
+not that published release. Earlier T05/T06 records retain their original
+identities; they do not support pre-1.0 entry into `1.x`. Do not infer artifact
+identity from a version string or reuse their outcomes for the current candidate.
 
-For the 1.0.0 candidate, explicitly select the latest registered native baseline
-without changing the historical v0.6.0 default or v0.6.0/v0.6.1 application pairs:
+### v1.0.0 transitional baseline and v1.0.1 candidate
+
+The registered `v1.0.0` baseline is commit
+`e85ab3fa90d1d5f6e4c53b56b2f5e0278f6da060`, PostgreSQL schema 36, with
+checksum-manifest SHA-256
+`0aa8270a68a65cc81b59a70001c53a9b4ace1ed6e33f4b36ef696db56ef4a401`.
+It uses the independently anchored signing key above and revisioned DEB names
+(`deb_asset_release=1`). The registry retains its published-artifact
+verification provenance and the known post-publication Controller
+checkout-permission failure. This is a published, upgradeable transitional
+release, not the recommended fresh-install baseline. Artifact registration
+does not erase that failure or prove an upgrade passed.
+
+Both the release package smoke and the manual native upgrade workflow use
+`v1.0.0` by default. For the first recommended production baseline, freeze the
+actual `1.0.1` candidate SHA and require fresh Agent/Controller x amd64/arm64
+evidence and the aggregate from one run/attempt. Prerelease strings such as
+`1.0.1-rc.1` are not accepted version inputs:
 
 ```bash
 branch='<frozen-candidate-branch>'
 sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
 gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version=1.0.0 -f baseline_release=v0.6.2 \
+  --ref "$branch" -f version=1.0.1 -f baseline_release=v1.0.0 \
   -f candidate_sha="$sha" -f session_compatibility=false \
   -f session_only=false -f business_only=false
 ```

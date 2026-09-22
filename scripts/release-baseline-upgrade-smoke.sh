@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Published-baseline upgrade smoke: install the real published baseline
-# release (default v0.1.1) from GitHub Release assets, then upgrade it to the
+# release (default v1.0.0) from GitHub Release assets, then upgrade it to the
 # locally built candidate package with the native package manager. This is
-# the deterministic v0.1.1 -> candidate hop a pre-v2 node uses to reach the
-# first Controller-upgrade-capable baseline; it proves the cross-version
-# package lifecycle (state preservation, rollback snapshot, no automatic
-# enable) rather than a fabricated old version. Baselines recorded with
-# production-relay capability additionally prove that a production managed
-# node established the way that baseline's own payload documents (its
+# the transitional 1.0 baseline, not a recommendation for new deployments.
+# Pre-1.0 entries remain historical fixtures, not upgrade paths into 1.x.
+# The smoke proves the cross-version package lifecycle (state preservation,
+# rollback snapshot, no automatic enable) rather than a fabricated old version.
+# Baselines recorded with production-relay capability additionally prove that a
+# production managed node established the way that baseline's own payload documents (its
 # verified install-agent.sh with INSTALL_PRODUCTION_RELAYS=true, then
 # operator relays.env, relay token, and identity state) upgrades into the
 # candidate with the relay drop-in, operator relay configuration, and
@@ -32,14 +32,11 @@ RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 VERSION="${VERSION:?candidate VERSION is required (plain SemVer)}"
 CANDIDATE_DEB="${CANDIDATE_DEB:?CANDIDATE_DEB path is required}"
-BASELINE_RELEASE="${BASELINE_RELEASE:-v0.1.1}"
-if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "${BASELINE_RELEASE}" != v[0-9]* ]]; then
-  echo "VERSION must be plain SemVer and BASELINE_RELEASE a v-prefixed tag" >&2
-  exit 2
-fi
+BASELINE_RELEASE="${BASELINE_RELEASE:-v1.0.0}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+node "${ROOT}/scripts/release-upgrade-contract.mjs" upgrade-path "${VERSION}" "${BASELINE_RELEASE}"
 BASELINE_VERSION="${BASELINE_RELEASE#v}"
 # Historical pins and capabilities have one owner shared with upgrade prepare.
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 baseline="$(jq -ce --arg tag "${BASELINE_RELEASE}" '.[$tag] // error("unregistered baseline")' \
   "${ROOT}/scripts/release-upgrade-baselines.json")"
 baseline_sums_sha256="$(jq -er '.sums_sha256' <<<"${baseline}")"
@@ -47,10 +44,6 @@ baseline_has_upgrader="$(jq -r 'if .upgrader then "yes" else "no" end' <<<"${bas
 baseline_has_version_query="$(jq -r 'if .version_query then "yes" else "no" end' <<<"${baseline}")"
 baseline_has_production_relays="$(jq -r 'if .production_relays then "yes" else "no" end' <<<"${baseline}")"
 baseline_has_rpm="$(jq -r 'if .rpm then "yes" else "no" end' <<<"${baseline}")"
-case "${BASELINE_RELEASE#v}" in
-  *.*.*) ;;
-  *) echo "baseline release must carry a plain SemVer version" >&2; exit 2 ;;
-esac
 if [[ ! -f "${CANDIDATE_DEB}" ]]; then
   echo "candidate deb not found: ${CANDIDATE_DEB}" >&2
   exit 2

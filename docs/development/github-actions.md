@@ -230,7 +230,7 @@ to GHCR, or loads the production signing key.
   It produces a signed tar archive plus deb/rpm,
   and runs `scripts/release-native-package-smoke.sh` for the candidate's
   deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  It also runs the published v0.6.0 DEB/RPM baseline package smoke, executing
+  It also runs the published transitional v1.0.0 DEB/RPM baseline package smoke, executing
   all three installed candidate binaries on Ubuntu and systemd Rocky 9.
   The additional full upgrade gate below is independent of this release job.
 - Tag pushes and `arch=all` dry runs download both package sets and run
@@ -272,7 +272,7 @@ to GHCR, or loads the production signing key.
 `.github/workflows/release-upgrade.yml` is a separate, manual-only workflow.
 By default it requires Agent and Controller upgrade results on both native
 `ubuntu-24.04` and `ubuntu-24.04-arm` runners. `session_compatibility=true`
-adds four published-node application cells (v0.6.0/v0.6.1 x amd64/arm64).
+adds four historical-node diagnostic cells (v0.6.0/v0.6.1 x amd64/arm64).
 `session_only=true` runs those application cells even without the other flag,
 and skips both native upgrade matrices and `Native Upgrade Result`. Both
 flags default to `false`. Prepare still requires and freezes candidate
@@ -280,7 +280,9 @@ version, baseline tag and exact dispatch SHA in every mode; application jobs
 always test both node baselines. The workflow neither publishes a release
 nor becomes a Basic CI required check.
 
-Application-only evidence does not satisfy native upgrade acceptance.
+Historical pre-1.0 diagnostics do not establish upgrade support into `1.x`
+and are not formal 1.x release requirements. Application-only evidence does
+not satisfy native upgrade acceptance or matched-candidate application acceptance.
 `Native Upgrade Result` covers only native units, not application outcomes.
 The [finite compatibility contract](../reference/stable-contracts.md#finite-release-matrix)
 defines required application workflows and the adopted exclusions; phase
@@ -289,8 +291,11 @@ failures remain failures even when they document an excluded promise.
 See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
 trust anchors, evidence, reproduction, and the limits of this gate. Select the
 pushed candidate branch, a numeric candidate version newer than the registered
-baseline, and that branch's full SHA. The default registered baseline remains
-`v0.6.0`; a new release does not automatically register itself. Unlike Quick/Full
+baseline, and that branch's full SHA. The default registered baseline is
+`v1.0.0`, the published transitional upgrade source for the first recommended
+production stable baseline `v1.0.1`. Pre-1.0 upgrade sources are rejected for
+formal 1.x candidates; those installations must redeploy. A new release does
+not automatically register itself. Unlike Quick/Full
 CI this is cross-version native upgrade evidence, unlike Release it does not
 publish, and unlike Formal G6 it does not certify full readiness, HA or PITR.
 

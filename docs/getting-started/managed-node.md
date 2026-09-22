@@ -4,6 +4,11 @@ A managed node is an existing ocserv server with the ocservia node services inst
 
 This guide covers the normal package-first installation path. Detailed package verification, manual archive installation, rollback, and uninstall behavior remain in the [Agent package lifecycle reference](../operations/agent-lifecycle.md).
 
+Select a matched published Controller and node release, with `v1.0.1` as the
+first recommended production stable baseline. `v1.0.0` is only a transitional
+upgrade source. Pre-1.0 nodes must be redeployed and enrolled for the new `1.x`
+deployment, not upgraded in place. See the [support policy](../reference/support-policy.md).
+
 ## Requirements
 
 - The Controller is deployed and reachable through the production relays.

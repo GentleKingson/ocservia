@@ -9,16 +9,16 @@ on:
         type: string
         required: true
       baseline_release:
-        description: Registered published stable Release tag
+        description: Registered published upgrade baseline (1.x upgrades start at v1.0.0)
         type: string
         required: true
-        default: v0.6.0
+        default: v1.0.0
       candidate_sha:
         description: Exact 40-character SHA of the selected dispatch branch
         type: string
         required: true
       session_compatibility:
-        description: Also run published v0.6.0 and v0.6.1 nodes against this candidate on both native architectures
+        description: Run historical v0.6.0 and v0.6.1 node diagnostics on both native architectures (not 1.x support)
         type: boolean
         default: false
       session_only:
@@ -167,7 +167,7 @@ jobs:
           retention-days: 7
 
   session-compatibility:
-    name: Published Node Compatibility (${{ matrix.arch }})
+    name: Historical Node Diagnostics (${{ matrix.arch }})
     if: ${{ !inputs.business_only && (inputs.session_compatibility || inputs.session_only) }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
