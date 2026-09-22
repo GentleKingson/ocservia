@@ -143,9 +143,12 @@ Three pairs are deliberately not conflated:
   and blocks the release until the affected base image is refreshed, unless
   the finding is covered by an exemption in
   `deploy/production/image-scan-exemptions.json` that binds the exact image,
-  package, installed version, and vulnerability id, names the base image,
-  records a reason, and has not passed its review date — a new CVE on the same
-  package or an expired review date fails the gate again; findings without an
+  package, installed version, and vulnerability id, is recorded against the
+  image's actual digest-pinned base image (resolved from the same Dockerfiles
+  the build consumed, so a base refresh invalidates the entry), records a
+  reason, and has not passed its review date — a new CVE on the same package,
+  a changed base image, or an expired review date fails the gate again;
+  findings without an
   available fix are recorded in the report without blocking. The gate covers
   the base-image (OS package) layer; the compiled first-party dependency graph
   remains covered by the dependency advisories above.

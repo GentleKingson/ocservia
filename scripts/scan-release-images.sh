@@ -53,8 +53,10 @@ export GRYPE_DB_AUTO_UPDATE=false
 
 # Explicit, reviewed escape hatch: a finding is only exempted when an entry
 # binds the exact image, package, installed version, and vulnerability id,
-# names the base image it came from, carries a reason, and its review date has
-# not passed. Everything else keeps the fail-closed behavior.
+# carries a reason, has not passed its review date, and was recorded against
+# the image's actual digest-pinned base, resolved below from the same
+# Dockerfiles the build consumed — a base refresh invalidates stale entries.
+# Everything else keeps the fail-closed behavior.
 exemptions_file="${IMAGE_SCAN_EXEMPTIONS:-${ROOT}/deploy/production/image-scan-exemptions.json}"
 [[ -f "${exemptions_file}" && ! -L "${exemptions_file}" && -s "${exemptions_file}" ]] || {
   echo "image scan exemptions file is missing or empty: ${exemptions_file}" >&2
@@ -94,6 +96,29 @@ archive_config_digest() {
     return 1
   }
   printf 'sha256:%s\n' "${config_name}"
+}
+
+# Exemptions bind the base image the finding was recorded against, so the gate
+# must know each image's actual base. It resolves the base the same way the
+# build consumes it: the final stage of each release Dockerfile enters through
+# the last digest-pinned FROM (later FROM lines only reference internal
+# stages). Keep this mapping in sync with scripts/build-release-controller.sh.
+controller_dockerfile_for() {
+  case "$1" in
+    gateway) printf 'deploy/production/gateway.Dockerfile\n' ;;
+    control) printf 'control-plane/Dockerfile\n' ;;
+    transport) printf 'rust/transportd.Dockerfile\n' ;;
+    backup) printf 'deploy/production/backup.Dockerfile\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+image_base_reference() {
+  local dockerfile="$1"
+  awk '
+    /^FROM[ \t]/ && $2 ~ /^[^@[:space:]]+@sha256:[0-9a-f]{64}$/ { base = $2 }
+    END { if (base != "") print base; else exit 1 }
+  ' "${ROOT:?}/${dockerfile}"
 }
 
 # Validate every row and require both platform legs per image before writing
@@ -144,7 +169,15 @@ first_image=true
 for name in $(printf '%s\n' "${!image_seen[@]}" | LC_ALL=C sort); do
   ${first_image} || printf ',\n' >>"${summary}"
   first_image=false
-  printf '  "%s": {"platforms": {' "${name}" >>"${summary}"
+  dockerfile="$(controller_dockerfile_for "${name}")" || {
+    echo "no release Dockerfile mapping for image ${name}; cannot resolve its base image" >&2
+    exit 1
+  }
+  base_ref="$(image_base_reference "${dockerfile}")" || {
+    echo "cannot resolve a digest-pinned base image for ${name} from ${dockerfile}" >&2
+    exit 1
+  }
+  printf '  "%s": {"base_image": "%s", "platforms": {' "${name}" "${base_ref}" >>"${summary}"
 
   first_platform=true
   for arch in amd64 arm64; do
@@ -165,7 +198,7 @@ for name in $(printf '%s\n' "${!image_seen[@]}" | LC_ALL=C sort); do
 
     # Classify every finding first (fixable High/Critical are gate-relevant),
     # then count only the reportable (non-exempted) ones into the summary.
-    findings="$(jq -c --arg image "${name}" --arg today "${today}" --argjson _exemptions "${exemptions_json}" '
+    findings="$(jq -c --arg image "${name}" --arg base "${base_ref}" --arg today "${today}" --argjson _exemptions "${exemptions_json}" '
       [.matches[]
       | .artifact.name as $package | .artifact.version as $version
       | .vulnerability.id as $id | .vulnerability.severity as $severity
@@ -173,7 +206,7 @@ for name in $(printf '%s\n' "${!image_seen[@]}" | LC_ALL=C sort); do
       | {package: $package, version: $version, id: $id, severity: $severity, fixable: $fixable,
          exempted: any($_exemptions[];
            .image == $image and .package == $package and .installed_version == $version
-           and .vulnerability_id == $id and .review_by >= $today)}]
+           and .vulnerability_id == $id and .base_image == $base and .review_by >= $today)}]
       | ([.[] | select(.exempted and .fixable and (.severity == "High" or .severity == "Critical"))]) as $exempted
       | ([.[] | select(.exempted | not)]) as $reportable
       | {

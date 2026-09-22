@@ -209,6 +209,11 @@ abort("Controller publishing must prove it pushes the scanned images") unless
   publish_steps.include?("docker image inspect --format '{{.Id}}'")
 abort("Controller publishing must ship the scan binding record") unless
   publish_steps.include?("controller-image-security-bindings.json")
+abort("Controller publishing must bind the pushed index digests into the scan binding record") unless
+  publish_steps.include?("index_digest: .[0][4]")
+abort("Controller publishing must verify the binding record against the final release manifests") unless
+  publish_steps.include?(".images[$name].index_digest") &&
+  publish_steps.include?("controller-release-${platform}.json")
 final_gate = publish.fetch("steps").find { |step| step["name"] == "Verify signed release manifest" }
 abort("Final release validation must retain the trusted key pin") unless
   final_gate.fetch("env").fetch("AGENT_TRUSTED_KEY_SHA256") == '${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}'

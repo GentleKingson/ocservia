@@ -474,6 +474,7 @@ jobs:
           : >"${output_dir}/security-bindings.tsv"
           for name in gateway control transport backup; do
             refs=()
+            binding_rows=()
             for arch in amd64 arm64; do
               archive="${images_dir}/${name}-linux-${arch}.tar"
               [[ -s "${archive}" ]] || {
@@ -505,8 +506,7 @@ jobs:
                 echo "could not read the pushed digest for ${arch_tag}" >&2
                 exit 1
               fi
-              printf '%s\tlinux-%s\t%s\t%s\n' "${name}" "${arch}" "${digest}" "${scanned_digest}" \
-                >>"${output_dir}/security-bindings.tsv"
+              binding_rows+=("$(printf '%s\tlinux-%s\t%s\t%s' "${name}" "${arch}" "${digest}" "${scanned_digest}")")
               refs+=("${CONTROLLER_IMAGE_PREFIX}/${name}@${digest}")
             done
             docker buildx imagetools create \
@@ -531,15 +531,21 @@ jobs:
             }
             printf '%s\t%s\n' "${name}" "${CONTROLLER_IMAGE_PREFIX}/${name}@${index_digest}" >>"${output_dir}/image-refs.tsv"
             printf '%s_digest=%s\n' "${name}" "${index_digest}" >>"${GITHUB_OUTPUT}"
+            for row in "${binding_rows[@]}"; do
+              printf '%s\t%s\n' "${row}" "${index_digest}" >>"${output_dir}/security-bindings.tsv"
+            done
           done
           # Bind the pre-push scan evidence to the public artifacts: per image,
           # the pushed per-arch manifest digests plus the scanned config
           # digests they were proven equal to, and the final index digest.
-          jq -rn --arg release_tag "${release_tag}" --arg source_commit "${source_commit}" '
+          # -R reads the bindings table as raw lines; without it jq would try
+          # to parse each TSV row as JSON and abort the publish.
+          jq -rRn --arg release_tag "${release_tag}" --arg source_commit "${source_commit}" '
             [inputs | split("\t")]
             | {release_tag: $release_tag, source_commit: $source_commit,
                images: ([group_by(.[0])[]
-                 | {(.[0][0]): {platforms: (map({(.[1]): {manifest_digest: .[2], config_digest: .[3]}}) | add)}}] | add)}
+                 | {(.[0][0]): {index_digest: .[0][4],
+                    platforms: (map({(.[1]): {manifest_digest: .[2], config_digest: .[3]}}) | add)}}] | add)}
           ' "${output_dir}/security-bindings.tsv" >"${output_dir}/controller-image-security-bindings.json"
           jq -e '.images | length >= 1' "${output_dir}/controller-image-security-bindings.json" >/dev/null
       - name: Generate Controller release manifests
@@ -563,6 +569,21 @@ jobs:
               --image "backup=$(image_ref backup)" \
               --image "postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f" \
               --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
+          done
+          # The bindings record is signed evidence, so it must agree with the
+          # manifests operators actually consume: every index digest it binds
+          # has to be the exact reference both release manifests ship.
+          for platform in amd64 arm64; do
+            for name in gateway control transport backup; do
+              bound_digest="$(jq -er --arg name "${name}" '.images[$name].index_digest' \
+                "${output_dir}/controller-image-security-bindings.json")"
+              manifest_ref="$(jq -er --arg name "${name}" '.images[$name]' \
+                "${output_dir}/controller-release-${platform}.json")"
+              [[ "${manifest_ref}" == *@"${bound_digest}" ]] || {
+                echo "security bindings index digest for ${name} does not match controller-release-${platform}.json: ${bound_digest} vs ${manifest_ref}" >&2
+                exit 1
+              }
+            done
           done
           # Compatibility alias: existing amd64 operators keep consuming
           # controller-release.json unchanged.

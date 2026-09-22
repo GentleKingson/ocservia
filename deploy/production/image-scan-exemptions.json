@@ -1,5 +1,5 @@
 {
-  "comment": "Findings recorded here are excluded from the release image scan gate. Every entry must bind the exact finding it covers - image, package, installed version, and vulnerability id - name the base image it came from, carry a reason, and stay inside its review_by date; an expired exemption or a new CVE on the same package fails the gate again. Everything else with an available fix at High or Critical still fails the publish.",
+  "comment": "Findings recorded here are excluded from the release image scan gate. Every entry must bind the exact finding it covers - image, package, installed version, and vulnerability id - match the digest-pinned base image the image is actually built from, carry a reason, and stay inside its review_by date; an expired exemption, a new CVE on the same package, or a base image change fails the gate again. Everything else with an available fix at High or Critical still fails the publish.",
   "exemptions": [
     {
       "image": "backup",

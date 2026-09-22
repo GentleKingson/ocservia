@@ -172,7 +172,9 @@ jobs.each_value do |job|
     pattern = step.fetch('with').fetch('pattern')
     abort 'release download must bind both exact architectures and this attempt' unless
       pattern.end_with?('-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}') ||
-      pattern.end_with?('-${{ github.run_id }}-${{ github.run_attempt }}')
+      # The merged, per-run security evidence artifact is the only download
+      # without per-architecture legs; it must still bind this exact attempt.
+      pattern == "controller-image-security-${{ github.run_id }}-${{ github.run_attempt }}"
   end
 end
 baseline = File.read('scripts/release-baseline-upgrade-smoke.sh')

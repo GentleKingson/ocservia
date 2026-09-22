@@ -118,7 +118,7 @@ write_fixtures() {
   printf 'gateway\tamd64\t%s\ngateway\tarm64\t%s\n' \
     "${work_dir}/gateway-linux-amd64.tar" "${work_dir}/gateway-linux-arm64.tar" >"${archives_tsv}"
   cat >"${exemptions}" <<'JSON'
-{"exemptions": [{"image": "backup", "package": "libpcre2-8-0", "installed_version": "10.42-1+deb12u0", "vulnerability_id": "CVE-2026-4444", "base_image": "postgres:17.10-bookworm", "reason": "stub", "review_by": "2999-01-01"}]}
+{"exemptions": [{"image": "backup", "package": "libpcre2-8-0", "installed_version": "10.42-1+deb12u0", "vulnerability_id": "CVE-2026-4444", "base_image": "postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f", "reason": "stub", "review_by": "2999-01-01"}]}
 JSON
 }
 
@@ -139,6 +139,7 @@ jq -e --arg digest "${config_digest}" '
   .tools.grype_db.schema == "v6.0.0-stub" and
   .tools.grype_db.from == "https://grype.anchore.io/databases/v6/stub" and
   .tools.grype_db.auto_update == false and
+  .images.gateway.base_image == "caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e" and
   .images.gateway.platforms["linux-amd64"].config_digest == $digest and
   .images.gateway.platforms["linux-amd64"].archive == "gateway-linux-amd64.tar" and
   .images.gateway.platforms["linux-amd64"].gate == "fail" and
@@ -206,7 +207,7 @@ fi
 
 # An exemption whose review date has passed stops covering its finding.
 cat >"${exemptions}" <<'JSON'
-{"exemptions": [{"image": "backup", "package": "libpcre2-8-0", "installed_version": "10.42-1+deb12u0", "vulnerability_id": "CVE-2026-4444", "base_image": "postgres:17.10-bookworm", "reason": "stub", "review_by": "2000-01-01"}]}
+{"exemptions": [{"image": "backup", "package": "libpcre2-8-0", "installed_version": "10.42-1+deb12u0", "vulnerability_id": "CVE-2026-4444", "base_image": "postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f", "reason": "stub", "review_by": "2000-01-01"}]}
 JSON
 printf 'backup\tamd64\t%s\nbackup\tarm64\t%s\n' \
   "${work_dir}/gateway-linux-amd64.tar" "${work_dir}/gateway-linux-arm64.tar" >"${archives_tsv}"
@@ -217,6 +218,23 @@ if run_scan >"${work_dir}/stdout.log" 2>&1; then
 fi
 jq -e '.images.backup.platforms["linux-amd64"].os_findings.exempted == 0' "${summary}" >/dev/null || {
   echo "an expired exemption must not count as exempted" >&2
+  exit 1
+}
+
+# An exemption recorded against a different base image stops covering its
+# finding: the entry binds the image's actual digest-pinned base, so a base
+# refresh invalidates stale exemptions.
+cat >"${exemptions}" <<'JSON'
+{"exemptions": [{"image": "backup", "package": "libpcre2-8-0", "installed_version": "10.42-1+deb12u0", "vulnerability_id": "CVE-2026-4444", "base_image": "postgres:17.10-bookworm@sha256:1111111111111111111111111111111111111111111111111111111111111111", "reason": "stub", "review_by": "2999-01-01"}]}
+JSON
+rm -rf "${output_dir}"
+write_grype_stub "$(finding_json libpcre2-8-0 10.42-1+deb12u0 CVE-2026-4444 High true)"
+if run_scan >"${work_dir}/stdout.log" 2>&1; then
+  echo "an exemption recorded against a different base image must re-fail the gate" >&2
+  exit 1
+fi
+jq -e '.images.backup.platforms["linux-amd64"].os_findings.exempted == 0' "${summary}" >/dev/null || {
+  echo "an exemption for a different base image must not count as exempted" >&2
   exit 1
 }
 
