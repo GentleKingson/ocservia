@@ -48,7 +48,7 @@ on that SHA before the numeric release is tagged.
   deprecation notice.
 - **Upgrade and recovery paths.** Verified upgrade baselines are registered in
   [`scripts/release-upgrade-baselines.json`](../../scripts/release-upgrade-baselines.json)
-  (currently through `v0.6.2`) and validated by the
+  (currently through `v1.0.0`) and validated by the
   [native release upgrade workflow](../development/release-upgrade-validation.md).
   Rollback follows the guarded
   [Controller rollback](../how-to/controller-rollback.md) and

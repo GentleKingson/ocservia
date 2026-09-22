@@ -359,8 +359,10 @@ prepare_checkout() {
   # may remove exactly that directory and never pre-existing content.
   mkdir -m 0700 -- "${TARGET}" || fail "cannot create ${TARGET}"
   echo "cloning ${REPOSITORY_URL} at ${VERSION} into ${TARGET}"
-  if ! git clone --quiet --branch "${VERSION}" --single-branch --depth 1 \
-    "${REPOSITORY_URL}" "${TARGET}"; then
+  # Public checkout files are bind-mounted into non-root containers. Keep the
+  # claimed root private and limit the readable umask to the clone itself.
+  if ! (umask 022; git clone --quiet --branch "${VERSION}" --single-branch --depth 1 \
+    "${REPOSITORY_URL}" "${TARGET}"); then
     rm -rf -- "${TARGET}"
     fail "cloning ${REPOSITORY_URL} at ${VERSION} failed; the release tag may not exist — check the published releases"
   fi
