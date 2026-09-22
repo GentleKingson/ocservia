@@ -121,5 +121,23 @@
       "key_source_package_sha256": "fc1118d87367d5842b7eaf29f5069ef4c8b65d7b2871ea6f549270c5a50a9587",
       "method": "Verify the historical checksum pin and DEB digest before extracting its key; verify v0.6.2 SHA256SUMS.sig, both archive signatures and all 21 published asset digests, compare the published key, and verify both Controller bundles at schema 36 and anonymous dual-platform image indexes. Confirm legacy DEB asset names with package Version 0.6.2-1. Cross-check immutable Release 391876832, direct tag commit and successful tag publication run 35378980967 attempt 1. No TOFU, installation or baseline rebuild."
     }
+  },
+  "v1.0.0": {
+    "sums_sha256": "0aa8270a68a65cc81b59a70001c53a9b4ace1ed6e33f4b36ef696db56ef4a401",
+    "commit": "e85ab3fa90d1d5f6e4c53b56b2f5e0278f6da060",
+    "key_der_sha256": "b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369",
+    "deb_asset_release": 1,
+    "upgrader": true,
+    "version_query": true,
+    "production_relays": true,
+    "rpm": true,
+    "controller": { "database": "postgres", "migration": 36, "authentication": "oidc" },
+    "verification": {
+      "date": "2026-09-22",
+      "anchor": "Historical v0.4.0 package key independently established for v0.5.0 through v0.6.2; same DER fingerprint",
+      "key_source": "ocservia-agent_0.4.0_arm64.deb/usr/share/ocservia-agent/release-signing.pub.pem",
+      "key_source_package_sha256": "fc1118d87367d5842b7eaf29f5069ef4c8b65d7b2871ea6f549270c5a50a9587",
+      "method": "Verify the historical DEB digest before extracting its key; verify v1.0.0 SHA256SUMS.sig, both archive signatures, all 21 published asset digests, both Controller bundles at schema 36, and anonymous dual-platform image indexes. Confirm revisioned DEB filenames and source labels. Cross-check immutable Release 393442543, direct tag commit and publication run 35683853925 attempt 1. Artifact identity does not imply successful fresh bootstrap: post-publication run 35686013647 retained the known Controller checkout-permission failure on both architectures. No TOFU or baseline rebuild."
+    }
   }
 }

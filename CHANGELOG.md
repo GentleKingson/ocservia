@@ -7,6 +7,15 @@ this file records the change categories per release line. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and ocservia uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1]
+
+### Fixed
+
+- Controller bootstrap clones public source files with container-readable
+  permissions, so PostgreSQL initialization and OTel configuration work for
+  non-root container users. Source roots, secrets, and lifecycle state keep
+  their protected permissions.
+
 ## [1.0.0]
 
 This section identifies the release line, not its publication status. The
