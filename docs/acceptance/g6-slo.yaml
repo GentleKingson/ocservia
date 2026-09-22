@@ -281,7 +281,7 @@ metrics:
     limit: 16
     comparison: lte
     unit: count
-    scope: PostgreSQL connection count growth from baseline to final recovery.
+    scope: PostgreSQL connection count growth from the bounded warm-up baseline, the peak of the sampling window's first 60 seconds, to final recovery.
     derivation: resource_samples.database_connection_growth
   queue_depth_end:
     limit: 0
