@@ -224,7 +224,8 @@ end.join("\n")
   "go-security" => %w[install_go install_govulncheck],
   "rust-security" => %w[install_rust install_cargo_audit install_cargo_deny],
   "npm-security" => %w[install_node install_npm],
-  "package-tools" => %w[install_nfpm]
+  "package-tools" => %w[install_nfpm],
+  "image-security" => %w[install_syft install_grype verify_host_command]
 }.each do |profile, expected|
   output, status = Open3.capture2e({"PROFILE" => profile}, "bash", "-eu", "-c", stubs + "\n" + dispatch)
   reject("#{profile} installs unrelated tools/dependencies: #{output}") unless status.success? && output.split == expected

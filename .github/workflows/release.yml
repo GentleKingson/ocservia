@@ -449,6 +449,29 @@ jobs:
             controller-release-amd64.json controller-release-amd64.json.sha256 \
             controller-release-arm64.json controller-release-arm64.json.sha256 \
             "${RUNNER_TEMP}/assets/"
+      - name: Bootstrap pinned image scanner tools
+        run: scripts/bootstrap.sh image-security
+      - name: Scan published Controller images & emit SBOMs
+        # OS-level vulnerability gate over the exact published index digests:
+        # any High/Critical OS finding with an available fix fails this step
+        # and blocks the publish. The SBOMs and scan reports ship as release
+        # assets bound to those digests.
+        env:
+          IMAGE_REFS_TSV: ${{ runner.temp }}/controller-release/image-refs.tsv
+        run: |
+          source scripts/env.sh
+          security_dir="${RUNNER_TEMP}/controller-release/image-security"
+          scripts/scan-release-images.sh "${security_dir}"
+          bundle="${RUNNER_TEMP}/controller-release/controller-image-security.tar.gz"
+          tar -czf "${bundle}" -C "${security_dir}" .
+          cd "${security_dir}"
+          sha256sum controller-image-security.json >controller-image-security.json.sha256
+          cd "${RUNNER_TEMP}/controller-release"
+          sha256sum controller-image-security.tar.gz >controller-image-security.tar.gz.sha256
+          cp -- "${security_dir}/controller-image-security.json" .
+          cp -- controller-image-security.tar.gz controller-image-security.tar.gz.sha256 \
+            controller-image-security.json controller-image-security.json.sha256 \
+            "${RUNNER_TEMP}/assets/"
       - name: Verify anonymous Controller image reads
         env:
           GATEWAY_DIGEST: ${{ steps.controller-index.outputs.gateway_digest }}
@@ -581,6 +604,10 @@ jobs:
             "${assets}/controller-release-arm64.json.sha256" \
             "${assets}/controller-bootstrap.sh" \
             "${assets}/managed-node-bootstrap.sh" \
+            "${assets}/controller-image-security.tar.gz" \
+            "${assets}/controller-image-security.tar.gz.sha256" \
+            "${assets}/controller-image-security.json" \
+            "${assets}/controller-image-security.json.sha256" \
             "${assets}/SHA256SUMS" \
             "${assets}/SHA256SUMS.sig" \
             "${assets}/release-signing.pub.pem"

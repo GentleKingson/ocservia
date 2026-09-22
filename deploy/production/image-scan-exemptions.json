@@ -1,0 +1,10 @@
+{
+  "comment": "Findings recorded here are excluded from the release image scan gate. Each entry needs a named image, package, and the reason the release cannot act on it. Everything else with an available fix at High or Critical still fails the publish.",
+  "exemptions": [
+    {
+      "image": "backup",
+      "package": "libpcre2-8-0",
+      "reason": "The image is pinned to postgres:17.10-bookworm, which upstream has not rebuilt with the Debian libpcre2 10.42-1+deb12u1 security update; moving to a newer PostgreSQL patch line is gated by the database patch review in docs/reference/support-policy.md and must not happen through a scanner-driven base bump. Revisit when the next 17.x patch image adopts the fixed Debian layer."
+    }
+  ]
+}
