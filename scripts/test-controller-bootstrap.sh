@@ -79,10 +79,18 @@ git -C "${origin_work}" add -A
 git -C "${origin_work}" commit -qm base
 git -C "${origin_work}" tag v0.1.0
 mkdir -p -- "${origin_work}/deploy/production"
+mkdir -p -- "${origin_work}/deploy/production/postgres-init"
+printf '#!/bin/sh\nexit 0\n' >"${origin_work}/deploy/production/postgres-init/001-runtime-role.sh"
+chmod 0755 -- "${origin_work}/deploy/production/postgres-init/001-runtime-role.sh"
+printf 'receivers: {}\n' >"${origin_work}/deploy/production/otel-collector.yaml"
 cat >"${origin_work}/deploy/production/install.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 : "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:?env-only installer received no release trust key}"
+[[ "$(umask)" == 0077 ]] || {
+  echo "bootstrap must restore the protected installer umask" >&2
+  exit 1
+}
 log="${BOOTSTRAP_TEST_INSTALL_LOG:?}"
 printf 'invoked-as:%s\n' "$0" >>"${log}"
 printf 'pwd:%s\n' "$(pwd -P)" >>"${log}"
@@ -425,6 +433,14 @@ target="${source_root}/v0.1.2"
   die "the checkout must carry the v0.1.2 tag at HEAD"
 [[ -z "$(git -C "${target}" status --porcelain --untracked-files=all)" ]] ||
   die "the cloned checkout must be clean"
+[[ "$(stat -c '%a' "${source_root}")" == 700 && "$(stat -c '%a' "${target}")" == 700 ]] ||
+  die "the source root and claimed checkout must remain private"
+[[ "$(stat -c '%a' "${target}/deploy/production/postgres-init")" == 755 ]] ||
+  die "container-mounted public directories must be traversable by non-root container users"
+[[ "$(stat -c '%a' "${target}/deploy/production/postgres-init/001-runtime-role.sh")" == 755 ]] ||
+  die "container-mounted public executables must remain readable and executable"
+[[ "$(stat -c '%a' "${target}/deploy/production/otel-collector.yaml")" == 644 ]] ||
+  die "container-mounted public configuration must remain readable"
 [[ "$(git_calls clone)" == 1 ]] ||
   die "exactly one clone was expected"
 assert_log_contains "${install_log}" "invoked-as:${target}/deploy/production/install.sh"

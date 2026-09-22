@@ -37,14 +37,19 @@ assert.equal(stable.sums_sha256, "a386f64d81f0ccb0b87482c3f4e4029d0a756b5e76c679
 assert.equal(stable.key_der_sha256, valid().key_der_sha256);
 assert.deepEqual(stable.controller, { database: "postgres", migration: 36, authentication: "oidc" });
 assert(!Object.hasOwn(stable, "deb_asset_release"));
+const maintenance = validateInputs("1.0.1", "v1.0.0", sha, sha, sha, baselines);
+assert.equal(maintenance.commit, "e85ab3fa90d1d5f6e4c53b56b2f5e0278f6da060");
+assert.equal(maintenance.sums_sha256, "0aa8270a68a65cc81b59a70001c53a9b4ace1ed6e33f4b36ef696db56ef4a401");
+assert.equal(maintenance.key_der_sha256, stable.key_der_sha256);
+assert.equal(maintenance.deb_asset_release, 1);
+assert.throws(() => validateInputs("1.0.0", "v1.0.0", sha, sha, sha, baselines));
 for (const version of ["0.6.2", "0.6.1", "1.0.0-rc.1"])
   assert.throws(() => validateInputs(version, "v0.6.2", sha, sha, sha, baselines));
 for (const arch of Object.keys(architectures)) {
   for (const baselineTag of ["v0.1.1", "v0.3.0", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0", "v0.6.1", "v0.6.2"]) {
     assert.equal(baselineDebAsset(baselineTag, arch, baselines[baselineTag]), `ocservia-agent_${baselineTag.slice(1)}_${arch}.deb`);
   }
-  // Synthetic metadata, not a rewrite of any published release.
-  const future = { ...latest, deb_asset_release: 1 };
+  const future = maintenance;
   const legacyName = `ocservia-agent_0.6.1_${arch}.deb`;
   const futureName = `ocservia-agent_1.0.0-1_${arch}.deb`;
   assert(requiredAssets("v0.6.1", latest).includes(legacyName));
