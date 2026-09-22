@@ -123,6 +123,28 @@ abort("Controller image build legs must only read source") unless controller.fet
 }
 abort("Controller image build legs must not run in a protected environment") if
   controller.key?("environment")
+security = jobs.fetch("controller-image-security")
+abort("Controller image security job must gate tag pushes and full multi-arch dispatch dry runs") unless
+  security.fetch("if") == "github.event_name == 'push' || inputs.arch == 'all'"
+abort("Controller image security job must wait for the build legs") unless
+  Array(security.fetch("needs")) == ["build-controller-images"]
+abort("Controller image security job must only read source") unless
+  security.fetch("permissions") == {"contents" => "read"}
+abort("Controller image security job must not run in a protected environment") if
+  security.key?("environment")
+security_steps = Array(security.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+security_uses = Array(security.fetch("steps")).map { |step| step["uses"] }.compact
+security_uses.each do |use|
+  abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
+end
+abort("Controller image security job must bootstrap the pinned scanner") unless
+  security_steps.include?("scripts/bootstrap.sh image-security")
+abort("Controller image security job must scan the built image archives") unless
+  security_steps.include?("IMAGE_ARCHIVES_TSV") && security_steps.include?("scripts/scan-release-images.sh")
+%w[docker\ login docker\ push imagetools].each do |forbidden|
+  abort("Controller image security job must not write to a registry: #{forbidden}") if
+    security_steps.include?(forbidden)
+end
 gated = jobs.values.select { |job| job["environment"] == "release-publishing" }
 abort("Exactly one release-publishing gated job must exist") unless gated.length == 1
 abort("The release-publishing environment must gate the publish job only") unless gated.first == publish
@@ -165,6 +187,16 @@ end
 
 abort("Controller publishing must wait for the image build legs") unless
   Array(publish.fetch("needs")).include?("build-controller-images")
+abort("Controller publishing must wait for the pre-push image security gate") unless
+  Array(publish.fetch("needs")).include?("controller-image-security")
+abort("Controller publishing must not run the image scanner itself") unless
+  !publish_steps.include?("scripts/scan-release-images.sh") &&
+    !publish_steps.include?("scripts/bootstrap.sh image-security")
+abort("Controller publishing must prove it pushes the scanned images") unless
+  publish_steps.include?(".images[$name].platforms[$platform].config_digest") &&
+  publish_steps.include?("docker image inspect --format '{{.Id}}'")
+abort("Controller publishing must ship the scan binding record") unless
+  publish_steps.include?("controller-image-security-bindings.json")
 validate_steps = Array(validate.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
 abort("Release dry runs must prepare both versioned bootstrap assets") unless
   validate_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')

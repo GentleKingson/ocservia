@@ -55,6 +55,13 @@ bootstrap_files=(
   "controller-bootstrap.sh"
   "managed-node-bootstrap.sh"
 )
+# Optional release hardening evidence: a bundle that carries any of it must
+# carry all of it, checksummed, and the signed SHA256SUMS must cover it.
+image_security_files=(
+  "controller-image-security.json"
+  "controller-image-security.tar.gz"
+  "controller-image-security-bindings.json"
+)
 
 for file in "${package_files[@]}" "${bootstrap_files[@]}"; do
   if [[ ! -f "${ASSET_DIR}/${file}" || -L "${ASSET_DIR}/${file}" || ! -s "${ASSET_DIR}/${file}" ]]; then
@@ -62,6 +69,30 @@ for file in "${package_files[@]}" "${bootstrap_files[@]}"; do
     exit 1
   fi
 done
+
+image_security_present=false
+for file in "${image_security_files[@]}"; do
+  if [[ -e "${ASSET_DIR}/${file}" || -e "${ASSET_DIR}/${file}.sha256" ]]; then
+    image_security_present=true
+  fi
+done
+security_manifest_files=()
+if [[ "${image_security_present}" == true ]]; then
+  for file in "${image_security_files[@]}"; do
+    if [[ ! -f "${ASSET_DIR}/${file}" || -L "${ASSET_DIR}/${file}" || ! -s "${ASSET_DIR}/${file}" ]] ||
+      [[ ! -f "${ASSET_DIR}/${file}.sha256" || -L "${ASSET_DIR}/${file}.sha256" || ! -s "${ASSET_DIR}/${file}.sha256" ]]; then
+      echo "controller image security asset or checksum is missing, empty, or a symlink: ${file}" >&2
+      exit 1
+    fi
+    expected_checksum="$(cd -- "${ASSET_DIR}" && sha256sum -- "${file}")"
+    actual_checksum="$(cat -- "${ASSET_DIR}/${file}.sha256")"
+    if [[ "${actual_checksum}" != "${expected_checksum}" ]]; then
+      echo "controller image security checksum mismatch: ${file}" >&2
+      exit 1
+    fi
+  done
+  security_manifest_files=("${image_security_files[@]}")
+fi
 
 cmp -s -- "${ASSET_DIR}/controller-bootstrap.sh" \
   "${ROOT}/deploy/production/controller-bootstrap.sh" \
@@ -190,7 +221,7 @@ else
 fi
 
 canonical_manifest="$(release_checksum_manifest "${ASSET_DIR}" "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" \
-  "${package_files[@]:0:6}" "${bootstrap_files[@]}")"
+  "${package_files[@]:0:6}" "${bootstrap_files[@]}" "${security_manifest_files[@]}")"
 if [[ ! -f "${ASSET_DIR}/SHA256SUMS" ]]; then
   if [[ "${WRITE_SHA256SUMS}" == "1" ]]; then
     printf '%s\n' "${canonical_manifest}" >"${ASSET_DIR}/SHA256SUMS"

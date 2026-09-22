@@ -1,0 +1,60 @@
+# macOS Finder metadata
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+/install.env
+/.ocservia-control/keys/
+
+# Build and test output
+coverage/
+dist/
+test-results/
+playwright-report/
+tmp/
+
+# Project-local tool downloads and caches.
+.tools/
+.cache/
+.zcode/
+
+# Local Mimosa runtime state and reports.
+**/.mimosa/
+
+target/
+node_modules/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

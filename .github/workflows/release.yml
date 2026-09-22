@@ -249,6 +249,101 @@ jobs:
         if: always()
         run: docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1 || true
 
+  controller-image-security:
+    name: Scan Controller Images & Emit SBOMs
+    # Gates the release on the built candidate images before any registry
+    # write: the reviewer-gated publish job below needs this job, so by the
+    # time a reviewer approves, the scan verdict already exists. The full
+    # multi-arch dispatch dry run exercises the same real scanner on the same
+    # candidate images.
+    needs: build-controller-images
+    if: github.event_name == 'push' || inputs.arch == 'all'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Resolve release identity
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "refusing to scan Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
+              exit 1
+            fi
+            version="${RELEASE_TAG#v}"
+            release_tag="${RELEASE_TAG}"
+          else
+            version="${INPUT_VERSION}"
+            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "dispatch version must be plain SemVer without a leading v, got ${version}" >&2
+              exit 1
+            fi
+            release_tag="v${version}-dispatch-dry-run"
+          fi
+          source_commit="$(git rev-parse HEAD)"
+          if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" != "${GITHUB_SHA}" ]]; then
+            echo "checked out source does not match the release commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "release_tag=${release_tag}"
+            echo "source_commit=${source_commit}"
+          } >>"${GITHUB_ENV}"
+      - name: Collect Controller image archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          pattern: controller-images-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/controller-images
+          merge-multiple: true
+      - name: Bootstrap pinned image scanner tools
+        run: scripts/bootstrap.sh image-security
+      - name: Scan Controller image candidates & emit SBOMs
+        # OS-level vulnerability gate over the exact built image archives: any
+        # High/Critical OS finding with an available fix fails this job and
+        # blocks the publish. Evidence is bound to the image config digests and
+        # ships as release assets; the publish job proves it loaded and pushed
+        # exactly these images before anything becomes public.
+        env:
+          IMAGE_ARCHIVES_TSV: ${{ runner.temp }}/controller-images/image-archives.tsv
+        run: |
+          set -euo pipefail
+          images_dir="${RUNNER_TEMP}/controller-images"
+          for archive in "${images_dir}"/*-linux-*.tar; do
+            base="$(basename "${archive}" .tar)"
+            printf '%s\t%s\t%s\n' "${base%-linux-*}" "${base##*-linux-}" "${archive}"
+          done | LC_ALL=C sort >"${IMAGE_ARCHIVES_TSV}"
+          source scripts/env.sh
+          RELEASE_TAG="${release_tag}" SOURCE_COMMIT="${source_commit}" \
+            scripts/scan-release-images.sh "${RUNNER_TEMP}/controller-image-security"
+      - name: Bundle Controller image security evidence
+        run: |
+          set -euo pipefail
+          security_dir="${RUNNER_TEMP}/controller-image-security"
+          cd "${security_dir}"
+          sha256sum controller-image-security.json >controller-image-security.json.sha256
+          cd "${RUNNER_TEMP}"
+          tar -czf controller-image-security.tar.gz -C "${security_dir}" .
+          sha256sum controller-image-security.tar.gz >controller-image-security.tar.gz.sha256
+      - name: Upload Controller image security evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: controller-image-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/controller-image-security/*
+            ${{ runner.temp }}/controller-image-security.tar.gz
+            ${{ runner.temp }}/controller-image-security.tar.gz.sha256
+          retention-days: 7
+          if-no-files-found: error
+
   validate-release-packages:
     name: Validate Multi-Arch Package Set
     needs: build-agent-packages
@@ -293,7 +388,7 @@ jobs:
 
   publish-release-packages:
     name: Sign & Publish Release Assets
-    needs: [validate-release-packages, build-controller-images, security]
+    needs: [validate-release-packages, build-controller-images, controller-image-security, security]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -325,6 +420,12 @@ jobs:
         with:
           pattern: controller-images-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/controller-images
+          merge-multiple: true
+      - name: Collect Controller image security evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          pattern: controller-image-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/image-security
           merge-multiple: true
       - name: Resolve package version & source epoch
         env:
@@ -363,11 +464,14 @@ jobs:
       # packages that are about to become public.
       - name: Push Controller images & assemble multi-platform indexes
         id: controller-index
+        env:
+          SECURITY_SUMMARY: ${{ runner.temp }}/image-security/controller-image-security.json
         run: |
           set -euo pipefail
           images_dir="${RUNNER_TEMP}/controller-images"
           output_dir="${RUNNER_TEMP}/controller-release"
           mkdir -p "${output_dir}"
+          : >"${output_dir}/security-bindings.tsv"
           for name in gateway control transport backup; do
             refs=()
             for arch in amd64 arm64; do
@@ -385,12 +489,24 @@ jobs:
                 echo "loaded Controller image archive did not restore ${arch_tag}" >&2
                 exit 1
               }
+              # The scan gate ran against these archives before any registry
+              # write; prove the image being pushed is the scanned one by its
+              # config digest before it becomes public.
+              scanned_digest="$(jq -er --arg name "${name}" --arg platform "linux-${arch}" \
+                '.images[$name].platforms[$platform].config_digest' "${SECURITY_SUMMARY}")"
+              loaded_digest="$(docker image inspect --format '{{.Id}}' "${arch_tag}")"
+              if [[ "${scanned_digest}" != "${loaded_digest}" ]]; then
+                echo "loaded ${arch_tag} config ${loaded_digest} does not match the scanned evidence ${scanned_digest}" >&2
+                exit 1
+              fi
               push_output="$(docker push "${arch_tag}")"
               digest="$(grep -oE 'digest: sha256:[0-9a-f]{64}' <<<"${push_output}" | head -1 | cut -d' ' -f2)"
               if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                 echo "could not read the pushed digest for ${arch_tag}" >&2
                 exit 1
               fi
+              printf '%s\tlinux-%s\t%s\t%s\n' "${name}" "${arch}" "${digest}" "${scanned_digest}" \
+                >>"${output_dir}/security-bindings.tsv"
               refs+=("${CONTROLLER_IMAGE_PREFIX}/${name}@${digest}")
             done
             docker buildx imagetools create \
@@ -416,6 +532,16 @@ jobs:
             printf '%s\t%s\n' "${name}" "${CONTROLLER_IMAGE_PREFIX}/${name}@${index_digest}" >>"${output_dir}/image-refs.tsv"
             printf '%s_digest=%s\n' "${name}" "${index_digest}" >>"${GITHUB_OUTPUT}"
           done
+          # Bind the pre-push scan evidence to the public artifacts: per image,
+          # the pushed per-arch manifest digests plus the scanned config
+          # digests they were proven equal to, and the final index digest.
+          jq -rn --arg release_tag "${release_tag}" --arg source_commit "${source_commit}" '
+            [inputs | split("\t")]
+            | {release_tag: $release_tag, source_commit: $source_commit,
+               images: ([group_by(.[0])[]
+                 | {(.[0][0]): {platforms: (map({(.[1]): {manifest_digest: .[2], config_digest: .[3]}}) | add)}}] | add)}
+          ' "${output_dir}/security-bindings.tsv" >"${output_dir}/controller-image-security-bindings.json"
+          jq -e '.images | length >= 1' "${output_dir}/controller-image-security-bindings.json" >/dev/null
       - name: Generate Controller release manifests
         run: |
           set -euo pipefail
@@ -449,28 +575,31 @@ jobs:
             controller-release-amd64.json controller-release-amd64.json.sha256 \
             controller-release-arm64.json controller-release-arm64.json.sha256 \
             "${RUNNER_TEMP}/assets/"
-      - name: Bootstrap pinned image scanner tools
-        run: scripts/bootstrap.sh image-security
-      - name: Scan published Controller images & emit SBOMs
-        # OS-level vulnerability gate over the exact published index digests:
-        # any High/Critical OS finding with an available fix fails this step
-        # and blocks the publish. The SBOMs and scan reports ship as release
-        # assets bound to those digests.
-        env:
-          IMAGE_REFS_TSV: ${{ runner.temp }}/controller-release/image-refs.tsv
+      - name: Assemble Controller image security evidence
+        # The scan gate already passed in controller-image-security, before
+        # this job pushed anything. Bind that evidence to the pushed digests
+        # and ship it as release assets.
         run: |
-          source scripts/env.sh
+          set -euo pipefail
           security_dir="${RUNNER_TEMP}/controller-release/image-security"
-          scripts/scan-release-images.sh "${security_dir}"
+          mkdir -p "${security_dir}"
+          find "${RUNNER_TEMP}/image-security" -maxdepth 1 -type f \
+            ! -name '*.tar.gz' ! -name '*.tar.gz.sha256' \
+            -exec cp -t "${security_dir}" {} +
+          cp -- "${RUNNER_TEMP}/controller-release/controller-image-security-bindings.json" "${security_dir}/"
+          cd "${security_dir}"
+          sha256sum controller-image-security-bindings.json >controller-image-security-bindings.json.sha256
           bundle="${RUNNER_TEMP}/controller-release/controller-image-security.tar.gz"
           tar -czf "${bundle}" -C "${security_dir}" .
-          cd "${security_dir}"
-          sha256sum controller-image-security.json >controller-image-security.json.sha256
           cd "${RUNNER_TEMP}/controller-release"
           sha256sum controller-image-security.tar.gz >controller-image-security.tar.gz.sha256
-          cp -- "${security_dir}/controller-image-security.json" .
+          cp -- "${security_dir}/controller-image-security.json" \
+            "${security_dir}/controller-image-security.json.sha256" \
+            "${security_dir}/controller-image-security-bindings.json" \
+            "${security_dir}/controller-image-security-bindings.json.sha256" .
           cp -- controller-image-security.tar.gz controller-image-security.tar.gz.sha256 \
             controller-image-security.json controller-image-security.json.sha256 \
+            controller-image-security-bindings.json controller-image-security-bindings.json.sha256 \
             "${RUNNER_TEMP}/assets/"
       - name: Verify anonymous Controller image reads
         env:
@@ -608,6 +737,8 @@ jobs:
             "${assets}/controller-image-security.tar.gz.sha256" \
             "${assets}/controller-image-security.json" \
             "${assets}/controller-image-security.json.sha256" \
+            "${assets}/controller-image-security-bindings.json" \
+            "${assets}/controller-image-security-bindings.json.sha256" \
             "${assets}/SHA256SUMS" \
             "${assets}/SHA256SUMS.sig" \
             "${assets}/release-signing.pub.pem"

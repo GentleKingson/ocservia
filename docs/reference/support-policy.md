@@ -130,15 +130,22 @@ Three pairs are deliberately not conflated:
   release candidate. See [SECURITY.md](../../SECURITY.md) for reporting and
   supported-version policy.
 - **Image scanning and SBOM (adopted with the first `1.0.x` maintenance
-  release, `v1.0.1`):** the release publish workflow scans every published
-  Controller image at its final multi-platform digest with the pinned Syft and
-  Grype tools. Each release ships a full SPDX SBOM and an OS-level
-  vulnerability report per image and architecture, bound to the published
-  digest in a security summary attached to the release. A High or Critical
-  OS-level finding with an available fix fails the publish and blocks the
-  release until the affected base image is refreshed, unless the finding is
-  covered by a reason-recorded exemption in
-  `deploy/production/image-scan-exemptions.json`; findings without an
+  release, `v1.0.1`):** the release workflow scans every Controller image
+  candidate with the pinned Syft and Grype tools on one frozen vulnerability
+  database snapshot, before any release image is written to the registry: the
+  scan job runs against the built image archives, and the reviewer-gated
+  publish job may only push after the gate passes and must prove the images it
+  loads and indexes match the scanned evidence by config digest. Each release
+  ships a full SPDX SBOM and an OS-level vulnerability report per image and
+  architecture, bound to the scanned evidence and to the pushed multi-platform
+  digests in a security summary and bindings record attached to the release. A
+  High or Critical OS-level finding with an available fix fails the publish
+  and blocks the release until the affected base image is refreshed, unless
+  the finding is covered by an exemption in
+  `deploy/production/image-scan-exemptions.json` that binds the exact image,
+  package, installed version, and vulnerability id, names the base image,
+  records a reason, and has not passed its review date — a new CVE on the same
+  package or an expired review date fails the gate again; findings without an
   available fix are recorded in the report without blocking. The gate covers
   the base-image (OS package) layer; the compiled first-party dependency graph
   remains covered by the dependency advisories above.
