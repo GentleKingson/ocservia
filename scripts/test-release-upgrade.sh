@@ -71,7 +71,7 @@ triggers = w['on'] || w[true]
 abort 'manual-only entrypoint required' unless triggers.keys == ['workflow_dispatch']
 abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release business_only candidate_sha session_compatibility session_only version]
 abort 'session matrix must be opt-in' unless triggers['workflow_dispatch']['inputs']['session_compatibility'] == {
-  'description'=>'Run historical v0.6.0 and v0.6.1 node diagnostics on both native architectures (not 1.x support)',
+  'description'=>'Run the published v1.0.0 node against the candidate (1.x mixed-version window evidence) plus historical v0.6.0/v0.6.1 diagnostics, on both native architectures',
   'type'=>'boolean', 'default'=>false}
 abort 'native upgrades must remain the default' unless
   triggers['workflow_dispatch']['inputs']['session_only']['default'] == false &&
@@ -101,9 +101,10 @@ session = w['jobs'].fetch('session-compatibility')
 abort 'session matrix must be explicit and native' unless session['if'] == '${{ !inputs.business_only && (inputs.session_compatibility || inputs.session_only) }}' &&
   session['needs'] == 'prepare' && session['strategy'] == w['jobs']['agent-upgrade']['strategy']
 cells = session['steps'].select { |step| step.fetch('run','').include?('scripts/release-session-compatibility.sh run') }
-abort 'published application baselines drift' unless cells.map { |step| step.dig('env','BASELINE_RELEASE') } == %w[v0.6.0 v0.6.1]
-abort 'second cell must survive first cell failure, not build failure' unless
-  cells[1]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
+abort 'published application baselines drift' unless cells.map { |step| step.dig('env','BASELINE_RELEASE') } == %w[v1.0.0 v0.6.0 v0.6.1]
+abort 'the 1.x mixed-window pair must lead the matrix' unless cells[0]['if'].nil?
+abort 'diagnostics must survive the v1.0.0 pair failure, not build failure' unless
+  cells[1]['if'].nil? && cells[2]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
 abort 'session matrix must use the shipped transport launcher' unless
   File.read('scripts/build-release-session-images.sh').include?('build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile')
 abort 'disposable node must not register host binfmt handlers' unless

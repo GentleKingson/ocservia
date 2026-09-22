@@ -272,17 +272,22 @@ to GHCR, or loads the production signing key.
 `.github/workflows/release-upgrade.yml` is a separate, manual-only workflow.
 By default it requires Agent and Controller upgrade results on both native
 `ubuntu-24.04` and `ubuntu-24.04-arm` runners. `session_compatibility=true`
-adds four historical-node diagnostic cells (v0.6.0/v0.6.1 x amd64/arm64).
+adds six application cells: the published `v1.0.0` node against the candidate
+(the exact-pair evidence for the temporary `1.x` mixed-version window,
+required for `1.x` release acceptance) plus historical `v0.6.0`/`v0.6.1`
+diagnostics, each on both architectures.
 `session_only=true` runs those application cells even without the other flag,
 and skips both native upgrade matrices and `Native Upgrade Result`. Both
 flags default to `false`. Prepare still requires and freezes candidate
 version, baseline tag and exact dispatch SHA in every mode; application jobs
-always test both node baselines. The workflow neither publishes a release
+always test all three node baselines. The workflow neither publishes a release
 nor becomes a Basic CI required check.
 
 Historical pre-1.0 diagnostics do not establish upgrade support into `1.x`
-and are not formal 1.x release requirements. Application-only evidence does
-not satisfy native upgrade acceptance or matched-candidate application acceptance.
+and are not formal 1.x release requirements. The `v1.0.0` pair does not
+replace the native upgrade gate or matched-candidate application acceptance.
+Application-only evidence does not
+satisfy native upgrade acceptance or matched-candidate application acceptance.
 `Native Upgrade Result` covers only native units, not application outcomes.
 The [finite compatibility contract](../reference/stable-contracts.md#finite-release-matrix)
 defines required application workflows and the adopted exclusions; phase

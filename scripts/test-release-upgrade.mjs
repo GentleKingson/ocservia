@@ -48,6 +48,8 @@ for (const baselineTag of Object.keys(baselines).filter(tag => tag.startsWith("v
   }
 }
 assert.equal(validateInputs("1.1.0", "v1.0.0", sha, sha, sha, baselines), maintenance);
+for (const version of ["2.0.0", "2.1.0", "3.0.0"])
+  assert.throws(() => validateInputs(version, "v1.0.0", sha, sha, sha, baselines), /2\.x and later.*migration contract/);
 const contract = new URL("./release-upgrade-contract.mjs", import.meta.url).pathname;
 execFileSync(process.execPath, [contract, "upgrade-path", "1.0.1", "v1.0.0"]);
 const unsupported = spawnSync(process.execPath, [contract, "upgrade-path", "1.0.1", "v0.6.2"], {
@@ -55,13 +57,18 @@ const unsupported = spawnSync(process.execPath, [contract, "upgrade-path", "1.0.
 });
 assert.equal(unsupported.status, 1);
 assert.match(unsupported.stderr, /pre-1\.0.*redeploy/);
+const majorTwo = spawnSync(process.execPath, [contract, "upgrade-path", "2.0.0", "v1.0.0"], {
+  env: { ...process.env, GITHUB_STEP_SUMMARY: "" }, encoding: "utf8",
+});
+assert.equal(majorTwo.status, 1);
+assert.match(majorTwo.stderr, /2\.x and later.*migration contract/);
 const smoke = spawnSync("bash", [new URL("./release-baseline-upgrade-smoke.sh", import.meta.url).pathname], {
   env: { ...process.env, VERSION: "1.0.1", BASELINE_RELEASE: "v0.6.2", RUN_ID: "unsupported-upgrade",
     ARTIFACT_DIR: "/unused", CANDIDATE_DEB: "/unused", GITHUB_STEP_SUMMARY: "" }, encoding: "utf8",
 });
 assert.equal(smoke.status, 1);
 assert.match(smoke.stderr, /pre-1\.0.*redeploy/);
-console.log("Transitional v1.0.0 upgrades accepted; pre-1.0 to 1.x rejected before native host setup");
+console.log("Transitional v1.0.0 upgrades accepted; pre-1.0 to 1.x rejected before native host setup; 2.x+ candidates fail closed pending a reviewed 1.x to 2.x migration contract");
 assert.throws(() => validateInputs("1.0.0", "v1.0.0", sha, sha, sha, baselines));
 for (const version of ["0.6.2", "0.6.1", "1.0.0-rc.1"])
   assert.throws(() => validateInputs(version, "v0.6.2", sha, sha, sha, baselines));

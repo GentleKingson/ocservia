@@ -9,8 +9,8 @@ six inputs:
 | `version` | Required string; no default | Candidate numeric X.Y.Z; strictly newer than the selected baseline unless `business_only=true` |
 | `baseline_release` | Required string; `v1.0.0` | Registered published baseline for prepare and native upgrades |
 | `candidate_sha` | Required string; no default | Exact full lowercase SHA of the dispatch branch |
-| `session_compatibility` | Boolean; `false` | Also run historical v0.6.0/v0.6.1 application diagnostics on both architectures; not 1.x support |
-| `session_only` | Boolean; `false` | Run the four application cells instead of native upgrades, even when `session_compatibility=false` |
+| `session_compatibility` | Boolean; `false` | Also run the six application cells on both architectures: the published `v1.0.0` node against the candidate (the 1.x mixed-version window pair required for 1.x release acceptance) plus historical v0.6.0/v0.6.1 diagnostics |
+| `session_only` | Boolean; `false` | Run the six application cells instead of native upgrades, even when `session_compatibility=false` |
 | `business_only` | Boolean; `false` | Run only the current candidate's native amd64 business probe, regardless of the session flags |
 
 Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
@@ -23,7 +23,10 @@ For formal `1.x`, the earliest supported upgrade source is `v1.0.0`, the
 published transitional release; `v1.0.1` is the first recommended production
 stable baseline. Prepare rejects pre-1.0 upgrade sources for stable candidates
 before candidate builds; the standalone package smoke rejects them before host setup.
-Pre-1.0 users must redeploy, not upgrade through `v1.0.0`.
+Pre-1.0 users must redeploy, not upgrade through `v1.0.0`. Prepare also
+rejects `2.x` and later candidates fail-closed: a future major version needs a
+separately reviewed `1.x` to `2.x` migration contract before this workflow
+accepts it.
 `baseline_release` selects the native upgrade baseline; application jobs always
 select both v0.6.0 and v0.6.1, independently of this input. Business-only mode
 has its own candidate checks and does not use the baseline (see below).
@@ -57,8 +60,8 @@ Dispatch modes are:
 | `business_only` | `session_compatibility` | `session_only` | Jobs |
 | --- | --- | --- | --- |
 | `false` | `false` | `false` | Prepare, four native upgrade units and `Native Upgrade Result` (default) |
-| `false` | `true` | `false` | Prepare, native units/result plus four application cells (v0.6.0/v0.6.1 x amd64/arm64) |
-| `false` | Either value | `true` | Prepare and four application cells only; both native matrices and `Native Upgrade Result` are skipped |
+| `false` | `true` | `false` | Prepare, native units/result plus six application cells (`v1.0.0`/`v0.6.0`/`v0.6.1` x amd64/arm64) |
+| `false` | Either value | `true` | Prepare and six application cells only; both native matrices and `Native Upgrade Result` are skipped |
 | `true` | Either value | Either value | Native candidate business probe on amd64 only; prepare, native upgrades, application matrix and `Native Upgrade Result` are skipped |
 
 The flags are not mutually exclusive: `business_only=true` selects the business
@@ -131,19 +134,25 @@ Excluded from native-upgrade evidence: database engine/major changes, MySQL/Mari
 all historical releases, all distributions, online Agent batches, cross-VM
 or relay end-to-end behavior, full database regression/security/G6 acceptance.
 
-### Optional historical-node application matrix
+### Application matrix: `v1.0.0` acceptance pair and historical diagnostics
 
-These pre-1.0 cells retain diagnostic coverage only. They do not establish a
-supported rolling window into `1.x`, are not formal 1.x release requirements,
-and cannot replace matched-candidate application acceptance. Keep
+The `v1.0.0` cell is the exact-pair evidence for the temporary `1.x`
+mixed-version window (published `v1.0.0` node against the candidate
+Controller) and belongs to `1.x` release acceptance together with the native
+upgrade gate. The pre-1.0 cells retain diagnostic coverage only. They do not
+establish a supported rolling window into `1.x`, are not formal 1.x release
+requirements, and cannot replace the `v1.0.0` pair, matched-candidate
+application acceptance, or the native upgrade gate. Keep
 `baseline_release=v1.0.0` for a 1.x candidate, even in application-only mode.
 
 Append `-f session_compatibility=true` to include application evidence with
 the native gate, or `-f session_only=true` for application-fixture iteration.
 Each native architecture builds candidate application images once and runs
-both published node baselines without rebuilding their binaries. The second
-baseline still runs after a first-baseline failure if the build succeeded and
-the job was not cancelled. The independent PKI/config-rejection phase retains
+the `v1.0.0` pair first, then both published historical node baselines,
+without rebuilding their binaries. The historical diagnostics still run after
+the `v1.0.0` pair fails if the build succeeded and the job was not cancelled;
+the v0.6.1 diagnostic still runs after a v0.6.0 failure on the same
+condition. The independent PKI/config-rejection phase retains
 its own exit code without hiding a session/reload/recovery failure.
 
 See the [finite release matrix and adopted exclusions](../reference/stable-contracts.md#finite-release-matrix)
@@ -273,7 +282,9 @@ does not erase that failure or prove an upgrade passed.
 Both the release package smoke and the manual native upgrade workflow use
 `v1.0.0` by default. For the first recommended production baseline, freeze the
 actual `1.0.1` candidate SHA and require fresh Agent/Controller x amd64/arm64
-evidence and the aggregate from one run/attempt. Prerelease strings such as
+evidence, the aggregate from one run/attempt, and the `v1.0.0` node against
+candidate Controller application cells on both architectures for the
+mixed-version window. Prerelease strings such as
 `1.0.1-rc.1` are not accepted version inputs:
 
 ```bash
@@ -281,7 +292,7 @@ branch='<frozen-candidate-branch>'
 sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
 gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
   --ref "$branch" -f version=1.0.1 -f baseline_release=v1.0.0 \
-  -f candidate_sha="$sha" -f session_compatibility=false \
+  -f candidate_sha="$sha" -f session_compatibility=true \
   -f session_only=false -f business_only=false
 ```
 
@@ -296,7 +307,7 @@ rebuild old sources or silently fall back to a different release.
 
 Artifacts are `upgrade-frozen-RUN-ATTEMPT`, one
 `upgrade-COMPONENT-ARCH-RUN-ATTEMPT` per native unit, and optional
-`session-ARCH-RUN-ATTEMPT` per application architecture, containing both
+`session-ARCH-RUN-ATTEMPT` per application architecture, containing all three
 baseline directories and their `compatibility-result.json` phase outcomes.
 The workflow requests seven days, but actual artifact expiry may be shorter;
 check the API's `expires_at` and download evidence promptly. Keep structured

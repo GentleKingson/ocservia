@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-}"
 case "${mode}" in fetch|verify|run) ;; *) echo 'usage: release-session-compatibility.sh fetch|verify|run' >&2; exit 2 ;; esac
 : "${BASELINE_RELEASE:?}" "${PACKAGE_ARCH:?}" "${RELEASE_ASSET_DIR:?}"
-case "${BASELINE_RELEASE}" in v0.6.0|v0.6.1) ;; *) echo 'unregistered session compatibility baseline' >&2; exit 2 ;; esac
+case "${BASELINE_RELEASE}" in v1.0.0|v0.6.0|v0.6.1) ;; *) echo 'unregistered session compatibility baseline' >&2; exit 2 ;; esac
 case "${PACKAGE_ARCH}" in amd64|arm64) ;; *) echo 'unsupported package architecture' >&2; exit 2 ;; esac
 baseline="$(jq -ce --arg tag "${BASELINE_RELEASE}" '.[$tag]' "${ROOT}/scripts/release-upgrade-baselines.json")"
 archive="ocservia-agent-${BASELINE_RELEASE#v}-linux-${PACKAGE_ARCH}.tar.gz"

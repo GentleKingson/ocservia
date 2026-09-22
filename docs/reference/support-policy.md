@@ -42,7 +42,9 @@ on that SHA before the numeric release is tagged.
   [stable contracts](stable-contracts.md). Mixing a published historical
   1.x node with a newer Controller is supported only inside the
   [finite release matrix](stable-contracts.md#finite-release-matrix) and its
-  recorded exclusions; upgrade the Controller first. There is no
+  recorded exclusions, with the published `v1.0.0`-node against
+  candidate-Controller application cells as the exact-pair evidence; upgrade
+  the Controller first. There is no
   security-equivalent downgrade promise.
 - **Deprecation.** A public contract surface may be deprecated only through a
   release-notes announcement in the minor release that introduces the

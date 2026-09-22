@@ -18,11 +18,11 @@ on:
         type: string
         required: true
       session_compatibility:
-        description: Run historical v0.6.0 and v0.6.1 node diagnostics on both native architectures (not 1.x support)
+        description: Run the published v1.0.0 node against the candidate (1.x mixed-version window evidence) plus historical v0.6.0/v0.6.1 diagnostics, on both native architectures
         type: boolean
         default: false
       session_only:
-        description: Run only the four application cells, without native package or Controller upgrades
+        description: Run only the six application cells, without native package or Controller upgrades
         type: boolean
         default: false
       business_only:
@@ -167,7 +167,7 @@ jobs:
           retention-days: 7
 
   session-compatibility:
-    name: Historical Node Diagnostics (${{ matrix.arch }})
+    name: Application Compatibility Matrix (${{ matrix.arch }})
     if: ${{ !inputs.business_only && (inputs.session_compatibility || inputs.session_only) }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
@@ -199,6 +199,15 @@ jobs:
             printf '%s\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null
           fi
           bash scripts/build-release-session-images.sh
+      - name: Published v1.0.0 node against candidate
+        env:
+          BASELINE_RELEASE: v1.0.0
+          RUN_ID: sc-${{ github.run_id }}-${{ github.run_attempt }}-100-${{ matrix.arch }}
+          RELEASE_ASSET_DIR: ${{ runner.temp }}/baseline-v100
+          ARTIFACT_DIR: ${{ runner.temp }}/session-${{ matrix.arch }}/v1.0.0
+        run: |
+          bash scripts/release-session-compatibility.sh fetch >"${SESSION_EVIDENCE}/v100-artifact.json"
+          bash scripts/release-session-compatibility.sh run
       - name: Published v0.6.0 node against candidate
         env:
           BASELINE_RELEASE: v0.6.0

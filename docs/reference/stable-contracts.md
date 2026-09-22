@@ -90,15 +90,21 @@ Require the four Agent/Controller x amd64/arm64 cells of the
 [native upgrade workflow](../development/release-upgrade-validation.md) on the
 exact candidate. Registration proves artifact identity, not successful fresh
 bootstrap, an accepted upgrade, or arbitrary mixed-version application support.
-Use a matched release for steady-state deployment; upgrade Controller first
-and accept any temporary 1.x mixed-version window only with exact-pair evidence.
+Use a matched release for steady-state deployment; upgrade Controller first.
+A temporary 1.x mixed-version window means exactly one pair: the published
+`v1.0.0` Agent/privd/upgrader package against the candidate
+Controller/transportd. Accept that window only after the `v1.0.0` x
+amd64/arm64 application cells below pass on the exact candidate, collected in
+one run/attempt together with the native upgrade gate; they are part of `1.x`
+release acceptance, not optional diagnostics.
 
 ### Historical pre-1.0 diagnostics
 
 The following matrix records historical coverage, not supported in-place
 upgrades or rolling deployments into `1.x`. Pre-1.0 users must redeploy.
 These optional diagnostic cells are not formal 1.x release requirements and
-cannot replace the `v1.0.0` native upgrade gate or matched-candidate acceptance.
+cannot replace the `v1.0.0` native upgrade gate, the `v1.0.0` mixed-version
+application acceptance above, or matched-candidate acceptance.
 The historical releases are real signed assets already registered in
 [`release-upgrade-baselines.json`](../../scripts/release-upgrade-baselines.json):
 
@@ -112,11 +118,12 @@ new download's self-reported digest. Older entries remain registered for
 historical lifecycle tests and artifact provenance, not as formal 1.x upgrade
 sources. Retained runtime compatibility code is not an upgrade-support promise.
 
-For **each** selected baseline and **each** native `amd64` / `arm64` architecture:
+For **each** selected baseline — the `v1.0.0` mixed-version acceptance pair or
+a historical diagnostic — and **each** native `amd64` / `arm64` architecture:
 
 | Combination | Executable entry | Acceptance boundary |
 | --- | --- | --- |
-| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Four application cells total. Required scope: enrollment, grant/fence/receipt, telemetry and approved reload; config revision/rejection and plan replay, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. The systemd chain uses two real Relays for v0.6.0 and one for v0.6.1; the real-process PKI chain uses two TLS Relays. No historical rebuild. Covered workflows require actual-artifact evidence; the two exclusions below are not positive acceptance. |
+| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Six application cells total: the `v1.0.0` mixed-version pair plus the two historical diagnostic baselines, each on amd64/arm64. Required scope: enrollment, grant/fence/receipt, telemetry and approved reload; config revision/rejection and plan replay, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. The systemd chain uses two real Relays for v0.6.0 and one for `v1.0.0` and v0.6.1; the real-process PKI chain uses two TLS Relays. No historical rebuild. Covered workflows require actual-artifact evidence; the two exclusions below are not positive acceptance. |
 | v0.6.0 node, either architecture: uncertain non-idempotent mutation across all-Relay outage / owner change | Same systemd chain, retaining its strict automatic-recovery assertion | **Excluded: guaranteed automatic mutation recovery.** Query-only `Unknown` requires manual reconciliation. Preserve evidence, reconcile before resuming writes, then upgrade the verified matched node package under the path below. A green run or a newer version alone does not restore this promise. |
 | v0.6.0 / v0.6.1 node, either architecture: positive ConfigPlan apply with candidate Controller | Same PKI chain checks rejection only | **Excluded: successful plan/apply/rollback.** Do not use positive configuration apply in this rolling window. Upgrade to a verified matched node package with a reviewed complete configuration contract and positive plan/apply/recovery acceptance before enabling it; no such qualifying release is established by this matrix. |
 | Published pre-1.0 native package -> newer pre-1.0 candidate package | Existing `release-upgrade.yml`, `baseline_release` set explicitly | Historical DEB Ubuntu and RPM Rocky 9 coverage only; no path into 1.x. |
@@ -258,12 +265,15 @@ host's native-admission policy; admission is checked again after the chain.
 For authorized GitHub Actions execution, dispatch the existing
 `release-upgrade.yml` on the exact candidate branch with `version`,
 `baseline_release`, `candidate_sha`, and `session_compatibility=true`. The
-optional application jobs build once per native architecture and run both
-published baselines, retaining all four cells in that run/attempt. They do not
+application jobs build once per native architecture and run the published
+`v1.0.0` upgrade-source pair plus both historical diagnostic baselines,
+retaining all six cells in that run/attempt. They do not
 publish images, run on ordinary PRs or replace the native upgrade jobs. For a
-1.x candidate, keep `baseline_release=v1.0.0`; the pre-1.0 application pairs are
-diagnostics only and do not select the native upgrade source.
-For application-fixture iteration, `session_only=true` runs those four cells
+1.x candidate, keep `baseline_release=v1.0.0`; the `v1.0.0` application pair
+is the mixed-version window evidence required by the finite matrix above, and
+the pre-1.0 application pairs are diagnostics only that do not select the
+native upgrade source.
+For application-fixture iteration, `session_only=true` runs those six cells
 without rebuilding native upgrade products. Its result cannot satisfy the
 separate native-upgrade requirements; the default remains native upgrades.
 
@@ -353,7 +363,9 @@ do not reset journals to make an upgrade pass.
    or incompatible schema require forward recovery or isolated backend restore,
    not down-migration or forced state edits. Reconcile Unknown before resuming.
 4. Before the `v1.0.1` production-candidate freeze: collect all four native
-   upgrade cells from `v1.0.0` and matched-candidate application acceptance on
+   upgrade cells from `v1.0.0`, the `v1.0.0` node against candidate Controller
+   application cells on both architectures for the mixed-version window, and
+   matched-candidate application acceptance on
    the exact candidate. Historical pre-1.0 application cells are optional
    diagnostics, not a formal 1.x release gate. Retain their exclusions and
    original results without turning them into support promises. Review the

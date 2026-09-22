@@ -35,6 +35,8 @@ export function validateUpgradePath(version, tag) {
   requireThat(compareVersions(version, tag.slice(1)) > 0, "candidate must be numerically newer than baseline");
   requireThat(compareVersions(version, "1.0.0") < 0 || compareVersions(tag.slice(1), "1.0.0") >= 0,
     "pre-1.0 in-place upgrades to stable releases are unsupported; redeploy instead");
+  requireThat(compareVersions(version, "2.0.0") < 0,
+    "2.x and later in-place upgrades are unsupported until a separately reviewed 1.x to 2.x migration contract exists");
 }
 export function validateInputs(version, tag, sha, dispatchSHA, head, baselines) {
   validateUpgradePath(version, tag);
