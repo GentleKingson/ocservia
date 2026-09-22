@@ -8,7 +8,7 @@ a simulator, the T06 upgrade gate, or complete T07 acceptance.
 
 With explicit authorization to use disposable GitHub-hosted runners, dispatch
 `release-upgrade.yml` on the exact candidate branch with `version`,
-`candidate_sha`, `baseline_release=v0.6.2` and `business_only=true`. The baseline
+`candidate_sha`, `baseline_release=v1.0.0` and `business_only=true`. The baseline
 input is unused in this mode; the ordinary native upgrade remains the default.
 This mode does not publish packages/images, create a tag, or modify Secrets.
 Local preparation checks must run in an isolated checkout on `BuildServer`.
@@ -107,11 +107,15 @@ Freeze the final candidate SHA/tree only after product, deployment, contract
 and probe edits stop. Keep later evidence outside the repository. Every final
 result must name that SHA, never splice artifacts from earlier commits or
 attempts. Changes to Compose, the verification-key contract and native units
-require a fresh complete `release-upgrade.yml` run from v0.6.2 with
-`version=1.0.0`, `candidate_sha` equal to the frozen SHA and
-`session_compatibility=false`, `session_only=false`, `business_only=false`.
-All four native Agent/Controller architecture jobs and the aggregate must pass
-in the same run/attempt. Business success does not replace this gate.
+require a fresh complete `release-upgrade.yml` run from transitional v1.0.0 with
+`version=1.0.1`, `candidate_sha` equal to the frozen SHA and
+`session_compatibility=true`, `session_only=false`, `business_only=false`.
+All four native Agent/Controller architecture jobs, the aggregate, and the two
+`v1.0.0` node against candidate Controller application cells (amd64/arm64) must
+pass in the same run/attempt; the mixed-version window has no other accepted
+evidence. Business success does not replace this gate.
+Pre-1.0 installations must redeploy into `1.x`; their historical diagnostic
+results are not upgrade support or acceptance of this production baseline.
 
 Existing [single-Relay](single-relay-validation.md) and
 [cross-VM enrollment](real-e2e.md) profiles retain their original scope.

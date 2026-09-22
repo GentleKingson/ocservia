@@ -2,6 +2,11 @@
 
 This guide is the short production path for installing the ocservia Controller. It focuses on what an operator needs to prepare and run. Exact file modes, lifecycle state, rollback behavior, and recovery details remain in the [Production deployment reference](../operations/production-deployment.md).
 
+Use an exact published release, with `v1.0.1` designated as the first
+recommended production stable baseline once published. `v1.0.0` is transitional, for existing installations to upgrade
+from, not for new deployments. Pre-1.0 installations must be redeployed rather
+than upgraded in place into `1.x`. See the [support policy](../reference/support-policy.md).
+
 ## What the Controller does
 
 The Controller is the central Web/API service. It stores state in a supported

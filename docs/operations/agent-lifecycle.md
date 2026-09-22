@@ -6,6 +6,12 @@
 > package construction, verified staging, sealing-key migration, and durable
 > lifecycle contracts.
 
+`v1.0.1` is the first recommended production stable baseline; the published
+`v1.0.0` remains a transitional upgrade source. Pre-1.0 installations must be
+[redeployed](../getting-started/managed-node.md), not upgraded in place into
+`1.x`. Historical lifecycle capabilities below do not extend the
+[support policy](../reference/support-policy.md).
+
 After its external endpoint is deployed and verified, the operator-hosted thin
 first-install chain is deliberately split:
 
@@ -318,16 +324,14 @@ fence-capable `ocserv.agent.upgrade.v2` capability. The upgrade is executed
 by the runner that is already installed on the node, so the first
 N → N+1 hop can only be protected when that runner carries the
 execution-time downgrade fence and the installation commit record. Nodes
-still advertising `ocserv.agent.upgrade.v1` are ineligible: seed the first
-fence-capable package manually (or with the native installers), approve its
-`v2` capability, and Controller-driven upgrades start from there. Upgrading
-an existing 0.1.x installation with the native package manager (`dpkg -i`,
-`rpm -Uvh`) preserves node identity, configuration, and durable state, and
-leaves services stopped rather than auto-enabled. The release pipeline
-exercises the published v0.1.1 DEB → candidate hop on both amd64 and arm64;
-RPM package-manager upgrade semantics are covered by the native
-fabricated-version lifecycle smoke, and a published historical RPM baseline
-leg is not yet implemented.
+still advertising `ocserv.agent.upgrade.v1` are ineligible. Historical pre-1.0
+package seeding and upgrade fixtures do not provide a supported path into
+`1.x`; redeploy those nodes instead. The release pipeline now starts at the
+published transitional `v1.0.0` baseline and exercises real DEB and RPM
+upgrades on both amd64 and arm64. It checks preservation of identity,
+configuration and durable state without automatically enabling services.
+The separate same-source lifecycle smoke is not cross-version evidence;
+per-candidate native upgrade acceptance remains required.
 
 The operation is created `queued`, and the agent's scheduling acknowledgement
 moves it to the non-terminal `accepted` state — an acknowledged schedule is
