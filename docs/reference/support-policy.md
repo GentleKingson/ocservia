@@ -1,11 +1,16 @@
 # 1.0 support and versioning policy
 
-Status: this is the support policy for the ocservia **1.0 release line**. The
-first release under it is `1.0.0`; until that tag is published, the current
-pre-1.0 statements remain in force and nothing here claims a released version.
+Status: this is the support policy for the ocservia **1.0 release line**.
+`v1.0.1` is the first recommended stable baseline for production deployments.
+`v1.0.0` is an already published, upgradeable transitional 1.0 release, not
+the recommended production baseline. Pre-1.0 installations have no supported
+in-place upgrade path into formal `1.x`; operators must redeploy, not upgrade
+through `v1.0.0` as a bridge.
 This document defines policy only. Contract surfaces are owned by
 [stable contracts](stable-contracts.md); platform facts are owned by the
 operational guides referenced below and are not duplicated here.
+Production recommendations apply to published tagged artifacts; this policy
+does not turn an unreleased candidate or an unrun acceptance check into a pass.
 
 ## Versioning
 
@@ -34,10 +39,12 @@ on that SHA before the numeric release is tagged.
 - **Controller and node version window.** The supported deployment runs a
   matched Controller/transportd release with a matched Agent/privd/upgrader
   package, as defined by the version and durable-state contract in
-  [stable contracts](stable-contracts.md). Mixing a published historical node
-  with a newer Controller is supported only inside the
+  [stable contracts](stable-contracts.md). Mixing a published historical
+  1.x node with a newer Controller is supported only inside the
   [finite release matrix](stable-contracts.md#finite-release-matrix) and its
-  recorded exclusions; upgrade the Controller first. There is no
+  recorded exclusions, with the published `v1.0.0`-node against
+  candidate-Controller application cells as the exact-pair evidence; upgrade
+  the Controller first. There is no
   security-equivalent downgrade promise.
 - **Deprecation.** A public contract surface may be deprecated only through a
   release-notes announcement in the minor release that introduces the
@@ -46,9 +53,16 @@ on that SHA before the numeric release is tagged.
   and requires its own release-note entry. Anything not listed in
   [stable contracts](stable-contracts.md) is private and can change without a
   deprecation notice.
-- **Upgrade and recovery paths.** Verified upgrade baselines are registered in
+- **Upgrade and recovery paths.** `v1.0.0` is the earliest supported source for
+  in-place upgrades within `1.x`, including the transition to `v1.0.1`.
+  Pre-1.0 deployments must follow the fresh
+  [Controller](../getting-started/production.md) and
+  [managed-node](../getting-started/managed-node.md) deployment paths instead.
+  Baseline artifact identities are registered in
   [`scripts/release-upgrade-baselines.json`](../../scripts/release-upgrade-baselines.json)
-  (currently through `v1.0.0`) and validated by the
+  (currently through `v1.0.0`); historical pre-1.0 entries are retained for
+  provenance and regression diagnostics, not as supported paths into `1.x`.
+  Actual upgrade acceptance requires the
   [native release upgrade workflow](../development/release-upgrade-validation.md).
   Rollback follows the guarded
   [Controller rollback](../how-to/controller-rollback.md) and

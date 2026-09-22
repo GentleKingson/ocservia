@@ -4,6 +4,12 @@ Install a newer published Agent package on a managed node. Native package
 installation invokes the same verified repository lifecycle as the archive
 path.
 
+For formal `1.x`, this procedure starts from `v1.0.0` or a later 1.x release.
+`v1.0.0` is a published transitional upgrade source; `v1.0.1` is the first
+recommended production stable baseline. Upgrade the Controller first.
+Pre-1.0 nodes must [redeploy](../getting-started/managed-node.md), not upgrade
+in place or use `v1.0.0` as a bridge. See the [support policy](../reference/support-policy.md).
+
 ## Before you begin
 
 - The target package matches the host architecture and is newer than the

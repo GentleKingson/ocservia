@@ -30,10 +30,17 @@ export function compareVersions(a, b) {
   for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] > right[i] ? 1 : -1;
   return 0;
 }
-export function validateInputs(version, tag, sha, dispatchSHA, head, baselines) {
+export function validateUpgradePath(version, tag) {
   requireThat(/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(tag), "baseline must be an exact stable tag");
-  requireThat(/^[0-9a-f]{40}$/.test(sha) && sha === dispatchSHA && sha === head, "candidate SHA must equal dispatch SHA and checkout HEAD");
   requireThat(compareVersions(version, tag.slice(1)) > 0, "candidate must be numerically newer than baseline");
+  requireThat(compareVersions(version, "1.0.0") < 0 || compareVersions(tag.slice(1), "1.0.0") >= 0,
+    "pre-1.0 in-place upgrades to stable releases are unsupported; redeploy instead");
+  requireThat(compareVersions(version, "2.0.0") < 0,
+    "2.x and later in-place upgrades are unsupported until a separately reviewed 1.x to 2.x migration contract exists");
+}
+export function validateInputs(version, tag, sha, dispatchSHA, head, baselines) {
+  validateUpgradePath(version, tag);
+  requireThat(/^[0-9a-f]{40}$/.test(sha) && sha === dispatchSHA && sha === head, "candidate SHA must equal dispatch SHA and checkout HEAD");
   const baseline = baselines[tag];
   requireThat(baseline?.controller?.database === "postgres" && baseline.rpm && baseline.production_relays &&
     baseline.upgrader && baseline.version_query && /^[0-9a-f]{40}$/.test(baseline.commit) &&
@@ -97,6 +104,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const env = process.env;
     if (mode === "baseline-deb") {
       console.log(baselineDebAsset(directory, process.argv[4], readJSON(0)));
+    } else if (mode === "upgrade-path") {
+      validateUpgradePath(directory, process.argv[4]);
     } else if (mode === "prepare") {
       const raw = fs.readFileSync("scripts/release-upgrade-baselines.json");
       const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -121,7 +130,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       walk(directory);
       const summary = validateResults(readJSON(`${directory}/frozen/frozen.json`), results, JSON.parse(env.NEEDS), env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT);
       fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Native Upgrade Result: PASS\n\n${JSON.stringify(summary)}\n`);
-    } else throw new Error("expected baseline-deb, prepare or aggregate");
+    } else throw new Error("expected baseline-deb, upgrade-path, prepare or aggregate");
   } catch (error) {
     console.error(error.message);
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Native Upgrade Result: NOT PASS (${error.message})\n`);

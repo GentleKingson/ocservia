@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { architectures, scenarios, compareVersions, validateInputs, validateRelease, requiredAssets, validateResults, readJSON, candidateArtifacts, baselineDebAsset } from "./release-upgrade-contract.mjs";
 const baselines = readJSON(new URL("./release-upgrade-baselines.json", import.meta.url));
 const sha = "a".repeat(40), run = "123", attempt = "2";
@@ -31,7 +31,7 @@ assert.equal(latest.commit, "1805962fe1a98a22955b3105bfa8ebce7f2ea1eb");
 assert.equal(latest.sums_sha256, "d562822bfdc55c784bf950a21c746f380a1cb6a7a2c86c6c801cfa25121df53b");
 assert.equal(latest.key_der_sha256, valid().key_der_sha256);
 assert.deepEqual(latest.controller, { database: "postgres", migration: 36, authentication: "oidc" });
-const stable = validateInputs("1.0.0", "v0.6.2", sha, sha, sha, baselines);
+const stable = baselines["v0.6.2"];
 assert.equal(stable.commit, "518df6e9c488e58613c9cc194c896b4edfd57c2e");
 assert.equal(stable.sums_sha256, "a386f64d81f0ccb0b87482c3f4e4029d0a756b5e76c679b72d70d1afa23abc66");
 assert.equal(stable.key_der_sha256, valid().key_der_sha256);
@@ -42,6 +42,33 @@ assert.equal(maintenance.commit, "e85ab3fa90d1d5f6e4c53b56b2f5e0278f6da060");
 assert.equal(maintenance.sums_sha256, "0aa8270a68a65cc81b59a70001c53a9b4ace1ed6e33f4b36ef696db56ef4a401");
 assert.equal(maintenance.key_der_sha256, stable.key_der_sha256);
 assert.equal(maintenance.deb_asset_release, 1);
+for (const baselineTag of Object.keys(baselines).filter(tag => tag.startsWith("v0."))) {
+  for (const version of ["1.0.0", "1.0.1", "1.1.0"]) {
+    assert.throws(() => validateInputs(version, baselineTag, sha, sha, sha, baselines), /pre-1\.0.*redeploy/);
+  }
+}
+assert.equal(validateInputs("1.1.0", "v1.0.0", sha, sha, sha, baselines), maintenance);
+for (const version of ["2.0.0", "2.1.0", "3.0.0"])
+  assert.throws(() => validateInputs(version, "v1.0.0", sha, sha, sha, baselines), /2\.x and later.*migration contract/);
+const contract = new URL("./release-upgrade-contract.mjs", import.meta.url).pathname;
+execFileSync(process.execPath, [contract, "upgrade-path", "1.0.1", "v1.0.0"]);
+const unsupported = spawnSync(process.execPath, [contract, "upgrade-path", "1.0.1", "v0.6.2"], {
+  env: { ...process.env, GITHUB_STEP_SUMMARY: "" }, encoding: "utf8",
+});
+assert.equal(unsupported.status, 1);
+assert.match(unsupported.stderr, /pre-1\.0.*redeploy/);
+const majorTwo = spawnSync(process.execPath, [contract, "upgrade-path", "2.0.0", "v1.0.0"], {
+  env: { ...process.env, GITHUB_STEP_SUMMARY: "" }, encoding: "utf8",
+});
+assert.equal(majorTwo.status, 1);
+assert.match(majorTwo.stderr, /2\.x and later.*migration contract/);
+const smoke = spawnSync("bash", [new URL("./release-baseline-upgrade-smoke.sh", import.meta.url).pathname], {
+  env: { ...process.env, VERSION: "1.0.1", BASELINE_RELEASE: "v0.6.2", RUN_ID: "unsupported-upgrade",
+    ARTIFACT_DIR: "/unused", CANDIDATE_DEB: "/unused", GITHUB_STEP_SUMMARY: "" }, encoding: "utf8",
+});
+assert.equal(smoke.status, 1);
+assert.match(smoke.stderr, /pre-1\.0.*redeploy/);
+console.log("Transitional v1.0.0 upgrades accepted; pre-1.0 to 1.x rejected before native host setup; 2.x+ candidates fail closed pending a reviewed 1.x to 2.x migration contract");
 assert.throws(() => validateInputs("1.0.0", "v1.0.0", sha, sha, sha, baselines));
 for (const version of ["0.6.2", "0.6.1", "1.0.0-rc.1"])
   assert.throws(() => validateInputs(version, "v0.6.2", sha, sha, sha, baselines));

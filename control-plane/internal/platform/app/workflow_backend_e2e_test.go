@@ -47,12 +47,14 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal("container root is required to launch the distinct runtime principals")
 	}
 	f := newControllerE2E(t)
-	if version := os.Getenv("PUBLISHED_AGENT_VERSION"); version != "" {
-		if version != "0.6.0" && version != "0.6.1" {
-			t.Fatal("unregistered published node version")
-		}
+	publishedVersion := os.Getenv("PUBLISHED_AGENT_VERSION")
+	capabilities, err := e2eTrustCapabilities(publishedVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publishedVersion != "" {
 		for _, binary := range []string{"ocservia-agent", "ocservia-privd", "ocservia-upgrader"} {
-			if got := strings.TrimSpace(string(f.run(0, 0, nil, "/usr/local/bin/"+binary, "--version"))); got != binary+" "+version {
+			if got := strings.TrimSpace(string(f.run(0, 0, nil, "/usr/local/bin/"+binary, "--version"))); got != binary+" "+publishedVersion {
 				t.Fatalf("published binary version mismatch: %s", got)
 			}
 		}
@@ -176,10 +178,6 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal("Agent enrollment did not return a UUIDv7 node")
 	}
 	nodePath := "/api/v1/nodes/" + nodeID
-	capabilities := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read", "ocserv.fencing.v2", "command.semantic-hash.v1", "command.strict-wire.v1", "privd_result_attestation_v1", "ocserv.certificate.issue", "ocserv.certificate.revoke", "ocserv.users.write", "ocserv.groups.write", "ocserv.config.plan", "ocserv.config.apply", "ocserv.service.reload"}
-	if os.Getenv("PUBLISHED_AGENT_VERSION") != "" {
-		capabilities = append(capabilities, "config.network")
-	}
 	trust := map[string]any{"labels": map[string]string{"fixture": "real-process"}, "policy": "default", "capabilities": capabilities}
 	approval := f.approve("node.approve", "node", nodeID, map[string]any{"node_approval": trust})
 	trust["reason"] = "activate authenticated real Agent"
@@ -204,7 +202,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		node := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK)
 		return node["trust_status"] == "active" && node["connection_state"] == "online" && node["observed_at"] != nil
 	})
-	f.requireFencedSession()
+	f.requireFencedSession(len(capabilities))
 	if version := os.Getenv("PUBLISHED_AGENT_VERSION"); version != "" {
 		if node := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK); node["agent_version"] != version {
 			t.Fatal("Controller did not observe the published Agent version")
@@ -445,7 +443,30 @@ func (f *controllerE2E) stop(name string) {
 	f.t.Fatalf("recovery process not found: %s", name)
 }
 
-func (f *controllerE2E) requireFencedSession() {
+// e2eTrustCapabilities returns the node trust-policy capability set approved
+// by the E2E. The empty published version is the locally built candidate.
+// Published versions form a finite admission list, and each profile must stay
+// inside the capabilities that version's binaries actually declare: 0.6.x
+// nodes add the config.network directives, and the 1.0.0 line additionally
+// grants the complete-config plan/apply capabilities frozen for 1.x.
+func e2eTrustCapabilities(publishedVersion string) ([]string, error) {
+	capabilities := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read",
+		"ocserv.fencing.v2", "command.semantic-hash.v1", "command.strict-wire.v1", "privd_result_attestation_v1",
+		"ocserv.certificate.issue", "ocserv.certificate.revoke", "ocserv.users.write", "ocserv.groups.write",
+		"ocserv.config.plan", "ocserv.config.apply", "ocserv.service.reload"}
+	switch publishedVersion {
+	case "":
+		return capabilities, nil
+	case "0.6.0", "0.6.1":
+		return append(capabilities, "config.network"), nil
+	case "1.0.0":
+		return append(capabilities, "config.network", "ocserv.config.complete.plan", "ocserv.config.complete.apply"), nil
+	default:
+		return nil, fmt.Errorf("unregistered published node version: %s", publishedVersion)
+	}
+}
+
+func (f *controllerE2E) requireFencedSession(expectedCapabilities int) {
 	f.t.Helper()
 	log, err := os.Open(filepath.Join(f.artifacts, "agent.log"))
 	if err != nil {
@@ -464,6 +485,12 @@ func (f *controllerE2E) requireFencedSession() {
 			f.t.Fatal("decode Agent session evidence", err)
 		}
 		if record.Fields["message"] == "agent session accepted" && record.Fields["session_mode"] == "fenced_v1_1" {
+			// The granted set is negotiated intact only when the Agent, which
+			// rejects grants beyond its declared capabilities, accepts exactly
+			// the approved profile size.
+			if count, ok := record.Fields["negotiated_capabilities"].(float64); !ok || int(count) != expectedCapabilities {
+				f.t.Fatalf("fenced session negotiated %v capabilities, expected %d", record.Fields["negotiated_capabilities"], expectedCapabilities)
+			}
 			return
 		}
 	}

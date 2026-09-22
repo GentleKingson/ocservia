@@ -10,31 +10,38 @@ openssl pkey -in "${fixture}/key.pem" -pubout -out "${fixture}/assets/release-si
 openssl genpkey -algorithm ED25519 -out "${fixture}/wrong-key.pem" 2>/dev/null
 openssl pkey -in "${fixture}/wrong-key.pem" -pubout -out "${fixture}/wrong-public.pem" 2>/dev/null
 archive=ocservia-agent-0.6.1-linux-arm64.tar.gz
+archive_stable=ocservia-agent-1.0.0-linux-arm64.tar.gz
 (
   cd "${fixture}/assets"
   # Integrity fixtures only, never installed or claimed as released binaries.
   printf 'not a runtime package\n' >"${archive}"
-  sha256sum "${archive}" >"${archive}.sha256"
-  openssl pkeyutl -sign -rawin -inkey "${fixture}/key.pem" -in "${archive}.sha256" -out "${archive}.sha256.sig"
-  sha256sum "${archive}" >SHA256SUMS
+  printf 'not a runtime package\n' >"${archive_stable}"
+  for payload in "${archive}" "${archive_stable}"; do
+    sha256sum "${payload}" >"${payload}.sha256"
+    openssl pkeyutl -sign -rawin -inkey "${fixture}/key.pem" -in "${payload}.sha256" -out "${payload}.sha256.sig"
+  done
+  sha256sum "${archive}" "${archive_stable}" >SHA256SUMS
   openssl pkeyutl -sign -rawin -inkey "${fixture}/key.pem" -in SHA256SUMS -out SHA256SUMS.sig
 )
 pin="$(sha256sum "${fixture}/assets/SHA256SUMS" | awk '{print $1}')"
 key="$(openssl pkey -pubin -in "${fixture}/assets/release-signing.pub.pem" -outform DER | sha256sum | awk '{print $1}')"
 jq -n --arg pin "${pin}" --arg key "${key}" \
-  '{"v0.6.1":{sums_sha256:$pin,key_der_sha256:$key,commit:"1805962fe1a98a22955b3105bfa8ebce7f2ea1eb"}}' \
+  '{"v0.6.1":{sums_sha256:$pin,key_der_sha256:$key,commit:"1805962fe1a98a22955b3105bfa8ebce7f2ea1eb"},
+    "v1.0.0":{sums_sha256:$pin,key_der_sha256:$key,commit:"e85ab3fa90d1d5f6e4c53b56b2f5e0278f6da060"}}' \
   >"${fixture}/repo/scripts/release-upgrade-baselines.json"
 export BASELINE_RELEASE=v0.6.1 PACKAGE_ARCH=arm64 RELEASE_ASSET_DIR="${fixture}/assets"
 runner="${fixture}/repo/scripts/release-session-compatibility.sh"
 bash "${runner}" verify >"${fixture}/verified.json"
 jq -e '.status == "artifact-verified" and .runtime_tested == false and .arch == "arm64" and .baseline_tag == "v0.6.1"' "${fixture}/verified.json" >/dev/null
+BASELINE_RELEASE=v1.0.0 bash "${runner}" verify >"${fixture}/verified-stable.json"
+jq -e '.status == "artifact-verified" and .runtime_tested == false and .arch == "arm64" and .baseline_tag == "v1.0.0"' "${fixture}/verified-stable.json" >/dev/null
 reject() {
   if "$@" >"${fixture}/rejected.log" 2>&1; then
     echo "unexpected acceptance: $*" >&2
     exit 1
   fi
 }
-reject env BASELINE_RELEASE=v1.0.0 bash "${runner}" verify
+reject env BASELINE_RELEASE=v1.0.1 bash "${runner}" verify
 reject env BASELINE_RELEASE=v0.5.2 bash "${runner}" verify
 reject env PACKAGE_ARCH=amd64 bash "${runner}" verify
 reject env PACKAGE_ARCH=386 bash "${runner}" verify

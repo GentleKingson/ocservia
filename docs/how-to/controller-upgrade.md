@@ -4,6 +4,12 @@ Upgrade an installed Controller to a newer signed release using the guarded
 lifecycle. The lifecycle keeps the current release running while it validates
 the target and records pending evidence.
 
+For formal `1.x`, this procedure starts from `v1.0.0` or a later 1.x release.
+`v1.0.0` is a published transitional upgrade source; `v1.0.1` is the first
+recommended production stable baseline. Pre-1.0 installations must
+[redeploy](../getting-started/production.md), not upgrade in place or use
+`v1.0.0` as a bridge. See the [support policy](../reference/support-policy.md).
+
 ## Before you begin
 
 - The current Controller is healthy and its backup is fresh.
@@ -14,11 +20,6 @@ the target and records pending evidence.
   [recovery procedure](../operations/incident-recovery.md#database-recovery).
 - Review the target's production deployment descriptor and schema compatibility;
   neither a newer version number nor an additive migration guarantees rollback.
-- For the legacy v0.4.0 application-network migration, reserve a maintenance
-  window and verify a recoverable backup. The guarded upgrade recreates gateway,
-  control-plane, transportd and only their application network, preserving named
-  volumes, PostgreSQL/backup and lifecycle state. Choose a non-overlapping target
-  subnet and update any explicit trusted-proxy CIDR before upgrading.
 
 ## Command
 
@@ -77,8 +78,8 @@ volumes or the database network. Do not delete pending evidence or substitute
 direct Compose commands.
 
 The v0.4.0 network/security transition is a historical **forward-only deployment
-change**, not the complete rollback rule for later releases. The lifecycle
-compares the actual current/previous deployment descriptors and database
+change**, not an upgrade path into `1.x` or the complete rollback rule for later
+releases. The lifecycle compares the actual current/previous deployment descriptors and database
 compatibility; changed deployment contracts can reject rollback even with a
 compatible schema. If same-target recovery is impossible, preserve failure
 evidence and select the [backend-specific recovery procedure](../operations/incident-recovery.md#database-recovery):

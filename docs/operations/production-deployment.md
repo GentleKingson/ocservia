@@ -590,6 +590,11 @@ automatically follows `OCSERV_GATEWAY_APPLICATION_IP`. An explicit
 `OCSERV_AUTH_TRUSTED_PROXY_CIDRS` overrides that default and must be updated
 when the chosen static IP changes; an explicitly empty value trusts no proxy.
 
+The following v0.4.0 network migration is historical pre-1.0 behavior, not a
+supported path into `1.x`. Those deployments must be
+[redeployed](../getting-started/production.md) under the
+[support policy](../reference/support-policy.md).
+
 Upgrading the legacy v0.4.0 application network requires a maintenance window;
 merely restarting containers does not change network IPAM. The guarded
 `controller.sh upgrade --release-file ...` owns this one-time migration after

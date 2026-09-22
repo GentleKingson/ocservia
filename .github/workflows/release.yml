@@ -119,11 +119,11 @@ jobs:
           CANDIDATE_DIR: ${{ runner.temp }}/packages
           VERSION: ${{ env.version }}
         run: scripts/release-native-package-smoke.sh
-      - name: Validate published v0.6.0 upgrade (${{ matrix.package_arch }})
+      - name: Validate published v1.0.0 upgrade (${{ matrix.package_arch }})
         env:
           RUN_ID: baseline-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/baseline-upgrade
-          BASELINE_RELEASE: v0.6.0
+          BASELINE_RELEASE: v1.0.0
           PACKAGE_ARCH: ${{ matrix.package_arch }}
         run: |
           case "${PACKAGE_ARCH}" in
