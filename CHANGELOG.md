@@ -7,7 +7,10 @@ this file records the change categories per release line. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and ocservia uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0]
+
+This section identifies the release line, not its publication status. The
+actual GitHub Release determines publication and the release date.
 
 ### Added
 
