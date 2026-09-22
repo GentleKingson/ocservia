@@ -2,7 +2,7 @@
   "schema_version": "ocservia.g6-evidence.v2",
   "candidate_sha": "1111111111111111111111111111111111111111",
   "release_manifest_digest": "sha256:266ded2ea8cb2896fbace4b2b6ef7dcc083042d51047d1bc5cedcc00885c5dac",
-  "slo_contract_digest": "sha256:0bee74245a3f19f8c5165a27b807d491dd58ba10bfe1bf952de72c19380a9c1d",
+  "slo_contract_digest": "sha256:9c27b85be51f00c64be6ed4a4b9074d420d7f6c802f888bf455c78c578fde600",
   "topology_digest": "sha256:88793e954838cbc668cbcb224714712acaae7823b0170d3d8f493f5e25980fcb",
   "started_at": "2026-08-14T00:00:00Z",
   "finished_at": "2026-08-14T00:05:30Z",

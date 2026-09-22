@@ -3117,7 +3117,14 @@ function nearestRank(sortedValues, quantile) {
   return sortedValues[rank - 1];
 }
 
-function growth(parsed, component, column, ratio) {
+// PostgreSQL connections ramp while client pools establish during the opening
+// seconds of a sampling window, so this metric takes its baseline from the peak
+// observed within this bounded warm-up prefix instead of the first sample. A
+// connection leak keeps growing past the prefix and still counts in full
+// against the limit.
+const databaseConnectionWarmupPrefixNs = 60n * 1000000000n;
+
+function growth(parsed, component, column, ratio, warmupPrefixNs = 0n) {
   const rows = parsed.componentRows.get(component);
   if (!rows || rows.length === 0) {
     fail(`resource samples must include ${component} samples`);
@@ -3130,7 +3137,12 @@ function growth(parsed, component, column, ratio) {
   let worst = null;
   for (const instanceRows of byInstance.values()) {
     instanceRows.sort((left, right) => left.timestampMs - right.timestampMs);
-    const baseline = instanceRows[0][column];
+    const windowStartNs = instanceRows[0].timestampNs;
+    let baseline = instanceRows[0][column];
+    for (const row of instanceRows) {
+      if (row.timestampNs - windowStartNs >= warmupPrefixNs) break;
+      if (row[column] > baseline) baseline = row[column];
+    }
     const end = instanceRows.at(-1)[column];
     if (ratio && baseline <= 0) {
       fail(`resource samples ${component} baseline must be positive`);
@@ -3417,7 +3429,14 @@ export const derivationRegistry = new Map([
   }],
   ["resource_samples.database_connection_growth", {
     kind: "resource_samples",
-    compute: (parsed) => growth(parsed, "postgres", "dbConnections", false),
+    compute: (parsed) =>
+      growth(
+        parsed,
+        "postgres",
+        "dbConnections",
+        false,
+        databaseConnectionWarmupPrefixNs,
+      ),
   }],
   ["resource_samples.queue_depth_end", {
     kind: "resource_samples",
