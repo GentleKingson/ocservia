@@ -189,14 +189,6 @@ abort("Controller publishing must wait for the image build legs") unless
   Array(publish.fetch("needs")).include?("build-controller-images")
 abort("Controller publishing must wait for the pre-push image security gate") unless
   Array(publish.fetch("needs")).include?("controller-image-security")
-abort("Controller publishing must not run the image scanner itself") unless
-  !publish_steps.include?("scripts/scan-release-images.sh") &&
-    !publish_steps.include?("scripts/bootstrap.sh image-security")
-abort("Controller publishing must prove it pushes the scanned images") unless
-  publish_steps.include?(".images[$name].platforms[$platform].config_digest") &&
-  publish_steps.include?("docker image inspect --format '{{.Id}}'")
-abort("Controller publishing must ship the scan binding record") unless
-  publish_steps.include?("controller-image-security-bindings.json")
 validate_steps = Array(validate.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
 abort("Release dry runs must prepare both versioned bootstrap assets") unless
   validate_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')
@@ -209,6 +201,14 @@ publish_uses.each do |use|
   abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
 end
 publish_steps = Array(publish.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+abort("Controller publishing must not run the image scanner itself") unless
+  !publish_steps.include?("scripts/scan-release-images.sh") &&
+    !publish_steps.include?("scripts/bootstrap.sh image-security")
+abort("Controller publishing must prove it pushes the scanned images") unless
+  publish_steps.include?('.images[$name].platforms[$platform].config_digest') &&
+  publish_steps.include?("docker image inspect --format '{{.Id}}'")
+abort("Controller publishing must ship the scan binding record") unless
+  publish_steps.include?("controller-image-security-bindings.json")
 final_gate = publish.fetch("steps").find { |step| step["name"] == "Verify signed release manifest" }
 abort("Final release validation must retain the trusted key pin") unless
   final_gate.fetch("env").fetch("AGENT_TRUSTED_KEY_SHA256") == '${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}'
