@@ -108,7 +108,7 @@ and probe edits stop. Keep later evidence outside the repository. Every final
 result must name that SHA, never splice artifacts from earlier commits or
 attempts. Changes to Compose, the verification-key contract and native units
 require a fresh complete `release-upgrade.yml` run from v0.6.2 with
-`version=0.7.0`, `candidate_sha` equal to the frozen SHA and
+`version=1.0.0`, `candidate_sha` equal to the frozen SHA and
 `session_compatibility=false`, `session_only=false`, `business_only=false`.
 All four native Agent/Controller architecture jobs and the aggregate must pass
 in the same run/attempt. Business success does not replace this gate.

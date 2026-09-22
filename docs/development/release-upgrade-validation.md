@@ -2,23 +2,26 @@
 
 `Native Release Upgrade Validation` is an independent `workflow_dispatch`
 workflow, not a publisher and not part of Basic CI. It accepts exactly these
-five inputs:
+six inputs:
 
 | Input | Type / default | Meaning |
 | --- | --- | --- |
-| `version` | Required string | Candidate numeric X.Y.Z, strictly newer than the selected baseline |
+| `version` | Required string; no default | Candidate numeric X.Y.Z; strictly newer than the selected baseline unless `business_only=true` |
 | `baseline_release` | Required string; `v0.6.0` | Registered published baseline for prepare and native upgrades |
-| `candidate_sha` | Required string | Exact full lowercase SHA of the dispatch branch |
+| `candidate_sha` | Required string; no default | Exact full lowercase SHA of the dispatch branch |
 | `session_compatibility` | Boolean; `false` | Also run both published v0.6.0/v0.6.1 application pairs on both architectures |
 | `session_only` | Boolean; `false` | Run the four application cells instead of native upgrades, even when `session_compatibility=false` |
+| `business_only` | Boolean; `false` | Run only the current candidate's native amd64 business probe, regardless of the session flags |
 
 Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
 must be the complete lowercase commit SHA of that branch and must equal
-both the dispatch SHA and checkout HEAD. The candidate's numeric X.Y.Z
-version must be strictly newer than the baseline.
-These three identity inputs remain required in application-only mode: prepare
-still freezes and verifies the selected registered baseline. The application
-jobs always select both v0.6.0 and v0.6.1, independently of `baseline_release`.
+both the dispatch SHA and checkout HEAD. When `business_only=false`, prepare
+requires the candidate's numeric X.Y.Z version to be strictly newer than the
+selected registered baseline. These three identity inputs remain required in
+application-only mode: prepare still freezes and verifies that baseline.
+`baseline_release` selects the native upgrade baseline; application jobs always
+select both v0.6.0 and v0.6.1, independently of this input. Business-only mode
+has its own candidate checks and does not use the baseline (see below).
 
 The maintained `.github/workflows/release-upgrade.yml` is the complete manual
 workflow. Dispatch only after the candidate edits are committed and pushed to
@@ -46,11 +49,15 @@ substitutes for another or extends a backend's production support.
 
 Dispatch modes are:
 
-| `session_compatibility` | `session_only` | Jobs after prepare |
-| --- | --- | --- |
-| `false` | `false` | Four native upgrade units and `Native Upgrade Result` (default) |
-| `true` | `false` | Native units/result plus four application cells |
-| Either value | `true` | Four application cells only; both native matrices and `Native Upgrade Result` are skipped |
+| `business_only` | `session_compatibility` | `session_only` | Jobs |
+| --- | --- | --- | --- |
+| `false` | `false` | `false` | Prepare, four native upgrade units and `Native Upgrade Result` (default) |
+| `false` | `true` | `false` | Prepare, native units/result plus four application cells (v0.6.0/v0.6.1 x amd64/arm64) |
+| `false` | Either value | `true` | Prepare and four application cells only; both native matrices and `Native Upgrade Result` are skipped |
+| `true` | Either value | Either value | Native candidate business probe on amd64 only; prepare, native upgrades, application matrix and `Native Upgrade Result` are skipped |
+
+The flags are not mutually exclusive: `business_only=true` selects the business
+job regardless of either session flag, as shown by the workflow conditions.
 
 In native-upgrade mode, four mandatory cells run with fail-fast disabled:
 
@@ -135,6 +142,22 @@ boundary and excluded positive ConfigPlan apply for old nodes. The broader
 strict recovery check is retained; a documented exclusion does not turn its
 failed cell into PASS. Application-only success cannot satisfy native upgrade
 requirements, and `Native Upgrade Result` does not aggregate application jobs.
+
+### Candidate business probe
+
+With `business_only=true`, the workflow invokes
+[`scripts/release-business-probe.sh`](../../scripts/release-business-probe.sh)
+instead of `release-upgrade-contract.mjs prepare`. Its own preflight requires a
+plain numeric X.Y.Z version, a full lowercase 40-character `candidate_sha`
+equal to both `GITHUB_SHA` and checkout HEAD, and a clean checkout on a disposable
+GitHub-hosted systemd runner. The dispatch form still requires `baseline_release`,
+but this mode does not use it as an upgrade baseline or compare versions against
+it. The current probe runs on native amd64 only.
+
+See [native candidate business validation](real-business-validation.md) for
+execution, evidence and limitations. Probe success is not complete T07, T10 or
+release acceptance; its result keeps `t07_status=NOT_EVALUATED` and cannot replace
+the native upgrade gate.
 
 ## Build and trust boundaries
 
@@ -226,6 +249,18 @@ Prerelease strings such as `1.0.0-rc.1` are not accepted version inputs. Require
 Agent/Controller x amd64/arm64 evidence; T05's earlier eight native units do
 not replace this gate. Do not infer artifact identity from a version string.
 
+For the 1.0.0 candidate, explicitly select the latest registered native baseline
+without changing the historical v0.6.0 default or v0.6.0/v0.6.1 application pairs:
+
+```bash
+branch='<frozen-candidate-branch>'
+sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
+gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
+  --ref "$branch" -f version=1.0.0 -f baseline_release=v0.6.2 \
+  -f candidate_sha="$sha" -f session_compatibility=false \
+  -f session_only=false -f business_only=false
+```
+
 To register another baseline, independently establish its key, verify its
 signed checksum manifest and both architectures' native packages and
 Controller bundles, inspect its actual installation/authentication/database
@@ -247,7 +282,8 @@ hashes and small logs. Controller bundles, version responses and lifecycle
 states contain no private key or database credential. No image archives or
 database contents are uploaded by this workflow.
 
-When `session_only=false`, `Native Upgrade Result` requires successful prepare and both native matrices plus
+When both `session_only=false` and `business_only=false`, `Native Upgrade Result`
+requires successful prepare and both native matrices plus
 four unique, complete, matching result documents. Missing, failed, skipped,
 cancelled, foreign-SHA/baseline/architecture or mixed-attempt evidence cannot
 pass. Use **Re-run all jobs**: re-running only failed jobs cannot combine old
