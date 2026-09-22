@@ -6,7 +6,7 @@ COPY rust/vendor ./vendor
 COPY rust/crates ./crates
 RUN cargo build --locked --release --package ocservia-transportd
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime-base
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-base
 RUN groupadd --system --gid 65532 ocservia \
     && useradd --system --uid 65532 --gid ocservia transportd \
     && install -d -o transportd -g ocservia -m 0750 /run/ocserv-platform \
