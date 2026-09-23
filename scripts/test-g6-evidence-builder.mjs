@@ -1291,6 +1291,15 @@ function expectBuilderFailure(outDir, expectedMessage, expectedDetails = {}) {
     { encoding: "utf8" },
   );
   const output = `${result.stderr}${result.stdout}`;
+  if (result.status === 0 && Object.keys(expectedDetails).length === 0) {
+    try {
+      const verdict = verifyBundle(outDir, "production_readiness");
+      if (verdict.failure_reasons.some(reason => reason.includes(expectedMessage))) return;
+    } catch (error) {
+      if (error.message.includes(expectedMessage)) return;
+      throw error;
+    }
+  }
   if (result.status === 0 || !output.includes(expectedMessage)) {
     throw new Error(
       `builder did not reject the invalid producer state: ${output}`,
@@ -1350,7 +1359,7 @@ function expectTamperedBundleFailure(
   const previousDigest = artifact.digest;
   artifact.digest = sha256Digest(mutated);
   for (const result of [
-    ...Object.values(evidence.measurements),
+    ...Object.values(evidence.measurements ?? {}),
     ...Object.values(evidence.observations),
   ]) {
     if (result.source_artifact_digest === previousDigest) {

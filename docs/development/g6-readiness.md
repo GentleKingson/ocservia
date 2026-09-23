@@ -19,6 +19,10 @@ runtime status and cleanup registry. Before raw upload, scan for secrets.
 At consumption, download the actual producer artifact ID, check the producer
 manifest digest, then validate every declared file and run binding.
 The result job requires both runtimes to succeed and computes the verdict once.
+The assembler emits observations and raw-data references, not precomputed
+metrics. Only the evaluator calculates metrics. Assembled event and sample
+rows omit repeated candidate/environment fields; producer and bundle bindings
+remain mandatory.
 It scans generated diagnostics before upload. Missing observations, failed
 fault injection, interrupted topology or a crashed harness never count as PASS.
 

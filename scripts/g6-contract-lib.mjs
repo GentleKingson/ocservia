@@ -507,7 +507,8 @@ function ordinal(label) {
   return `${label} record`;
 }
 
-// Shared JSONL streaming: strict binding, strictly increasing sequences,
+// Dataset binding is verified before parsing; explicit row claims are checked.
+// Shared JSONL streaming: strictly increasing sequences,
 // non-decreasing timestamps, and evidence-window containment for every record.
 function streamEventLines(entry, kindLabel, recordFields, binding, onRecord) {
   const lines = splitArtifactLines(
@@ -534,8 +535,8 @@ function streamEventLines(entry, kindLabel, recordFields, binding, onRecord) {
       [
         "sequence",
         "timestamp",
-        "environment_id",
-        "candidate_sha",
+        ...(record.environment_id === undefined && record.candidate_sha === undefined
+          ? [] : ["environment_id", "candidate_sha"]),
         ...fields,
       ],
       `${kindLabel} artifact ${entry.name} entry`,
@@ -556,7 +557,7 @@ function streamEventLines(entry, kindLabel, recordFields, binding, onRecord) {
       fail(`${kindLabel} artifact ${entry.name} timestamps must not decrease`);
     }
     requireWindow(record.timestamp, `${label}`, binding);
-    requireBinding(
+    if (record.environment_id !== undefined || record.candidate_sha !== undefined) requireBinding(
       record.environment_id,
       record.candidate_sha,
       `${kindLabel} artifact ${entry.name} entry`,
@@ -684,7 +685,8 @@ function parseResourceSamples(entry, binding) {
     fail(`resource samples artifact ${entry.name} needs a header and samples`);
   }
   const header = lines[0].split(",");
-  if (JSON.stringify(header) !== JSON.stringify(resourceSampleHeader)) {
+  if (JSON.stringify(header) !== JSON.stringify(resourceSampleHeader) &&
+      JSON.stringify(header) !== JSON.stringify(resourceSampleHeader.slice(0, -2))) {
     fail(`resource samples artifact ${entry.name} has an invalid header`);
   }
   const rows = [];
@@ -709,7 +711,7 @@ function parseResourceSamples(entry, binding) {
     }
     lastTimestampNs = parsedTimestampNs;
     requireWindow(columns[0], label, binding);
-    requireBinding(columns[8], columns[9], label, binding);
+    if (columns.length === resourceSampleHeader.length) requireBinding(columns[8], columns[9], label, binding);
     const component = columns[1];
     if (!resourceComponents.has(component)) {
       fail(`${label} has an unknown component: ${component}`);
@@ -1910,7 +1912,8 @@ function parseHttpSamples(entry, binding) {
     lines[0],
     `http samples artifact ${entry.name} header`,
   );
-  if (JSON.stringify(header) !== JSON.stringify(httpSampleHeader)) {
+  if (JSON.stringify(header) !== JSON.stringify(httpSampleHeader) &&
+      JSON.stringify(header) !== JSON.stringify(httpSampleHeader.slice(0, -2))) {
     fail(`http samples artifact ${entry.name} has an invalid header`);
   }
   const state = {
@@ -1939,7 +1942,7 @@ function parseHttpSamples(entry, binding) {
     rfc3339(columns[0], `${label} timestamp`);
     const timestampNs = rfc3339Nanoseconds(columns[0], `${label} timestamp`);
     requireWindow(columns[0], label, binding);
-    requireBinding(columns[13], columns[14], label, binding);
+    if (columns.length === httpSampleHeader.length) requireBinding(columns[13], columns[14], label, binding);
     if (!httpKinds.has(columns[1])) {
       fail(`${label} has an invalid kind`);
     }
@@ -3635,7 +3638,7 @@ function validateEvidence(evidence, slo, artifactRoot) {
       "started_at",
       "finished_at",
       "environment",
-      "measurements",
+      ...(evidence.measurements === undefined ? [] : ["measurements"]),
       "observations",
       "artifacts",
     ],
@@ -3684,12 +3687,10 @@ function validateEvidence(evidence, slo, artifactRoot) {
     fail("evidence limitations must be strings");
   }
 
-  exactKeys(
-    evidence.measurements,
-    Object.keys(slo.metrics),
-    "evidence measurements",
+  if (evidence.measurements !== undefined) exactKeys(
+    evidence.measurements, Object.keys(slo.metrics), "evidence measurements",
   );
-  for (const [name, measurement] of Object.entries(evidence.measurements)) {
+  for (const [name, measurement] of Object.entries(evidence.measurements ?? {})) {
     closed(
       measurement,
       ["actual", "sample_count", "source_artifact_digest"],
@@ -3764,7 +3765,7 @@ function validateEvidence(evidence, slo, artifactRoot) {
   const verifiedDigests = new Set(
     [...verifiedArtifacts.values()].map((entry) => entry.digest),
   );
-  for (const [name, measurement] of Object.entries(evidence.measurements)) {
+  for (const [name, measurement] of Object.entries(evidence.measurements ?? {})) {
     if (!verifiedDigests.has(measurement.source_artifact_digest)) {
       fail(`evidence measurement ${name} references an unverified artifact`);
     }
@@ -4528,7 +4529,7 @@ export function verifyG6({
     (instance) => instance.role === "agent",
   ).length;
   if (
-    evidence.measurements.authorized_real_agents?.actual >
+    evidence.measurements?.authorized_real_agents?.actual >
     topologyAgentInstances
   ) {
     fail(
@@ -4539,29 +4540,34 @@ export function verifyG6({
   const failureReasons = [];
   const measurementResults = {};
   for (const [name, contract] of Object.entries(slo.metrics)) {
-    const measurement = evidence.measurements[name];
+    let measurement = evidence.measurements?.[name];
     let derivation = null;
     if (contract.derivation !== undefined) {
       const registry = derivationRegistry.get(contract.derivation);
       const artifact = standardArtifacts.get(registry.kind);
-      if (measurement.source_artifact_digest !== artifact.digest) {
+      if (measurement && measurement.source_artifact_digest !== artifact.digest) {
         fail(
           `evidence measurement ${name} must reference the ${registry.kind} artifact`,
         );
       }
       const computed = registry.compute(parsedArtifacts.get(registry.kind));
-      if (measurement.actual !== computed.value) {
+      if (measurement && measurement.actual !== computed.value) {
         fail(
           `evidence measurement ${name} does not match the artifact-derived value`,
         );
       }
-      if (measurement.sample_count !== computed.sampleCount) {
+      if (measurement && measurement.sample_count !== computed.sampleCount) {
         fail(
           `evidence measurement ${name} sample_count does not match the artifact-derived value`,
         );
       }
+      measurement = { actual: computed.value, sample_count: computed.sampleCount, source_artifact_digest: artifact.digest };
       derivation = contract.derivation;
     }
+    if (!measurement) fail(`metric ${name} has no verified producer`);
+    finiteNumber(measurement.actual, `derived measurement ${name}.actual`);
+    if (!Number.isInteger(measurement.sample_count) || measurement.sample_count < 1)
+      fail(`derived measurement ${name}.sample_count must be positive`);
     const passed = metricPass(measurement.actual, contract);
     measurementResults[name] = {
       actual: measurement.actual,
@@ -4576,6 +4582,9 @@ export function verifyG6({
     if (!passed && !(purpose === "resilience" && diagnosticMetrics.has(name)))
       failureReasons.push(`metric failed: ${name}`);
   }
+
+  if (measurementResults.authorized_real_agents?.actual > topologyAgentInstances)
+    fail("derived authorized Agent count exceeds topology instances");
 
   const timelineArtifact = standardArtifacts.get("timeline");
   const timelineEvents = parsedArtifacts.get("timeline");

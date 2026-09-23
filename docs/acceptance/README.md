@@ -77,10 +77,14 @@ number of opaque `harness_log` files:
   authority leases, session expiries, and reconnect storm record;
 - `relay_transitions` — the relay and path transition report.
 
-Every record and row of every structured artifact repeats the run's
-`environment_id` and `candidate_sha`, so an artifact swapped in from another
-run, environment, or build is rejected even when the evidence digest is
-updated to match the swapped bytes. All artifact timestamps must stay inside
+Run, environment and candidate identity are checked at the raw producer and
+bundle boundaries, including the trusted producer digest and each file hash.
+The assembled event and sample rows do not repeat that identity. Explicit
+identity claims in older diagnostic inputs are still checked when present;
+they do not replace the producer boundary. Metrics are computed only in the
+result evaluator, not first in the assembler. Optional claimed measurements
+in diagnostic fixtures are compared with those derived values, never trusted
+as the result. All artifact timestamps must stay inside
 the evidence window, except lease deadlines, which must extend beyond their
 DB-clock cut and may outlive the window. Line-oriented artifacts must use LF
 endings, strictly increasing sequences, non-decreasing timestamps, and unique
