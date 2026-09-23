@@ -2,6 +2,12 @@ name: Release Business
 on:
   workflow_call:
     inputs:
+      helpers-id:
+        type: string
+        required: true
+      helpers-sha256:
+        type: string
+        required: true
       version:
         type: string
         required: true
@@ -46,7 +52,14 @@ jobs:
           arch: amd64
           version: ${{ inputs.version }}
           path: ${{ runner.temp }}/products
-      - uses: ./.github/actions/g6-cache-credentials
+      - uses: ./.github/actions/release-test-images
+        with:
+          artifact-id: ${{ inputs.helpers-id }}
+          sha256: ${{ inputs.helpers-sha256 }}
+          component: test-helpers
+          arch: amd64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/test-helpers
       - name: Exercise signed deployment and real business paths
         env:
           VERSION: ${{ inputs.version }}

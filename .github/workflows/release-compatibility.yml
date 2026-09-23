@@ -2,6 +2,18 @@ name: Supported Application Compatibility
 on:
   workflow_call:
     inputs:
+      helpers-id:
+        type: string
+        required: true
+      helpers-sha256:
+        type: string
+        required: true
+      session-id:
+        type: string
+        required: true
+      session-sha256:
+        type: string
+        required: true
       version:
         type: string
         required: true
@@ -40,7 +52,22 @@ jobs:
           arch: ${{ inputs.arch }}
           version: ${{ inputs.version }}
           path: ${{ runner.temp }}/products
-      - uses: ./.github/actions/g6-cache-credentials
+      - uses: ./.github/actions/release-test-images
+        with:
+          artifact-id: ${{ inputs.helpers-id }}
+          sha256: ${{ inputs.helpers-sha256 }}
+          component: test-helpers
+          arch: ${{ inputs.arch }}
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/test-helpers
+      - uses: ./.github/actions/release-test-images
+        with:
+          artifact-id: ${{ inputs.session-id }}
+          sha256: ${{ inputs.session-sha256 }}
+          component: session-base
+          arch: ${{ inputs.arch }}
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/session-base
       - run: bash scripts/build-release-session-images.sh
       - name: Published supported node against candidate Controller
         env:

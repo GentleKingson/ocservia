@@ -397,12 +397,15 @@ if [[ "${baseline_has_rpm}" == yes ]]; then
   candidate_rpm_name="$(basename "${CANDIDATE_RPM}")"
   install -m 0644 -- "${CANDIDATE_RPM}" "${pkg_dir}/${candidate_rpm_name}"
   install -m 0644 -- "${download_dir}/${baseline_rpm}" "${pkg_dir}/${baseline_rpm}"
-  # The stock rockylinux:9 image ships without systemd; build a one-off image
-  # that can run scriptlets exactly as a real systemd host would.
-  docker build --tag "${container_image}" - >"${ARTIFACT_DIR}/rpm-image-build.log" 2>&1 <<'DOCKERFILE'
-FROM rockylinux:9
-RUN dnf install -y systemd openssl file diffutils && dnf clean all
-DOCKERFILE
+  rpm_started="$(date +%s)"
+  if [[ -n "${RELEASE_RPM_IMAGE:-}" ]]; then
+    docker tag "${RELEASE_RPM_IMAGE}" "${container_image}"
+  else
+    docker build --tag "${container_image}" -f "${ROOT}/scripts/release-rpm-test.Dockerfile" "${ROOT}" \
+      >"${ARTIFACT_DIR}/rpm-image-build.log" 2>&1
+  fi
+  printf 'image_preparation\t%s\n' "$(( $(date +%s) - rpm_started ))" >"${ARTIFACT_DIR}/rpm-timings.tsv"
+  rpm_started="$(date +%s)"
   docker run --privileged --detach --name "${container}" \
     --volume "${pkg_dir}":/packages:ro "${container_image}" /sbin/init \
     >"${ARTIFACT_DIR}/rpm-container-start.log" 2>&1
@@ -413,6 +416,8 @@ DOCKERFILE
   done
   [[ "${state}" == "running" || "${state}" == "degraded" ]] \
     || { echo "rpm baseline container systemd never became ready (state: ${state})" >&2; exit 1; }
+  printf 'systemd_ready\t%s\n' "$(( $(date +%s) - rpm_started ))" >>"${ARTIFACT_DIR}/rpm-timings.tsv"
+  rpm_started="$(date +%s)"
   [[ "$(docker exec "${container}" uname -m)" == "$(uname -m)" ]]
   [[ "$(docker image inspect --format '{{.Architecture}}' "${container_image}")" == "${PACKAGE_ARCH}" ]]
   docker exec "${container}" getconf GNU_LIBC_VERSION >"${ARTIFACT_DIR}/rpm-libc.txt"
@@ -560,6 +565,7 @@ DOCKERFILE
     docker cp "${container}:/root/evidence" "${ARTIFACT_DIR}/rpm-state"
   fi
 
+  printf 'rpm_lifecycle\t%s\n' "$(( $(date +%s) - rpm_started ))" >>"${ARTIFACT_DIR}/rpm-timings.tsv"
   docker rm -f -- "${container}" >/dev/null
   docker rmi -f -- "${container_image}" >/dev/null
 fi

@@ -2,6 +2,12 @@ name: Validate Release Product Upgrades
 on:
   workflow_call:
     inputs:
+      rpm-id:
+        type: string
+        required: true
+      rpm-sha256:
+        type: string
+        required: true
       version:
         type: string
         required: true
@@ -60,6 +66,15 @@ jobs:
           arch: ${{ inputs.arch }}
           version: ${{ inputs.version }}
           path: ${{ runner.temp }}/products
+      - uses: ./.github/actions/release-test-images
+        if: matrix.component == 'agent'
+        with:
+          artifact-id: ${{ inputs.rpm-id }}
+          sha256: ${{ inputs.rpm-sha256 }}
+          component: rpm-test
+          arch: ${{ inputs.arch }}
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/rpm-test
       - name: Validate candidate upgrade
         env:
           FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json

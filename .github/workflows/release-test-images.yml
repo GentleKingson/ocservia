@@ -1,0 +1,99 @@
+name: Prepare Release Test Images
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+      complete:
+        type: boolean
+        required: true
+    outputs:
+      helpers-id:
+        value: ${{ jobs.prepare.outputs.helpers-id }}
+      helpers-sha256:
+        value: ${{ jobs.prepare.outputs.helpers-sha256 }}
+      session-id:
+        value: ${{ jobs.prepare.outputs.session-id }}
+      session-sha256:
+        value: ${{ jobs.prepare.outputs.session-sha256 }}
+      rpm-id:
+        value: ${{ jobs.prepare.outputs.rpm-id }}
+      rpm-sha256:
+        value: ${{ jobs.prepare.outputs.rpm-sha256 }}
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 35
+    env:
+      VERSION: ${{ inputs.version }}
+      BUILDX_BUILDER: release-fixtures-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+    outputs:
+      helpers-id: ${{ steps.helpers-upload.outputs.artifact-id }}
+      helpers-sha256: ${{ steps.helpers.outputs.sha256 }}
+      session-id: ${{ steps.session-upload.outputs.artifact-id }}
+      session-sha256: ${{ steps.session.outputs.sha256 }}
+      rpm-id: ${{ steps.rpm-upload.outputs.artifact-id }}
+      rpm-sha256: ${{ steps.rpm.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/g6-cache-credentials
+      - name: Prepare native fixture builder
+        run: |
+          bash scripts/release-upgrade-native.sh "${{ inputs.arch }}"
+          args=()
+          if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+            for name in ACTIONS_RUNTIME_TOKEN ACTIONS_CACHE_URL ACTIONS_RESULTS_URL; do
+              [[ -z "${!name:-}" ]] || args+=(--driver-opt "env.${name}=${!name}")
+            done
+          fi
+          docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
+            --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 \
+            "${args[@]}" --bootstrap --use
+      - name: Prepare shared probe, tunnel and Relay
+        id: helpers
+        if: inputs.complete
+        run: bash scripts/release-test-images.sh build test-helpers "${{ inputs.arch }}" "${RUNNER_TEMP}/helpers"
+      - id: helpers-upload
+        if: inputs.complete
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: test-helpers-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/helpers/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Prepare candidate-independent session bases
+        id: session
+        if: inputs.complete
+        run: bash scripts/release-test-images.sh build session-base "${{ inputs.arch }}" "${RUNNER_TEMP}/session-base"
+      - id: session-upload
+        if: inputs.complete
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: session-base-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-base/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Prepare RPM systemd environment
+        id: rpm
+        run: bash scripts/release-test-images.sh build rpm-test "${{ inputs.arch }}" "${RUNNER_TEMP}/rpm"
+      - id: rpm-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rpm-test-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rpm/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Remove fixture builder
+        if: always()
+        run: docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1 || true

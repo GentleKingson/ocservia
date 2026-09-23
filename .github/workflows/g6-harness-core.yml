@@ -3,6 +3,12 @@ name: G6 Readiness Core (Reusable)
 on:
   workflow_call:
     inputs:
+      helpers-id:
+        type: string
+        default: ''
+      helpers-sha256:
+        type: string
+        default: ''
       version:
         type: string
         default: ''
@@ -109,6 +115,15 @@ jobs:
           arch: amd64
           version: ${{ inputs.version }}
           path: ${{ runner.temp }}/candidate
+      - uses: ./.github/actions/release-test-images
+        if: inputs.helpers-id != ''
+        with:
+          artifact-id: ${{ inputs.helpers-id }}
+          sha256: ${{ inputs.helpers-sha256 }}
+          component: test-helpers
+          arch: amd64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/test-helpers
       - name: Initialize release timing diagnostics
         run: >-
           scripts/g6-timing.sh init
@@ -218,6 +233,9 @@ jobs:
           ) &
           build_pids+=("$!")
           (
+            if [[ -n "${RELEASE_RELAY_IMAGE:-}" ]]; then
+              docker tag "${RELEASE_RELAY_IMAGE}" "${G6RD_RELAY_IMAGE}"
+            else
             scripts/g6-timing.sh measure "${timing}" relay_build -- \
               scripts/g6-buildx-cache.sh g6-relay true relay-build \
                 --pull=false \
@@ -226,6 +244,7 @@ jobs:
                 --load \
                 --file deploy/production/relay.Dockerfile \
                 --tag "${G6RD_RELAY_IMAGE}" .
+            fi
           ) &
           build_pids+=("$!")
           (
@@ -239,6 +258,9 @@ jobs:
                 --target transportd-runtime \
                 --tag "${G6RD_TRANSPORTD_IMAGE}" .
             fi
+            if [[ -n "${RELEASE_PROBE_IMAGE:-}" ]]; then
+              docker tag "${RELEASE_PROBE_IMAGE}" "${G6RD_PROBE_IMAGE}"
+            else
             scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
               scripts/g6-buildx-cache.sh g6-rust-runtime false g6-probe-build \
                 --pull=false \
@@ -247,6 +269,7 @@ jobs:
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-probe-runtime \
                 --tag "${G6RD_PROBE_IMAGE}" .
+            fi
             if [[ "${CANDIDATE_PRODUCTS}" == true ]]; then
               mkdir -p "${RUNNER_TEMP}/agent-payload"
               tar -xzf "${RUNNER_TEMP}/candidate/ocservia-agent-${CANDIDATE_VERSION}-linux-amd64.tar.gz" \
@@ -284,6 +307,9 @@ jobs:
           record_image_timing g6_probe "${G6RD_PROBE_IMAGE}"
           record_image_timing g6_agent "${G6RD_AGENT_IMAGE}"
           scripts/g6-timing.sh start "${timing}" helper_harness_tunnel_build
+          if [[ -n "${RELEASE_PROBE_IMAGE:-}" ]]; then
+            install -m 0755 "${RUNNER_TEMP}/test-helpers/ocservia-g6-tunnel" "${archive_dir}/ocservia-g6-tunnel"
+          else
           tunnel_output="${archive_dir}/tunnel-output"
           # Export the tunnel from the shared builder's content-addressed
           # BuildKit stage; this reuses the compiled layer and does not
@@ -296,6 +322,7 @@ jobs:
           install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" \
             "${archive_dir}/ocservia-g6-tunnel"
           rm -rf -- "${tunnel_output}"
+          fi
           source scripts/env.sh
           pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"
           expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"

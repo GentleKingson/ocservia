@@ -68,6 +68,7 @@ node scripts/test-release-upgrade.mjs
 bash scripts/test-release-session-compatibility.sh
 node scripts/test-release-selection.mjs
 node scripts/test-release-artifacts.mjs
+bash scripts/test-release-test-images.sh
 ruby -r yaml -r json - <<'RUBY'
 workflow = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 abort 'upgrade validation must not receive write permissions' unless workflow['permissions'] == {'contents' => 'read'}
@@ -97,6 +98,25 @@ required.each do |job|
 end
 release = YAML.safe_load(File.read('.github/workflows/release.yml'))
 release_jobs = release.fetch('jobs')
+fixtures = YAML.safe_load(File.read('.github/workflows/release-test-images.yml'))
+abort 'fixture preparation must remain read-only' unless fixtures['permissions'] == {'contents' => 'read'}
+fixture_steps = fixtures.fetch('jobs').fetch('prepare').fetch('steps')
+%w[helpers session rpm].zip(%w[test-helpers session-base rpm-test]).each do |id, component|
+  build = fixture_steps.find { |step| step['id'] == id }
+  abort "missing fixture recipe #{component}" unless build.fetch('run').include?("release-test-images.sh build #{component}")
+  abort 'single-architecture diagnostics only need RPM fixtures' unless build['if'] == (id == 'rpm' ? nil : 'inputs.complete')
+end
+{'release-compatibility.yml' => %w[test-helpers session-base],
+ 'release-business.yml' => %w[test-helpers], 'release-product-upgrade.yml' => %w[rpm-test],
+ 'g6-harness-core.yml' => %w[test-helpers]}.each do |file, components|
+  workflow = YAML.safe_load(File.read(".github/workflows/#{file}"))
+  consumers = workflow.fetch('jobs').values.flat_map { |job| job.fetch('steps') }.select { |step| step['uses'] == './.github/actions/release-test-images' }
+  abort "fixture reuse missing from #{file}" unless consumers.map { |step| step.dig('with', 'component') } == components
+  consumers.each do |step|
+    prefix = {'test-helpers' => 'helpers', 'session-base' => 'session', 'rpm-test' => 'rpm'}.fetch(step.dig('with', 'component'))
+    abort "#{file} lost producer identity" unless step.dig('with', 'artifact-id') == "${{ inputs.#{prefix}-id }}" && step.dig('with', 'sha256') == "${{ inputs.#{prefix}-sha256 }}"
+  end
+end
 products = YAML.safe_load(File.read('.github/workflows/release-products.yml'))
 abort 'product producers must not wait for upgrades' if products.to_json.include?('release-upgrade-unit.sh') || products.to_json.include?('frozen-')
 upgrades = YAML.safe_load(File.read('.github/workflows/release-product-upgrade.yml'))
@@ -126,19 +146,28 @@ abort 'upgrade lost frozen digest' unless validate.dig('env', 'FROZEN_SHA256') =
 abort 'upgrade lost frozen file' unless validate.dig('env', 'FROZEN_FILE') == "#{download.dig('with', 'path')}/frozen.json"
 %w[amd64 arm64].each do |arch|
   caller = release_jobs.fetch("upgrade-#{arch}")
-  abort 'upgrade must follow only its native producer and prepare' unless caller['needs'].sort == ['prepare', "build-#{arch}"].sort
+  abort 'upgrade must follow its native products, fixtures and prepare' unless caller['needs'].sort == ['prepare', "build-#{arch}", "test-images-#{arch}"].sort
   abort 'upgrade must also run for single-architecture diagnostics' if caller.key?('if')
   abort 'upgrade workflow not called' unless caller['uses'] == './.github/workflows/release-product-upgrade.yml'
   expected = {'arch' => arch, 'version' => '${{ needs.prepare.outputs.version }}'}
   %w[frozen-id frozen-sha256].each { |key| expected[key] = "${{ needs.prepare.outputs.#{key} }}" }
   %w[agent-id agent-sha256 controller-id controller-sha256].each { |key| expected[key] = "${{ needs.build-#{arch}.outputs.#{key} }}" }
+  %w[rpm-id rpm-sha256].each { |key| expected[key] = "${{ needs.test-images-#{arch}.outputs.#{key} }}" }
   abort 'upgrade caller must preserve all producer identities' unless caller['with'] == expected
   abort 'Release Check must observe upgrade results' unless release_jobs.fetch('release-check').fetch('needs').include?("upgrade-#{arch}")
+  producer = release_jobs.fetch("test-images-#{arch}")
+  abort 'fixtures must prepare independently of candidate builds' unless producer['needs'] == 'prepare' && producer['uses'] == './.github/workflows/release-test-images.yml'
+  abort 'fixture architecture selection drifted' unless producer['if'] == release_jobs.fetch("build-#{arch}")['if']
+  abort 'Release Check must observe fixture preparation' unless release_jobs.fetch('release-check').fetch('needs').include?("test-images-#{arch}")
 end
 %w[compatibility-amd64 compatibility-arm64 business-smoke integration resilience validate-release-packages controller-image-security].each do |name|
   arch = name == 'compatibility-arm64' ? 'arm64' : 'amd64'
-  expected = %w[validate-release-packages controller-image-security].include?(name) ? %w[prepare build-amd64 build-arm64] : ['prepare', "build-#{arch}"]
+  expected = %w[validate-release-packages controller-image-security].include?(name) ? %w[prepare build-amd64 build-arm64] : ['prepare', "build-#{arch}", "test-images-#{arch}"]
   abort "#{name} must not wait for upgrade results" unless release_jobs.fetch(name).fetch('needs').sort == expected.sort
+  next if %w[validate-release-packages controller-image-security].include?(name)
+  %w[helpers-id helpers-sha256].each do |key|
+    abort "#{name} lost shared fixture identity" unless release_jobs.fetch(name).dig('with', key) == "${{ needs.test-images-#{arch}.outputs.#{key} }}"
+  end
 end
 publish = release.fetch('jobs').fetch('publish-release-packages')
 abort 'production approval lost' unless publish['environment'] == 'release-publishing'
