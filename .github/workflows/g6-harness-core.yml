@@ -3,6 +3,24 @@ name: G6 Readiness Core (Reusable)
 on:
   workflow_call:
     inputs:
+      version:
+        type: string
+        default: ''
+      agent-id:
+        type: string
+        default: ''
+      agent-sha256:
+        type: string
+        default: ''
+      controller-id:
+        type: string
+        default: ''
+      controller-sha256:
+        type: string
+        default: ''
+      purpose:
+        type: string
+        default: resilience
       profile:
         description: Exact harness execution profile
         type: string
@@ -22,6 +40,10 @@ permissions:
 
 env:
   G6_AUTHORITY: ${{ inputs.authority }}
+  # Five local owner terms exercise the five distinct stale-owner probes.
+  G6_AGENTS_A: ${{ inputs.purpose == 'performance' && '25' || '5' }}
+  G6_AGENTS_B: ${{ inputs.purpose == 'performance' && '25' || '5' }}
+  G6RD_WINDOW_SECONDS: ${{ inputs.purpose == 'performance' && '305' || '60' }}
 
 # The formal profile freezes every runtime image and host-side binary once,
 # then runs the two failure domains through the authority-selected Environment.
@@ -34,6 +56,7 @@ jobs:
       G6_CORE_PROFILE: ${{ inputs.profile }}
       G6_CORE_AUTHORITY: ${{ inputs.authority }}
       G6_CORE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      G6_CORE_PURPOSE: ${{ inputs.purpose }}
     steps:
       - name: Validate the exact reusable-workflow invocation
         run: |
@@ -41,6 +64,7 @@ jobs:
           [[ "${G6_CORE_CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           test "${G6_CORE_CANDIDATE_SHA}" = "${GITHUB_SHA}"
           test "${G6_CORE_PROFILE}" = formal
+          test "${G6_CORE_PURPOSE}" = resilience || test "${G6_CORE_PURPOSE}" = performance
           test "${G6_CORE_AUTHORITY}" = engineering || \
             test "${G6_CORE_AUTHORITY}" = production_readiness
 
@@ -67,6 +91,24 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: ./.github/actions/release-artifacts
+        if: inputs.agent-id != ''
+        with:
+          artifact-id: ${{ inputs.agent-id }}
+          sha256: ${{ inputs.agent-sha256 }}
+          component: agent
+          arch: amd64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/candidate
+      - uses: ./.github/actions/release-artifacts
+        if: inputs.controller-id != ''
+        with:
+          artifact-id: ${{ inputs.controller-id }}
+          sha256: ${{ inputs.controller-sha256 }}
+          component: controller
+          arch: amd64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/candidate
       - name: Initialize release timing diagnostics
         run: >-
           scripts/g6-timing.sh init
@@ -133,6 +175,9 @@ jobs:
             --use
           scripts/g6-timing.sh end "${timing}" buildx_builder_prepare || true
       - name: Build and freeze the release images
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          CANDIDATE_PRODUCTS: ${{ inputs.agent-id != '' && inputs.controller-id != '' && 'true' || 'false' }}
         id: release-build
         timeout-minutes: 30
         run: |
@@ -147,19 +192,20 @@ jobs:
               "$(docker image inspect --format '{{.Size}}' "$2")" \
               "$(docker image inspect --format '{{.Id}}' "$2")" || true
           }
-          # Three concurrent build lanes with disjoint dependency trees: the
-          # Go control-plane, the pinned iroh-relay, and one shared Rust
-          # graph. The Rust lane runs the three original compile partitions
-          # (transportd; probe+tunnel; agent+privd) sequentially in the
-          # g6-rust-builder stage — separate Cargo invocations sharing one
-          # target cache, so dependency features never unify across
-          # partitions — and every first-party Rust image then only assembles
-          # from those frozen layers.
+          # Reuse verified products in release runs. Standalone diagnostics
+          # build separate Cargo feature graphs; probes and relay are fixtures.
           # The wrapper bounds the external cache wait, preserves a failed
           # cache-backed solve, and retries exactly once without cache flags.
           # The retry is the authoritative build result.
           build_pids=()
           (
+            if [[ "${CANDIDATE_PRODUCTS}" == true ]]; then
+              for name in control transport; do
+                docker load -i "${RUNNER_TEMP}/candidate/${name}-linux-amd64.tar"
+                case "${name}" in control) image="${G6RD_CONTROL_PLANE_IMAGE}" ;; transport) image="${G6RD_TRANSPORTD_IMAGE}" ;; esac
+                docker tag "ghcr.io/gentlekingson/ocservia/${name}:${CANDIDATE_VERSION}-linux-amd64" "${image}"
+              done
+            else
             scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
               scripts/g6-buildx-cache.sh g6-control-plane true control-plane-build \
                 --pull=false \
@@ -168,6 +214,7 @@ jobs:
                 --load \
                 --file control-plane/Dockerfile \
                 --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
+            fi
           ) &
           build_pids+=("$!")
           (
@@ -182,11 +229,7 @@ jobs:
           ) &
           build_pids+=("$!")
           (
-            scripts/g6-timing.sh measure "${timing}" rust_workspace_build -- \
-              scripts/g6-buildx-cache.sh g6-rust-runtime true rust-workspace-build \
-                --pull=false \
-                --file rust/g6-runtime.Dockerfile \
-                --target g6-rust-builder .
+            if [[ "${CANDIDATE_PRODUCTS}" != true ]]; then
             scripts/g6-timing.sh measure "${timing}" transportd_build -- \
               scripts/g6-buildx-cache.sh g6-rust-runtime false transportd-build \
                 --pull=false \
@@ -195,6 +238,7 @@ jobs:
                 --file rust/g6-runtime.Dockerfile \
                 --target transportd-runtime \
                 --tag "${G6RD_TRANSPORTD_IMAGE}" .
+            fi
             scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
               scripts/g6-buildx-cache.sh g6-rust-runtime false g6-probe-build \
                 --pull=false \
@@ -203,6 +247,18 @@ jobs:
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-probe-runtime \
                 --tag "${G6RD_PROBE_IMAGE}" .
+            if [[ "${CANDIDATE_PRODUCTS}" == true ]]; then
+              mkdir -p "${RUNNER_TEMP}/agent-payload"
+              tar -xzf "${RUNNER_TEMP}/candidate/ocservia-agent-${CANDIDATE_VERSION}-linux-amd64.tar.gz" \
+                -C "${RUNNER_TEMP}/agent-payload" --strip-components=4 \
+                "ocservia-agent-${CANDIDATE_VERSION}/rust/target/release/ocservia-agent" \
+                "ocservia-agent-${CANDIDATE_VERSION}/rust/target/release/ocservia-privd"
+              scripts/g6-buildx-cache.sh g6-agent-candidate false g6-agent-build \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" --load \
+                --file rust/g6-runtime.Dockerfile --target g6-agent-candidate \
+                --build-context "candidate-agent=${RUNNER_TEMP}/agent-payload" \
+                --tag "${G6RD_AGENT_IMAGE}" .
+            else
             scripts/g6-timing.sh measure "${timing}" g6_agent_build -- \
               scripts/g6-buildx-cache.sh g6-rust-runtime false g6-agent-build \
                 --pull=false \
@@ -211,6 +267,7 @@ jobs:
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-agent-runtime \
                 --tag "${G6RD_AGENT_IMAGE}" .
+            fi
           ) &
           build_pids+=("$!")
           build_status=0
@@ -367,6 +424,7 @@ jobs:
       G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     outputs:
       raw-artifact-id: ${{ steps.fd-a-raw-upload.outputs.artifact-id }}
+      raw-source-sha256: ${{ steps.source-digest.outputs.sha256 }}
       raw-artifact-digest: ${{ steps.fd-a-raw-upload.outputs.artifact-digest }}
       release-manifest-digest: ${{ needs.g6-rd-release-image.outputs.release-manifest-digest }}
     steps:
@@ -435,7 +493,7 @@ jobs:
           --name "g6-rd-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
           --timeout 1200s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A bootstrap segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment bootstrap'
       - name: Wait for failure domain B recipient certificate
@@ -446,7 +504,7 @@ jobs:
           --name "g6-rd-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-shared-recipient-key"
           --timeout 1200s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Encrypt the shared trust rendezvous for failure domain B
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment shared-trust'
       - name: Publish the shared trust rendezvous
@@ -479,7 +537,7 @@ jobs:
           --name "g6-rd-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
           --timeout 1200s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A transport trust segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment transport-trust'
       - name: Publish transport trust readiness
@@ -498,7 +556,7 @@ jobs:
           --name "g6-rd-load-active-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-load-active"
           --timeout 900s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A failover cut segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment failover-cut'
       - name: Publish the isolation record
@@ -515,7 +573,7 @@ jobs:
           --name "g6-rd-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-new-primary"
           --timeout 600s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A recovery segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment recovery'
       - name: Upload relay observation readiness
@@ -532,7 +590,7 @@ jobs:
           --name "g6-rd-relay-pre-fault-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-relay-pre-fault"
           --timeout 600s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A relay cut segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment relay-cut'
       - name: Upload failure domain A scenario readiness
@@ -549,7 +607,7 @@ jobs:
           --name "g6-rd-window-barrier-arm-request-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request"
           --timeout 600s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A barrier arm segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment barrier-arm'
       - name: Publish failure domain A barrier acknowledgement
@@ -572,7 +630,7 @@ jobs:
           --name "g6-rd-final-freeze-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-final-freeze"
           --timeout 1800s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
+          --peer-job "Resilience / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Finish failure domain A peer observation timing
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" peer_observation_wait || true
       - name: Start failure domain A evidence timing
@@ -585,15 +643,28 @@ jobs:
         if: always()
         timeout-minutes: 3
         run: scripts/g6-readiness-fd-a.sh runtime-result "${{ job.status }}"
+      - id: source-digest
+        if: always()
+        run: |
+          source="${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/fd-a-final/source-manifest.json"
+          echo "sha256=$(sha256sum "${source}" | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
+      - name: Scan raw output before upload
+        id: raw-scan
+        if: always()
+        run: |
+          scripts/bootstrap.sh g6-secret-scan
+          source scripts/env.sh
+          gitleaks dir --no-banner --redact --no-color --config scripts/g6-secret-scan.toml \
+            "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/fd-a-final"
       - name: Publish failure domain A raw evidence
         id: fd-a-raw-upload
-        if: always()
+        if: always() && steps.raw-scan.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-rd-raw-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/fd-a-final
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
       - name: Collect redacted failure domain A diagnostics
         if: always()
         timeout-minutes: 5
@@ -642,6 +713,7 @@ jobs:
       G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     outputs:
       raw-artifact-id: ${{ steps.fd-b-raw-upload.outputs.artifact-id }}
+      raw-source-sha256: ${{ steps.source-digest.outputs.sha256 }}
       raw-artifact-digest: ${{ steps.fd-b-raw-upload.outputs.artifact-digest }}
       release-manifest-digest: ${{ needs.g6-rd-release-image.outputs.release-manifest-digest }}
     steps:
@@ -710,7 +782,7 @@ jobs:
           --name "g6-rd-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
           --timeout 1200s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B bootstrap segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment bootstrap'
       - name: Publish failure domain B recipient certificate
@@ -727,7 +799,7 @@ jobs:
           --name "g6-rd-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-shared"
           --timeout 1200s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B peer runtime segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment peer-runtime'
       - name: Wait for the peer primary
@@ -738,7 +810,7 @@ jobs:
           --name "g6-rd-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-primary-up"
           --timeout 1200s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B standby segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment standby'
       - name: Wait for the agent fleet rendezvous
@@ -749,7 +821,7 @@ jobs:
           --name "g6-rd-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-agents"
           --timeout 1800s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B enrollment segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment enroll'
       - name: Publish failure domain B enrollment
@@ -766,7 +838,7 @@ jobs:
           --name "g6-rd-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-trust-ready"
           --timeout 600s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B load segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment load'
       - name: Publish the active load rendezvous
@@ -783,7 +855,7 @@ jobs:
           --name "g6-rd-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-isolation"
           --timeout 600s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B promotion segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment promote'
       - name: Publish the promoted primary
@@ -800,7 +872,7 @@ jobs:
           --name "g6-rd-relay-rejoin-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
           --timeout 1800s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B relay observation segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment relay-observe'
       - name: Publish the pre-fault relay-a observation
@@ -817,7 +889,7 @@ jobs:
           --name "g6-rd-fd-a-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-fd-a-ready"
           --timeout 1200s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B fault scenarios segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment fault-scenarios'
       - name: Finish failure domain B scenario timing
@@ -838,7 +910,7 @@ jobs:
           --name "g6-rd-window-barrier-armed-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
           --timeout 600s
-          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
+          --peer-job "Resilience / G6 Formal FD-A: Primary & PITR"
       - name: Start 300-second observation timing
         run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" observation_300_seconds
       - name: Run failure domain B observation window segment
@@ -861,15 +933,28 @@ jobs:
         if: always()
         timeout-minutes: 3
         run: scripts/g6-readiness-fd-b.sh runtime-result "${{ job.status }}"
+      - id: source-digest
+        if: always()
+        run: |
+          source="${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/fd-b-final/source-manifest.json"
+          echo "sha256=$(sha256sum "${source}" | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
+      - name: Scan raw output before upload
+        id: raw-scan
+        if: always()
+        run: |
+          scripts/bootstrap.sh g6-secret-scan
+          source scripts/env.sh
+          gitleaks dir --no-banner --redact --no-color --config scripts/g6-secret-scan.toml \
+            "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/fd-b-final"
       - name: Publish failure domain B raw evidence
         id: fd-b-raw-upload
-        if: always()
+        if: always() && steps.raw-scan.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-rd-raw-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/fd-b-final
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
       - name: Collect redacted failure domain B diagnostics
         if: always()
         timeout-minutes: 5
@@ -896,498 +981,79 @@ jobs:
           if-no-files-found: warn
           retention-days: 5
 
-  g6-rd-assemble:
-    name: G6 Formal Evidence Assembly
+  resilience-result:
+    name: Resilience Result
     needs: [g6-rd-fd-a, g6-rd-fd-b]
-    env:
-      G6_PIPELINE_NEEDS: ${{ toJSON(needs) }}
-    if: ${{ always() && inputs.profile == 'formal' }}
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment:
-      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
-    outputs:
-      bundle-artifact-id: ${{ steps.bundle-upload.outputs.artifact-id }}
-      bundle-artifact-digest: ${{ steps.bundle-upload.outputs.artifact-digest }}
-      assembly-result-artifact-id: ${{ steps.assembly-result-upload.outputs.artifact-id }}
-      fd-a-artifact-id: ${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}
-      fd-a-artifact-digest: ${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}
-      fd-b-artifact-id: ${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}
-      fd-b-artifact-digest: ${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}
-      release-manifest-digest: ${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}
+    env:
+      G6_PIPELINE_NEEDS: ${{ toJSON(needs) }}
     steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Verify runner prerequisites
-        run: scripts/ci-preflight.sh
-      - name: Restore verified G6 Node runtime
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Require both fault domains
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: jq -e '. as $results | all(["g6-rd-fd-a", "g6-rd-fd-b"][]; $results[.].result == "success")' <<<"${RESULTS}"
+      - run: scripts/bootstrap.sh g6-secret-scan
+      - run: scripts/bootstrap.sh g6-runtime
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
-      - name: Restore shared npm cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
-          restore-keys: |
-            npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned G6 Node runtime
-        run: scripts/bootstrap.sh g6-runtime
-      - name: Download failure domain A raw evidence
-        if: needs.g6-rd-fd-a.outputs.raw-artifact-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-raw-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}
           path: ${{ runner.temp }}/g6-rd-raw-fd-a
-      - name: Download failure domain B raw evidence
-        if: needs.g6-rd-fd-b.outputs.raw-artifact-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-raw-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-raw-fd-b
-      - name: Recompute the run-bound environment identity
+      - name: Verify domain A producer manifest
+        env:
+          EXPECTED: ${{ needs.g6-rd-fd-a.outputs.raw-source-sha256 }}
         run: |
-          echo "G6RD_EXPECTED_ENVIRONMENT_ID=g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" >>"${GITHUB_ENV}"
-      - name: Assemble the evidence bundle
+          [[ "${EXPECTED}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(sha256sum "${RUNNER_TEMP}/g6-rd-raw-fd-a/source-manifest.json" | cut -d' ' -f1)" == "${EXPECTED}" ]]
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          artifact-ids: ${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}
+          path: ${{ runner.temp }}/g6-rd-raw-fd-b
+      - name: Verify domain B producer manifest
+        env:
+          EXPECTED: ${{ needs.g6-rd-fd-b.outputs.raw-source-sha256 }}
+        run: |
+          [[ "${EXPECTED}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(sha256sum "${RUNNER_TEMP}/g6-rd-raw-fd-b/source-manifest.json" | cut -d' ' -f1)" == "${EXPECTED}" ]]
+      - name: Assemble and evaluate once
         timeout-minutes: 15
+        env:
+          PURPOSE: ${{ inputs.purpose }}
         run: |
           node scripts/g6-pipeline.mjs assemble \
             --fd-a "${RUNNER_TEMP}/g6-rd-raw-fd-a" \
             --fd-b "${RUNNER_TEMP}/g6-rd-raw-fd-b" \
-            --output "${RUNNER_TEMP}/g6-rd-evidence-bundle" \
-            --work-dir "${RUNNER_TEMP}/g6-rd-assembly-work" \
+            --output "${RUNNER_TEMP}/resilience" \
+            --work-dir "${RUNNER_TEMP}/assembly" \
             --builder "${GITHUB_WORKSPACE}/scripts/build-g6-evidence.mjs" \
             --slo "${GITHUB_WORKSPACE}/docs/acceptance/g6-slo.yaml"
-      - name: Embed the deterministic bundle verdict
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          bundle="${RUNNER_TEMP}/g6-rd-evidence-bundle"
-          status=0
-          # The published bundle carries the verdict computed at assembly
-          # time from exactly the bytes being published, so the independent
-          # verifier's recomputation proves the bundle and its verdict
-          # cannot drift apart. Engineering authority legitimately settles
-          # non-final (exit 1) on the authority fence; only verdict-free or
-          # crashing evaluation fails assembly here.
-          node scripts/verify-g6-evidence.mjs \
+          environment="g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)"
+          node scripts/verify-g6-evidence.mjs --purpose "${PURPOSE}" \
             --slo docs/acceptance/g6-slo.yaml \
-            --evidence "${bundle}/evidence.json" \
-            --topology "${bundle}/topology.json" \
-            --release-manifest "${bundle}/release-manifest.json" \
-            --artifact-root "${bundle}" \
+            --evidence "${RUNNER_TEMP}/resilience/evidence.json" \
+            --topology "${RUNNER_TEMP}/resilience/topology.json" \
+            --release-manifest "${RUNNER_TEMP}/resilience/release-manifest.json" \
+            --artifact-root "${RUNNER_TEMP}/resilience" \
             --expected-authority "${G6_AUTHORITY}" \
-            --expected-environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
+            --expected-environment-id "${environment}" \
             --expected-failure-domain-class multi_host \
-            --result "${RUNNER_TEMP}/g6-rd-assembly-work/bundle-verification-result.json" \
-            >"${bundle}/verdict.json" || status=$?
-          jq -e '.schema_version == "ocservia.g6-verdict.v2"' \
-            "${bundle}/verdict.json" >/dev/null || {
-            echo "the assembly-time verifier did not produce a G6 verdict" >&2
-            exit 1
-          }
-          if [[ "${status}" != 0 && "${status}" != 1 ]]; then
-            echo "the assembly-time verifier exited ${status}" >&2
-            exit 1
-          fi
-      - name: Preserve an assembly result when assembly could not start
+            >"${RUNNER_TEMP}/resilience/result.json"
+      - name: Scan diagnostics before upload
+        id: scan
         if: always()
-        run: |
-          node scripts/g6-pipeline.mjs fallback --phase assembly \
-            --output "${RUNNER_TEMP}/g6-rd-evidence-bundle/assembly-result.json"
-      - name: Stage the preliminary assembly result outside the bundle
-        if: always()
-        run: |
-          mkdir -p "${RUNNER_TEMP}/g6-rd-assembly-result"
-          mv -f \
-            "${RUNNER_TEMP}/g6-rd-evidence-bundle/assembly-result.json" \
-            "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.preliminary.json"
-      - name: Publish the partial or complete evidence bundle
-        id: bundle-upload
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-evidence-bundle
-          if-no-files-found: error
-          retention-days: 14
-      - name: Bind the assembly result to the uploaded bundle
-        if: always()
-        env:
-          G6_BUNDLE_ARTIFACT_ID: ${{ steps.bundle-upload.outputs.artifact-id }}
-          G6_BUNDLE_ARTIFACT_DIGEST: ${{ steps.bundle-upload.outputs.artifact-digest }}
-        run: |
-          status=0
-          node scripts/g6-pipeline.mjs finalize-assembly \
-            --input "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.preliminary.json" \
-            --output "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.json" || status=$?
-          rm -f "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.preliminary.json"
-          exit "${status}"
-      - name: Publish the artifact-bound assembly result
-        id: assembly-result-upload
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: g6-rd-assembly-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-assembly-result
-          if-no-files-found: error
-          retention-days: 14
-
-  g6-rd-secret-scan:
-    name: G6 Formal Evidence Secret Scan
-    needs: [g6-rd-fd-a, g6-rd-fd-b, g6-rd-assemble]
-    env:
-      G6_PIPELINE_NEEDS: ${{ toJSON(needs) }}
-    if: ${{ always() && inputs.profile == 'formal' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    environment:
-      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
-    outputs:
-      result-artifact-id: ${{ steps.secret-scan-upload.outputs.artifact-id }}
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Initialize secret scan timing diagnostics
-        run: >-
-          scripts/g6-timing.sh init
-          "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json"
-          g6-rd-secret-scan formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-          || true
-      - name: Verify runner prerequisites
-        run: |
-          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" runner_preparation || true
-          scripts/ci-preflight.sh
-          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" runner_preparation || true
-      - name: Bootstrap the pinned secret-scan tools
-        run: |
-          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_tool_bootstrap || true
-          scripts/bootstrap.sh g6-secret-scan
-          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_tool_bootstrap || true
-      - name: Start secret scan evidence download timing
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_artifact_download || true
-      - name: Download failure domain A raw evidence
-        if: needs.g6-rd-fd-a.outputs.raw-artifact-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-raw-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-raw-fd-a
-      - name: Download failure domain B raw evidence
-        if: needs.g6-rd-fd-b.outputs.raw-artifact-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-raw-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-raw-fd-b
-      - name: Download the evidence bundle
-        if: needs.g6-rd-assemble.outputs.bundle-artifact-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-evidence-bundle
-      - name: Finish secret scan evidence download timing
-        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_artifact_download || true
-      - name: Start secret scan execution timing
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_execution || true
-      - name: Scan the published evidence for secrets
-        id: secret-scan
         run: |
           source scripts/env.sh
-          scan_status=0
-          scan_report_dir="${RUNNER_TEMP}/g6-rd-secret-scan-reports"
-          mkdir -p "${scan_report_dir}"
-          for domain in fd-a fd-b; do
-            if ! node scripts/g6-pipeline.mjs check-runtime \
-              --root "${RUNNER_TEMP}/g6-rd-raw-${domain}" --domain "${domain}"; then
-              echo "runtime-result binding failed for ${domain}" >&2
-              scan_status=1
-            fi
-          done
-          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-evidence-bundle" --report-format json --report-path "${scan_report_dir}/assembled-bundle.json"; then
-            scan_status=1
-            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
-              "${scan_report_dir}/assembled-bundle.json" || true
-          fi
-          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-a" --report-format json --report-path "${scan_report_dir}/raw-fd-a.json"; then
-            scan_status=1
-            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
-              "${scan_report_dir}/raw-fd-a.json" || true
-          fi
-          if ! gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-b" --report-format json --report-path "${scan_report_dir}/raw-fd-b.json"; then
-            scan_status=1
-            jq -c '[.[] | {rule_id:.RuleID,file:.File,start_line:.StartLine,end_line:.EndLine,match:.Match}]' \
-              "${scan_report_dir}/raw-fd-b.json" || true
-          fi
-          exit "${scan_status}"
-      - name: Finish secret scan execution timing
-        if: always()
-        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_execution || true
-      - name: Record the secret scan result
-        if: always()
-        env:
-          SCAN_OUTCOME: ${{ steps.secret-scan.outcome }}
-        run: |
-          node scripts/g6-pipeline.mjs secret-scan-result \
-            --outcome "${SCAN_OUTCOME}" \
-            --output "${RUNNER_TEMP}/g6-rd-secret-scan/secret-scan-result.json"
-      - name: Start secret scan result upload timing
-        if: always()
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_result_upload || true
-      - name: Publish the secret scan result
-        id: secret-scan-upload
-        if: always()
+          test -d "${RUNNER_TEMP}/resilience"
+          gitleaks dir --no-banner --redact --no-color --config scripts/g6-secret-scan.toml "${RUNNER_TEMP}/resilience"
+      - name: Preserve scoped result and sanitized diagnostics
+        if: always() && steps.scan.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: g6-rd-secret-scan-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-secret-scan
+          name: resilience-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/resilience
+          retention-days: 7
           if-no-files-found: error
-          retention-days: 14
-      - name: Publish redacted secret scan diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: g6-rd-secret-scan-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-secret-scan-reports
-          if-no-files-found: warn
-          retention-days: 14
-      - name: Record secret scan timing diagnostics
-        if: always()
-        run: |
-          timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json"
-          scripts/g6-timing.sh end "${timing}" secret_scan_result_upload || true
-          scripts/g6-timing.sh summary "${timing}" || true
-      - name: Upload secret scan timing diagnostics
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: g6-timing-rd-secret-scan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/timing/g6-rd-secret-scan.json
-          if-no-files-found: warn
-          retention-days: 5
-
-  g6-rd-verifier:
-    name: G6 Formal Independent Verification
-    needs: [g6-rd-assemble]
-    env:
-      G6_PIPELINE_NEEDS: ${{ toJSON(needs) }}
-    if: ${{ always() && inputs.profile == 'formal' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    environment:
-      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
-    outputs:
-      result-artifact-id: ${{ steps.verdict-upload.outputs.artifact-id }}
-      release-manifest-digest: ${{ needs.g6-rd-assemble.outputs.release-manifest-digest }}
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Verify runner prerequisites
-        run: scripts/ci-preflight.sh
-      - name: Restore verified tools
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
-      - name: Restore shared npm cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
-          restore-keys: |
-            npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned G6 Node runtime
-        run: scripts/bootstrap.sh g6-runtime
-      - name: Download the evidence bundle
-        if: needs.g6-rd-assemble.outputs.bundle-artifact-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-evidence-bundle
-      - name: Download the artifact-bound assembly result
-        if: needs.g6-rd-assemble.outputs.assembly-result-artifact-id != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-assembly-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-assembly-result
-      - name: Recompute the run-bound environment identity
-        run: |
-          echo "G6RD_EXPECTED_ENVIRONMENT_ID=g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" >>"${GITHUB_ENV}"
-      - name: Independently verify the evidence bundle
-        env:
-          G6_AUTHORITY: ${{ inputs.authority }}
-        run: |
-          set -euo pipefail
-          bundle="${RUNNER_TEMP}/g6-rd-evidence-bundle"
-          output="${RUNNER_TEMP}/g6-rd-verdict"
-          mkdir -p "${output}"
-          status=0
-          rm -f -- "${output}/verification-result.json" "${output}/verdict.json"
-          node scripts/verify-g6-evidence.mjs \
-            --slo docs/acceptance/g6-slo.yaml \
-            --evidence "${bundle}/evidence.json" \
-            --topology "${bundle}/topology.json" \
-            --release-manifest "${bundle}/release-manifest.json" \
-            --artifact-root "${bundle}" \
-            --expected-authority "${G6_AUTHORITY}" \
-            --expected-environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
-            --expected-failure-domain-class multi_host \
-            --result "${output}/verification-result.json" \
-            >"${output}/verify.stdout.log" \
-            2>"${output}/verify.stderr.log" || status=$?
-          printf '%s\n' "${status}" >"${output}/evidence-verify-exit-code.txt"
-          if [[ ! -s "${output}/verification-result.json" ]]; then
-            echo "the independent verifier did not emit verification-result.json" >&2
-            cat "${output}/verify.stderr.log" >&2
-            exit 1
-          fi
-          result_status="$(jq -er '
-            select(
-              .schema_version == "ocservia.g6-evidence-phase-result.v1" and
-              .phase == "verify"
-            ) | .status
-          ' "${output}/verification-result.json")" || {
-            echo "the independent verifier emitted an invalid verification result" >&2
-            exit 1
-          }
-          if [[ -s "${output}/verify.stdout.log" ]]; then
-            jq -e '.schema_version == "ocservia.g6-verdict.v2"' \
-              "${output}/verify.stdout.log" >/dev/null || {
-              echo "the independent verifier stdout is not a G6 verdict" >&2
-              exit 1
-            }
-            cp -f "${output}/verify.stdout.log" "${output}/verdict.json"
-          fi
-          [[ ! -s "${output}/verify.stderr.log" ]] || cat "${output}/verify.stderr.log" >&2
-          # A production-readiness dispatch must earn exit 0; an engineering
-          # rehearsal may stay non-final on the authority fence alone, and
-          # the preserved verdict records exactly that.
-          if [[ "${G6_AUTHORITY}" == production_readiness ]]; then
-            if [[ "${status}" != 0 || "${result_status}" != passed ]] \
-              || [[ ! -s "${output}/verdict.json" ]] \
-              || ! jq -e '.schema_version == "ocservia.g6-verdict.v2" and .passed == true' \
-                "${output}/verdict.json" >/dev/null; then
-              echo "the independent verifier rejected the production-readiness bundle" >&2
-              exit 1
-            fi
-          else
-            if [[ "${status}" != 1 || "${result_status}" != accepted_non_final ]] \
-              || [[ ! -s "${output}/verdict.json" ]] \
-              || ! jq -e '
-              .passed == false and
-              .failure_reasons == ["final pass requires production_readiness authority"] and
-              all(.measurement_results[]; .passed == true) and
-              all(.observation_results[]; .passed == true)
-            ' "${output}/verdict.json" >/dev/null; then
-              echo "the independent engineering verifier found a failure beyond the authority fence" >&2
-              exit 1
-            fi
-            echo "engineering rehearsal verifier exit status: ${status}"
-          fi
-          if ! diff -u <(jq -S . "${bundle}/verdict.json") <(jq -S . "${output}/verdict.json"); then
-            echo "the independent verdict differs from the bundle verdict" >&2
-            exit 1
-          fi
-      - name: Bind the verification result to this run
-        if: always()
-        run: |
-          result="${RUNNER_TEMP}/g6-rd-verdict/verification-result.json"
-          node scripts/g6-pipeline.mjs fallback --phase verification --output "${result}"
-          status=0
-          node scripts/g6-pipeline.mjs bind-verification \
-            --input "${result}" --output "${result}.tmp" \
-            --assembly-result "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.json" || status=$?
-          mv -f "${result}.tmp" "${result}"
-          exit "${status}"
-      - name: Publish the independent verdict
-        id: verdict-upload
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: g6-rd-verdict-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-verdict
-          if-no-files-found: warn
-          retention-days: 14
-
-  g6-rd-gate:
-    name: G6 Formal Readiness Verdict
-    env:
-      G6_PIPELINE_NEEDS: ${{ toJSON(needs) }}
-    needs:
-      - g6-rd-fd-a
-      - g6-rd-fd-b
-      - g6-rd-assemble
-      - g6-rd-secret-scan
-      - g6-rd-verifier
-    if: ${{ always() && inputs.profile == 'formal' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    environment:
-      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
-    steps:
-      - name: Checkout candidate source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Download failure domain A runtime result
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-raw-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-raw-fd-a
-      - name: Download failure domain B runtime result
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-raw-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-raw-fd-b
-      - name: Download assembly result
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-assembly-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-assembly-result
-      - name: Download secret scan result
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-secret-scan-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-secret-scan
-      - name: Download independent verification result
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: g6-rd-verdict-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-verdict
-      - name: Build the fail-closed G6 gate result
-        run: |
-          test "${{ needs.g6-rd-fd-a.result }}" = success
-          test "${{ needs.g6-rd-fd-b.result }}" = success
-          test "${{ needs.g6-rd-assemble.result }}" = success
-          test "${{ needs.g6-rd-secret-scan.result }}" = success
-          test "${{ needs.g6-rd-verifier.result }}" = success
-          node scripts/g6-pipeline.mjs gate \
-            --fd-a-result "${RUNNER_TEMP}/g6-rd-raw-fd-a/runtime-result.json" \
-            --fd-b-result "${RUNNER_TEMP}/g6-rd-raw-fd-b/runtime-result.json" \
-            --assembly-result "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.json" \
-            --secret-scan-result "${RUNNER_TEMP}/g6-rd-secret-scan/secret-scan-result.json" \
-            --verification-result "${RUNNER_TEMP}/g6-rd-verdict/verification-result.json" \
-            --output "${RUNNER_TEMP}/g6-rd-gate/gate-result.json"
-      - name: Preserve a gate result when an upstream artifact is unavailable
-        if: always()
-        run: |
-          node scripts/g6-pipeline.mjs fallback --phase gate \
-            --output "${RUNNER_TEMP}/g6-rd-gate/gate-result.json"
-      - name: Publish the G6 gate result
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: g6-rd-gate-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-gate
-          if-no-files-found: error
-          retention-days: 14

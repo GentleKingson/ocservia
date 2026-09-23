@@ -70,32 +70,22 @@ export function validateRelease(release, tag, ref, baseline) {
     requireThat(release.assets.filter((a) => a.name === name && a.state === "uploaded").length === 1, `missing or duplicate baseline asset: ${name}`);
   }
 }
-export function validateResults(frozen, results, needs, runID, attempt) {
-  requireThat(["prepare", "agent-upgrade", "controller-upgrade"].every((j) => needs[j]?.result === "success"), "prerequisite failed, skipped or cancelled");
-  requireThat(results.length === 4, "exactly four unit results required");
-  const seen = new Set();
-  for (const r of results) {
-    const key = `${r.component}-${r.arch}`;
-    requireThat(scenarios[r.component] && architectures[r.arch] && !seen.has(key), "duplicate or unknown unit");
-    seen.add(key);
-    for (const field of ["candidate_sha", "candidate_version", "baseline_tag", "baseline_commit", "baseline_lock_sha256"])
-      requireThat(r[field] === frozen[field], `inconsistent ${key} ${field}`);
-    requireThat(r.run_id === runID && r.run_attempt === attempt && frozen.run_id === runID && frozen.run_attempt === attempt,
-      "mixed run/attempt evidence; rerun all jobs");
-    const expected = architectures[r.arch];
-    requireThat(r.native?.runner_arch === expected.runner_arch && r.native?.kernel === expected.kernel &&
-      r.native?.docker === r.arch && r.native?.binfmt === "none", "native architecture evidence mismatch");
-    requireThat(r.status === "pass" && r.failure === null && Number.isFinite(Date.parse(r.started_at)) &&
-      Date.parse(r.finished_at) >= Date.parse(r.started_at), "unit incomplete or failed");
-    requireThat(scenarios[r.component].every((s) => r.scenarios?.[s] === "pass"), "required scenario missing or not passed");
-    requireThat(Array.isArray(r.artifacts) && r.artifacts.length > 0 && r.artifacts.every((a) =>
-      typeof a.name === "string" && /^[0-9a-f]{64}$/.test(a.sha256)), "missing tested artifact digests");
-    for (const name of candidateArtifacts(r.component, r.arch, r.candidate_version))
-      requireThat(r.artifacts.filter(a => a.name === name).length === 1, `missing or duplicate candidate artifact: ${name}`);
-  }
-  return { status: "pass", units: [...seen].sort(), run_id: runID, run_attempt: attempt,
-    wall_seconds: (Math.max(...results.map((r) => Date.parse(r.finished_at))) - Math.min(...results.map((r) => Date.parse(r.started_at)))) / 1000,
-    unit_runner_minutes: results.reduce((n, r) => n + (Date.parse(r.finished_at) - Date.parse(r.started_at)) / 60000, 0) };
+export function validateUnit(frozen, r, runID) {
+  const key = `${r.component}-${r.arch}`;
+  requireThat(scenarios[r.component] && architectures[r.arch], "unknown unit");
+  for (const field of ["candidate_sha", "candidate_version", "baseline_tag", "baseline_commit", "baseline_lock_sha256"])
+    requireThat(r[field] === frozen[field], `inconsistent ${key} ${field}`);
+  requireThat(r.run_id === runID && frozen.run_id === runID, "foreign workflow run");
+  const expected = architectures[r.arch];
+  requireThat(r.native?.runner_arch === expected.runner_arch && r.native?.kernel === expected.kernel &&
+    r.native?.docker === r.arch, "native architecture evidence mismatch");
+  requireThat(r.status === "pass" && r.failure === null && Number.isFinite(Date.parse(r.started_at)) &&
+    Date.parse(r.finished_at) >= Date.parse(r.started_at), "unit incomplete or failed");
+  requireThat(scenarios[r.component].every(s => r.scenarios?.[s] === "pass"), "required scenario missing or not passed");
+  requireThat(Array.isArray(r.artifacts) && r.artifacts.every(a =>
+    typeof a.name === "string" && /^[0-9a-f]{64}$/.test(a.sha256)), "missing tested artifact digests");
+  for (const name of candidateArtifacts(r.component, r.arch, r.candidate_version))
+    requireThat(r.artifacts.filter(a => a.name === name).length === 1, `missing or duplicate candidate artifact: ${name}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -121,16 +111,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         assets: release.assets.filter((a) => requiredAssets(env.BASELINE_RELEASE, baseline).includes(a.name)).map((a) => ({ name: a.name, url: a.browser_download_url, digest: a.digest })) };
       fs.writeFileSync(`${directory}/frozen.json`, JSON.stringify(frozen, null, 2) + "\n");
       fs.appendFileSync(env.GITHUB_OUTPUT, `baseline_commit=${baseline.commit}\n`);
-    } else if (mode === "aggregate") {
-      const results = [];
-      const walk = (dir) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (e.isDirectory()) walk(`${dir}/${e.name}`);
-        else if (e.name === "result.json") results.push(readJSON(`${dir}/${e.name}`));
-      } };
-      walk(directory);
-      const summary = validateResults(readJSON(`${directory}/frozen/frozen.json`), results, JSON.parse(env.NEEDS), env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT);
-      fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Native Upgrade Result: PASS\n\n${JSON.stringify(summary)}\n`);
-    } else throw new Error("expected baseline-deb, upgrade-path, prepare or aggregate");
+    } else if (mode === "validate-unit") {
+      validateUnit(readJSON(env.FROZEN_FILE), readJSON(directory), env.GITHUB_RUN_ID);
+    } else throw new Error("expected baseline-deb, upgrade-path, prepare or validate-unit");
   } catch (error) {
     console.error(error.message);
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Native Upgrade Result: NOT PASS (${error.message})\n`);

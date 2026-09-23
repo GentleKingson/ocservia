@@ -61,8 +61,8 @@ command alone, when assessing its benefit.
 - Rust behavior or boundaries: `make rust-check`
 - Web behavior: `make web-check`
 - Real cross-VM behavior: follow [real E2E validation](real-e2e.md); module checks and browser fixtures are not substitutes
-- Signed candidate business checks on authorized native runners: [T07 Release Business Smoke](real-business-validation.md); the separate extended profile retains unmatched production-path coverage
-- Formal release/readiness: use the G6 workflow and read [G6 readiness](g6-readiness.md)
+- Signed candidate business checks on authorized native runners: [Business Smoke and Integration](real-business-validation.md)
+- Release acceptance: use [Release Check](release-checks.md); selected cross-host checks are described in [Resilience](g6-readiness.md)
 
 Do not run the formal G6 harness for an ordinary documentation change unless
 the change touches its acceptance contracts or execution paths.

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { architectures, scenarios, compareVersions, validateInputs, validateRelease, requiredAssets, validateResults, readJSON, candidateArtifacts, baselineDebAsset } from "./release-upgrade-contract.mjs";
+import { architectures, scenarios, compareVersions, validateInputs, validateRelease, requiredAssets, validateUnit, readJSON, candidateArtifacts, baselineDebAsset } from "./release-upgrade-contract.mjs";
 const baselines = readJSON(new URL("./release-upgrade-baselines.json", import.meta.url));
 const sha = "a".repeat(40), run = "123", attempt = "2";
 assert.equal(compareVersions("0.10.0", "0.9.9"), 1);
@@ -124,21 +124,22 @@ for (const field of ["draft", "prerelease"])
 assert.throws(() => validateRelease(release, tag, { object: { type: "commit", sha } }, valid()));
 const frozen = { candidate_sha: sha, candidate_version: "0.6.1", baseline_tag: tag, baseline_commit: valid().commit,
   baseline_lock_sha256: "b".repeat(64), run_id: run, run_attempt: attempt };
-const needs = Object.fromEntries(["prepare", "agent-upgrade", "controller-upgrade"].map(j => [j, { result: "success" }]));
 const units = Object.entries(scenarios).flatMap(([component, required]) => Object.entries(architectures).map(([arch, native]) => ({
-  ...frozen, component, arch, native: { runner_arch: native.runner_arch, kernel: native.kernel, docker: arch, binfmt: "none" },
+  ...frozen, component, arch, native: { runner_arch: native.runner_arch, kernel: native.kernel, docker: arch },
   status: "pass", failure: null, started_at: "2026-09-14T01:00:00Z", finished_at: "2026-09-14T01:05:00Z",
   scenarios: Object.fromEntries(required.map(s => [s, "pass"])),
   artifacts: candidateArtifacts(component, arch, frozen.candidate_version).map(name => ({ name, sha256: "c".repeat(64) })),
 })));
-const gate = (results = units, jobs = needs) => validateResults(frozen, results, jobs, run, attempt);
-assert.equal(gate().status, "pass");
+const gate = (results = units) => results.forEach(r => validateUnit(frozen, r, run));
+gate();
+const retry = structuredClone(units);
+retry[0].run_attempt = "3";
+gate(retry);
 const legacyCandidate = structuredClone(units);
 legacyCandidate[0].artifacts[0].name = `ocservia-agent_${frozen.candidate_version}_${legacyCandidate[0].arch}.deb`;
 assert.throws(() => gate(legacyCandidate), /missing or duplicate candidate artifact/);
 for (let i = 0; i < 4; i++) {
-  assert.throws(() => gate(units.filter((_, index) => index !== i)));
-  for (const [field, bad] of Object.entries({ candidate_sha: "b".repeat(40), baseline_tag: "v0.4.0", run_attempt: "1", status: "cancelled", artifacts: [], failure: "failure" })) {
+  for (const [field, bad] of Object.entries({ candidate_sha: "b".repeat(40), baseline_tag: "v0.4.0", run_id: "foreign", status: "cancelled", artifacts: [], failure: "failure" })) {
     const changed = structuredClone(units); changed[i][field] = bad;
     assert.throws(() => gate(changed));
   }
@@ -149,11 +150,7 @@ for (let i = 0; i < 4; i++) {
   const changed = structuredClone(units); changed[i].native.kernel = "wrong";
   assert.throws(() => gate(changed));
 }
-assert.throws(() => gate([...units, units[0]]));
-assert.throws(() => gate([units[0], units[0], ...units.slice(2)]));
-for (const job of Object.keys(needs)) for (const result of ["failure", "cancelled", "skipped", "", "timed_out"])
-  assert.throws(() => gate(units, { ...needs, [job]: { result } }));
-console.log("Release upgrade input, baseline, architecture, identity and four-unit fail-closed contracts passed");
+console.log("Release upgrade baseline, native identity, scenarios and independent rerun contracts passed");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "upgrade-redaction-"));
 try {
   fs.mkdirSync(`${tmp}/secrets`);

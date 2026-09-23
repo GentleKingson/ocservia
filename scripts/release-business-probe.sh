@@ -26,7 +26,7 @@ stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
 export SOURCE_COMMIT="${CANDIDATE_SHA}" PACKAGE_ARCH=amd64 CONTROLLER_ARCH=amd64
-export SOURCE_DATE_EPOCH OUTPUT_DIR="${work}/products" AGENT_SIGNING_KEY="${work}/signing.key"
+export SOURCE_DATE_EPOCH OUTPUT_DIR="${CANDIDATE_PRODUCTS:-${work}/products}" AGENT_SIGNING_KEY="${work}/signing.key"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
 export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
 registry="${BUILDX_BUILDER}-registry"
@@ -84,45 +84,23 @@ cleanup() {
       "${work}/private.log" "${work}/private" "${work}/sanitized.log" &&
       sudo install -o "$(id -u)" -g "$(id -g)" -m 600 "${work}/sanitized.log" "${ARTIFACT_DIR}/probe.log"
   fi
+  [[ -f "${ARTIFACT_DIR}/checkpoints.txt" ]] || : >"${ARTIFACT_DIR}/checkpoints.txt"
   jq -n --arg sha "${CANDIDATE_SHA}" --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg profile "${BUSINESS_PROFILE}" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
+    --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
     '{candidate_sha:$sha,candidate_version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
-      timings:$timings[0],
+      timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
-      t07_status:(if $profile == "smoke" then (if $code == 0 then "SMOKE_PASS" else "FAIL" end) else "NOT_EVALUATED" end),
+      scope:(if $profile == "smoke" then "business-smoke" else "integration" end),
       planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
-      deferred:["T09/formal release: immutable published Release download/bootstrap"],
-      not_applicable:["T08 independent failure domains and formal SLO"]}' >"${ARTIFACT_DIR}/result.json"
-  [[ -f "${ARTIFACT_DIR}/checkpoints.txt" ]] || : >"${ARTIFACT_DIR}/checkpoints.txt"
-  product_digests_sha256=
-  candidate_manifest_sha256=
-  if [[ -f "${ARTIFACT_DIR}/product-digests.txt" ]]; then
-    product_digests_sha256="$(sha256sum "${ARTIFACT_DIR}/product-digests.txt" | cut -d' ' -f1)"
-  fi
-  if [[ -f "${ARTIFACT_DIR}/candidate-manifest.json" ]]; then
-    candidate_manifest_sha256="$(sha256sum "${ARTIFACT_DIR}/candidate-manifest.json" | cut -d' ' -f1)"
-  fi
-  jq -n --slurpfile result "${ARTIFACT_DIR}/result.json" \
-    --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
-    --arg products "${product_digests_sha256}" --arg candidate_manifest "${candidate_manifest_sha256}" \
-    '{schema_version:1,candidate_sha:$result[0].candidate_sha,candidate_version:$result[0].candidate_version,
-      profile:$result[0].profile,
-      run_id:$result[0].run_id,run_attempt:$result[0].run_attempt,
-      started_at:$result[0].started_at,finished_at:$result[0].finished_at,
-      status:$result[0].probe_status,exit_code:$result[0].exit_code,last_stage:$result[0].last_stage,
-      planned_coverage:(if $result[0].profile == "smoke" then
-        "signed amd64 production-path candidate; Local login; separate requester/approver; ConfigPlan apply and automatic rollback; real VPN before and after rollback"
-        else "supplemental production-path OIDC, PKI, browser, Relay recovery and cross-source evidence checks" end),
-      product_digests_sha256:(if $products == "" then null else $products end),
-      candidate_manifest_sha256:(if $candidate_manifest == "" then null else $candidate_manifest end),
-      passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
-      timings:$result[0].timings}' >"${ARTIFACT_DIR}/evidence-manifest.json"
+      deferred:["Publish: immutable published Release download/bootstrap"],
+      not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
   sudo ip netns pids t07-client 2>/dev/null | xargs -r sudo kill
   sudo ip netns del t07-client >/dev/null 2>&1
@@ -140,21 +118,25 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'printf "probe failed at line %s, stage %s\n" "${LINENO}" "${stage}" >&2' ERR
 mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup" "${work}/bundle"
-# Unlike shared BuildServer, this explicitly authorized runner is disposable.
-if [[ -f /proc/sys/fs/binfmt_misc/status ]]; then
-  printf '%s\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null
-fi
 bash "${ROOT}/scripts/release-upgrade-native.sh" amd64 >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
 next_stage dependency_setup
-bash "${ROOT}/scripts/bootstrap.sh" native-packages
 openssl genpkey -algorithm ED25519 -out "${AGENT_SIGNING_KEY}"
 openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${work}/trusted-release.pub.pem"
 export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${work}/trusted-release.pub.pem"
-next_stage agent_package_build
-env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
-next_stage controller_image_build
-bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+if [[ -n "${CANDIDATE_PRODUCTS:-}" ]]; then
+  next_stage candidate_verification
+  node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" agent amd64 "${VERSION}" "${AGENT_MANIFEST_SHA256:?}"
+  node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" controller amd64 "${VERSION}" "${CONTROLLER_MANIFEST_SHA256:?}"
+  docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
+    --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 --bootstrap --use
+else
+  bash "${ROOT}/scripts/bootstrap.sh" native-packages
+  next_stage agent_package_build
+  env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+  next_stage controller_image_build
+  bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+fi
 next_stage relay_image_build
 bash "${ROOT}/scripts/g6-buildx-cache.sh" relay-business-amd64 true business-relay \
   --builder "${BUILDX_BUILDER}" --platform linux/amd64 --provenance=false --load \
@@ -316,9 +298,10 @@ fi
 sha256sum -c "${work}/package.sha256"
 record real_signature_and_tamper_rejection
 sudo install -d -m 755 /etc/ocservia
-sudo install -m 644 "${work}/trusted-release.pub.pem" /etc/ocservia/release-signing.pub.pem
+node_key="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-amd64.tar.gz.sha256.pub.pem"
+sudo install -m 644 "${node_key}" /etc/ocservia/release-signing.pub.pem
 export EXPECTED_RELEASE_KEY_SHA256
-EXPECTED_RELEASE_KEY_SHA256="$(openssl pkey -pubin -in "${work}/trusted-release.pub.pem" -outform DER | sha256sum | cut -d' ' -f1)"
+EXPECTED_RELEASE_KEY_SHA256="$(openssl pkey -pubin -in "${node_key}" -outform DER | sha256sum | cut -d' ' -f1)"
 printf '%s\n' "${EXPECTED_RELEASE_KEY_SHA256}" | sudo tee /etc/ocservia/trusted-release-key.sha256 >/dev/null
 sudo chmod 644 /etc/ocservia/trusted-release-key.sha256
 sudo touch /etc/ocservia/agent-install-production-relays

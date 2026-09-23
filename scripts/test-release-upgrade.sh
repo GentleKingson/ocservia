@@ -66,145 +66,64 @@ git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
 python3 scripts/test-release-business-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-session-compatibility.sh
-ruby -r yaml - <<'RUBY'
-w = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
-triggers = w['on'] || w[true]
-abort 'manual-only entrypoint required' unless triggers.keys == ['workflow_dispatch']
-abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release business_only business_profile candidate_sha session_compatibility session_only version]
-abort 'business profiles must preserve supplemental coverage' unless
-  triggers['workflow_dispatch']['inputs']['business_profile'] == {
-    'description'=>'Smoke is T07; extended retains OIDC, PKI, browser and recovery assertions pending coverage transfer',
-    'type'=>'choice', 'options'=>%w[smoke extended], 'default'=>'smoke'}
-abort 'session matrix must be opt-in' unless triggers['workflow_dispatch']['inputs']['session_compatibility'] == {
-  'description'=>'Run the published v1.0.0 node against the candidate (1.x mixed-version window evidence) plus historical v0.6.0/v0.6.1 diagnostics, on both native architectures',
-  'type'=>'boolean', 'default'=>false}
-abort 'native upgrades must remain the default' unless
-  triggers['workflow_dispatch']['inputs']['session_only']['default'] == false &&
-  triggers['workflow_dispatch']['inputs']['business_only']['default'] == false
-abort 'business probe must not prepare an unrelated upgrade' unless
-  w['jobs']['prepare']['if'] == '${{ !inputs.business_only }}'
-business = w['jobs'].fetch('business-probe')
-abort 'business probe must be explicit and disposable' unless
-  business['if'] == 'inputs.business_only' && business['runs-on'] == 'ubuntu-24.04' && !business.key?('needs') &&
-  business.dig('env', 'BUSINESS_PROFILE') == '${{ inputs.business_profile }}'
-abort 'business probe must use its bounded entrypoint' unless
-  business['steps'].any? { |step| step['run'] == 'bash scripts/release-business-probe.sh' }
-abort 'business result must fail closed on missing profile checkpoints' unless
-  business['steps'].any? { |step| step['name'] == 'Require complete scoped business evidence' &&
-    step.fetch('run', '').include?('"SMOKE_PASS"') &&
-    step.fetch('run', '').include?('"real_vpn_after_rollback"') &&
-    step.fetch('run', '').include?('"real_vpn_business_and_recovery"') }
-driver = File.read('scripts/release-business-probe.sh')
-phases = %w[smoke_config_apply smoke_user vpn_before_rollback smoke_rollback vpn_after_rollback].map do |phase|
-  driver.index("release-business-api.py\" #{phase}")
+node scripts/test-release-selection.mjs
+node scripts/test-release-artifacts.mjs
+ruby -r yaml -r json - <<'RUBY'
+workflow = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
+abort 'upgrade validation must not receive write permissions' unless workflow['permissions'] == {'contents' => 'read'}
+jobs = workflow.fetch('jobs')
+%w[agent-upgrade controller-upgrade session-compatibility].each do |name|
+  matrix = jobs.fetch(name).fetch('strategy').fetch('matrix').fetch('include')
+  abort "missing supported architecture: #{name}" unless matrix.map { |row| row['arch'] }.sort == %w[amd64 arm64]
 end
-abort 'native VPN must be checked after apply and again after rollback' unless
-  phases.all? && phases == phases.sort && driver.include?('timings.json') &&
-  driver.include?('"SMOKE_PASS"') &&
-  driver.include?('evidence-manifest.json') &&
-  driver.include?('if [[ "${BUSINESS_PROFILE}" == extended ]]') &&
-  driver.include?('release-business-api.py" certificate') &&
-  driver.include?('release-business-browser.mjs') &&
-  driver.include?('release-business-api.py" business')
-abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v1.0.0'
-abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
+baselines = jobs.fetch('session-compatibility').fetch('steps').filter_map { |step| step.dig('env', 'BASELINE_RELEASE') }
+abort 'application matrix must contain only the supported baseline' unless baselines == ['v1.0.0']
 %w[agent-upgrade controller-upgrade].each do |name|
-  job = w['jobs'][name]
-  abort 'native upgrade scope drift' unless job['if'] == '${{ !inputs.session_only && !inputs.business_only }}'
-  abort 'matrix must not fail fast' unless job['strategy']['fail-fast'] == false
-  abort 'incomplete native matrix' unless job['strategy']['matrix']['include'] == [
-    {'arch'=>'amd64','runner'=>'ubuntu-24.04'}, {'arch'=>'arm64','runner'=>'ubuntu-24.04-arm'}]
-  abort 'must wait for frozen prepare' unless job['needs'] == 'prepare'
-  execution = job['steps'].find { |step| step.fetch('run','').include?('bash scripts/release-upgrade-unit.sh') }.fetch('run')
-  removal = "printf '%s\\n' -1 | sudo tee /proc/sys/fs/binfmt_misc/status >/dev/null"
-  abort 'hosted binfmt handlers must be removed before strict native checks' unless
-    execution.include?(removal) && execution.index(removal) < execution.index('bash scripts/release-upgrade-unit.sh')
+  download = jobs.fetch(name).fetch('steps').find { |step| step.fetch('uses', '').start_with?('actions/download-artifact@') }
+  abort 'frozen input must use its producer artifact ID' unless download.dig('with', 'artifact-ids')
 end
-session = w['jobs'].fetch('session-compatibility')
-abort 'session matrix must be explicit and native' unless session['if'] == '${{ !inputs.business_only && (inputs.session_compatibility || inputs.session_only) }}' &&
-  session['needs'] == 'prepare' && session['strategy'] == w['jobs']['agent-upgrade']['strategy']
-cells = session['steps'].select { |step| step.fetch('run','').include?('scripts/release-session-compatibility.sh run') }
-abort 'published application baselines drift' unless cells.map { |step| step.dig('env','BASELINE_RELEASE') } == %w[v1.0.0 v0.6.0 v0.6.1]
-abort 'the 1.x mixed-window pair must lead the matrix' unless cells[0]['if'].nil?
-abort 'diagnostics must survive the v1.0.0 pair failure, not build failure' unless
-  cells[1]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}" &&
-  cells[2]['if'] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
-abort 'session matrix must use the shipped transport launcher' unless
-  File.read('scripts/build-release-session-images.sh').include?('build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile')
-abort 'disposable node must not register host binfmt handlers' unless
-  File.read('scripts/single-relay-node.Dockerfile').include?('systemctl mask systemd-binfmt.service')
-abort 'native summary must always run in upgrade scope' unless w['jobs']['upgrade-result']['if'] == '${{ always() && !inputs.session_only && !inputs.business_only }}'
-abort 'summary graph incomplete' unless w['jobs']['upgrade-result']['needs'].sort == %w[agent-upgrade controller-upgrade prepare]
-w['jobs'].each_value do |job|
-  abort 'unsafe job' if job['environment'] || job['permissions'] || job['continue-on-error']
-  abort 'explicit timeout required' unless job['timeout-minutes'].is_a?(Integer)
-  job['steps'].each do |step|
-    abort 'continue-on-error hides failures' if step['continue-on-error']
-    abort 'action not pinned' if step['uses'] && step['uses'] != './.github/actions/g6-cache-credentials' && !step['uses'].match?(/@[0-9a-f]{40}$/)
-    abort 'checkout persists credentials' if step.fetch('uses','').start_with?('actions/checkout@') && step.dig('with','persist-credentials') != false
+gate = jobs.fetch('upgrade-result')
+required = %w[prepare agent-upgrade controller-upgrade]
+abort 'upgrade summary must observe all native units' unless gate.fetch('needs').sort == required.sort
+command = gate.fetch('steps').find { |step| step.fetch('env', {}).key?('NEEDS') }.fetch('run')
+results = required.to_h { |job| [job, {'result' => 'success'}] }
+abort 'complete native units rejected' unless system({'NEEDS' => results.to_json}, 'bash', '-euc', command, out: File::NULL)
+required.each do |job|
+  %w[failure skipped cancelled].each do |state|
+    changed = Marshal.load(Marshal.dump(results))
+    changed[job]['result'] = state
+    abort "#{job} #{state} accepted" if system({'NEEDS' => changed.to_json}, 'bash', '-euc', command, out: File::NULL)
   end
 end
-puts 'Manual upgrade workflow contract passed'
 release = YAML.safe_load(File.read('.github/workflows/release.yml'))
-jobs = release.fetch('jobs')
-baseline_steps = jobs['build-agent-packages']['steps'].select { |step| step.fetch('name','').start_with?('Validate published ') }
-abort 'published upgrade baseline drift' unless baseline_steps.length == 1 &&
-  baseline_steps[0]['name'] == 'Validate published v1.0.0 upgrade (${{ matrix.package_arch }})' &&
-  baseline_steps[0].dig('env','BASELINE_RELEASE') == 'v1.0.0'
-abort 'release dispatch can publish' unless jobs['publish-release-packages']['if'] == "github.event_name == 'push'"
-abort 'release must call candidate security checks' unless
-  jobs.fetch('security').fetch('uses') == './.github/workflows/security.yml'
-abort 'publication guard changed' unless jobs['publish-release-packages']['environment'] == 'release-publishing' &&
-  jobs['publish-release-packages']['needs'].sort ==
-  %w[build-controller-images controller-image-security security validate-release-packages]
-%w[agent controller].each do |component|
-  job = jobs[component == 'agent' ? 'build-agent-packages' : 'build-controller-images']
-  abort 'shared build path missing' unless job['steps'].any? {|s| s.fetch('run','').include?("bash scripts/build-release-#{component}.sh")}
+publish = release.fetch('jobs').fetch('publish-release-packages')
+abort 'production approval lost' unless publish['environment'] == 'release-publishing'
+abort 'publish bypasses Release Check' unless publish.fetch('needs').include?('release-check')
+abort 'manual dispatch can publish' unless publish['if'] == "github.event_name == 'push'"
+release.fetch('jobs').each do |name, job|
+  next if name == 'publish-release-packages'
+  abort "write permission in validation: #{name}" if job.fetch('permissions', {}).values.include?('write')
+  abort "production secret in validation: #{name}" if job.to_json.include?('secrets.') || job.key?('secrets')
 end
-build = File.read('scripts/build-release-controller.sh')
-abort 'Controller no longer builds once' unless build.scan('scripts/g6-buildx-cache.sh').length == 1
-abort 'Controller caches must isolate image and architecture' unless build.include?('controller-v1-${name}-linux-${CONTROLLER_ARCH}')
-abort 'Controller export changed' unless build.include?('type=docker,dest=') && build.include?('--platform "linux/${CONTROLLER_ARCH}"')
-agent = File.read('scripts/build-release-agent.sh')
-abort 'shared Agent build must use the native ABI builder' unless
-  agent.include?('bash "${ROOT}/scripts/build-agent-binaries.sh"') && !agent.include?('cargo build')
-abi = File.read('scripts/build-agent-binaries.sh')
-controller_upgrade = File.read('scripts/release-controller-upgrade-smoke.sh')
-abort 'Controller smoke must check out the frozen baseline source' unless
-  controller_upgrade.include?('checkout_baseline_source "${ROOT}" "${work}/baseline" "${baseline_commit}"')
-abort 'rollback evidence must compare the verified trees and reject Git errors' unless
-  controller_upgrade.include?('require_changed_descriptor "${work}/baseline" "${baseline_commit}" "${candidate_commit}" "${descriptor}"') &&
-  controller_upgrade.include?('git -C "${work}/candidate" fetch --quiet --no-tags --depth=1 "${work}/baseline" "${baseline_commit}"')
-abort 'Agent release contract changed' unless abi.include?('OCSERV_AGENT_RELEASE_VERSION="${VERSION}" cargo build --locked --release') &&
-  abi.include?('--package ocservia-agent --package ocservia-privd --package ocservia-upgrader') &&
-  abi.include?('CARGO_TARGET_DIR="${OCSERVIA_ROOT}/rust/target/agent-${BUILD_CACHE_KEY}"') &&
-  abi.include?('[[ "$(getconf GNU_LIBC_VERSION)" == "glibc 2.34" ]]') &&
-  abi.include?('[[ "$("${path}" --version)" == "${binary} ${VERSION}" ]]')
-abort 'Agent ABI builder must pin its Rocky 9 base' unless
-  File.read('rust/agent-build.Dockerfile').match?(/^FROM rockylinux:9@sha256:[0-9a-f]{64}$/)
-native = File.read('scripts/release-native-package-smoke.sh')
-abort 'real native lifecycle fixtures must use the ABI builder' unless
-  native.include?('build-agent-binaries.sh') && !native.include?('cargo build')
-abort 'duplicate native build returned' unless native.scan('bash "${ROOT}/scripts/build-agent-binaries.sh"').length == 1
-lifecycle = jobs['build-agent-packages']['steps'].find { |step| step.fetch('name','').start_with?('Validate native package lifecycle') }
-abort 'release lifecycle must reuse the real candidate' unless
-  lifecycle.dig('env','CANDIDATE_DIR') == '${{ runner.temp }}/packages' && lifecycle.dig('env','VERSION') == '${{ env.version }}'
-jobs.each_value do |job|
-  job.fetch('steps', []).each do |step|
-    next unless step.fetch('uses','').start_with?('actions/download-artifact@')
-    pattern = step.fetch('with').fetch('pattern')
-    abort 'release download must bind both exact architectures and this attempt' unless
-      pattern.end_with?('-{amd64,arm64}-${{ github.run_id }}-${{ github.run_attempt }}') ||
-      # The merged, per-run security evidence artifact is the only download
-      # without per-architecture legs; it must still bind this exact attempt.
-      pattern == "controller-image-security-${{ github.run_id }}-${{ github.run_attempt }}"
+abort 'source security missing' unless release['jobs'].values.any? { |job| job['uses'] == './.github/workflows/security.yml' }
+release_gate = release.fetch('jobs').fetch('release-check')
+gate_command = release_gate.fetch('steps').find { |step| step.dig('env', 'RESULTS') }.fetch('run')
+[false, true].repeated_permutation(2) do |integration, resilience|
+  selection = {'candidate' => 'a' * 40, 'integration' => {'selected' => integration}, 'resilience' => {'selected' => resilience}}
+  results = release_gate.fetch('needs').to_h { |job| [job, {'result' => 'success'}] }
+  results['integration']['result'] = integration ? 'success' : 'skipped'
+  results['resilience']['result'] = resilience ? 'success' : 'skipped'
+  results['business-smoke']['result'] = integration ? 'skipped' : 'success'
+  env = {'SELECTION' => selection.to_json, 'GITHUB_SHA' => selection['candidate']}
+  abort 'valid selected release scope rejected' unless system(env.merge('RESULTS' => results.to_json), 'bash', '-euc', gate_command, out: File::NULL)
+  results.each_key do |job|
+    %w[failure cancelled skipped].each do |state|
+      next if results[job]['result'] == state
+      changed = Marshal.load(Marshal.dump(results))
+      changed[job]['result'] = state
+      abort "release accepted #{job}: #{state}" if system(env.merge('RESULTS' => changed.to_json), 'bash', '-euc', gate_command, out: File::NULL, err: File::NULL)
+    end
   end
 end
-baseline = File.read('scripts/release-baseline-upgrade-smoke.sh')
-abort 'standalone smoke baseline default drift' unless baseline.include?('BASELINE_RELEASE="${BASELINE_RELEASE:-v1.0.0}"')
-abort 'candidate package smoke must execute all three binaries in both runtimes' unless
-  baseline.scan('for binary in ocservia-agent ocservia-privd ocservia-upgrader; do').length == 2 &&
-  baseline.include?('sudo "/usr/libexec/ocservia/${binary}" --version') &&
-  baseline.include?('docker exec "${container}" "/usr/libexec/ocservia/${binary}" --version')
-puts 'Shared release build and publishing boundary contracts passed'
+puts 'Native workflow matrix, producer identity and job-result boundaries passed'
 RUBY

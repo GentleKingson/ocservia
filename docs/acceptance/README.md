@@ -16,70 +16,28 @@ entrypoints, see [GitHub Actions](../development/github-actions.md).
 - `g6-topology-schema.json` defines the public-safe deployed topology record.
 - `g6-verdict-schema.json` defines the independently computed verdict.
 
-The workflow preserves failure provenance as a sequence of separately uploaded
-and independently bound layers. Both runtime jobs emit immutable raw evidence,
-then a dedicated job assembles the cross-domain bundle, a separate job scans
-all raw and assembled artifacts for secrets, an independent job verifies the
-bundle, and the final gate aggregates those results. Every layer repeats the
-exact candidate SHA, workflow run ID and attempt, `environment_id`, and
-authority, plus the frozen release manifest digest; a mismatch fails closed.
+The release [Resilience regression](../development/g6-readiness.md) prepares
+products, executes two failure domains and computes one result. The result
+records its assessment purpose; finite fault regression is not a production
+SLO certification. Raw output is scanned before upload and bound at the
+consumption boundary by the producer manifest digest and exact file hashes.
 
 - `ocservia.g6-runtime-result.v1` records each failure domain's terminal state.
-- `ocservia.g6-source-manifest.v1` binds every raw file by path, size, and digest.
-- `ocservia.g6-raw-source-inventory.v1` binds both downloaded raw artifacts to
-  their GitHub artifact IDs, digests, producer domains, and source manifests.
-- `ocservia.g6-builder-source-inventory.v1` records the exact producer files
-  transcribed by the evidence Builder without replacing raw provenance.
-- `ocservia.g6-assembly-result.v1` preserves bundle-construction diagnostics.
-- `ocservia.g6-secret-scan-result.v1` records the independent redacted scan.
-- `ocservia.g6-gate-result.v1` aggregates all preceding layers without
-  converting an engineering rehearsal into a final production-readiness pass.
+- `ocservia.g6-source-manifest.v1` binds every raw file by path, size and digest.
+- `ocservia.g6-builder-source-inventory.v1` records producer files transcribed
+  into the computed dataset.
+- `ocservia.g6-runtime-state.v1`, `ocservia.g6-runtime-event.v1` and
+  `ocservia.g6-phase-result.v1` preserve fault execution and failure provenance.
+- `ocservia.g6-resource-registry.v1` supports cleanup after interruption.
+- `ocservia.g6-checkpoint.v1` and `ocservia.g6-rendezvous-result.v1` protect
+  bounded cross-runner exchange: reject foreign runs/attempts, expired or
+  swapped manifests, duplicate artifacts, sequence rollback, unsafe paths
+  and mismatched digests.
 
-Each failure-domain runtime is driven by a frozen `ocservia-g6-harness`
-binary built once with the repository-pinned Go toolchain. Its typed phase
-graph persists `ocservia.g6-runtime-state.v1`, append-only
-`ocservia.g6-runtime-event.v1` records, one `ocservia.g6-phase-result.v1` per
-leaf phase, and an `ocservia.g6-resource-registry.v1`. Exact candidate, run,
-attempt, environment, authority, and failure-domain bindings reject duplicate,
-out-of-order, interrupted, or cross-run state. Cleanup reads the durable
-registry independently, so it remains available after the main state machine
-fails or its work directory becomes incomplete.
-
-Cross-runner rendezvous remains out-of-band through GitHub Actions artifacts,
-but it is no longer inferred from an artifact name or marker file alone.
-`ocservia.g6-checkpoint.v1` binds each checkpoint and every declared payload
-digest to the exact candidate, run, attempt, environment, authority, producer,
-and monotonic sequence. Consumers reject duplicate artifacts, sequence
-rollback, expired or swapped manifests, undeclared files, unsafe ZIP members,
-and artifact or payload digest mismatch. `ocservia.g6-rendezvous-result.v1`
-records every successful wait or structured fail-closed outcome, including
-peer failure, bounded timeout, GitHub API failure, and contract rejection.
-
-Only the manual formal caller invokes the reusable core workflow. The former
-pull-request smoke caller and its jobs have been removed; Basic CI does not
-produce G6 results, including for documentation-only PRs. The following smoke
-contracts describe retained legacy tooling and historical evidence, not
-current workflow jobs. The legacy smoke profile is fixed to
-`engineering`, runs on two distinct hosted-runner boot identities, and verifies
-that both runners execute the same candidate-bound frozen harness bytes. Each
-domain result also binds a deterministic digest of its bounded, regular-file-only
-raw evidence tree and the validated runtime claims recorded by the leaf phases.
-Assembly and independent verification report through the separate
-`ocservia.g6-harness-smoke-assembly-result.v1` and
-`ocservia.g6-harness-smoke-verification-result.v1` contracts. Both permanently
-set `formal_verdict_eligible` to `false`.
-The intervening gitleaks job emits
-`ocservia.g6-harness-smoke-secret-scan-result.v1` and is likewise permanently
-non-formal.
-`ocservia.g6-harness-smoke-result.v1` binds those domain results and their
-GitHub artifact IDs and digests while fixing `formal_verdict_eligible` to
-`false`. A smoke result is never an `ocservia.g6-verdict.v2`, never references
-the production-readiness Environment, and cannot satisfy the formal G6 gate.
-For a pull request limited to ordinary documentation, the former caller used
-`status=not_applicable`, null artifact bindings, and `not_applicable` stage
-states. This kept the old aggregate check stable without representing that a
-runtime or verifier executed. Current G6-only changes select Basic CI's docs
-check, not acceptance.
+The old PR smoke tooling and its schemas are removed. Basic CI produces no
+fault-run PASS. Assembly, scan, verifier and gate no longer publish mutually
+bound copies of the same verdict. Engineering authority is context, not a
+deliberate nonzero exit after otherwise successful checks.
 
 The harness records actual values and source artifact digests. It does not
 authoritatively declare limits, comparisons, per-item results, or the final
@@ -119,10 +77,14 @@ number of opaque `harness_log` files:
   authority leases, session expiries, and reconnect storm record;
 - `relay_transitions` — the relay and path transition report.
 
-Every record and row of every structured artifact repeats the run's
-`environment_id` and `candidate_sha`, so an artifact swapped in from another
-run, environment, or build is rejected even when the evidence digest is
-updated to match the swapped bytes. All artifact timestamps must stay inside
+Run, environment and candidate identity are checked at the raw producer and
+bundle boundaries, including the trusted producer digest and each file hash.
+The assembled event and sample rows do not repeat that identity. Explicit
+identity claims in older diagnostic inputs are still checked when present;
+they do not replace the producer boundary. Metrics are computed only in the
+result evaluator, not first in the assembler. Optional claimed measurements
+in diagnostic fixtures are compared with those derived values, never trusted
+as the result. All artifact timestamps must stay inside
 the evidence window, except lease deadlines, which must extend beyond their
 DB-clock cut and may outlive the window. Line-oriented artifacts must use LF
 endings, strictly increasing sequences, non-decreasing timestamps, and unique

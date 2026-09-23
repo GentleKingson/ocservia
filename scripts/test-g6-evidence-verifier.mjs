@@ -35,6 +35,7 @@ function mutate(target, mutation) {
 }
 
 const allowedFixtureFields = new Set([
+  "expected_pass",
   "base",
   "topology_mutations",
   "evidence_mutations",
@@ -2372,6 +2373,10 @@ for (const name of cases) {
     continue;
   }
   if (rejected) throw new Error(`${name}: ${rejected.message}`);
+  if (fixture.expected_pass) {
+    if (!verdict.passed) throw new Error(`${name}: valid context rejected`);
+    continue;
+  }
   if (verdict.passed)
     throw new Error(`${name}: forged or failing evidence produced PASS`);
   if (!verdict.failure_reasons.includes(fixture.expected_failure_reason)) {

@@ -1,6 +1,11 @@
 name: Basic CI
 
 on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        required: true
   pull_request:
   push:
     branches: [main]
@@ -48,7 +53,8 @@ jobs:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || github.sha }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           CI_PROFILE: ${{ inputs.profile }}
-        run: scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}" "${CI_PROFILE}"
+          CI_EVENT: ${{ inputs.profile == 'full' && 'workflow_dispatch' || github.event_name }}
+        run: scripts/ci-relevance.sh "${CI_EVENT}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}" "${CI_PROFILE}"
 
   docs:
     needs: ci-relevance
