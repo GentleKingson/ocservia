@@ -42,9 +42,10 @@ pass/fail comparisons remain in the result. `assessment=performance` evaluates
 the original limits. Neither mode treats a crash, OOM, deadlock or missing
 measurement as runner noise.
 
-The candidate functional topology uses three Agents per fault domain and a
-60-second post-fault observation window. The three distinct local crash windows
-require three FD-B Agents; the peer domain is symmetric. This candidate minimum
+The candidate functional topology uses five Agents per fault domain and a
+60-second post-fault observation window. A hosted trial with three per domain
+failed because the five distinct stale-owner probes require five local owner
+terms. Those probes remain unchanged; the peer domain is symmetric. This minimum
 must pass the real hosted fault run before adoption, not just fixture tests.
 `purpose=performance` retains 25+25 Agents, the 305-second observation window,
 and all original metric thresholds. No smaller-topology result is a capacity

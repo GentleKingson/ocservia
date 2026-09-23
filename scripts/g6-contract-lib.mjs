@@ -4640,15 +4640,15 @@ export function verifyG6({
     const roleInstances = topology.instances.filter(
       (instance) => instance.role === role,
     );
-    const minimum = purpose === "resilience" && role === "agent" ? 6 : requirement.instances_min;
+    const minimum = purpose === "resilience" && role === "agent" ? 10 : requirement.instances_min;
     if (roleInstances.length < minimum) {
       failureReasons.push(`topology role ${role} has too few instances`);
     }
     if (purpose === "resilience" && role === "agent") {
       const counts = new Map();
       for (const instance of roleInstances) counts.set(instance.fault_domain, (counts.get(instance.fault_domain) ?? 0) + 1);
-      if ([...counts.values()].filter(count => count >= 3).length < 2)
-        failureReasons.push("resilience requires three Agents in each of two fault domains");
+      if ([...counts.values()].filter(count => count >= 5).length < 2)
+        failureReasons.push("resilience requires five Agents in each of two fault domains");
     }
     if (requirement.failure_domains_min !== undefined) {
       const roleDomains = new Set(

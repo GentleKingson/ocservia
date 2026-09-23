@@ -40,9 +40,9 @@ permissions:
 
 env:
   G6_AUTHORITY: ${{ inputs.authority }}
-  # Three local Agents are required by the three distinct crash windows.
-  G6_AGENTS_A: ${{ inputs.purpose == 'performance' && '25' || '3' }}
-  G6_AGENTS_B: ${{ inputs.purpose == 'performance' && '25' || '3' }}
+  # Five local owner terms exercise the five distinct stale-owner probes.
+  G6_AGENTS_A: ${{ inputs.purpose == 'performance' && '25' || '5' }}
+  G6_AGENTS_B: ${{ inputs.purpose == 'performance' && '25' || '5' }}
   G6RD_WINDOW_SECONDS: ${{ inputs.purpose == 'performance' && '305' || '60' }}
 
 # The formal profile freezes every runtime image and host-side binary once,
