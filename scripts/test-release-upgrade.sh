@@ -63,13 +63,18 @@ git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
   require_changed_descriptor "${fixture}/active-candidate" "${baseline_commit}" "${candidate_commit}" deploy/production/compose.yaml
   if checkout_baseline_source . "${fixture}/invalid" invalid; then exit 1; fi
 )
+python3 scripts/test-release-business-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-session-compatibility.sh
 ruby -r yaml - <<'RUBY'
 w = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 triggers = w['on'] || w[true]
 abort 'manual-only entrypoint required' unless triggers.keys == ['workflow_dispatch']
-abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release business_only candidate_sha session_compatibility session_only version]
+abort 'unexpected inputs' unless triggers['workflow_dispatch']['inputs'].keys.sort == %w[baseline_release business_only business_profile candidate_sha session_compatibility session_only version]
+abort 'business profiles must preserve supplemental coverage' unless
+  triggers['workflow_dispatch']['inputs']['business_profile'] == {
+    'description'=>'Smoke is T07; extended retains OIDC, PKI, browser and recovery assertions pending coverage transfer',
+    'type'=>'choice', 'options'=>%w[smoke extended], 'default'=>'smoke'}
 abort 'session matrix must be opt-in' unless triggers['workflow_dispatch']['inputs']['session_compatibility'] == {
   'description'=>'Run the published v1.0.0 node against the candidate (1.x mixed-version window evidence) plus historical v0.6.0/v0.6.1 diagnostics, on both native architectures',
   'type'=>'boolean', 'default'=>false}
@@ -80,9 +85,27 @@ abort 'business probe must not prepare an unrelated upgrade' unless
   w['jobs']['prepare']['if'] == '${{ !inputs.business_only }}'
 business = w['jobs'].fetch('business-probe')
 abort 'business probe must be explicit and disposable' unless
-  business['if'] == 'inputs.business_only' && business['runs-on'] == 'ubuntu-24.04' && !business.key?('needs')
+  business['if'] == 'inputs.business_only' && business['runs-on'] == 'ubuntu-24.04' && !business.key?('needs') &&
+  business.dig('env', 'BUSINESS_PROFILE') == '${{ inputs.business_profile }}'
 abort 'business probe must use its bounded entrypoint' unless
   business['steps'].any? { |step| step['run'] == 'bash scripts/release-business-probe.sh' }
+abort 'business result must fail closed on missing profile checkpoints' unless
+  business['steps'].any? { |step| step['name'] == 'Require complete scoped business evidence' &&
+    step.fetch('run', '').include?('"SMOKE_PASS"') &&
+    step.fetch('run', '').include?('"real_vpn_after_rollback"') &&
+    step.fetch('run', '').include?('"real_vpn_business_and_recovery"') }
+driver = File.read('scripts/release-business-probe.sh')
+phases = %w[smoke_config_apply smoke_user vpn_before_rollback smoke_rollback vpn_after_rollback].map do |phase|
+  driver.index("release-business-api.py\" #{phase}")
+end
+abort 'native VPN must be checked after apply and again after rollback' unless
+  phases.all? && phases == phases.sort && driver.include?('timings.json') &&
+  driver.include?('"SMOKE_PASS"') &&
+  driver.include?('evidence-manifest.json') &&
+  driver.include?('if [[ "${BUSINESS_PROFILE}" == extended ]]') &&
+  driver.include?('release-business-api.py" certificate') &&
+  driver.include?('release-business-browser.mjs') &&
+  driver.include?('release-business-api.py" business')
 abort 'baseline default drift' unless triggers['workflow_dispatch']['inputs']['baseline_release']['default'] == 'v1.0.0'
 abort 'write permissions' unless w['permissions'] == {'contents' => 'read'}
 %w[agent-upgrade controller-upgrade].each do |name|

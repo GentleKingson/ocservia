@@ -408,6 +408,113 @@ def config_prepare():
     record('complete_config_tls_provisioned', reference_id=reference['id'], version='v1', file_identity='0:0:400:1', overwrite_rejected=True)
 
 
+def smoke_directives(max_clients):
+    reference = json.loads((WORK / 'config-reference.json').read_text())['id']
+    values = {'auth': 'plain[passwd=/etc/ocserv/ocpasswd]', 'cookie-timeout': '360', 'device': 'vpns',
+              'dns': '1.1.1.1', 'ipv4-network': '10.208.0.0/24', 'max-clients': str(max_clients),
+              'max-same-clients': '2', 'route': 'default', 'socket-file': '/run/ocserv.socket',
+              'tcp-port': '44443', 'udp-port': '0'}
+    return ([{'name': name, 'value': value} for name, value in values.items()] +
+            [{'name': name, 'secret_ref': {'secret_ref_id': reference}} for name in ('server-cert', 'server-key')])
+
+
+def smoke_plan(directives, revision, name):
+    node = os.environ['T07_NODE']
+    planned = api(f'nodes/{node}/config-plans',
+                  {'expected_revision': revision, 'template': {'name': name, 'directives': directives},
+                   'ttl_seconds': 900, 'reason': 'T07 Release Business Smoke'},
+                  headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+    def planned_result():
+        value = api('config-plans/' + planned['id'])
+        if value['state'] == 'failed':
+            raise RuntimeError(name + ' failed')
+        return value if value['state'] == 'succeeded' else None
+
+    plan = wait_for(name, planned_result)
+    assert plan['validation'] == 'valid'
+    return plan
+
+
+def smoke_config_apply():
+    node = os.environ['T07_NODE']
+    physical_before = run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0]
+    plan = smoke_plan(smoke_directives(4), 0, 't07-smoke-apply')
+    assert plan['materialized_hash'] != physical_before
+    approval_id = approval('config.apply', 'config_plan', plan['id'])
+    operation = api(f"config-plans/{plan['id']}/apply",
+                    {'approval_id': approval_id, 'reason': 'T07 Release Business Smoke'},
+                    headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+    def applied_result():
+        value = api('operations/' + operation['id'])
+        if value['state'] in ('failed', 'expired', 'cancelled'):
+            raise RuntimeError('positive ConfigPlan apply ' + value['state'])
+        return value if value['state'] == 'succeeded' else None
+
+    result = wait_for('positive ConfigPlan apply', applied_result)
+    assert result['config_apply_state'] == 'succeeded'
+    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == plan['materialized_hash']
+    assert api(f'nodes/{node}')['config_revision'] == 1
+    (WORK / 'smoke-applied.json').write_text(json.dumps({'operation_id': operation['id'],
+                                                         'materialized_hash': plan['materialized_hash']}))
+    record('smoke_config_plan_applied', operation_id=operation['id'], materialized_hash=plan['materialized_hash'])
+
+
+def smoke_user():
+    node = os.environ['T07_NODE']
+    password = secrets.token_hex(24)
+    (WORK / 'private/smoke-vpn-password').write_text(password)
+    encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(WORK / 'user.pub.pem'),
+                                '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
+                               input=password.encode(), capture_output=True, check=True).stdout
+    sealed = {'version': 1, 'purpose': 'user_password', 'key_id': 't07-user',
+              'ciphertext': base64.b64encode(encrypted).decode()}
+    operation = api(f'nodes/{node}/users', {'name': 't07-smoke', 'sealed_password': sealed,
+                                           'reason': 'T07 Release Business Smoke'},
+                    headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=202)
+    def user_ready():
+        state = api('operations/' + operation['id'])['state']
+        if state in ('failed', 'expired', 'cancelled'):
+            raise RuntimeError('smoke VPN user ' + state)
+        return state == 'succeeded'
+
+    wait_for('smoke VPN user', user_ready)
+    record('smoke_vpn_user_ready', operation_id=operation['id'])
+
+
+def smoke_rollback():
+    node = os.environ['T07_NODE']
+    physical_before = json.loads((WORK / 'smoke-applied.json').read_text())['materialized_hash']
+    plan = smoke_plan(smoke_directives(129), 1, 't07-smoke-rollback')
+    assert plan['materialized_hash'] != physical_before
+    approval_id = approval('config.apply', 'config_plan', plan['id'])
+    script = WORK / 'reject-new-config-reload'
+    script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
+    dropin = WORK / 'config-reload-fault.conf'
+    dropin.write_text('[Service]\nExecReload=\nExecReload=/run/t07-config-reload $MAINPID\n')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/run/t07-config-reload')
+    run('sudo', 'mkdir', '-p', '/etc/systemd/system/ocserv.service.d')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin),
+        '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf')
+    try:
+        run('sudo', 'systemctl', 'daemon-reload')
+        operation = api(f"config-plans/{plan['id']}/apply",
+                        {'approval_id': approval_id, 'reason': 'T07 Release Business Smoke rollback'},
+                        headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
+        def rollback_result():
+            value = api('operations/' + operation['id'])
+            if value.get('config_apply_state') == 'failed_critical':
+                raise RuntimeError('native ConfigPlan rollback failed critically')
+            return value if value.get('config_apply_state') == 'rolled_back' else None
+
+        result = wait_for('native ConfigPlan rollback', rollback_result)
+        assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
+        assert api(f'nodes/{node}')['config_revision'] == 1
+        record('smoke_config_plan_rolled_back', operation_id=operation['id'], state=result['config_apply_state'])
+    finally:
+        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/run/t07-config-reload')
+        run('sudo', 'systemctl', 'daemon-reload')
+
+
 def configuration():
     node = os.environ['T07_NODE']
     prefix = 'nodes/' + node
@@ -765,9 +872,40 @@ def business():
     client_log.close()
 
 
+def vpn_smoke(phase):
+    smoke = os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke'
+    password = (WORK / 'private' / ('smoke-vpn-password' if smoke else 'browser-vpn-password')).read_text().strip()
+    username = 't07-smoke' if smoke else 't07-browser'
+    with (WORK / 'private' / f'openconnect-{phase}.log').open('wb') as log:
+        vpn = subprocess.Popen(['sudo', 'ip', 'netns', 'exec', 't07-client', 'openconnect', '--non-inter',
+                                '--protocol=anyconnect', '--user=' + username, '--passwd-on-stdin',
+                                '--cafile', str(WORK / 'ca.crt'), '--script', str(WORK / 'vpn-script'),
+                                'https://10.207.0.1:44443'], stdin=subprocess.PIPE, stdout=log, stderr=log)
+        try:
+            vpn.stdin.write((password + '\n').encode())
+            vpn.stdin.close()
+
+            def connected():
+                result = subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'ping',
+                                         '-c', '2', '-W', '2', '10.208.0.1'], capture_output=True)
+                return vpn.poll() is None and result.returncode == 0
+
+            wait_for('real VPN ICMP ' + phase, connected, 40)
+            assert api(f"nodes/{os.environ['T07_NODE']}")['config_revision'] == 1
+            record('real_vpn_' + phase)
+        finally:
+            subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
+                           capture_output=True, check=False)
+            vpn.wait(timeout=15)
+
+
 if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
-                     'browser_prepare', 'browser_verify', 'business'):
+                     'browser_prepare', 'browser_verify', 'business', 'smoke_config_apply', 'smoke_user', 'smoke_rollback',
+                     'vpn_before_rollback', 'vpn_after_rollback'):
         raise SystemExit('unknown phase')
-    globals()[phase]()
+    if phase.startswith('vpn_'):
+        vpn_smoke(phase.removeprefix('vpn_'))
+    else:
+        globals()[phase]()
