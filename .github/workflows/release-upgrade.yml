@@ -1,5 +1,5 @@
 name: Native Release Upgrade Validation
-run-name: ${{ inputs.business_only && 'Native business probe' || 'Native upgrade' }} ${{ inputs.baseline_release }} to ${{ inputs.version }} at ${{ inputs.candidate_sha }}
+run-name: ${{ inputs.business_only && (inputs.business_profile == 'extended' && 'Native business supplemental' || 'T07 Release Business Smoke') || 'Native upgrade' }} ${{ inputs.baseline_release }} to ${{ inputs.version }} at ${{ inputs.candidate_sha }}
 
 on:
   workflow_dispatch:
@@ -26,9 +26,14 @@ on:
         type: boolean
         default: false
       business_only:
-        description: Run the native candidate business probe only (partial T07, not release acceptance)
+        description: Run the native amd64 candidate business validation instead of T06
         type: boolean
         default: false
+      business_profile:
+        description: Smoke is T07; extended retains OIDC, PKI, browser and recovery assertions pending coverage transfer
+        type: choice
+        options: [smoke, extended]
+        default: smoke
 
 permissions:
   contents: read
@@ -275,13 +280,14 @@ jobs:
           node scripts/release-upgrade-contract.mjs aggregate "${RUNNER_TEMP}/results"
 
   business-probe:
-    name: Native Candidate Business Probe (amd64, partial T07)
+    name: Native Candidate Business (${{ inputs.business_profile }}, amd64)
     if: inputs.business_only
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       VERSION: ${{ inputs.version }}
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      BUSINESS_PROFILE: ${{ inputs.business_profile }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -298,18 +304,52 @@ jobs:
           restore-keys: |
             business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
             native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
-      - name: Signed production lifecycle and native business probe
+      - name: Signed production lifecycle and native business validation
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
         run: bash scripts/release-business-probe.sh
+      - name: Require complete scoped business evidence
+        env:
+          EVIDENCE: ${{ runner.temp }}/business-evidence
+          PROFILE: ${{ inputs.business_profile }}
+        run: |
+          test -s "${EVIDENCE}/probe.log"
+          jq -e --arg profile "${PROFILE}" --arg sha "${CANDIDATE_SHA}" \
+            '.profile == $profile and .candidate_sha == $sha and .probe_status == "PASS" and .exit_code == 0 and
+             (.timings | type == "array" and length > 0)' \
+            "${EVIDENCE}/result.json" >/dev/null
+          jq -e --arg profile "${PROFILE}" --arg sha "${CANDIDATE_SHA}" '
+            .profile == $profile and .candidate_sha == $sha and .status == "PASS" and
+            (if $profile == "smoke" then
+              (["approved_config_apply_and_vpn_user", "real_vpn_after_config_apply",
+                "config_plan_automatic_rollback", "real_vpn_after_rollback"] - .passed_checkpoints | length) == 0
+             else
+              (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset",
+                "real_vpn_business_and_recovery"] - .passed_checkpoints | length) == 0
+             end)' "${EVIDENCE}/evidence-manifest.json" >/dev/null
+      - name: Mark evidence upload start
+        if: always()
+        run: date +%s >"${RUNNER_TEMP}/business-upload-start"
       - name: Preserve sanitized evidence, including blockers
         if: always()
+        id: business_evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: business-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: business-${{ inputs.business_profile }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/business-evidence
           if-no-files-found: error
           retention-days: 7
+      - name: Record artifact identity and upload time
+        if: ${{ always() && steps.business_evidence.outcome == 'success' }}
+        env:
+          ARTIFACT_DIGEST: ${{ steps.business_evidence.outputs.artifact-digest }}
+          ARTIFACT_URL: ${{ steps.business_evidence.outputs.artifact-url }}
+        run: |
+          {
+            echo "Artifact: ${ARTIFACT_URL}"
+            echo "Artifact SHA-256: ${ARTIFACT_DIGEST}"
+            echo "Artifact upload: $(( $(date +%s) - $(cat "${RUNNER_TEMP}/business-upload-start") )) seconds"
+          } >>"${GITHUB_STEP_SUMMARY}"
       - name: Retain native build cache even when a business assertion fails
         if: ${{ !cancelled() }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

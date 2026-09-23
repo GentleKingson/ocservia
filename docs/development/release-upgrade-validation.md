@@ -2,7 +2,7 @@
 
 `Native Release Upgrade Validation` is an independent `workflow_dispatch`
 workflow, not a publisher and not part of Basic CI. It accepts exactly these
-six inputs:
+seven inputs:
 
 | Input | Type / default | Meaning |
 | --- | --- | --- |
@@ -11,7 +11,8 @@ six inputs:
 | `candidate_sha` | Required string; no default | Exact full lowercase SHA of the dispatch branch |
 | `session_compatibility` | Boolean; `false` | Also run the six application cells on both architectures: the published `v1.0.0` node against the candidate (the 1.x mixed-version window pair required for 1.x release acceptance) plus historical v0.6.0/v0.6.1 diagnostics |
 | `session_only` | Boolean; `false` | Run the six application cells instead of native upgrades, even when `session_compatibility=false` |
-| `business_only` | Boolean; `false` | Run only the current candidate's native amd64 business probe, regardless of the session flags |
+| `business_only` | Boolean; `false` | Run only the current candidate's native amd64 business validation, regardless of the session flags |
+| `business_profile` | Choice; `smoke` | `smoke` runs T07's core real business chain; `extended` retains supplemental OIDC, PKI, browser and recovery checks |
 
 Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
 must be the complete lowercase commit SHA of that branch and must equal
@@ -62,7 +63,7 @@ Dispatch modes are:
 | `false` | `false` | `false` | Prepare, four native upgrade units and `Native Upgrade Result` (default) |
 | `false` | `true` | `false` | Prepare, native units/result plus six application cells (`v1.0.0`/`v0.6.0`/`v0.6.1` x amd64/arm64) |
 | `false` | Either value | `true` | Prepare and six application cells only; both native matrices and `Native Upgrade Result` are skipped |
-| `true` | Either value | Either value | Native candidate business probe on amd64 only; prepare, native upgrades, application matrix and `Native Upgrade Result` are skipped |
+| `true` | Either value | Either value | Native candidate `business_profile` on amd64 only; prepare, native upgrades, application matrix and `Native Upgrade Result` are skipped |
 
 The flags are not mutually exclusive: `business_only=true` selects the business
 job regardless of either session flag, as shown by the workflow conditions.
@@ -171,12 +172,18 @@ plain numeric X.Y.Z version, a full lowercase 40-character `candidate_sha`
 equal to both `GITHUB_SHA` and checkout HEAD, and a clean checkout on a disposable
 GitHub-hosted systemd runner. The dispatch form still requires `baseline_release`,
 but this mode does not use it as an upgrade baseline or compare versions against
-it. The current probe runs on native amd64 only.
+it. Both business profiles run on native amd64 only. The default `smoke` profile
+proves the signed installation, separate Local principals, approved ConfigPlan
+apply, real VPN traffic, automatic ConfigPlan rollback and a second real VPN
+connection. `extended` retains the previous production-path OIDC, PKI, browser,
+Relay fault/recovery and cross-source evidence assertions. For the current
+release baseline, dispatch both profiles on the same candidate SHA; Full CI and
+G6 do not yet replace those exact extended checks.
 
 See [native candidate business validation](real-business-validation.md) for
-execution, evidence and limitations. Probe success is not complete T07, T10 or
-release acceptance; its result keeps `t07_status=NOT_EVALUATED` and cannot replace
-the native upgrade gate.
+execution, evidence and limitations. Smoke success is scoped T07 evidence, not
+T06, G6, T10 or release acceptance. The extended profile is supplemental and
+does not replace the native upgrade gate.
 
 ## Build and trust boundaries
 
