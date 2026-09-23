@@ -39,6 +39,11 @@ jq -e '
   .services.backup.depends_on.postgres.condition == "service_healthy" and
   (.services.postgres.healthcheck.test | length > 0) and
   (.services.backup.healthcheck.test | length > 0) and
+  .services.backup.healthcheck.start_period == "1m0s" and
+  .services.backup.healthcheck.interval == "5m0s" and
+  .services.backup.healthcheck.timeout == "5s" and
+  .services.backup.healthcheck.retries == 2 and
+  (.services.backup.healthcheck | has("start_interval") | not) and
   (.volumes | has("postgres-data")) and
   ([.services["control-plane"].secrets[].source] | index("database_owner_url") | not)
 ' "${work}/postgres.json" >/dev/null

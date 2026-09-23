@@ -22,6 +22,22 @@ they are not supported upgrade paths into 1.x and do not run in the release
 matrix. Pre-1.0 operators must redeploy. A 2.x migration requires a separately
 reviewed contract; the current entrypoint rejects it.
 
+Bundled PostgreSQL backup health uses a 60-second start period. Engine 25+ uses
+its default 5-second startup probe interval; `start_interval` is deliberately
+omitted to retain older Compose compatibility. Older engines retain the slow
+5-minute probe interval. The LATEST freshness predicate, steady-state interval,
+timeout and retries are unchanged. A first backup taking longer than the start
+period can still wait for the next steady-state probe.
+See [Docker healthcheck timing](https://docs.docker.com/reference/dockerfile/#healthcheck).
+
+The released v1.0.0 descriptor is never patched to accelerate validation.
+Changing `compose.postgres.yaml` triggers the existing production descriptor
+rollback rejection contract; shorter rejection is not a rollback speedup.
+The focused `bash scripts/test-backup-startup-healthcheck.sh` check runs only
+on BuildServer with Engine 25+, in uniquely named, network-isolated containers.
+It tests the production health predicate and schedule with fresh, missing and
+stale LATEST markers, not backup contents or a full database restore.
+
 The host, local Docker daemon, image platform and executable ELF architecture
 must agree. Binaries are actually executed. An unrelated binfmt handler is
 not evidence that the candidate uses emulation; no host handlers are cleared.

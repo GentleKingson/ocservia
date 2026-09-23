@@ -117,7 +117,9 @@ reject("tool checks must receive the same Go selection") unless
 Dir.mktmpdir("ci-entrypoints-") do |tmp|
   work = File.join(tmp, "work")
   files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
-  files += %w[.github/workflows/release.yml .github/workflows/release-upgrade.yml rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
+  files += %w[.github/workflows/release.yml .github/workflows/release-upgrade.yml
+              .github/workflows/release-products.yml .github/workflows/release-product-upgrade.yml
+              rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
   files.each do |source|
     target = File.join(work, source.delete_prefix(root + "/"))
     FileUtils.mkdir_p(File.dirname(target))

@@ -65,6 +65,8 @@ services:
       interval: 5m
       timeout: 5s
       retries: 2
+      # Engine 25+ defaults to 5s startup probes; omit start_interval for older Compose.
+      start_period: 60s
     deploy:
       resources:
         limits: {cpus: "1.0", memory: 512M, pids: 256}
