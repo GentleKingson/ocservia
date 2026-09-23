@@ -41,9 +41,13 @@ time in `rpm-timings.tsv`; the producer build step records the expensive image
 preparation before the candidate is available. A single-architecture diagnostic
 prepares only its RPM environment, not unused compatibility/G6 helpers.
 
-Preparation outputs are grouped per architecture in this first version, so
-consumers wait for that architecture's fixture set. Download/load and archive
-costs must be included in measured timing; fewer builds alone is not a wall-time
+Each architecture prepares helpers, session bases and RPM in independent
+workflow invocations. Controller upgrades depend only on candidate products;
+Agent upgrades additionally wait for RPM. Business and Resilience need helpers,
+while Compatibility needs helpers and session bases. Release Check requires all
+selected consumers to succeed, transitively gating their fixture producers.
+Download/load and archive costs must be included in measured timing;
+fewer builds alone is not a wall-time
 or runner-minute performance claim. Focused fixture tests run through
 `bash scripts/test-release-upgrade.sh` on BuildServer.
 

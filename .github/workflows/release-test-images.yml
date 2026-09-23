@@ -8,22 +8,14 @@ on:
       arch:
         type: string
         required: true
-      complete:
-        type: boolean
+      component:
+        type: string
         required: true
     outputs:
-      helpers-id:
-        value: ${{ jobs.prepare.outputs.helpers-id }}
-      helpers-sha256:
-        value: ${{ jobs.prepare.outputs.helpers-sha256 }}
-      session-id:
-        value: ${{ jobs.prepare.outputs.session-id }}
-      session-sha256:
-        value: ${{ jobs.prepare.outputs.session-sha256 }}
-      rpm-id:
-        value: ${{ jobs.prepare.outputs.rpm-id }}
-      rpm-sha256:
-        value: ${{ jobs.prepare.outputs.rpm-sha256 }}
+      artifact-id:
+        value: ${{ jobs.prepare.outputs.artifact-id }}
+      sha256:
+        value: ${{ jobs.prepare.outputs.sha256 }}
 permissions:
   contents: read
 jobs:
@@ -32,14 +24,10 @@ jobs:
     timeout-minutes: 35
     env:
       VERSION: ${{ inputs.version }}
-      BUILDX_BUILDER: release-fixtures-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+      BUILDX_BUILDER: release-${{ inputs.component }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
     outputs:
-      helpers-id: ${{ steps.helpers-upload.outputs.artifact-id }}
-      helpers-sha256: ${{ steps.helpers.outputs.sha256 }}
-      session-id: ${{ steps.session-upload.outputs.artifact-id }}
-      session-sha256: ${{ steps.session.outputs.sha256 }}
-      rpm-id: ${{ steps.rpm-upload.outputs.artifact-id }}
-      rpm-sha256: ${{ steps.rpm.outputs.sha256 }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.fixture.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -57,40 +45,17 @@ jobs:
           docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
             --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 \
             "${args[@]}" --bootstrap --use
-      - name: Prepare shared probe, tunnel and Relay
-        id: helpers
-        if: inputs.complete
-        run: bash scripts/release-test-images.sh build test-helpers "${{ inputs.arch }}" "${RUNNER_TEMP}/helpers"
-      - id: helpers-upload
-        if: inputs.complete
+      - name: Prepare fixture
+        id: fixture
+        env:
+          COMPONENT: ${{ inputs.component }}
+          ARCH: ${{ inputs.arch }}
+        run: bash scripts/release-test-images.sh build "$COMPONENT" "$ARCH" "${RUNNER_TEMP}/fixture"
+      - id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: test-helpers-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/helpers/*
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - name: Prepare candidate-independent session bases
-        id: session
-        if: inputs.complete
-        run: bash scripts/release-test-images.sh build session-base "${{ inputs.arch }}" "${RUNNER_TEMP}/session-base"
-      - id: session-upload
-        if: inputs.complete
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: session-base-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/session-base/*
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - name: Prepare RPM systemd environment
-        id: rpm
-        run: bash scripts/release-test-images.sh build rpm-test "${{ inputs.arch }}" "${RUNNER_TEMP}/rpm"
-      - id: rpm-upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: rpm-test-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rpm/*
+          name: ${{ inputs.component }}-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture/*
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
