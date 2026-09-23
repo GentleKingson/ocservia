@@ -9,12 +9,36 @@ this file records the change categories per release line. The format follows
 
 ## [1.0.1]
 
+Designated as the first recommended stable production baseline once published.
+`v1.0.0` remains a supported in-place upgrade source; pre-1.0 installations
+must be redeployed to enter `1.x`. See the
+[1.0 support and versioning policy](docs/reference/support-policy.md).
+
+### Added
+
+- Controller image security gate with per-image, per-architecture SPDX SBOMs
+  and vulnerability reports bound to the exact release images. Fixable High
+  and Critical OS-package findings block publication unless covered by an
+  explicit, unexpired exemption.
+- Registered `v1.0.0` native upgrade baseline and application compatibility
+  checks for published `v1.0.0` nodes against the candidate Controller on
+  `amd64` and `arm64`.
+
+### Changed
+
+- Unified release acceptance builds candidate products once and reuses them
+  for upgrade, compatibility, business, and image-security checks before
+  publication. Integration and resilience checks are selected from the
+  complete change set since the last published stable release.
+
 ### Fixed
 
 - Controller bootstrap clones public source files with container-readable
   permissions, so PostgreSQL initialization and OTel configuration work for
   non-root container users. Source roots, secrets, and lifecycle state keep
   their protected permissions.
+- G6 database connection-growth measurement uses a bounded warm-up baseline;
+  resource-sampler failures retain diagnostic details.
 
 ## [1.0.0]
 
