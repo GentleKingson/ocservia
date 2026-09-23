@@ -125,10 +125,10 @@ if ! grep -qF 'docker network rm "${relay_topology_network}"' <<<"${cleanup_lib}
   exit 1
 fi
 for token in \
-  'g6rd_stop_sampler || sampler_stop_status=$?' \
+  'g6rd_stop_sampler || sampler_status=$?' \
   'g6rd_compose --profile bootstrap --profile probe down --volumes --remove-orphans --rmi local' \
   'sampler_process_cleanup_failed=%s other_resource_cleanup_failed=%s' \
-  '((sampler_stop_status == 0)) || return 1'; do
+  '((sampler_status == 0)) || return 1'; do
   grep -qF "${token}" <<<"${cleanup_lib}" || {
     echo "cleanup must continue after sampler failure and report both outcomes: ${token}" >&2
     exit 1

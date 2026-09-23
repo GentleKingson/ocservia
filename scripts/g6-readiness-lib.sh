@@ -2022,7 +2022,9 @@ g6rd_sampler_report_failure() {
   local stage="$1" component="$2" timeout="$3" elapsed_seconds="$4" status="$5" stderr_file="$6"
   local stderr secret name
   [[ -n "${timeout}" ]] || timeout=none
-  stderr="$(head -c 1024 "${stderr_file}" | tr '\r\n' '  ')"
+  stderr="$(head -c 1024 "${stderr_file}" | sed -E \
+    -e 's/([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Cc][Oo][Oo][Kk][Ii][Ee])[[:space:]]*:.*/\1=[redacted]/g' \
+    | tr '\r\n' '  ')"
   if (($(wc -c <"${stderr_file}") > 1024)); then
     stderr="$(printf '%s' "${stderr}" | sed -E 's/[^[:space:]]+$//') [truncated]"
   fi
@@ -2472,11 +2474,15 @@ g6rd_stop_sampler_process() {
   local child_status=0 reaped=0 _
   [[ -s "${pid_file}" ]] || {
     echo "resource sampler pid file is missing" >&2
+    G6RD_SAMPLER_STOP_FAILED=1
+    G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=1
     return 2
   }
   pid="$(<"${pid_file}")"
   [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || {
     echo "invalid resource sampler process-group id in ${pid_file}" >&2
+    G6RD_SAMPLER_STOP_FAILED=1
+    G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=1
     return 2
   }
 
@@ -2536,15 +2542,25 @@ g6rd_stop_sampler_process() {
   if kill -0 -- "-${pid}" 2>/dev/null; then
     echo "resource sampler process group ${pid} did not terminate" >&2
     status=2
+    G6RD_SAMPLER_STOP_FAILED=1
+    G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=1
   else
     rm -f -- "${pid_file}"
   fi
   if ((child_status != 0)); then
     echo "resource sampler exited with status ${child_status}" >&2
+    if ((forced == 0)); then
+      G6RD_SAMPLER_FAILED=1
+      if [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]]; then
+        g6rd_now >"${G6RD_STATE}/sampler-failed-at" || \
+          echo "resource sampler could not persist its failed-exit timestamp" >&2
+      fi
+    fi
     ((status != 0)) || status=1
   fi
   if ((forced != 0)); then
     echo "resource sampler required a forced process-group stop" >&2
+    G6RD_SAMPLER_STOP_FAILED=1
     ((status != 0)) || status=1
   fi
   return "${status}"
@@ -2552,21 +2568,32 @@ g6rd_stop_sampler_process() {
 
 g6rd_stop_sampler() {
   local status=0
+  G6RD_SAMPLER_FAILED=0
+  G6RD_SAMPLER_STOP_FAILED=0
+  G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=0
   if [[ ! -e "${G6RD_STATE}/sampler-started-at" \
-    && ! -e "${G6RD_STATE}/sampler.pid" ]]; then
+    && ! -e "${G6RD_STATE}/sampler.pid" \
+    && ! -e "${G6RD_STATE}/sampler-stop" ]]; then
     return 0
   fi
-  touch "${G6RD_STATE}/sampler-stop"
-  g6rd_stop_sampler_process "${G6RD_STATE}/sampler.pid" || status=$?
+  if [[ -e "${G6RD_STATE}/sampler-started-at" || -e "${G6RD_STATE}/sampler.pid" ]]; then
+    touch "${G6RD_STATE}/sampler-stop"
+    g6rd_stop_sampler_process "${G6RD_STATE}/sampler.pid" || status=$?
+  fi
   [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || {
     echo "resource sampler failed closed at $(<"${G6RD_STATE}/sampler-failed-at")" >&2
+    G6RD_SAMPLER_FAILED=1
     ((status != 0)) || status=1
   }
+  [[ ! -e "${G6RD_STATE}/sampler-forced-at" ]] || G6RD_SAMPLER_STOP_FAILED=1
   [[ -s "${G6RD_STATE}/sampler-complete-at" ]] || {
     echo "resource sampler exited without a graceful-completion sentinel" >&2
+    if ((G6RD_SAMPLER_STOP_FAILED == 0 && G6RD_SAMPLER_PROCESS_CLEANUP_FAILED == 0)); then
+      G6RD_SAMPLER_FAILED=1
+    fi
     ((status != 0)) || status=1
   }
-  if ((status == 0)); then
+  if ((G6RD_SAMPLER_PROCESS_CLEANUP_FAILED == 0)); then
     rm -f -- "${G6RD_STATE}/sampler-started-at"
   fi
   return "${status}"
@@ -2650,11 +2677,9 @@ g6rd_diagnostics() {
 }
 
 g6rd_cleanup() {
-  local status=0 sampler_stop_status=0 sampler_failed=0 sampler_process_cleanup_failed=0
+  local status=0 sampler_status=0
   local volume image variable pid helper_container
-  g6rd_stop_sampler || sampler_stop_status=$?
-  [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || sampler_failed=1
-  ((sampler_stop_status != 2)) || sampler_process_cleanup_failed=1
+  g6rd_stop_sampler || sampler_status=$?
   g6rd_release_synthetic_barriers || status=1
   if [[ -s "${G6RD_STATE}/load-dispatch-barrier.pid" ]]; then
     pid="$(<"${G6RD_STATE}/load-dispatch-barrier.pid")"
@@ -2750,9 +2775,9 @@ g6rd_cleanup() {
     status=1
   fi
   printf 'cleanup: sampler_failed=%s sampler_stop_failed=%s sampler_process_cleanup_failed=%s other_resource_cleanup_failed=%s\n' \
-    "${sampler_failed}" "$((sampler_stop_status != 0))" \
-    "${sampler_process_cleanup_failed}" "${status}" >&2
-  ((sampler_stop_status == 0)) || return 1
+    "${G6RD_SAMPLER_FAILED}" "${G6RD_SAMPLER_STOP_FAILED}" \
+    "${G6RD_SAMPLER_PROCESS_CLEANUP_FAILED}" "${status}" >&2
+  ((sampler_status == 0)) || return 1
   return "${status}"
 }
 
