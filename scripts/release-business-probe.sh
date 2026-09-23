@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Disposable hosted runner only. This probe cannot close the full T07 gate.
+# Disposable hosted runner only. Smoke and extended profiles retain separate scope.
 # shellcheck disable=SC2024 # sudo reads protected state; redirects are runner-owned.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${ARTIFACT_DIR:?}" "${VERSION:?}" "${CANDIDATE_SHA:?}"
+: "${BUSINESS_PROFILE:=smoke}"
+[[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
 [[ "${GITHUB_SHA:?}" == "${CANDIDATE_SHA}" && "$(git -C "${ROOT}" rev-parse HEAD)" == "${CANDIDATE_SHA}" ]]
@@ -22,6 +24,7 @@ T07_WORK="$(mktemp -d "${HOME}/.t07-XXXXXX")"
 work="${T07_WORK}"
 stage=preflight
 started="$(date -u +%FT%TZ)"
+stage_started="$(date +%s)"
 export SOURCE_COMMIT="${CANDIDATE_SHA}" PACKAGE_ARCH=amd64 CONTROLLER_ARCH=amd64
 export SOURCE_DATE_EPOCH OUTPUT_DIR="${work}/products" AGENT_SIGNING_KEY="${work}/signing.key"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
@@ -40,6 +43,13 @@ unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL OCSERV_O
 unset OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH OCSERV_MANAGED_NODE_SYSROOT OCSERV_MANAGED_NODE_OS_RELEASE
 compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
 record() { printf '%s\n' "$1" >>"${ARTIFACT_DIR}/checkpoints.txt"; }
+next_stage() {
+  local now
+  now="$(date +%s)"
+  printf '%s\t%s\n' "${stage}" "$((now - stage_started))" >>"${ARTIFACT_DIR}/timings.tsv"
+  stage="$1"
+  stage_started="${now}"
+}
 configure_auth_peers() {
   # --no-deps makes ordering our responsibility. The launcher stops both peers;
   # wait for the trust backend before starting the unchanged transport container.
@@ -51,6 +61,10 @@ cleanup() {
   local code=$?
   trap - EXIT ERR
   set +e
+  local failed_stage="${stage}"
+  next_stage cleanup
+  jq -Rn '[inputs | split("\t") | {stage:.[0],seconds:(.[1]|tonumber)}]' \
+    <"${ARTIFACT_DIR}/timings.tsv" >"${ARTIFACT_DIR}/timings.json"
   if [[ -f "${work}/private.log" ]]; then
     {
       compose logs --no-color
@@ -71,16 +85,44 @@ cleanup() {
       sudo install -o "$(id -u)" -g "$(id -g)" -m 600 "${work}/sanitized.log" "${ARTIFACT_DIR}/probe.log"
   fi
   jq -n --arg sha "${CANDIDATE_SHA}" --arg version "${VERSION}" --arg start "${started}" \
-    --arg end "$(date -u +%FT%TZ)" --arg stage "${stage}" --argjson code "${code}" \
+    --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
+    --arg profile "${BUSINESS_PROFILE}" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
-    '{candidate_sha:$sha,candidate_version:$version,run_id:$run,run_attempt:$attempt,
+    --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
+    '{candidate_sha:$sha,candidate_version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
-      probe_status:(if $code == 0 then "PASS" else "FAIL" end),t07_status:"NOT_EVALUATED",
+      timings:$timings[0],
+      probe_status:(if $code == 0 then "PASS" else "FAIL" end),
+      t07_status:(if $profile == "smoke" then (if $code == 0 then "SMOKE_PASS" else "FAIL" end) else "NOT_EVALUATED" end),
       planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
       deferred:["T09/formal release: immutable published Release download/bootstrap"],
       not_applicable:["T08 independent failure domains and formal SLO"]}' >"${ARTIFACT_DIR}/result.json"
+  [[ -f "${ARTIFACT_DIR}/checkpoints.txt" ]] || : >"${ARTIFACT_DIR}/checkpoints.txt"
+  product_digests_sha256=
+  candidate_manifest_sha256=
+  if [[ -f "${ARTIFACT_DIR}/product-digests.txt" ]]; then
+    product_digests_sha256="$(sha256sum "${ARTIFACT_DIR}/product-digests.txt" | cut -d' ' -f1)"
+  fi
+  if [[ -f "${ARTIFACT_DIR}/candidate-manifest.json" ]]; then
+    candidate_manifest_sha256="$(sha256sum "${ARTIFACT_DIR}/candidate-manifest.json" | cut -d' ' -f1)"
+  fi
+  jq -n --slurpfile result "${ARTIFACT_DIR}/result.json" \
+    --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
+    --arg products "${product_digests_sha256}" --arg candidate_manifest "${candidate_manifest_sha256}" \
+    '{schema_version:1,candidate_sha:$result[0].candidate_sha,candidate_version:$result[0].candidate_version,
+      profile:$result[0].profile,
+      run_id:$result[0].run_id,run_attempt:$result[0].run_attempt,
+      started_at:$result[0].started_at,finished_at:$result[0].finished_at,
+      status:$result[0].probe_status,exit_code:$result[0].exit_code,last_stage:$result[0].last_stage,
+      planned_coverage:(if $result[0].profile == "smoke" then
+        "signed amd64 production-path candidate; Local login; separate requester/approver; ConfigPlan apply and automatic rollback; real VPN before and after rollback"
+        else "supplemental production-path OIDC, PKI, browser, Relay recovery and cross-source evidence checks" end),
+      product_digests_sha256:(if $products == "" then null else $products end),
+      candidate_manifest_sha256:(if $candidate_manifest == "" then null else $candidate_manifest end),
+      passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
+      timings:$result[0].timings}' >"${ARTIFACT_DIR}/evidence-manifest.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
   sudo ip netns pids t07-client 2>/dev/null | xargs -r sudo kill
   sudo ip netns del t07-client >/dev/null 2>&1
@@ -104,13 +146,16 @@ if [[ -f /proc/sys/fs/binfmt_misc/status ]]; then
 fi
 bash "${ROOT}/scripts/release-upgrade-native.sh" amd64 >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
-stage=build
+next_stage dependency_setup
 bash "${ROOT}/scripts/bootstrap.sh" native-packages
 openssl genpkey -algorithm ED25519 -out "${AGENT_SIGNING_KEY}"
 openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${work}/trusted-release.pub.pem"
 export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${work}/trusted-release.pub.pem"
+next_stage agent_package_build
 env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+next_stage controller_image_build
 bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+next_stage relay_image_build
 bash "${ROOT}/scripts/g6-buildx-cache.sh" relay-business-amd64 true business-relay \
   --builder "${BUILDX_BUILDER}" --platform linux/amd64 --provenance=false --load \
   --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
@@ -120,7 +165,7 @@ docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay"
 docker image inspect --format '{{.Id}} {{.Architecture}}' "${BUILDX_BUILDER}-relay" >"${ARTIFACT_DIR}/relay-image.txt"
 find "${OUTPUT_DIR}" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum >"${ARTIFACT_DIR}/product-digests.txt"
 record candidate_built
-stage=provision
+next_stage dependency_install
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
 sudo systemctl stop ocserv
@@ -187,7 +232,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${mani
 cp "${work}/bundle/SHA256SUMS" "${manifest}.sha256"
 openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${work}/bundle/SHA256SUMS" -out "${work}/bundle/SHA256SUMS.sig"
 cp "${manifest}" "${ARTIFACT_DIR}/candidate-manifest.json"
-stage=controller_install
+next_stage controller_install
 "${ROOT}/deploy/production/controller.sh" install --release-file "${manifest}"
 curl --fail --silent --show-error https://localhost/api/v1/version | \
   jq -e --arg sha "${CANDIDATE_SHA}" --arg v "${VERSION}" '.commit == $sha and .version == $v' >/dev/null
@@ -210,10 +255,11 @@ compose run --rm --no-deps -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=t07-requester \
   -v "${OCSERV_SECRET_DIR}/requester-password:/run/secrets/requester-password:ro" \
   -v "${OCSERV_SECRET_DIR}/approver-password:/run/secrets/approver-password:ro" \
   control-plane --bootstrap-local-admin
-stage=local_auth
+next_stage local_auth
 python3 "${ROOT}/scripts/release-business-api.py" local
 record real_local_auth
-stage=external_auth
+if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+next_stage external_auth
 # This contains only public fault names; the capability-free fixture must read it.
 mkdir -m 755 "${work}/oidc-fault"
 printf '\n' >"${work}/oidc-fault/mode"
@@ -249,7 +295,10 @@ configure_auth_peers
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c 'SHOW server_version' >>"${ARTIFACT_DIR}/environment.txt"
 record real_external_oidc
-stage=native_node
+else
+  python3 "${ROOT}/scripts/release-business-api.py" transport_ready
+fi
+next_stage native_node
 # The candidate is not a published Release. Verify the real signed package
 # locally, then exercise the official managed-node convergence/preparation.
 deb="${OUTPUT_DIR}/ocservia-agent_${VERSION}-1_amd64.deb"
@@ -342,7 +391,7 @@ sudo iptables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --
 sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
 sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
 sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
-stage=config_tls
+next_stage config_tls
 python3 "${ROOT}/scripts/release-business-api.py" config_prepare
 config_ref="$(jq -r .id "${work}/config-reference.json")"
 cat >"${work}/ocserv.conf" <<EOF
@@ -367,16 +416,17 @@ sudo install -m 600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
 sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
 sudo systemctl daemon-reload
 sudo systemctl start ocserv ocservia-privd
-stage=node_approval
+next_stage node_approval
 python3 "${ROOT}/scripts/release-business-api.py" approve
 sudo systemctl enable --now ocservia-privd ocservia-agent
 bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
 record native_node_services
-stage=certificate
+if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+next_stage certificate
 python3 "${ROOT}/scripts/release-business-api.py" certificate
 record real_certificate_lifecycle
-stage=browser
+next_stage browser
 npm --prefix "${ROOT}/web" ci --ignore-scripts
 (cd "${ROOT}/web" && npx playwright install --with-deps chromium)
 sudo apt-get install -y --no-install-recommends libnss3-tools
@@ -389,9 +439,13 @@ python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
 NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
 python3 "${ROOT}/scripts/release-business-api.py" browser_verify
 record real_browser_subset
-stage=configuration
-python3 "${ROOT}/scripts/release-business-api.py" configuration
-record complete_config_plan_apply_rollback_restart
+else
+  next_stage config_apply
+  python3 "${ROOT}/scripts/release-business-api.py" smoke_config_apply
+  python3 "${ROOT}/scripts/release-business-api.py" smoke_user
+  record approved_config_apply_and_vpn_user
+fi
+next_stage vpn_client_setup
 sudo ip netns add t07-client
 sudo ip link add t07-host type veth peer name t07-peer
 sudo ip link set t07-peer netns t07-client
@@ -409,7 +463,22 @@ if [ "$reason" = connect ]; then
 fi
 EOF
 chmod 700 "${work}/vpn-script"
-stage=business
-python3 "${ROOT}/scripts/release-business-api.py" business
-record real_vpn_business
-stage=complete
+next_stage vpn_before_rollback
+python3 "${ROOT}/scripts/release-business-api.py" vpn_before_rollback
+record real_vpn_after_config_apply
+next_stage configuration_rollback
+if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+  python3 "${ROOT}/scripts/release-business-api.py" configuration
+else
+  python3 "${ROOT}/scripts/release-business-api.py" smoke_rollback
+fi
+record config_plan_automatic_rollback
+next_stage vpn_after_rollback
+python3 "${ROOT}/scripts/release-business-api.py" vpn_after_rollback
+record real_vpn_after_rollback
+if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+  next_stage supplemental_business
+  python3 "${ROOT}/scripts/release-business-api.py" business
+  record real_vpn_business_and_recovery
+fi
+next_stage complete
