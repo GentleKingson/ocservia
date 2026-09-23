@@ -30,9 +30,10 @@ ocservia follows [Semantic Versioning](https://semver.org/) for the 1.0 line.
 
 Releases are plain `X.Y.Z` SemVer. The release workflow rejects non-SemVer
 input, and there is no `-rc.N` scheme: a **release candidate** is a frozen
-branch plus the candidate artifacts built from its exact SHA, validated by the
-existing dry-run dispatch, native upgrade jobs, and session-compatibility cells
-on that SHA before the numeric release is tagged.
+branch plus the candidate artifacts built from its exact SHA. The integrated
+[Release Check](../development/release-checks.md) validates the exact products
+before publication. Manual dry-run is optional debugging, not a second required
+full execution before the tag workflow repeats the same checks.
 
 ## Compatibility and deprecation
 

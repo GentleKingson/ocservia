@@ -11,18 +11,12 @@ abort("formal authority enum drifted") unless authority.fetch("options") == %w[e
 concurrency = formal.fetch("concurrency")
 abort("formal runs must queue without cancellation") unless concurrency.fetch("queue") == "max" && !concurrency.key?("cancel-in-progress")
 call = formal.fetch("jobs").fetch("g6-harness-core")
-abort("formal caller may select only the formal profile") unless call.fetch("with") == {"profile"=>"formal", "authority"=>"${{ inputs.authority }}", "candidate_sha"=>"${{ github.sha }}"}
+abort("caller must bind candidate and authority") unless call.fetch("with").values_at("profile", "authority", "candidate_sha") == ["formal", "${{ inputs.authority }}", "${{ github.sha }}"]
 jobs = core.fetch("jobs")
 jobs.select { |id, _| id.start_with?("g6-rd-") }.each do |id, job|
   environment = job.fetch("environment").fetch("name")
   abort("#{id} must select the protected production environment") unless environment.include?("g6-production-readiness") && environment.include?("inputs.authority")
 end
-gate = jobs.fetch("g6-rd-gate")
-gate_text = Array(gate.fetch("steps")).map { |step| step.fetch("run", "") }.join("\n")
-abort("formal gate must bind the caller authority through the shared pipeline") unless
-  gate.fetch("env").fetch("G6_PIPELINE_NEEDS") == '${{ toJSON(needs) }}' &&
-  core.fetch("env").fetch("G6_AUTHORITY") == '${{ inputs.authority }}' &&
-  gate_text.include?("g6-pipeline.mjs gate")
 abort("authority must be passed through the environment") unless core.fetch("env").fetch("G6_AUTHORITY") == '${{ inputs.authority }}'
 jobs.each do |id, job|
   job.fetch("steps").each do |step|

@@ -1,86 +1,23 @@
-# Shared G6 harness release builder for every first-party Rust image. The
-# three release compile partitions below run as three separate Cargo
-# invocations in one builder container: a single workspace-level invocation
-# would unify dependency features across packages and silently change the
-# transportd and probe binaries G6 is supposed to verify against production.
-# The groups share this builder and its target/ cache sequentially — same
-# resolved features per package, no duplicated common dependencies, and no
-# three-way Docker builder contention — and each group's binaries are frozen
-# to /out immediately after it links. The transportd runtime stages mirror
-# rust/transportd.Dockerfile exactly; scripts/test-g6-runtime-adapters.sh
-# rejects any drift between the two definitions and any future attempt to
-# merge the compile partitions back together.
-FROM rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3 AS g6-rust-builder
+# Test helpers compile separately from production products; Cargo feature sets do not unify.
+FROM rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3 AS g6-rust-source
 WORKDIR /src
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
 COPY rust/vendor ./vendor
-# Dependency warmup experiment: the layers below are keyed only on the pinned
-# toolchain, the workspace manifests, and the vendored third-party sources —
-# never on first-party crate sources, so a first-party edit leaves them
-# cached. Each member's manifest is copied individually to its real path, and
-# the generated stub sources match every member's real target layout exactly
-# (no workspace member declares build.rs, [lib], [[bin]], or custom target
-# paths), so the real COPY rust/crates layer below replaces every stub file
-# one-for-one. The three warmup invocations are byte-identical to the three
-# real partitions below — same per-partition package sets, no workspace-level
-# unification — so the warm target/ cache resolves exactly the features the
-# real partitions consume. scripts/test-g6-runtime-adapters.sh enforces both
-# the byte identity and this layer ordering.
-COPY rust/crates/agent/Cargo.toml crates/agent/Cargo.toml
-COPY rust/crates/agent-identity/Cargo.toml crates/agent-identity/Cargo.toml
-COPY rust/crates/agent-protocol/Cargo.toml crates/agent-protocol/Cargo.toml
-COPY rust/crates/command-authorization/Cargo.toml crates/command-authorization/Cargo.toml
-COPY rust/crates/command-journal/Cargo.toml crates/command-journal/Cargo.toml
-COPY rust/crates/contracts/Cargo.toml crates/contracts/Cargo.toml
-COPY rust/crates/g6-probe/Cargo.toml crates/g6-probe/Cargo.toml
-COPY rust/crates/g6-tunnel/Cargo.toml crates/g6-tunnel/Cargo.toml
-COPY rust/crates/observability/Cargo.toml crates/observability/Cargo.toml
-COPY rust/crates/ocserv-adapter/Cargo.toml crates/ocserv-adapter/Cargo.toml
-COPY rust/crates/privd/Cargo.toml crates/privd/Cargo.toml
-COPY rust/crates/privd-attestation/Cargo.toml crates/privd-attestation/Cargo.toml
-COPY rust/crates/transportd/Cargo.toml crates/transportd/Cargo.toml
-COPY rust/crates/transportd-stub/Cargo.toml crates/transportd-stub/Cargo.toml
-COPY rust/crates/upgrader/Cargo.toml crates/upgrader/Cargo.toml
-RUN mkdir -p crates/agent/src crates/agent-identity/src crates/agent-protocol/src \
-    crates/command-authorization/src crates/command-journal/src crates/contracts/src \
-    crates/g6-probe/src crates/g6-tunnel/src crates/observability/src \
-    crates/ocserv-adapter/src crates/privd/src crates/privd-attestation/src \
-    crates/transportd/src crates/transportd-stub/src crates/upgrader/src \
-    && for lib_only in agent-identity agent-protocol command-authorization \
-      command-journal contracts observability ocserv-adapter privd-attestation; do \
-      : > "crates/${lib_only}/src/lib.rs"; \
-    done \
-    && printf 'fn main() {}\n' > crates/g6-probe/src/main.rs \
-    && for lib_and_bin in agent g6-tunnel privd transportd transportd-stub upgrader; do \
-      : > "crates/${lib_and_bin}/src/lib.rs"; \
-      printf 'fn main() {}\n' > "crates/${lib_and_bin}/src/main.rs"; \
-    done
-RUN cargo build --locked --release --package ocservia-transportd
-RUN cargo build --locked --release \
-    --package ocservia-g6-probe \
-    --package ocservia-g6-tunnel
-RUN cargo build --locked --release \
-    --package ocservia-agent \
-    --package ocservia-privd
 COPY rust/crates ./crates
-# BuildKit COPY preserves build-context mtimes, which predate the warmup
-# build outputs in the same solve. cargo treats sources older than a unit's
-# recorded build as unchanged, which would silently link the warmup's stub
-# rlibs into the real partitions. Normalize mtimes so cargo consults content
-# hashes instead: changed crates recompile, unchanged crates stay cached.
-RUN find crates -type f -exec touch {} +
+
+FROM g6-rust-source AS g6-transport-builder
 RUN cargo build --locked --release --package ocservia-transportd \
     && mkdir -p /out/transportd \
     && cp target/release/ocservia-transportd /out/transportd/
-RUN cargo build --locked --release \
-    --package ocservia-g6-probe \
-    --package ocservia-g6-tunnel \
+
+FROM g6-rust-source AS g6-probe-builder
+RUN cargo build --locked --release --package ocservia-g6-probe --package ocservia-g6-tunnel \
     && mkdir -p /out/probe \
     && cp target/release/ocservia-g6-probe target/release/ocservia-g6-tunnel /out/probe/
-RUN cargo build --locked --release \
-    --package ocservia-agent \
-    --package ocservia-privd \
+
+FROM g6-rust-source AS g6-agent-builder
+RUN cargo build --locked --release --package ocservia-agent --package ocservia-privd \
     && mkdir -p /out/agent \
     && cp target/release/ocservia-agent target/release/ocservia-privd /out/agent/
 
@@ -94,7 +31,7 @@ COPY --chmod=0555 deploy/prepare-transport-runtime.sh /usr/local/libexec/ocservi
 USER transportd:ocservia
 
 FROM transportd-runtime-base AS transportd-runtime
-COPY --from=g6-rust-builder /out/transportd/ocservia-transportd /usr/local/bin/ocservia-transportd
+COPY --from=g6-transport-builder /out/transportd/ocservia-transportd /usr/local/bin/ocservia-transportd
 ENTRYPOINT ["/usr/local/bin/ocservia-transportd"]
 CMD ["--socket", "/run/ocserv-platform/transportd.sock", "--key-file", "/run/secrets/controller-iroh.key", "--control-plane-uid", "65534", "--control-plane-gid", "65532"]
 
@@ -105,7 +42,7 @@ CMD ["--socket", "/run/ocserv-platform/transportd.sock", "--key-file", "/run/sec
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS g6-probe-runtime
 RUN groupadd --system --gid 65532 ocservia \
     && usermod --gid ocservia nobody
-COPY --from=g6-rust-builder /out/probe/ocservia-g6-probe /usr/local/bin/ocservia-g6-probe
+COPY --from=g6-probe-builder /out/probe/ocservia-g6-probe /usr/local/bin/ocservia-g6-probe
 USER nobody:ocservia
 ENTRYPOINT ["/usr/local/bin/ocservia-g6-probe"]
 
@@ -113,14 +50,14 @@ ENTRYPOINT ["/usr/local/bin/ocservia-g6-probe"]
 # to the candidate commit. Failure-domain runners consume those frozen bytes
 # instead of rebuilding the host-side tunnel independently.
 FROM scratch AS g6-tunnel-artifact
-COPY --from=g6-rust-builder /out/probe/ocservia-g6-tunnel /ocservia-g6-tunnel
+COPY --from=g6-probe-builder /out/probe/ocservia-g6-tunnel /ocservia-g6-tunnel
 
 # G6 readiness managed-node image: real Agent and privd plus the fixed-path
 # read fixtures they snapshot. One container represents one production
 # managed node in the G6 topology; the supervisor starts privd as root and
 # the Agent as the unprivileged ocservia-agent account, exactly as the
 # deployed systemd units split the two principals.
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS g6-agent-runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS g6-agent-base
 # sqlite3 lets the harness read the durable command journal live from inside
 # the container; the journal bind is owned by the agent uid, so the host
 # runner cannot read it directly.
@@ -132,8 +69,6 @@ RUN apt-get update \
     && install -d -o root -g ocservia -m 0750 /run/ocserv-platform \
     && install -d -o root -g root -m 0755 /etc/ocserv /etc/ocservia /var/lib/ocservia-privd \
     && install -d -o ocservia-agent -g ocservia -m 0700 /var/lib/ocservia-agent/identity /var/lib/ocservia-agent/journal
-COPY --from=g6-rust-builder /out/agent/ocservia-agent /usr/local/bin/ocservia-agent
-COPY --from=g6-rust-builder /out/agent/ocservia-privd /usr/local/bin/ocservia-privd
 COPY --chmod=0555 deploy/g6-readiness/agent-supervisor.sh /usr/local/libexec/ocservia-agent-supervisor
 # The adapter executes exactly these fixed paths; the shims answer the seven
 # read-only snapshot probes with healthy, parseable output.
@@ -143,3 +78,12 @@ COPY --chmod=0555 deploy/g6-readiness/fake-ocserv/shims/occtl /usr/bin/occtl
 COPY --chmod=0444 deploy/g6-readiness/fake-ocserv/ocserv.conf /etc/ocserv/ocserv.conf
 ENV OCSERVIA_NODE_ROOT=/var/lib/ocservia-agent
 ENTRYPOINT ["/usr/local/libexec/ocservia-agent-supervisor"]
+
+FROM g6-agent-base AS g6-agent-runtime
+COPY --from=g6-agent-builder /out/agent/ocservia-agent /usr/local/bin/ocservia-agent
+COPY --from=g6-agent-builder /out/agent/ocservia-privd /usr/local/bin/ocservia-privd
+
+# The named build context is the verified release archive, not another build.
+FROM g6-agent-base AS g6-agent-candidate
+COPY --from=candidate-agent /ocservia-agent /usr/local/bin/ocservia-agent
+COPY --from=candidate-agent /ocservia-privd /usr/local/bin/ocservia-privd

@@ -36,7 +36,7 @@ evidence remains necessary even when it passes.
 
 ## Approval principal boundary
 
-Baseline 1.0 and T07 require **independently controlled requester and approver
+Baseline 1.0 and Business Smoke require **independently controlled requester and approver
 principals**, not an organizational four-eyes or two-person rule. Each principal
 must authenticate with its own credential and session and satisfy workspace
 authorization and RBAC. Sensitive-operation approval remains bound to the exact
@@ -50,7 +50,7 @@ An automated run may exercise both principals through normal authentication
 and isolated sessions. Record this as simulated two-principal acceptance,
 never as verified human custody. Actual custody by two different people is an
 additional production-hardening or enterprise security profile, excluded from
-baseline T07 and requiring separate human evidence when a deployment selects it.
+Business Smoke and requiring separate human evidence when a deployment selects it.
 This reviewed scope does not remove RBAC, approval binding, self-approval
 rejection, replay protection or approval requirements from runtime behavior.
 
@@ -95,7 +95,7 @@ A temporary 1.x mixed-version window means exactly one pair: the published
 `v1.0.0` Agent/privd/upgrader package against the candidate
 Controller/transportd. Accept that window only after the `v1.0.0` x
 amd64/arm64 application cells below pass on the exact candidate, collected in
-one run/attempt together with the native upgrade gate; they are part of `1.x`
+one release run using the exact tested products together with the native upgrade gate; they are part of `1.x`
 release acceptance, not optional diagnostics.
 
 ### Historical pre-1.0 diagnostics
@@ -123,7 +123,7 @@ a historical diagnostic — and **each** native `amd64` / `arm64` architecture:
 
 | Combination | Executable entry | Acceptance boundary |
 | --- | --- | --- |
-| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Six application cells total: the `v1.0.0` mixed-version pair plus the two historical diagnostic baselines, each on amd64/arm64. Required scope: enrollment, grant/fence/receipt, telemetry and approved reload; config revision/rejection and plan replay, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. The systemd chain uses two real Relays for v0.6.0 and one for `v1.0.0` and v0.6.1; the real-process PKI chain uses two TLS Relays. No historical rebuild. Covered workflows require actual-artifact evidence; the two exclusions below are not positive acceptance. |
+| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Two required application cells: the `v1.0.0` mixed-version pair on amd64/arm64. Pre-1.0 diagnostics are on-demand only. Required scope: enrollment, grant/fence/receipt, telemetry and approved reload; config revision/rejection and plan replay, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. The systemd chain uses two real Relays for v0.6.0 and one for `v1.0.0` and v0.6.1; the real-process PKI chain uses two TLS Relays. No historical rebuild. Covered workflows require actual-artifact evidence; the two exclusions below are not positive acceptance. |
 | v0.6.0 node, either architecture: uncertain non-idempotent mutation across all-Relay outage / owner change | Same systemd chain, retaining its strict automatic-recovery assertion | **Excluded: guaranteed automatic mutation recovery.** Query-only `Unknown` requires manual reconciliation. Preserve evidence, reconcile before resuming writes, then upgrade the verified matched node package under the path below. A green run or a newer version alone does not restore this promise. |
 | v0.6.0 / v0.6.1 node, either architecture: positive ConfigPlan apply with candidate Controller | Same PKI chain checks rejection only | **Excluded: successful plan/apply/rollback.** Do not use positive configuration apply in this rolling window. Upgrade to a verified matched node package with a reviewed complete configuration contract and positive plan/apply/recovery acceptance before enabling it; no such qualifying release is established by this matrix. |
 | Published pre-1.0 native package -> newer pre-1.0 candidate package | Existing `release-upgrade.yml`, `baseline_release` set explicitly | Historical DEB Ubuntu and RPM Rocky 9 coverage only; no path into 1.x. |
@@ -262,20 +262,13 @@ host's native-admission policy; admission is checked again after the chain.
 
 ### Execute one application cell
 
-For authorized GitHub Actions execution, dispatch the existing
-`release-upgrade.yml` on the exact candidate branch with `version`,
-`baseline_release`, `candidate_sha`, and `session_compatibility=true`. The
-application jobs build once per native architecture and run the published
-`v1.0.0` upgrade-source pair plus both historical diagnostic baselines,
-retaining all six cells in that run/attempt. They do not
-publish images, run on ordinary PRs or replace the native upgrade jobs. For a
-1.x candidate, keep `baseline_release=v1.0.0`; the `v1.0.0` application pair
-is the mixed-version window evidence required by the finite matrix above, and
-the pre-1.0 application pairs are diagnostics only that do not select the
-native upgrade source.
-For application-fixture iteration, `session_only=true` runs those six cells
-without rebuilding native upgrade products. Its result cannot satisfy the
-separate native-upgrade requirements; the default remains native upgrades.
+The integrated [Release Check](../development/release-checks.md) runs the
+supported v1.0.0 application pair on both architectures using exact candidate
+images. For diagnostic iteration, dispatch `release-upgrade.yml` with
+`version`, `baseline_release=v1.0.0` and `purpose=compatibility`.
+The candidate SHA is derived from dispatch. This runs only the supported two
+cells, never the historical pre-1.0 matrix, and does not publish.
+Historical diagnostic scripts below remain available on explicit request.
 
 On BuildServer, `fetch` and `verify` perform only bounded artifact download and
 checksum/signature verification, without extraction, installation or execution:
@@ -292,7 +285,7 @@ tags and architectures; a verified foreign-architecture archive is not a native
 runtime pass. A corrupted or incomplete set fails instead of falling back.
 
 Run `run` only on an explicitly authorized disposable native systemd VM/runner,
-with a local Docker daemon and no emulation handlers. Never unregister binfmt
+with matching host, daemon, image and binary architectures. Never unregister binfmt
 or run host installers on shared BuildServer. Use a clean exact candidate
 checkout and [the existing single-Relay setup](../development/single-relay-validation.md#real-agent-chain).
 Set `CANDIDATE_SHA`, `RUNNER_ARCH` (`X64` or `ARM64`), unique `RUN_ID`, private
@@ -312,9 +305,8 @@ inside the isolated node, requires the signed matched node package and checks
 the final Controller-observed Agent version, and records `compatibility-result.json`.
 Missing inputs, mutable image tags, foreign/dirty source, wrong architecture,
 wrong version, absent result or a failed chain cannot pass. Preflight failures
-have no success result. A result is one cell only; require all four unique
-tag/architecture cells on the same candidate, with one coherent CI run/attempt
-when applicable. No automatic workflow dispatch or publishing is performed.
+have no success result. A result is one cell only; require both supported architecture cells on the exact candidate products.
+Independent failed cells may rerun; never combine different product identities. No automatic workflow dispatch or publishing is performed.
 
 Retain sanitized command logs, start/end time and exit code, baseline pins,
 candidate SHA, script/patch digest, exact package/image identities, native
@@ -342,7 +334,7 @@ the actual server, client and backup image versions/digests per acceptance run.
 T02 identified same-line patch candidates (PostgreSQL 17.11, MySQL container
 8.4.12/native 8.4.11 plus vendor patches, MariaDB 12.3.3). They are **pending
 compatibility and artifact review**, not replacements for the existing support
-rows. T09 owns final image pins/inventory; T07 owns actual deployment evidence.
+rows. T09 owns final image pins/inventory; Business Smoke owns actual deployment evidence.
 Verify migration/permissions and matching backup/restore before accepting a
 patch set. Do not substitute PG18/G6 or silently remove old rows. SQLite
 journal WAL-reset applicability and upgrade recovery remain T06/T08 work;

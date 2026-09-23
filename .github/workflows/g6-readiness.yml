@@ -1,9 +1,15 @@
-name: G6 Formal Readiness
+name: Resilience
 run-name: G6 Formal · ${{ inputs.authority }} · ${{ github.sha }}
 
 on:
   workflow_dispatch:
     inputs:
+      purpose:
+        description: Finite fault regression or performance assessment using original limits
+        type: choice
+        options: [resilience, performance]
+        default: resilience
+        required: true
       authority:
         description: Evidence authority carried by this dispatch
         type: choice
@@ -23,9 +29,10 @@ concurrency:
 
 jobs:
   g6-harness-core:
-    name: G6 Formal Readiness
+    name: Resilience
     uses: ./.github/workflows/g6-harness-core.yml
     with:
       profile: formal
       authority: ${{ inputs.authority }}
       candidate_sha: ${{ github.sha }}
+      purpose: ${{ inputs.purpose }}

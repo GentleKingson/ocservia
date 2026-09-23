@@ -40,24 +40,12 @@ try {
     expectedAuthority: values["expected-authority"],
     expectedEnvironmentId: values["expected-environment-id"],
     expectedFailureDomainClass: values["expected-failure-domain-class"],
+    purpose: values.purpose ?? "resilience",
   });
-  const authorityFenceOnly =
-    values["expected-authority"] === "engineering" &&
-    verdict.failure_reasons.length === 1 &&
-    verdict.failure_reasons[0] ===
-      "final pass requires production_readiness authority" &&
-    Object.values(verdict.measurement_results).every(
-      (result) => result.passed,
-    ) &&
-    Object.values(verdict.observation_results).every((result) => result.passed);
   writeResult({
     schema_version: "ocservia.g6-evidence-phase-result.v1",
     phase: "verify",
-    status: verdict.passed
-      ? "passed"
-      : authorityFenceOnly
-        ? "accepted_non_final"
-        : "failed",
+    status: verdict.passed ? "passed" : "failed",
     verdict_passed: verdict.passed,
     exit_code: verdict.passed ? 0 : 1,
     failure_reasons: verdict.failure_reasons,

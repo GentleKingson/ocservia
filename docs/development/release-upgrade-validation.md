@@ -1,353 +1,68 @@
-# Native release upgrade validation
+# Package and upgrade validation
 
-`Native Release Upgrade Validation` is an independent `workflow_dispatch`
-workflow, not a publisher and not part of Basic CI. It accepts exactly these
-seven inputs:
+The release graph is [Release Check](release-checks.md). Each architecture
+builds its actual Agent/privd/upgrader package set and Controller images once;
+native installation and supported-baseline upgrade tests consume those bytes.
+The standalone `Release Diagnostics` workflow is for debugging, not another
+mandatory release run and never a complete Release Check.
 
-| Input | Type / default | Meaning |
+## Supported matrix
+
+| Component | Architectures | Required behavior |
 | --- | --- | --- |
-| `version` | Required string; no default | Candidate numeric X.Y.Z; strictly newer than the selected baseline unless `business_only=true` |
-| `baseline_release` | Required string; `v1.0.0` | Registered published baseline for prepare and native upgrades |
-| `candidate_sha` | Required string; no default | Exact full lowercase SHA of the dispatch branch |
-| `session_compatibility` | Boolean; `false` | Also run the six application cells on both architectures: the published `v1.0.0` node against the candidate (the 1.x mixed-version window pair required for 1.x release acceptance) plus historical v0.6.0/v0.6.1 diagnostics |
-| `session_only` | Boolean; `false` | Run the six application cells instead of native upgrades, even when `session_compatibility=false` |
-| `business_only` | Boolean; `false` | Run only the current candidate's native amd64 business validation, regardless of the session flags |
-| `business_profile` | Choice; `smoke` | `smoke` runs T07's core real business chain; `extended` retains supplemental OIDC, PKI, browser and recovery checks |
+| Agent | amd64, arm64 | DEB on Ubuntu 24.04 and RPM on Rocky 9; install, v1.0.0 upgrade, state preservation, retry, rejection and rollback |
+| Controller | amd64, arm64 | Published v1.0.0 PostgreSQL state, authenticated read/write, migration, interrupted upgrade recovery, data preservation, rollback contract and backup restore |
+| Application | amd64, arm64 | Published v1.0.0 node against the candidate Controller and transport |
 
-Choose the candidate branch in the Actions UI or with `gh --ref`. The SHA
-must be the complete lowercase commit SHA of that branch and must equal
-both the dispatch SHA and checkout HEAD. When `business_only=false`, prepare
-requires the candidate's numeric X.Y.Z version to be strictly newer than the
-selected registered baseline. These three identity inputs remain required in
-application-only mode: prepare still freezes and verifies that baseline.
-For formal `1.x`, the earliest supported upgrade source is `v1.0.0`, the
-published transitional release; `v1.0.1` is the first recommended production
-stable baseline. Prepare rejects pre-1.0 upgrade sources for stable candidates
-before candidate builds; the standalone package smoke rejects them before host setup.
-Pre-1.0 users must redeploy, not upgrade through `v1.0.0`. Prepare also
-rejects `2.x` and later candidates fail-closed: a future major version needs a
-separately reviewed `1.x` to `2.x` migration contract before this workflow
-accepts it.
-`baseline_release` selects the native upgrade baseline; application jobs always
-select both v0.6.0 and v0.6.1, independently of this input. Business-only mode
-has its own candidate checks and does not use the baseline (see below).
-
-The maintained `.github/workflows/release-upgrade.yml` is the complete manual
-workflow. Dispatch only after the candidate edits are committed and pushed to
-the selected branch. Replace the branch and numeric version placeholders;
-resolve and inspect the full 40-character lowercase SHA before dispatch, and
-do not move the branch while the dispatch is being created:
-
-```bash
-branch='<candidate-branch>'
-version='<candidate-X.Y.Z>'
-sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
-gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version="$version" -f baseline_release=v1.0.0 \
-  -f candidate_sha="$sha"
-```
-
-## Scope
-
-Quick/Full Basic CI checks change regressions. `release.yml` builds packages
-and images, runs its release smoke checks, and publishes only through its
-tag/approval path. In default mode this workflow validates the registered old
-release to exact candidate upgrade on four native units without publishing. Formal G6 is the
-separate production-readiness/HA/PITR acceptance harness. None of these gates
-substitutes for another or extends a backend's production support.
-
-Dispatch modes are:
-
-| `business_only` | `session_compatibility` | `session_only` | Jobs |
-| --- | --- | --- | --- |
-| `false` | `false` | `false` | Prepare, four native upgrade units and `Native Upgrade Result` (default) |
-| `false` | `true` | `false` | Prepare, native units/result plus six application cells (`v1.0.0`/`v0.6.0`/`v0.6.1` x amd64/arm64) |
-| `false` | Either value | `true` | Prepare and six application cells only; both native matrices and `Native Upgrade Result` are skipped |
-| `true` | Either value | Either value | Native candidate `business_profile` on amd64 only; prepare, native upgrades, application matrix and `Native Upgrade Result` are skipped |
-
-The flags are not mutually exclusive: `business_only=true` selects the business
-job regardless of either session flag, as shown by the workflow conditions.
-
-In native-upgrade mode, four mandatory cells run with fail-fast disabled:
-
-| Cell | Native runner | Required upgrade path |
-| --- | --- | --- |
-| agent-amd64 | ubuntu-24.04 / X64 / x86_64 | Published DEB on Ubuntu and RPM on systemd Rocky 9 |
-| agent-arm64 | ubuntu-24.04-arm / ARM64 / aarch64 | Published DEB on Ubuntu and RPM on systemd Rocky 9 |
-| controller-amd64 | ubuntu-24.04 / X64 / x86_64 | Published Controller, PostgreSQL, guarded in-place upgrade |
-| controller-arm64 | ubuntu-24.04-arm / ARM64 / aarch64 | Published Controller, PostgreSQL, guarded in-place upgrade |
+The v1.0.0 transitional baseline is registered in
+[`release-upgrade-baselines.json`](../../scripts/release-upgrade-baselines.json).
+Its registration establishes artifact identity, not upgrade success.
+Historical v0.6.x entries remain available to diagnostic fetch/verify tools;
+they are not supported upgrade paths into 1.x and do not run in the release
+matrix. Pre-1.0 operators must redeploy. A 2.x migration requires a separately
+reviewed contract; the current entrypoint rejects it.
 
 The host, local Docker daemon, image platform and executable ELF architecture
-must agree. Active binfmt handlers and remote Docker daemons are refused.
-Each disposable hosted runner first unregisters all preinstalled binfmt
-handlers, including LLVM's runtime handler, then executes the unchanged
-strict audit. This preparation is not run on shared BuildServer.
-Within native-upgrade mode there is no component/architecture skip input.
-RPM names use x86_64/aarch64;
-DEB metadata includes nfpm's `-1` revision, separate from the binary X.Y.Z.
+must agree. Binaries are actually executed. An unrelated binfmt handler is
+not evidence that the candidate uses emulation; no host handlers are cleared.
 
-Agent tests retain the old package's own production-relay installer. They
-compare configuration, command/release trust, sealing keys, prepared endpoint
-identity, relay configuration/token/drop-in, ownership and modes, execute
-candidate binaries, reinstall identical packages, reject corrupt payloads
-and unsafe upgrade prerequisites, and execute the installed rollback command.
-Rollback restores runtime binaries/units, not the package-manager version.
-Operator state remains byte-identical across upgrade, retry and rollback.
-Package-owned Relay drop-ins and launchers are checked against the signed
-candidate payload after upgrade, must remain unchanged on retry/rejection,
-and must return to their exact baseline content or absence on rollback.
-An identical retry first uses the rollback command's `--verify-only` snapshot
-validation: missing manifests, corrupt members or unsafe installed rollback
-scripts fail before any retry restart. A broken snapshot is not silently
-replaced with candidate files.
-Unconfigured installs stay disabled. Restart requests during rollback are
-not proof of healthy services or a fresh online Controller report.
+## Diagnostic entrypoint
 
-Controller tests use clean exact old/candidate checkouts, unchanged signed
-old manifests and digest-pinned images. A private fixture creates PostgreSQL
-credentials, PKI, identity keys and an OIDC provider with a password-protected
-principal and one-use PKCE codes. The fixture CA is mounted into only the
-running test Controller's trust-store namespace; TLS verification and real
-production authentication remain enabled. No host trust store is changed.
-The native, pinned Node fixture container joins the unchanged internal
-application network at its reserved test address; its host port is loopback
-only. The CA is written inside the container's writable tmpfs before mounting,
-not copied through Docker's read-only-root archive interface.
-Relay/signer/OTLP fixture addresses do not certify those external protocols.
-
-The old Controller creates the authenticated session and audited bootstrap
-token. Its database contains a workspace, restricted workspace, role binding
-and node inventory before the candidate touches it. The gate compares these
-records, keeps the old session working, checks permission denial, writes a new
-authenticated token, checks migration and production release smoke, and
-verifies lifecycle state and identical-target idempotence. Stopping the local
-candidate registry induces a real pull failure; the old confirmed state and
-failed pending evidence must survive, then the identical manifest is retried.
-
-Rollback must either succeed and revalidate the old version, or fail with the
-specific changed-production-descriptor guard, corroborated by the source
-diff without changing confirmed state. Other failures do not pass as expected
-refusals. The old production backup worker creates a physical base backup
-after old data exists; a separate PostgreSQL instance verifies and restores it.
-This focused restore is not the full G6 PITR/failover matrix.
-
-Excluded from native-upgrade evidence: database engine/major changes, MySQL/MariaDB historical upgrades,
-all historical releases, all distributions, online Agent batches, cross-VM
-or relay end-to-end behavior, full database regression/security/G6 acceptance.
-
-### Application matrix: `v1.0.0` acceptance pair and historical diagnostics
-
-The `v1.0.0` cell is the exact-pair evidence for the temporary `1.x`
-mixed-version window (published `v1.0.0` node against the candidate
-Controller) and belongs to `1.x` release acceptance together with the native
-upgrade gate. The pre-1.0 cells retain diagnostic coverage only. They do not
-establish a supported rolling window into `1.x`, are not formal 1.x release
-requirements, and cannot replace the `v1.0.0` pair, matched-candidate
-application acceptance, or the native upgrade gate. Keep
-`baseline_release=v1.0.0` for a 1.x candidate, even in application-only mode.
-
-Append `-f session_compatibility=true` to include application evidence with
-the native gate, or `-f session_only=true` for application-fixture iteration.
-Each native architecture builds candidate application images once and runs
-the `v1.0.0` pair first, then both published historical node baselines,
-without rebuilding their binaries. The historical diagnostics still run after
-the `v1.0.0` pair fails if the build succeeded and the job was not cancelled;
-the v0.6.1 diagnostic still runs after a v0.6.0 failure on the same
-condition. The independent PKI/config-rejection phase retains
-its own exit code without hiding a session/reload/recovery failure.
-
-See the [finite release matrix and adopted exclusions](../reference/stable-contracts.md#finite-release-matrix)
-for topology, required workflows, the v0.6.0 uncertain-mutation recovery
-boundary and excluded positive ConfigPlan apply for old nodes. The broader
-strict recovery check is retained; a documented exclusion does not turn its
-failed cell into PASS. Application-only success cannot satisfy native upgrade
-requirements, and `Native Upgrade Result` does not aggregate application jobs.
-
-### Candidate business probe
-
-With `business_only=true`, the workflow invokes
-[`scripts/release-business-probe.sh`](../../scripts/release-business-probe.sh)
-instead of `release-upgrade-contract.mjs prepare`. Its own preflight requires a
-plain numeric X.Y.Z version, a full lowercase 40-character `candidate_sha`
-equal to both `GITHUB_SHA` and checkout HEAD, and a clean checkout on a disposable
-GitHub-hosted systemd runner. The dispatch form still requires `baseline_release`,
-but this mode does not use it as an upgrade baseline or compare versions against
-it. Both business profiles run on native amd64 only. The default `smoke` profile
-proves the signed installation, separate Local principals, approved ConfigPlan
-apply, real VPN traffic, automatic ConfigPlan rollback and a second real VPN
-connection. `extended` retains the previous production-path OIDC, PKI, browser,
-Relay fault/recovery and cross-source evidence assertions. For the current
-release baseline, dispatch both profiles on the same candidate SHA; Full CI and
-G6 do not yet replace those exact extended checks.
-
-See [native candidate business validation](real-business-validation.md) for
-execution, evidence and limitations. Smoke success is scoped T07 evidence, not
-T06, G6, T10 or release acceptance. The extended profile is supplemental and
-does not replace the native upgrade gate.
-
-## Build and trust boundaries
-
-`build-release-agent.sh` and `build-release-controller.sh` are shared with
-`release.yml`. Every native unit builds one candidate package set or four production
-image archives. Tests consume those exact files and retain their digests.
-Agent builds use `build-agent-binaries.sh` and the digest-pinned native
-Rocky 9 build container for all three common tar/DEB/RPM payload binaries.
-The builder checks native architecture and glibc 2.34, isolates Cargo objects
-from Ubuntu-built objects, and executes every binary before packaging.
-The locked toolchain, Cargo locks and four Controller Dockerfiles are unchanged.
-BuildKit exports archives without registry access; the test daemon loads and
-pushes those archives to a registry bound only to `127.0.0.1:5000`. The actual
-registry manifest digests, never image config IDs, enter the generated
-candidate manifest. No candidate image is pushed externally.
-
-Only source-read permissions are used. Signing keys are ephemeral, outside
-the checkout/cache/artifacts. The original tag-only publisher, security
-dependency, production re-signing and `release-publishing` approval remain
-unchanged. Ordinary same-source native smoke remains a separate installer
-regression, not cross-version evidence.
-
-`release-upgrade-baselines.json` owns historical checksum pins and capabilities.
-Its optional `deb_asset_release` must be a positive integer (not a string).
-Omitting it selects the legacy `ocservia-agent_<version>_<arch>.deb` asset;
-setting it to `1` selects `ocservia-agent_<version>-1_<arch>.deb`. Add it only
-when registering a release actually published with the revisioned filename.
-Existing baselines, including v0.6.1 and v0.6.2, retain their original metadata and asset
-names, such as `ocservia-agent_0.6.2_amd64.deb`. Candidate packages always use
-`-1`; their naming never determines the historical baseline filename.
-The baseline smoke uses Node to share this resolver with upgrade prepare.
-
-### Historical pre-1.0 baselines
-
-Historical entries and evidence remain immutable. They are not supported
-upgrade sources into `1.x`, fallback baselines, or production recommendations.
-The former default v0.6.0 is bound to commit
-`cc8399641dc32083466a9c77369fcb8debf1ee48`, schema 36, checksum-manifest SHA-256
-`26f4ab236630ff52777dabf5723cd3d5814022d4e08ab4079768117dd4e262df`, and DER key SHA-256
-`b0156efe8c67273d773be595fa34546d086950961d8fa33b5f7bfe6297e80369`.
-On 2026-09-14, the key was recovered from the real v0.4.0 arm64 DEB after
-checking its digest against the already repository-pinned v0.4.0 SHA256SUMS.
-That independent historical key verified v0.5.0 SHA256SUMS.sig. On 2026-09-15
-the same anchor verified v0.5.2's signatures and all 21 published assets, both
-Controller bundles, and anonymous dual-platform indexes. Immutable Release
-388897497, direct tag commit and successful publication run 34934040575 were
-cross-checked. On 2026-09-16, the same historical anchor verified v0.6.0's
-signed checksums and all 21 published assets, both Controller bundles at
-schema 36, and anonymous dual-platform image indexes. Immutable Release
-388971765, direct tag commit and successful publication run 34945045708 were
-cross-checked. The key was not accepted through trust-on-first-download.
-v0.5.0, v0.5.1 and v0.5.2 remain registered as historical data, not final-baseline
-recommendations or fallbacks. v0.5.1 fixed v0.5.0's PostgreSQL/gateway startup
-defects, but its immutable RPM privd requires GLIBC_2.39 and cannot execute on
-supported Rocky 9. The genuine v0.5.2 release fixes the common payload ABI;
-both native release jobs execute all three binaries on glibc 2.34. Its
-release/fresh-install acceptance does not replace this four-unit upgrade gate.
-
-### v0.6.1 supplemental baseline
-
-The registered v0.6.1 baseline is commit
-`1805962fe1a98a22955b3105bfa8ebce7f2ea1eb`, schema 36, with checksum-manifest
-SHA-256 `d562822bfdc55c784bf950a21c746f380a1cb6a7a2c86c6c801cfa25121df53b` and
-the same independently anchored key fingerprint above. On 2026-09-18, its
-signed checksums, both archive signatures, all 21 asset digests, both Controller
-bundles and anonymous dual-platform indexes were verified using the historical
-v0.4.0 package key. Immutable Release 389674680 and publication run 35061703465
-were cross-checked. This metadata verification did not install or rebuild the
-baseline and is not upgrade acceptance.
-
-This supplemental baseline records historical pre-1.0 validation only. A
-v0.6.0 run cannot be reported as v0.6.1 upgrade evidence; neither is evidence
-for the supported `v1.0.0` to `v1.0.1` transition.
-
-### Historical v0.6.2 identity
-
-The published [v0.6.2 release](https://github.com/GentleKingson/ocservia/releases/tag/v0.6.2)
-is registered at commit `518df6e9c488e58613c9cc194c896b4edfd57c2e`, PostgreSQL
-schema 36 and OIDC authentication. Its checksum-manifest SHA-256 is
-`a386f64d81f0ccb0b87482c3f4e4029d0a756b5e76c679b72d70d1afa23abc66`;
-the signing key retains the independently anchored historical fingerprint above.
-The baseline registry records its verification provenance. This registration
-establishes artifact identity, not successful installation or upgrade.
-
-A disposable T05 build labeled `version=0.6.2` from a different source SHA is
-not that published release. Earlier T05/T06 records retain their original
-identities; they do not support pre-1.0 entry into `1.x`. Do not infer artifact
-identity from a version string or reuse their outcomes for the current candidate.
-
-### v1.0.0 transitional baseline and v1.0.1 candidate
-
-The registered `v1.0.0` baseline is commit
-`e85ab3fa90d1d5f6e4c53b56b2f5e0278f6da060`, PostgreSQL schema 36, with
-checksum-manifest SHA-256
-`0aa8270a68a65cc81b59a70001c53a9b4ace1ed6e33f4b36ef696db56ef4a401`.
-It uses the independently anchored signing key above and revisioned DEB names
-(`deb_asset_release=1`). The registry retains its published-artifact
-verification provenance and the known post-publication Controller
-checkout-permission failure. This is a published, upgradeable transitional
-release, not the recommended fresh-install baseline. Artifact registration
-does not erase that failure or prove an upgrade passed.
-
-Both the release package smoke and the manual native upgrade workflow use
-`v1.0.0` by default. For the first recommended production baseline, freeze the
-actual `1.0.1` candidate SHA and require fresh Agent/Controller x amd64/arm64
-evidence, the aggregate from one run/attempt, and the `v1.0.0` node against
-candidate Controller application cells on both architectures for the
-mixed-version window. Prerelease strings such as
-`1.0.1-rc.1` are not accepted version inputs:
+Choose an exact candidate branch; the workflow derives its SHA from dispatch
+and requires checkout HEAD to match. Version is plain X.Y.Z, newer than the
+registered baseline for upgrade/compatibility purposes.
 
 ```bash
-branch='<frozen-candidate-branch>'
-sha=$(gh api "repos/GentleKingson/ocservia/commits/$branch" --jq .sha)
-gh workflow run release-upgrade.yml --repo GentleKingson/ocservia \
-  --ref "$branch" -f version=1.0.1 -f baseline_release=v1.0.0 \
-  -f candidate_sha="$sha" -f session_compatibility=true \
-  -f session_only=false -f business_only=false
+gh workflow run release-upgrade.yml --ref <candidate-branch> \
+  -f version=1.0.1 -f baseline_release=v1.0.0 -f purpose=upgrade
 ```
 
-To register another baseline, independently establish its key, verify its
-signed checksum manifest and both architectures' native packages and
-Controller bundles, inspect its actual installation/authentication/database
-contract, record the commit/capabilities/provenance, and review the data-file
-change. Unregistered or incomplete releases fail before building. Do not
-rebuild old sources or silently fall back to a different release.
+`purpose` is one of `upgrade`, `compatibility`, `smoke`, `integration`.
+There are no interacting boolean mode flags. Smoke and Integration are amd64
+business diagnostics and do not use the selected upgrade baseline.
 
-## Evidence and reproduction
+## Trust and reruns
 
-Artifacts are `upgrade-frozen-RUN-ATTEMPT`, one
-`upgrade-COMPONENT-ARCH-RUN-ATTEMPT` per native unit, and optional
-`session-ARCH-RUN-ATTEMPT` per application architecture, containing all three
-baseline directories and their `compatibility-result.json` phase outcomes.
-The workflow requests seven days, but actual artifact expiry may be shorter;
-check the API's `expires_at` and download evidence promptly. Keep structured
-summaries, digests and a controlled archive, not just expiring artifact URLs.
-Each native unit includes `result.json`, scenario names, architecture proof, tested-file
-hashes and small logs. Controller bundles, version responses and lifecycle
-states contain no private key or database credential. No image archives or
-database contents are uploaded by this workflow.
+Builds use ephemeral signing keys, never production release credentials.
+Consumers download producer-supplied artifact IDs and fail explicitly if the
+trusted candidate-manifest digest or any product digest differs. Source SHA
+alone is not a binary identity. Final publication may re-sign and repackage,
+but must retain the tested payload archives and validate the resulting
+signatures, embedded trust root and installer payloads.
 
-When both `session_only=false` and `business_only=false`, `Native Upgrade Result`
-requires successful prepare and both native matrices plus
-four unique, complete, matching result documents. Missing, failed, skipped,
-cancelled, foreign-SHA/baseline/architecture or mixed-attempt evidence cannot
-pass. Use **Re-run all jobs**: re-running only failed jobs cannot combine old
-attempt artifacts into a new complete gate. Timing covers measured unit
-execution, not GitHub queue time or billed-minute rounding. No cold-cache
-duration guarantee is made.
-Any new candidate commit, including documentation or test-only edits, requires
-a fresh four-cell run **to claim native upgrade acceptance for that SHA**.
-This is not a requirement to rerun the gate for every documentation-only PR;
-existing evidence remains attached to its original SHA. Record final run links/results in the
-PR and external evidence report rather than changing the tested commit merely
-to embed its own SHA or run URL.
+Each native unit validates its own required scenarios and identity before
+returning success. The aggregate uses GitHub job results, not another collection
+of result documents. Independent failed units can rerun without discarding
+successful architecture/component jobs. Frozen baseline input is downloaded
+by the prepare job's artifact ID and checked against its producer digest,
+even when prepare came from an earlier attempt of this same run.
+Rerunning a product producer reruns its dependent tests; never combine results
+from a different candidate or substitute a latest-success artifact.
+Shared cross-host Resilience is different: both fault domains belong to one
+timeline and must rerun together.
 
-Run local checks through `ssh BuildServer`, in a fresh checkout. Use
-`bash scripts/test-release-upgrade.sh`, Bash syntax, ShellCheck, actionlint,
-and `bash scripts/docs-check.sh`. The focused
-`test-agent-upgrade-retry.sh` requires an isolated root container and uses
-stub binaries with DESTDIR; it is explicitly not upgrade acceptance.
-
-Never run the host-installing Agent smoke on shared BuildServer. Reproduce it
-on a new native systemd VM/runner. Controller reproduction must use a fresh
-isolated Docker daemon: production fixes its Compose project name, and the
-script refuses existing containers or volumes. Keep the same frozen inputs
-and candidate artifacts. Preserve sanitized diagnostics before removing only
-the resources created by that reproduction.
+Local syntax/behavior checks run only in an isolated BuildServer checkout:
+`bash scripts/test-release-upgrade.sh`, affected ShellCheck/actionlint checks,
+and documentation checks. Actual host installation belongs only on authorized
+disposable native VMs or hosted runners. Never run these installers on shared
+BuildServer, alter its systemd/users/network, or clear its Docker daemon.

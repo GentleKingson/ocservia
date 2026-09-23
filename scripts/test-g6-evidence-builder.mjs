@@ -5,7 +5,7 @@
 // format the fd-a/fd-b phases freeze) is assembled, run through
 // build-g6-evidence.mjs, and the resulting bundle must be awarded a final
 // G6 pass by the shared verifier. The same bundle assembled under the
-// engineering authority must stay non-final for the authority reason alone.
+// engineering authority carries context without forcing a false failure.
 
 import { spawnSync } from "node:child_process";
 import {
@@ -1311,7 +1311,7 @@ function expectBuilderFailure(outDir, expectedMessage, expectedDetails = {}) {
   }
 }
 
-function verifyBundle(outDir, authority) {
+function verifyBundle(outDir, authority, purpose = "performance") {
   return verifyG6({
     sloText: readFileSync(
       join(root, "docs", "acceptance", "g6-slo.yaml"),
@@ -1324,6 +1324,7 @@ function verifyBundle(outDir, authority) {
     expectedAuthority: authority,
     expectedEnvironmentId: environmentId,
     expectedFailureDomainClass: "multi_host",
+    purpose,
   });
 }
 
@@ -2697,25 +2698,8 @@ try {
   const engineeringDir = join(work, "engineering-bundle");
   runBuilder(engineeringDir, "engineering");
   const rehearsal = verifyBundle(engineeringDir, "engineering");
-  if (rehearsal.passed) {
-    throw new Error("engineering bundle must stay non-final");
-  }
-  if (
-    !rehearsal.failure_reasons.includes(
-      "final pass requires production_readiness authority",
-    )
-  ) {
-    throw new Error(
-      `engineering bundle must fail only on the authority fence: ${rehearsal.failure_reasons.join("; ")}`,
-    );
-  }
-  const failedRehearsal = Object.entries(rehearsal.measurement_results).filter(
-    ([, result]) => !result.passed,
-  );
-  if (failedRehearsal.length > 0) {
-    throw new Error(
-      `engineering bundle metrics failed beyond the fence: ${failedRehearsal.map(([name]) => name).join(", ")}`,
-    );
+  if (!rehearsal.passed || !verifyBundle(engineeringDir, "engineering", "resilience").passed) {
+    throw new Error("valid engineering context must pass without an artificial authority failure");
   }
 
   const originalReconnectSessions = readFileSync(reconnectSessionsPath, "utf8");

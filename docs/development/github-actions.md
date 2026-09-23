@@ -209,103 +209,32 @@ Use `profile=quick` for the other profile. Record the actual candidate SHA,
 cache state and job/step timings. Local BuildServer results are not GitHub CI
 acceptance.
 
-## Release packages workflow
+## Release workflow
 
-`.github/workflows/release.yml` builds the Agent distribution outside the
-primary CI graph. It triggers on `v*.*.*` tag pushes, requiring a lightweight
-`vX.Y.Z` tag with a plain SemVer version, and on manual `workflow_dispatch`.
-Dispatch always stays a dry run: it never publishes a GitHub Release, writes
-to GHCR, or loads the production signing key.
+The [Release Check](release-checks.md) owns the complete release graph, including
+the existing Full CI invocation, exact product builds, Package & Upgrade,
+supported application compatibility, Business Smoke, selected Integration and
+Resilience, and existing security checks. It is not added to PR required checks.
+The initial migration selects every supported check; normal selection uses the
+entire diff from the last published Release.
 
-- Dispatch accepts `version` and `arch` (`amd64`, `arm64`, or `all`).
-  The default `amd64` builds and smokes only one architecture, avoiding the
-  arm64 Agent and Controller build legs for faster feedback. Tag pushes
-  always build both amd64 and arm64, regardless of dispatch defaults.
-- Agent packages build natively on `ubuntu-24.04` (amd64) and
-  `ubuntu-24.04-arm` (arm64), without emulation. Each selected leg builds
-  Agent, privd, and upgrader through the shared `build-release-agent.sh` and
-  `build-agent-binaries.sh` entrypoints in a digest-pinned Rocky 9 container
-  with glibc 2.34. Cargo objects are isolated from host-built objects; native
-  host/daemon/container/ELF identity and all three binary versions are checked.
-  It produces a signed tar archive plus deb/rpm,
-  and runs `scripts/release-native-package-smoke.sh` for the candidate's
-  deb install/upgrade/removal and rpm install/upgrade/erase scripts.
-  It also runs the published transitional v1.0.0 DEB/RPM baseline package smoke, executing
-  all three installed candidate binaries on Ubuntu and systemd Rocky 9.
-  The additional full upgrade gate below is independent of this release job.
-- Tag pushes and `arch=all` dry runs download both package sets and run
-  `scripts/validate-release-packages.sh`. This retains package presence,
-  signatures, architecture metadata, embedded payload consistency, and
-  canonical checksum coverage of packages and versioned bootstrap assets.
-  Single-architecture dry runs skip this two-architecture aggregate job;
-  their candidate lifecycle smoke still runs.
-- Controller builds use the same selected architectures and pinned BuildKit.
-  Each leg exports the four first-party images as Docker archives and runs
-  `scripts/release-controller-image-smoke.sh` against those exact archives
-  on its native runner. Package sets and Controller image archives remain
-  uploaded as artifacts. Native smoke diagnostics upload only on failure
-  or cancellation, without duplicate baseline diagnostics.
-- Build jobs use ephemeral signing keys and source-read permissions only.
-  The tag-push-only publish job remains behind the `release-publishing`
-  environment with `contents: write` and `packages: write`. It checks
-  SemVer and binds the remote tag to the source commit once before
-  production writes. Runner environment recording runs only here and is
-  non-blocking.
-- The publish job loads the built Controller archives, pushes both platforms
-  to GHCR, assembles multi-platform indexes, checks both architectures and
-  anonymous reads, and generates the platform manifests plus the amd64
-  compatibility alias. It re-signs Agent archives with the release key,
-  rebuilds native installers with the release trust anchor, validates against
-  `AGENT_TRUSTED_KEY_SHA256`, and signs and verifies `SHA256SUMS`.
-  The complete package, Controller manifest, and bootstrap asset set is
-  uploaded to a draft GitHub Release before publication, without
-  `--clobber`. A leftover draft may be recreated; an already-published
-  release is not modified, and reruns have no read-only recovery path.
-- Release immutability prerequisites, `REPO_ADMIN_READ_TOKEN`, gh release
-  verification support checks, image provenance attestations, post-publish
-  attestation/immutability verification, and repeated tag binding are not
-  required by this workflow. Existing package signatures and installer trust
-  verification remain unchanged.
+Dispatch `release.yml` with `version` and `arch=all` for a full dry-run.
+It never publishes, writes to production registries or reads the production
+signing key. `arch=amd64` or `arm64` is diagnostic only and skips Release Check.
+Tag runs execute one integrated round before protected Publish; no extra full
+dry-run is required. Only Publish obtains write permissions and release keys.
 
-## Manual native upgrade validation
+The [diagnostic workflow](release-upgrade-validation.md) has one purpose enum
+instead of interacting booleans. Historical pre-1.0 application cells are not
+part of the formal matrix. Existing registered v1.0.0 requirements remain.
 
-`.github/workflows/release-upgrade.yml` is a separate, manual-only workflow.
-By default it requires Agent and Controller upgrade results on both native
-`ubuntu-24.04` and `ubuntu-24.04-arm` runners. `session_compatibility=true`
-adds six application cells: the published `v1.0.0` node against the candidate
-(the exact-pair evidence for the temporary `1.x` mixed-version window,
-required for `1.x` release acceptance) plus historical `v0.6.0`/`v0.6.1`
-diagnostics, each on both architectures.
-`session_only=true` runs those application cells even without the other flag,
-and skips both native upgrade matrices and `Native Upgrade Result`. Both
-flags default to `false`. Prepare still requires and freezes candidate
-version, baseline tag and exact dispatch SHA in every mode; application jobs
-always test all three node baselines. The workflow neither publishes a release
-nor becomes a Basic CI required check.
+Product consumers use actual producer artifact IDs plus explicit candidate
+manifest and payload verification. Independent failed jobs may rerun without
+requiring all architectures to share a run attempt. Shared cross-host faults
+still require a coherent group rerun. See [Resilience](g6-readiness.md).
 
-Historical pre-1.0 diagnostics do not establish upgrade support into `1.x`
-and are not formal 1.x release requirements. The `v1.0.0` pair does not
-replace the native upgrade gate or matched-candidate application acceptance.
-Application-only evidence does not
-satisfy native upgrade acceptance or matched-candidate application acceptance.
-`Native Upgrade Result` covers only native units, not application outcomes.
-The [finite compatibility contract](../reference/stable-contracts.md#finite-release-matrix)
-defines required application workflows and the adopted exclusions; phase
-failures remain failures even when they document an excluded promise.
-
-See [Native upgrade validation](release-upgrade-validation.md) for dispatch,
-trust anchors, evidence, reproduction, and the limits of this gate. Select the
-pushed candidate branch, a numeric candidate version newer than the registered
-baseline, and that branch's full SHA. The default registered baseline is
-`v1.0.0`, the published transitional upgrade source for the first recommended
-production stable baseline `v1.0.1`. Pre-1.0 upgrade sources are rejected for
-formal 1.x candidates; those installations must redeploy. A new release does
-not automatically register itself. Unlike Quick/Full
-CI this is cross-version native upgrade evidence, unlike Release it does not
-publish, and unlike Formal G6 it does not certify full readiness, HA or PITR.
-
-## Deferred native validation
-
-Native systemd/privd/PKI and live relay scenarios remain outside Basic CI.
-Pure Rust adapter tests still run in the ordinary Rust workspace suite.
-Use the script-level manual acceptance commands for environment-dependent checks.
+Source dependency/secret scans and Controller image scanning/SBOM policies are
+unchanged. Image scans precede any production registry write, and Publish still
+checks loaded image config digests against the scanned summary before pushing.
+Final package re-signing may not change the tested payload archive; installer
+signatures, embedded trust and payload equality are validated before release.
