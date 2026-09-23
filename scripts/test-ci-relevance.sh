@@ -51,7 +51,7 @@ while read -r path selected; do
           expect "${out}" ci_suites guards ;;
         .github/workflows/release*.yml|scripts/release-upgrade-baselines.json)
           expect "${out}" ci_suites release ;;
-        .github/workflows/g6-harness-core.yml|scripts/g6-pipeline.mjs|docs/acceptance/g6-*)
+        .github/workflows/g6-harness-core.yml|scripts/g6-pipeline.mjs|scripts/test-g6-resource-sampler.sh|docs/acceptance/g6-*)
           expect "${out}" ci_suites g6 ;;
       esac
     else
@@ -110,6 +110,7 @@ docs/acceptance/g6-slo.yaml run_ci_tools
 docs/acceptance/g6-runtime-result-schema.json run_ci_tools
 scripts/g6-runtime/package-lock.json run_ci_tools
 scripts/g6-pipeline.mjs run_ci_tools
+scripts/test-g6-resource-sampler.sh run_ci_tools
 scripts/g6-buildx-cache.sh run_ci_tools
 .github/actions/g6-cache-credentials/index.js run_ci_tools
 tools/g6-harness/internal/runtime/runtime.go run_ci_tools

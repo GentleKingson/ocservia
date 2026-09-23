@@ -187,8 +187,8 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       reject("#{name} must run harness #{command} #{expected} times") unless calls.count("go|#{work}/tools/g6-harness|#{command}") == expected
     end
     if expected == 1
-      reject("#{name} lost G6 contract/evidence checks") unless calls.grep(/^test-g6-/).length == 12 &&
-        %w[test-g6-workflow-contract.sh test-g6-evidence-pipeline.sh test-g6-evidence-verifier.mjs].all? { |test| calls.count(test) == 1 }
+      reject("#{name} lost G6 contract/evidence checks") unless calls.grep(/^test-g6-/).length == 13 &&
+        %w[test-g6-workflow-contract.sh test-g6-evidence-pipeline.sh test-g6-evidence-verifier.mjs test-g6-resource-sampler.sh].all? { |test| calls.count(test) == 1 }
     else
       reject("Release-only must run the publishing contract without guards") unless
         output.include?("Shared release build and publishing boundary contracts passed") && !calls.include?("test-bootstrap-profiles.sh")
