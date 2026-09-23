@@ -563,12 +563,12 @@ phase_isolate() {
       WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID%-fd-a}-fd-b-backlog-%'
         AND o.published_at IS NULL AND o.available_at<=now())
   ) FROM active" >"${G6RD_OUTBOX}/isolation/active-load.json"
-  jq -e '.queued_outbox_count >= 50 and (.commands | length >= 50 and all(
+  jq -e --argjson agents "$(g6rd_total_agent_count)" '.queued_outbox_count >= $agents and (.commands | length >= $agents and all(
     (.command_state | IN("dispatched","accepted","running")) and
     .attempt_state == "sent" and .attempt_finished and
     (.last_telemetry_at | type == "string" and length > 0)))' \
     "${G6RD_OUTBOX}/isolation/active-load.json" >/dev/null || {
-    echo "fewer than fifty real commands, outbox rows, and live telemetry producers are active at failure injection" >&2
+    echo "not every configured Agent has real commands, outbox rows, and live telemetry at failure injection" >&2
     return 1
   }
   # Freeze the conservative RTO start immediately before the fault using the

@@ -67,9 +67,8 @@ critical_timeouts = {
     "Build and freeze the release images" => 30,
     "Clean release-image resources" => 5
   },
-  "g6-rd-assemble" => {
-    "Assemble the evidence bundle" => 15,
-    "Embed the deterministic bundle verdict" => 5
+  "resilience-result" => {
+    "Assemble and evaluate once" => 15
   }
 }
 critical_timeouts.each do |job_id, expected|
@@ -87,12 +86,6 @@ window = fd_b_steps.find { |step| step["run"] == '"${G6_HARNESS_BIN}" run-segmen
 reject("resource preflight must precede the full observation window") unless
   preflight && window && fd_b_steps.index(preflight) < fd_b_steps.index(window)
 
-bundle_upload = jobs.fetch("g6-rd-assemble").fetch("steps").find do |step|
-  step["name"] == "Publish the partial or complete evidence bundle"
-end
-reject("the evidence bundle diagnostics upload is missing") unless bundle_upload
-reject("the evidence bundle diagnostics must upload after failure") unless bundle_upload.fetch("if") == "always()"
-reject("assembly must always publish a structured partial or complete bundle") unless bundle_upload.fetch("with").fetch("if-no-files-found") == "error"
 
 fd_a_steps = jobs.fetch("g6-rd-fd-a").fetch("steps")
 promoted_wait = fd_a_steps.find { |step| step["name"] == "Wait for the promoted primary" }

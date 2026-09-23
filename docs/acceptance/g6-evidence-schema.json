@@ -13,7 +13,6 @@
     "started_at",
     "finished_at",
     "environment",
-    "measurements",
     "observations",
     "artifacts"
   ],

@@ -19,10 +19,6 @@ import { parseArgs } from "node:util";
 
 const RUNTIME_SCHEMA = "ocservia.g6-runtime-result.v1";
 const SOURCE_SCHEMA = "ocservia.g6-source-manifest.v1";
-const ASSEMBLY_SCHEMA = "ocservia.g6-assembly-result.v1";
-const SECRET_SCAN_SCHEMA = "ocservia.g6-secret-scan-result.v1";
-const GATE_SCHEMA = "ocservia.g6-gate-result.v1";
-const PHASE_SCHEMA = "ocservia.g6-evidence-phase-result.v1";
 
 function fail(message) {
   throw new Error(message);
@@ -98,73 +94,14 @@ function bindingFromOptions(values, allowMissingRelease = false) {
 function workflowOptions(env = process.env) {
   if (!env.G6_PIPELINE_NEEDS) return {};
   const needs = JSON.parse(env.G6_PIPELINE_NEEDS);
-  const assembly = needs["g6-rd-assemble"]?.outputs ?? {};
-  const fdA = needs["g6-rd-fd-a"]?.outputs;
-  const fdB = needs["g6-rd-fd-b"]?.outputs;
   return {
     "candidate-sha": env.GITHUB_SHA,
     "run-id": env.GITHUB_RUN_ID,
     "run-attempt": env.GITHUB_RUN_ATTEMPT,
     "environment-id": `g6-${createHash("sha256").update(`${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`).digest("hex").slice(0, 16)}`,
     authority: env.G6_AUTHORITY,
-    "release-manifest-digest": fdA?.["release-manifest-digest"] ?? assembly["release-manifest-digest"],
-    "fd-a-artifact-id": fdA?.["raw-artifact-id"] ?? assembly["fd-a-artifact-id"],
-    "fd-a-artifact-digest": fdA?.["raw-artifact-digest"] ?? assembly["fd-a-artifact-digest"],
-    "fd-b-artifact-id": fdB?.["raw-artifact-id"] ?? assembly["fd-b-artifact-id"],
-    "fd-b-artifact-digest": fdB?.["raw-artifact-digest"] ?? assembly["fd-b-artifact-digest"],
-    "bundle-artifact-id": env.G6_BUNDLE_ARTIFACT_ID ?? assembly["bundle-artifact-id"],
-    "bundle-artifact-digest": env.G6_BUNDLE_ARTIFACT_DIGEST ?? assembly["bundle-artifact-digest"],
-    "job-results": needs,
+    "release-manifest-digest": needs["g6-rd-fd-a"]?.outputs?.["release-manifest-digest"],
   };
-}
-
-function normalizedOutcome(outcome) {
-  return outcome === "success" ? "passed" : "failed";
-}
-
-function failureResult(values) {
-  if (!values.overwrite && existsSync(values.output) && statSync(values.output).size > 0) return;
-  mkdirSync(dirname(values.output), { recursive: true });
-  const binding = bindingFromOptions(values, true);
-  const artifacts = emptyArtifactBindings();
-  for (const [source, prefix] of [["fd_a", "fd-a"], ["fd_b", "fd-b"], ["bundle", "bundle"]]) {
-    const id = values[`${prefix}-artifact-id`] || null;
-    const digest = values[`${prefix}-artifact-digest`] || null;
-    if (id && !/^[1-9][0-9]*$/.test(id)) fail(`${prefix} artifact ID is invalid`);
-    if (digest && !/^[0-9a-f]{64}$/.test(digest)) fail(`${prefix} artifact digest is invalid`);
-    artifacts[source] = { artifact_id: id, artifact_digest: digest };
-  }
-  const reason = values.reason || `${values.phase} did not produce a result`;
-  let result;
-  if (values.phase === "assembly") {
-    result = assemblyResultBase(binding, "failed", 1, reason, artifacts);
-    writeFileSync(join(dirname(values.output), "build.stderr.log"), `${reason}\n`, { flag: "a" });
-    writeFileSync(join(dirname(values.output), "evidence-build-exit-code.txt"), "1\n");
-  } else if (values.phase === "verification") {
-    result = { schema_version: PHASE_SCHEMA, phase: "verify", ...binding, artifacts,
-      status: "failed", exit_code: 1, reason };
-  } else if (values.phase === "gate") {
-    const needs = values["job-results"] ?? {};
-    const outcome = (job) => normalizedOutcome(needs[job]?.result);
-    result = {
-      schema_version: GATE_SCHEMA, ...binding, artifacts,
-      runtime: { fd_a: outcome("g6-rd-fd-a"), fd_b: outcome("g6-rd-fd-b") },
-      assembly: outcome("g6-rd-assemble"), secret_scan: outcome("g6-rd-secret-scan"),
-      independent_verification: outcome("g6-rd-verifier"), final_status: "failed",
-    };
-  } else {
-    fail("fallback phase must be assembly, verification or gate");
-  }
-  writeJson(values.output, result);
-}
-
-function secretScanResult(values) {
-  const status = normalizedOutcome(values.outcome);
-  writeJson(values.output, {
-    schema_version: SECRET_SCAN_SCHEMA,
-    ...bindingFromOptions(values, status !== "passed"),
-    status,
-  });
 }
 
 function assertBinding(actual, expected, label) {
@@ -296,274 +233,30 @@ function mergePeerEffects(fdA, runDir) {
   }
 }
 
-function emptyArtifactBindings() {
-  return {
-    fd_a: { artifact_id: null, artifact_digest: null },
-    fd_b: { artifact_id: null, artifact_digest: null },
-    bundle: { artifact_id: null, artifact_digest: null },
-  };
-}
-
-function artifactBindingsFromOptions(values) {
-  return {
-    fd_a: artifactReference(
-      values["fd-a-artifact-id"],
-      values["fd-a-artifact-digest"],
-      "fd-a",
-    ),
-    fd_b: artifactReference(
-      values["fd-b-artifact-id"],
-      values["fd-b-artifact-digest"],
-      "fd-b",
-    ),
-    bundle: artifactReference(
-      values["bundle-artifact-id"],
-      values["bundle-artifact-digest"],
-      "bundle",
-    ),
-  };
-}
-
-function assertArtifactBindings(actual, expected, label) {
-  for (const source of ["fd_a", "fd_b", "bundle"]) {
-    for (const key of ["artifact_id", "artifact_digest"]) {
-      if (actual?.[source]?.[key] !== expected[source][key]) {
-        fail(
-          `${label} ${source} ${key} mismatch: expected ${expected[source][key]}, got ${actual?.[source]?.[key]}`,
-        );
-      }
-    }
-  }
-}
-
-function requireCompleteArtifactBindings(artifacts, label) {
-  for (const source of ["fd_a", "fd_b", "bundle"]) {
-    if (!artifacts[source].artifact_id || !artifacts[source].artifact_digest) {
-      fail(`${label} ${source} artifact provenance is unavailable`);
-    }
-  }
-}
-
-function assemblyResultBase(binding, status, exitCode, reason, artifacts) {
-  return {
-    schema_version: ASSEMBLY_SCHEMA,
-    ...binding,
-    artifacts: artifacts ?? emptyArtifactBindings(),
-    status,
-    exit_code: exitCode,
-    reason: reason || null,
-  };
-}
-
-function artifactReference(id, digest, label) {
-  if (!id && !digest) return { artifact_id: null, artifact_digest: null };
-  if (!/^[1-9][0-9]*$/.test(id ?? "")) fail(`${label} artifact ID is invalid`);
-  if (!/^[0-9a-f]{64}$/.test(digest ?? "")) fail(`${label} artifact digest is invalid`);
-  return { artifact_id: id, artifact_digest: digest };
-}
-
 function assemble(values) {
-  const fdA = resolve(values["fd-a"]);
-  const fdB = resolve(values["fd-b"]);
-  const out = resolve(values.output);
-  const work = resolve(values["work-dir"]);
+  const fdA = resolve(values["fd-a"]), fdB = resolve(values["fd-b"]);
+  const out = resolve(values.output), work = resolve(values["work-dir"]);
   const binding = bindingFromOptions(values);
-  let artifacts = emptyArtifactBindings();
   mkdirSync(out, { recursive: true });
-  let fdAResult;
-  let fdBResult;
   try {
-    artifacts = artifactBindingsFromOptions(values);
-    const sources = [
-      {
-        failure_domain: "fd-a",
-        root: fdA,
-        ...artifacts.fd_a,
-      },
-      {
-        failure_domain: "fd-b",
-        root: fdB,
-        ...artifacts.fd_b,
-      },
-    ];
-    const validationFailures = [];
-    for (const source of sources) {
-      try {
-        if (!source.artifact_id || !source.artifact_digest) {
-          fail(`${source.failure_domain} artifact provenance is unavailable`);
-        }
-        const result = validateRuntime(source.root, binding, source.failure_domain);
-        source.runtime_status = result.status;
-        source.manifest_sha256 = digestFile(join(source.root, "source-manifest.json"));
-        if (source.failure_domain === "fd-a") fdAResult = result;
-        if (source.failure_domain === "fd-b") fdBResult = result;
-      } catch (error) {
-        source.runtime_status = "unavailable";
-        source.manifest_sha256 = null;
-        source.validation_error = error.message;
-        validationFailures.push(`${source.failure_domain}: ${error.message}`);
-      }
-      delete source.root;
-    }
-    writeJson(join(out, "raw-source-inventory.json"), {
-      schema_version: "ocservia.g6-raw-source-inventory.v1",
-      ...binding,
-      sources,
-    });
-    if (validationFailures.length > 0) {
-      writeJson(
-        join(out, "assembly-result.json"),
-        assemblyResultBase(
-          binding,
-          "failed",
-          1,
-          `raw source validation failed: ${validationFailures.join("; ")}`,
-          artifacts,
-        ),
-      );
-      return 1;
-    }
-    if (fdAResult.status !== "passed" || fdBResult.status !== "passed") {
-      writeJson(
-        join(out, "assembly-result.json"),
-        assemblyResultBase(binding, "failed", 1, "runtime evidence is incomplete", artifacts),
-      );
-      return 1;
-    }
+    const a = validateRuntime(fdA, binding, "fd-a");
+    const b = validateRuntime(fdB, binding, "fd-b");
+    if (a.status !== "passed" || b.status !== "passed") fail("runtime evidence is incomplete");
     copyAssemblyInput(fdB, work);
     mergePeerEffects(fdA, work);
-    const builder = spawnSync(
-      process.execPath,
-      [
-        values.builder,
-        "--run-dir", work,
-        "--peer-dir", fdA,
-        "--out-dir", out,
-        "--slo", values.slo,
-        "--environment-id", binding.environment_id,
-        "--candidate-sha", binding.candidate_sha,
-        "--authority", binding.authority,
-        "--failure-domain-class", "multi_host",
-        "--run-id", fdBResult.domain_run_id || `${binding.run_id}-fd-b`,
-      ],
-      { encoding: "utf8" },
-    );
+    const builder = spawnSync(process.execPath, [
+      values.builder, "--run-dir", work, "--peer-dir", fdA, "--out-dir", out,
+      "--slo", values.slo, "--environment-id", binding.environment_id,
+      "--candidate-sha", binding.candidate_sha, "--authority", binding.authority,
+      "--failure-domain-class", "multi_host", "--run-id", b.domain_run_id || `${binding.run_id}-fd-b`,
+    ], { encoding: "utf8" });
     writeFileSync(join(out, "build.stdout.log"), builder.stdout || "");
-    writeFileSync(join(out, "build.stderr.log"), builder.stderr || "");
-    writeFileSync(join(out, "evidence-build-exit-code.txt"), `${builder.status ?? 1}\n`);
-    if (builder.status !== 0) {
-      const builderError = existsSync(join(out, "builder-error.json"))
-        ? readJson(join(out, "builder-error.json"))
-        : null;
-      const reason = builderError?.reason || (builder.stderr || "evidence builder failed").trim();
-      writeJson(
-        join(out, "assembly-result.json"),
-        assemblyResultBase(binding, "failed", builder.status ?? 1, reason, artifacts),
-      );
-      return builder.status ?? 1;
-    }
-    writeJson(
-      join(out, "assembly-result.json"),
-      assemblyResultBase(binding, "passed", 0, null, artifacts),
-    );
-    return 0;
+    writeFileSync(join(out, "build.stderr.log"), builder.stderr || builder.error?.message || "");
+    return builder.status ?? 1;
   } catch (error) {
-    writeJson(
-      join(out, "assembly-result.json"),
-      assemblyResultBase(binding, "failed", 1, error.message, artifacts),
-    );
-    writeFileSync(join(out, "build.stderr.log"), `${error.stack || error.message}\n`);
-    writeFileSync(join(out, "evidence-build-exit-code.txt"), "1\n");
+    writeFileSync(join(out, "build.stderr.log"), error.stack || error.message);
     return 1;
   }
-}
-
-function finalizeAssembly(values) {
-  const binding = bindingFromOptions(values);
-  const input = readJson(values.input);
-  assertBinding(input, binding, "assembly result");
-  if (input.schema_version !== ASSEMBLY_SCHEMA) fail("assembly result schema is invalid");
-  const expected = artifactBindingsFromOptions(values);
-  for (const source of ["fd_a", "fd_b"]) {
-    for (const key of ["artifact_id", "artifact_digest"]) {
-      if (input.artifacts?.[source]?.[key] !== expected[source][key]) {
-        fail(`assembly result ${source} ${key} mismatch`);
-      }
-    }
-  }
-  if (!expected.bundle.artifact_id || !expected.bundle.artifact_digest) {
-    fail("assembled bundle artifact provenance is unavailable");
-  }
-  writeJson(values.output, { ...input, artifacts: expected });
-}
-
-function bindVerification(values) {
-  const binding = bindingFromOptions(values);
-  const result = readJson(values.input);
-  if (result.schema_version !== PHASE_SCHEMA || result.phase !== "verify") {
-    fail("verification result schema is invalid");
-  }
-  const artifacts = artifactBindingsFromOptions(values);
-  const assembly = readJson(values["assembly-result"]);
-  assertBinding(assembly, binding, "assembly result");
-  if (assembly.schema_version !== ASSEMBLY_SCHEMA) fail("assembly result schema is invalid");
-  assertArtifactBindings(assembly.artifacts, artifacts, "assembly result");
-  if (result.status !== "failed") {
-    requireCompleteArtifactBindings(artifacts, "verification");
-  }
-  writeJson(values.output, { ...result, ...binding, artifacts });
-}
-
-function gate(values) {
-  const output = resolve(values.output);
-  const binding = bindingFromOptions(values);
-  const fdA = readJson(values["fd-a-result"]);
-  const fdB = readJson(values["fd-b-result"]);
-  const assembly = readJson(values["assembly-result"]);
-  const scan = readJson(values["secret-scan-result"]);
-  const verification = readJson(values["verification-result"]);
-  const artifacts = artifactBindingsFromOptions(values);
-  requireCompleteArtifactBindings(artifacts, "gate");
-  for (const [label, result] of [
-    ["fd-a runtime", fdA],
-    ["fd-b runtime", fdB],
-    ["assembly", assembly],
-    ["secret scan", scan],
-    ["verification", verification],
-  ]) {
-    assertBinding(result, binding, label);
-  }
-  if (fdA.schema_version !== RUNTIME_SCHEMA || fdB.schema_version !== RUNTIME_SCHEMA) {
-    fail("gate runtime result schema is invalid");
-  }
-  if (assembly.schema_version !== ASSEMBLY_SCHEMA) fail("gate assembly result schema is invalid");
-  if (scan.schema_version !== SECRET_SCAN_SCHEMA) fail("gate secret scan result schema is invalid");
-  if (verification.schema_version !== PHASE_SCHEMA || verification.phase !== "verify") {
-    fail("gate verification result schema is invalid");
-  }
-  assertArtifactBindings(assembly.artifacts, artifacts, "assembly result");
-  assertArtifactBindings(verification.artifacts, artifacts, "verification result");
-  const prerequisitePass =
-    fdA.status === "passed" &&
-    fdB.status === "passed" &&
-    assembly.status === "passed" &&
-    scan.status === "passed";
-  const finalStatus = !prerequisitePass
-    ? "failed"
-    : binding.authority === "production_readiness"
-      ? verification.status === "passed" ? "passed" : "failed"
-      : verification.status === "accepted_non_final" ? "accepted_non_final" : "failed";
-  writeJson(output, {
-    schema_version: GATE_SCHEMA,
-    ...binding,
-    artifacts,
-    runtime: { fd_a: fdA.status, fd_b: fdB.status },
-    assembly: assembly.status,
-    secret_scan: scan.status,
-    independent_verification: verification.status,
-    final_status: finalStatus,
-  });
-  return finalStatus === "failed" ? 1 : 0;
 }
 
 function parse(command, args) {
@@ -576,134 +269,32 @@ function parse(command, args) {
     "release-manifest-digest": { type: "string" },
   };
   const commandOptions = {
-    fallback: {
-      ...common,
-      phase: { type: "string" },
-      output: { type: "string" },
-    },
-    "secret-scan-result": {
-      ...common,
-      output: { type: "string" },
-      outcome: { type: "string" },
-    },
-    "check-runtime": {
-      ...common,
-      root: { type: "string" },
-      domain: { type: "string" },
-    },
+    "check-runtime": { ...common, root: { type: "string" }, domain: { type: "string" } },
     "runtime-result": {
-      ...common,
-      root: { type: "string" },
-      output: { type: "string" },
-      domain: { type: "string" },
-      status: { type: "string" },
-      "last-phase": { type: "string" },
-      "domain-run-id": { type: "string" },
-      "failure-class": { type: "string" },
-      "failure-code": { type: "string" },
+      ...common, root: { type: "string" }, output: { type: "string" }, domain: { type: "string" },
+      status: { type: "string" }, "last-phase": { type: "string" }, "domain-run-id": { type: "string" },
+      "failure-class": { type: "string" }, "failure-code": { type: "string" },
     },
     assemble: {
-      ...common,
-      "fd-a": { type: "string" },
-      "fd-b": { type: "string" },
-      output: { type: "string" },
-      "work-dir": { type: "string" },
-      builder: { type: "string" },
-      slo: { type: "string" },
-      "fd-a-artifact-id": { type: "string" },
-      "fd-a-artifact-digest": { type: "string" },
-      "fd-b-artifact-id": { type: "string" },
-      "fd-b-artifact-digest": { type: "string" },
-    },
-    "finalize-assembly": {
-      ...common,
-      input: { type: "string" },
-      output: { type: "string" },
-      "fd-a-artifact-id": { type: "string" },
-      "fd-a-artifact-digest": { type: "string" },
-      "fd-b-artifact-id": { type: "string" },
-      "fd-b-artifact-digest": { type: "string" },
-      "bundle-artifact-id": { type: "string" },
-      "bundle-artifact-digest": { type: "string" },
-    },
-    "bind-verification": {
-      ...common,
-      input: { type: "string" },
-      output: { type: "string" },
-      "assembly-result": { type: "string" },
-      "fd-a-artifact-id": { type: "string" },
-      "fd-a-artifact-digest": { type: "string" },
-      "fd-b-artifact-id": { type: "string" },
-      "fd-b-artifact-digest": { type: "string" },
-      "bundle-artifact-id": { type: "string" },
-      "bundle-artifact-digest": { type: "string" },
-    },
-    gate: {
-      ...common,
-      output: { type: "string" },
-      "fd-a-result": { type: "string" },
-      "fd-b-result": { type: "string" },
-      "assembly-result": { type: "string" },
-      "secret-scan-result": { type: "string" },
-      "verification-result": { type: "string" },
-      "fd-a-artifact-id": { type: "string" },
-      "fd-a-artifact-digest": { type: "string" },
-      "fd-b-artifact-id": { type: "string" },
-      "fd-b-artifact-digest": { type: "string" },
-      "bundle-artifact-id": { type: "string" },
-      "bundle-artifact-digest": { type: "string" },
+      ...common, "fd-a": { type: "string" }, "fd-b": { type: "string" }, output: { type: "string" },
+      "work-dir": { type: "string" }, builder: { type: "string" }, slo: { type: "string" },
     },
   };
   if (!commandOptions[command]) fail(`unknown command: ${command}`);
   return parseArgs({ args, options: commandOptions[command], strict: true }).values;
 }
 
-export {
-  ASSEMBLY_SCHEMA,
-  GATE_SCHEMA,
-  RUNTIME_SCHEMA,
-  SECRET_SCAN_SCHEMA,
-  SOURCE_SCHEMA,
-  assemble,
-  bindVerification,
-  finalizeAssembly,
-  gate,
-  runtimeResult,
-  sourceManifest,
-  verifySource,
-  workflowOptions,
-  failureResult,
-  secretScanResult,
-};
+export { assemble, runtimeResult, sourceManifest, verifySource, workflowOptions };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const command = process.argv[2];
-  let values;
   try {
-    values = { ...workflowOptions(), ...parse(command, process.argv.slice(3)) };
-    const status = command === "fallback"
-      ? (mkdirSync(dirname(values.output), { recursive: true }), failureResult(values), 0)
-      : command === "secret-scan-result"
-        ? (secretScanResult(values), 0)
-      : command === "check-runtime"
-        ? (validateRuntime(values.root, bindingFromOptions(values), values.domain), 0)
-      : command === "runtime-result"
-      ? (runtimeResult(values), 0)
-      : command === "assemble"
-        ? assemble(values)
-        : command === "finalize-assembly"
-          ? (finalizeAssembly(values), 0)
-          : command === "bind-verification"
-            ? (bindVerification(values), 0)
-            : gate(values);
-    process.exitCode = status;
+    const command = process.argv[2];
+    const values = { ...workflowOptions(), ...parse(command, process.argv.slice(3)) };
+    if (command === "runtime-result") runtimeResult(values);
+    else if (command === "check-runtime") validateRuntime(values.root, bindingFromOptions(values), values.domain);
+    else process.exitCode = assemble(values);
   } catch (error) {
     console.error(error.stack || error.message);
-    const phase = { "finalize-assembly": "assembly", "bind-verification": "verification" }[command];
-    if (phase && values?.output) {
-      mkdirSync(dirname(values.output), { recursive: true });
-      failureResult({ ...values, phase, reason: error.message, overwrite: true });
-    }
     process.exitCode = 1;
   }
 }

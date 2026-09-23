@@ -34,10 +34,20 @@ build_image() {
   printf '%s=%s\n' "${variable}" "${id}" >>"${GITHUB_ENV}"
   docker image inspect "${id}" >"${SESSION_EVIDENCE}/${variable}.image.json"
 }
-build_image G6RD_CONTROL_PLANE_IMAGE control control-plane/Dockerfile \
-  --build-arg "COMMIT=${CANDIDATE_SHA}" --no-cache-filter runtime-base
-# The single-Relay chain needs the launcher shipped in the production image.
-build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile
+if [[ -n "${CANDIDATE_PRODUCTS:-}" ]]; then
+  node scripts/release-artifacts.mjs verify "${CANDIDATE_PRODUCTS}" controller "${PACKAGE_ARCH}" "${VERSION:?}" "${CONTROLLER_MANIFEST_SHA256:?}"
+  for name in control transport; do
+    case "${name}" in control) variable=G6RD_CONTROL_PLANE_IMAGE ;; transport) variable=G6RD_TRANSPORTD_IMAGE ;; esac
+    docker load -i "${CANDIDATE_PRODUCTS}/${name}-linux-${PACKAGE_ARCH}.tar"
+    tag="ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${PACKAGE_ARCH}"
+    docker tag "${tag}" "session-${variable,,}:candidate"
+    printf '%s=%s\n' "${variable}" "$(docker image inspect --format '{{.Id}}' "${tag}")" >>"${GITHUB_ENV}"
+  done
+else
+  build_image G6RD_CONTROL_PLANE_IMAGE control control-plane/Dockerfile \
+    --build-arg "COMMIT=${CANDIDATE_SHA}" --no-cache-filter runtime-base
+  build_image G6RD_TRANSPORTD_IMAGE transport rust/transportd.Dockerfile
+fi
 docker run --rm --entrypoint /bin/sh session-g6rd_transportd_image:candidate \
   -ec 'test -x /usr/local/libexec/ocservia-transportd-relays'
 build_image G6RD_PROBE_IMAGE rust rust/g6-runtime.Dockerfile --target g6-probe-runtime

@@ -30,7 +30,7 @@ func TestWaitCommandPersistsStructuredFailure(t *testing.T) {
 		"wait-download",
 		"--name", "g6-rd-tunnel-fd-b-424242-3",
 		"--destination", filepath.Join(root, "destination"),
-		"--peer-job", "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults",
+		"--peer-job", "Resilience / G6 Formal FD-B: Standby, Promotion & Faults",
 		"--timeout", "1s",
 		"--result", resultPath,
 		"--state", filepath.Join(root, "state.json"),

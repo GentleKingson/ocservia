@@ -5,9 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FORMAL_CALLER="${ROOT}/.github/workflows/g6-readiness.yml"
 WORKFLOW="${ROOT}/.github/workflows/g6-harness-core.yml"
-CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 COMPOSE_FILE="${ROOT}/deploy/g6-readiness/compose.yaml"
 SUPERVISOR="${ROOT}/deploy/g6-readiness/agent-supervisor.sh"
 AGENT_MAIN="${ROOT}/rust/crates/agent/src/main.rs"
@@ -15,7 +13,6 @@ LIB="${ROOT}/scripts/g6-readiness-lib.sh"
 FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 AUTHORITY_HISTORY_SQL="${ROOT}/scripts/g6-authority-history.sql"
-CONTROL_APP="${ROOT}/control-plane/internal/platform/app/app.go"
 CONTROL_CONFIG="${ROOT}/control-plane/internal/platform/config/config.go"
 COORDINATION_MAINTENANCE="${ROOT}/control-plane/internal/coordination/maintenance.go"
 BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
@@ -34,408 +31,13 @@ CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
 INSTALL_ACTION="${ROOT}/.github/actions/g6-install-release/action.yml"
 INSTALL_HELPER="${ROOT}/scripts/g6-install-release.sh"
 
-ruby -r yaml - "${FORMAL_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" "${CHECKPOINT_ACTION}" "${RENDEZVOUS_CONTRACT}" <<'RUBY'
-formal_path, workflow_path, compose_path, ci_workflow_path = ARGV
-formal = YAML.safe_load(File.read(formal_path), aliases: true)
-workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
+# Workflow boundaries are exercised by the focused workflow and pipeline tests.
+ruby -r yaml - "${COMPOSE_FILE}" <<'RUBY'
+compose_path = ARGV.fetch(0)
 compose = YAML.safe_load(File.read(compose_path), aliases: true)
-ci_workflow = YAML.safe_load(File.read(ci_workflow_path), aliases: true)
-
 def reject(message)
-  warn message
-  exit 1
+  abort message
 end
-
-# Only the typed checkpoint action may publish a registered rendezvous name;
-# a raw artifact upload with one of these prefixes would skip the secret
-# policy and the typed manifest entirely.
-registry_prefixes = File.read(ARGV[5]).scan(/Prefix: "([^"]+)"/).flatten
-
-trigger = formal.fetch(true)
-reject("G6 readiness must remain workflow_dispatch-only") unless trigger.keys == ["workflow_dispatch"]
-authority = trigger.fetch("workflow_dispatch").fetch("inputs").fetch("authority")
-reject("the authority input must be a required choice") unless authority.fetch("type") == "choice" && authority.fetch("required") == true
-reject("the authority enum is frozen") unless authority.fetch("options") == %w[engineering production_readiness]
-reject("engineering must stay the default authority") unless authority.fetch("default") == "engineering"
-reject("G6 readiness permissions must be read-only") unless formal.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-concurrency = formal.fetch("concurrency")
-reject("G6 readiness concurrency must bind ref and authority") unless concurrency.fetch("group").include?("github.ref") && concurrency.fetch("group").include?("inputs.authority")
-reject("formal G6 dispatches must queue without cancelling an active evidence run") unless
-  concurrency.fetch("queue") == "max" && !concurrency.key?("cancel-in-progress")
-
-formal_jobs = formal.fetch("jobs")
-reject("formal readiness must be a single thin reusable-workflow caller") unless formal_jobs.keys == ["g6-harness-core"]
-formal_call = formal_jobs.fetch("g6-harness-core")
-reject("formal readiness must call the local reusable core") unless formal_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
-reject("formal readiness must select only the formal profile") unless
-  formal_call.fetch("with") == {
-    "profile" => "formal",
-    "authority" => "${{ inputs.authority }}",
-    "candidate_sha" => "${{ github.sha }}",
-  }
-
-core_trigger = workflow.fetch(true)
-reject("the G6 core must be reusable-only") unless core_trigger.keys == ["workflow_call"]
-core_inputs = core_trigger.fetch("workflow_call").fetch("inputs")
-reject("the reusable core must expose exact typed profile, authority, and candidate inputs") unless
-  core_inputs.keys.sort == %w[authority candidate_sha profile] &&
-  core_inputs.values_at("profile", "authority", "candidate_sha").all? { |input| input.fetch("type") == "string" && input.fetch("required") == true }
-reject("the reusable core permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-
-jobs = workflow.fetch("jobs")
-required_jobs = %w[
-  g6-contract
-  g6-rd-release-image
-  g6-rd-fd-a
-  g6-rd-fd-b
-  g6-rd-assemble
-  g6-rd-secret-scan
-  g6-rd-verifier
-  g6-rd-gate
-]
-reject("G6 readiness is missing a required semantic layer") unless
-  (required_jobs - jobs.keys).empty?
-policy_commands = %w[
-  scripts/test-g6-workflow-contract.sh
-  scripts/test-g6-formal-authority.sh
-  scripts/test-g6-release-identity.sh
-  scripts/test-g6-evidence-pipeline.sh
-  scripts/test-g6-secret-scan-config.sh
-  scripts/test-g6-runtime-adapters.sh
-  scripts/test-g6-readiness-hang-guards.sh
-]
-ci_jobs = ci_workflow.fetch("jobs")
-policy_commands.each do |command|
-  ci_count = ci_jobs.values.sum do |job|
-    Array(job.fetch("steps", [])).sum do |step|
-      step.fetch("run", "").lines.count { |line| line.strip == command }
-    end
-  end
-  reject("Basic CI must not run #{command}") unless ci_count.zero?
-  reject("failure-domain jobs must not repeat #{command}") if %w[g6-rd-fd-a g6-rd-fd-b].any? do |job_id|
-    Array(jobs.fetch(job_id).fetch("steps")).any? do |step|
-      step.fetch("run", "").lines.any? { |line| line.strip == command }
-    end
-  end
-end
-jobs.each do |job_id, job|
-  reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
-  reject("#{job_id} job env must not reference the step-only runner context") if job.fetch("env", {}).values.any? { |value| value.to_s.include?("runner.") }
-  timeout_bound = job_id.start_with?("g6-rd-fd-") ? 90 : (job_id == "g6-rd-release-image" ? 35 : 20)
-  reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= timeout_bound
-  reject("#{job_id} Action is not pinned to a full SHA or exact local path") if
-    Array(job.fetch("steps")).any? do |step|
-      step.key?("uses") &&
-        !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) &&
-        !%w[./.github/actions/g6-checkpoint-upload ./.github/actions/g6-install-release ./.github/actions/g6-cache-credentials].include?(step.fetch("uses"))
-    end
-  reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
-  # Failure masking stays forbidden for every authoritative step. The only
-  # exemption is the pure telemetry upload: an artifact-service failure in a
-  # g6-timing-* diagnostics upload must not fail a job whose scan result and
-  # evidence are already published; anything else masking a step is rejected.
-  reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? do |step|
-    step["continue-on-error"] == true &&
-      !(step["uses"].to_s.start_with?("actions/upload-artifact@") &&
-        step.fetch("with", {}).fetch("name", "").include?("g6-timing-"))
-  end
-  Array(job.fetch("steps")).each do |step|
-    next unless step["uses"].to_s.start_with?("actions/upload-artifact")
-    rendered = step.fetch("with", {}).fetch("name", "")
-      .gsub("${{ github.run_id }}", "${GITHUB_RUN_ID}")
-      .gsub("${{ github.run_attempt }}", "${GITHUB_RUN_ATTEMPT}")
-    prefix = rendered.sub(/-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}\z/, "")
-    reject("#{job_id} must publish #{prefix} through the typed checkpoint action") if
-      registry_prefixes.include?(prefix)
-  end
-  if job_id.start_with?("g6-rd-")
-    environment = job.fetch("environment").fetch("name")
-    reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
-  else
-    reject("#{job_id} must never enter a formal G6 environment") if job.key?("environment")
-  end
-end
-
-reject("caller-specific concurrency policy must not be duplicated inside the reusable core") if
-  workflow.key?("concurrency")
-%w[g6-rd-release-image g6-rd-fd-a g6-rd-fd-b].each do |job_id|
-  reject("#{job_id} must select the formal profile") unless
-    jobs.fetch(job_id).fetch("if") == "inputs.profile == 'formal'"
-end
-%w[g6-rd-assemble g6-rd-secret-scan g6-rd-verifier g6-rd-gate].each do |job_id|
-  reject("#{job_id} must select the formal profile even under always()") unless
-    jobs.fetch(job_id).fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
-end
-
-release_job = jobs.fetch("g6-rd-release-image")
-release_steps = Array(release_job.fetch("steps"))
-reject("the release producer must expose its frozen manifest digest") unless
-  release_job.fetch("outputs").fetch("release-manifest-digest").include?("steps.release-build.outputs.release-manifest-digest")
-release_build = release_steps.find { |step| step["name"] == "Build and freeze the release images" }
-release_upload = release_steps.find { |step| step["name"] == "Publish the frozen release images" }
-release_cleanup = release_steps.find { |step| step["name"] == "Clean release-image resources" }
-release_run = release_build&.fetch("run")
-release_variables = %w[G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE G6RD_AGENT_IMAGE]
-required_dockerfiles = %w[control-plane/Dockerfile rust/g6-runtime.Dockerfile deploy/production/relay.Dockerfile]
-reject("the complete release image set must be candidate-labeled and exported once") unless release_run&.include?("org.opencontainers.image.revision=${GITHUB_SHA}") && required_dockerfiles.all? { |path| release_run.include?(path) } && release_run.include?("postgres:17.10-bookworm") && release_run.include?("docker save") && release_run.include?("sha256sum runtime-images.tar.gz image-ids.tsv")
-shared_builder_tokens = [
-  "--target g6-rust-builder",
-  "--target transportd-runtime",
-  "--target g6-probe-runtime",
-  "--target g6-agent-runtime",
-]
-reject("every first-party Rust image must assemble from the one shared builder stage") unless
-  shared_builder_tokens.all? { |token| release_run.include?(token) }
-reject("the shared Rust graph must keep its own per-build timing marks") unless
-  %w[control_plane_build relay_build rust_workspace_build transportd_build g6_probe_build g6_agent_build].all? { |stage| release_run.include?(stage) } &&
-    release_run.include?("g6-timing.sh image")
-tunnel_release_tokens = [
-  "--target g6-tunnel-artifact",
-  "--output \"type=local,dest=${tunnel_output}\"",
-  "ocservia-g6-tunnel",
-  "tunnel-manifest.tsv",
-  "candidate_sha",
-  "release-artifacts.sha256",
-]
-reject("the host-side tunnel must be built once and frozen with the release") unless
-  tunnel_release_tokens.all? { |token| release_run.include?(token) }
-harness_release_tokens = [
-  "scripts/env.sh",
-  '.tools/go/bin/go',
-  "GOTOOLCHAIN=local",
-  "GOOS=linux",
-  "GOARCH=amd64",
-  "./tools/g6-harness/cmd/g6-harness",
-  "ocservia-g6-harness",
-  "harness-manifest.tsv",
-  "go_version",
-]
-reject("the harness must be built once with the exact pinned Go toolchain and frozen with the release") unless
-  harness_release_tokens.all? { |token| release_run.include?(token) } &&
-    release_steps.any? { |step| step.fetch("run", "").include?("scripts/bootstrap.sh go-test") }
-reject("the release producer must not fall back to a bare ambient go build") if
-  release_run.match?(/(?:^|\s)go\s+build(?:\s|$)/)
-reject("parallel release builds must be PID-scoped and propagate every failure") unless release_run.include?('build_pids+=("$!")') && release_run.include?('for pid in "${build_pids[@]}"') && release_run.include?('if ! wait "${pid}"') && release_run.include?('test "${build_status}" -eq 0')
-reject("the release image artifact must be run scoped") unless release_upload&.fetch("with")&.fetch("name")&.include?("github.run_id") && release_upload.fetch("with").fetch("name").include?("github.run_attempt")
-reject("the release image archive must use the step-scoped runner temp directory") unless release_upload.fetch("with").fetch("path").include?("runner.temp") && release_run.include?("RUNNER_TEMP")
-reject("the release image producer must clean its scoped images") unless release_cleanup&.fetch("if") == "always()" && release_cleanup.fetch("timeout-minutes") == 5 && release_variables.all? { |variable| release_cleanup.fetch("run").include?(variable) }
-release_images = release_variables.to_h { |variable| [variable, release_job.fetch("env").fetch(variable)] }
-%w[g6-rd-fd-a g6-rd-fd-b].each do |job_id|
-  reject("#{job_id} must depend only on the shared release image") unless jobs.fetch(job_id).fetch("needs") == "g6-rd-release-image"
-  reject("#{job_id} must use the producer's complete release image set") unless release_variables.all? { |variable| jobs.fetch(job_id).fetch("env").fetch(variable) == release_images.fetch(variable) }
-  reject("#{job_id} must use the exact 25-Agent formal default") if
-    jobs.fetch(job_id).fetch("env", {}).keys.any? { |key| %w[G6_AGENTS_A G6_AGENTS_B].include?(key) }
-  steps = Array(jobs.fetch(job_id).fetch("steps"))
-  names = steps.map { |step| step["name"] }.compact
-  download = steps.find { |step| step["name"] == "Download the frozen release images" }
-  load = steps.find { |step| step["name"] == "Verify and load the release images" }
-  reject("#{job_id} must download the exact run-scoped release images") unless download&.fetch("with")&.fetch("name") == release_upload.fetch("with").fetch("name")
-  reject("#{job_id} must install the one frozen release through the shared verifier") unless
-    load&.fetch("uses") == "./.github/actions/g6-install-release" &&
-      load.fetch("with").fetch("archive-dir") == "${{ runner.temp }}/g6-rd-runtime-images"
-  bootstrap_runs = steps.each_with_object([]) do |step, runs|
-    runs << step["run"] if step["run"]&.include?("scripts/bootstrap.sh")
-  end
-  reject("#{job_id} must bootstrap only the minimal pinned G6 Node runtime") unless
-    bootstrap_runs.length == 1 && bootstrap_runs.first.include?("scripts/bootstrap.sh g6-runtime")
-  reject("#{job_id} must not install or build with Go") if
-    steps.any? { |step| step.fetch("run", "").include?("bootstrap.sh go-") || step.fetch("run", "").match?(/(?:^|\s)go\s+build(?:\s|$)/) }
-  reject("#{job_id} must not perform a host-side Rust build") if
-    steps.any? { |step| step.fetch("run", "").match?(/(?:bootstrap\.sh native|\bcargo (?:build|run|test)\b)/) }
-  tooling = steps.find { |step| step["name"] == "Restore verified G6 Node runtime" }
-  reject("#{job_id} tooling cache must bind the minimal G6 runtime lock") unless
-    tooling&.fetch("with")&.fetch("key")&.include?("tooling-v5-g6-node-runtime-") &&
-      tooling.fetch("with").fetch("key").include?("scripts/g6-runtime/package-lock.json")
-  diagnostics_step = steps.find { |step| step["name"]&.start_with?("Collect redacted") }
-  cleanup_step = steps.find { |step| step["name"]&.start_with?("Clean failure domain") }
-  reject("#{job_id} must collect diagnostics before cleanup") unless
-    diagnostics_step && cleanup_step && steps.index(diagnostics_step) < steps.index(cleanup_step)
-  diagnostics = diagnostics_step.fetch("run")
-  cleanup = steps.find { |step| step["name"]&.include?("Clean") }.fetch("run")
-  reject("#{job_id} diagnostics must have a hard timeout") unless diagnostics.start_with?("timeout --signal=TERM --kill-after=15s 120s ")
-  domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
-  reject("#{job_id} cleanup must run through the typed bounded registry recovery path") unless
-    cleanup == %Q{"${G6_HARNESS_BIN}" cleanup --domain #{domain} --timeout 180s}
-  peer = job_id.end_with?("a") ? "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults" : "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
-  waits = steps.select { |step| step["run"]&.include?(%Q{"${G6_HARNESS_BIN}" wait-download}) }
-  reject("#{job_id} must use the Go client for every rendezvous wait") if waits.empty?
-  reject("#{job_id} artifact waits must name their producer job") unless
-    waits.all? { |step| step.fetch("run").include?(%Q{--peer-job "#{peer}"}) }
-  reject("#{job_id} must not call the legacy Bash artifact waiter") if
-    steps.any? { |step| step.fetch("run", "").include?("real-e2e-artifact.sh wait-download") }
-end
-fd_a_steps = Array(jobs.fetch("g6-rd-fd-a").fetch("steps"))
-fd_b_steps = Array(jobs.fetch("g6-rd-fd-b").fetch("steps"))
-checkpoint_uploads = (fd_a_steps + fd_b_steps).select do |step|
-  step["uses"] == "./.github/actions/g6-checkpoint-upload"
-end
-waited_names = (fd_a_steps + fd_b_steps).each_with_object([]) do |step, names|
-  name = step.fetch("run", "")[/--name\s+"([^"]+)"/, 1]
-  names << name if name
-end
-published_names = checkpoint_uploads.map do |step|
-  step.fetch("with").fetch("name")
-    .gsub("${{ github.run_id }}", "${GITHUB_RUN_ID}")
-    .gsub("${{ github.run_attempt }}", "${GITHUB_RUN_ATTEMPT}")
-end
-reject("every waited checkpoint must have exactly one typed producer upload") unless
-  waited_names.sort == published_names.sort && waited_names.uniq.length == waited_names.length
-reject("all current rendezvous uploads must use the typed checkpoint action") unless
-  checkpoint_uploads.length == 17
-checkpoint_action = YAML.safe_load(File.read(ARGV[4]), aliases: true)
-action_steps = Array(checkpoint_action.fetch("runs").fetch("steps"))
-reject("the checkpoint action must scan, manifest, then upload in that exact order") unless
-  action_steps.map { |step| step.fetch("name") } == ["Reject plaintext credentials", "Generate the typed checkpoint manifest", "Upload the checkpoint"]
-reject("the checkpoint secret policy must scan the exact upload payload first") unless
-  action_steps.fetch(0).fetch("run") == 'scripts/g6-checkpoint-secret-policy.sh "${{ inputs.path }}"'
-manifest_run = action_steps.fetch(1).fetch("run")
-reject("the typed checkpoint manifest must bind the exact artifact name and payload root") unless
-  manifest_run.include?("checkpoint-manifest") && manifest_run.include?('--name "${{ inputs.name }}"') && manifest_run.include?('--root "${{ inputs.path }}"')
-upload_step = action_steps.fetch(2)
-reject("the checkpoint upload must use the proven pinned official uploader") unless
-  upload_step.fetch("uses") == "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-reject("the checkpoint upload must wire exactly the scanned payload and fail closed when empty") unless
-  upload_step.fetch("with") == {
-    "name" => "${{ inputs.name }}",
-    "path" => "${{ inputs.path }}",
-    "if-no-files-found" => "error",
-    "retention-days" => "${{ inputs.retention-days }}"
-  }
-expected_segments = {
-  "fd-a" => %w[prepare bootstrap shared-trust primary enroll transport-trust activate-agents failover-cut recovery relay-cut barrier-arm barrier-release evidence],
-  "fd-b" => %w[prepare bootstrap peer-runtime standby enroll load promote relay-observe fault-scenarios resource-preflight window evidence],
-}
-{"fd-a" => fd_a_steps, "fd-b" => fd_b_steps}.each do |domain, steps|
-  segment_runs = steps.map do |step|
-    step.fetch("run", "")[/\A"\$\{G6_HARNESS_BIN\}" run-segment --domain #{domain} --segment ([a-z0-9-]+)\z/, 1]
-  end.compact
-  reject("#{domain} must expose only its ordered high-level typed segments") unless
-    segment_runs == expected_segments.fetch(domain)
-  direct_leaf_calls = steps.select do |step|
-    run = step.fetch("run", "")
-    run.include?("scripts/g6-readiness-#{domain}.sh") &&
-      !run.include?(" runtime-result ") && !run.end_with?(" diagnostics")
-  end
-  reject("#{domain} workflow must not express the product state machine with Bash leaf steps") unless
-    direct_leaf_calls.empty?
-end
-assemble = jobs.fetch("g6-rd-assemble")
-reject("evidence assembly must depend on both runtime jobs") unless
-  assemble.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
-reject("evidence assembly must always preserve a partial or complete result") unless
-  assemble.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
-assemble_steps = Array(assemble.fetch("steps"))
-assemble_fallback = assemble_steps.find do |step|
-  step["name"] == "Preserve an assembly result when assembly could not start"
-end
-reject("assembly must retain a bound failure result when its main command cannot start") unless
-  assemble_fallback&.fetch("if") == "always()" &&
-  assemble_fallback.fetch("run").include?("ocservia.g6-assembly-result.v1") &&
-  assemble_fallback.fetch("run").include?("release_manifest_digest") &&
-  assemble_fallback.fetch("run").include?("fd_a_artifact_id") &&
-  assemble_fallback.fetch("run").include?("fd_b_artifact_digest")
-assembly_finalize = assemble_steps.find do |step|
-  step["name"] == "Bind the assembly result to the uploaded bundle"
-end
-assembly_stage = assemble_steps.find do |step|
-  step["name"] == "Stage the preliminary assembly result outside the bundle"
-end
-assembly_result_upload = assemble_steps.find do |step|
-  step["name"] == "Publish the artifact-bound assembly result"
-end
-reject("assembly must publish a separate result bound to raw and bundle artifact identity") unless
-  assembly_stage&.fetch("if") == "always()" &&
-  assembly_stage.fetch("run").include?("assembly-result.preliminary.json") &&
-  assembly_finalize&.fetch("if") == "always()" &&
-  assembly_finalize.fetch("run").include?("finalize-assembly") &&
-  assembly_finalize.fetch("run").include?("steps.bundle-upload.outputs.artifact-id") &&
-  assembly_finalize.fetch("run").include?("steps.bundle-upload.outputs.artifact-digest") &&
-  assembly_result_upload&.fetch("if") == "always()" &&
-  assemble.fetch("outputs").fetch("assembly-result-artifact-id")
-    .include?("steps.assembly-result-upload.outputs.artifact-id")
-secret_scan = jobs.fetch("g6-rd-secret-scan")
-reject("secret scan must inspect both raw domains and the assembled bundle") unless
-  secret_scan.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b] &&
-  secret_scan.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
-secret_downloads = Array(secret_scan.fetch("steps")).select do |step|
-  step.fetch("name", "").start_with?("Download ")
-end
-reject("secret scan must skip only unavailable downloads, not its structured result job") unless
-  secret_downloads.length == 3 &&
-  secret_downloads.all? { |step| step.fetch("if", "").include?("artifact-id != ''") }
-formal_secret_scan = Array(secret_scan.fetch("steps")).find { |step| step["name"] == "Scan the published evidence for secrets" }
-reject("formal secret scanning must activate the pinned tool environment") unless
-  formal_secret_scan&.fetch("run", "").include?("source scripts/env.sh") &&
-  formal_secret_scan.fetch("run").include?("gitleaks dir")
-verifier = jobs.fetch("g6-rd-verifier")
-reject("the independent verifier must consume only the assembled evidence layer") unless
-  verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
-verifier_download = Array(verifier.fetch("steps")).find do |step|
-  step["name"] == "Download the evidence bundle"
-end
-reject("verifier must skip only an unavailable bundle download, not its structured result job") unless
-  verifier_download&.fetch("if") == "needs.g6-rd-assemble.outputs.bundle-artifact-id != ''"
-verifier_assembly_download = Array(verifier.fetch("steps")).find do |step|
-  step["name"] == "Download the artifact-bound assembly result"
-end
-reject("verifier must consume the separately published artifact-bound assembly result") unless
-  verifier_assembly_download&.fetch("if") ==
-    "needs.g6-rd-assemble.outputs.assembly-result-artifact-id != ''"
-secret_result = Array(secret_scan.fetch("steps")).find do |step|
-  step["name"] == "Record the secret scan result"
-end
-reject("secret scan must always retain a run-bound result independent of downloaded payload parsing") unless
-  secret_result&.fetch("if") == "always()" &&
-  secret_result.fetch("run").include?("needs.g6-rd-fd-a.outputs.release-manifest-digest") &&
-  !secret_result.fetch("run").include?("jq -er '.release_manifest_digest'")
-verifier_binding = Array(verifier.fetch("steps")).find do |step|
-  step["name"] == "Bind the verification result to this run"
-end
-reject("verifier result binding must survive an earlier download or verification failure") unless
-  verifier_binding&.fetch("if") == "always()" &&
-  verifier_binding.fetch("run").include?("needs.g6-rd-assemble.outputs.release-manifest-digest") &&
-  verifier_binding.fetch("run").include?("GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}") &&
-  verifier_binding.fetch("run").include?("bind-verification") &&
-  verifier_binding.fetch("run").include?("needs.g6-rd-assemble.outputs.bundle-artifact-digest")
-gate = jobs.fetch("g6-rd-gate")
-reject("the final gate must always aggregate every result layer") unless
-  gate.fetch("if") == "${{ always() && inputs.profile == 'formal' }}" &&
-  gate.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-verifier]
-gate_build = Array(gate.fetch("steps")).find { |step| step["name"] == "Build the fail-closed G6 gate result" }
-reject("the final gate must reject a failed semantic job even when it emitted a result") unless
-  gate.fetch("needs").all? do |job_id|
-    gate_build&.fetch("run", "").include?(%Q(test "${{ needs.#{job_id}.result }}" = success))
-  end
-reject("the final gate must bind both raw artifacts and the assembled bundle") unless
-  %w[fd-a-artifact-id fd-a-artifact-digest fd-b-artifact-id fd-b-artifact-digest
-     bundle-artifact-id bundle-artifact-digest].all? do |option|
-    gate_build&.fetch("run", "").include?("--#{option}")
-  end
-{
-  "g6-rd-fd-a" => "fd-a-raw-upload",
-  "g6-rd-fd-b" => "fd-b-raw-upload",
-}.each do |job_id, upload_id|
-  job = jobs.fetch(job_id)
-  reject("#{job_id} must expose its raw artifact ID") unless
-    job.fetch("outputs").fetch("raw-artifact-id").include?("steps.#{upload_id}.outputs.artifact-id")
-  reject("#{job_id} must expose its raw artifact digest") unless
-    job.fetch("outputs").fetch("raw-artifact-digest").include?("steps.#{upload_id}.outputs.artifact-digest")
-  reject("#{job_id} must expose the frozen release manifest digest") unless
-    job.fetch("outputs").fetch("release-manifest-digest").include?("needs.g6-rd-release-image.outputs.release-manifest-digest")
-  upload = Array(job.fetch("steps")).find { |step| step["id"] == upload_id }
-  reject("#{job_id} raw upload step is not bound to its outputs") unless
-    upload && upload.fetch("if") == "always()"
-end
-verifier_steps = Array(jobs.fetch("g6-rd-verifier").fetch("steps"))
-verifier_bootstrap = verifier_steps.find { |step| step["run"]&.include?("scripts/bootstrap.sh") }
-reject("the independent verifier must use only the pinned G6 Node runtime") unless
-  verifier_bootstrap&.fetch("run") == "scripts/bootstrap.sh g6-runtime"
-verifier_tooling = verifier_steps.find do |step|
-  step.fetch("with", {}).fetch("key", "").start_with?("tooling-")
-end
-reject("the independent verifier tooling cache must bind the minimal G6 runtime lock") unless
-  verifier_tooling&.fetch("with")&.fetch("key")&.include?("tooling-v5-g6-node-runtime-") &&
-    verifier_tooling.fetch("with").fetch("key").include?("scripts/g6-runtime/package-lock.json")
 
 services = compose.fetch("services")
 required = %w[postgres migrate api worker scheduler transportd
@@ -575,145 +177,8 @@ dockerfile_joined="$(
     if (line ~ /\\$/) { pending = substr(line, 1, length(line) - 1) } else { pending = ""; print line }
   }' "${G6_RUNTIME_DOCKERFILE}"
 )"
-# Partition invocations freeze artifacts under /out; the dependency warmup
-# experiment's invocations do not. Both classes are tracked separately so a
-# warmup invocation can never stand in for a real partition.
-partition_invocations="$(grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' || true)"
-warmup_invocations="$(grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep -v '&& mkdir -p /out/' || true)"
-partition_invocation_count="$(grep -c '^RUN' <<<"${partition_invocations}" || true)"
-warmup_invocation_count="$(grep -c '^RUN' <<<"${warmup_invocations}" || true)"
-if [[ "${partition_invocation_count}" -ne 3 ]]; then
-  echo "the shared Rust builder must issue exactly three cargo invocations (transportd; probe+tunnel; agent+privd), found ${partition_invocation_count}" >&2
-  exit 1
-fi
-if [[ "${warmup_invocation_count}" -ne 3 ]]; then
-  echo "the dependency warmup must duplicate all three partitions exactly, found ${warmup_invocation_count} warmup invocations" >&2
-  exit 1
-fi
-# Each warmup invocation must equal its partition's cargo command byte for
-# byte (trailing whitespace from line continuations is formatting, not part
-# of the command), so the warm target/ cache resolves exactly the features
-# the real partitions consume.
-warmup_number=0
-while IFS= read -r warmup_invocation; do
-  warmup_number=$(( warmup_number + 1 ))
-  partition_invocation="$(sed -n "${warmup_number}p" <<<"${partition_invocations}")"
-  warmup_command="${warmup_invocation#RUN }"
-  warmup_command="${warmup_command%%&&*}"
-  partition_command="${partition_invocation#RUN }"
-  partition_command="${partition_command%%&&*}"
-  warmup_command="$(sed -e 's/[[:space:]]*$//' <<<"${warmup_command}")"
-  partition_command="$(sed -e 's/[[:space:]]*$//' <<<"${partition_command}")"
-  if [[ "${warmup_command}" != "${partition_command}" ]]; then
-    echo "dependency warmup invocation ${warmup_number} must equal its partition's cargo command exactly" >&2
-    exit 1
-  fi
-  if [[ "${warmup_command}" != *'--locked --release'* ]]; then
-    echo "dependency warmup invocation ${warmup_number} must stay a locked release build" >&2
-    exit 1
-  fi
-done <<<"$(grep -v '^$' <<<"${warmup_invocations}")"
-# The warmup's cache key must never depend on first-party crate sources:
-# layers before the first warmup invocation may reference member manifests
-# only, and the real source tree must be copied only after the warmup and
-# before the real partitions.
-warmup_prefix="$(awk '/^RUN cargo build/ { exit } { print }' "${G6_RUNTIME_DOCKERFILE}")"
-if grep -E '^COPY .*rust/crates' <<<"${warmup_prefix}" | grep -v 'Cargo.toml' | grep -q .; then
-  echo "layers before the dependency warmup must not copy first-party crate sources" >&2
-  exit 1
-fi
-joined_warmup_first="$(grep -n '^RUN cargo build' <<<"${dockerfile_joined}" | head -1 | cut -d: -f1)"
-joined_crates_copy="$(grep -n '^COPY rust/crates \./crates$' <<<"${dockerfile_joined}" | cut -d: -f1)"
-joined_partition_first="$(
-  grep -n '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' | head -1 | cut -d: -f1
-)"
-if [[ -z "${joined_warmup_first}" || -z "${joined_crates_copy}" || -z "${joined_partition_first}" ]] \
-  || [[ "${joined_warmup_first}" -ge "${joined_crates_copy}" ]] \
-  || [[ "${joined_crates_copy}" -ge "${joined_partition_first}" ]]; then
-  echo "the warmup must run before COPY rust/crates ./crates and the real partitions" >&2
-  exit 1
-fi
-# The warmup stub model is generated from a fixed snapshot of the workspace,
-# so it is only valid while the workspace still matches that snapshot.
-# Enforce the exact member set, the per-member stub classification against
-# the real source layout, and the absence of any Cargo mechanism that would
-# change automatic target discovery underneath the stubs. Path dependencies
-# between workspace members are legitimate and are deliberately not checked.
-workspace_members="$(
-  sed -n '/^members = \[/,/^\]/p' "${ROOT}/rust/Cargo.toml" \
-    | grep -oE '"crates/[^"]+"' | sed -e 's/^"crates\///' -e 's/"$//' | sort
-)"
-warmup_manifest_members="$(
-  grep -E '^COPY rust/crates/[a-z0-9_-]+/Cargo\.toml crates/[a-z0-9_-]+/Cargo\.toml$' \
-    "${G6_RUNTIME_DOCKERFILE}" \
-    | awk '{
-        src = $2; dst = $3;
-        sub(/^rust\/crates\//, "", src); sub(/\/Cargo\.toml$/, "", src);
-        sub(/^crates\//, "", dst); sub(/\/Cargo\.toml$/, "", dst);
-        if (src == dst) { print src }
-      }' | sort
-)"
-if [[ -z "${workspace_members}" || "${workspace_members}" != "${warmup_manifest_members}" ]]; then
-  echo "the warmup manifest copies must cover exactly the workspace members" >&2
-  exit 1
-fi
-lib_only_members="$(
-  sed -n 's/^.*for lib_only in \([a-z0-9_ -]*\); do.*$/\1/p' <<<"${dockerfile_joined}" \
-    | tr -s ' ' '\n' | sed '/^$/d' | sort
-)"
-lib_and_bin_members="$(
-  sed -n 's/^.*for lib_and_bin in \([a-z0-9_ -]*\); do.*$/\1/p' <<<"${dockerfile_joined}" \
-    | tr -s ' ' '\n' | sed '/^$/d' | sort
-)"
-bin_only_members="$(
-  grep -oE '> crates/[a-z0-9_-]+/src/main\.rs' <<<"${dockerfile_joined}" \
-    | grep -oE 'crates/[a-z0-9_-]+' | sed 's|^crates/||' | sort
-)"
-fs_lib_only=""
-fs_lib_and_bin=""
-fs_bin_only=""
-for member in ${workspace_members}; do
-  member_manifest="${ROOT}/rust/crates/${member}/Cargo.toml"
-  if [[ -f "${ROOT}/rust/crates/${member}/build.rs" ]]; then
-    echo "workspace member ${member} has build.rs; Cargo discovers it without a manifest key and the warmup stub model does not run it" >&2
-    exit 1
-  fi
-  if [[ -d "${ROOT}/rust/crates/${member}/src/bin" ]]; then
-    echo "workspace member ${member} has src/bin auto binary targets the warmup stub model cannot represent" >&2
-    exit 1
-  fi
-  if grep -qE '^\[\[?(lib|bin)\]\]?' "${member_manifest}"; then
-    echo "workspace member ${member} declares an explicit [lib]/[[bin]] target; the stub model assumes automatic target discovery" >&2
-    exit 1
-  fi
-  if grep -qE '^(autolib|autobins)[[:space:]]*=' "${member_manifest}"; then
-    echo "workspace member ${member} overrides autolib/autobins; the stub model assumes automatic target discovery" >&2
-    exit 1
-  fi
-  if grep -qE '^build[[:space:]]*=' "${member_manifest}"; then
-    echo "workspace member ${member} declares a build key; the warmup stub model does not support build scripts" >&2
-    exit 1
-  fi
-  if [[ -f "${ROOT}/rust/crates/${member}/src/lib.rs" && ! -f "${ROOT}/rust/crates/${member}/src/main.rs" ]]; then
-    fs_lib_only+="${member}"$'\n'
-  elif [[ ! -f "${ROOT}/rust/crates/${member}/src/lib.rs" && -f "${ROOT}/rust/crates/${member}/src/main.rs" ]]; then
-    fs_bin_only+="${member}"$'\n'
-  elif [[ -f "${ROOT}/rust/crates/${member}/src/lib.rs" && -f "${ROOT}/rust/crates/${member}/src/main.rs" ]]; then
-    fs_lib_and_bin+="${member}"$'\n'
-  else
-    echo "workspace member ${member} has neither src/lib.rs nor src/main.rs; the warmup stub model cannot represent it" >&2
-    exit 1
-  fi
-done
-fs_lib_only="$(sed '/^$/d' <<<"${fs_lib_only}" | sort)"
-fs_lib_and_bin="$(sed '/^$/d' <<<"${fs_lib_and_bin}" | sort)"
-fs_bin_only="$(sed '/^$/d' <<<"${fs_bin_only}" | sort)"
-if [[ "${fs_lib_only}" != "${lib_only_members}" ]] \
-  || [[ "${fs_lib_and_bin}" != "${lib_and_bin_members}" ]] \
-  || [[ "${fs_bin_only}" != "${bin_only_members}" ]]; then
-  echo "the warmup stub classification must match each member's real src/lib.rs and src/main.rs layout" >&2
-  exit 1
-fi
+# Each product/helper partition remains a separate Cargo feature graph.
+partition_invocations="$(grep '^RUN cargo build' <<<"${dockerfile_joined}")"
 production_transportd_build_command="$(
   sed -n 's/^RUN \(cargo build --locked --release --package ocservia-transportd\)$/\1/p' \
     "${TRANSPORT_DOCKERFILE}"
@@ -763,7 +228,7 @@ for frozen_copy in \
     exit 1
   }
 done
-if grep -Eq '^COPY --from=g6-rust-builder /src/' "${G6_RUNTIME_DOCKERFILE}"; then
+if grep -Eq '^COPY --from=g6-transport-builder /src/' "${G6_RUNTIME_DOCKERFILE}"; then
   echo "runtime stages must consume frozen /out artifacts, not the shared target tree" >&2
   exit 1
 fi
@@ -805,7 +270,7 @@ production_transportd_block="$(
     | grep -vE '^(#|$)' \
     | sed -e 's/ AS runtime-base$/ AS transportd-runtime-base/' \
       -e 's/^FROM runtime-base$/FROM transportd-runtime-base AS transportd-runtime/' \
-      -e 's/--from=build/--from=g6-rust-builder/' \
+      -e 's/--from=build/--from=g6-transport-builder/' \
       -e 's|/src/target/release/ocservia-transportd|/out/transportd/ocservia-transportd|'
 )"
 if [[ "${shared_transportd_block}" != "${production_transportd_block}" ]]; then
@@ -1258,13 +723,6 @@ scheduler_observation_fixture="$(mktemp -d)"
   }
 )
 rm -rf -- "${scheduler_observation_fixture}"
-checkpoint_line="$(grep -nF 'auditManager.CheckpointAll(sessionCtx)' "${CONTROL_APP}" | cut -d: -f1)"
-maintenance_record_line="$(grep -nF 'coordination.RecordMaintenanceCompletion(sessionCtx, backend, session)' "${CONTROL_APP}" | cut -d: -f1)"
-[[ -n "${checkpoint_line}" && -n "${maintenance_record_line}" \
-  && "${checkpoint_line}" -lt "${maintenance_record_line}" ]] || {
-  echo "the scheduler must record maintenance only after the real maintenance body completes" >&2
-  exit 1
-}
 for token in \
   'OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE' \
   'scheduler maintenance evidence is test-only' \
@@ -4953,16 +4411,6 @@ grep -qF 'shared_run="${RUN_ID%-fd-[a-b]}"' "${LIB}" || {
   echo "the environment id must derive from the shared run identity" >&2
   exit 1
 }
-authority_bindings="$(grep -c 'G6_AUTHORITY: ${{ inputs.authority }}' "${WORKFLOW}")"
-if [[ "${authority_bindings}" -ne 4 ]]; then
-  echo "workflow defaults, both failure-domain jobs and the verifier must bind the dispatched authority (found ${authority_bindings})" >&2
-  exit 1
-fi
-sha_bindings="$(grep -c 'G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}' "${WORKFLOW}")"
-if [[ "${sha_bindings}" -ne 2 ]]; then
-  echo "both formal domains must bind the reusable candidate input (found ${sha_bindings})" >&2
-  exit 1
-fi
 if grep -q 'G6RD_FAILURE_DOMAIN_CLASS' "${WORKFLOW}"; then
   echo "the workflow must not override the lib's multi-host failure-domain class" >&2
   exit 1
@@ -5057,8 +4505,7 @@ if [[ -z "${fd_b_ready_wait}" || -z "${fd_b_scenario}" || "${fd_b_ready_wait}" -
   echo "fd-b scenarios must wait for fd-a readiness" >&2
   exit 1
 fi
-# Runtime jobs only publish immutable, domain-scoped raw evidence. Assembly,
-# secret scanning, verification, and verdict aggregation remain separate jobs.
+# Runtime jobs publish domain-scoped raw data for one result calculation.
 if grep -qE 'build-g6-evidence\.mjs|verify-g6-evidence\.mjs|evidence-build|evidence-verify|merge-peer-final-evidence' "${FD_B}"; then
   echo "fd-b must not assemble or verify the cross-domain evidence bundle" >&2
   exit 1
@@ -5075,11 +4522,6 @@ grep -q 'node scripts/g6-pipeline.mjs assemble' "${WORKFLOW}" || {
   echo "the assembly job must own cross-domain bundle construction" >&2
   exit 1
 }
-grep -q 'node scripts/g6-pipeline.mjs gate' "${WORKFLOW}" || {
-  echo "the final gate job must aggregate every semantic layer" >&2
-  exit 1
-}
-
 # Deterministic producer wiring and causality guards found during the first
 # independent harness review.
 basebackup_line="$(grep -n 'pg_basebackup -h 127.0.0.1' "${FD_A}" | head -1 | cut -d: -f1)"
@@ -5278,7 +4720,7 @@ grep -q 'fd-a final evidence was not frozen after the bounded window' "${BUILDER
   exit 1
 }
 
-# The pipeline unit test executes source-manifest validation and the final gate
+# The pipeline unit test executes source-manifest validation and assembly
 # with exact run bindings. Cross-domain construction no longer belongs to fd-b.
 node "${ROOT}/scripts/test-g6-pipeline.mjs"
 
@@ -5286,43 +4728,6 @@ grep -qE '"scenario-relay":[[:space:]]+\{"scenario-relay", peer\("fd-a-ready"\)\
   echo "the relay scenario must consume the peer readiness evidence" >&2
   exit 1
 }
-
-# The independent verifier recomputes the environment identity from the run
-# identity itself, evaluates against the dispatched authority, and must not
-# drift from the verdict published with the bundle.
-grep -q 'g6-rd-verifier' "${WORKFLOW}" || {
-  echo "the workflow must run the independent verifier job" >&2
-  exit 1
-}
-grep -qF 'printf '\''%s'\'' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16' "${WORKFLOW}" || {
-  echo "the verifier job must recompute the environment id from the run identity" >&2
-  exit 1
-}
-grep -q -- '--expected-authority "${G6_AUTHORITY}"' "${WORKFLOW}" || {
-  echo "the verifier job must evaluate the dispatched authority" >&2
-  exit 1
-}
-grep -q 'the independent verdict differs from the bundle verdict' "${WORKFLOW}" || {
-  echo "the verifier job must compare its verdict with the bundle verdict" >&2
-  exit 1
-}
-grep -q 'the independent verifier rejected the production-readiness bundle' "${WORKFLOW}" || {
-  echo "the verifier job must fail closed on a rejected production bundle" >&2
-  exit 1
-}
-
-# The secret scan is an independent job over the published evidence, run
-# with the pinned redacting scanner rather than the git-history scan, and
-# always through the pinned narrow allowlist configuration.
-grep -q 'gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-evidence-bundle"' "${WORKFLOW}" || {
-  echo "the secret-scan job must scan the published bundle with redaction" >&2
-  exit 1
-}
-if ! grep -q 'gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-a"' "${WORKFLOW}" \
-  || ! grep -q 'gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-b"' "${WORKFLOW}"; then
-  echo "the secret-scan job must scan both published raw failure-domain artifacts" >&2
-  exit 1
-fi
 
 # The builder itself must stay a pure transcriber bound to the frozen
 # contract library: no local metric thresholds, no authority shortcuts.

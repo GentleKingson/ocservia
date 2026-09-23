@@ -18,6 +18,7 @@
     "passed"
   ],
   "properties": {
+    "assessment": { "enum": ["resilience", "performance"] },
     "schema_version": {
       "const": "ocservia.g6-verdict.v2"
     },

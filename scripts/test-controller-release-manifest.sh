@@ -102,7 +102,8 @@ ruby -r yaml -r tmpdir -r open3 - "${ROOT}/.github/workflows/release.yml" \
   "${ROOT}/scripts/release-controller-image-smoke.sh" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 jobs = workflow.fetch("jobs")
-controller = jobs.fetch("build-controller-images")
+products = YAML.safe_load(File.read(File.join(File.dirname(ARGV.fetch(0)), "release-products.yml")), aliases: true)
+controller = products.fetch("jobs").fetch("build-controller-images")
 validate = jobs.fetch("validate-release-packages")
 publish = jobs.fetch("publish-release-packages")
 smoke = File.read(ARGV.fetch(2))
@@ -127,7 +128,7 @@ security = jobs.fetch("controller-image-security")
 abort("Controller image security job must gate tag pushes and full multi-arch dispatch dry runs") unless
   security.fetch("if") == "github.event_name == 'push' || inputs.arch == 'all'"
 abort("Controller image security job must wait for the build legs") unless
-  Array(security.fetch("needs")) == ["build-controller-images"]
+  %w[build-amd64 build-arm64].all? { |id| Array(security.fetch("needs")).include?(id) }
 abort("Controller image security job must only read source") unless
   security.fetch("permissions") == {"contents" => "read"}
 abort("Controller image security job must not run in a protected environment") if
@@ -149,14 +150,22 @@ gated = jobs.values.select { |job| job["environment"] == "release-publishing" }
 abort("Exactly one release-publishing gated job must exist") unless gated.length == 1
 abort("The release-publishing environment must gate the publish job only") unless gated.first == publish
 arch_input = triggers.fetch("workflow_dispatch").fetch("inputs").fetch("arch")
-abort("Dispatch must default to amd64 and offer amd64, arm64, all") unless
-  arch_input.fetch("default") == "amd64" && arch_input.fetch("options") == %w[amd64 arm64 all]
-%w[build-agent-packages build-controller-images].each do |job_name|
-  matrix = jobs.fetch(job_name).fetch("strategy").fetch("matrix").fetch("include")
-  abort("#{job_name} must select native architecture legs for tag pushes and dispatch") unless
-    matrix.include?("github.event_name == 'push'") && matrix.include?("inputs.arch == 'all'") &&
-    matrix.include?("inputs.arch == 'arm64'") &&
-    matrix.include?("ubuntu-24.04") && matrix.include?("ubuntu-24.04-arm")
+abort("Dispatch must default to all supported architectures") unless
+  arch_input.fetch("default") == "all" && arch_input.fetch("options").sort == %w[all amd64 arm64]
+%w[amd64 arm64].each do |arch|
+  caller = jobs.fetch("build-#{arch}")
+  abort("missing native product producer for #{arch}") unless
+    caller.fetch("uses") == "./.github/workflows/release-products.yml" && caller.dig("with", "arch") == arch
+  abort("#{arch} products must support tag pushes and selected dispatches") unless
+    caller.fetch("if").include?("github.event_name == 'push'") &&
+    caller.fetch("if").include?("inputs.arch == 'all'") && caller.fetch("if").include?("inputs.arch == '#{arch}'")
+end
+products.fetch("jobs").each do |id, job|
+  abort("#{id} must run on the selected native architecture") unless
+    job.fetch("runs-on") == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
+  abort("#{id} must remain a read-only product producer") unless
+    job.fetch("permissions", products.fetch("permissions")) == {"contents" => "read"} &&
+    !job.key?("environment") && !job.key?("secrets") && !job.to_s.include?("secrets.")
 end
 uses = Array(controller.fetch("steps")).map { |step| step["uses"] }.compact
 uses.each do |use|
@@ -171,8 +180,6 @@ abort("Controller image legs must build one matrix platform per leg") unless
 abort("Controller image legs must export Docker image archives") unless
   build_script.include?("type=docker,dest=") &&
   !build_script.include?("type=oci,dest=")
-abort("Controller image legs must build each image once") unless
-  build_script.scan("scripts/g6-buildx-cache.sh").length == 1
 abort("Controller image legs must smoke the built images on the native runner") unless
   run_steps.include?("scripts/release-controller-image-smoke.sh")
 abort("Controller image smoke must load the persisted Docker archive") unless
@@ -185,10 +192,8 @@ abort("Controller image smoke must load the persisted Docker archive") unless
     (run_steps + build_script).include?(forbidden)
 end
 
-abort("Controller publishing must wait for the image build legs") unless
-  Array(publish.fetch("needs")).include?("build-controller-images")
-abort("Controller publishing must wait for the pre-push image security gate") unless
-  Array(publish.fetch("needs")).include?("controller-image-security")
+# The Release Check failure matrix and its Publish dependency are exercised
+# by test-release-upgrade.sh, including image-security failures.
 validate_steps = Array(validate.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
 abort("Release dry runs must prepare both versioned bootstrap assets") unless
   validate_steps.include?('scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"')

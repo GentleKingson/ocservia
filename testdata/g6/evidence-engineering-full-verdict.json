@@ -8,6 +8,6 @@
       "value": "engineering"
     }
   ],
-  "expected_failure_reason": "final pass requires production_readiness authority",
-  "expected_all_measurements_pass": true
+  "expected_all_measurements_pass": true,
+  "expected_pass": true
 }

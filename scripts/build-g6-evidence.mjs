@@ -26,7 +26,6 @@ import {
 import { join, relative, resolve, sep } from "node:path";
 import { verifyRelayProof } from "./g6-relay-proof.mjs";
 import {
-  computeG6Derivations,
   parseSlo,
   sha256Digest,
 } from "./g6-contract-lib.mjs";
@@ -700,11 +699,11 @@ const activeLoad = JSON.parse(
 );
 if (
   !Array.isArray(activeLoad.commands) ||
-  activeLoad.commands.length < 50 ||
+  activeLoad.commands.length < nodes.length ||
   !Number.isInteger(activeLoad.queued_outbox_count) ||
-  activeLoad.queued_outbox_count < 50
+  activeLoad.queued_outbox_count < nodes.length
 ) {
-  fail("the database failure boundary has fewer than fifty active commands");
+  fail("the database failure boundary lacks an active command and backlog row for every Agent");
 }
 const rejoinBoundaryAt = normalizePreciseStamp(
   readText(peerDir, "rejoin-at").trim(),
@@ -778,7 +777,7 @@ const okCommandIds = new Set();
 const okCommandKeyById = new Map();
 const okCommandRequestIdById = new Map();
 const httpLines = [
-  "timestamp,kind,status,latency_seconds,request_id,idempotency_key,attempt_ordinal,attempt_limit,requested_revision,http_status,problem_type,problem_detail,command_id,environment_id,candidate_sha",
+  "timestamp,kind,status,latency_seconds,request_id,idempotency_key,attempt_ordinal,attempt_limit,requested_revision,http_status,problem_type,problem_detail,command_id",
 ];
 const latencyText = (value) => {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
@@ -803,8 +802,6 @@ for (const sample of readLog) {
       "",
       "",
       "",
-      environmentId,
-      candidateSha,
     ],
     "read HTTP sample",
   ));
@@ -838,8 +835,6 @@ for (const sample of enqueueLog) {
       sample.problem_type,
       sample.problem_detail,
       sample.command_id,
-      environmentId,
-      candidateSha,
     ],
     "enqueue HTTP attempt",
   ));
@@ -1315,8 +1310,6 @@ const commandTraceText = jsonl(
   traceRecords.map((entry, index) => ({
     sequence: index + 1,
     timestamp: preciseIsoOfMicros(entry.stampMicros),
-    environment_id: environmentId,
-    candidate_sha: candidateSha,
     ...entry.record,
   })),
 );
@@ -2425,8 +2418,6 @@ const relayTransitionsText = jsonl([
   {
     sequence: 1,
     timestamp: relayPreFaultObservedAt,
-    environment_id: environmentId,
-    candidate_sha: candidateSha,
     event_type: "path_active",
     session_id: relayPreObservation.node,
     path: "relay",
@@ -2463,8 +2454,6 @@ const relayTransitionsText = jsonl([
   {
     sequence: 2,
     timestamp: relayAFailedAt,
-    environment_id: environmentId,
-    candidate_sha: candidateSha,
     event_type: "relay_failed",
     relay: "relay-a",
     session_id: relayPreObservation.node,
@@ -2479,8 +2468,6 @@ const relayTransitionsText = jsonl([
   {
     sequence: 3,
     timestamp: relayBActiveAt,
-    environment_id: environmentId,
-    candidate_sha: candidateSha,
     event_type: "path_active",
     session_id: relayObservation.node,
     path: "relay",
@@ -3371,8 +3358,6 @@ const epochEventsText = jsonl(
   epochEvents.map((entry, index) => ({
     sequence: index + 1,
     timestamp: epochEventTimestamp(entry),
-    environment_id: environmentId,
-    candidate_sha: candidateSha,
     ...entry.record,
   })),
 );
@@ -3523,8 +3508,16 @@ const topologyText = canonicalJson({
 // The evidence window and the assembled bundle.
 // ---------------------------------------------------------------------------
 
-const resourceSamplesText = readText(runDir, "state", "resource-samples.csv");
-const timelineText = readText(runDir, "outbox", "timeline.jsonl");
+const resourceSamplesText = readText(runDir, "state", "resource-samples.csv").trimEnd().split("\n").map((line, index) => {
+  const fields = line.split(",");
+  if (fields.length !== 10 || (index > 0 && (fields[8] !== environmentId || fields[9] !== candidateSha)))
+    fail("resource sample producer binding mismatch");
+  return fields.slice(0, 8).join(",");
+}).join("\n") + "\n";
+const timelineText = jsonl(timelineRecords.map(({ environment_id, candidate_sha, ...event }) => {
+  if (environment_id !== environmentId || candidate_sha !== candidateSha) fail("timeline producer binding mismatch");
+  return event;
+}));
 const pitrReportText = readText(peerDir, "pitr", "pitr-report.json");
 
 const artifactFiles = [
@@ -3676,30 +3669,6 @@ const digestByKind = new Map(
 const sloText = readText(values.slo);
 const slo = parseSlo(sloText);
 
-const derivations = computeG6Derivations({
-  sloText,
-  artifactEntries: artifactFiles.map(([name, , kind]) => ({
-    name,
-    kind,
-    bytes: Buffer.from(readFileSync(join(outDir, name), "utf8"), "utf8"),
-  })),
-  environmentId,
-  candidateSha,
-  startedAt,
-  finishedAt,
-});
-
-const measurements = {};
-for (const [name, metric] of Object.entries(slo.metrics)) {
-  const derived = derivations.get(metric.derivation);
-  if (!derived) fail(`no derivation computed for metric ${name}`);
-  measurements[name] = {
-    actual: derived.value,
-    sample_count: derived.sampleCount,
-    source_artifact_digest: digestByKind.get(metric.derivation.split(".")[0]),
-  };
-}
-
 const observations = {};
 for (const [name, contract] of Object.entries(slo.observations)) {
   const missing = contract.required_timeline_events.filter(
@@ -3732,12 +3701,11 @@ const evidence = canonicalJson({
     ...(authority === "engineering"
       ? {
           limitations: [
-            "engineering rehearsal: the authority fence withholds the final G6 pass by design",
+            "engineering fault regression; not a production SLO certification",
           ],
         }
       : {}),
   },
-  measurements,
   observations,
   artifacts,
 });

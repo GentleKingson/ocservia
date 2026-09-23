@@ -156,9 +156,9 @@ func peerJobName(contract Contract) (string, error) {
 	}
 	switch contract.ProducerDomain {
 	case "fd-a":
-		return "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR", nil
+		return "Resilience / G6 Formal FD-A: Primary & PITR", nil
 	case "fd-b":
-		return "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults", nil
+		return "Resilience / G6 Formal FD-B: Standby, Promotion & Faults", nil
 	default:
 		return "", fmt.Errorf("unsupported producer domain %q", contract.ProducerDomain)
 	}

@@ -1,0 +1,67 @@
+name: Release Business
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      profile:
+        type: string
+        required: true
+      agent-id:
+        type: string
+        required: true
+      agent-sha256:
+        type: string
+        required: true
+      controller-id:
+        type: string
+        required: true
+      controller-sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  business:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/release-artifacts
+        with:
+          artifact-id: ${{ inputs.agent-id }}
+          sha256: ${{ inputs.agent-sha256 }}
+          component: agent
+          arch: amd64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/products
+      - uses: ./.github/actions/release-artifacts
+        with:
+          artifact-id: ${{ inputs.controller-id }}
+          sha256: ${{ inputs.controller-sha256 }}
+          component: controller
+          arch: amd64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/products
+      - uses: ./.github/actions/g6-cache-credentials
+      - name: Exercise signed deployment and real business paths
+        env:
+          VERSION: ${{ inputs.version }}
+          BUSINESS_PROFILE: ${{ inputs.profile }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          CANDIDATE_PRODUCTS: ${{ runner.temp }}/products
+          AGENT_MANIFEST_SHA256: ${{ inputs.agent-sha256 }}
+          CONTROLLER_MANIFEST_SHA256: ${{ inputs.controller-sha256 }}
+          ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
+        run: bash scripts/release-business-probe.sh
+      - name: Preserve sanitized diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: business-${{ inputs.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/business-evidence
+          retention-days: 7
+          if-no-files-found: warn
