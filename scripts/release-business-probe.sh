@@ -93,7 +93,7 @@ cleanup() {
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       timings:$timings[0],
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
-      t07_status:(if $profile == "smoke" then (if $code == 0 then "PASS" else "FAIL" end) else "NOT_EVALUATED" end),
+      t07_status:(if $profile == "smoke" then (if $code == 0 then "SMOKE_PASS" else "FAIL" end) else "NOT_EVALUATED" end),
       planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],

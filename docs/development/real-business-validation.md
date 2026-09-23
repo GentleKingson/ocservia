@@ -88,7 +88,8 @@ The following limitations are deliberately retained, not scored as PASS:
   fault-domain/SLO proof. The client namespace protects host routes; it is not
   another host. The probe checks test VPN traffic, never real user traffic.
 
-`result.json` reports the smoke result as `t07_status=PASS` or `FAIL`; extended
+`result.json` reports a successful smoke as `t07_status=SMOKE_PASS`, never
+`PASS` for full release acceptance; a failed smoke reports `FAIL`. Extended
 results keep `t07_status=NOT_EVALUATED` because they are supplemental. Both record
 `operator_mode=simulated_two_principals` and human custody `NOT_VERIFIED`, even
 when the probe passes. Baseline 1.0 and T07 require independently controlled

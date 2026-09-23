@@ -316,6 +316,7 @@ jobs:
           test -s "${EVIDENCE}/probe.log"
           jq -e --arg profile "${PROFILE}" --arg sha "${CANDIDATE_SHA}" \
             '.profile == $profile and .candidate_sha == $sha and .probe_status == "PASS" and .exit_code == 0 and
+             .t07_status == (if $profile == "smoke" then "SMOKE_PASS" else "NOT_EVALUATED" end) and
              (.timings | type == "array" and length > 0)' \
             "${EVIDENCE}/result.json" >/dev/null
           jq -e --arg profile "${PROFILE}" --arg sha "${CANDIDATE_SHA}" '

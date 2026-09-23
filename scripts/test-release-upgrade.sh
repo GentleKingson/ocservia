@@ -91,6 +91,7 @@ abort 'business probe must use its bounded entrypoint' unless
   business['steps'].any? { |step| step['run'] == 'bash scripts/release-business-probe.sh' }
 abort 'business result must fail closed on missing profile checkpoints' unless
   business['steps'].any? { |step| step['name'] == 'Require complete scoped business evidence' &&
+    step.fetch('run', '').include?('"SMOKE_PASS"') &&
     step.fetch('run', '').include?('"real_vpn_after_rollback"') &&
     step.fetch('run', '').include?('"real_vpn_business_and_recovery"') }
 driver = File.read('scripts/release-business-probe.sh')
@@ -99,6 +100,7 @@ phases = %w[smoke_config_apply smoke_user vpn_before_rollback smoke_rollback vpn
 end
 abort 'native VPN must be checked after apply and again after rollback' unless
   phases.all? && phases == phases.sort && driver.include?('timings.json') &&
+  driver.include?('"SMOKE_PASS"') &&
   driver.include?('evidence-manifest.json') &&
   driver.include?('if [[ "${BUSINESS_PROFILE}" == extended ]]') &&
   driver.include?('release-business-api.py" certificate') &&
