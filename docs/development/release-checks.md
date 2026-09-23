@@ -18,6 +18,12 @@ and PR routing. Release Check is not a required check for every PR.
 | Release Check | All selected required jobs must succeed |
 | Publish | Existing protected environment, signing and permissions; tested products only |
 
+Per-architecture producers finish after build, basic smoke, sealing and upload.
+Agent and Controller upgrades consume those artifacts in separate native jobs,
+alongside compatibility, business, Resilience and artifact checks; none of those
+checks waits for upgrade results. Both architectures' upgrades remain mandatory
+Release Check inputs. Single-architecture dry runs also run their upgrades.
+
 The single executable selection table is
 [`scripts/release-selection.mjs`](../../scripts/release-selection.mjs).
 It resolves the last published stable Release and compares its complete tree

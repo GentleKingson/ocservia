@@ -96,6 +96,50 @@ required.each do |job|
   end
 end
 release = YAML.safe_load(File.read('.github/workflows/release.yml'))
+release_jobs = release.fetch('jobs')
+products = YAML.safe_load(File.read('.github/workflows/release-products.yml'))
+abort 'product producers must not wait for upgrades' if products.to_json.include?('release-upgrade-unit.sh') || products.to_json.include?('frozen-')
+upgrades = YAML.safe_load(File.read('.github/workflows/release-product-upgrade.yml'))
+abort 'upgrades must remain read-only and secret-free' unless upgrades['permissions'] == {'contents' => 'read'} && !upgrades.to_json.include?('secrets')
+unit = upgrades.fetch('jobs').fetch('upgrade')
+abort 'upgrade units must be isolated native jobs' unless unit['runs-on'] == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
+abort 'one failed component must not cancel another' unless unit.dig('strategy', 'fail-fast') == false
+matrix = unit.fetch('strategy').fetch('matrix').fetch('include')
+abort 'both product upgrades required' unless matrix.map { |row| row['component'] }.sort == %w[agent controller]
+matrix.each do |row|
+  component = row.fetch('component')
+  abort 'upgrade must consume its own producer identity' unless row['artifact-id'] == "${{ inputs.#{component}-id }}" && row['sha256'] == "${{ inputs.#{component}-sha256 }}"
+end
+steps = unit.fetch('steps')
+download = steps.find { |step| step.fetch('uses', '').start_with?('actions/download-artifact@') }
+abort 'upgrade lost frozen producer ID' unless download.dig('with', 'artifact-ids') == '${{ inputs.frozen-id }}'
+consume = steps.find { |step| step['uses'] == './.github/actions/release-artifacts' }.fetch('with')
+{'artifact-id' => '${{ matrix.artifact-id }}', 'sha256' => '${{ matrix.sha256 }}',
+ 'component' => '${{ matrix.component }}', 'arch' => '${{ inputs.arch }}',
+ 'version' => '${{ inputs.version }}'}.each do |key, value|
+  abort "upgrade candidate verification lost #{key}" unless consume[key] == value
+end
+validate = steps.find { |step| step.fetch('run', '').include?('release-upgrade-unit.sh') }
+abort 'upgrade must use existing unit entrypoint' unless validate['run'] == 'bash scripts/release-upgrade-unit.sh "${{ matrix.component }}" "${{ inputs.arch }}"'
+abort 'upgrade must reuse verified candidates without rebuilding' unless validate.dig('env', 'CANDIDATE_PRODUCTS') == consume['path'] && validate.dig('env', 'CANDIDATE_MANIFEST_SHA256') == consume['sha256']
+abort 'upgrade lost frozen digest' unless validate.dig('env', 'FROZEN_SHA256') == '${{ inputs.frozen-sha256 }}'
+abort 'upgrade lost frozen file' unless validate.dig('env', 'FROZEN_FILE') == "#{download.dig('with', 'path')}/frozen.json"
+%w[amd64 arm64].each do |arch|
+  caller = release_jobs.fetch("upgrade-#{arch}")
+  abort 'upgrade must follow only its native producer and prepare' unless caller['needs'].sort == ['prepare', "build-#{arch}"].sort
+  abort 'upgrade must also run for single-architecture diagnostics' if caller.key?('if')
+  abort 'upgrade workflow not called' unless caller['uses'] == './.github/workflows/release-product-upgrade.yml'
+  expected = {'arch' => arch, 'version' => '${{ needs.prepare.outputs.version }}'}
+  %w[frozen-id frozen-sha256].each { |key| expected[key] = "${{ needs.prepare.outputs.#{key} }}" }
+  %w[agent-id agent-sha256 controller-id controller-sha256].each { |key| expected[key] = "${{ needs.build-#{arch}.outputs.#{key} }}" }
+  abort 'upgrade caller must preserve all producer identities' unless caller['with'] == expected
+  abort 'Release Check must observe upgrade results' unless release_jobs.fetch('release-check').fetch('needs').include?("upgrade-#{arch}")
+end
+%w[compatibility-amd64 compatibility-arm64 business-smoke integration resilience validate-release-packages controller-image-security].each do |name|
+  arch = name == 'compatibility-arm64' ? 'arm64' : 'amd64'
+  expected = %w[validate-release-packages controller-image-security].include?(name) ? %w[prepare build-amd64 build-arm64] : ['prepare', "build-#{arch}"]
+  abort "#{name} must not wait for upgrade results" unless release_jobs.fetch(name).fetch('needs').sort == expected.sort
+end
 publish = release.fetch('jobs').fetch('publish-release-packages')
 abort 'production approval lost' unless publish['environment'] == 'release-publishing'
 abort 'publish bypasses Release Check' unless publish.fetch('needs').include?('release-check')
@@ -117,7 +161,7 @@ gate_command = release_gate.fetch('steps').find { |step| step.dig('env', 'RESULT
   env = {'SELECTION' => selection.to_json, 'GITHUB_SHA' => selection['candidate']}
   abort 'valid selected release scope rejected' unless system(env.merge('RESULTS' => results.to_json), 'bash', '-euc', gate_command, out: File::NULL)
   results.each_key do |job|
-    %w[failure cancelled skipped].each do |state|
+    ['failure', 'cancelled', 'skipped', nil].each do |state|
       next if results[job]['result'] == state
       changed = Marshal.load(Marshal.dump(results))
       changed[job]['result'] = state

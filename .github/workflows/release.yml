@@ -1,5 +1,5 @@
 name: Release
-run-name: Agent Packages · ${{ github.event_name == 'push' && github.ref_name || inputs.version || github.sha }}
+run-name: Release · ${{ github.event_name == 'push' && github.ref_name || inputs.version || github.sha }}
 
 on:
   push:
@@ -87,15 +87,27 @@ jobs:
     uses: ./.github/workflows/security.yml
 
   build-amd64:
-    name: Build / Package & Upgrade (amd64)
+    name: Build & Smoke (amd64)
     needs: prepare
     if: github.event_name == 'push' || inputs.arch == 'all' || inputs.arch == 'amd64'
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: amd64
+
+  upgrade-amd64:
+    name: Upgrade (amd64)
+    needs: [prepare, build-amd64]
+    uses: ./.github/workflows/release-product-upgrade.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      arch: amd64
       frozen-id: ${{ needs.prepare.outputs.frozen-id }}
       frozen-sha256: ${{ needs.prepare.outputs.frozen-sha256 }}
+      agent-id: ${{ needs.build-amd64.outputs.agent-id }}
+      agent-sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
+      controller-id: ${{ needs.build-amd64.outputs.controller-id }}
+      controller-sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
 
   compatibility-amd64:
     needs: [prepare, build-amd64]
@@ -108,15 +120,27 @@ jobs:
       controller-sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
 
   build-arm64:
-    name: Build / Package & Upgrade (arm64)
+    name: Build & Smoke (arm64)
     needs: prepare
     if: github.event_name == 'push' || inputs.arch == 'all' || inputs.arch == 'arm64'
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: arm64
+
+  upgrade-arm64:
+    name: Upgrade (arm64)
+    needs: [prepare, build-arm64]
+    uses: ./.github/workflows/release-product-upgrade.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      arch: arm64
       frozen-id: ${{ needs.prepare.outputs.frozen-id }}
       frozen-sha256: ${{ needs.prepare.outputs.frozen-sha256 }}
+      agent-id: ${{ needs.build-arm64.outputs.agent-id }}
+      agent-sha256: ${{ needs.build-arm64.outputs.agent-sha256 }}
+      controller-id: ${{ needs.build-arm64.outputs.controller-id }}
+      controller-sha256: ${{ needs.build-arm64.outputs.controller-sha256 }}
 
   compatibility-arm64:
     needs: [prepare, build-arm64]
@@ -335,7 +359,7 @@ jobs:
   release-check:
     name: Release Check
     if: always() && needs.prepare.outputs.complete == 'true'
-    needs: [prepare, full-ci, security, build-amd64, build-arm64, compatibility-amd64, compatibility-arm64, business-smoke, integration, resilience, validate-release-packages, controller-image-security]
+    needs: [prepare, full-ci, security, build-amd64, build-arm64, upgrade-amd64, upgrade-arm64, compatibility-amd64, compatibility-arm64, business-smoke, integration, resilience, validate-release-packages, controller-image-security]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -353,6 +377,7 @@ jobs:
           if (selection.candidate !== process.env.GITHUB_SHA) throw new Error('wrong candidate selection');
           checkResults(selection, JSON.parse(process.env.RESULTS), [
             'prepare', 'full-ci', 'security', 'build-amd64', 'build-arm64',
+            'upgrade-amd64', 'upgrade-arm64',
             'compatibility-amd64', 'compatibility-arm64',
             'validate-release-packages', 'controller-image-security',
           ]);
