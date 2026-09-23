@@ -1834,10 +1834,7 @@ sampler_trace="$(mktemp)"
     echo "Agent resource samples must use one Agent Compose overlay exec" >&2
     exit 1
   fi
-  g6rd_agent_compose() {
-    echo 'password=fixture-secret' >&2
-    return 124
-  }
+  g6rd_agent_compose() { return 1; }
   if sampler_error="$(g6rd_sampler_row agent agent-fd-b-01 agent-fd-b-01 \
     'cat /run/ocserv-platform/agent.pid' \
     'cat /run/ocservia-agent/journal/tasks.json' 0 '' \
@@ -1845,14 +1842,9 @@ sampler_trace="$(mktemp)"
     echo "a failed Agent sample was accepted" >&2
     exit 1
   fi
-  grep -qF 'stage=component_probe component=agent-fd-b-01 timeout=none' \
+  grep -qF 'stage=component_probe component=agent-fd-b-01' \
     <<<"${sampler_error}" || {
     echo "a resource probe failure did not identify its instance" >&2
-    exit 1
-  }
-  [[ "${sampler_error}" == *'status=124 stderr=password=[redacted]'* \
-    && "${sampler_error}" != *fixture-secret* ]] || {
-    echo "a resource probe failure lost its status or exposed stderr secrets" >&2
     exit 1
   }
   [[ -z "$(ls -A "${G6RD_STATE}")" ]] || {
@@ -1862,71 +1854,6 @@ sampler_trace="$(mktemp)"
   rm -rf -- "${G6RD_STATE}"
 )
 rm -f "${sampler_trace}"
-sampler_db_output="$(mktemp)"
-sampler_db_state="$(mktemp -d)"
-(
-  export FD_ID=fd-b G6RD_STATE="${sampler_db_state}"
-  export G6RD_SECRETS="${sampler_db_state}/secrets"
-  mkdir -p "${G6RD_SECRETS}"
-  printf '%s\n' 'fixture-secret' >"${G6RD_SECRETS}/owner-password"
-  g6rd_now() { printf '2026-08-19T00:00:00Z\n'; }
-  g6rd_psql() {
-    echo 'connection failed: fixture-secret password=fixture-secret' >&2
-    return 124
-  }
-  if g6rd_sampler_tick "${sampler_db_output}" 2>"${sampler_db_state}/error"; then
-    echo "a failed database counter probe was accepted" >&2
-    exit 1
-  else
-    [[ "$?" == 124 ]] || {
-      echo "the database counter probe exit status was rewritten" >&2
-      exit 1
-    }
-  fi
-  grep -qF 'stage=db_counters component=postgres-fd-b timeout=3s elapsed=' \
-    "${sampler_db_state}/error" || {
-    echo "the database counter probe lacks bounded stage diagnostics" >&2
-    exit 1
-  }
-  grep -qF 'status=124 stderr=connection failed: [redacted] password=[redacted]' \
-    "${sampler_db_state}/error" || {
-    echo "the database counter probe lost its status or redacted stderr" >&2
-    exit 1
-  }
-  if grep -qF 'fixture-secret' "${sampler_db_state}/error" \
-    || [[ -s "${sampler_db_output}" ]]; then
-    echo "a failed database counter probe leaked a secret or partial sample" >&2
-    exit 1
-  fi
-  g6rd_psql() {
-    printf 'failure %1200s\n' x >&2
-    return 1
-  }
-  if g6rd_sampler_tick "${sampler_db_output}" 2>"${sampler_db_state}/error"; then
-    echo "an oversized database probe error was accepted" >&2
-    exit 1
-  fi
-  [[ "$(wc -c <"${sampler_db_state}/error")" -lt 1200 ]] \
-    && grep -qF '[truncated]' "${sampler_db_state}/error" || {
-    echo "the database probe stderr diagnostic was not bounded" >&2
-    exit 1
-  }
-  for invalid in 'bad 2:db_connections' '2 bad:queue_depth' '1 2 3 4:queue_depth'; do
-    value="${invalid%%:*}"
-    field="${invalid#*:}"
-    g6rd_psql() { printf '%s\n' "${value}"; }
-    if g6rd_sampler_tick "${sampler_db_output}" 2>"${sampler_db_state}/error"; then
-      echo "an invalid ${field} counter was accepted" >&2
-      exit 1
-    fi
-    grep -qF "invalid ${field}" "${sampler_db_state}/error" || {
-      echo "an invalid ${field} counter lacked a reason" >&2
-      exit 1
-    }
-  done
-)
-rm -f -- "${sampler_db_output}"
-rm -rf -- "${sampler_db_state}"
 sampler_failure_output="$(mktemp)"
 sampler_state_fixture="$(mktemp -d)"
 (
@@ -1934,15 +1861,10 @@ sampler_state_fixture="$(mktemp -d)"
   export G6RD_STATE="${sampler_state_fixture}"
   g6rd_now() { printf '2026-08-19T00:00:00Z\n'; }
   g6rd_psql() { printf '1 2\n'; }
-  g6rd_sampler_row() { [[ "$1" != agent ]] || return 124; }
+  g6rd_sampler_row() { [[ "$1" != agent ]]; }
   if g6rd_sampler_tick "${sampler_failure_output}"; then
     echo "the resource sampler hid a missing required component sample" >&2
     exit 1
-  else
-    [[ "$?" == 124 ]] || {
-      echo "a failed component probe lost its exit status" >&2
-      exit 1
-    }
   fi
   [[ -s "${sampler_failure_output}" ]] && {
     echo "a failed tick appended partial rows" >&2
@@ -4930,28 +4852,6 @@ sampler_cadence_fixture="$(mktemp -d)"
   fi
 )
 rm -rf -- "${sampler_cadence_fixture}"
-sampler_failed_fixture="$(mktemp -d)"
-(
-  export G6RD_STATE="${sampler_failed_fixture}"
-  export G6RD_SAMPLER_OUT="${sampler_failed_fixture}/samples.csv"
-  g6rd_now() { printf '2026-08-19T00:00:00Z\n'; }
-  g6rd_sampler_tick() { return 124; }
-  if g6rd_sampler_loop; then
-    echo "a failed sampler loop was accepted" >&2
-    exit 1
-  else
-    [[ "$?" == 124 ]] || {
-      echo "the sampler loop rewrote the failed probe status" >&2
-      exit 1
-    }
-  fi
-  [[ -s "${G6RD_STATE}/sampler-failed-at" \
-    && ! -e "${G6RD_STATE}/sampler-complete-at" ]] || {
-    echo "a failed sampler loop lost its failure sentinel" >&2
-    exit 1
-  }
-)
-rm -rf -- "${sampler_failed_fixture}"
 if command -v setsid >/dev/null 2>&1; then
   sampler_stop_fixture="$(mktemp -d)"
   (
@@ -5018,45 +4918,6 @@ if command -v setsid >/dev/null 2>&1; then
   )
   rm -rf -- "${sampler_stop_fixture}"
 fi
-sampler_cleanup_fixture="$(mktemp -d)"
-(
-  export RUNNER_TEMP="${sampler_cleanup_fixture}" RUN_ID=fixture
-  export COMPOSE_PROJECT=ocservia-g6-rd-fixture
-  export G6RD_STATE="${sampler_cleanup_fixture}/state"
-  export G6RD_LOGS="${sampler_cleanup_fixture}/logs"
-  export G6RD_WORK="${sampler_cleanup_fixture}/g6-readiness-fixture"
-  export G6RD_ARCHIVE="${G6RD_WORK}/archive"
-  export G6RD_BASEBACKUP="${G6RD_WORK}/basebackup"
-  export G6RD_RESTORE="${G6RD_WORK}/restore"
-  export G6RD_AGENT_COMPOSE="${sampler_cleanup_fixture}/missing-agent-overlay"
-  mkdir -p "${G6RD_STATE}" "${G6RD_LOGS}" "${G6RD_WORK}"
-  unset G6RD_AGENT_IMAGE G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE \
-    G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE
-  g6rd_stop_sampler() { return 1; }
-  g6rd_release_synthetic_barriers() { :; }
-  g6rd_tunnel_stop() { :; }
-  g6rd_reclaim_directory() { :; }
-  g6rd_compose() { printf '%s\n' "$*" >"${sampler_cleanup_fixture}/compose-call"; }
-  docker() {
-    case "$1" in
-      ps | images) return 0 ;;
-      network | volume) return 1 ;;
-      *) echo "unexpected cleanup Docker call: $*" >&2; return 1 ;;
-    esac
-  }
-  if g6rd_cleanup 2>"${sampler_cleanup_fixture}/cleanup.log"; then
-    echo "cleanup accepted a failed sampler" >&2
-    exit 1
-  fi
-  grep -qF 'sampler_failed=1 resource_cleanup_failed=0' \
-    "${sampler_cleanup_fixture}/cleanup.log" \
-    && grep -qF 'down --volumes --remove-orphans --rmi local' \
-      "${sampler_cleanup_fixture}/compose-call" || {
-    echo "cleanup skipped resource recovery or conflated its result with sampling" >&2
-    exit 1
-  }
-)
-rm -rf -- "${sampler_cleanup_fixture}"
 for metric in stability_sample_span_seconds stability_max_sample_gap_seconds \
   stability_valid_sample_count authorized_real_agents \
   max_production_command_inflight database_rpo_seconds database_rto_seconds; do

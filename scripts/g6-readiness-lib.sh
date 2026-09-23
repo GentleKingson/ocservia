@@ -2467,16 +2467,17 @@ g6rd_start_sampler() {
 }
 
 g6rd_stop_sampler_process() {
+  # Status 2 means process-group recovery failed or could not be verified.
   local pid_file="${1:?sampler pid file is required}" pid status=0 forced=0
   local child_status=0 reaped=0 _
   [[ -s "${pid_file}" ]] || {
     echo "resource sampler pid file is missing" >&2
-    return 1
+    return 2
   }
   pid="$(<"${pid_file}")"
   [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || {
     echo "invalid resource sampler process-group id in ${pid_file}" >&2
-    return 1
+    return 2
   }
 
   # A legal tick may start immediately before sampler-stop; its three-second
@@ -2534,17 +2535,17 @@ g6rd_stop_sampler_process() {
   fi
   if kill -0 -- "-${pid}" 2>/dev/null; then
     echo "resource sampler process group ${pid} did not terminate" >&2
-    status=1
+    status=2
   else
     rm -f -- "${pid_file}"
   fi
   if ((child_status != 0)); then
     echo "resource sampler exited with status ${child_status}" >&2
-    status=1
+    ((status != 0)) || status=1
   fi
   if ((forced != 0)); then
     echo "resource sampler required a forced process-group stop" >&2
-    status=1
+    ((status != 0)) || status=1
   fi
   return "${status}"
 }
@@ -2556,14 +2557,14 @@ g6rd_stop_sampler() {
     return 0
   fi
   touch "${G6RD_STATE}/sampler-stop"
-  g6rd_stop_sampler_process "${G6RD_STATE}/sampler.pid" || status=1
+  g6rd_stop_sampler_process "${G6RD_STATE}/sampler.pid" || status=$?
   [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || {
     echo "resource sampler failed closed at $(<"${G6RD_STATE}/sampler-failed-at")" >&2
-    status=1
+    ((status != 0)) || status=1
   }
   [[ -s "${G6RD_STATE}/sampler-complete-at" ]] || {
     echo "resource sampler exited without a graceful-completion sentinel" >&2
-    status=1
+    ((status != 0)) || status=1
   }
   if ((status == 0)); then
     rm -f -- "${G6RD_STATE}/sampler-started-at"
@@ -2649,8 +2650,11 @@ g6rd_diagnostics() {
 }
 
 g6rd_cleanup() {
-  local status=0 sampler_status=0 volume image variable pid helper_container
-  g6rd_stop_sampler || sampler_status=1
+  local status=0 sampler_stop_status=0 sampler_failed=0 sampler_process_cleanup_failed=0
+  local volume image variable pid helper_container
+  g6rd_stop_sampler || sampler_stop_status=$?
+  [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || sampler_failed=1
+  ((sampler_stop_status != 2)) || sampler_process_cleanup_failed=1
   g6rd_release_synthetic_barriers || status=1
   if [[ -s "${G6RD_STATE}/load-dispatch-barrier.pid" ]]; then
     pid="$(<"${G6RD_STATE}/load-dispatch-barrier.pid")"
@@ -2745,9 +2749,10 @@ g6rd_cleanup() {
     echo "scoped PostgreSQL helper container cleanup failed for ${RUN_ID}" >&2
     status=1
   fi
-  printf 'cleanup: sampler_failed=%s resource_cleanup_failed=%s\n' \
-    "${sampler_status}" "${status}" >&2
-  ((sampler_status == 0)) || return 1
+  printf 'cleanup: sampler_failed=%s sampler_stop_failed=%s sampler_process_cleanup_failed=%s other_resource_cleanup_failed=%s\n' \
+    "${sampler_failed}" "$((sampler_stop_status != 0))" \
+    "${sampler_process_cleanup_failed}" "${status}" >&2
+  ((sampler_stop_status == 0)) || return 1
   return "${status}"
 }
 
