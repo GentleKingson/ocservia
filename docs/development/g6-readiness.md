@@ -42,10 +42,13 @@ pass/fail comparisons remain in the result. `assessment=performance` evaluates
 the original limits. Neither mode treats a crash, OOM, deadlock or missing
 measurement as runner noise.
 
-The current topology still uses 50 Agents and its existing observation window.
-A smaller functional topology must be established by actual execution before
-changing the count; static tests cannot establish that minimum. Performance
-and capacity interpretation remains separate from finite correctness.
+The candidate functional topology uses three Agents per fault domain and a
+60-second post-fault observation window. The three distinct local crash windows
+require three FD-B Agents; the peer domain is symmetric. This candidate minimum
+must pass the real hosted fault run before adoption, not just fixture tests.
+`purpose=performance` retains 25+25 Agents, the 305-second observation window,
+and all original metric thresholds. No smaller-topology result is a capacity
+or sustained-resource-growth certification.
 
 ## Execution and reruns
 

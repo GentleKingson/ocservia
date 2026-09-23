@@ -5,6 +5,11 @@ complete published-release-to-candidate diff by
 [`release-selection.mjs`](../../scripts/release-selection.mjs), not by the
 last PR. The [Release Check](release-checks.md) owns execution and aggregation.
 An unselected Integration job is not evaluated, never an inherited PASS.
+When Integration is selected, its existing extended path executes the core
+deployment/apply/VPN/rollback chain in the same environment. The standalone
+Business Smoke job is then skipped, not run a second time; Release Check
+requires Integration success instead. When Integration is not selected,
+standalone Business Smoke must succeed.
 
 | Behavior | Owner | Decision |
 | --- | --- | --- |

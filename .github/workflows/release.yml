@@ -131,7 +131,7 @@ jobs:
   business-smoke:
     name: Business Smoke
     needs: [prepare, build-amd64]
-    if: needs.prepare.outputs.complete == 'true'
+    if: needs.prepare.outputs.complete == 'true' && needs.prepare.outputs.integration != 'true'
     uses: ./.github/workflows/release-business.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
@@ -353,9 +353,12 @@ jobs:
           if (selection.candidate !== process.env.GITHUB_SHA) throw new Error('wrong candidate selection');
           checkResults(selection, JSON.parse(process.env.RESULTS), [
             'prepare', 'full-ci', 'security', 'build-amd64', 'build-arm64',
-            'compatibility-amd64', 'compatibility-arm64', 'business-smoke',
+            'compatibility-amd64', 'compatibility-arm64',
             'validate-release-packages', 'controller-image-security',
           ]);
+          const smoke = JSON.parse(process.env.RESULTS)['business-smoke']?.result;
+          const expectedSmoke = selection.integration.selected ? 'skipped' : 'success';
+          if (smoke !== expectedSmoke) throw new Error(`business smoke: expected ${expectedSmoke}, got ${smoke}`);
           console.log('Selected release checks passed; unselected specialties are not evaluated.');
           JS
 

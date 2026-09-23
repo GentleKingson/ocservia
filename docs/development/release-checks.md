@@ -35,11 +35,14 @@ Selected jobs that fail, are cancelled, unexpectedly skip, or have no result
 block publication. Unselected specialties must be skipped and carry the
 selection reason, not PASS. Single-architecture diagnostics skip Release Check;
 they cannot report complete release acceptance.
+Selected Integration includes the core deployment/apply/VPN/rollback chain,
+so it replaces standalone Business Smoke rather than initializing a second
+environment. Release Check requires exactly the corresponding job outcome.
 
 Build producers export actual artifact IDs and small candidate manifests
 (SHA, version, architecture, filenames, SHA-256). Every product consumer checks
-the trusted producer manifest digest and payload hashes explicitly, not just
-the download action's warning-only integrity behavior. Never look up the
+the trusted producer manifest digest and payload hashes explicitly, independently
+of the download action's archive validation. Never look up the
 latest successful artifact or guess a producer attempt from the consumer.
 Re-signing/repackaging may change installers but cannot rebuild or alter the
 tested payload archive. Final signature, trust root and payload validation

@@ -106,5 +106,24 @@ release.fetch('jobs').each do |name, job|
   abort "production secret in validation: #{name}" if job.to_json.include?('secrets.') || job.key?('secrets')
 end
 abort 'source security missing' unless release['jobs'].values.any? { |job| job['uses'] == './.github/workflows/security.yml' }
+release_gate = release.fetch('jobs').fetch('release-check')
+gate_command = release_gate.fetch('steps').find { |step| step.dig('env', 'RESULTS') }.fetch('run')
+[false, true].repeated_permutation(2) do |integration, resilience|
+  selection = {'candidate' => 'a' * 40, 'integration' => {'selected' => integration}, 'resilience' => {'selected' => resilience}}
+  results = release_gate.fetch('needs').to_h { |job| [job, {'result' => 'success'}] }
+  results['integration']['result'] = integration ? 'success' : 'skipped'
+  results['resilience']['result'] = resilience ? 'success' : 'skipped'
+  results['business-smoke']['result'] = integration ? 'skipped' : 'success'
+  env = {'SELECTION' => selection.to_json, 'GITHUB_SHA' => selection['candidate']}
+  abort 'valid selected release scope rejected' unless system(env.merge('RESULTS' => results.to_json), 'bash', '-euc', gate_command, out: File::NULL)
+  results.each_key do |job|
+    %w[failure cancelled skipped].each do |state|
+      next if results[job]['result'] == state
+      changed = Marshal.load(Marshal.dump(results))
+      changed[job]['result'] = state
+      abort "release accepted #{job}: #{state}" if system(env.merge('RESULTS' => changed.to_json), 'bash', '-euc', gate_command, out: File::NULL, err: File::NULL)
+    end
+  end
+end
 puts 'Native workflow matrix, producer identity and job-result boundaries passed'
 RUBY

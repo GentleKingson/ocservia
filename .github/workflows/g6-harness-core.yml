@@ -40,6 +40,10 @@ permissions:
 
 env:
   G6_AUTHORITY: ${{ inputs.authority }}
+  # Three local Agents are required by the three distinct crash windows.
+  G6_AGENTS_A: ${{ inputs.purpose == 'performance' && '25' || '3' }}
+  G6_AGENTS_B: ${{ inputs.purpose == 'performance' && '25' || '3' }}
+  G6RD_WINDOW_SECONDS: ${{ inputs.purpose == 'performance' && '305' || '60' }}
 
 # The formal profile freezes every runtime image and host-side binary once,
 # then runs the two failure domains through the authority-selected Environment.
@@ -52,6 +56,7 @@ jobs:
       G6_CORE_PROFILE: ${{ inputs.profile }}
       G6_CORE_AUTHORITY: ${{ inputs.authority }}
       G6_CORE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      G6_CORE_PURPOSE: ${{ inputs.purpose }}
     steps:
       - name: Validate the exact reusable-workflow invocation
         run: |
@@ -59,6 +64,7 @@ jobs:
           [[ "${G6_CORE_CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           test "${G6_CORE_CANDIDATE_SHA}" = "${GITHUB_SHA}"
           test "${G6_CORE_PROFILE}" = formal
+          test "${G6_CORE_PURPOSE}" = resilience || test "${G6_CORE_PURPOSE}" = performance
           test "${G6_CORE_AUTHORITY}" = engineering || \
             test "${G6_CORE_AUTHORITY}" = production_readiness
 
@@ -186,14 +192,8 @@ jobs:
               "$(docker image inspect --format '{{.Size}}' "$2")" \
               "$(docker image inspect --format '{{.Id}}' "$2")" || true
           }
-          # Three concurrent build lanes with disjoint dependency trees: the
-          # Go control-plane, the pinned iroh-relay, and one shared Rust
-          # graph. The Rust lane runs the three original compile partitions
-          # (transportd; probe+tunnel; agent+privd) sequentially in the
-          # g6-rust-builder stage — separate Cargo invocations sharing one
-          # target cache, so dependency features never unify across
-          # partitions — and every first-party Rust image then only assembles
-          # from those frozen layers.
+          # Reuse verified products in release runs. Standalone diagnostics
+          # build separate Cargo feature graphs; probes and relay are fixtures.
           # The wrapper bounds the external cache wait, preserves a failed
           # cache-backed solve, and retries exactly once without cache flags.
           # The retry is the authoritative build result.

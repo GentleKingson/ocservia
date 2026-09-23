@@ -462,7 +462,7 @@ phase_load_start() {
     printf '%s\n' "${key}" >>"${G6RD_STATE}/load-keys.txt"
     count=$((count + 1))
   done
-  [[ "${count}" -ge 50 ]] || {
+  [[ "${count}" -eq "$(g6rd_total_agent_count)" ]] || {
     echo "only ${count} nodes are available for the load phase" >&2
     return 1
   }
@@ -684,7 +684,7 @@ load_commands_active() {
   [[ "$(psql_primary -Atc \
     "SELECT count(*) FROM commands c WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID}-%' \
       AND c.state IN ('dispatched','accepted','running') \
-      AND NOT EXISTS (SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id)")" -ge 50 ]]
+      AND NOT EXISTS (SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id)")" -ge "$(g6rd_total_agent_count)" ]]
 }
 
 dispatch_barrier_held() {
@@ -696,7 +696,7 @@ load_outbox_pending() {
   [[ "$(psql_primary -Atc \
     "SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id \
       WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID}-backlog-%' \
-        AND o.published_at IS NULL AND o.available_at<=now()")" -ge 50 ]]
+        AND o.published_at IS NULL AND o.available_at<=now()")" -ge "$(g6rd_total_agent_count)" ]]
 }
 
 report_load_command_timeout() {

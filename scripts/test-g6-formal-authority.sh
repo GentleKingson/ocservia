@@ -26,7 +26,7 @@ jobs.each do |id, job|
 end
 contract = jobs.fetch("g6-contract").fetch("steps").first.fetch("run")
 %w[engineering production_readiness invalid].push('$(touch /tmp/authority-injection)', '"; exit 0; #').each do |value|
-  _, _, status = Open3.capture3({"G6_CORE_AUTHORITY" => value, "G6_CORE_PROFILE" => "formal", "G6_CORE_CANDIDATE_SHA" => "a" * 40, "GITHUB_SHA" => "a" * 40}, "bash", "-c", contract)
+  _, _, status = Open3.capture3({"G6_CORE_PURPOSE" => "resilience", "G6_CORE_AUTHORITY" => value, "G6_CORE_PROFILE" => "formal", "G6_CORE_CANDIDATE_SHA" => "a" * 40, "GITHUB_SHA" => "a" * 40}, "bash", "-c", contract)
   expected = %w[engineering production_readiness].include?(value)
   abort("authority validation changed for #{value.inspect}") unless status.success? == expected
 end

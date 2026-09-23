@@ -700,11 +700,11 @@ const activeLoad = JSON.parse(
 );
 if (
   !Array.isArray(activeLoad.commands) ||
-  activeLoad.commands.length < 50 ||
+  activeLoad.commands.length < nodes.length ||
   !Number.isInteger(activeLoad.queued_outbox_count) ||
-  activeLoad.queued_outbox_count < 50
+  activeLoad.queued_outbox_count < nodes.length
 ) {
-  fail("the database failure boundary has fewer than fifty active commands");
+  fail("the database failure boundary lacks an active command and backlog row for every Agent");
 }
 const rejoinBoundaryAt = normalizePreciseStamp(
   readText(peerDir, "rejoin-at").trim(),
