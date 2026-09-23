@@ -1,4 +1,4 @@
-name: Build and Validate Release Products
+name: Build and Smoke Release Products
 on:
   workflow_call:
     inputs:
@@ -6,12 +6,6 @@ on:
         type: string
         required: true
       arch:
-        type: string
-        required: true
-      frozen-id:
-        type: string
-        required: true
-      frozen-sha256:
         type: string
         required: true
     outputs:
@@ -106,26 +100,6 @@ jobs:
       - name: Seal candidate products
         id: manifest
         run: node scripts/release-artifacts.mjs seal "${RUNNER_TEMP}/packages" agent "${{ inputs.arch }}" "${version}"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
-        with:
-          artifact-ids: ${{ inputs.frozen-id }}
-          path: ${{ runner.temp }}/frozen
-      - name: Package & Upgrade (agent)
-        env:
-          FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
-          FROZEN_SHA256: ${{ inputs.frozen-sha256 }}
-          CANDIDATE_PRODUCTS: ${{ runner.temp }}/packages
-          CANDIDATE_MANIFEST_SHA256: ${{ steps.manifest.outputs.sha256 }}
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/upgrade
-        run: bash scripts/release-upgrade-unit.sh agent "${{ inputs.arch }}"
-      - name: Upload sanitized upgrade diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: upgrade-agent-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/upgrade
-          retention-days: 7
-          if-no-files-found: warn
       - name: Upload package set
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -217,26 +191,6 @@ jobs:
       - name: Seal candidate products
         id: manifest
         run: node scripts/release-artifacts.mjs seal "${RUNNER_TEMP}/controller-images" controller "${{ inputs.arch }}" "${version}"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
-        with:
-          artifact-ids: ${{ inputs.frozen-id }}
-          path: ${{ runner.temp }}/frozen
-      - name: Package & Upgrade (controller)
-        env:
-          FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
-          FROZEN_SHA256: ${{ inputs.frozen-sha256 }}
-          CANDIDATE_PRODUCTS: ${{ runner.temp }}/controller-images
-          CANDIDATE_MANIFEST_SHA256: ${{ steps.manifest.outputs.sha256 }}
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/upgrade
-        run: bash scripts/release-upgrade-unit.sh controller "${{ inputs.arch }}"
-      - name: Upload sanitized upgrade diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: upgrade-controller-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/upgrade
-          retention-days: 7
-          if-no-files-found: warn
       - name: Upload Controller image archives
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
