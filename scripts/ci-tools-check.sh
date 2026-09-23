@@ -30,6 +30,7 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-g6-cache-credentials.sh
       bash scripts/test-g6-buildx-cache-fallback.sh
       bash scripts/test-g6-readiness-hang-guards.sh
+      bash scripts/test-g6-resource-sampler.sh
       node scripts/test-g6-pipeline.mjs
       node scripts/test-g6-evidence-builder.mjs
       node scripts/test-g6-evidence-verifier.mjs

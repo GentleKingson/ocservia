@@ -124,6 +124,16 @@ if ! grep -qF 'docker network rm "${relay_topology_network}"' <<<"${cleanup_lib}
   echo "bounded cleanup does not remove and gate the run-scoped relay topology" >&2
   exit 1
 fi
+for token in \
+  'g6rd_stop_sampler || sampler_status=$?' \
+  'g6rd_compose --profile bootstrap --profile probe down --volumes --remove-orphans --rmi local' \
+  'sampler_process_cleanup_failed=%s other_resource_cleanup_failed=%s' \
+  '((sampler_status == 0)) || return 1'; do
+  grep -qF "${token}" <<<"${cleanup_lib}" || {
+    echo "cleanup must continue after sampler failure and report both outcomes: ${token}" >&2
+    exit 1
+  }
+done
 relay_up_phase="$(sed -n '/^phase_relay_up() {/,/^}/p' "${FD_B}")"
 relay_health_probe="$(sed -n '/^relay_b_healthy() {/,/^}/p' "${FD_B}")"
 if ! grep -qF 'g6rd_wait_until_deadline 120 2' <<<"${relay_up_phase}" \

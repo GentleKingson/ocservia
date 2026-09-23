@@ -1799,6 +1799,7 @@ sampler_trace="$(mktemp)"
 (
   export G6RD_ENVIRONMENT_ID=fixture-environment
   export G6RD_CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
+  export G6RD_STATE="$(mktemp -d)"
   g6rd_compose() {
     printf 'base\n' >>"${sampler_trace}"
     return 1
@@ -1841,11 +1842,16 @@ sampler_trace="$(mktemp)"
     echo "a failed Agent sample was accepted" >&2
     exit 1
   fi
-  grep -qF 'resource sampler agent-fd-b-01 probe failed' \
+  grep -qF 'stage=component_probe component=agent-fd-b-01' \
     <<<"${sampler_error}" || {
     echo "a resource probe failure did not identify its instance" >&2
     exit 1
   }
+  [[ -z "$(ls -A "${G6RD_STATE}")" ]] || {
+    echo "a failed resource probe retained raw stderr" >&2
+    exit 1
+  }
+  rm -rf -- "${G6RD_STATE}"
 )
 rm -f "${sampler_trace}"
 sampler_failure_output="$(mktemp)"

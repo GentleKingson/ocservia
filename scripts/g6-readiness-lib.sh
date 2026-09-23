@@ -2018,9 +2018,35 @@ g6rd_synthetic_barriers_armed() {
 # failure domain keeps the gap metric on a single runner clock.
 # ---------------------------------------------------------------------------
 
+g6rd_sampler_report_failure() {
+  local stage="$1" component="$2" timeout="$3" elapsed_seconds="$4" status="$5" stderr_file="$6"
+  local stderr secret name
+  [[ -n "${timeout}" ]] || timeout=none
+  stderr="$(head -c 1024 "${stderr_file}" | sed -E \
+    -e 's/([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Cc][Oo][Oo][Kk][Ii][Ee])[[:space:]]*:.*/\1=[redacted]/g' \
+    | tr '\r\n' '  ')"
+  if (($(wc -c <"${stderr_file}") > 1024)); then
+    stderr="$(printf '%s' "${stderr}" | sed -E 's/[^[:space:]]+$//') [truncated]"
+  fi
+  for name in owner-password app-password replication-password dev-auth-token relay-token \
+    oidc-client-secret session-key requester-session-cookie approver-session-cookie; do
+    [[ -s "${G6RD_SECRETS:-/dev/null}/${name}" ]] || continue
+    secret="$(<"${G6RD_SECRETS}/${name}")"
+    [[ -n "${secret}" ]] && stderr="${stderr//"${secret}"/[redacted]}"
+  done
+  stderr="$(printf '%s' "${stderr}" | sed -E \
+    -e 's#(://[^[:space:]/:@]+:)[^[:space:]@]+@#\1[redacted]@#g' \
+    -e 's/([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])[[:space:]]*[:=][[:space:]]*[^[:space:]]+/\1=[redacted]/g' \
+    -e 's/[[:xdigit:]]{16,}/[redacted]/g')"
+  printf 'resource sampler stage=%s component=%s timeout=%s elapsed=%ss status=%s stderr=%s\n' \
+    "${stage}" "${component}" "${timeout}" "${elapsed_seconds}" "${status}" \
+    "${stderr:-[empty]}" >&2
+}
+
 g6rd_sampler_row() {
   local component="$1" instance="$2" container="$3" pid_expr="$4" tasks_expr="$5" queue="$6" db="$7" stamp="$8"
-  local compose_command=g6rd_compose rss fd tasks probe
+  local compose_command=g6rd_compose rss fd tasks probe stderr_file started status probe_context
+  local timeout="${G6RD_COMPOSE_TIMEOUT_SECONDS:+${G6RD_COMPOSE_TIMEOUT_SECONDS}s}"
   local -a compose_args=()
   if [[ "${component}" == agent ]]; then
     compose_command=g6rd_agent_compose
@@ -2029,34 +2055,43 @@ g6rd_sampler_row() {
   # One exec per row: separate RSS, descriptor, and task probes tripled the
   # per-tick Docker cost and whole ticks could stretch past the five-second
   # sample-gap bound under load.
-  if ! probe="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
+  stderr_file="$(mktemp "${G6RD_STATE}/sampler-stderr.XXXXXX")" || return 1
+  started="${SECONDS}"
+  if probe="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
     "pid=\$(${pid_expr})
 printf '%s %s\n' \"\$(awk '/VmRSS/{print \$2}' /proc/\$pid/status 2>/dev/null)\" \"\$(ls /proc/\$pid/fd 2>/dev/null | wc -l)\"
-${tasks_expr}" 2>/dev/null)"; then
-    echo "resource sampler ${instance} probe failed" >&2
-    return 1
+${tasks_expr}" 2>"${stderr_file}")"; then
+    rm -f -- "${stderr_file}"
+  else
+    status=$?
+    g6rd_sampler_report_failure component_probe "${instance}" \
+      "${timeout}" \
+      "$((SECONDS - started))" "${status}" "${stderr_file}"
+    rm -f -- "${stderr_file}"
+    return "${status}"
   fi
+  probe_context="resource sampler stage=component_probe component=${instance} timeout=${timeout:-none} elapsed=$((SECONDS - started))s"
   rss="$(awk 'NR==1 { print $1 }' <<<"${probe}")"
   fd="$(awk 'NR==1 { print $2 }' <<<"${probe}")"
   tasks="$(awk 'NR==2' <<<"${probe}")"
   [[ "${rss}" =~ ^[0-9]+$ ]] || {
-    echo "resource sampler ${instance} returned invalid RSS" >&2
+    echo "${probe_context} invalid RSS" >&2
     return 1
   }
   [[ "${fd}" =~ ^[0-9]+$ ]] || {
-    echo "resource sampler ${instance} returned an invalid file-descriptor count" >&2
+    echo "${probe_context} invalid file-descriptor count" >&2
     return 1
   }
   [[ "${tasks}" =~ ^[0-9]+$ ]] || {
-    echo "resource sampler ${instance} returned an invalid task count" >&2
+    echo "${probe_context} invalid task count" >&2
     return 1
   }
   [[ "${queue}" =~ ^[0-9]*$ ]] || {
-    echo "resource sampler ${instance} received an invalid queue depth" >&2
+    echo "${probe_context} invalid queue_depth" >&2
     return 1
   }
   [[ "${db}" =~ ^[0-9]*$ ]] || {
-    echo "resource sampler ${instance} received an invalid database connection count" >&2
+    echo "${probe_context} invalid db_connections" >&2
     return 1
   }
   rss="$((rss * 1024))"
@@ -2067,7 +2102,7 @@ ${tasks_expr}" 2>/dev/null)"; then
 
 g6rd_sampler_tick() {
   local out_file="${1:?output csv is required}"
-  local counts queue db stamp row status=0 index
+  local counts queue db stamp row status=0 index stderr_file started probe_status count_context
   local -a row_order=(api worker scheduler transportd agent postgres) pids=()
   local G6RD_COMPOSE_TIMEOUT_SECONDS="${G6RD_SAMPLER_COMPOSE_TIMEOUT_SECONDS:-3}"
   local G6RD_PSQL_TIMEOUT_SECONDS="${G6RD_SAMPLER_PSQL_TIMEOUT_SECONDS:-3}"
@@ -2082,11 +2117,33 @@ g6rd_sampler_tick() {
   stamp="$(g6rd_now)"
   # one database roundtrip for both counters: two sequential psql calls
   # doubled the fixed tick cost every three seconds
-  counts="$(g6rd_psql -Atc \
+  stderr_file="$(mktemp "${G6RD_STATE}/sampler-stderr.XXXXXX")" || return 1
+  started="${SECONDS}"
+  if counts="$(g6rd_psql -Atc \
     "SELECT (SELECT count(*) FROM pg_stat_activity) || ' ' || (SELECT count(*) FROM outbox_events WHERE published_at IS NULL)" \
-    2>/dev/null)" || return 1
+    2>"${stderr_file}")"; then
+    rm -f -- "${stderr_file}"
+  else
+    status=$?
+    g6rd_sampler_report_failure db_counters "postgres-${FD_ID}" \
+      "${G6RD_PSQL_TIMEOUT_SECONDS}s" "$((SECONDS - started))" "${status}" "${stderr_file}"
+    rm -f -- "${stderr_file}"
+    return "${status}"
+  fi
+  count_context="resource sampler stage=db_counters component=postgres-${FD_ID} timeout=${G6RD_PSQL_TIMEOUT_SECONDS}s elapsed=$((SECONDS - started))s"
+  [[ "${counts}" != *$'\n'* ]] || {
+    echo "${count_context} invalid counter row count" >&2
+    return 1
+  }
   read -r db queue <<<"${counts}"
-  [[ "${db}" =~ ^[0-9]+$ && "${queue}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${db}" =~ ^[0-9]+$ ]] || {
+    echo "${count_context} invalid db_connections" >&2
+    return 1
+  }
+  [[ "${queue}" =~ ^[0-9]+$ ]] || {
+    echo "${count_context} invalid queue_depth" >&2
+    return 1
+  }
   # The six row probes run concurrently so a tick costs its slowest probe,
   # not the sum of all probes; a sum of sequential probes is what pushed a
   # loaded tick past the five-second sample-gap bound. Every probe keeps its
@@ -2120,11 +2177,16 @@ g6rd_sampler_tick() {
     "${queue}" "${db}" "${stamp}" >"${tick_tmp}/postgres" &
   pids+=("$!")
   for index in "${!pids[@]}"; do
-    wait "${pids[$index]}" || status=1
+    if wait "${pids[$index]}"; then
+      :
+    else
+      probe_status=$?
+      ((status != 0)) || status="${probe_status}"
+    fi
   done
   if ((status != 0)); then
     rm -rf "${tick_tmp}"
-    return 1
+    return "${status}"
   fi
   for row in "${row_order[@]}"; do
     cat "${tick_tmp}/${row}"
@@ -2185,11 +2247,14 @@ g6rd_validate_sampler_batch() {
 # g6rd_spawn_harness_loop with the identity variables re-exported, so the
 # loop body itself is ordinary sourced shell with ordinary quoting.
 g6rd_sampler_loop() {
-  local next_tick="${SECONDS}" completed_tmp
+  local next_tick="${SECONDS}" completed_tmp status
   while [[ ! -e "${G6RD_STATE}/sampler-stop" ]]; do
-    if ! g6rd_sampler_tick "${G6RD_SAMPLER_OUT}"; then
+    if g6rd_sampler_tick "${G6RD_SAMPLER_OUT}"; then
+      :
+    else
+      status=$?
       g6rd_now >"${G6RD_STATE}/sampler-failed-at"
-      return 1
+      return "${status}"
     fi
     # Anchor starts to a three-second monotonic cadence. Sleeping for three
     # seconds after the sequential probes made probe cost part of the sample
@@ -2404,16 +2469,21 @@ g6rd_start_sampler() {
 }
 
 g6rd_stop_sampler_process() {
+  # Status 2 means process-group recovery failed or could not be verified.
   local pid_file="${1:?sampler pid file is required}" pid status=0 forced=0
   local child_status=0 reaped=0 _
   [[ -s "${pid_file}" ]] || {
     echo "resource sampler pid file is missing" >&2
-    return 1
+    G6RD_SAMPLER_STOP_FAILED=1
+    G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=1
+    return 2
   }
   pid="$(<"${pid_file}")"
   [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || {
     echo "invalid resource sampler process-group id in ${pid_file}" >&2
-    return 1
+    G6RD_SAMPLER_STOP_FAILED=1
+    G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=1
+    return 2
   }
 
   # A legal tick may start immediately before sampler-stop; its three-second
@@ -2471,38 +2541,59 @@ g6rd_stop_sampler_process() {
   fi
   if kill -0 -- "-${pid}" 2>/dev/null; then
     echo "resource sampler process group ${pid} did not terminate" >&2
-    status=1
+    status=2
+    G6RD_SAMPLER_STOP_FAILED=1
+    G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=1
   else
     rm -f -- "${pid_file}"
   fi
   if ((child_status != 0)); then
     echo "resource sampler exited with status ${child_status}" >&2
-    status=1
+    if ((forced == 0)); then
+      G6RD_SAMPLER_FAILED=1
+      if [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]]; then
+        g6rd_now >"${G6RD_STATE}/sampler-failed-at" || \
+          echo "resource sampler could not persist its failed-exit timestamp" >&2
+      fi
+    fi
+    ((status != 0)) || status=1
   fi
   if ((forced != 0)); then
     echo "resource sampler required a forced process-group stop" >&2
-    status=1
+    G6RD_SAMPLER_STOP_FAILED=1
+    ((status != 0)) || status=1
   fi
   return "${status}"
 }
 
 g6rd_stop_sampler() {
   local status=0
+  G6RD_SAMPLER_FAILED=0
+  G6RD_SAMPLER_STOP_FAILED=0
+  G6RD_SAMPLER_PROCESS_CLEANUP_FAILED=0
   if [[ ! -e "${G6RD_STATE}/sampler-started-at" \
-    && ! -e "${G6RD_STATE}/sampler.pid" ]]; then
+    && ! -e "${G6RD_STATE}/sampler.pid" \
+    && ! -e "${G6RD_STATE}/sampler-stop" ]]; then
     return 0
   fi
-  touch "${G6RD_STATE}/sampler-stop"
-  g6rd_stop_sampler_process "${G6RD_STATE}/sampler.pid" || status=1
+  if [[ -e "${G6RD_STATE}/sampler-started-at" || -e "${G6RD_STATE}/sampler.pid" ]]; then
+    touch "${G6RD_STATE}/sampler-stop"
+    g6rd_stop_sampler_process "${G6RD_STATE}/sampler.pid" || status=$?
+  fi
   [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || {
     echo "resource sampler failed closed at $(<"${G6RD_STATE}/sampler-failed-at")" >&2
-    status=1
+    G6RD_SAMPLER_FAILED=1
+    ((status != 0)) || status=1
   }
+  [[ ! -e "${G6RD_STATE}/sampler-forced-at" ]] || G6RD_SAMPLER_STOP_FAILED=1
   [[ -s "${G6RD_STATE}/sampler-complete-at" ]] || {
     echo "resource sampler exited without a graceful-completion sentinel" >&2
-    status=1
+    if ((G6RD_SAMPLER_STOP_FAILED == 0 && G6RD_SAMPLER_PROCESS_CLEANUP_FAILED == 0)); then
+      G6RD_SAMPLER_FAILED=1
+    fi
+    ((status != 0)) || status=1
   }
-  if ((status == 0)); then
+  if ((G6RD_SAMPLER_PROCESS_CLEANUP_FAILED == 0)); then
     rm -f -- "${G6RD_STATE}/sampler-started-at"
   fi
   return "${status}"
@@ -2586,8 +2677,9 @@ g6rd_diagnostics() {
 }
 
 g6rd_cleanup() {
-  local status=0 volume image variable pid helper_container
-  g6rd_stop_sampler || status=1
+  local status=0 sampler_status=0
+  local volume image variable pid helper_container
+  g6rd_stop_sampler || sampler_status=$?
   g6rd_release_synthetic_barriers || status=1
   if [[ -s "${G6RD_STATE}/load-dispatch-barrier.pid" ]]; then
     pid="$(<"${G6RD_STATE}/load-dispatch-barrier.pid")"
@@ -2682,6 +2774,10 @@ g6rd_cleanup() {
     echo "scoped PostgreSQL helper container cleanup failed for ${RUN_ID}" >&2
     status=1
   fi
+  printf 'cleanup: sampler_failed=%s sampler_stop_failed=%s sampler_process_cleanup_failed=%s other_resource_cleanup_failed=%s\n' \
+    "${G6RD_SAMPLER_FAILED}" "${G6RD_SAMPLER_STOP_FAILED}" \
+    "${G6RD_SAMPLER_PROCESS_CLEANUP_FAILED}" "${status}" >&2
+  ((sampler_status == 0)) || return 1
   return "${status}"
 }
 
