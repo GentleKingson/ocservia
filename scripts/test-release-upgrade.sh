@@ -68,6 +68,7 @@ node scripts/test-release-upgrade.mjs
 bash scripts/test-release-session-compatibility.sh
 node scripts/test-release-selection.mjs
 node scripts/test-release-artifacts.mjs
+bash scripts/test-release-test-images.sh
 ruby -r yaml -r json - <<'RUBY'
 workflow = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 abort 'upgrade validation must not receive write permissions' unless workflow['permissions'] == {'contents' => 'read'}
@@ -97,48 +98,89 @@ required.each do |job|
 end
 release = YAML.safe_load(File.read('.github/workflows/release.yml'))
 release_jobs = release.fetch('jobs')
+fixtures = YAML.safe_load(File.read('.github/workflows/release-test-images.yml'))
+abort 'fixture preparation must remain read-only' unless fixtures['permissions'] == {'contents' => 'read'}
+fixture_steps = fixtures.fetch('jobs').fetch('prepare').fetch('steps')
+build = fixture_steps.find { |step| step['id'] == 'fixture' }
+abort 'fixture invocation must build exactly its selected component' unless build.fetch('run') == 'bash scripts/release-test-images.sh build "$COMPONENT" "$ARCH" "${RUNNER_TEMP}/fixture"' && build.dig('env', 'COMPONENT') == '${{ inputs.component }}'
+abort 'fixture invocation must publish one artifact' unless fixture_steps.count { |step| step.fetch('uses', '').start_with?('actions/upload-artifact@') } == 1
+{'release-compatibility.yml' => %w[test-helpers session-base],
+ 'release-business.yml' => %w[test-helpers], 'release-product-upgrade.yml' => %w[rpm-test],
+ 'g6-harness-core.yml' => %w[test-helpers]}.each do |file, components|
+  workflow = YAML.safe_load(File.read(".github/workflows/#{file}"))
+  consumers = workflow.fetch('jobs').values.flat_map { |job| job.fetch('steps') }.select { |step| step['uses'] == './.github/actions/release-test-images' }
+  abort "fixture reuse missing from #{file}" unless consumers.map { |step| step.dig('with', 'component') } == components
+  consumers.each do |step|
+    prefix = {'test-helpers' => 'helpers', 'session-base' => 'session', 'rpm-test' => 'rpm'}.fetch(step.dig('with', 'component'))
+    abort "#{file} lost producer identity" unless step.dig('with', 'artifact-id') == "${{ inputs.#{prefix}-id }}" && step.dig('with', 'sha256') == "${{ inputs.#{prefix}-sha256 }}"
+  end
+end
 products = YAML.safe_load(File.read('.github/workflows/release-products.yml'))
 abort 'product producers must not wait for upgrades' if products.to_json.include?('release-upgrade-unit.sh') || products.to_json.include?('frozen-')
 upgrades = YAML.safe_load(File.read('.github/workflows/release-product-upgrade.yml'))
 abort 'upgrades must remain read-only and secret-free' unless upgrades['permissions'] == {'contents' => 'read'} && !upgrades.to_json.include?('secrets')
 unit = upgrades.fetch('jobs').fetch('upgrade')
 abort 'upgrade units must be isolated native jobs' unless unit['runs-on'] == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
-abort 'one failed component must not cancel another' unless unit.dig('strategy', 'fail-fast') == false
-matrix = unit.fetch('strategy').fetch('matrix').fetch('include')
-abort 'both product upgrades required' unless matrix.map { |row| row['component'] }.sort == %w[agent controller]
-matrix.each do |row|
-  component = row.fetch('component')
-  abort 'upgrade must consume its own producer identity' unless row['artifact-id'] == "${{ inputs.#{component}-id }}" && row['sha256'] == "${{ inputs.#{component}-sha256 }}"
-end
+abort 'upgrade invocation must contain only one component' if unit.key?('strategy')
 steps = unit.fetch('steps')
 download = steps.find { |step| step.fetch('uses', '').start_with?('actions/download-artifact@') }
 abort 'upgrade lost frozen producer ID' unless download.dig('with', 'artifact-ids') == '${{ inputs.frozen-id }}'
 consume = steps.find { |step| step['uses'] == './.github/actions/release-artifacts' }.fetch('with')
-{'artifact-id' => '${{ matrix.artifact-id }}', 'sha256' => '${{ matrix.sha256 }}',
- 'component' => '${{ matrix.component }}', 'arch' => '${{ inputs.arch }}',
+{'artifact-id' => '${{ inputs.artifact-id }}', 'sha256' => '${{ inputs.sha256 }}',
+ 'component' => '${{ inputs.component }}', 'arch' => '${{ inputs.arch }}',
  'version' => '${{ inputs.version }}'}.each do |key, value|
   abort "upgrade candidate verification lost #{key}" unless consume[key] == value
 end
 validate = steps.find { |step| step.fetch('run', '').include?('release-upgrade-unit.sh') }
-abort 'upgrade must use existing unit entrypoint' unless validate['run'] == 'bash scripts/release-upgrade-unit.sh "${{ matrix.component }}" "${{ inputs.arch }}"'
+abort 'upgrade must use existing unit entrypoint' unless validate['run'] == 'bash scripts/release-upgrade-unit.sh "${{ inputs.component }}" "${{ inputs.arch }}"'
 abort 'upgrade must reuse verified candidates without rebuilding' unless validate.dig('env', 'CANDIDATE_PRODUCTS') == consume['path'] && validate.dig('env', 'CANDIDATE_MANIFEST_SHA256') == consume['sha256']
 abort 'upgrade lost frozen digest' unless validate.dig('env', 'FROZEN_SHA256') == '${{ inputs.frozen-sha256 }}'
 abort 'upgrade lost frozen file' unless validate.dig('env', 'FROZEN_FILE') == "#{download.dig('with', 'path')}/frozen.json"
+rpm_consumer = steps.find { |step| step['uses'] == './.github/actions/release-test-images' }
+abort 'only Agent upgrades may consume RPM fixtures' unless rpm_consumer['if'] == "inputs.component == 'agent'"
 %w[amd64 arm64].each do |arch|
-  caller = release_jobs.fetch("upgrade-#{arch}")
-  abort 'upgrade must follow only its native producer and prepare' unless caller['needs'].sort == ['prepare', "build-#{arch}"].sort
-  abort 'upgrade must also run for single-architecture diagnostics' if caller.key?('if')
-  abort 'upgrade workflow not called' unless caller['uses'] == './.github/workflows/release-product-upgrade.yml'
-  expected = {'arch' => arch, 'version' => '${{ needs.prepare.outputs.version }}'}
-  %w[frozen-id frozen-sha256].each { |key| expected[key] = "${{ needs.prepare.outputs.#{key} }}" }
-  %w[agent-id agent-sha256 controller-id controller-sha256].each { |key| expected[key] = "${{ needs.build-#{arch}.outputs.#{key} }}" }
-  abort 'upgrade caller must preserve all producer identities' unless caller['with'] == expected
-  abort 'Release Check must observe upgrade results' unless release_jobs.fetch('release-check').fetch('needs').include?("upgrade-#{arch}")
+  %w[agent controller].each do |component|
+    name = "upgrade-#{component}-#{arch}"
+    caller = release_jobs.fetch(name)
+    dependencies = ['prepare', "build-#{arch}"]
+    dependencies << "rpm-#{arch}" if component == 'agent'
+    abort "#{name} has unrelated dependencies" unless caller['needs'].sort == dependencies.sort
+    abort 'upgrade must also run for single-architecture diagnostics' if caller.key?('if')
+    abort 'upgrade workflow not called' unless caller['uses'] == './.github/workflows/release-product-upgrade.yml'
+    expected = {'component' => component, 'arch' => arch, 'version' => '${{ needs.prepare.outputs.version }}',
+                'artifact-id' => "${{ needs.build-#{arch}.outputs.#{component}-id }}",
+                'sha256' => "${{ needs.build-#{arch}.outputs.#{component}-sha256 }}"}
+    %w[frozen-id frozen-sha256].each { |key| expected[key] = "${{ needs.prepare.outputs.#{key} }}" }
+    if component == 'agent'
+      expected['rpm-id'] = "${{ needs.rpm-#{arch}.outputs.artifact-id }}"
+      expected['rpm-sha256'] = "${{ needs.rpm-#{arch}.outputs.sha256 }}"
+    end
+    abort 'upgrade caller must preserve all producer identities' unless caller['with'] == expected
+    abort 'Release Check must observe upgrade results' unless release_jobs.fetch('release-check').fetch('needs').include?(name)
+  end
+  {'helpers' => 'test-helpers', 'session' => 'session-base', 'rpm' => 'rpm-test'}.each do |prefix, component|
+    producer = release_jobs.fetch("#{prefix}-#{arch}")
+    abort 'fixtures must prepare independently' unless producer['needs'] == 'prepare' && producer['uses'] == './.github/workflows/release-test-images.yml'
+    expected = {'component' => component, 'arch' => arch, 'version' => '${{ needs.prepare.outputs.version }}'}
+    abort 'fixture recipe identity drifted' unless producer['with'] == expected
+    condition = prefix == 'rpm' ? release_jobs.fetch("build-#{arch}")['if'] : "needs.prepare.outputs.complete == 'true'"
+    abort 'fixture selection drifted' unless producer['if'] == condition
+  end
 end
 %w[compatibility-amd64 compatibility-arm64 business-smoke integration resilience validate-release-packages controller-image-security].each do |name|
   arch = name == 'compatibility-arm64' ? 'arm64' : 'amd64'
-  expected = %w[validate-release-packages controller-image-security].include?(name) ? %w[prepare build-amd64 build-arm64] : ['prepare', "build-#{arch}"]
-  abort "#{name} must not wait for upgrade results" unless release_jobs.fetch(name).fetch('needs').sort == expected.sort
+  security = %w[validate-release-packages controller-image-security].include?(name)
+  compatibility = name.start_with?('compatibility-')
+  expected = security ? %w[prepare build-amd64 build-arm64] : ['prepare', "build-#{arch}", "helpers-#{arch}"]
+  expected << "session-#{arch}" if compatibility
+  abort "#{name} has unrelated dependencies" unless release_jobs.fetch(name).fetch('needs').sort == expected.sort
+  next if security
+  prefixes = compatibility ? %w[helpers session] : %w[helpers]
+  prefixes.each do |prefix|
+    {'id' => 'artifact-id', 'sha256' => 'sha256'}.each do |input, output|
+      abort "#{name} lost #{prefix} identity" unless release_jobs.fetch(name).dig('with', "#{prefix}-#{input}") == "${{ needs.#{prefix}-#{arch}.outputs.#{output} }}"
+    end
+  end
 end
 publish = release.fetch('jobs').fetch('publish-release-packages')
 abort 'production approval lost' unless publish['environment'] == 'release-publishing'

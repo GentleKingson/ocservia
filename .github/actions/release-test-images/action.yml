@@ -1,0 +1,36 @@
+name: Consume release test images
+description: Verify same-run fixture bytes and native image identity before reuse
+inputs:
+  artifact-id:
+    required: true
+    description: Producer artifact ID
+  sha256:
+    required: true
+    description: Producer manifest digest
+  component:
+    required: true
+    description: test-helpers, session-base or rpm-test
+  arch:
+    required: true
+    description: Native architecture
+  version:
+    required: true
+    description: Candidate version
+  path:
+    required: true
+    description: Artifact directory
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+      with:
+        artifact-ids: ${{ inputs.artifact-id }}
+        path: ${{ inputs.path }}
+    - shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TEST_IMAGES_SHA256: ${{ inputs.sha256 }}
+        COMPONENT: ${{ inputs.component }}
+        ARCH: ${{ inputs.arch }}
+        DIRECTORY: ${{ inputs.path }}
+      run: bash scripts/release-test-images.sh load "$COMPONENT" "$ARCH" "$DIRECTORY"

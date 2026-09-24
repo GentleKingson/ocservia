@@ -5,11 +5,16 @@ import { pathToFileURL } from "node:url";
 import { candidateArtifacts } from "./release-upgrade-contract.mjs";
 
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+const fixtureFiles = {
+  "test-helpers": ["probe.tar", "relay.tar", "ocservia-g6-tunnel"],
+  "session-base": ["node.tar", "workflow-tools.tar"],
+  "rpm-test": ["rpm.tar"],
+};
 export function artifactManifest(directory, identity) {
   if (!/^[0-9a-f]{40}$/.test(identity.sha) || !/^\d+\.\d+\.\d+$/.test(identity.version) ||
-      !["amd64", "arm64"].includes(identity.arch) || !["agent", "controller"].includes(identity.component))
+      !["amd64", "arm64"].includes(identity.arch) || !["agent", "controller", ...Object.keys(fixtureFiles)].includes(identity.component))
     throw new Error("invalid candidate identity");
-  const names = candidateArtifacts(identity.component, identity.arch, identity.version);
+  const names = fixtureFiles[identity.component] ?? candidateArtifacts(identity.component, identity.arch, identity.version);
   if (identity.component === "agent") {
     const archive = names.find(name => name.endsWith(".tar.gz"));
     names.push(...[".sha256", ".sha256.sig", ".sha256.pub.pem"].map(suffix => archive + suffix));

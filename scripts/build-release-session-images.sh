@@ -19,9 +19,11 @@ if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
   done
 fi
 builder="session-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+if [[ -z "${RELEASE_PROBE_IMAGE:-}" || -z "${CANDIDATE_PRODUCTS:-}" ]]; then
 docker buildx create --driver docker-container \
   --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 \
   "${driver_opts[@]}" --name "${builder}" --bootstrap --use
+fi
 build_image() {
   local variable="$1" scope="$2" dockerfile="$3" id
   shift 3
@@ -50,14 +52,24 @@ else
 fi
 docker run --rm --entrypoint /bin/sh session-g6rd_transportd_image:candidate \
   -ec 'test -x /usr/local/libexec/ocservia-transportd-relays'
-build_image G6RD_PROBE_IMAGE rust rust/g6-runtime.Dockerfile --target g6-probe-runtime
-build_image G6RD_RELAY_IMAGE relay deploy/production/relay.Dockerfile --no-cache-filter relay-runtime
-build_image SINGLE_NODE_IMAGE node scripts/single-relay-node.Dockerfile
+workflow_args=()
+if [[ -n "${RELEASE_PROBE_IMAGE:-}" ]]; then
+  : "${RELEASE_RELAY_IMAGE:?}" "${RELEASE_NODE_IMAGE:?}" "${RELEASE_WORKFLOW_TOOLS_IMAGE:?}"
+  printf 'G6RD_PROBE_IMAGE=%s\nG6RD_RELAY_IMAGE=%s\nSINGLE_NODE_IMAGE=%s\n' \
+    "${RELEASE_PROBE_IMAGE}" "${RELEASE_RELAY_IMAGE}" "${RELEASE_NODE_IMAGE}" >>"${GITHUB_ENV}"
+  docker tag "${RELEASE_RELAY_IMAGE}" session-g6rd_relay_image:candidate
+  docker tag "${RELEASE_WORKFLOW_TOOLS_IMAGE}" session-workflow-tools:candidate
+  workflow_args+=(--build-arg WORKFLOW_TOOLS=session-workflow-tools:candidate)
+else
+  build_image G6RD_PROBE_IMAGE rust rust/g6-runtime.Dockerfile --target g6-probe-runtime
+  build_image G6RD_RELAY_IMAGE relay deploy/production/relay.Dockerfile --no-cache-filter relay-runtime
+  build_image SINGLE_NODE_IMAGE node scripts/single-relay-node.Dockerfile
+fi
 # Reuse the real-process TLS PKI fixture without any candidate node binaries.
 # The default builder can resolve these job-local images; no registry push.
 docker tag session-g6rd_transportd_image:candidate ocservia-pr02-transport:e2e
 docker tag session-g6rd_relay_image:candidate ocservia-pr02-relay:e2e
-docker build --builder default --target workflow-base \
+docker build --builder default --target workflow-base "${workflow_args[@]}" \
   --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
   -f deploy/database-e2e/Dockerfile -t session-workflow:candidate .
 workflow_image="$(docker image inspect --format '{{.Id}}' session-workflow:candidate)"
