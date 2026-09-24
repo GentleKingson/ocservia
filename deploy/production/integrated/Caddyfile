@@ -1,0 +1,54 @@
+{
+	admin off
+	auto_https off
+	servers {
+		protocols h1 h2
+		strict_sni_host on
+		listener_wrappers {
+			proxy_protocol {
+				timeout 5s
+				allow {$OCSERV_EDGE_GATEWAY_IP:172.30.241.2}/32
+				fallback_policy reject
+			}
+			tls
+		}
+		timeouts {
+			read_header 5s
+			read_body 30s
+		}
+	}
+}
+
+:8443 {
+	tls /run/secrets/tls_certificate /run/secrets/tls_private_key
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	route {
+		@wrongHost not host {$OCSERV_PUBLIC_HOST}
+		respond @wrongHost 421
+		@wrongPort expression `!({http.request.hostport}.lowerAscii() in ["{$OCSERV_PUBLIC_HOST}", "{$OCSERV_PUBLIC_HOST}:443"])`
+		respond @wrongPort 421
+		handle /api/* {
+			reverse_proxy control-plane:8080 {
+				header_up X-Ocservia-Client-IP {http.request.remote.host}
+			}
+		}
+		handle /healthz {
+			reverse_proxy control-plane:8080
+		}
+		handle /readyz {
+			reverse_proxy control-plane:8080
+		}
+		handle {
+			root * /srv
+			try_files {path} /index.html
+			file_server
+		}
+	}
+}

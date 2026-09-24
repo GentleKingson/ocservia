@@ -27,6 +27,17 @@ node_hosts=(--add-host "relay-a:$GATEWAY")
 transport_hosts="[\"relay-a:$GATEWAY\"]"
 extra_compose=()
 chain_name=Single-relay
+if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+  : "${SINGLE_EDGE_IMAGE:?}" "${SINGLE_NETWORK_PROBE_IMAGE:?}"
+  [[ "${SINGLE_LEGACY_SECOND_RELAY:-false}" != true ]] || exit 2
+  python3 -c 'import ipaddress,sys; assert ipaddress.ip_address(sys.argv[1]).is_global' "$SINGLE_INTEGRATED_PUBLIC_IP"
+  RELAY_PORT=443
+  RELAY_URL=https://relay.p1.test
+  relay_args=(--relay-url "$RELAY_URL")
+  node_hosts=(--add-host "relay.p1.test:$SINGLE_INTEGRATED_PUBLIC_IP")
+  transport_hosts="[\"relay.p1.test:$SINGLE_INTEGRATED_PUBLIC_IP\"]"
+  chain_name='Integrated public Relay'
+fi
 if [[ "${SINGLE_LEGACY_SECOND_RELAY:-false}" == true ]]; then
   RELAY_URL_B=https://relay-b:23444
   RELAYS+=(legacy-relay)
@@ -45,6 +56,10 @@ finish() {
   trap - EXIT
   set +e
   printf '%s\n' "$status" >"$ARTIFACT_DIR/exit-status"
+  if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+    g6rd_compose logs --no-color edge >"$ARTIFACT_DIR/edge.log" 2>&1
+    docker rm -f "p1-network-$RUN_ID" >/dev/null 2>&1
+  fi
   for role in transportd worker api "${RELAYS[@]}"; do
     g6rd_compose logs --no-color "$role" >"$ARTIFACT_DIR/$role.log" 2>&1
   done
@@ -67,6 +82,15 @@ finish() {
 }
 trap finish EXIT
 g6rd_generate_secrets
+if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+  openssl req -new -key "$G6RD_SECRETS/relay-leaf.key" -subj /CN=relay.p1.test \
+    -out "$G6RD_SECRETS/p1.csr"
+  openssl x509 -req -in "$G6RD_SECRETS/p1.csr" -CA "$G6RD_SECRETS/relay-ca.pem" \
+    -CAkey "$G6RD_SECRETS/relay-ca.key" -CAcreateserial -days 1 \
+    -extfile <(printf 'subjectAltName=DNS:relay.p1.test\nextendedKeyUsage=serverAuth\n') \
+    -out "$G6RD_SECRETS/relay-leaf.crt"
+  cat "$G6RD_SECRETS/relay-leaf.crt" "$G6RD_SECRETS/relay-ca.pem" >"$G6RD_SECRETS/relay-chain.crt"
+fi
 g6rd_export_common_env
 g6rd_prepare_release_images
 cat >"$OVERRIDE" <<EOF
@@ -110,6 +134,31 @@ networks:
   relay-egress: {}
   relay-boundary: {}
 EOF
+if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+  sed 's/0.0.0.0:3443/0.0.0.0:8443/' "$ROOT/deploy/g6-readiness/relay.toml" >"$G6RD_WORK/p1-relay.toml"
+  chmod 0644 "$G6RD_WORK/p1-relay.toml"
+  cat >"$G6RD_WORK/p1-edge.yaml" <<EOF
+services:
+  edge:
+    image: $SINGLE_EDGE_IMAGE
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    environment:
+      OCSERV_PUBLIC_HOST: controller.p1.test
+      OCSERV_RELAY_PUBLIC_HOST: relay.p1.test
+    ports: ["0.0.0.0:443:8443/tcp"]
+    networks: [relay-boundary]
+  relay:
+    ports: !override ["0.0.0.0:7842:7842/udp"]
+    volumes:
+      - $G6RD_WORK/p1-relay.toml:/etc/iroh-relay/relay.toml:ro
+EOF
+  extra_compose=(-f "$G6RD_WORK/p1-edge.yaml")
+  g6rd_compose up -d --no-deps edge
+fi
 if [[ -n "$RELAY_URL_B" ]]; then
   # Preserve v0.6.0's two-Relay requirement with two real authenticated
   # services, not duplicate URLs. Both still share this one disposable host.
@@ -126,6 +175,28 @@ EOF
   extra_compose=(-f "$G6RD_WORK/legacy-relay.yaml")
 fi
 phase_primary_up
+network_probe_status=0
+if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+  g6rd_wait_until 20 1 'public Relay TLS ready' curl --silent --show-error --fail --max-time 3 \
+    --resolve "relay.p1.test:443:$SINGLE_INTEGRATED_PUBLIC_IP" \
+    --cacert "$G6RD_SECRETS/relay-ca.pem" https://relay.p1.test/healthz
+  timeout --kill-after=5s 70s docker run --rm --name "p1-network-$RUN_ID" \
+    --user 65534:65532 --network "${COMPOSE_PROJECT}_relay-egress" \
+    --add-host "relay.p1.test:$SINGLE_INTEGRATED_PUBLIC_IP" \
+    -v "$G6_RELAY_DIR/probe:/probe:ro" "$SINGLE_NETWORK_PROBE_IMAGE" \
+    "$RELAY_URL" /probe/relay-ca.pem /probe/relay-token \
+    >"$ARTIFACT_DIR/relay-network.log" 2>&1 || network_probe_status=$?
+  printf '%s\n' "$network_probe_status" >"$ARTIFACT_DIR/relay-network-status"
+  if [[ "$network_probe_status" != 0 ]]; then
+    # A private-path control distinguishes a local Relay failure from public hairpin loss.
+    timeout --kill-after=5s 70s docker run --rm --name "p1-network-$RUN_ID" \
+      --user 65534:65532 --network "${COMPOSE_PROJECT}_relay-egress" \
+      --add-host "relay.p1.test:$GATEWAY" \
+      -v "$G6_RELAY_DIR/probe:/probe:ro" "$SINGLE_NETWORK_PROBE_IMAGE" \
+      "$RELAY_URL" /probe/relay-ca.pem /probe/relay-token \
+      >"$ARTIFACT_DIR/relay-network-private-control.log" 2>&1 || true
+  fi
+fi
 if [[ -n "$RELAY_URL_B" ]]; then
   g6rd_compose up -d --no-build --no-deps legacy-relay
 fi
@@ -145,6 +216,14 @@ docker run -d --name "$NODE_CONTAINER" --privileged --cgroupns private \
   -v "$(dirname "$SINGLE_AGENT_ARCHIVE"):/payload:ro" \
   -v "$SINGLE_AGENT_PUBLIC_KEY:/test-release-key.pem:ro" \
   "$SINGLE_NODE_IMAGE" /sbin/init >/dev/null
+if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+  # Block direct QUIC only in this disposable node namespace; TCP Relay stays available.
+  node_pid="$(docker inspect --format '{{.State.Pid}}' "$NODE_CONTAINER")"
+  nsenter -t "$node_pid" -n iptables -A OUTPUT -p udp ! -d 127.0.0.0/8 -j REJECT
+  nsenter -t "$node_pid" -n ip6tables -A OUTPUT -p udp -j REJECT
+  nsenter -t "$node_pid" -n iptables-save >"$ARTIFACT_DIR/node-direct-udp-block.txt"
+  nsenter -t "$node_pid" -n ip6tables-save >>"$ARTIFACT_DIR/node-direct-udp-block.txt"
+fi
 archive_name="$(basename "$SINGLE_AGENT_ARCHIVE")"
 docker exec -e "ARCHIVE=/payload/$archive_name" -e "KEY_SHA=$SINGLE_AGENT_KEY_SHA256" \
   "$NODE_CONTAINER" bash -euo pipefail -c '
@@ -321,6 +400,10 @@ docker exec "$NODE_CONTAINER" journalctl --no-pager -u ocserv >"$ARTIFACT_DIR/oc
 grep -Eiq 'reload|SIGHUP' "$ARTIFACT_DIR/ocserv-reload.log"
 echo 'Real ocserv reload command and result passed'
 cp "$ARTIFACT_DIR/reload-result.json" "$ARTIFACT_DIR/initial-reload-result.json"
+if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+  echo 'Integrated public Relay-only real Agent command passed; recovery scenarios not requested here'
+  exit "$network_probe_status"
+fi
 
 # Freeze the deadline before fault injection: Agent backoff caps at 30s and
 # the existing handshake timeout is bounded; 120s covers redial and telemetry.

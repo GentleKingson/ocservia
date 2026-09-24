@@ -1,0 +1,67 @@
+# Prototype overlay, applied LAST with deploy/production/compose.yaml first.
+# Requires Compose >= 2.24.4 (!override); lifecycle admission belongs to P3.
+services:
+  edge:
+    image: ${OCSERV_EDGE_IMAGE:?set a digest-pinned Edge image}
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    environment:
+      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST:?set Controller DNS name}
+      OCSERV_RELAY_PUBLIC_HOST: ${OCSERV_RELAY_PUBLIC_HOST:?set Relay DNS name}
+    ports:
+      - "${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:443:8443/tcp"
+    tmpfs: ["/tmp:size=8m,mode=0700,uid=65532,gid=65532"]
+    ulimits:
+      nofile: {soft: 8192, hard: 8192}
+    networks:
+      frontend: {}
+      edge-gateway:
+        ipv4_address: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
+      edge-relay: {}
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 64M, pids: 32}
+
+  gateway:
+    ports: !override []
+    tmpfs: !override
+      - /config:size=1m,mode=0700,uid=65532,gid=65532
+      - /data:size=8m,mode=0700,uid=65532,gid=65532
+      - /tmp:size=8m,mode=0700,uid=65532,gid=65532
+    environment:
+      OCSERV_EDGE_GATEWAY_IP: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
+    volumes:
+      - ./integrated/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks: !override
+      edge-gateway: {}
+      application:
+        ipv4_address: ${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}
+
+  relay:
+    extends:
+      file: ./relay/compose.yaml
+      service: relay
+    ports: !override
+      - "${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:7842:7842/udp"
+    volumes: !override
+      - ./relay/relay.toml:/etc/iroh-relay/relay.toml:ro
+    networks: !override [edge-relay]
+
+networks:
+  edge-gateway:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${OCSERV_EDGE_GATEWAY_SUBNET:-172.30.241.0/24}
+          ip_range: ${OCSERV_EDGE_GATEWAY_IP_RANGE:-172.30.241.128/25}
+  edge-relay: {}
+
+secrets:
+  relay_tls_certificate:
+    file: ${OCSERV_RELAY_SECRET_DIR:?set Relay secret directory}/tls.crt
+  relay_tls_private_key:
+    file: ${OCSERV_RELAY_SECRET_DIR}/tls.key
