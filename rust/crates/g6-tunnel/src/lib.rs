@@ -1500,9 +1500,10 @@ mod tests {
     async fn target_failure_rejects_only_its_stream() {
         const STAGE_TIMEOUT: Duration = Duration::from_secs(20);
 
-        let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Reserve without listening so concurrent tests cannot claim the failed target.
+        let reservation = tokio::net::TcpSocket::new_v4().unwrap();
+        reservation.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let target = reservation.local_addr().unwrap();
-        drop(reservation);
         let (server_key, client_key) = (SecretKey::generate(), SecretKey::generate());
         let server_limiter = ConnectionLimiter::with_limits(4, 2, Duration::from_secs(1));
         let metrics = OuterConnectionMetrics::default();
@@ -1547,7 +1548,7 @@ mod tests {
         drop(rejected);
         wait_for_no_flows(&server_limiter).await;
 
-        let echo = TcpListener::bind(target).await.unwrap();
+        let echo = reservation.listen(128).unwrap();
         tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = echo.accept().await else {
