@@ -138,13 +138,32 @@ explicitly. This changes only the test topology, not production networking.
 These failed attempts were not P1 passes. Check the final artifact for the
 exact candidate, image identities and added negative-case results.
 
+Public validation on 2026-09-25 (Hong Kong time) additionally exercised two
+GitHub-hosted sources against one BuildServer endpoint. The real-node run
+`p1public2f9sbng` used a signed test Agent package, one custom Relay URL, and
+namespace rules rejecting non-loopback IPv4 UDP and all IPv6 UDP on the Agent.
+The connection probe reported `Relay(https://relay.p1.test/)`; independently
+approved real ocserv reload operation `01a0d451-e760-75da-94a6-31dda8c0ad17`
+reached `succeeded`. The locked Relay client accepted the correct token and
+returned `ServerDeniedAuth` with `not authorized` for the wrong token. This is
+a protocol-level denial, not necessarily an HTTP 401/403 response.
+
+The combined run intentionally remains failed: public UDP7842 QAD timed out.
+The same binary, Relay, CA and token passed QAD through the private host-bridge
+address (reported address `172.18.0.1:48712`). A bounded packet capture saw
+UDP7842 requests leave the host's physical interface for its public IP, with
+no matching inbound UDP response. The cloud UDP rules/public NAT return path
+remain to be inspected; this evidence does not identify which cloud component
+dropped the traffic. No private-route workaround was counted as a public pass.
+All task containers and added host firewall rules were removed after each run.
+
 | Gate | Status / next evidence |
 | --- | --- |
 | Public two-name TLS and two external client sources | PASS with explicit public IP and private test CA in [Actions run 36026179708](https://github.com/GentleKingson/ocservia/actions/runs/36026179708): observed sources `52.234.44.112` and `135.232.215.240`, one shared endpoint, both TLS branches and spoof rejection. Public DNS/ACME remain untested. |
-| Exact published port set | PASS in rendered overlay. Runtime fixture uses isolated ephemeral loopback bindings; public host listeners still need deployment validation. |
-| Same-host return path | NOT_RUN for transportd and QUIC discovery. Current prototype retains public DNS/host hairpin, without assuming it works. No TCP-only DNS override is supplied: mapping the Relay name only to Edge would break UDP7842 and its internal TCP443 path. |
-| Authenticated Relay-only command / wrong token / no public fallback | NOT_RUN. Reuse the existing real Agent chain and Relay connection-type evidence with direct paths excluded, then stop/restore Relay without changing identities. HTTPS health is not that proof. |
-| Relay Host / SNI boundary | Contract amendment approved 2026-09-25: strict Relay SNI and normal Token authentication, not HTTP Host rejection. The locked Relay returned `HTTP/1.1 200 OK` for `/healthz` with wrong Host and valid SNI. Gateway keeps strict Host checks; Relay Token verification remains a separate unrun gate below the TLS health check. |
+| Exact published port set | PASS in rendered overlay; the authorized public fixture bound TCP443 and UDP7842. The real-node engineering harness also has its existing loopback-only backend publications, not a production deployment. |
+| Same-host return path | TCP PASS, public QUIC FAIL. Authenticated TCP and real Agent commands traversed the public IP; public UDP7842 QAD timed out while the private-path QAD control passed. Cloud rules/NAT return-path evidence is required before accepting this topology. |
+| Authenticated Relay-only command / wrong token / no public fallback | PASS for real approved ocserv reload with direct Agent UDP excluded and exactly one custom Relay URL in both process argv. Wrong token was explicitly rejected by the Relay protocol. Outage/recovery remains a separate unrun public-path scenario. |
+| Relay Host / SNI boundary | Contract amendment approved 2026-09-25: strict Relay SNI and normal Token authentication, not HTTP Host rejection. The locked Relay returned `HTTP/1.1 200 OK` for `/healthz` with wrong Host and valid SNI. Gateway keeps strict Host checks; the independent real Token check now passes. |
 | Idle and business reconnect | Short synthetic SSE and new TLS connections checked; 35-minute idle boundary, OIDC callback, real SSE authorization and established Agent reconnection remain NOT_RUN. |
 | Registry production artifacts | NOT_RUN; P4/P5 responsibility. Local image IDs are not published pull references. |
 

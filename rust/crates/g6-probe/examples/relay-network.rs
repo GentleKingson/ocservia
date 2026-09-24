@@ -8,6 +8,9 @@ use rustls_pki_types::pem::PemObject;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter("warn,iroh::net_report=debug")
+        .init();
     let args: Vec<_> = std::env::args().collect();
     assert_eq!(args.len(), 4, "relay-network URL CA_FILE TOKEN_FILE");
     let url: RelayUrl = args[1].parse()?;
@@ -34,12 +37,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let error = rejected.expect_err("wrong token unexpectedly accepted");
-    let message = format!("{error:?}");
     assert!(
-        message.contains("403") || message.contains("401"),
-        "not an authentication rejection: {message}"
+        matches!(&error, iroh_relay::client::ConnectError::Handshake {
+            source: iroh_relay::protos::handshake::Error::ServerDeniedAuth { reason, .. }, ..
+        } if reason == "not authorized"),
+        "not an authentication rejection: {error:?}"
     );
-    println!("wrong_token=PASS error={message}");
+    println!("wrong_token=PASS error={error:?}");
     let endpoint = Endpoint::builder(presets::N0)
         .relay_mode(RelayMode::Custom(
             RelayMap::from_iter([url]).with_auth_token(token),
@@ -48,8 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .net_report_config(NetReportConfig::minimal())
         .bind()
         .await?;
-    let report = tokio::time::timeout(Duration::from_secs(25), endpoint.net_report().initialized())
-        .await?;
+    let report =
+        tokio::time::timeout(Duration::from_secs(25), endpoint.net_report().initialized()).await?;
     println!("quic_report={report:?}");
     assert!(
         report.global_v4.is_some(),

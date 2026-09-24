@@ -136,6 +136,7 @@ networks:
 EOF
 if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
   sed 's/0.0.0.0:3443/0.0.0.0:8443/' "$ROOT/deploy/g6-readiness/relay.toml" >"$G6RD_WORK/p1-relay.toml"
+  chmod 0644 "$G6RD_WORK/p1-relay.toml"
   cat >"$G6RD_WORK/p1-edge.yaml" <<EOF
 services:
   edge:
@@ -144,7 +145,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    tmpfs: [/tmp:size=16m,mode=1777]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
     environment:
       OCSERV_PUBLIC_HOST: controller.p1.test
       OCSERV_RELAY_PUBLIC_HOST: relay.p1.test
@@ -176,13 +177,25 @@ fi
 phase_primary_up
 network_probe_status=0
 if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
+  g6rd_wait_until 20 1 'public Relay TLS ready' curl --silent --show-error --fail --max-time 3 \
+    --resolve "relay.p1.test:443:$SINGLE_INTEGRATED_PUBLIC_IP" \
+    --cacert "$G6RD_SECRETS/relay-ca.pem" https://relay.p1.test/healthz
   timeout --kill-after=5s 70s docker run --rm --name "p1-network-$RUN_ID" \
     --user 65534:65532 --network "${COMPOSE_PROJECT}_relay-egress" \
     --add-host "relay.p1.test:$SINGLE_INTEGRATED_PUBLIC_IP" \
-    -v "$G6RD_RELAY_DIR/probe:/probe:ro" "$SINGLE_NETWORK_PROBE_IMAGE" \
+    -v "$G6_RELAY_DIR/probe:/probe:ro" "$SINGLE_NETWORK_PROBE_IMAGE" \
     "$RELAY_URL" /probe/relay-ca.pem /probe/relay-token \
     >"$ARTIFACT_DIR/relay-network.log" 2>&1 || network_probe_status=$?
   printf '%s\n' "$network_probe_status" >"$ARTIFACT_DIR/relay-network-status"
+  if [[ "$network_probe_status" != 0 ]]; then
+    # A private-path control distinguishes a local Relay failure from public hairpin loss.
+    timeout --kill-after=5s 70s docker run --rm --name "p1-network-$RUN_ID" \
+      --user 65534:65532 --network "${COMPOSE_PROJECT}_relay-egress" \
+      --add-host "relay.p1.test:$GATEWAY" \
+      -v "$G6_RELAY_DIR/probe:/probe:ro" "$SINGLE_NETWORK_PROBE_IMAGE" \
+      "$RELAY_URL" /probe/relay-ca.pem /probe/relay-token \
+      >"$ARTIFACT_DIR/relay-network-private-control.log" 2>&1 || true
+  fi
 fi
 if [[ -n "$RELAY_URL_B" ]]; then
   g6rd_compose up -d --no-build --no-deps legacy-relay
