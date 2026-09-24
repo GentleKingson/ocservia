@@ -69,6 +69,7 @@ bash scripts/test-release-session-compatibility.sh
 node scripts/test-release-selection.mjs
 node scripts/test-release-artifacts.mjs
 bash scripts/test-release-test-images.sh
+bash scripts/test-release-rust-cache.sh
 ruby -r yaml -r json - <<'RUBY'
 workflow = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 abort 'upgrade validation must not receive write permissions' unless workflow['permissions'] == {'contents' => 'read'}

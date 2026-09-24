@@ -51,6 +51,29 @@ fewer builds alone is not a wall-time
 or runner-minute performance claim. Focused fixture tests run through
 `bash scripts/test-release-upgrade.sh` on BuildServer.
 
+Release Rust compilation caches are accelerators, not candidate artifacts.
+Agent restores only its architecture/builder-specific Rocky target directory;
+the cache key also binds the toolchain, lockfile, manifests, Cargo configuration
+and build scripts. A source-SHA suffix permits a new cache after changed source,
+with fallback only inside that same build identity. Every hit still runs the
+locked release build and native ABI/version checks before packaging and smoke.
+The Ubuntu test target and Controller compilation objects are never restored
+into this directory.
+
+The transport Dockerfile uses pinned cargo-chef to derive a dependency recipe
+from the complete workspace. Dependency cooking and the final locked build use
+the same toolchain, package, release profile and Cargo configuration; the patched
+vendor sources and real workspace sources are copied before the final build.
+Existing per-architecture BuildKit exports include the dependency layer, without
+requiring an unexported cache mount or a second compiler-cache backend.
+
+GitHub cache visibility still applies: caches created on one release tag are
+not automatically available to another tag. A successful dry-run on trusted
+`main` can populate default-branch caches accessible to subsequent releases;
+this change does not add scheduled or automatic prewarming. Include cache
+restore/save and BuildKit export time when assessing net build savings, and do
+not assume a same-branch warm run represents the next tag's cold start.
+
 The single executable selection table is
 [`scripts/release-selection.mjs`](../../scripts/release-selection.mjs).
 It resolves the last published stable Release and compares its complete tree
