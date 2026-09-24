@@ -53,6 +53,14 @@ ENTRYPOINT ["/usr/local/bin/ocservia-g6-probe"]
 FROM scratch AS g6-tunnel-artifact
 COPY --from=g6-probe-builder /out/probe/ocservia-g6-tunnel /ocservia-g6-tunnel
 
+FROM g6-probe-builder AS relay-network-builder
+RUN cargo build --locked --release --package ocservia-g6-probe --example relay-network
+
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS relay-network-probe
+COPY --from=relay-network-builder /src/target/release/examples/relay-network /usr/local/bin/relay-network
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/relay-network"]
+
 # G6 readiness managed-node image: real Agent and privd plus the fixed-path
 # read fixtures they snapshot. One container represents one production
 # managed node in the G6 topology; the supervisor starts privd as root and

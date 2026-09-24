@@ -137,6 +137,10 @@ requirements and reevaluation conditions. Mark drafts as proposed; retain
 superseded decisions with a link to their replacement. Ordinary fixes do not
 need an ADR, a template directory or retrospective records for every past PR.
 
+The proposed [Integrated deployment contract](development/integrated-deployment-adr.md)
+records the single-host network, Signer and delivery decisions. It is not an
+implemented deployment mode or an expansion of current production support.
+
 The reasoning method follows [Awesome Architecture](https://github.com/study8677/awesome-architecture)
 chapters 02 and 08; diagram scope follows the [C4 guidance](https://c4model.com/diagrams),
 and lightweight decision history follows [Nygard's ADR method](https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions).
