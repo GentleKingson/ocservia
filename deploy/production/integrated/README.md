@@ -148,20 +148,26 @@ reached `succeeded`. The locked Relay client accepted the correct token and
 returned `ServerDeniedAuth` with `not authorized` for the wrong token. This is
 a protocol-level denial, not necessarily an HTTP 401/403 response.
 
-The combined run intentionally remains failed: public UDP7842 QAD timed out.
+The initial combined run failed: public UDP7842 QAD timed out.
 The same binary, Relay, CA and token passed QAD through the private host-bridge
 address (reported address `172.18.0.1:48712`). A bounded packet capture saw
 UDP7842 requests leave the host's physical interface for its public IP, with
 no matching inbound UDP response. The cloud UDP rules/public NAT return path
-remain to be inspected; this evidence does not identify which cloud component
-dropped the traffic. No private-route workaround was counted as a public pass.
-All task containers and added host firewall rules were removed after each run.
+were not independently inspected, so that capture alone did not identify which
+cloud component dropped the traffic. After the operator confirmed opening the
+cloud ports, a focused same-host public retest at 2026-09-25 01:01 Hong Kong time
+passed: QAD returned `161.118.198.240:56303`, with a measured latency of 2.215397 ms.
+Authenticated TCP and explicit wrong-token rejection passed again in that run.
+The original failed artifacts remain failures; the later public retest supplies
+the missing evidence. No private-route workaround was counted as a public pass.
+All task containers and added host firewall rules were removed after each run;
+operator-managed cloud rules were not changed by the harness.
 
 | Gate | Status / next evidence |
 | --- | --- |
 | Public two-name TLS and two external client sources | PASS with explicit public IP and private test CA in [Actions run 36026179708](https://github.com/GentleKingson/ocservia/actions/runs/36026179708): observed sources `52.234.44.112` and `135.232.215.240`, one shared endpoint, both TLS branches and spoof rejection. Public DNS/ACME remain untested. |
 | Exact published port set | PASS in rendered overlay; the authorized public fixture bound TCP443 and UDP7842. The real-node engineering harness also has its existing loopback-only backend publications, not a production deployment. |
-| Same-host return path | TCP PASS, public QUIC FAIL. Authenticated TCP and real Agent commands traversed the public IP; public UDP7842 QAD timed out while the private-path QAD control passed. Cloud rules/NAT return-path evidence is required before accepting this topology. |
+| Same-host return path | TCP and public IPv4 QUIC PASS after the operator's cloud-port change. Authenticated TCP and real Agent commands traversed the public IP; the subsequent public UDP7842 QAD retest returned the actual public address with HTTPS probe fallback disabled. IPv6 was not validated. |
 | Authenticated Relay-only command / wrong token / no public fallback | PASS for real approved ocserv reload with direct Agent UDP excluded and exactly one custom Relay URL in both process argv. Wrong token was explicitly rejected by the Relay protocol. Outage/recovery remains a separate unrun public-path scenario. |
 | Relay Host / SNI boundary | Contract amendment approved 2026-09-25: strict Relay SNI and normal Token authentication, not HTTP Host rejection. The locked Relay returned `HTTP/1.1 200 OK` for `/healthz` with wrong Host and valid SNI. Gateway keeps strict Host checks; the independent real Token check now passes. |
 | Idle and business reconnect | Short synthetic SSE and new TLS connections checked; 35-minute idle boundary, OIDC callback, real SSE authorization and established Agent reconnection remain NOT_RUN. |
