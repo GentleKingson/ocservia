@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--edge-image", required=True)
     parser.add_argument("--relay-image", required=True)
     parser.add_argument("--artifacts", type=Path, required=True)
+    parser.add_argument("--serve-public-until", type=Path,
+                        help="Explicitly bind TCP443/UDP7842 until this stop file exists (max 15 minutes)")
     args = parser.parse_args()
     args.artifacts.mkdir(parents=True, exist_ok=False)
     work = Path(tempfile.mkdtemp(prefix="ocservia-p1-"))
@@ -113,6 +115,9 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
             environment={"OCSERV_PUBLIC_HOST": "controller.p1.test", "OCSERV_RELAY_PUBLIC_HOST": "relay.p1.test"},
             ports=["127.0.0.1::8443"],
             networks={"frontend": {}, "edge-gateway": {"ipv4_address": "198.18.91.2"}, "edge-relay": {}})
+        if args.serve_public_until:
+            assert not args.serve_public_until.exists(), "stop file already exists"
+            services["edge"]["ports"] = ["0.0.0.0:443:8443/tcp"]
         services["gateway"].update(image=gateway_image,
             environment={"OCSERV_PUBLIC_HOST": "controller.p1.test", "OCSERV_EDGE_GATEWAY_IP": "198.18.91.2"},
             networks={"edge-gateway": {}, "application": {}},
@@ -125,6 +130,8 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
                      f"{work}/relay.crt:/run/secrets/relay_tls_certificate:ro",
                      f"{work}/relay.key:/run/secrets/relay_tls_private_key:ro",
                      f"{work}/token:/run/secrets/relay_access_token:ro"])
+        if args.serve_public_until:
+            services["relay"]["ports"] = ["0.0.0.0:7842:7842/udp"]
         services["control-plane"] = {"image": PROBE, "command": ["python3", "-u", "-c", backend], "networks": ["application"]}
         for name in ("client-a", "client-b"):
             services[name] = {"image": PROBE, "command": ["sleep", "600"], "networks": ["frontend"],
@@ -171,6 +178,20 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
 
         wait_ready()
         wait_ready("relay.p1.test", "/healthz")
+        if args.serve_public_until:
+            # Only public trust material is exported. This is infrastructure,
+            # not a PASS for the external/QUIC/Agent acceptance gates.
+            (args.artifacts / "public.json").write_text(json.dumps({
+                "controller_host": "controller.p1.test", "relay_host": "relay.p1.test",
+                "ca_pem": (work / "ca.crt").read_text(), "project": project,
+            }, indent=2) + "\n")
+            deadline = time.monotonic() + 900
+            while not args.serve_public_until.exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("public fixture expired after 15 minutes")
+                time.sleep(1)
+            result["status"] = "SERVED"
+            return
         assert "iroh-relay 1.2.0" in compose("exec", "-T", "relay", "iroh-relay", "--version")
         result["checks"].append("both TLS certificates; real iroh-relay 1.2.0 accepts stripped TLS")
         assert b"421" in request(host="wrong.p1.test").split(b"\r\n", 1)[0]

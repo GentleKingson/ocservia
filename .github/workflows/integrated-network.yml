@@ -2,6 +2,15 @@ name: Integrated Network Prototype
 
 on:
   workflow_dispatch:
+    inputs:
+      public_address:
+        description: Authorized nonproduction public fixture IP (empty runs isolated checks)
+        type: string
+        default: ''
+      public_ca_pem:
+        description: Public test CA PEM, never a private key
+        type: string
+        default: ''
   push:
     branches: [codex/p1-integrated-network]
     paths:
@@ -18,7 +27,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  public-client:
+    if: github.event_name == 'workflow_dispatch' && inputs.public_address != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Probe shared public fixture
+        env:
+          P1_PUBLIC_ADDRESS: ${{ inputs.public_address }}
+          P1_PUBLIC_CA_PEM: ${{ inputs.public_ca_pem }}
+        run: |
+          python3 scripts/probe-integrated-public.py --address "${P1_PUBLIC_ADDRESS}" \
+            --output "${RUNNER_TEMP}/public-client/result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: public-client-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-client/
+          retention-days: 1
+          if-no-files-found: warn
   network:
+    if: github.event_name != 'workflow_dispatch' || inputs.public_address == ''
     name: Isolated network (${{ matrix.arch }})
     strategy:
       fail-fast: false
