@@ -94,6 +94,30 @@ runs this same bounded check on native AMD64 and ARM64 without publishing
 images. Two independent architecture jobs are not a shared-public-endpoint
 test. Artifacts state their scope and retain NOT_RUN items.
 
+For an explicitly authorized disposable public endpoint, add
+`--serve-public-until /absolute/stop-file` to the fixture invocation. This binds
+TCP443 and UDP7842 for at most 15 minutes, then cleans up. The caller must arrange
+and restore authorized host/cloud firewall rules; the script does not change
+them. Pass the endpoint IP and the public `ca_pem` from `public.json` to the
+workflow's `public_address` and `public_ca_pem` inputs. Never upload private keys
+or Relay tokens. Compare the two resulting observed public client IPs; two
+runner labels alone are not proof of distinct sources. This uses explicit IP
+routing with test-domain SNI, not public DNS or public certificate issuance.
+
+The `relay-network-probe` target in `rust/g6-runtime.Dockerfile` accepts
+`URL CA_FILE TOKEN_FILE`. It uses the locked Relay client to check a valid TCP
+upgrade and an explicit bad-token rejection, then runs QUIC address discovery
+with HTTPS fallback probes disabled. Mount only its test CA/token, map the test
+hostname to the authorized public IP, and run it from the same-host egress
+network. A timeout is not an authentication rejection or a QUIC pass.
+
+The existing real-node chain supports `SINGLE_INTEGRATED_PUBLIC_IP` together with
+`SINGLE_EDGE_IMAGE` and `SINGLE_NETWORK_PROBE_IMAGE`. In that mode it publishes Edge TCP443 and Relay UDP7842,
+uses the public IP for both Agent and transportd, blocks non-loopback Agent UDP
+inside its disposable namespace, and stops after the independently approved
+real ocserv reload result. Its normal signed-package and image inputs remain
+required. This mode does not run its separate outage/recovery scenarios.
+
 ## Results and remaining gates
 
 BuildServer ARM64 development verification on 2026-09-24 passed the merged port
@@ -116,7 +140,7 @@ exact candidate, image identities and added negative-case results.
 
 | Gate | Status / next evidence |
 | --- | --- |
-| Public two-name TLS and two external client sources | NOT_RUN. Need one reachable nonproduction endpoint and two clients; isolated Actions jobs alone do not satisfy this. |
+| Public two-name TLS and two external client sources | PASS with explicit public IP and private test CA in [Actions run 36026179708](https://github.com/GentleKingson/ocservia/actions/runs/36026179708): observed sources `52.234.44.112` and `135.232.215.240`, one shared endpoint, both TLS branches and spoof rejection. Public DNS/ACME remain untested. |
 | Exact published port set | PASS in rendered overlay. Runtime fixture uses isolated ephemeral loopback bindings; public host listeners still need deployment validation. |
 | Same-host return path | NOT_RUN for transportd and QUIC discovery. Current prototype retains public DNS/host hairpin, without assuming it works. No TCP-only DNS override is supplied: mapping the Relay name only to Edge would break UDP7842 and its internal TCP443 path. |
 | Authenticated Relay-only command / wrong token / no public fallback | NOT_RUN. Reuse the existing real Agent chain and Relay connection-type evidence with direct paths excluded, then stop/restore Relay without changing identities. HTTPS health is not that proof. |

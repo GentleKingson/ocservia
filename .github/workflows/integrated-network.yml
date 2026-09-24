@@ -18,6 +18,7 @@ on:
       - deploy/production/edge.Dockerfile
       - deploy/production/integrated/**
       - scripts/test-integrated-network.py
+      - scripts/probe-integrated-public.py
 
 permissions:
   contents: read
