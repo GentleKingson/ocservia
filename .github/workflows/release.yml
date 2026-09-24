@@ -551,7 +551,7 @@ jobs:
           EXPECTED: ${{ needs.controller-image-security.outputs.sha256 }}
         run: |
           [[ "${EXPECTED}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$(sha256sum "${RUNNER_TEMP}/image-security/controller-image-security.json" | cut -d' ' -f1)" == "${EXPECTED}" ]]
+          [[ "$(sha256sum "${RUNNER_TEMP}/image-security/controller-image-security/controller-image-security.json" | cut -d' ' -f1)" == "${EXPECTED}" ]]
       - name: Resolve package version & source epoch
         env:
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
@@ -590,7 +590,7 @@ jobs:
       - name: Push Controller images & assemble multi-platform indexes
         id: controller-index
         env:
-          SECURITY_SUMMARY: ${{ runner.temp }}/image-security/controller-image-security.json
+          SECURITY_SUMMARY: ${{ runner.temp }}/image-security/controller-image-security/controller-image-security.json
         run: |
           set -euo pipefail
           images_dir="${RUNNER_TEMP}/controller-images"
@@ -729,7 +729,7 @@ jobs:
           set -euo pipefail
           security_dir="${RUNNER_TEMP}/controller-release/image-security"
           mkdir -p "${security_dir}"
-          find "${RUNNER_TEMP}/image-security" -maxdepth 1 -type f \
+          find "${RUNNER_TEMP}/image-security/controller-image-security" -maxdepth 1 -type f \
             ! -name '*.tar.gz' ! -name '*.tar.gz.sha256' \
             -exec cp -t "${security_dir}" {} +
           cp -- "${RUNNER_TEMP}/controller-release/controller-image-security-bindings.json" "${security_dir}/"
