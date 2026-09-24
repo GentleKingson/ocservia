@@ -30,6 +30,13 @@ must be redeployed to enter `1.x`. See the
   for upgrade, compatibility, business, and image-security checks before
   publication. Integration and resilience checks are selected from the
   complete change set since the last published stable release.
+- Native upgrade validation runs in separate jobs, so other product consumers
+  no longer wait for upgrade results. Test images are prepared once per
+  architecture and shared through verified same-run artifacts; each consumer
+  retains isolated runtime state.
+- Native Agent builds reuse architecture-specific Rust compilation caches,
+  and Controller transport builds cache dependency layers. Every candidate
+  still runs the locked build and required validation before publication.
 
 ### Fixed
 
@@ -39,6 +46,11 @@ must be redeployed to enter `1.x`. See the
   their protected permissions.
 - G6 database connection-growth measurement uses a bounded warm-up baseline;
   resource-sampler failures retain diagnostic details.
+- Bundled PostgreSQL backup health checks probe during the startup grace
+  period on Docker Engine 25+, avoiding a wait for the normal five-minute
+  interval when the first backup is ready.
+- Parallel ocserv adapter tests no longer retain writable executable-fixture
+  descriptors or provisioning locks across child processes.
 
 ## [1.0.0]
 
