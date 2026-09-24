@@ -206,6 +206,25 @@ publish_uses.each do |use|
   abort("Controller release action is not SHA-pinned: #{use}") unless use.start_with?("./") || use.match?(/@[0-9a-f]{40}$/)
 end
 publish_steps = Array(publish.fetch("steps")).map { |step| step["run"] }.compact.join("\n")
+scanner_gate = publish.fetch("steps").find { |step| step["name"] == "Verify scanner summary at the publishing boundary" }
+image_push = publish.fetch("steps").find { |step| step["id"] == "controller-index" }
+abort("Publishing must read the scanner artifact's preserved subdirectory") unless
+  image_push.dig("env", "SECURITY_SUMMARY") == '${{ runner.temp }}/image-security/controller-image-security/controller-image-security.json' &&
+  publish_steps.include?('find "${RUNNER_TEMP}/image-security/controller-image-security" -maxdepth 1 -type f')
+Dir.mktmpdir("ocservia-scanner-artifact-gate") do |dir|
+  Dir.mkdir("#{dir}/image-security")
+  Dir.mkdir("#{dir}/image-security/controller-image-security")
+  summary = "#{dir}/image-security/controller-image-security/controller-image-security.json"
+  File.write(summary, "{}\n")
+  digest, status = Open3.capture2("sha256sum", summary)
+  abort("Cannot hash scanner fixture") unless status.success?
+  env = {"RUNNER_TEMP" => dir, "EXPECTED" => digest.split.first}
+  _, status = Open3.capture2e(env, "bash", "-euo", "pipefail", "-c", scanner_gate.fetch("run"))
+  abort("Publishing rejected the scanner artifact layout") unless status.success?
+  File.write(summary, "changed\n")
+  _, status = Open3.capture2e(env, "bash", "-euo", "pipefail", "-c", scanner_gate.fetch("run"))
+  abort("Publishing accepted an altered scanner summary") if status.success?
+end
 abort("Controller publishing must not run the image scanner itself") unless
   !publish_steps.include?("scripts/scan-release-images.sh") &&
     !publish_steps.include?("scripts/bootstrap.sh image-security")
