@@ -86,7 +86,7 @@ and static page, and runs the real Caddy and Relay binaries. It does not run
 the real Controller Web/login/Agent workflow. Host bindings use loopback with
 ephemeral ports, not the server's public 443/7842. Two client containers have
 distinct bridge addresses; they are not two external hosts. The reserved
-fixture subnet `198.18.91.0/24` must be free. Resources are removed on exit;
+fixture subnets `198.18.91.0/24` and `198.18.92.0/24` must be free. Resources are removed on exit;
 sanitized results and logs remain in the requested evidence directory.
 
 The [manual/branch Actions workflow](../../../.github/workflows/integrated-network.yml)
@@ -108,6 +108,9 @@ a probe image without Python, Relay HTTPS `/healthz` versus HTTP-only
 `/generate_204`, and ephemeral host-port reassignment after Docker restart.
 The Host-port negative also exposed Caddy directive ordering; an explicit
 `route` now runs authority rejection before any API/static handler.
+The first Actions attempt rejected the fixture's static address reservation
+on a Docker-managed subnet; the fixture now declares its Relay subnet
+explicitly. This changes only the test topology, not production networking.
 These failed attempts were not P1 passes. Check the final artifact for the
 exact candidate, image identities and added negative-case results.
 
@@ -117,7 +120,7 @@ exact candidate, image identities and added negative-case results.
 | Exact published port set | PASS in rendered overlay. Runtime fixture uses isolated ephemeral loopback bindings; public host listeners still need deployment validation. |
 | Same-host return path | NOT_RUN for transportd and QUIC discovery. Current prototype retains public DNS/host hairpin, without assuming it works. No TCP-only DNS override is supplied: mapping the Relay name only to Edge would break UDP7842 and its internal TCP443 path. |
 | Authenticated Relay-only command / wrong token / no public fallback | NOT_RUN. Reuse the existing real Agent chain and Relay connection-type evidence with direct paths excluded, then stop/restore Relay without changing identities. HTTPS health is not that proof. |
-| P0 Relay Host rejection | FAIL: the locked Relay returned `HTTP/1.1 200 OK` for `/healthz` with wrong Host and valid Relay SNI. Encrypted Host is invisible to Edge. Resolve the contract or implementation explicitly before claiming network readiness; upstream Relay was not patched and TLS was not moved to Edge. |
+| Relay Host / SNI boundary | Contract amendment approved 2026-09-25: strict Relay SNI and normal Token authentication, not HTTP Host rejection. The locked Relay returned `HTTP/1.1 200 OK` for `/healthz` with wrong Host and valid SNI. Gateway keeps strict Host checks; Relay Token verification remains a separate unrun gate below the TLS health check. |
 | Idle and business reconnect | Short synthetic SSE and new TLS connections checked; 35-minute idle boundary, OIDC callback, real SSE authorization and established Agent reconnection remain NOT_RUN. |
 | Registry production artifacts | NOT_RUN; P4/P5 responsibility. Local image IDs are not published pull references. |
 

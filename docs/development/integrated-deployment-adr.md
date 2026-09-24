@@ -60,8 +60,12 @@ public certificates externally; HTTP-01 issuance is not implied. TLS SNI must
 be visible; missing/unknown SNI and non-TLS input fail closed, never fall back
 to the Controller. Gateway permits only the configured Controller Host/HTTP2
 authority (with optional standard `:443`); wrong Host is rejected before API
-or SPA serving. Relay's TLS/HTTP entry must similarly reject the wrong name.
-Edge cannot enforce HTTP Host without terminating TLS.
+or SPA serving. Relay routing requires the exact configured SNI and normal
+Relay Token authentication; its HTTP Host is not an additional admission
+boundary. This P1 amendment was explicitly accepted on 2026-09-25 after the
+locked Relay returned health success with a different Host. Edge cannot
+inspect encrypted Host without terminating TLS; upstream Relay remains
+unchanged. Gateway's strict Host requirement is retained.
 
 Use separate Edge-to-Gateway and Edge-to-Relay networks, a Controller-to-Signer
 internal network, and the existing application/database/observability

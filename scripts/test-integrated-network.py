@@ -130,7 +130,8 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
             services[name] = {"image": PROBE, "command": ["sleep", "600"], "networks": ["frontend"],
                               "volumes": [f"{work}/ca.crt:/ca.crt:ro"]}
         topology = {"services": services, "networks": {
-            "frontend": {}, "edge-relay": {}, "application": {"internal": True},
+            "frontend": {}, "edge-relay": {"ipam": {"config": [{"subnet": "198.18.92.0/24"}]}},
+            "application": {"internal": True},
             "edge-gateway": {"internal": True, "ipam": {"config": [
                 {"subnet": "198.18.91.0/24", "ip_range": "198.18.91.128/25"}]}}}}
         save_topology()
