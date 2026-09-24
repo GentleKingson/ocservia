@@ -1,0 +1,53 @@
+name: Integrated Network Prototype
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/p1-integrated-network]
+    paths:
+      - .github/workflows/integrated-network.yml
+      - deploy/production/edge.Dockerfile
+      - deploy/production/integrated/**
+      - scripts/test-integrated-network.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrated-network-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  network:
+    name: Isolated network (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build development images (no Registry write)
+        run: |
+          docker build -f deploy/production/edge.Dockerfile -t ocservia-p1-edge .
+          docker build -f deploy/production/relay.Dockerfile -t ocservia-p1-relay .
+      - name: Test isolated network
+        run: |
+          python3 scripts/test-integrated-network.py \
+            --edge-image ocservia-p1-edge --relay-image ocservia-p1-relay \
+            --artifacts "${RUNNER_TEMP}/integrated-network"
+      - name: Upload scoped evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: integrated-network-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/integrated-network/
+          if-no-files-found: warn
+          retention-days: 7
