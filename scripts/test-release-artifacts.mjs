@@ -30,5 +30,21 @@ try {
   fs.rmSync(path.join(root, "control-linux-amd64.tar"));
   fs.symlinkSync("gateway-linux-amd64.tar", path.join(root, "control-linux-amd64.tar"));
   assert.throws(() => artifactManifest(root, identity));
+  for (const [component, names] of Object.entries({
+    "test-helpers": ["probe.tar", "relay.tar", "ocservia-g6-tunnel"],
+    "session-base": ["node.tar", "workflow-tools.tar"], "rpm-test": ["rpm.tar"],
+  })) {
+    const fixtureIdentity = { ...identity, component };
+    for (const name of names) fs.writeFileSync(path.join(root, name), name);
+    const bytes = JSON.stringify(artifactManifest(root, fixtureIdentity)) + "\n";
+    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+    fs.writeFileSync(path.join(root, `candidate-${component}-amd64.json`), bytes);
+    verifyArtifacts(root, fixtureIdentity, digest);
+    assert.throws(() => verifyArtifacts(root, { ...fixtureIdentity, sha: "b".repeat(40) }, digest));
+    fs.writeFileSync(path.join(root, names[0]), "tampered");
+    assert.throws(() => verifyArtifacts(root, fixtureIdentity, digest));
+    fs.unlinkSync(path.join(root, names[0]));
+    assert.throws(() => verifyArtifacts(root, fixtureIdentity, digest));
+  }
 } finally { fs.rmSync(root, { recursive: true }); }
 console.log("Wrong candidate, altered products/manifest, traversal and symlink rejected");

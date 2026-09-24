@@ -2,6 +2,15 @@ name: Validate Release Product Upgrades
 on:
   workflow_call:
     inputs:
+      component:
+        type: string
+        required: true
+      rpm-id:
+        type: string
+        default: ''
+      rpm-sha256:
+        type: string
+        default: ''
       version:
         type: string
         required: true
@@ -14,35 +23,19 @@ on:
       frozen-sha256:
         type: string
         required: true
-      agent-id:
+      artifact-id:
         type: string
         required: true
-      agent-sha256:
-        type: string
-        required: true
-      controller-id:
-        type: string
-        required: true
-      controller-sha256:
+      sha256:
         type: string
         required: true
 permissions:
   contents: read
 jobs:
   upgrade:
-    name: Upgrade ${{ matrix.component }} (${{ inputs.arch }})
+    name: Upgrade ${{ inputs.component }} (${{ inputs.arch }})
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - component: agent
-            artifact-id: ${{ inputs.agent-id }}
-            sha256: ${{ inputs.agent-sha256 }}
-          - component: controller
-            artifact-id: ${{ inputs.controller-id }}
-            sha256: ${{ inputs.controller-sha256 }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -54,25 +47,34 @@ jobs:
           path: ${{ runner.temp }}/frozen
       - uses: ./.github/actions/release-artifacts
         with:
-          artifact-id: ${{ matrix.artifact-id }}
-          sha256: ${{ matrix.sha256 }}
-          component: ${{ matrix.component }}
+          artifact-id: ${{ inputs.artifact-id }}
+          sha256: ${{ inputs.sha256 }}
+          component: ${{ inputs.component }}
           arch: ${{ inputs.arch }}
           version: ${{ inputs.version }}
           path: ${{ runner.temp }}/products
+      - uses: ./.github/actions/release-test-images
+        if: inputs.component == 'agent'
+        with:
+          artifact-id: ${{ inputs.rpm-id }}
+          sha256: ${{ inputs.rpm-sha256 }}
+          component: rpm-test
+          arch: ${{ inputs.arch }}
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/rpm-test
       - name: Validate candidate upgrade
         env:
           FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
           FROZEN_SHA256: ${{ inputs.frozen-sha256 }}
           CANDIDATE_PRODUCTS: ${{ runner.temp }}/products
-          CANDIDATE_MANIFEST_SHA256: ${{ matrix.sha256 }}
+          CANDIDATE_MANIFEST_SHA256: ${{ inputs.sha256 }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/upgrade
-        run: bash scripts/release-upgrade-unit.sh "${{ matrix.component }}" "${{ inputs.arch }}"
+        run: bash scripts/release-upgrade-unit.sh "${{ inputs.component }}" "${{ inputs.arch }}"
       - name: Upload sanitized upgrade diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: upgrade-${{ matrix.component }}-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: upgrade-${{ inputs.component }}-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/upgrade
           retention-days: 7
           if-no-files-found: warn

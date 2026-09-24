@@ -1,0 +1,64 @@
+name: Prepare Release Test Images
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+      component:
+        type: string
+        required: true
+    outputs:
+      artifact-id:
+        value: ${{ jobs.prepare.outputs.artifact-id }}
+      sha256:
+        value: ${{ jobs.prepare.outputs.sha256 }}
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 35
+    env:
+      VERSION: ${{ inputs.version }}
+      BUILDX_BUILDER: release-${{ inputs.component }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.fixture.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/g6-cache-credentials
+      - name: Prepare native fixture builder
+        run: |
+          bash scripts/release-upgrade-native.sh "${{ inputs.arch }}"
+          args=()
+          if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+            for name in ACTIONS_RUNTIME_TOKEN ACTIONS_CACHE_URL ACTIONS_RESULTS_URL; do
+              [[ -z "${!name:-}" ]] || args+=(--driver-opt "env.${name}=${!name}")
+            done
+          fi
+          docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
+            --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 \
+            "${args[@]}" --bootstrap --use
+      - name: Prepare fixture
+        id: fixture
+        env:
+          COMPONENT: ${{ inputs.component }}
+          ARCH: ${{ inputs.arch }}
+        run: bash scripts/release-test-images.sh build "$COMPONENT" "$ARCH" "${RUNNER_TEMP}/fixture"
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.component }}-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Remove fixture builder
+        if: always()
+        run: docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1 || true

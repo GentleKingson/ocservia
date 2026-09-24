@@ -128,8 +128,10 @@ if [[ -n "${CANDIDATE_PRODUCTS:-}" ]]; then
   next_stage candidate_verification
   node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" agent amd64 "${VERSION}" "${AGENT_MANIFEST_SHA256:?}"
   node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" controller amd64 "${VERSION}" "${CONTROLLER_MANIFEST_SHA256:?}"
-  docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
+  if [[ -z "${RELEASE_RELAY_IMAGE:-}" ]]; then
+    docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
     --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 --bootstrap --use
+  fi
 else
   bash "${ROOT}/scripts/bootstrap.sh" native-packages
   next_stage agent_package_build
@@ -138,11 +140,15 @@ else
   bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
 fi
 next_stage relay_image_build
+if [[ -n "${RELEASE_RELAY_IMAGE:-}" ]]; then
+  docker tag "${RELEASE_RELAY_IMAGE}" "${BUILDX_BUILDER}-relay"
+else
 bash "${ROOT}/scripts/g6-buildx-cache.sh" relay-business-amd64 true business-relay \
   --builder "${BUILDX_BUILDER}" --platform linux/amd64 --provenance=false --load \
   --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
   -t "${BUILDX_BUILDER}-relay" -f "${ROOT}/deploy/production/relay.Dockerfile" "${ROOT}" \
   >"${ARTIFACT_DIR}/relay-build.log" 2>&1
+fi
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
 docker image inspect --format '{{.Id}} {{.Architecture}}' "${BUILDX_BUILDER}-relay" >"${ARTIFACT_DIR}/relay-image.txt"
 find "${OUTPUT_DIR}" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum >"${ARTIFACT_DIR}/product-digests.txt"
