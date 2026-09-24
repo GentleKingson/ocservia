@@ -115,8 +115,8 @@ abort("Release workflow must trigger only on version tag pushes") unless
 abort("Release workflow must not trigger on release publication") if triggers.key?("release")
 abort("Controller image job must run for tag-push release runs and workflow dispatch dry runs") unless
   controller.fetch("if") == "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"
-abort("Controller publishing must run only for tag-push release runs") unless
-  publish.fetch("if") == "github.event_name == 'push'"
+abort("Controller publishing must require an uncancelled tag push and successful Release Check") unless
+  publish.fetch("if") == "${{ !cancelled() && github.event_name == 'push' && needs.release-check.result == 'success' }}"
 # The build legs must stay source-only: no registry credential may exist
 # before the reviewer-gated publishing job.
 abort("Controller image build legs must only read source") unless controller.fetch("permissions") == {

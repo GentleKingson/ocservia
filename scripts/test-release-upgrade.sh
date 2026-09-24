@@ -186,7 +186,8 @@ end
 publish = release.fetch('jobs').fetch('publish-release-packages')
 abort 'production approval lost' unless publish['environment'] == 'release-publishing'
 abort 'publish bypasses Release Check' unless publish.fetch('needs').include?('release-check')
-abort 'manual dispatch can publish' unless publish['if'] == "github.event_name == 'push'"
+abort 'publish must handle optional skips but reject dispatch, cancellation and failed acceptance' unless
+  publish['if'] == "${{ !cancelled() && github.event_name == 'push' && needs.release-check.result == 'success' }}"
 release.fetch('jobs').each do |name, job|
   next if name == 'publish-release-packages'
   abort "write permission in validation: #{name}" if job.fetch('permissions', {}).values.include?('write')

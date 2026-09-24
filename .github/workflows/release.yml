@@ -487,7 +487,8 @@ jobs:
   publish-release-packages:
     name: Sign & Publish Release Assets
     needs: [release-check, prepare, build-amd64, build-arm64, controller-image-security]
-    if: github.event_name == 'push'
+    # Optional upstream jobs may skip; only the aggregate gate grants publication.
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.release-check.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release-publishing
