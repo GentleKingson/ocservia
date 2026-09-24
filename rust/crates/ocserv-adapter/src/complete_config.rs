@@ -534,7 +534,11 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
                 .expect("make owned fixture writable");
         }
-        std::fs::write(path, bytes).expect("write fixture");
+        if mode & 0o111 != 0 {
+            super::super::tests::write_executable(path, bytes);
+        } else {
+            std::fs::write(path, bytes).expect("write fixture");
+        }
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
             .expect("fixture permissions");
     }
@@ -1004,8 +1008,13 @@ mod tests {
             fixture.adapter.complete_config_plan(&fixture.plan).await,
             Err(AdapterError::Unavailable)
         ));
+        // Model the descriptor a parallel test's child can retain until exec.
+        let inherited_lock = lock.try_clone().expect("inherited provisioning lock");
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock)
+            .expect("release provisioning lock even while a child holds a duplicate");
         drop(lock);
         fixture.apply().await;
+        drop(inherited_lock);
     }
 
     #[tokio::test]
