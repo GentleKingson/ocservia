@@ -273,9 +273,6 @@ if [[ "${prepare_transport_runtime}" == true ]]; then
     "${compose[@]}" --profile observability rm --stop --force otel-collector
   fi
   "${compose[@]}" stop control-plane transportd
-  if [[ "${deployment_mode}" == integrated ]]; then
-    "${compose[@]}" stop signer
-  fi
   "${compose[@]}" run --rm --no-deps transport-runtime-init
 fi
 
