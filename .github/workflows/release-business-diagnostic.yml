@@ -105,7 +105,7 @@ jobs:
             printf '%s' "$GH_TOKEN" | sudo docker --config "${RUNNER_TEMP}/candidate-docker" login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
             export DOCKER_CONFIG="${RUNNER_TEMP}/candidate-docker"
             sudo --preserve-env=ARTIFACT_DIR,VERSION,CANDIDATE_SHA,BUSINESS_PROFILE,PRODUCTION_SIGNER_ACCEPTANCE,CANDIDATE_BUNDLE,CANDIDATE_PRODUCTS,CANDIDATE_BUNDLE_SHA256,CANDIDATE_KEY_SHA256,AGENT_MANIFEST_SHA256,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,RUNNER_ENVIRONMENT,CONTROLLER_ARCH,INTEGRATED_INSTALL_ONLY \
-              --preserve-env=DOCKER_CONFIG bash scripts/release-business-probe.sh
+              --preserve-env=DOCKER_CONFIG,RUNNER_ARCH bash scripts/release-business-probe.sh
           else
             bash scripts/release-business-probe.sh
           fi

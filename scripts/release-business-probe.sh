@@ -355,7 +355,7 @@ docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-o
   -v "${OCSERV_SECRET_DIR}/oidc-client-secret:/fixture/oidc-client-secret:ro" \
   -v "${work}/oidc-fault:/fault:ro" \
   node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 \
-  node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode
+  node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode "$OCSERV_OIDC_REDIRECT_URL"
 # The internal application network deliberately has no host gateway. Join only
 # the task provider's network namespace, then run the signer as the runner UID.
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
