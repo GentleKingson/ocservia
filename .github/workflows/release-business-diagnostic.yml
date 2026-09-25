@@ -38,6 +38,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      packages: read
     env:
       VERSION: ${{ inputs.version }}
       CANDIDATE_SHA: ${{ github.sha }}
@@ -85,10 +86,15 @@ jobs:
           CANDIDATE_BUNDLE_SHA256: ${{ needs.candidate.outputs.bundle-sha256 }}
           CANDIDATE_KEY_SHA256: ${{ needs.candidate.outputs.key-sha256 }}
           AGENT_MANIFEST_SHA256: ${{ matrix.arch == 'arm64' && needs.candidate.outputs.agent-arm64-sha256 || needs.candidate.outputs.agent-amd64-sha256 }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+            sudo install -d -m 700 "${RUNNER_TEMP}/candidate-docker"
+            trap 'sudo rm -rf -- "${RUNNER_TEMP}/candidate-docker"' EXIT
+            printf '%s' "$GH_TOKEN" | sudo docker --config "${RUNNER_TEMP}/candidate-docker" login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            export DOCKER_CONFIG="${RUNNER_TEMP}/candidate-docker"
             sudo --preserve-env=ARTIFACT_DIR,VERSION,CANDIDATE_SHA,BUSINESS_PROFILE,PRODUCTION_SIGNER_ACCEPTANCE,CANDIDATE_BUNDLE,CANDIDATE_PRODUCTS,CANDIDATE_BUNDLE_SHA256,CANDIDATE_KEY_SHA256,AGENT_MANIFEST_SHA256,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,RUNNER_ENVIRONMENT,CONTROLLER_ARCH,INTEGRATED_INSTALL_ONLY \
-              bash scripts/release-business-probe.sh
+              --preserve-env=DOCKER_CONFIG bash scripts/release-business-probe.sh
           else
             bash scripts/release-business-probe.sh
           fi

@@ -77,7 +77,7 @@ abort 'upgrade validation must not receive write permissions' unless workflow['p
 jobs = workflow.fetch('jobs')
 ordinary = jobs.fetch('business-probe')
 privileged = jobs.fetch('production-signer-probe')
-abort 'ordinary business diagnostics gained write permissions' unless ordinary['permissions'] == {'contents' => 'read'}
+abort 'ordinary business diagnostics gained write permissions' unless ordinary['permissions'] == {'contents' => 'read', 'packages' => 'read'}
 abort 'ordinary diagnostics must exclude production publication' unless
   ordinary['if'] == "${{ !inputs.production_signer && (inputs.purpose == 'smoke' || inputs.purpose == 'integration') }}" &&
   ordinary.dig('with', 'production_signer') == false
@@ -92,7 +92,7 @@ abort 'business callers must use the same checks' unless ordinary['uses'] == dia
 diagnostic = YAML.safe_load(File.read(diagnostic_path))
 consumer = diagnostic.fetch('jobs').fetch('business')
 producer = diagnostic.fetch('jobs').fetch('candidate')
-abort 'clean consumer must be read-only' unless consumer['permissions'] == {'contents' => 'read'}
+abort 'clean consumer must be read-only' unless consumer['permissions'] == {'contents' => 'read', 'packages' => 'read'}
 abort 'Registry publication must remain opt-in' unless producer['if'] == 'inputs.production_signer' &&
   producer['permissions'] == {'contents' => 'read', 'packages' => 'write'} &&
   producer['uses'] == './.github/workflows/release-integrated-candidate.yml'

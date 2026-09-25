@@ -243,6 +243,7 @@ jobs:
     if: ${{ !inputs.production_signer && (inputs.purpose == 'smoke' || inputs.purpose == 'integration') }}
     permissions:
       contents: read
+      packages: read
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
       version: ${{ inputs.version }}
