@@ -317,6 +317,9 @@ select_lifecycle() {
     echo "lifecycle: root (explicit --root-lifecycle)"
     return
   fi
+  if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]] && (( EUID != 0 )); then
+    fail "Integrated requires explicit --root-lifecycle for private Signer custody"
+  fi
   if ! command -v docker >/dev/null 2>&1; then
     ROOT_LIFECYCLE=true
     echo "lifecycle: root (no Docker client installed; the host bootstrap will install Docker, and a fresh installation grants no non-root daemon access)"

@@ -215,6 +215,25 @@ expect_failure "${ROOT}/deploy/production/compose.sh" up --build
 "${owner[@]}" chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 "${owner[@]}" chmod 400 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
+# Ordinary partial Compose activation must not stop an unselected Signer.
+# Lifecycle transactions own its exclusive stop/inspect/restart sequence.
+mkdir -m 700 "${work}/bin" "${OCSERV_BACKUP_DIR}"
+"${owner[@]}" chown 999:999 "${OCSERV_BACKUP_DIR}"
+CONFIG_TEST_DOCKER="$(command -v docker)"
+export CONFIG_TEST_DOCKER CONFIG_TEST_LOG="${work}/commands.log"
+cat >"${work}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" config "*|*" version "*) exec "${CONFIG_TEST_DOCKER}" "$@" ;;
+  *) printf '%s\n' "$*" >>"${CONFIG_TEST_LOG}" ;;
+esac
+EOF
+chmod 700 "${work}/bin/docker"
+PATH="${work}/bin:${PATH}" "${ROOT}/deploy/production/compose.sh" up -d --wait --no-deps control-plane
+grep -Fq ' stop control-plane transportd' "${CONFIG_TEST_LOG}"
+if grep -Fq ' stop signer' "${CONFIG_TEST_LOG}"; then
+  echo "partial Controller activation stopped Signer without restarting it" >&2; exit 1
+fi
 rm "${OCSERV_SECRET_DIR}/session-key"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 echo "Production auth configuration: all three documented modes, installer allowlists, secret mounts and rejection checks passed"

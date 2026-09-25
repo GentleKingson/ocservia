@@ -180,6 +180,9 @@ fi
 # Every configuration-derived variable is computed only after the
 # configuration sources above are final.
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
+if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated && "${ROOT_LIFECYCLE}" != true ]] && (( EUID != 0 )); then
+  fail "Integrated requires --root-lifecycle for private Signer custody"
+fi
 
 forward_root_lifecycle() {
   local variable allowed

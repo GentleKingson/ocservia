@@ -9,6 +9,10 @@ deployment_mode="${OCSERV_DEPLOYMENT_MODE:-standalone}"
 case "${deployment_mode}" in
   standalone) ;;
   integrated)
+    if (( EUID != 0 )); then
+      echo "Integrated requires the explicit root lifecycle to inspect UID-65532 private Signer material" >&2
+      exit 2
+    fi
     compose_version="$(docker compose version --short)"
     compose_version="${compose_version#v}"
     if [[ ! "${compose_version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)([-+].*)?$ ]] \

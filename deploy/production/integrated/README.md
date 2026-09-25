@@ -22,6 +22,13 @@ OCSERV_SIGNER_SECRET_DIR=/etc/ocservia/signer
 OCSERV_SIGNER_STATE_DIR=/var/lib/ocservia-signer
 ```
 
+Integrated uses the existing explicit root lifecycle: pass `--root-lifecycle`
+to bootstrap/install, and run subsequent lifecycle/Compose commands as root
+with the same configuration. Provision launcher-owned paths for root. This
+lets preflight inspect UID-65532-only Signer material without broadening its
+permissions or adding a privileged helper. Non-root Integrated launch is
+rejected before host bootstrap; standalone launcher behavior is unchanged.
+
 Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
 `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` and `OCSERV_CERTIFICATE_SIGNER_URL`:
 the launcher derives one Relay URL and `https://signer:9443/sign`. Conflicting
