@@ -163,6 +163,7 @@ def seal():
 def before():
     if NODE_CRL.exists():
         raise RuntimeError('refusing existing CRL test node')
+    primary_socket = run('sudo', 'stat', '-c', '%d:%i', '/run/occtl.socket').decode().strip()
     run('sudo', 'install', '-d', '-m', '755', NODE_CRL)
     number = export_crl()
     run('openssl', 'pkcs12', '-in', PRIVATE / 'download.p12', '-passin', 'file:' + str(PRIVATE / 'p12-password'),
@@ -185,6 +186,7 @@ def before():
     config.write_text('auth = "certificate"\ncert-user-oid = 2.5.4.3\nlisten-host = 127.0.0.1\n'
                       'tcp-port = 44444\nudp-port = 0\nrun-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\n'
                       'socket-file = /run/ocserv-p2-crl.socket\ndevice = p2crl\n'
+                      'occtl-socket-file = /run/occtl-p2-crl.socket\npid-file = /run/ocserv-p2-crl.pid\n'
                       'ipv4-network = 10.209.0.0/24\nmax-clients = 8\nmax-same-clients = 4\n'
                       f'server-cert = {NODE_CRL}/tls.crt\nserver-key = {NODE_CRL}/tls.key\n'
                       f'ca-cert = {NODE_CRL}/ca.pem\ncrl = {NODE_CRL}/crl.pem\n')
@@ -202,7 +204,8 @@ def before():
         result = authenticate(control)
         assert result.returncode == 0 and b'COOKIE=' in result.stdout, 'pre-revoke certificate login failed'
     (EVIDENCE / 'crl-acceptance.json').write_text(json.dumps({'candidate_sha': os.environ['CANDIDATE_SHA'],
-                                                           'before_auth': True, 'before_crl_number': number}))
+                                                           'before_auth': True, 'before_crl_number': number,
+                                                           'primary_occtl_identity': primary_socket}))
 
 
 def after():
@@ -227,12 +230,15 @@ def after():
     assert control.returncode == 0 and b'COOKIE=' in control.stdout, 'non-revoked control login failed'
     journal = run('sudo', 'journalctl', '--no-pager', '-u', 'ocservia-p2-crl')
     assert b'revok' in journal.lower(), 'missing node revocation rejection evidence'
+    run('sudo', 'systemctl', 'stop', 'ocservia-p2-crl')
+    assert run('sudo', 'stat', '-c', '%d:%i', '/run/occtl.socket').decode().strip() == evidence['primary_occtl_identity']
+    assert isinstance(json.loads(run('sudo', 'occtl', '--json', 'show', 'users')), list)
     evidence.update(after_crl_number=number, revoked_rejected=True, control_auth=True,
+                    primary_occtl_preserved=True,
                     refresh='signed-export-atomic-install-sighup',
                     distribution='protected operator channel to disposable native node',
                     existing_session_termination='NOT_TESTED')
     (EVIDENCE / 'crl-acceptance.json').write_text(json.dumps(evidence, indent=2) + '\n')
-    run('sudo', 'systemctl', 'stop', 'ocservia-p2-crl')
 
 
 if __name__ == '__main__':

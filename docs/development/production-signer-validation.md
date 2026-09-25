@@ -72,3 +72,27 @@ production readiness. No commit, push, merge, Registry upload or production
 deployment was performed. Task-owned test containers, images, private fixture
 keys and directories are removed after retaining this record; shared caches and
 unrelated tasks are not cleaned.
+
+## Actions acceptance follow-up
+
+The operator subsequently authorized disposable GitHub-hosted runners and
+candidate GHCR publication. Run
+[36149926748](https://github.com/GentleKingson/ocservia/actions/runs/36149926748)
+tested candidate `5a3c4033e7d5bbf57457a8c6d40d1e927d9c83a2` with
+`purpose=integration`, `production_signer=true`, candidate version `1.0.2`.
+Six candidate images were published with unique run-bound tags and pulled by
+digest. The real daemon certificate CSR/issue/P12/one-use/revoke/restart checks
+passed, with matching Controller, Agent journal and privd root results.
+Signed CRL operator distribution and SIGHUP refresh rejected the revoked
+certificate while an unrevoked control certificate still authenticated;
+CRL number advanced from 3 to 6.
+
+The overall run FAILED in the later browser configuration apply check and is
+not full business acceptance. The additional CRL ocserv had used the default
+occtl socket path; ocserv 1.2.4 removes that path on shutdown even when its
+control socket is disabled. This interfered with the primary node's health
+check. The harness now assigns separate occtl/PID paths and asserts the
+primary socket identity and actual occtl query survive CRL-node shutdown.
+All gates must be rerun on the corrected candidate; earlier partial results
+must not be inherited as its acceptance. Final run evidence belongs to the
+exact tested SHA and the acceptance PR, which is created only after success.
