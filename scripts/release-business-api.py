@@ -237,6 +237,7 @@ def approve():
     api(f'nodes/{node}/approval', {**binding, 'reason': 'T07 isolated validation'}, status=400)
     decision = approval('node.approve', 'node', node, {'node_approval': binding})
     api(f'nodes/{node}/approval', {**binding, 'reason': 'T07 isolated validation'}, headers={'X-Approval-ID': decision})
+    (WORK / 'node-approval').write_text(decision)
     assert sql(f"SELECT status FROM nodes WHERE id='{node}';") == 'active'
     credential = api(f'nodes/{node}/privd-attestation-credentials',
                      {'ttl_seconds': 300, 'reason': 'T07 receipt authority'}, status=201)
@@ -358,6 +359,8 @@ def certificate():
     run('openssl', 'pkcs12', '-in', str(WORK / 'private/download.p12'),
         '-passin', 'file:' + str(WORK / 'private/p12-password'), '-noout')
     api('artifacts/' + grant['artifact_id'], headers=download_headers, status=403, raw=True)
+    if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
+        subprocess.run(['python3', str(ROOT / 'scripts/release-production-signer.py'), 'before'], check=True)
     reason = 'T07 revoke issued certificate'
     revoke_approval = approval('certificate.revoke', 'certificate', cert['id'],
                               {'certificate': {'expected_version': cert['version'], 'reason': reason}})
@@ -365,7 +368,10 @@ def certificate():
                                         'certificate_version': cert['version'], 'approval_id': revoke_approval,
                                         'reason': reason}, headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
     wait_for('certificate revoked', lambda: api(cert_path)['state'] == 'revoked')
-    assert (WORK / 'signer-revoked').read_text() == cert['id']
+    if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
+        subprocess.run(['python3', str(ROOT / 'scripts/release-production-signer.py'), 'after'], check=True)
+    else:
+        assert (WORK / 'signer-revoked').read_text() == cert['id']
     assert run('sudo', 'test', '!', '-e', key_path) == ''
     # Revoke returns its operation, unlike the CSR certificate resource.
     operation_ids.append(revoked['id'])
@@ -667,6 +673,9 @@ def business():
         return operation, headers
 
     def sealed(password):
+        if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
+            return json.loads(run('python3', str(ROOT / 'scripts/release-production-signer.py'), 'seal',
+                                  data=password.encode()))
         encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(WORK / 'user.pub.pem'),
                                     '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
                                    input=password.encode(), capture_output=True, check=True).stdout
