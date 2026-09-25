@@ -120,7 +120,8 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
   files += %w[.github/workflows/release.yml .github/workflows/release-upgrade.yml
               .github/workflows/release-products.yml .github/workflows/release-product-upgrade.yml
               .github/workflows/release-test-images.yml .github/workflows/release-compatibility.yml
-              .github/workflows/release-business.yml .github/workflows/g6-harness-core.yml
+              .github/workflows/release-business.yml .github/workflows/release-business-diagnostic.yml
+              .github/workflows/g6-harness-core.yml
               rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
   files.each do |source|
     target = File.join(work, source.delete_prefix(root + "/"))

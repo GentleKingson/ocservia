@@ -74,6 +74,25 @@ ruby -r yaml -r json - <<'RUBY'
 workflow = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
 abort 'upgrade validation must not receive write permissions' unless workflow['permissions'] == {'contents' => 'read'}
 jobs = workflow.fetch('jobs')
+ordinary = jobs.fetch('business-probe')
+privileged = jobs.fetch('production-signer-probe')
+abort 'ordinary business diagnostics gained write permissions' unless ordinary['permissions'] == {'contents' => 'read'}
+abort 'ordinary diagnostics must exclude production publication' unless
+  ordinary['if'] == "${{ !inputs.production_signer && (inputs.purpose == 'smoke' || inputs.purpose == 'integration') }}" &&
+  ordinary.dig('with', 'production_signer') == false
+abort 'candidate publication must be explicitly selected integration' unless
+  privileged['if'] == "${{ inputs.production_signer && inputs.purpose == 'integration' }}" &&
+  privileged['permissions'] == {'contents' => 'read', 'packages' => 'write'} &&
+  privileged.dig('with', 'production_signer') == true && privileged.dig('with', 'profile') == 'extended'
+abort 'only the opt-in caller may hold write permissions' unless
+  jobs.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['production-signer-probe']
+diagnostic_path = './.github/workflows/release-business-diagnostic.yml'
+abort 'business callers must use the same checks' unless ordinary['uses'] == diagnostic_path && privileged['uses'] == diagnostic_path
+diagnostic = YAML.safe_load(File.read(diagnostic_path))
+abort 'reusable diagnostics must inherit caller permissions without widening them' if diagnostic.key?('permissions') ||
+  diagnostic.fetch('jobs').values.any? { |job| job.key?('permissions') }
+login = diagnostic.fetch('jobs').fetch('business').fetch('steps').find { |step| step['name'] == 'Authenticate candidate Registry publication' }
+abort 'Registry login must remain opt-in' unless login && login['if'] == 'inputs.production_signer'
 %w[agent-upgrade controller-upgrade session-compatibility].each do |name|
   matrix = jobs.fetch(name).fetch('strategy').fetch('matrix').fetch('include')
   abort "missing supported architecture: #{name}" unless matrix.map { |row| row['arch'] }.sort == %w[amd64 arm64]

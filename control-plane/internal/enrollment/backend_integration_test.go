@@ -3,6 +3,8 @@ package enrollment
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -191,6 +193,9 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	approval := Approval{NodeID: node, Policy: "standard", Capabilities: capabilities, ActorID: requester.String(), IdentityID: requester, SessionID: session, ApprovalID: approveRequest("node.approve", hash, summary), Reason: "approve", RequestID: uuid.NewString()}
+	if _, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint)); err == nil {
+		t.Fatal("pending enrollment exported")
+	}
 	changed := approval
 	changed.Policy = "changed"
 	if _, err := s.Approve(ctx, changed); !errors.Is(err, approvals.ErrNotReady) {
@@ -202,6 +207,32 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}
 	if replay, err := s.Approve(ctx, approval); err != nil || replay.Revision != trust.Revision {
 		t.Fatal("approval replay", replay, err)
+	}
+	exported, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint))
+	if err != nil {
+		t.Fatal("approved sealing export", err)
+	}
+	var binding struct {
+		NodeID uuid.UUID `json:"node_id"`
+		Keys   []struct {
+			Digest string `json:"public_key_sha256"`
+		} `json:"keys"`
+	}
+	if json.Unmarshal(exported, &binding) != nil || binding.NodeID != node || len(binding.Keys) != 2 {
+		t.Fatal("invalid exported binding")
+	}
+	for _, invalid := range []struct {
+		workspace, node, approval uuid.UUID
+		endpoint                  string
+	}{
+		{uuid.New(), node, approval.ApprovalID, hex.EncodeToString(endpoint)},
+		{workspace, uuid.New(), approval.ApprovalID, hex.EncodeToString(endpoint)},
+		{workspace, node, uuid.New(), hex.EncodeToString(endpoint)},
+		{workspace, node, approval.ApprovalID, strings.Repeat("a", 64)},
+	} {
+		if _, err := ExportSealingBinding(ctx, b, invalid.workspace, invalid.node, invalid.approval, invalid.endpoint); err == nil {
+			t.Fatal("wrong export identity accepted")
+		}
 	}
 	if _, _, _, err := s.ApprovalBinding(ctx, node, nil, "standard", capabilities); !errors.Is(err, database.ErrNotFound) {
 		t.Fatal("active approval binding")
@@ -293,6 +324,9 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	revoked, err := s.Revoke(ctx, revocation)
 	if err != nil || revoked.Revision != trust.Revision+1 {
 		t.Fatal("revoke", revoked, err)
+	}
+	if _, err := ExportSealingBinding(ctx, b, workspace, node, approval.ApprovalID, hex.EncodeToString(endpoint)); err == nil {
+		t.Fatal("revoked enrollment exported")
 	}
 	if replay, err := s.Revoke(ctx, revocation); err != nil || replay.Revision != revoked.Revision {
 		t.Fatal("revoke replay", replay, err)

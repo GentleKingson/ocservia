@@ -3,12 +3,15 @@ package certificates
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -32,6 +35,27 @@ func NewHTTPSigner(endpoint, token string, timeout time.Duration) (*HTTPSigner, 
 	return &HTTPSigner{endpoint: parsed.String(), token: token, client: &http.Client{Timeout: timeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return errors.New("external signer redirects are forbidden")
 	}}}, nil
+}
+
+// NewHTTPSignerWithCA confines private trust to this client; default external
+// HTTPS behavior is unchanged when no CA file is supplied.
+func NewHTTPSignerWithCA(endpoint, token string, timeout time.Duration, caFile string) (*HTTPSigner, error) {
+	signer, err := NewHTTPSigner(endpoint, token, timeout)
+	if err != nil || caFile == "" {
+		return signer, err
+	}
+	data, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, errors.New("external signer CA file is unreadable")
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(data) {
+		return nil, errors.New("external signer CA file is invalid")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	signer.client.Transport = transport
+	return signer, nil
 }
 
 func (s *HTTPSigner) Sign(ctx context.Context, request SignRequest) (SignResult, error) {
