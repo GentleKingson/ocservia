@@ -24,6 +24,7 @@ jobs:
   amd64:
     permissions:
       contents: read
+      actions: read
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ inputs.version }}
@@ -31,6 +32,7 @@ jobs:
   arm64:
     permissions:
       contents: read
+      actions: read
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ inputs.version }}
@@ -89,6 +91,7 @@ jobs:
           IMAGES_DIR: ${{ runner.temp }}/images
           SECURITY_SUMMARY: ${{ runner.temp }}/security/controller-image-security.json
           OUTPUT_DIR: ${{ runner.temp }}/candidate
+          CANDIDATE_PRODUCTS_JSON: ${{ toJSON(needs) }}
         run: |
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           bash scripts/publish-controller-candidate.sh

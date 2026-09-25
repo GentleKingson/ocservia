@@ -11,6 +11,9 @@ mkdir -p "$OUTPUT_DIR"
 jq -e --arg sha "$GITHUB_SHA" '.source_commit == $sha and (.images | length == 9) and
   all(.images[].platforms[]; .gate == "pass")' "$SECURITY_SUMMARY" >/dev/null
 cp "$SECURITY_SUMMARY" "$OUTPUT_DIR/controller-image-security.json"
+jq -n --arg sha "$GITHUB_SHA" --arg version "$VERSION" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+  --argjson products "${CANDIDATE_PRODUCTS_JSON:?}" \
+  '{source_commit:$sha,version:$version,run_id:$run,run_attempt:$attempt,products:$products}' >"$OUTPUT_DIR/producer.json"
 : >"$OUTPUT_DIR/registry-bindings.jsonl"
 for arch in amd64 arm64; do
   args=()
@@ -47,7 +50,7 @@ trap 'rm -f -- "$key"' EXIT
 openssl genpkey -algorithm ED25519 -out "$key"
 openssl pkey -in "$key" -pubout -out "$OUTPUT_DIR/candidate-signing.pub.pem"
 cd "$OUTPUT_DIR"
-sha256sum controller-release-*.json registry-bindings.jsonl controller-image-security.json >SHA256SUMS
+sha256sum controller-release-*.json registry-bindings.jsonl controller-image-security.json producer.json >SHA256SUMS
 openssl pkeyutl -sign -rawin -inkey "$key" -in SHA256SUMS -out SHA256SUMS.sig
 for arch in amd64 arm64; do
   sha256sum "controller-release-${arch}.json" >"controller-release-${arch}.json.sha256"

@@ -9,21 +9,70 @@ on:
         type: string
         required: true
     outputs:
+      accepted-id:
+        value: ${{ jobs.reuse-accepted.outputs.accepted-id }}
+      accepted-sha256:
+        value: ${{ jobs.reuse-accepted.outputs.accepted-sha256 }}
       agent-id:
-        value: ${{ jobs.build-agent-packages.outputs.artifact-id }}
+        value: ${{ jobs.reuse-accepted.outputs.agent-id || jobs.build-agent-packages.outputs.artifact-id }}
       agent-sha256:
-        value: ${{ jobs.build-agent-packages.outputs.sha256 }}
+        value: ${{ jobs.reuse-accepted.outputs.agent-sha256 || jobs.build-agent-packages.outputs.sha256 }}
       controller-id:
-        value: ${{ jobs.build-controller-images.outputs.artifact-id }}
+        value: ${{ jobs.reuse-accepted.outputs.controller-id || jobs.build-controller-images.outputs.artifact-id }}
       controller-sha256:
-        value: ${{ jobs.build-controller-images.outputs.sha256 }}
+        value: ${{ jobs.reuse-accepted.outputs.controller-sha256 || jobs.build-controller-images.outputs.sha256 }}
 permissions:
   contents: read
+  actions: read
 env:
   CARGO_INCREMENTAL: "0"
 jobs:
+  reuse-accepted:
+    name: Reuse accepted products (${{ inputs.arch }})
+    if: github.event_name == 'push'
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    outputs:
+      accepted-id: ${{ steps.accepted.outputs.artifact-id }}
+      accepted-sha256: ${{ steps.reuse.outputs.accepted-sha256 }}
+      agent-id: ${{ steps.agent.outputs.artifact-id }}
+      agent-sha256: ${{ steps.reuse.outputs.agent-sha256 }}
+      controller-id: ${{ steps.controller.outputs.artifact-id }}
+      controller-sha256: ${{ steps.reuse.outputs.controller-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Reuse successful main Integrated acceptance, never rebuild
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: node scripts/reuse-accepted-products.mjs "${RUNNER_TEMP}/accepted-products" "${{ inputs.arch }}" "$VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: agent
+        with:
+          name: agent-packages-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/accepted-products/agent
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: controller
+        with:
+          name: controller-images-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/accepted-products/controller
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: accepted
+        with:
+          name: accepted-integrated-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/accepted-products/accepted
+          retention-days: 7
+          if-no-files-found: error
   build-agent-packages:
     name: Build & Smoke Agent Packages (${{ inputs.arch }})
+    if: github.event_name != 'push'
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     outputs:
@@ -143,7 +192,7 @@ jobs:
     # A dispatch run builds and smokes the same images as a tag push but
     # stops before every production write: the publish job below stays
     # push-only.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     outputs:

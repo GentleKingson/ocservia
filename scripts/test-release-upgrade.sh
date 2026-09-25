@@ -68,6 +68,7 @@ node scripts/test-release-upgrade.mjs
 bash scripts/test-release-session-compatibility.sh
 node scripts/test-release-selection.mjs
 node scripts/test-release-artifacts.mjs
+node scripts/test-reuse-accepted-products.mjs
 bash scripts/test-controller-candidate.sh
 bash scripts/test-release-test-images.sh
 bash scripts/test-release-rust-cache.sh
@@ -94,7 +95,7 @@ consumer = diagnostic.fetch('jobs').fetch('business')
 producer = jobs.fetch('production-signer-products')
 abort 'clean consumer must be read-only' unless consumer['permissions'] == {'contents' => 'read', 'packages' => 'read'}
 abort 'Registry publication must remain opt-in' unless producer['if'] == "${{ inputs.production_signer && inputs.purpose == 'integration' }}" &&
-  producer['permissions'] == {'contents' => 'read', 'packages' => 'write'} &&
+  producer['permissions'] == {'contents' => 'read', 'actions' => 'read', 'packages' => 'write'} &&
   producer['uses'] == './.github/workflows/release-integrated-candidate.yml'
 abort 'diagnostics must contain no write-capable job' if
   diagnostic.fetch('jobs').values.any? { |job| job.fetch('permissions', {}).values.include?('write') }
@@ -150,6 +151,11 @@ abort 'fixture invocation must publish one artifact' unless fixture_steps.count 
 end
 products = YAML.safe_load(File.read('.github/workflows/release-products.yml'))
 abort 'product producers must not wait for upgrades' if products.to_json.include?('release-upgrade-unit.sh') || products.to_json.include?('frozen-')
+product_jobs = products.fetch('jobs')
+abort 'stable publication must reuse accepted products instead of building' unless
+  product_jobs.fetch('reuse-accepted')['if'] == "github.event_name == 'push'" &&
+  product_jobs.fetch('build-agent-packages')['if'] == "github.event_name != 'push'" &&
+  product_jobs.fetch('build-controller-images')['if'] == "github.event_name == 'workflow_dispatch'"
 upgrades = YAML.safe_load(File.read('.github/workflows/release-product-upgrade.yml'))
 abort 'upgrades must remain read-only and secret-free' unless upgrades['permissions'] == {'contents' => 'read'} && !upgrades.to_json.include?('secrets')
 unit = upgrades.fetch('jobs').fetch('upgrade')
@@ -216,6 +222,12 @@ end
   end
 end
 publish = release.fetch('jobs').fetch('publish-release-packages')
+publish_names = publish.fetch('steps').map { |step| step['name'] }
+bind_index = publish_names.index('Verify accepted bindings before any stable Registry write')
+push_index = publish_names.index('Push Controller images & assemble multi-platform indexes')
+abort 'accepted bindings must be verified on the publishing runner before Registry writes' unless bind_index && push_index && bind_index < push_index
+abort 'dispatch package validation must not require stable acceptance' if
+  release_jobs.fetch('validate-release-packages').to_json.include?('accepted-integrated')
 abort 'production approval lost' unless publish['environment'] == 'release-publishing'
 abort 'publish bypasses Release Check' unless publish.fetch('needs').include?('release-check')
 abort 'publish must handle optional skips but reject dispatch, cancellation and failed acceptance' unless
