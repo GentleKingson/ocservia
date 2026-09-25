@@ -239,104 +239,24 @@ jobs:
             . as $job | $ENV.NEEDS | fromjson | .[$job].result == "success")' <<< '{}'
 
   business-probe:
-    name: Native Candidate Business (${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}, amd64)
-    if: inputs.purpose == 'smoke' || inputs.purpose == 'integration'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    name: Read-only business diagnostics
+    if: ${{ !inputs.production_signer && (inputs.purpose == 'smoke' || inputs.purpose == 'integration') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-business-diagnostic.yml
+    with:
+      version: ${{ inputs.version }}
+      profile: ${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}
+      production_signer: false
+
+  production-signer-probe:
+    name: Opt-in production Signer acceptance
+    if: ${{ inputs.production_signer && inputs.purpose == 'integration' }}
     permissions:
       contents: read
       packages: write
-    env:
-      VERSION: ${{ inputs.version }}
-      CANDIDATE_SHA: ${{ github.sha }}
-      BUSINESS_PROFILE: ${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}
-      PRODUCTION_SIGNER_ACCEPTANCE: ${{ inputs.production_signer }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Relay optional BuildKit cache credentials
-        uses: ./.github/actions/g6-cache-credentials
-      - name: Authenticate candidate Registry publication
-        if: inputs.production_signer
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          test "$BUSINESS_PROFILE" = extended
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-            rust/target
-          key: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
-            native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
-      - name: Signed production lifecycle and native business validation
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
-        run: bash scripts/release-business-probe.sh
-      - name: Require complete scoped business evidence
-        env:
-          EVIDENCE: ${{ runner.temp }}/business-evidence
-          PROFILE: ${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}
-        run: |
-          test -s "${EVIDENCE}/probe.log"
-          jq -e --arg profile "${PROFILE}" --arg sha "${CANDIDATE_SHA}" \
-            '.profile == $profile and .candidate_sha == $sha and .probe_status == "PASS" and .exit_code == 0 and
-             (.timings | type == "array" and length > 0)' \
-            "${EVIDENCE}/result.json" >/dev/null
-          jq -e --arg profile "${PROFILE}" --arg sha "${CANDIDATE_SHA}" '
-            .profile == $profile and .candidate_sha == $sha and .probe_status == "PASS" and
-            (if $profile == "smoke" then
-              (["approved_config_apply_and_vpn_user", "real_vpn_after_config_apply",
-                "config_plan_automatic_rollback", "real_vpn_after_rollback"] - .passed_checkpoints | length) == 0
-             else
-              (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset",
-                "real_vpn_business_and_recovery"] - .passed_checkpoints | length) == 0
-             end)' "${EVIDENCE}/result.json" >/dev/null
-          if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-            jq -e --arg sha "$CANDIDATE_SHA" '.candidate_sha == $sha and .primary_occtl_preserved == true and
-              .before_auth == true and .revoked_rejected == true and .control_auth == true and
-              .refresh == "signed-export-atomic-install-sighup"' "${EVIDENCE}/crl-acceptance.json"
-            test "$(wc -l < "${EVIDENCE}/registry-pulls.jsonl")" -eq 6
-            jq -se --arg sha "$CANDIDATE_SHA" 'length == 6 and all(.[];
-              .candidate_sha == $sha and (.reference | startswith("ghcr.io/")) and
-              (.reference | test("@sha256:[0-9a-f]{64}$")) and .pulled == true)' \
-              "${EVIDENCE}/registry-pulls.jsonl"
-            grep -Fx production_signer_approved_binding "${EVIDENCE}/checkpoints.txt"
-          fi
-      - name: Mark evidence upload start
-        if: always()
-        run: date +%s >"${RUNNER_TEMP}/business-upload-start"
-      - name: Preserve sanitized evidence, including blockers
-        if: always()
-        id: business_evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: business-${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/business-evidence
-          if-no-files-found: error
-          retention-days: 7
-      - name: Record artifact identity and upload time
-        if: ${{ always() && steps.business_evidence.outcome == 'success' }}
-        env:
-          ARTIFACT_DIGEST: ${{ steps.business_evidence.outputs.artifact-digest }}
-          ARTIFACT_URL: ${{ steps.business_evidence.outputs.artifact-url }}
-        run: |
-          {
-            echo "Artifact: ${ARTIFACT_URL}"
-            echo "Artifact SHA-256: ${ARTIFACT_DIGEST}"
-            echo "Artifact upload: $(( $(date +%s) - $(cat "${RUNNER_TEMP}/business-upload-start") )) seconds"
-          } >>"${GITHUB_STEP_SUMMARY}"
-      - name: Retain native build cache even when a business assertion fails
-        if: ${{ !cancelled() }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-            rust/target
-          key: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
+    uses: ./.github/workflows/release-business-diagnostic.yml
+    with:
+      version: ${{ inputs.version }}
+      profile: extended
+      production_signer: true

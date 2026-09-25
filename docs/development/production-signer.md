@@ -100,7 +100,11 @@ there is no HTTP key registration endpoint.
    `--database-url-file`, `--backend`, optional `--database-ca-file`, and the
    independently verified `--workspace`, `--node`, `--endpoint`, `--approval`.
    This is an OS-protected administrative CLI using authenticated database
-   credentials, not a new public API. It uses existing domain stores and a
+   credentials, not a new public API. The credential must be an absolute canonical
+   path with root- or process-owned ancestry that is not group/world writable;
+   symlinks are rejected. The regular file must have one link, mode 0400/0600,
+   root/process ownership and 1..4096 bytes. Reads use the verified descriptor,
+   not a second path lookup. It uses existing domain stores and a
    repeatable-read transaction, locks the node, requires active/offline node
    plus active endpoint, reconstructs the approval binding and verifies its
    independently approved, consumed state before exporting persisted key
@@ -203,6 +207,9 @@ the candidate version on its exact branch. This opt-in path publishes six
 candidate images under unique SHA/run/attempt GHCR tags, removes their local
 tags, pulls their immutable digests and installs the Controller through the
 signed candidate manifest. It does not publish a Release or change stable tags.
+The ordinary smoke/integration caller has only `contents: read`; a separate
+opt-in integration caller alone grants `packages: write`. Both call the same
+reusable business workflow, which inherits rather than widens caller permissions.
 
 The extended native daemon checks use the production Signer with an online
 intermediate, approved Controller export and actual node public-key export.

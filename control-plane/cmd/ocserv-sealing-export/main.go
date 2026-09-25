@@ -24,11 +24,7 @@ func main() {
 	endpoint := flag.String("endpoint", "", "expected endpoint hex identity")
 	flag.Parse()
 	fail := func() { fmt.Fprintln(os.Stderr, "approved sealing binding export rejected"); os.Exit(1) }
-	info, err := os.Lstat(*dsnFile)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		fail()
-	}
-	dsn, err := os.ReadFile(*dsnFile)
+	dsn, err := readCredentialFile(*dsnFile)
 	if err != nil {
 		fail()
 	}
