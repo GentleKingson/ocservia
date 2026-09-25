@@ -1,0 +1,49 @@
+services:
+  signer:
+    image: ${OCSERV_SIGNER_IMAGE:?set a digest-pinned Signer image}
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    command: [serve]
+    volumes:
+      - type: bind
+        source: ${OCSERV_SIGNER_STATE_DIR:?set Signer state directory}
+        target: /var/lib/ocservia-signer
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OCSERV_SIGNER_SECRET_DIR:?set Signer secret directory}
+        target: /run/secrets
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [signer]
+    healthcheck:
+      test: [CMD, /ocserv-signer, health, --url, "https://signer:9443/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 256M, pids: 64}
+
+  control-plane:
+    environment:
+      OCSERV_CERTIFICATE_SIGNER_URL: https://signer:9443/sign
+      OCSERV_CERTIFICATE_SIGNER_CA_FILE: /run/secrets/certificate_signer_ca
+    secrets:
+      - certificate_signer_ca
+    networks:
+      signer: {}
+    depends_on:
+      signer:
+        condition: service_healthy
+
+networks:
+  signer:
+    internal: true
+
+secrets:
+  certificate_signer_ca:
+    file: ${OCSERV_SIGNER_SECRET_DIR}/tls-ca.pem

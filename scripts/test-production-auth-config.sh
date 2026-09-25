@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Static production auth regression: no containers, real accounts or secrets.
 set -euo pipefail
+if (( EUID != 0 )); then
+  exec sudo -- bash "$0" "$@"
+fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d "${HOME}/ocservia-auth-config.XXXXXX")"
-trap 'rm -rf -- "${work}"' EXIT
+trap '"${owner[@]}" rm -rf -- "${work}"' EXIT
+owner=()
 mkdir -m 0700 "${work}/secrets"
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backups"
 for name in tls.crt tls.key postgres-owner-password postgres-app-password \
@@ -16,7 +20,6 @@ for name in audit-event-key controller-command-signing-key.pem relay-access-toke
   printf 'test-only-not-a-production-secret\n' >"${OCSERV_SECRET_DIR}/${name}"
   chmod 0400 "${OCSERV_SECRET_DIR}/${name}"
 done
-owner=()
 if (( EUID != 0 )); then owner=(sudo); fi
 "${owner[@]}" install -o 0 -g 65532 -m 440 /dev/null "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 "${owner[@]}" chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" \
@@ -160,6 +163,58 @@ expect_failure env OCSERV_OIDC_ISSUER=https://id.example.test OCSERV_OIDC_CLIENT
 rm "${OCSERV_SECRET_DIR}/oidc-client-secret"
 expect_failure env OCSERV_OIDC_ISSUER=https://id.example.test OCSERV_OIDC_CLIENT_ID=test \
   "${ROOT}/deploy/production/compose.sh" config --quiet
+# Integrated shares the existing auth and database overlays and must preserve
+# their private networks while adding the isolated, TLS-verified Signer.
+export OCSERV_DEPLOYMENT_MODE=integrated OCSERV_RELAY_PUBLIC_HOST=relay.example.com
+export OCSERV_RELAY_SECRET_DIR="${work}/relay"
+export OCSERV_SIGNER_SECRET_DIR="${work}/signer-secrets" OCSERV_SIGNER_STATE_DIR="${work}/signer-state"
+export OCSERV_EDGE_IMAGE="${image}" OCSERV_RELAY_IMAGE="${image}" OCSERV_SIGNER_IMAGE="${image}"
+unset OCSERV_RELAY_URL_A OCSERV_RELAY_URL_B OCSERV_CERTIFICATE_SIGNER_URL
+mkdir -m 700 "${OCSERV_RELAY_SECRET_DIR}" "${OCSERV_SIGNER_SECRET_DIR}" "${OCSERV_SIGNER_STATE_DIR}"
+for name in tls.crt tls.key; do
+  cp "${OCSERV_SECRET_DIR}/${name}" "${OCSERV_RELAY_SECRET_DIR}/${name}"
+done
+for name in issuer-chain.pem issuer-key.pem tls-cert.pem tls-key.pem api-token tls-ca.pem; do
+  cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SIGNER_SECRET_DIR}/${name}"
+  "${owner[@]}" chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}/${name}"
+  chmod 400 "${OCSERV_SIGNER_SECRET_DIR}/${name}"
+done
+chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/tls-ca.pem"
+"${owner[@]}" chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}" "${OCSERV_SIGNER_STATE_DIR}"
+for name in database-ca.pem database-backup.cnf oidc-client-secret; do
+  cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SECRET_DIR}/${name}"
+done
+export OCSERV_DATABASE_BACKUP_HOST=database.example.com OCSERV_DATABASE_BACKUP_IMAGE="${image}"
+for backend in postgres:bundled postgres:external mysql:external mariadb:external; do
+  export OCSERV_DATABASE_BACKEND="${backend%:*}" OCSERV_DATABASE_DEPLOYMENT="${backend#*:}"
+  for auth in local oidc combined; do
+    export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_OIDC_ISSUER='' OCSERV_OIDC_CLIENT_ID='' OCSERV_OIDC_REDIRECT_URL=''
+    if [[ "${auth}" != local ]]; then
+      export OCSERV_OIDC_ISSUER=https://id.example.com OCSERV_OIDC_CLIENT_ID=test
+      export OCSERV_OIDC_REDIRECT_URL=https://controller.example.com/api/v1/auth/callback
+      [[ "${auth}" != oidc ]] || export OCSERV_LOCAL_AUTH_ENABLED=false
+    fi
+    "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/integrated.json"
+    jq -e --arg backend "${backend}" '
+      (.services["control-plane"].networks | has("application") and has("signer") and
+        has(if $backend == "postgres:bundled" then "database" else "database-egress" end)) and
+      .services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_URL == "https://signer:9443/sign" and
+      .services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_CA_FILE == "/run/secrets/certificate_signer_ca" and
+      .services.transportd.environment.OCSERV_RELAY_URL_A == "https://relay.example.com" and
+      (.services.signer.networks | keys == ["signer"]) and
+      (.services.signer.ports // [] | length == 0) and .networks.signer.internal
+    ' "${work}/integrated.json" >/dev/null
+  done
+done
+expect_failure env OCSERV_RELAY_PUBLIC_HOST=controller.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_RELAY_URL_B=https://second.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_AUTH_TRUSTED_PROXY_CIDRS= "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_CERTIFICATE_SIGNER_URL=https://elsewhere.test/sign "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_SIGNER_IMAGE=signer:latest "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure "${ROOT}/deploy/production/compose.sh" up --build
+"${owner[@]}" chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+"${owner[@]}" chmod 400 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
 rm "${OCSERV_SECRET_DIR}/session-key"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 echo "Production auth configuration: all three documented modes, installer allowlists, secret mounts and rejection checks passed"

@@ -184,15 +184,20 @@ validate_manifest_file() {
     else
       .[0] as $manifest |
       ($manifest | type == "object") and
-      ($manifest | keys == ["database_migration", "images", "manifest_version", "platform", "release_tag", "release_version", "source_commit"]) and
-      ($manifest.manifest_version | positive_integer and . == 1) and
+      (if $manifest.manifest_version == 1 then
+        ($manifest | keys == ["database_migration", "images", "manifest_version", "platform", "release_tag", "release_version", "source_commit"]) and
+        ($manifest.images | keys == ["backup", "control", "gateway", "otel", "postgres", "transport"])
+      elif $manifest.manifest_version == 2 then
+        ($manifest | keys == ["database_migration", "images", "manifest_version", "platform", "release_tag", "release_version", "signer_state_version", "source_commit"]) and
+        ($manifest.signer_state_version == 1) and
+        ($manifest.images | keys == ["backup", "control", "edge", "gateway", "mariadb_backup", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])
+      else false end) and
       ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
       ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+$") and . == ("v" + $manifest.release_version)) and
       ($manifest.source_commit | matches("^[0-9a-f]{40}$")) and
       ($manifest.platform | IN("linux/amd64", "linux/arm64")) and
       ($manifest.database_migration | positive_integer) and
       ($manifest.images | type == "object" and
-        keys == ["backup", "control", "gateway", "otel", "postgres", "transport"] and
         all(.[]; matches("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")))
     end
   '
@@ -220,6 +225,27 @@ stage_and_validate_manifest() {
 
 map_manifest_images() {
   local manifest="$1"
+  local mode="${OCSERV_DEPLOYMENT_MODE:-standalone}" profile="${STATE_ROOT}/deployment-profile.json"
+  local backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
+  if [[ -e "${profile}" || -L "${profile}" ]]; then
+    validate_state_file_path "deployment profile" "${profile}"
+    jq -e 'keys == ["database_backend", "database_deployment", "deployment_mode"] and
+      (.deployment_mode | IN("standalone", "integrated")) and
+      ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"], ["mysql", "external"], ["mariadb", "external"]))' \
+      "${profile}" >/dev/null || fail "invalid deployment profile"
+    mode="$(jq -r '.deployment_mode' "${profile}")"
+    backend="$(jq -r '.database_backend' "${profile}")"
+    deployment="$(jq -r '.database_deployment' "${profile}")"
+    [[ "${OCSERV_DEPLOYMENT_MODE:-${mode}}" == "${mode}" ]] ||
+      fail "deployment mode cannot change during an existing installation"
+    [[ "${OCSERV_DATABASE_BACKEND:-${backend}}" == "${backend}" && "${OCSERV_DATABASE_DEPLOYMENT:-${deployment}}" == "${deployment}" ]] ||
+      fail "database deployment cannot change during an existing installation"
+  elif [[ -e "${CURRENT_RELEASE}" && "${mode}" != standalone ]]; then
+    fail "existing standalone installation cannot be switched to Integrated"
+  fi
+  case "${mode}" in standalone|integrated) ;; *) fail "invalid deployment mode" ;; esac
+  export OCSERV_DEPLOYMENT_MODE="${mode}"
+  export OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT="${deployment}"
   OCSERV_GATEWAY_IMAGE="$(jq -er -s '.[0].images.gateway' "${manifest}")"
   OCSERV_CONTROL_IMAGE="$(jq -er -s '.[0].images.control' "${manifest}")"
   OCSERV_TRANSPORT_IMAGE="$(jq -er -s '.[0].images.transport' "${manifest}")"
@@ -228,6 +254,20 @@ map_manifest_images() {
   OCSERV_OTEL_IMAGE="$(jq -er -s '.[0].images.otel' "${manifest}")"
   export OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE
   export OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
+  if [[ "$(jq -r '.manifest_version' "${manifest}")" == 2 ]]; then
+    OCSERV_EDGE_IMAGE="$(jq -er '.images.edge' "${manifest}")"
+    OCSERV_RELAY_IMAGE="$(jq -er '.images.relay' "${manifest}")"
+    OCSERV_SIGNER_IMAGE="$(jq -er '.images.signer' "${manifest}")"
+    export OCSERV_EDGE_IMAGE OCSERV_RELAY_IMAGE OCSERV_SIGNER_IMAGE
+    case "${OCSERV_DATABASE_BACKEND:-postgres}" in
+      mysql|mariadb)
+        OCSERV_DATABASE_BACKUP_IMAGE="$(jq -er --arg role "${OCSERV_DATABASE_BACKEND}_backup" '.images[$role]' "${manifest}")"
+        export OCSERV_DATABASE_BACKUP_IMAGE
+        ;;
+    esac
+  elif [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
+    fail "Integrated deployment requires a v2 release manifest"
+  fi
 }
 
 check_manifest_platform() {
@@ -246,6 +286,40 @@ check_manifest_platform() {
   esac
   [[ "${manifest_platform}" == "${host_platform}" ]] ||
     fail "release manifest platform ${manifest_platform} does not match the Docker host platform ${host_platform}"
+}
+
+record_deployment_profile() {
+  [[ ! -e "${STATE_ROOT}/deployment-profile.json" ]] || return 0
+  local staged
+  staged="$(mktemp "${STATE_ROOT}/.deployment-profile.XXXXXX")"
+  jq -n --arg mode "${OCSERV_DEPLOYMENT_MODE}" --arg backend "${OCSERV_DATABASE_BACKEND}" \
+    --arg deployment "${OCSERV_DATABASE_DEPLOYMENT}" \
+    '{deployment_mode:$mode, database_backend:$backend, database_deployment:$deployment}' >"${staged}"
+  mv -- "${staged}" "${STATE_ROOT}/deployment-profile.json"
+}
+
+checkpoint_signer() {
+  [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]] || return 0
+  local checkpoint="${STATE_ROOT}/signer-checkpoint.json" staged
+  "${COMPOSE_LAUNCHER}" stop control-plane transportd signer ||
+    fail "cannot stop writers for exclusive Signer state validation"
+  staged="$(mktemp "${STATE_ROOT}/.signer-checkpoint.XXXXXX")"
+  if ! "${COMPOSE_LAUNCHER}" run --rm --no-deps signer inspect >"${staged}" ||
+    ! jq -e '.state_version == 1 and (.issuer_sha256 | test("^[0-9a-f]{64}$")) and
+      (.policy | type == "string") and (.revision | type == "number" and . >= 0 and floor == .)' "${staged}" >/dev/null; then
+    rm -f -- "${staged}"
+    fail "Signer state inspection failed; preserve stopped state for recovery"
+  fi
+  if [[ -e "${checkpoint}" || -L "${checkpoint}" ]]; then
+    validate_state_file_path "Signer checkpoint" "${checkpoint}"
+    if ! jq -e --slurpfile previous "${checkpoint}" '
+      .state_version == $previous[0].state_version and .issuer_sha256 == $previous[0].issuer_sha256 and
+      .policy == $previous[0].policy and .revision >= $previous[0].revision' "${staged}" >/dev/null; then
+      rm -f -- "${staged}"
+      fail "Signer identity or minimum revision changed; reconcile without resetting state"
+    fi
+  fi
+  mv -f -- "${staged}" "${checkpoint}"
 }
 
 validate_prerequisites() {
@@ -638,6 +712,12 @@ production_descriptor_paths() {
     "deploy/production/compose.external-postgres.yaml" \
     "deploy/production/compose.postgres.yaml" \
     "deploy/production/compose.yaml"
+  if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
+    printf '%s\n' "deploy/production/integrated/compose.yaml" \
+      "deploy/production/integrated/compose.signer.yaml" \
+      "deploy/production/integrated/Caddyfile" \
+      "deploy/production/relay/compose.yaml" "deploy/production/relay/relay.toml"
+  fi
   grep -Eo '\./[^[:space:]:]+' "${compose_file}" | sort -u | while IFS= read -r source; do
     printf 'deploy/production/%s\n' "${source#./}"
   done
@@ -744,6 +824,21 @@ install_controller() {
   if ! "${COMPOSE_LAUNCHER}" pull; then
     fail "target image pull failed; pending release state retained"
   fi
+  record_deployment_profile
+  if [[ "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
+    "${COMPOSE_LAUNCHER}" stop signer || fail "cannot stop Signer before exclusive initialization"
+    if [[ -e "${STATE_ROOT}/signer-init-attempted" || -L "${STATE_ROOT}/signer-init-attempted" ]]; then
+      validate_state_file_path "Signer initialization intent" "${STATE_ROOT}/signer-init-attempted"
+    else
+      [[ ! -e "${OCSERV_SIGNER_STATE_DIR}/ledger.db" && ! -L "${OCSERV_SIGNER_STATE_DIR}/ledger.db" ]] ||
+        fail "first install refuses preexisting Signer state"
+      # Persist intent before init: a lost reply must never cause identity recreation.
+      printf '%s\n' attempted >"${STATE_ROOT}/signer-init-attempted"
+      "${COMPOSE_LAUNCHER}" run --rm --no-deps signer init ||
+        fail "Signer initialization failed; preserve state and reconcile before retry"
+    fi
+    checkpoint_signer
+  fi
   mark_pending_phase activation
   if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
     fail "activation started but was not confirmed successful; pending release state retained" 1
@@ -801,6 +896,8 @@ upgrade_controller() {
   if ! "${COMPOSE_LAUNCHER}" pull; then
     fail "target image pull failed; current release remains unchanged"
   fi
+  record_deployment_profile
+  checkpoint_signer
   migrate_application_network
   mark_pending_phase activation "${CURRENT_RELEASE}"
   if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
@@ -845,6 +942,7 @@ rollback_controller() {
 
   current_migration="$(jq -er -s '.[0].database_migration' "${CURRENT_RELEASE}")"
   previous_migration="$(jq -er -s '.[0].database_migration' "${PREVIOUS_RELEASE}")"
+  map_manifest_images "${CURRENT_RELEASE}"
   validate_production_deployment_contract "${current_commit}" "${previous_commit}"
 
   STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
@@ -869,6 +967,7 @@ rollback_controller() {
   if ! "${COMPOSE_LAUNCHER}" pull; then
     fail "rollback target image pull failed; current release remains unchanged"
   fi
+  checkpoint_signer
   mark_pending_phase rollback-activation "${CURRENT_RELEASE}"
   if [[ "${current_migration}" != "${previous_migration}" ]]; then
     # The compatibility preflight already validated the database. Do not let
@@ -882,6 +981,9 @@ rollback_controller() {
       rollback_services+=(otel-collector)
     fi
     rollback_services+=(transportd control-plane gateway)
+    if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
+      rollback_services+=(signer relay edge)
+    fi
     if ! "${COMPOSE_LAUNCHER}" up -d --wait --no-deps "${rollback_services[@]}"; then
       fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
     fi
@@ -916,6 +1018,7 @@ purge_controller_state() {
     "${CURRENT_RELEASE}"
     "${PREVIOUS_RELEASE}"
     "${PENDING_RELEASE}"
+    "${STATE_ROOT}/deployment-profile.json"
   )
 
   for state_file in "${state_files[@]}"; do
@@ -957,6 +1060,9 @@ uninstall_controller() {
   validate_prerequisites false
   map_manifest_images "${CURRENT_RELEASE}"
 
+  if [[ "${PURGE_DATA}" == true && "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
+    fail "Integrated uninstall preserves Signer identity and revision evidence; data purge requires separate operator reconciliation"
+  fi
   if [[ "${PURGE_DATA}" == true ]]; then
     down_args+=(--volumes)
   fi
@@ -992,6 +1098,10 @@ start_controller() {
   map_manifest_images "${CURRENT_RELEASE}"
   release_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
 
+  "${COMPOSE_LAUNCHER}" config --quiet || fail "start preflight failed; current release remains unchanged"
+  "${COMPOSE_LAUNCHER}" pull || fail "start image pull failed; current release remains unchanged"
+  record_deployment_profile
+  checkpoint_signer
   if ! COMPOSE_PROJECT_NAME=ocservia-production "${COMPOSE_LAUNCHER}" up -d --wait; then
     fail "start activation was not confirmed successful; confirmed release state remains unchanged" 1
   fi

@@ -1,11 +1,69 @@
-# Integrated network prototype
+# Integrated deployment
 
-P1 development prototype against source baseline
-`e861b72130d4d409883f68d01805566f26cbafbc`; not a production mode, release
-artifact or completed P1 acceptance. Read the
+The P1 network prototype was developed against source baseline
+`e861b72130d4d409883f68d01805566f26cbafbc`. P3 connects it and the production
+Signer to the existing lifecycle. Candidate publication and real deployment
+acceptance remain P4/P5 gates, not implied by configuration tests. Read the
 [P0 contract](../../../docs/development/integrated-deployment-adr.md).
-The existing lifecycle/manifest/environment allowlist does not admit this
-overlay yet. Do not bypass `controller.sh` to activate it on production.
+Do not bypass the signed-manifest checks in `controller.sh` for deployment.
+
+## Lifecycle configuration
+
+Use the existing bootstrap, `install.sh`, `controller.sh` and `compose.sh`,
+not a second installer. Standalone remains the default. Integrated requires a
+v2 platform manifest, Compose >= 2.24.4, and these additional `install.env`
+settings alongside the normal database, authentication and Controller Secrets:
+
+```dotenv
+OCSERV_DEPLOYMENT_MODE=integrated
+OCSERV_RELAY_PUBLIC_HOST=relay.example.com
+OCSERV_RELAY_SECRET_DIR=/etc/ocservia/relay
+OCSERV_SIGNER_SECRET_DIR=/etc/ocservia/signer
+OCSERV_SIGNER_STATE_DIR=/var/lib/ocservia-signer
+```
+
+Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
+`OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` and `OCSERV_CERTIFICATE_SIGNER_URL`:
+the launcher derives one Relay URL and `https://signer:9443/sign`. Conflicting
+values are rejected. Controller's trusted proxy must remain the Gateway's
+application `/32`, not Edge or an entire subnet. Certificates are provisioned
+externally; this installer does not request ACME certificates or generate CAs.
+
+The Relay secret directory is launcher-owned mode 0700 and contains nonempty
+single-link `tls.crt` and `tls.key`, launcher-owned mode 0444. Its access token
+is the existing Controller `relay-access-token`, not a second Relay token.
+Signer secret and state directories are UID:GID 65532:65532, mode 0700,
+canonical paths with protected ancestry. Signer requires `issuer-chain.pem`,
+`issuer-key.pem`, `tls-cert.pem`, `tls-key.pem` and `api-token`, single-link
+65532:65532 mode 0400 files. `tls-ca.pem` has the same ownership and mode 0444
+so Controller can read its individual public-CA mount. Signer's TLS leaf must
+include SAN `signer`. `api-token` must exactly match Controller's
+`certificate-signer-token`; no private issuer key is mounted into Controller.
+See the [Signer custody contract](../../../docs/development/production-signer.md)
+for chain, token, approved key-transfer and recovery requirements.
+
+Installation verifies the existing signed bundle and exact source checkout,
+checks the final Compose model and pulls all selected images before stopping
+anything. Only first installation attempts `signer init`; its durable intent
+is recorded before execution. Retry, start, upgrade and rollback inspect an
+existing ledger and never recreate a missing ledger. An interrupted init with
+missing/invalid state requires reconciliation, not removal of its intent file.
+Mode and database selection are retained in `deployment-profile.json`; an
+existing deployment cannot silently switch mode or database via environment.
+
+Signer inspection is exclusive: lifecycle stops Controller/transportd/Signer
+and retains `signer-checkpoint.json` (issuer, policy, state version and revision)
+before activation. A different identity or lower revision fails closed, leaving
+recoverable stopped state. This checkpoint is a lifecycle high-water mark,
+not a live per-request backup; backup/restore still requires independently
+reconciled newer issuance/revocation evidence. Rollback changes images, never
+the ledger, CA, node identity or uncertain operation state.
+
+`uninstall` stops the integrated services but preserves Secrets, ledger and
+lifecycle evidence. Integrated `--purge-data` is refused; identity disposal is
+a separate reconciled operator action. There is no automatic cross-mode
+migration, automatic CRL distribution, HA or forced disconnection of existing
+VPN sessions.
 
 ## Network contract
 
@@ -27,8 +85,8 @@ Only Edge publishes TCP443 and Relay UDP7842. `!override` removes inherited
 Gateway ports, not an empty merge list. Compose >= 2.24.4 is required.
 Resolve all paths relative to `deploy/production/compose.yaml`, the first file;
 apply the Integrated overlay last, after the selected database/auth overlays.
-P3 must integrate this into the existing launcher, check mode/image/hostname
-inputs and preserve the standalone path. `compose.sh` is deliberately unchanged.
+The launcher checks mode/image/hostname inputs and the merged published-port
+set, adds `compose.signer.yaml`, and preserves the standalone path.
 
 Render for review only, with the ordinary required environment plus
 `OCSERV_EDGE_IMAGE`, `OCSERV_RELAY_IMAGE`, `OCSERV_RELAY_PUBLIC_HOST` and

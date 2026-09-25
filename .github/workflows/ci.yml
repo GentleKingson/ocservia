@@ -137,6 +137,8 @@ jobs:
           bash scripts/test-managed-node-install.sh
           bash scripts/test-controller-install.sh
           bash scripts/test-controller-bootstrap.sh
+          bash scripts/test-controller-lifecycle.sh
+          bash scripts/test-production-auth-config.sh
           docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
             python3 /source/scripts/test-relay-launchers.py
           docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
