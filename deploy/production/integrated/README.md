@@ -167,7 +167,7 @@ streams; this is not proof of original-IP abuse controls behind Edge.
 
 Run locally only on BuildServer, in an isolated checkout. Development builds
 are allowed here; final production-path acceptance must pull approved Registry
-digests instead. NGINX 1.28.3 and Caddy 2.11.4 are digest-pinned; Relay uses the
+digests instead. NGINX 1.30.5 and Caddy 2.11.4 are digest-pinned; Relay uses the
 existing locked iroh-relay 1.2.0 build. No upstream Relay changes are made.
 
 ```bash

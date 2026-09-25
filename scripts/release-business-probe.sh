@@ -107,7 +107,7 @@ cleanup() {
   jq -n --arg sha "${CANDIDATE_SHA}" --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg profile "${BUSINESS_PROFILE}" \
-    --arg arch "$CONTROLLER_ARCH" \
+    --arg arch "$CONTROLLER_ARCH" --argjson install_only "$INTEGRATED_INSTALL_ONLY" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
@@ -116,7 +116,7 @@ cleanup() {
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
       scope:(if $profile == "smoke" then "business-smoke" else "integration" end),
-      planned_topology:{hosts:1,architecture:$arch,native_systemd_node:true,relays:1,relay_redundancy:false},
+      planned_topology:{hosts:1,architecture:$arch,native_systemd_node:($install_only | not),relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
       deferred:["Publish: immutable published Release download/bootstrap"],
@@ -191,7 +191,7 @@ docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay"
 docker image inspect --format '{{.Id}} {{.Architecture}}' "${BUILDX_BUILDER}-relay" >"${ARTIFACT_DIR}/relay-image.txt"
 fi
 find "${OUTPUT_DIR}" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum >"${ARTIFACT_DIR}/product-digests.txt"
-record candidate_built
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then record candidate_consumed; else record candidate_built; fi
 next_stage dependency_install
 if [[ "$INTEGRATED_INSTALL_ONLY" != true ]]; then
 sudo apt-get update -qq

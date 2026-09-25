@@ -588,7 +588,9 @@ jobs:
       - name: Verify accepted bindings before any stable Registry write
         env:
           EXPECTED: ${{ needs.build-amd64.outputs.accepted-sha256 }}
+          ARM64_EXPECTED: ${{ needs.build-arm64.outputs.accepted-sha256 }}
         run: |
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ && "$EXPECTED" == "$ARM64_EXPECTED" ]]
           cd "${RUNNER_TEMP}/accepted-integrated"
           [[ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" == "$EXPECTED" ]]
           sha256sum --strict -c SHA256SUMS

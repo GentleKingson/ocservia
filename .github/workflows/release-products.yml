@@ -189,9 +189,7 @@ jobs:
 
   build-controller-images:
     name: Build Controller Images (${{ inputs.arch }})
-    # A dispatch run builds and smokes the same images as a tag push but
-    # stops before every production write: the publish job below stays
-    # push-only.
+    # Dispatch builds once; a later tag push reuses the accepted products.
     if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90

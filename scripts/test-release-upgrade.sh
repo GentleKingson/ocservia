@@ -226,6 +226,10 @@ publish_names = publish.fetch('steps').map { |step| step['name'] }
 bind_index = publish_names.index('Verify accepted bindings before any stable Registry write')
 push_index = publish_names.index('Push Controller images & assemble multi-platform indexes')
 abort 'accepted bindings must be verified on the publishing runner before Registry writes' unless bind_index && push_index && bind_index < push_index
+binding = publish.fetch('steps').fetch(bind_index)
+abort 'both native legs must reuse the same accepted bundle before publishing' unless
+  binding.dig('env', 'ARM64_EXPECTED') == '${{ needs.build-arm64.outputs.accepted-sha256 }}' &&
+  binding.fetch('run').include?('[[ "$EXPECTED" =~ ^[0-9a-f]{64}$ && "$EXPECTED" == "$ARM64_EXPECTED" ]]')
 abort 'dispatch package validation must not require stable acceptance' if
   release_jobs.fetch('validate-release-packages').to_json.include?('accepted-integrated')
 abort 'production approval lost' unless publish['environment'] == 'release-publishing'

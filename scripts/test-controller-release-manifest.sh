@@ -125,8 +125,12 @@ push_trigger = triggers.fetch("push")
 abort("Release workflow must trigger only on version tag pushes") unless
   !push_trigger.key?("branches") && push_trigger.fetch("tags") == ["v*.*.*"]
 abort("Release workflow must not trigger on release publication") if triggers.key?("release")
-abort("Controller image job must run for tag-push release runs and workflow dispatch dry runs") unless
-  controller.fetch("if") == "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"
+abort("Controller image builds must not rebuild accepted tag-push products") unless
+  controller.fetch("if") == "github.event_name == 'workflow_dispatch'"
+reuse = products.fetch("jobs").fetch("reuse-accepted")
+abort("Tag-push products must reuse exact accepted artifacts") unless
+  reuse.fetch("if") == "github.event_name == 'push'" &&
+  reuse.fetch("steps").any? { |step| step.fetch("run", "").include?("scripts/reuse-accepted-products.mjs") }
 abort("Controller publishing must require an uncancelled tag push and successful Release Check") unless
   publish.fetch("if") == "${{ !cancelled() && github.event_name == 'push' && needs.release-check.result == 'success' }}"
 # The build legs must stay source-only: no registry credential may exist
@@ -175,8 +179,10 @@ end
 products.fetch("jobs").each do |id, job|
   abort("#{id} must run on the selected native architecture") unless
     job.fetch("runs-on") == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
+  expected_permissions = {"contents" => "read"}
+  expected_permissions["actions"] = "read" unless id == "build-controller-images"
   abort("#{id} must remain a read-only product producer") unless
-    job.fetch("permissions", products.fetch("permissions")) == {"contents" => "read"} &&
+    job.fetch("permissions", products.fetch("permissions")) == expected_permissions &&
     !job.key?("environment") && !job.key?("secrets") && !job.to_s.include?("secrets.")
 end
 uses = Array(controller.fetch("steps")).map { |step| step["uses"] }.compact
@@ -248,7 +254,7 @@ abort("Controller publishing must ship the scan binding record") unless
 abort("Controller publishing must bind the pushed index digests into the scan binding record") unless
   publish_steps.include?("index_digest: .[0][4]")
 abort("Controller publishing must verify the binding record against the final release manifests") unless
-  publish_steps.include?(".images[$name].index_digest") &&
+  publish_steps.include?(".images[$name].platforms[$arch].manifest_digest") &&
   publish_steps.include?("controller-release-${platform}.json")
 final_gate = publish.fetch("steps").find { |step| step["name"] == "Verify signed release manifest" }
 abort("Final release validation must retain the trusted key pin") unless
