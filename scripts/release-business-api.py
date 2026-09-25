@@ -85,6 +85,16 @@ def wait_for(description, fn, seconds=120):
     raise RuntimeError(f'timeout: {description}')
 
 
+def wait_for_relay_outage(node):
+    # Stopping Relay does not immediately invalidate a buffered QUIC session.
+    # This case queues offline work, not an uncertain in-flight reload.
+    wait_for('single Relay owner lease invalidation', lambda: sql(
+        "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
+        f"WHERE node_id=decode('{node.replace('-', '')}','hex') "
+        "AND lease_until>clock_timestamp());") == 't')
+    record('single_relay_owner_lease_invalidated')
+
+
 def approval(action, resource_type, resource_id, extra=None):
     request = api('approval-requests', {'action': action, 'resource_type': resource_type,
                                       'resource_id': resource_id, 'reason': 'T07 isolated validation',
@@ -788,6 +798,7 @@ def business():
     record('reload_before_fault', native_reload_count=reloads_before)
     try:
         run('docker', 'stop', relay)
+        wait_for_relay_outage(node)
         for _ in range(3):
             assert ping()
             assert native_session() == live_session
@@ -806,6 +817,11 @@ def business():
         assert 'id' in pending
         time.sleep(10)
         assert api('operations/' + pending['id'])['state'] != 'succeeded'
+        queued = cross_check(pending)
+        assert queued['journal'] == [] and queued['root'] == []
+        assert queued['outbox'] and all(row['published_at'] is None for row in queued['outbox'])
+        assert all(row['state'] != 'sent' for row in queued['attempts'])
+        (EVIDENCE / 'recovery-queued.json').write_text(json.dumps(queued))
         record('single_relay_outage_preserves_live_vpn_and_queues_operation')
     finally:
         run('docker', 'start', relay)
