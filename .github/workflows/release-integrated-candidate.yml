@@ -1,0 +1,109 @@
+name: Integrated Candidate Products
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+    outputs:
+      bundle-id:
+        value: ${{ jobs.publish.outputs.bundle-id }}
+      bundle-sha256:
+        value: ${{ jobs.publish.outputs.bundle-sha256 }}
+      key-sha256:
+        value: ${{ jobs.publish.outputs.key-sha256 }}
+      agent-amd64-id:
+        value: ${{ jobs.amd64.outputs.agent-id }}
+      agent-amd64-sha256:
+        value: ${{ jobs.amd64.outputs.agent-sha256 }}
+      agent-arm64-id:
+        value: ${{ jobs.arm64.outputs.agent-id }}
+      agent-arm64-sha256:
+        value: ${{ jobs.arm64.outputs.agent-sha256 }}
+jobs:
+  amd64:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-products.yml
+    with:
+      version: ${{ inputs.version }}
+      arch: amd64
+  arm64:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-products.yml
+    with:
+      version: ${{ inputs.version }}
+      arch: arm64
+  publish:
+    needs: [amd64, arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      bundle-id: ${{ steps.upload.outputs.artifact-id }}
+      bundle-sha256: ${{ steps.publish.outputs.sha256 }}
+      key-sha256: ${{ steps.publish.outputs.key-sha256 }}
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/release-artifacts
+        with:
+          artifact-id: ${{ needs.amd64.outputs.controller-id }}
+          sha256: ${{ needs.amd64.outputs.controller-sha256 }}
+          component: controller
+          arch: amd64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/images
+      - uses: ./.github/actions/release-artifacts
+        with:
+          artifact-id: ${{ needs.arm64.outputs.controller-id }}
+          sha256: ${{ needs.arm64.outputs.controller-sha256 }}
+          component: controller
+          arch: arm64
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/images
+      - name: Scan the exact native archives before publication
+        env:
+          IMAGES_DIR: ${{ runner.temp }}/images
+          IMAGE_ARCHIVES_TSV: ${{ runner.temp }}/images/image-archives.tsv
+          RELEASE_TAG: candidate-${{ inputs.version }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          bash scripts/bootstrap.sh image-security
+          source scripts/env.sh
+          for archive in "$IMAGES_DIR"/*-linux-*.tar; do
+            base="$(basename "$archive" .tar)"
+            printf '%s\t%s\t%s\n' "${base%-linux-*}" "${base##*-linux-}" "$archive"
+          done | LC_ALL=C sort >"$IMAGE_ARCHIVES_TSV"
+          bash scripts/scan-release-images.sh "${RUNNER_TEMP}/security"
+      - name: Publish task candidates and sign their per-platform manifests
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGES_DIR: ${{ runner.temp }}/images
+          SECURITY_SUMMARY: ${{ runner.temp }}/security/controller-image-security.json
+          OUTPUT_DIR: ${{ runner.temp }}/candidate
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          bash scripts/publish-controller-candidate.sh
+          docker logout ghcr.io
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: integrated-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: integrated-image-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/security
+          retention-days: 7
+          if-no-files-found: warn

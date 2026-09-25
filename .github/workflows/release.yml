@@ -597,7 +597,7 @@ jobs:
           output_dir="${RUNNER_TEMP}/controller-release"
           mkdir -p "${output_dir}"
           : >"${output_dir}/security-bindings.tsv"
-          for name in gateway control transport backup; do
+          for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
             refs=()
             binding_rows=()
             for arch in amd64 arm64; do
@@ -682,6 +682,7 @@ jobs:
           }
           for platform in amd64 arm64; do
             scripts/generate-controller-release-manifest.mjs \
+              --manifest-version 2 \
               --output "${output_dir}/controller-release-${platform}.json" \
               --platform "linux/${platform}" \
               --release-version "${version}" \
@@ -692,6 +693,11 @@ jobs:
               --image "control=$(image_ref control)" \
               --image "transport=$(image_ref transport)" \
               --image "backup=$(image_ref backup)" \
+              --image "edge=$(image_ref edge)" \
+              --image "relay=$(image_ref relay)" \
+              --image "signer=$(image_ref signer)" \
+              --image "mysql_backup=$(image_ref mysql_backup)" \
+              --image "mariadb_backup=$(image_ref mariadb_backup)" \
               --image "postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f" \
               --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
           done
@@ -699,7 +705,7 @@ jobs:
           # manifests operators actually consume: every index digest it binds
           # has to be the exact reference both release manifests ship.
           for platform in amd64 arm64; do
-            for name in gateway control transport backup; do
+            for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
               bound_digest="$(jq -er --arg name "${name}" '.images[$name].index_digest' \
                 "${output_dir}/controller-image-security-bindings.json")"
               manifest_ref="$(jq -er --arg name "${name}" '.images[$name]' \

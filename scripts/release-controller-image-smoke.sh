@@ -41,7 +41,7 @@ image_ref() {
   printf '%s/%s:%s-linux-%s' "${CONTROLLER_IMAGE_PREFIX}" "$1" "${VERSION}" "${CONTROLLER_ARCH}"
 }
 
-for name in gateway control transport backup; do
+for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
   archive="${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ -s "${archive}" ]] || fail "Controller image archive is missing or empty: ${archive}"
   image="$(image_ref "${name}")"
@@ -51,6 +51,22 @@ for name in gateway control transport backup; do
   platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${image}")"
   [[ "${platform}" == "linux/${CONTROLLER_ARCH}" ]] ||
     fail "loaded ${name} image is ${platform}, expected linux/${CONTROLLER_ARCH}"
+done
+
+# Exercise the additional native runtimes, not just their archive headers.
+docker run --rm --entrypoint nginx "$(image_ref edge)" -V 2>&1 | grep -Fq -- --with-stream_ssl_preread_module
+docker run --rm --entrypoint /usr/local/bin/iroh-relay "$(image_ref relay)" --version | grep -Fq iroh-relay
+if signer_output="$(docker run --rm "$(image_ref signer)" invalid-command 2>&1)"; then
+  fail "signer accepted an unknown command"
+fi
+grep -Fq 'unknown command' <<<"${signer_output}" || fail "signer did not reach command validation"
+for backend in mysql mariadb; do
+  docker run --rm --entrypoint "${backend}" "$(image_ref "${backend}_backup")" --version
+  if backup_output="$(docker run --rm -e "DATABASE_BACKEND=${backend}" "$(image_ref "${backend}_backup")" 2>&1)"; then
+    fail "${backend} backup ran without its client configuration"
+  fi
+  grep -Fq 'database backup client configuration must be a regular file' <<<"${backup_output}" ||
+    fail "${backend} backup did not reach its entrypoint guard"
 done
 
 # Gateway must actually start: its USER directive once referenced an

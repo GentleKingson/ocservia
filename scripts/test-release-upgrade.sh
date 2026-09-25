@@ -68,6 +68,7 @@ node scripts/test-release-upgrade.mjs
 bash scripts/test-release-session-compatibility.sh
 node scripts/test-release-selection.mjs
 node scripts/test-release-artifacts.mjs
+bash scripts/test-controller-candidate.sh
 bash scripts/test-release-test-images.sh
 bash scripts/test-release-rust-cache.sh
 ruby -r yaml -r json - <<'RUBY'
@@ -89,10 +90,20 @@ abort 'only the opt-in caller may hold write permissions' unless
 diagnostic_path = './.github/workflows/release-business-diagnostic.yml'
 abort 'business callers must use the same checks' unless ordinary['uses'] == diagnostic_path && privileged['uses'] == diagnostic_path
 diagnostic = YAML.safe_load(File.read(diagnostic_path))
-abort 'reusable diagnostics must inherit caller permissions without widening them' if diagnostic.key?('permissions') ||
-  diagnostic.fetch('jobs').values.any? { |job| job.key?('permissions') }
-login = diagnostic.fetch('jobs').fetch('business').fetch('steps').find { |step| step['name'] == 'Authenticate candidate Registry publication' }
-abort 'Registry login must remain opt-in' unless login && login['if'] == 'inputs.production_signer'
+consumer = diagnostic.fetch('jobs').fetch('business')
+producer = diagnostic.fetch('jobs').fetch('candidate')
+abort 'clean consumer must be read-only' unless consumer['permissions'] == {'contents' => 'read'}
+abort 'Registry publication must remain opt-in' unless producer['if'] == 'inputs.production_signer' &&
+  producer['permissions'] == {'contents' => 'read', 'packages' => 'write'} &&
+  producer['uses'] == './.github/workflows/release-integrated-candidate.yml'
+candidate = YAML.safe_load(File.read('.github/workflows/release-integrated-candidate.yml')).fetch('jobs')
+abort 'only publication may write packages' unless
+  candidate.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['publish']
+%w[amd64 arm64].each do |arch|
+  abort 'candidate must reuse native release products' unless
+    candidate.fetch(arch)['uses'] == './.github/workflows/release-products.yml' &&
+    candidate.fetch(arch).dig('with', 'arch') == arch
+end
 %w[agent-upgrade controller-upgrade session-compatibility].each do |name|
   matrix = jobs.fetch(name).fetch('strategy').fetch('matrix').fetch('include')
   abort "missing supported architecture: #{name}" unless matrix.map { |row| row['arch'] }.sort == %w[amd64 arm64]

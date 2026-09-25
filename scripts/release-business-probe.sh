@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${ARTIFACT_DIR:?}" "${VERSION:?}" "${CANDIDATE_SHA:?}"
 : "${BUSINESS_PROFILE:=smoke}"
 : "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
+: "${INTEGRATED_INSTALL_ONLY:=false}"
 [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == false || "$BUSINESS_PROFILE" == extended ]]
 [[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]
@@ -27,7 +28,7 @@ work="${T07_WORK}"
 stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
-export SOURCE_COMMIT="${CANDIDATE_SHA}" PACKAGE_ARCH=amd64 CONTROLLER_ARCH=amd64
+export SOURCE_COMMIT="${CANDIDATE_SHA}" PACKAGE_ARCH="${CONTROLLER_ARCH:-amd64}" CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 export SOURCE_DATE_EPOCH OUTPUT_DIR="${CANDIDATE_PRODUCTS:-${work}/products}" AGENT_SIGNING_KEY="${work}/signing.key"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
 export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
@@ -42,6 +43,17 @@ export OCSERV_PUBLIC_HOST=localhost OCSERV_HTTPS_ADDRESS=127.0.0.1
 export OCSERV_CONTROLLER_PUBLIC_URL=https://localhost OCSERV_PUBLIC_ORIGIN=https://localhost
 export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_AUDIT_EVENT_KEY_ID=t07 OCSERV_BACKUP_INTERVAL_SECONDS=86400
 export OCSERV_CERTIFICATE_SIGNER_URL=https://signer.unavailable.invalid
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  [[ "$EUID" == 0 && -n "${CANDIDATE_BUNDLE:-}" && -n "${CANDIDATE_PRODUCTS:-}" ]]
+  gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
+  export OCSERV_DEPLOYMENT_MODE=integrated OCSERV_HTTPS_ADDRESS=0.0.0.0
+  export OCSERV_PUBLIC_HOST="controller.${gateway}.sslip.io" OCSERV_RELAY_PUBLIC_HOST="relay.${gateway}.sslip.io"
+  export OCSERV_CONTROLLER_PUBLIC_URL="https://${OCSERV_PUBLIC_HOST}" OCSERV_PUBLIC_ORIGIN="https://${OCSERV_PUBLIC_HOST}"
+  export OCSERV_RELAY_URL_A="https://${OCSERV_RELAY_PUBLIC_HOST}" OCSERV_RELAY_URL_B=
+  export OCSERV_CERTIFICATE_SIGNER_URL=https://signer:9443/sign
+  export OCSERV_RELAY_SECRET_DIR="${work}/relay-secrets"
+  export OCSERV_SIGNER_SECRET_DIR="${work}/production-signer/secrets" OCSERV_SIGNER_STATE_DIR="${work}/production-signer/data"
+fi
 unset OCSERV_OIDC_ISSUER OCSERV_OIDC_CLIENT_ID OCSERV_OIDC_REDIRECT_URL OCSERV_OTEL_BACKEND_ENDPOINT
 unset OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH OCSERV_MANAGED_NODE_SYSROOT OCSERV_MANAGED_NODE_OS_RELEASE
 compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
@@ -95,6 +107,7 @@ cleanup() {
   jq -n --arg sha "${CANDIDATE_SHA}" --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg profile "${BUSINESS_PROFILE}" \
+    --arg arch "$CONTROLLER_ARCH" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
@@ -103,7 +116,7 @@ cleanup() {
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
       scope:(if $profile == "smoke" then "business-smoke" else "integration" end),
-      planned_topology:{hosts:1,architecture:"amd64",native_systemd_node:true,relays:1,relay_redundancy:false},
+      planned_topology:{hosts:1,architecture:$arch,native_systemd_node:true,relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
       deferred:["Publish: immutable published Release download/bootstrap"],
@@ -129,7 +142,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'printf "probe failed at line %s, stage %s\n" "${LINENO}" "${stage}" >&2' ERR
 mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup" "${work}/bundle"
-bash "${ROOT}/scripts/release-upgrade-native.sh" amd64 >"${ARTIFACT_DIR}/native.json"
+bash "${ROOT}/scripts/release-upgrade-native.sh" "$CONTROLLER_ARCH" >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
 next_stage dependency_setup
 openssl genpkey -algorithm ED25519 -out "${AGENT_SIGNING_KEY}"
@@ -137,11 +150,13 @@ openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${work}/trusted-release.pu
 export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${work}/trusted-release.pub.pem"
 if [[ -n "${CANDIDATE_PRODUCTS:-}" ]]; then
   next_stage candidate_verification
-  node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" agent amd64 "${VERSION}" "${AGENT_MANIFEST_SHA256:?}"
+  node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" agent "$CONTROLLER_ARCH" "${VERSION}" "${AGENT_MANIFEST_SHA256:?}"
+  if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
   node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" controller amd64 "${VERSION}" "${CONTROLLER_MANIFEST_SHA256:?}"
   if [[ -z "${RELEASE_RELAY_IMAGE:-}" ]]; then
     docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
     --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 --bootstrap --use
+  fi
   fi
 else
   bash "${ROOT}/scripts/bootstrap.sh" native-packages
@@ -151,6 +166,18 @@ else
   bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
 fi
 next_stage relay_image_build
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  cp -R "${CANDIDATE_BUNDLE}/." "${work}/bundle/"
+  export CANDIDATE_BUNDLE="${work}/bundle"
+  bash "$ROOT/scripts/consume-controller-candidate.sh"
+  manifest="${CANDIDATE_BUNDLE}/controller-release-${CONTROLLER_ARCH}.json"
+  for name in gateway control transport backup edge relay signer postgres otel; do
+    export "OCSERV_${name^^}_IMAGE=$(jq -er --arg name "$name" '.images[$name]' "$manifest")"
+  done
+  export T07_RELAY_IMAGE="$OCSERV_RELAY_IMAGE" T07_SIGNER_IMAGE="$OCSERV_SIGNER_IMAGE"
+  install -m 600 "${CANDIDATE_BUNDLE}/candidate-signing.pub.pem" "${work}/candidate-release.pub.pem"
+  export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${work}/candidate-release.pub.pem"
+else
 if [[ -n "${RELEASE_RELAY_IMAGE:-}" ]]; then
   docker tag "${RELEASE_RELAY_IMAGE}" "${BUILDX_BUILDER}-relay"
 else
@@ -162,13 +189,16 @@ bash "${ROOT}/scripts/g6-buildx-cache.sh" relay-business-amd64 true business-rel
 fi
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
 docker image inspect --format '{{.Id}} {{.Architecture}}' "${BUILDX_BUILDER}-relay" >"${ARTIFACT_DIR}/relay-image.txt"
+fi
 find "${OUTPUT_DIR}" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum >"${ARTIFACT_DIR}/product-digests.txt"
 record candidate_built
 next_stage dependency_install
+if [[ "$INTEGRATED_INSTALL_ONLY" != true ]]; then
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
 sudo systemctl stop ocserv
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
+fi
 # Subsequent output can contain task-only secret data. Keep it private until
 # the exact-value redactor runs; the uploaded results never contain cookies.
 exec >"${work}/private.log" 2>&1
@@ -178,11 +208,14 @@ chmod 444 "${work}/ca.crt"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
   -keyout "${work}/private/tls.key" -out "${work}/tls.csr"
-printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:%s,IP:10.207.0.1,IP:172.30.240.1,IP:172.30.240.3\nextendedKeyUsage=serverAuth\n' "${gateway}" >"${work}/leaf.ext"
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,DNS:%s,IP:127.0.0.1,IP:%s,IP:10.207.0.1,IP:172.30.240.1,IP:172.30.240.3\nextendedKeyUsage=serverAuth\n' "$OCSERV_PUBLIC_HOST" "${gateway}" >"${work}/leaf.ext"
 openssl x509 -req -days 1 -in "${work}/tls.csr" -CA "${work}/ca.crt" -CAkey "${work}/private/ca.key" \
   -CAcreateserial -extfile "${work}/leaf.ext" -out "${OCSERV_SECRET_DIR}/tls.crt"
 cp "${work}/private/tls.key" "${OCSERV_SECRET_DIR}/tls.key"
-export CURL_CA_BUNDLE="${work}/ca.crt" OCSERV_RELAY_URL_A="https://${gateway}:3443" OCSERV_RELAY_URL_B=
+export CURL_CA_BUNDLE="${work}/ca.crt"
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
+  export OCSERV_RELAY_URL_A="https://${gateway}:3443" OCSERV_RELAY_URL_B=
+fi
 for name in postgres-owner-password postgres-app-password postgres-backup-password session-key audit-checkpoint-key \
   audit-event-key certificate-signer-token relay-access-token oidc-client-secret; do
   openssl rand -hex 32 >"${work}/private/${name}"
@@ -211,11 +244,19 @@ sudo chown 999:999 "${work}/backup"
 registry_prefix=localhost:5000
 registry_tag="$VERSION"
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  registry_prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
-  registry_tag="p2-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+  mkdir -m 700 "$OCSERV_RELAY_SECRET_DIR"
+  openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$OCSERV_RELAY_PUBLIC_HOST" \
+    -keyout "$work/private/relay-tls.key" -out "$work/relay.csr"
+  printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\n' "$OCSERV_RELAY_PUBLIC_HOST" >"$work/relay.ext"
+  openssl x509 -req -days 1 -in "$work/relay.csr" -CA "$work/ca.crt" -CAkey "$work/private/ca.key" \
+    -CAcreateserial -extfile "$work/relay.ext" -out "$OCSERV_RELAY_SECRET_DIR/tls.crt"
+  install -m 444 "$work/private/relay-tls.key" "$OCSERV_RELAY_SECRET_DIR/tls.key"
+  chmod 444 "$OCSERV_RELAY_SECRET_DIR/tls.crt"
+  python3 "$ROOT/scripts/release-production-signer.py" prepare
 else
   docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 fi
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
 publish_pull() {
   local name="$1" source="$2" target="${registry_prefix}/$1:${registry_tag}" ref image_id
   image_id="$(docker image inspect --format '{{.Id}}' "$source")"
@@ -240,15 +281,6 @@ for name in gateway control transport backup; do
   args+=(--image "${name}=${ref}")
   export "OCSERV_${name^^}_IMAGE=${ref}"
 done
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  publish_pull relay "${BUILDX_BUILDER}-relay"
-  export T07_RELAY_IMAGE="$PULLED_REFERENCE"
-  docker buildx build --builder "$BUILDX_BUILDER" --platform linux/amd64 --provenance=false --load \
-    --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
-    -t "${BUILDX_BUILDER}-signer" -f "$ROOT/deploy/production/signer.Dockerfile" "$ROOT"
-  publish_pull signer "${BUILDX_BUILDER}-signer"
-  export T07_SIGNER_IMAGE="$PULLED_REFERENCE"
-fi
 # The frozen existing production database/image rows, not a new support matrix.
 export OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
 OCSERV_POSTGRES_IMAGE=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
@@ -262,11 +294,26 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${mani
 cp "${work}/bundle/SHA256SUMS" "${manifest}.sha256"
 openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${work}/bundle/SHA256SUMS" -out "${work}/bundle/SHA256SUMS.sig"
 cp "${manifest}" "${ARTIFACT_DIR}/candidate-manifest.json"
+fi
 next_stage controller_install
 "${ROOT}/deploy/production/controller.sh" install --release-file "${manifest}"
-curl --fail --silent --show-error https://localhost/api/v1/version | \
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  T07_SIGNER_CONTAINER="$(compose ps -q signer)"
+  T07_RELAY_CONTAINER="$(compose ps -q relay)"
+fi
+curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" | \
   jq -e --arg sha "${CANDIDATE_SHA}" --arg v "${VERSION}" '.commit == $sha and .version == $v' >/dev/null
 record signed_controller_lifecycle
+if [[ "$INTEGRATED_INSTALL_ONLY" == true ]]; then
+  [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]
+  "$ROOT/deploy/production/controller.sh" uninstall
+  "$ROOT/deploy/production/controller.sh" start
+  curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" |
+    jq -e --arg sha "$CANDIDATE_SHA" '.commit == $sha' >/dev/null
+  record integrated_native_install_restart
+  next_stage complete
+  exit 0
+fi
 export T07_WORKSPACE=00000000-0000-7000-8000-000000000071
 compose exec -T postgres psql -XAt -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <<SQL
 INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES
@@ -295,9 +342,11 @@ mkdir -m 755 "${work}/oidc-fault"
 printf '\n' >"${work}/oidc-fault/mode"
 chmod 644 "${work}/oidc-fault/mode"
 export OCSERV_OIDC_ISSUER=https://172.30.240.3:19443 OCSERV_OIDC_CLIENT_ID=upgrade
-export OCSERV_OIDC_REDIRECT_URL=https://localhost/api/v1/auth/callback
+export OCSERV_OIDC_REDIRECT_URL="$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/auth/callback"
 signer_address=172.30.240.3
-export OCSERV_CERTIFICATE_SIGNER_URL="https://${signer_address}:19444/sign"
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
+  export OCSERV_CERTIFICATE_SIGNER_URL="https://${signer_address}:19444/sign"
+fi
 docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --network ocservia-production_application --ip 172.30.240.3 \
   -v "${ROOT}/scripts/release-upgrade-oidc-fixture.mjs:/fixture.mjs:ro" \
@@ -309,9 +358,7 @@ docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-o
   node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode
 # The internal application network deliberately has no host gateway. Join only
 # the task provider's network namespace, then run the signer as the runner UID.
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  python3 "$ROOT/scripts/release-production-signer.py" prepare
-else
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
 provider_pid="$(docker inspect --format '{{.State.Pid}}' "${oidc_container}")"
 sudo nsenter --target "${provider_pid}" --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
   python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
@@ -368,6 +415,7 @@ bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFA
 grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
 record signed_native_package_and_managed_prepare
 
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
 mkdir -m 700 "${work}/relay"
 cp "${OCSERV_SECRET_DIR}/tls.crt" "${work}/relay/relay.crt"
 cp "${work}/private/tls.key" "${work}/relay/relay.key"
@@ -380,6 +428,7 @@ docker run -d --name "${T07_RELAY_CONTAINER}" --read-only --cap-drop ALL \
   -v "${work}/relay:/run/relay-secrets:ro" \
   -v "${ROOT}/deploy/g6-readiness/relay.toml:/etc/iroh-relay/relay.toml:ro" \
   "${T07_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}" --config-path /etc/iroh-relay/relay.toml
+fi
 export T07_TRANSPORT_CONTAINER
 T07_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
 [[ -n "${T07_TRANSPORT_CONTAINER}" ]]

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORK = Path(os.environ['T07_WORK'])
 EVIDENCE = Path(os.environ['ARTIFACT_DIR'])
 WORKSPACE = os.environ['T07_WORKSPACE']
-ORIGIN = 'https://localhost'
+ORIGIN = os.environ.get('OCSERV_CONTROLLER_PUBLIC_URL', 'https://localhost')
 CONTEXT = ssl.create_default_context(cafile=str(WORK / 'ca.crt'))
 CLIENTS = {}
 
