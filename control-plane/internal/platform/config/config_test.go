@@ -560,6 +560,23 @@ func TestCertificateSignerRequiresHTTPSAndCompleteCredentials(t *testing.T) {
 	}
 }
 
+func TestCertificateSignerCAConfiguration(t *testing.T) {
+	values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_CERTIFICATE_SIGNER_CA_FILE": "/run/secrets/signer-ca.pem"}
+	lookup := func(k string) (string, bool) { v, ok := values[k]; return v, ok }
+	if _, err := Load(nil, lookup); err == nil {
+		t.Fatal("orphan signer CA accepted")
+	}
+	values["OCSERV_CERTIFICATE_SIGNER_URL"] = "https://signer:9443/sign"
+	values["OCSERV_CERTIFICATE_SIGNER_TOKEN"] = "fixture-token"
+	cfg, err := Load(nil, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CertificateSignerCAFile != values["OCSERV_CERTIFICATE_SIGNER_CA_FILE"] {
+		t.Fatal("CA setting not loaded")
+	}
+}
+
 func TestBrowserOriginUsesPublicOrigin(t *testing.T) {
 	tests := []struct {
 		name         string

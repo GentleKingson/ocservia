@@ -86,6 +86,7 @@ type Config struct {
 	TestCommandLease         time.Duration
 	TestSchedulerEvidence    bool
 	CertificateSignerURL     string
+	CertificateSignerCAFile  string
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
 	RecommendedAgentVersion  string
@@ -163,6 +164,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	setString(lookup, "OCSERV_OIDC_REDIRECT_URL", &cfg.OIDCRedirectURL)
 	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_URL", &cfg.CertificateSignerURL)
+	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_CA_FILE", &cfg.CertificateSignerCAFile)
 	setString(lookup, "OCSERV_RECOMMENDED_AGENT_VERSION", &cfg.RecommendedAgentVersion)
 	setString(lookup, "OCSERV_AGENT_RELEASE_MANIFEST", &cfg.AgentReleaseManifest)
 	if err := setStringOrFile(lookup, "OCSERV_CERTIFICATE_SIGNER_TOKEN", &cfg.CertificateSignerToken); err != nil {
@@ -480,7 +482,7 @@ func (c Config) Validate() error {
 	if err := c.EventStreams.Validate(); err != nil {
 		return fmt.Errorf("invalid SSE capacity configuration: %w", err)
 	}
-	signerConfigured := c.CertificateSignerURL != "" || c.CertificateSignerToken != ""
+	signerConfigured := c.CertificateSignerURL != "" || c.CertificateSignerToken != "" || c.CertificateSignerCAFile != ""
 	if signerConfigured {
 		signerURL, signerErr := url.Parse(c.CertificateSignerURL)
 		if signerErr != nil || signerURL.Scheme != "https" || signerURL.Host == "" || signerURL.User != nil || signerURL.RawQuery != "" || signerURL.Fragment != "" || c.CertificateSignerToken == "" || c.CertificateSignerTimeout < time.Second || c.CertificateSignerTimeout > 30*time.Second {

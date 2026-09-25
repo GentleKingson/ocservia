@@ -24,6 +24,25 @@ def main():
             business = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(business)
 
+        with patch.object(business, 'sql', side_effect=['f', 'f', 't']) as sql, \
+                patch.object(business.time, 'sleep') as sleep, patch.object(business, 'record') as record:
+            business.wait_for_relay_outage('0123-4567')
+            assert sql.call_count == 3 and sleep.call_count == 2
+            assert "node_id=decode('01234567','hex')" in sql.call_args.args[0]
+            assert 'lease_until>clock_timestamp()' in sql.call_args.args[0]
+            record.assert_called_once_with('single_relay_owner_lease_invalidated')
+
+        with patch.object(business, 'sql', return_value='f'), \
+                patch.object(business.time, 'monotonic', side_effect=[0, 0, 121]), \
+                patch.object(business.time, 'sleep'), patch.object(business, 'record') as record:
+            try:
+                business.wait_for_relay_outage('0123-4567')
+            except RuntimeError as error:
+                assert 'owner lease invalidation' in str(error)
+            else:
+                raise AssertionError('live owner must prevent offline queueing')
+            record.assert_not_called()
+
         directives = business.smoke_directives(4)
         assert {item['name'] for item in directives} == {
             'auth', 'cookie-timeout', 'device', 'dns', 'ipv4-network', 'max-clients',

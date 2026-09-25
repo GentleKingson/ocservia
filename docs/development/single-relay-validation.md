@@ -133,7 +133,13 @@ Both actual process argv contain exactly one custom Relay URL. Separate bridges
 prevent direct UDP connectivity; connection probes must report the Relay path.
 The chain checks enrollment, approval, online/fresh heartbeat, read-only ocserv
 telemetry, an independently approved real reload, and its verified result.
-It then queues another approved reload while the only Relay is stopped. After
+It then queues another approved reload while the only Relay is stopped. The
+native business probe first waits for the old owner lease to become invalid,
+then records that the queued command has no published outbox entry, sent attempt,
+Agent journal entry or root effect before restoring the Relay. Stopping the
+container alone does not prove the buffered QUIC connection is gone. This
+offline-queue case does not promise automatic recovery of an uncertain in-flight
+reload without a root receipt; that case must remain fail closed. After
 restoration, the same operation must succeed, have one Agent journal entry with
 a root receipt, and produce exactly one additional ocserv reload. Replaying the
 API idempotency key must return the same operation and command without another

@@ -19,6 +19,12 @@ revocation idempotent by certificate ID and provide node-targeted secret
 sealing. An unavailable signer leaves the certificate request recoverable and
 returns a service-unavailable problem response.
 
+For a private Signer trust chain, set `OCSERV_CERTIFICATE_SIGNER_CA_FILE` to
+the public PEM CA bundle. It affects only this client, never the process-wide
+trust store. Without it, external HTTPS trust is unchanged. The bundled
+implementation, controlled public-key transfer and offline recovery procedures
+are described in [Production Signer](production-signer.md).
+
 The `/seal` request includes `X-Ocservia-Node-ID` and the exact
 `X-Ocservia-Seal-Purpose` (`user_password` or
 `certificate_p12_password`). Its response must echo `version: 1`, the exact

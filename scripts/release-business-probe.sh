@@ -5,6 +5,8 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${ARTIFACT_DIR:?}" "${VERSION:?}" "${CANDIDATE_SHA:?}"
 : "${BUSINESS_PROFILE:=smoke}"
+: "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
+[[ "$PRODUCTION_SIGNER_ACCEPTANCE" == false || "$BUSINESS_PROFILE" == extended ]]
 [[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
@@ -32,6 +34,7 @@ export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
 registry="${BUILDX_BUILDER}-registry"
 export T07_RELAY_CONTAINER="${BUILDX_BUILDER}-relay"
 oidc_container="${BUILDX_BUILDER}-oidc"
+export T07_OIDC_CONTAINER="$oidc_container" T07_SIGNER_CONTAINER="${BUILDX_BUILDER}-signer"
 signer_pid=
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backup"
 export OCSERV_CONTROLLER_STATE_ROOT="${work}/state"
@@ -76,6 +79,10 @@ cleanup() {
       done
       docker logs "${oidc_container}"
       sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv
+      if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+        docker logs "$T07_SIGNER_CONTAINER"
+        sudo journalctl --no-pager -o short-iso-precise -u ocservia-p2-crl
+      fi
     } >>"${work}/private.log" 2>&1
   fi
   # Never export environment, cookies, raw databases, passwords or raw logs.
@@ -102,6 +109,10 @@ cleanup() {
       deferred:["Publish: immutable published Release download/bootstrap"],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
+  if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+    sudo systemctl stop ocservia-p2-crl >/dev/null 2>&1
+    docker rm -f "$T07_SIGNER_CONTAINER" >/dev/null 2>&1
+  fi
   sudo ip netns pids t07-client 2>/dev/null | xargs -r sudo kill
   sudo ip netns del t07-client >/dev/null 2>&1
   compose down --volumes --remove-orphans >/dev/null 2>&1
@@ -197,16 +208,47 @@ sudo chmod 400 "${OCSERV_SECRET_DIR}/audit-event-key" "${OCSERV_SECRET_DIR}/cont
 sudo install -o root -g 65532 -m 440 "${work}/command.pub.pem" "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 sudo install -o root -g root -m 444 "${work}/ca.crt" "${OCSERV_SECRET_DIR}/relay-ca.pem"
 sudo chown 999:999 "${work}/backup"
-docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
+registry_prefix=localhost:5000
+registry_tag="$VERSION"
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  registry_prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+  registry_tag="p2-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+else
+  docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
+fi
+publish_pull() {
+  local name="$1" source="$2" target="${registry_prefix}/$1:${registry_tag}" ref image_id
+  image_id="$(docker image inspect --format '{{.Id}}' "$source")"
+  docker tag "$source" "$target"
+  docker push "$target"
+  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$target" | grep "^${registry_prefix}/${name}@sha256:")"
+  [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]]
+  if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+    docker image rm "$source" "$target" >/dev/null
+    docker pull "$ref"
+    [[ "$(docker image inspect --format '{{.Id}}' "$ref")" == "$image_id" ]]
+    jq -nc --arg candidate_sha "$CANDIDATE_SHA" --arg reference "$ref" --arg image_id "$image_id" \
+      '{candidate_sha:$candidate_sha,reference:$reference,image_id:$image_id,pulled:true}' >>"${ARTIFACT_DIR}/registry-pulls.jsonl"
+  fi
+  PULLED_REFERENCE="$ref"
+}
 args=()
 for name in gateway control transport backup; do
   docker load -i "${OUTPUT_DIR}/${name}-linux-amd64.tar"
-  docker tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-amd64" "localhost:5000/${name}:${VERSION}"
-  docker push "localhost:5000/${name}:${VERSION}"
-  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "localhost:5000/${name}:${VERSION}" | grep "^localhost:5000/${name}@sha256:")"
+  publish_pull "$name" "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-amd64"
+  ref="$PULLED_REFERENCE"
   args+=(--image "${name}=${ref}")
   export "OCSERV_${name^^}_IMAGE=${ref}"
 done
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  publish_pull relay "${BUILDX_BUILDER}-relay"
+  export T07_RELAY_IMAGE="$PULLED_REFERENCE"
+  docker buildx build --builder "$BUILDX_BUILDER" --platform linux/amd64 --provenance=false --load \
+    --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
+    -t "${BUILDX_BUILDER}-signer" -f "$ROOT/deploy/production/signer.Dockerfile" "$ROOT"
+  publish_pull signer "${BUILDX_BUILDER}-signer"
+  export T07_SIGNER_IMAGE="$PULLED_REFERENCE"
+fi
 # The frozen existing production database/image rows, not a new support matrix.
 export OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
 OCSERV_POSTGRES_IMAGE=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
@@ -267,10 +309,14 @@ docker run -d --name "${oidc_container}" --read-only --cap-drop ALL --security-o
   node /fixture.mjs /fixture "${OCSERV_OIDC_ISSUER}" /fault/mode
 # The internal application network deliberately has no host gateway. Join only
 # the task provider's network namespace, then run the signer as the runner UID.
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  python3 "$ROOT/scripts/release-production-signer.py" prepare
+else
 provider_pid="$(docker inspect --format '{{.State.Pid}}' "${oidc_container}")"
 sudo nsenter --target "${provider_pid}" --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
   python3 "${ROOT}/scripts/release-business-signer.py" "${work}" "${signer_address}" &
 signer_pid=$!
+fi
 configure_auth_peers
 python3 "${ROOT}/scripts/release-business-api.py" trust_controller
 python3 "${ROOT}/scripts/release-business-api.py" oidc
@@ -333,7 +379,7 @@ docker run -d --name "${T07_RELAY_CONTAINER}" --read-only --cap-drop ALL \
   -e RUST_LOG=info,iroh_relay::server::clients=debug \
   -v "${work}/relay:/run/relay-secrets:ro" \
   -v "${ROOT}/deploy/g6-readiness/relay.toml:/etc/iroh-relay/relay.toml:ro" \
-  "${BUILDX_BUILDER}-relay" --config-path /etc/iroh-relay/relay.toml
+  "${T07_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}" --config-path /etc/iroh-relay/relay.toml
 export T07_TRANSPORT_CONTAINER
 T07_TRANSPORT_CONTAINER="$(compose ps -q transportd)"
 [[ -n "${T07_TRANSPORT_CONTAINER}" ]]
@@ -407,6 +453,10 @@ sudo systemctl daemon-reload
 sudo systemctl start ocserv ocservia-privd
 next_stage node_approval
 python3 "${ROOT}/scripts/release-business-api.py" approve
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  python3 "$ROOT/scripts/release-production-signer.py" import
+  record production_signer_approved_binding
+fi
 sudo systemctl enable --now ocservia-privd ocservia-agent
 bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"

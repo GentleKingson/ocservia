@@ -7309,8 +7309,20 @@ mod tests {
             .expect("sealing stdin")
             .write_all(password)
             .expect("seal password input");
-        let sealed = seal.wait_with_output().expect("seal password");
+        let mut sealed = seal.wait_with_output().expect("seal password");
         assert!(sealed.status.success());
+        if let Some(helper) = std::env::var_os("OCSERV_SIGNER_INTEROP_HELPER") {
+            assert!(
+                Command::new(helper)
+                    .arg("-test.run=^TestSealInteropHelper$")
+                    .env("SIGNER_INTEROP_DIR", &directory)
+                    .status()
+                    .expect("run Go Signer HTTP sealing helper")
+                    .success()
+            );
+            sealed.stdout =
+                std::fs::read(directory.join("signer-1.bin")).expect("Go Signer P12 ciphertext");
+        }
         let sealed_password = SealedSecretV1 {
             version: SealedSecretVersion::V1 as i32,
             purpose: SealedSecretPurpose::CertificateP12Password as i32,
@@ -7336,8 +7348,30 @@ mod tests {
             .expect("user sealing stdin")
             .write_all(password)
             .expect("user sealing input");
-        let user_sealed = seal_user.wait_with_output().expect("seal user password");
+        let mut user_sealed = seal_user.wait_with_output().expect("seal user password");
         assert!(user_sealed.status.success());
+        if std::env::var_os("OCSERV_SIGNER_INTEROP_HELPER").is_some() {
+            user_sealed.stdout =
+                std::fs::read(directory.join("signer-0.bin")).expect("Go Signer user ciphertext");
+            let output = adapter
+                .execute_with_input(
+                    &adapter.resources.openssl,
+                    &[
+                        "pkeyutl",
+                        "-decrypt",
+                        "-inkey",
+                        adapter.resources.user_secret_key.to_str().unwrap(),
+                        "-pkeyopt",
+                        "rsa_padding_mode:oaep",
+                        "-pkeyopt",
+                        "rsa_oaep_md:sha256",
+                    ],
+                    &user_sealed.stdout,
+                )
+                .await
+                .expect("real privd adapter user-key decryption");
+            assert_eq!(output.stdout, password);
+        }
         let chain = std::fs::read(&certificate_path).expect("read certificate chain");
         let artifact_id = Uuid::now_v7();
         let operation_id = Uuid::now_v7();

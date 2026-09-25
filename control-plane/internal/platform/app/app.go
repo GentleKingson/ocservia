@@ -123,7 +123,7 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 	}
 	var certificateService *certificates.Service
 	if cfg.CertificateSignerURL != "" {
-		signer, signerErr := certificates.NewHTTPSigner(cfg.CertificateSignerURL, cfg.CertificateSignerToken, cfg.CertificateSignerTimeout)
+		signer, signerErr := certificates.NewHTTPSignerWithCA(cfg.CertificateSignerURL, cfg.CertificateSignerToken, cfg.CertificateSignerTimeout, cfg.CertificateSignerCAFile)
 		if signerErr != nil {
 			return fmt.Errorf("configure external certificate signer: %w", signerErr)
 		}
