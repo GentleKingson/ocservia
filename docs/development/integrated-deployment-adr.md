@@ -210,26 +210,28 @@ Relay, Signer, migrate, transport-runtime-init, backup, optional bundled
 PostgreSQL and optional collector. One-shot services share control/transport
 images; every actually invoked image, including backup/restore, must be bound.
 
-### Proposed manifest v2
+### Manifest v2 implementation decision
 
 Keep v1's exact schema, six roles, verification and standalone meaning intact.
-New readers dispatch explicitly on version; old readers reject v2. Proposed
-v2 retains `release_version`, `release_tag`, `source_commit`, `platform` and
-`database_migration`, and adds `deployment_mode`, `database_backend`,
-`database_deployment`, `observability_enabled`, `signer_state_version` and
-`images`. These are proposals, not accepted fields in today's validator.
+New readers dispatch explicitly on version; old readers reject v2. P3 chooses
+a smaller extension than the originally proposed per-configuration variants:
+retain one file per architecture and the six existing image roles, add the
+exact roles `edge`, `relay`, `signer`, `mysql_backup`, `mariadb_backup`, and add
+`signer_state_version: 1`. All eleven values are immutable Registry digests.
+Unknown fields, roles, state versions and missing roles remain errors; scalar,
+SemVer, platform, SHA, canonical JSON and existing signature rules are unchanged.
+The schema covers both modes and all existing database/auth overlays without
+a second asset-naming or publication matrix. Only selected services are pulled.
 
-P3/P4 implement one closed schema: each combination has an exact image-role
-set, not arbitrary extensions. Common roles are gateway/control/transport/backup;
-postgres is required only for bundled PostgreSQL, otel only when enabled;
-Integrated additionally requires edge/relay/signer and a positive Signer state
-version, while standalone requires a null Signer state version. The backup
-role selects the actual backend-specific backup image. Preserve strict scalar,
-SemVer, platform, SHA and digest validation and reject unknown/missing roles.
-Bind mode/backend selection in pending/current/previous state; env changes
-must not reinterpret the same manifest. P4 signs separate configuration
-variants using this finite schema; v1 assets and the amd64 alias keep their
-existing meaning. No manifest contains Secret values.
+The launcher maps the chosen backend's backup image from the verified manifest,
+not an environment override. Protected lifecycle `deployment-profile.json`
+binds mode/backend/deployment across pending, current and previous activation;
+conflicting environment changes fail before stopping services. Optional
+observability may still be enabled because its digest is always signed.
+Integrated requires v2 and retains a separate Signer identity/revision
+checkpoint. V1 assets and the amd64 alias keep their existing meaning. No
+manifest contains Secret values. P4 must produce the added image roles before
+these files are deliverable, and P5 must exercise the deployed configuration.
 
 ### Candidate and release order
 

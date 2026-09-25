@@ -162,6 +162,15 @@ operator action, not an automatic part of this update.
 
 ### Release manifests
 
+The v1 schema remains strictly supported for standalone installations. The v2
+reader additionally requires `signer_state_version: 1` and five exact image
+roles: `edge`, `relay`, `signer`, `mysql_backup`, `mariadb_backup`. It retains
+the same per-architecture filenames and signature rules. Integrated requires
+v2; see [Integrated configuration](../../deploy/production/integrated/README.md#lifecycle-configuration).
+V2 selects backend backup digests from the manifest rather than
+`OCSERV_DATABASE_BACKUP_IMAGE`. Candidate publication/acceptance is separate
+from the legacy stable-release inventory described below.
+
 Formal GitHub Releases publish the Controller release manifests
 `controller-release-amd64.json` and `controller-release-arm64.json` with their
 `.sha256` checksums alongside the Agent assets, plus the byte-identical

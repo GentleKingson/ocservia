@@ -58,6 +58,19 @@ for image in gateway control transport backup postgres otel; do
   fi
   export "${variable}=${value}"
 done
+if [[ "$(jq -r '.manifest_version' "${RELEASE_FILE}")" == 2 ]]; then
+  for image in edge relay signer; do
+    value="$(jq -er --arg image "${image}" '.images[$image]' "${RELEASE_FILE}")"
+    [[ "${value}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "invalid ${image} digest"
+    export "OCSERV_${image^^}_IMAGE=${value}"
+  done
+  case "${OCSERV_DATABASE_BACKEND:-postgres}" in
+    mysql|mariadb)
+      OCSERV_DATABASE_BACKUP_IMAGE="$(jq -er --arg role "${OCSERV_DATABASE_BACKEND}_backup" '.images[$role]' "${RELEASE_FILE}")"
+      export OCSERV_DATABASE_BACKUP_IMAGE
+      ;;
+  esac
+fi
 
 if [[ -z "${PUBLIC_URL}" ]]; then
   [[ -n "${OCSERV_PUBLIC_HOST:-}" ]] || fail "OCSERV_PUBLIC_HOST or OCSERV_CONTROLLER_PUBLIC_URL is required"
@@ -70,6 +83,9 @@ PUBLIC_URL="${PUBLIC_URL%/}"
 services=(control-plane transportd backup)
 if [[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]]; then
   services=(postgres control-plane transportd backup)
+fi
+if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
+  services+=(relay signer)
 fi
 health_json="$("${COMPOSE_LAUNCHER}" ps --format json "${services[@]}")" ||
   fail "cannot inspect Compose health"

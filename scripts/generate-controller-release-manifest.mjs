@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const imageNames = ["gateway", "control", "transport", "backup", "postgres", "otel"];
+const integratedImageNames = ["edge", "relay", "signer", "mysql_backup", "mariadb_backup"];
 const supportedPlatforms = ["linux/amd64", "linux/arm64"];
 const imageDigestPattern = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
 const semverPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/;
@@ -19,7 +20,7 @@ function usage() {
     "usage: generate-controller-release-manifest.mjs --output <path|-> " +
       "--release-version <version> --release-tag <tag> --source-commit <sha> " +
       "--platform <linux/amd64|linux/arm64> [--migration-dir <path>] " +
-      "--image <name=ref> ...",
+      "[--manifest-version <1|2>] --image <name=ref> ...",
   );
   process.exit(2);
 }
@@ -34,13 +35,13 @@ function parseArguments(argv) {
       const separator = value.indexOf("=");
       const name = value.slice(0, separator);
       const ref = value.slice(separator + 1);
-      if (!imageNames.includes(name) || values.images.has(name)) {
+      if (![...imageNames, ...integratedImageNames].includes(name) || values.images.has(name)) {
         fail(`image must be one unique production name (${imageNames.join(", ")})`);
       }
       values.images.set(name, ref);
       continue;
     }
-    if (["--output", "--release-version", "--release-tag", "--source-commit", "--platform", "--migration-dir"].includes(argument)) {
+    if (["--output", "--release-version", "--release-tag", "--source-commit", "--platform", "--migration-dir", "--manifest-version"].includes(argument)) {
       const value = argv[++index];
       if (!value) usage();
       const key = {
@@ -50,6 +51,7 @@ function parseArguments(argv) {
         "--source-commit": "sourceCommit",
         "--platform": "platform",
         "--migration-dir": "migrationDir",
+        "--manifest-version": "manifestVersion",
       }[argument];
       if (values[key] !== undefined && key !== "migrationDir") fail(`${argument} was provided more than once`);
       values[key] = value;
@@ -87,6 +89,12 @@ function deriveMigrationHead(directory) {
 }
 
 const values = parseArguments(process.argv.slice(2));
+const manifestVersion = values.manifestVersion ?? "1";
+if (!["1", "2"].includes(manifestVersion)) fail("manifest version must be 1 or 2");
+const requiredImages = manifestVersion === "2" ? [...imageNames, ...integratedImageNames] : imageNames;
+if ([...values.images.keys()].some((name) => !requiredImages.includes(name))) {
+  fail("image is not supported by this manifest version");
+}
 if (!values.output || !values.releaseVersion || !values.releaseTag || !values.sourceCommit || !values.platform) usage();
 if (!semverPattern.test(values.releaseVersion)) fail(`release version is not plain SemVer: ${values.releaseVersion}`);
 if (values.releaseTag !== `v${values.releaseVersion}`) {
@@ -96,20 +104,21 @@ if (!commitPattern.test(values.sourceCommit)) fail("source commit must be a lowe
 if (!supportedPlatforms.includes(values.platform)) {
   fail(`platform must be one of the supported release platforms (${supportedPlatforms.join(", ")}): ${values.platform}`);
 }
-for (const name of imageNames) {
+for (const name of requiredImages) {
   if (!values.images.has(name)) fail(`missing production image: ${name}`);
   const ref = values.images.get(name);
   if (!imageDigestPattern.test(ref)) fail(`${name} must be a full sha256 image digest`);
 }
 
 const manifest = {
-  manifest_version: 1,
+  manifest_version: Number(manifestVersion),
   release_version: values.releaseVersion,
   release_tag: values.releaseTag,
   source_commit: values.sourceCommit,
   platform: values.platform,
   database_migration: deriveMigrationHead(path.resolve(values.migrationDir)),
-  images: Object.fromEntries(imageNames.map((name) => [name, values.images.get(name)])),
+  ...(manifestVersion === "2" ? { signer_state_version: 1 } : {}),
+  images: Object.fromEntries(requiredImages.map((name) => [name, values.images.get(name)])),
 };
 const serialized = `${JSON.stringify(manifest, null, 2)}\n`;
 
