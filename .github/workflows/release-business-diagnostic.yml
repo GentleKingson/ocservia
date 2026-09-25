@@ -11,24 +11,35 @@ on:
       production_signer:
         type: boolean
         default: false
+      bundle-id:
+        type: string
+        default: ''
+      bundle-sha256:
+        type: string
+        default: ''
+      key-sha256:
+        type: string
+        default: ''
+      agent-amd64-id:
+        type: string
+        default: ''
+      agent-amd64-sha256:
+        type: string
+        default: ''
+      agent-arm64-id:
+        type: string
+        default: ''
+      agent-arm64-sha256:
+        type: string
+        default: ''
 
-# Inherit the caller's permissions: ordinary diagnostics are read-only.
-# Only the opt-in production-signer caller grants packages: write.
+# Both ordinary diagnostics and candidate consumers are read-only.
+# Publication is a separate opt-in producer in release-upgrade.yml.
 env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  candidate:
-    if: inputs.production_signer
-    permissions:
-      contents: read
-      packages: write
-    uses: ./.github/workflows/release-integrated-candidate.yml
-    with:
-      version: ${{ inputs.version }}
   business:
-    needs: candidate
-    if: ${{ !cancelled() && (!inputs.production_signer || needs.candidate.result == 'success') }}
     name: Native Candidate Business (${{ inputs.profile }}, ${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -53,13 +64,13 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         if: inputs.production_signer
         with:
-          artifact-ids: ${{ needs.candidate.outputs.bundle-id }}
+          artifact-ids: ${{ inputs.bundle-id }}
           path: ${{ runner.temp }}/candidate
       - uses: ./.github/actions/release-artifacts
         if: inputs.production_signer
         with:
-          artifact-id: ${{ matrix.arch == 'arm64' && needs.candidate.outputs.agent-arm64-id || needs.candidate.outputs.agent-amd64-id }}
-          sha256: ${{ matrix.arch == 'arm64' && needs.candidate.outputs.agent-arm64-sha256 || needs.candidate.outputs.agent-amd64-sha256 }}
+          artifact-id: ${{ matrix.arch == 'arm64' && inputs.agent-arm64-id || inputs.agent-amd64-id }}
+          sha256: ${{ matrix.arch == 'arm64' && inputs.agent-arm64-sha256 || inputs.agent-amd64-sha256 }}
           component: agent
           arch: ${{ matrix.arch }}
           version: ${{ inputs.version }}
@@ -83,9 +94,9 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
           CANDIDATE_BUNDLE: ${{ inputs.production_signer && format('{0}/candidate', runner.temp) || '' }}
           CANDIDATE_PRODUCTS: ${{ inputs.production_signer && format('{0}/products', runner.temp) || '' }}
-          CANDIDATE_BUNDLE_SHA256: ${{ needs.candidate.outputs.bundle-sha256 }}
-          CANDIDATE_KEY_SHA256: ${{ needs.candidate.outputs.key-sha256 }}
-          AGENT_MANIFEST_SHA256: ${{ matrix.arch == 'arm64' && needs.candidate.outputs.agent-arm64-sha256 || needs.candidate.outputs.agent-amd64-sha256 }}
+          CANDIDATE_BUNDLE_SHA256: ${{ inputs.bundle-sha256 }}
+          CANDIDATE_KEY_SHA256: ${{ inputs.key-sha256 }}
+          AGENT_MANIFEST_SHA256: ${{ matrix.arch == 'arm64' && inputs.agent-arm64-sha256 || inputs.agent-amd64-sha256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then

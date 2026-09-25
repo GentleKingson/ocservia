@@ -83,19 +83,21 @@ abort 'ordinary diagnostics must exclude production publication' unless
   ordinary.dig('with', 'production_signer') == false
 abort 'candidate publication must be explicitly selected integration' unless
   privileged['if'] == "${{ inputs.production_signer && inputs.purpose == 'integration' }}" &&
-  privileged['permissions'] == {'contents' => 'read', 'packages' => 'write'} &&
+  privileged['permissions'] == {'contents' => 'read', 'packages' => 'read'} &&
   privileged.dig('with', 'production_signer') == true && privileged.dig('with', 'profile') == 'extended'
 abort 'only the opt-in caller may hold write permissions' unless
-  jobs.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['production-signer-probe']
+  jobs.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['production-signer-products']
 diagnostic_path = './.github/workflows/release-business-diagnostic.yml'
 abort 'business callers must use the same checks' unless ordinary['uses'] == diagnostic_path && privileged['uses'] == diagnostic_path
 diagnostic = YAML.safe_load(File.read(diagnostic_path))
 consumer = diagnostic.fetch('jobs').fetch('business')
-producer = diagnostic.fetch('jobs').fetch('candidate')
+producer = jobs.fetch('production-signer-products')
 abort 'clean consumer must be read-only' unless consumer['permissions'] == {'contents' => 'read', 'packages' => 'read'}
-abort 'Registry publication must remain opt-in' unless producer['if'] == 'inputs.production_signer' &&
+abort 'Registry publication must remain opt-in' unless producer['if'] == "${{ inputs.production_signer && inputs.purpose == 'integration' }}" &&
   producer['permissions'] == {'contents' => 'read', 'packages' => 'write'} &&
   producer['uses'] == './.github/workflows/release-integrated-candidate.yml'
+abort 'diagnostics must contain no write-capable job' if
+  diagnostic.fetch('jobs').values.any? { |job| job.fetch('permissions', {}).values.include?('write') }
 candidate = YAML.safe_load(File.read('.github/workflows/release-integrated-candidate.yml')).fetch('jobs')
 abort 'only publication may write packages' unless
   candidate.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['publish']

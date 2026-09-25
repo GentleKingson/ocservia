@@ -250,14 +250,32 @@ jobs:
       profile: ${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}
       production_signer: false
 
-  production-signer-probe:
-    name: Opt-in production Signer acceptance
+  production-signer-products:
+    name: Opt-in Integrated candidate publication
     if: ${{ inputs.production_signer && inputs.purpose == 'integration' }}
     permissions:
       contents: read
       packages: write
+    uses: ./.github/workflows/release-integrated-candidate.yml
+    with:
+      version: ${{ inputs.version }}
+
+  production-signer-probe:
+    name: Opt-in production Signer acceptance
+    needs: production-signer-products
+    if: ${{ inputs.production_signer && inputs.purpose == 'integration' }}
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
       version: ${{ inputs.version }}
       profile: extended
       production_signer: true
+      bundle-id: ${{ needs.production-signer-products.outputs.bundle-id }}
+      bundle-sha256: ${{ needs.production-signer-products.outputs.bundle-sha256 }}
+      key-sha256: ${{ needs.production-signer-products.outputs.key-sha256 }}
+      agent-amd64-id: ${{ needs.production-signer-products.outputs.agent-amd64-id }}
+      agent-amd64-sha256: ${{ needs.production-signer-products.outputs.agent-amd64-sha256 }}
+      agent-arm64-id: ${{ needs.production-signer-products.outputs.agent-arm64-id }}
+      agent-arm64-sha256: ${{ needs.production-signer-products.outputs.agent-arm64-sha256 }}
