@@ -118,8 +118,8 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
   work = File.join(tmp, "work")
   files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
   files += %w[.github/workflows/release.yml .github/workflows/release-upgrade.yml
-              .github/workflows/release-products.yml .github/workflows/release-product-upgrade.yml
-              .github/workflows/release-test-images.yml .github/workflows/release-compatibility.yml
+              .github/workflows/release-products.yml
+              .github/workflows/release-test-images.yml
               .github/workflows/release-business.yml .github/workflows/release-business-diagnostic.yml
               .github/workflows/release-integrated-candidate.yml
               .github/workflows/g6-harness-core.yml

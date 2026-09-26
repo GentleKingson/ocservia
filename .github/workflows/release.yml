@@ -43,8 +43,6 @@ jobs:
       selection: ${{ steps.selection.outputs.selection }}
       integration: ${{ steps.selection.outputs.integration }}
       resilience: ${{ steps.selection.outputs.resilience }}
-      frozen-id: ${{ steps.frozen.outputs.artifact-id }}
-      frozen-sha256: ${{ steps.prepare.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -58,23 +56,18 @@ jobs:
         env:
           VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
           CANDIDATE_SHA: ${{ github.sha }}
-          BASELINE_RELEASE: v1.0.0
-          GH_TOKEN: ${{ github.token }}
           COMPLETE: ${{ github.event_name == 'push' || inputs.arch == 'all' }}
         run: |
           VERSION="${VERSION#v}"
           export VERSION
-          node scripts/release-upgrade-contract.mjs prepare "${RUNNER_TEMP}/frozen"
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { validateCandidate } from './scripts/release-artifacts.mjs';
+          validateCandidate(process.env.VERSION, process.env.CANDIDATE_SHA, process.env.GITHUB_SHA,
+            execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim());
+          JS
           echo "version=${VERSION}" >>"${GITHUB_OUTPUT}"
           echo "complete=${COMPLETE}" >>"${GITHUB_OUTPUT}"
-          echo "sha256=$(sha256sum "${RUNNER_TEMP}/frozen/frozen.json" | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
-      - id: frozen
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: release-frozen-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/frozen/frozen.json
-          retention-days: 7
-          if-no-files-found: error
 
   full-ci:
     needs: prepare
@@ -104,66 +97,6 @@ jobs:
       arch: amd64
       component: test-helpers
 
-  session-amd64:
-    needs: prepare
-    if: needs.prepare.outputs.complete == 'true'
-    uses: ./.github/workflows/release-test-images.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      arch: amd64
-      component: session-base
-
-  rpm-amd64:
-    needs: prepare
-    if: github.event_name == 'push' || inputs.arch == 'all' || inputs.arch == 'amd64'
-    uses: ./.github/workflows/release-test-images.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      arch: amd64
-      component: rpm-test
-
-  upgrade-agent-amd64:
-    name: Upgrade agent (amd64)
-    needs: [prepare, build-amd64, rpm-amd64]
-    uses: ./.github/workflows/release-product-upgrade.yml
-    with:
-      component: agent
-      artifact-id: ${{ needs.build-amd64.outputs.agent-id }}
-      sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
-      rpm-id: ${{ needs.rpm-amd64.outputs.artifact-id }}
-      rpm-sha256: ${{ needs.rpm-amd64.outputs.sha256 }}
-      version: ${{ needs.prepare.outputs.version }}
-      arch: amd64
-      frozen-id: ${{ needs.prepare.outputs.frozen-id }}
-      frozen-sha256: ${{ needs.prepare.outputs.frozen-sha256 }}
-
-  upgrade-controller-amd64:
-    name: Upgrade controller (amd64)
-    needs: [prepare, build-amd64]
-    uses: ./.github/workflows/release-product-upgrade.yml
-    with:
-      component: controller
-      artifact-id: ${{ needs.build-amd64.outputs.controller-id }}
-      sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
-      version: ${{ needs.prepare.outputs.version }}
-      arch: amd64
-      frozen-id: ${{ needs.prepare.outputs.frozen-id }}
-      frozen-sha256: ${{ needs.prepare.outputs.frozen-sha256 }}
-
-  compatibility-amd64:
-    needs: [prepare, build-amd64, helpers-amd64, session-amd64]
-    if: needs.prepare.outputs.complete == 'true'
-    uses: ./.github/workflows/release-compatibility.yml
-    with:
-      helpers-id: ${{ needs.helpers-amd64.outputs.artifact-id }}
-      helpers-sha256: ${{ needs.helpers-amd64.outputs.sha256 }}
-      session-id: ${{ needs.session-amd64.outputs.artifact-id }}
-      session-sha256: ${{ needs.session-amd64.outputs.sha256 }}
-      version: ${{ needs.prepare.outputs.version }}
-      arch: amd64
-      controller-id: ${{ needs.build-amd64.outputs.controller-id }}
-      controller-sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
-
   build-arm64:
     name: Build & Smoke (arm64)
     needs: prepare
@@ -172,75 +105,6 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: arm64
-
-  helpers-arm64:
-    needs: prepare
-    if: needs.prepare.outputs.complete == 'true'
-    uses: ./.github/workflows/release-test-images.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      arch: arm64
-      component: test-helpers
-
-  session-arm64:
-    needs: prepare
-    if: needs.prepare.outputs.complete == 'true'
-    uses: ./.github/workflows/release-test-images.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      arch: arm64
-      component: session-base
-
-  rpm-arm64:
-    needs: prepare
-    if: github.event_name == 'push' || inputs.arch == 'all' || inputs.arch == 'arm64'
-    uses: ./.github/workflows/release-test-images.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      arch: arm64
-      component: rpm-test
-
-  upgrade-agent-arm64:
-    name: Upgrade agent (arm64)
-    needs: [prepare, build-arm64, rpm-arm64]
-    uses: ./.github/workflows/release-product-upgrade.yml
-    with:
-      component: agent
-      artifact-id: ${{ needs.build-arm64.outputs.agent-id }}
-      sha256: ${{ needs.build-arm64.outputs.agent-sha256 }}
-      rpm-id: ${{ needs.rpm-arm64.outputs.artifact-id }}
-      rpm-sha256: ${{ needs.rpm-arm64.outputs.sha256 }}
-      version: ${{ needs.prepare.outputs.version }}
-      arch: arm64
-      frozen-id: ${{ needs.prepare.outputs.frozen-id }}
-      frozen-sha256: ${{ needs.prepare.outputs.frozen-sha256 }}
-
-  upgrade-controller-arm64:
-    name: Upgrade controller (arm64)
-    needs: [prepare, build-arm64]
-    uses: ./.github/workflows/release-product-upgrade.yml
-    with:
-      component: controller
-      artifact-id: ${{ needs.build-arm64.outputs.controller-id }}
-      sha256: ${{ needs.build-arm64.outputs.controller-sha256 }}
-      version: ${{ needs.prepare.outputs.version }}
-      arch: arm64
-      frozen-id: ${{ needs.prepare.outputs.frozen-id }}
-      frozen-sha256: ${{ needs.prepare.outputs.frozen-sha256 }}
-
-  compatibility-arm64:
-    needs: [prepare, build-arm64, helpers-arm64, session-arm64]
-    if: needs.prepare.outputs.complete == 'true'
-    uses: ./.github/workflows/release-compatibility.yml
-    with:
-      helpers-id: ${{ needs.helpers-arm64.outputs.artifact-id }}
-      helpers-sha256: ${{ needs.helpers-arm64.outputs.sha256 }}
-      session-id: ${{ needs.session-arm64.outputs.artifact-id }}
-      session-sha256: ${{ needs.session-arm64.outputs.sha256 }}
-      version: ${{ needs.prepare.outputs.version }}
-      arch: arm64
-      controller-id: ${{ needs.build-arm64.outputs.controller-id }}
-      controller-sha256: ${{ needs.build-arm64.outputs.controller-sha256 }}
 
   business-smoke:
     name: Business Smoke
@@ -455,7 +319,7 @@ jobs:
   release-check:
     name: Release Check
     if: always() && needs.prepare.outputs.complete == 'true'
-    needs: [prepare, full-ci, security, build-amd64, build-arm64, upgrade-agent-amd64, upgrade-controller-amd64, upgrade-agent-arm64, upgrade-controller-arm64, compatibility-amd64, compatibility-arm64, business-smoke, integration, resilience, validate-release-packages, controller-image-security]
+    needs: [prepare, full-ci, security, build-amd64, build-arm64, business-smoke, integration, resilience, validate-release-packages, controller-image-security]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -473,9 +337,6 @@ jobs:
           if (selection.candidate !== process.env.GITHUB_SHA) throw new Error('wrong candidate selection');
           checkResults(selection, JSON.parse(process.env.RESULTS), [
             'prepare', 'full-ci', 'security', 'build-amd64', 'build-arm64',
-            'upgrade-agent-amd64', 'upgrade-controller-amd64',
-            'upgrade-agent-arm64', 'upgrade-controller-arm64',
-            'compatibility-amd64', 'compatibility-arm64',
             'validate-release-packages', 'controller-image-security',
           ]);
           const smoke = JSON.parse(process.env.RESULTS)['business-smoke']?.result;

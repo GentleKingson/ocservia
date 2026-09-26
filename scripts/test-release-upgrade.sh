@@ -42,43 +42,8 @@ set +e
 auth_status=$?
 set -e
 [[ "${auth_status}" == 19 && "$(wc -l <"${fixture}/auth-failed-order")" == 1 ]]
-# Exercise the same local clone/check-out path from a genuinely shallow repo.
-# shellcheck disable=SC1090
-source <(sed -n '/^checkout_baseline_source() {/,/^}/p' scripts/release-controller-upgrade-smoke.sh)
-# shellcheck disable=SC1090
-source <(sed -n '/^require_changed_descriptor() {/,/^}/p' scripts/release-controller-upgrade-smoke.sh)
-git init -q "${fixture}/origin"
-git -C "${fixture}/origin" config user.name test
-git -C "${fixture}/origin" config user.email test@example.invalid
-git -C "${fixture}/origin" commit --allow-empty -qm parent
-parent="$(git -C "${fixture}/origin" rev-parse HEAD)"
-git -C "${fixture}/origin" commit --allow-empty -qm baseline
-baseline_commit="$(git -C "${fixture}/origin" rev-parse HEAD)"
-mkdir -p "${fixture}/origin/deploy/production"
-printf 'changed\n' >"${fixture}/origin/deploy/production/compose.yaml"
-git -C "${fixture}/origin" add deploy/production/compose.yaml
-git -C "${fixture}/origin" commit -qm candidate
-candidate_commit="$(git -C "${fixture}/origin" rev-parse HEAD)"
-git clone -q --depth=1 "file://${fixture}/origin" "${fixture}/candidate"
-(
-  cd "${fixture}/candidate"
-  if git cat-file -e "${baseline_commit}^{commit}" 2>/dev/null; then exit 1; fi
-  checkout_baseline_source . "${fixture}/baseline" "${baseline_commit}"
-  [[ "$(git rev-parse HEAD)" == "${candidate_commit}" ]]
-  if git -C "${fixture}/baseline" cat-file -e "${parent}^{commit}" 2>/dev/null; then exit 1; fi
-  [[ "$(git -C "${fixture}/baseline" rev-parse HEAD)" == "${baseline_commit}" ]]
-  require_changed_descriptor "${fixture}/baseline" "${baseline_commit}" "${candidate_commit}" deploy/production/compose.yaml
-  if require_changed_descriptor "${fixture}/baseline" "${baseline_commit}" "${candidate_commit}" unchanged; then exit 1; fi
-  if require_changed_descriptor . "${baseline_commit}" "${candidate_commit}" deploy/production/compose.yaml 2>/dev/null; then exit 1; fi
-  git clone -q --no-hardlinks . "${fixture}/active-candidate"
-  git -C "${fixture}/active-candidate" fetch --quiet --no-tags --depth=1 "${fixture}/baseline" "${baseline_commit}"
-  [[ "$(git -C "${fixture}/active-candidate" rev-parse HEAD)" == "${candidate_commit}" ]]
-  require_changed_descriptor "${fixture}/active-candidate" "${baseline_commit}" "${candidate_commit}" deploy/production/compose.yaml
-  if checkout_baseline_source . "${fixture}/invalid" invalid; then exit 1; fi
-)
 python3 scripts/test-release-business-smoke.py
 node scripts/test-release-upgrade.mjs
-bash scripts/test-release-session-compatibility.sh
 node scripts/test-release-selection.mjs
 node scripts/test-release-artifacts.mjs
 node scripts/test-reuse-accepted-products.mjs
@@ -87,6 +52,11 @@ bash scripts/test-release-test-images.sh
 bash scripts/test-release-rust-cache.sh
 ruby -r yaml -r json -r tmpdir - <<'RUBY'
 workflow = YAML.safe_load(File.read('.github/workflows/release-upgrade.yml'))
+inputs = workflow.fetch('on', workflow[true]).fetch('workflow_dispatch').fetch('inputs')
+abort 'historical diagnostics remain exposed' unless inputs.fetch('purpose').fetch('options') == %w[smoke integration] && !inputs.key?('baseline_release')
+%w[release-product-upgrade.yml release-compatibility.yml].each do |file|
+  abort "historical workflow remains: #{file}" if File.exist?(".github/workflows/#{file}")
+end
 abort 'upgrade validation must not receive write permissions' unless workflow['permissions'] == {'contents' => 'read'}
 jobs = workflow.fetch('jobs')
 ordinary = jobs.fetch('business-probe')
@@ -120,29 +90,6 @@ abort 'only publication may write packages' unless
     candidate.fetch(arch)['uses'] == './.github/workflows/release-products.yml' &&
     candidate.fetch(arch).dig('with', 'arch') == arch
 end
-%w[agent-upgrade controller-upgrade session-compatibility].each do |name|
-  matrix = jobs.fetch(name).fetch('strategy').fetch('matrix').fetch('include')
-  abort "missing supported architecture: #{name}" unless matrix.map { |row| row['arch'] }.sort == %w[amd64 arm64]
-end
-baselines = jobs.fetch('session-compatibility').fetch('steps').filter_map { |step| step.dig('env', 'BASELINE_RELEASE') }
-abort 'application matrix must contain only the supported baseline' unless baselines == ['v1.0.0']
-%w[agent-upgrade controller-upgrade].each do |name|
-  download = jobs.fetch(name).fetch('steps').find { |step| step.fetch('uses', '').start_with?('actions/download-artifact@') }
-  abort 'frozen input must use its producer artifact ID' unless download.dig('with', 'artifact-ids')
-end
-gate = jobs.fetch('upgrade-result')
-required = %w[prepare agent-upgrade controller-upgrade]
-abort 'upgrade summary must observe all native units' unless gate.fetch('needs').sort == required.sort
-command = gate.fetch('steps').find { |step| step.fetch('env', {}).key?('NEEDS') }.fetch('run')
-results = required.to_h { |job| [job, {'result' => 'success'}] }
-abort 'complete native units rejected' unless system({'NEEDS' => results.to_json}, 'bash', '-euc', command, out: File::NULL)
-required.each do |job|
-  %w[failure skipped cancelled].each do |state|
-    changed = Marshal.load(Marshal.dump(results))
-    changed[job]['result'] = state
-    abort "#{job} #{state} accepted" if system({'NEEDS' => changed.to_json}, 'bash', '-euc', command, out: File::NULL)
-  end
-end
 release = YAML.safe_load(File.read('.github/workflows/release.yml'))
 release_jobs = release.fetch('jobs')
 fixtures = YAML.safe_load(File.read('.github/workflows/release-test-images.yml'))
@@ -150,99 +97,42 @@ abort 'fixture preparation must remain read-only' unless fixtures['permissions']
 build = fixtures.fetch('jobs').fetch('prepare').fetch('steps').find { |step| step['id'] == 'fixture' }
 abort 'fixture lost selected component or architecture' unless
   build.dig('env', 'COMPONENT') == '${{ inputs.component }}' && build.dig('env', 'ARCH') == '${{ inputs.arch }}'
-{'release-compatibility.yml' => %w[test-helpers session-base],
- 'release-business.yml' => %w[test-helpers], 'release-product-upgrade.yml' => %w[rpm-test],
+Dir.mktmpdir('release-invocation-') do |dir|
+  Dir.mkdir("#{dir}/scripts")
+  File.write("#{dir}/scripts/release-test-images.sh", "#!/usr/bin/env bash\n" + 'printf "%s\n" "$@" >"$CAPTURE"' + "\n")
+  %w[amd64 arm64].each do |arch|
+    env = {'COMPONENT' => 'test-helpers', 'ARCH' => arch, 'RUNNER_TEMP' => dir, 'CAPTURE' => "#{dir}/args"}
+    abort 'fixture invocation failed' unless system(env, 'bash', '-euc', build.fetch('run'), chdir: dir)
+    abort 'fixture arguments drifted' unless File.readlines(env['CAPTURE'], chomp: true) == ['build', 'test-helpers', arch, "#{dir}/fixture"]
+  end
+end
+producer = release_jobs.fetch('helpers-amd64')
+expected = {'component' => 'test-helpers', 'arch' => 'amd64', 'version' => '${{ needs.prepare.outputs.version }}'}
+abort 'fixture recipe identity drifted' unless expected.all? { |key, value| producer.dig('with', key) == value }
+abort 'fixture selection drifted' unless producer['if'] == "needs.prepare.outputs.complete == 'true'"
+%w[business-smoke integration resilience].each do |name|
+  {'id' => 'artifact-id', 'sha256' => 'sha256'}.each do |input, output|
+    abort "#{name} lost helper identity" unless release_jobs.fetch(name).dig('with', "helpers-#{input}") == "${{ needs.helpers-amd64.outputs.#{output} }}"
+  end
+end
+{'release-business.yml' => %w[test-helpers],
  'g6-harness-core.yml' => %w[test-helpers]}.each do |file, components|
   workflow = YAML.safe_load(File.read(".github/workflows/#{file}"))
   consumers = workflow.fetch('jobs').values.flat_map { |job| job.fetch('steps') }.select { |step| step['uses'] == './.github/actions/release-test-images' }
   abort "fixture reuse missing from #{file}" unless consumers.map { |step| step.dig('with', 'component') } == components
   consumers.each do |step|
-    prefix = {'test-helpers' => 'helpers', 'session-base' => 'session', 'rpm-test' => 'rpm'}.fetch(step.dig('with', 'component'))
-    abort "#{file} lost producer identity" unless step.dig('with', 'artifact-id') == "${{ inputs.#{prefix}-id }}" && step.dig('with', 'sha256') == "${{ inputs.#{prefix}-sha256 }}"
+    abort "#{file} lost producer identity" unless step.dig('with', 'artifact-id') == '${{ inputs.helpers-id }}' && step.dig('with', 'sha256') == '${{ inputs.helpers-sha256 }}'
   end
 end
 products = YAML.safe_load(File.read('.github/workflows/release-products.yml'))
 abort 'product producers must not wait for upgrades' if products.to_json.include?('release-upgrade-unit.sh') || products.to_json.include?('frozen-')
+abort 'release still requires historical inputs' if release.to_json.match?(/BASELINE_RELEASE|frozen-id|release-upgrade-contract/)
+abort 'historical release jobs remain' if release_jobs.keys.any? { |name| name.start_with?('upgrade-', 'compatibility-', 'session-', 'rpm-') }
 product_jobs = products.fetch('jobs')
 abort 'stable publication must reuse accepted products instead of building' unless
   product_jobs.fetch('reuse-accepted')['if'] == "github.event_name == 'push'" &&
   product_jobs.fetch('build-agent-packages')['if'] == "github.event_name != 'push'" &&
   product_jobs.fetch('build-controller-images')['if'] == "github.event_name == 'workflow_dispatch'"
-upgrades = YAML.safe_load(File.read('.github/workflows/release-product-upgrade.yml'))
-abort 'upgrades must remain read-only and secret-free' unless upgrades['permissions'] == {'contents' => 'read'} && !upgrades.to_json.include?('secrets')
-unit = upgrades.fetch('jobs').fetch('upgrade')
-abort 'upgrade units must be isolated native jobs' unless unit['runs-on'] == "${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
-steps = unit.fetch('steps')
-download = steps.find { |step| step.fetch('uses', '').start_with?('actions/download-artifact@') }
-abort 'upgrade lost frozen producer ID' unless download.dig('with', 'artifact-ids') == '${{ inputs.frozen-id }}'
-consume = steps.find { |step| step['uses'] == './.github/actions/release-artifacts' }.fetch('with')
-{'artifact-id' => '${{ inputs.artifact-id }}', 'sha256' => '${{ inputs.sha256 }}',
- 'component' => '${{ inputs.component }}', 'arch' => '${{ inputs.arch }}',
- 'version' => '${{ inputs.version }}'}.each do |key, value|
-  abort "upgrade candidate verification lost #{key}" unless consume[key] == value
-end
-validate = steps.find { |step| step.fetch('run', '').include?('release-upgrade-unit.sh') }
-# Execute these two leaf invocations with argument-recording stubs instead of
-# freezing their quoting, whitespace or complete command strings.
-Dir.mktmpdir('release-invocation-') do |dir|
-  Dir.mkdir("#{dir}/scripts")
-  %w[release-test-images release-upgrade-unit].each do |script|
-    File.write("#{dir}/scripts/#{script}.sh", "#!/usr/bin/env bash\n" + 'printf "%s\n" "$@" >"$CAPTURE"' + "\n")
-    File.chmod(0755, "#{dir}/scripts/#{script}.sh")
-  end
-  %w[amd64 arm64].each do |arch|
-    env = {'COMPONENT' => 'test-helpers', 'ARCH' => arch, 'RUNNER_TEMP' => dir, 'CAPTURE' => "#{dir}/args"}
-    abort 'fixture invocation failed' unless system(env, 'bash', '-euc', build.fetch('run'), chdir: dir)
-    abort 'fixture arguments drifted' unless File.readlines(env['CAPTURE'], chomp: true) == ['build', 'test-helpers', arch, "#{dir}/fixture"]
-    %w[agent controller].each do |component|
-      command = validate.fetch('run').gsub('${{ inputs.component }}', component).gsub('${{ inputs.arch }}', arch)
-      abort 'upgrade invocation failed' unless system(env, 'bash', '-euc', command, chdir: dir)
-      abort 'upgrade arguments drifted' unless File.readlines(env['CAPTURE'], chomp: true) == [component, arch]
-    end
-  end
-end
-abort 'upgrade must reuse verified candidates without rebuilding' unless validate.dig('env', 'CANDIDATE_PRODUCTS') == consume['path'] && validate.dig('env', 'CANDIDATE_MANIFEST_SHA256') == consume['sha256']
-abort 'upgrade lost frozen digest' unless validate.dig('env', 'FROZEN_SHA256') == '${{ inputs.frozen-sha256 }}'
-abort 'upgrade lost frozen file' unless validate.dig('env', 'FROZEN_FILE') == "#{download.dig('with', 'path')}/frozen.json"
-rpm_consumer = steps.find { |step| step['uses'] == './.github/actions/release-test-images' }
-abort 'only Agent upgrades may consume RPM fixtures' unless rpm_consumer['if'] == "inputs.component == 'agent'"
-%w[amd64 arm64].each do |arch|
-  %w[agent controller].each do |component|
-    name = "upgrade-#{component}-#{arch}"
-    caller = release_jobs.fetch(name)
-    abort 'upgrade must also run for single-architecture diagnostics' if caller.key?('if')
-    abort 'upgrade workflow not called' unless caller['uses'] == './.github/workflows/release-product-upgrade.yml'
-    expected = {'component' => component, 'arch' => arch, 'version' => '${{ needs.prepare.outputs.version }}',
-                'artifact-id' => "${{ needs.build-#{arch}.outputs.#{component}-id }}",
-                'sha256' => "${{ needs.build-#{arch}.outputs.#{component}-sha256 }}"}
-    %w[frozen-id frozen-sha256].each { |key| expected[key] = "${{ needs.prepare.outputs.#{key} }}" }
-    if component == 'agent'
-      expected['rpm-id'] = "${{ needs.rpm-#{arch}.outputs.artifact-id }}"
-      expected['rpm-sha256'] = "${{ needs.rpm-#{arch}.outputs.sha256 }}"
-    end
-    abort 'upgrade caller must preserve all producer identities' unless expected.all? { |key, value| caller.dig('with', key) == value }
-    abort 'Release Check must observe upgrade results' unless release_jobs.fetch('release-check').fetch('needs').include?(name)
-  end
-  {'helpers' => 'test-helpers', 'session' => 'session-base', 'rpm' => 'rpm-test'}.each do |prefix, component|
-    producer = release_jobs.fetch("#{prefix}-#{arch}")
-    expected = {'component' => component, 'arch' => arch, 'version' => '${{ needs.prepare.outputs.version }}'}
-    abort 'fixture recipe identity drifted' unless expected.all? { |key, value| producer.dig('with', key) == value }
-    condition = prefix == 'rpm' ? release_jobs.fetch("build-#{arch}")['if'] : "needs.prepare.outputs.complete == 'true'"
-    abort 'fixture selection drifted' unless producer['if'] == condition
-  end
-end
-%w[compatibility-amd64 compatibility-arm64 business-smoke integration resilience validate-release-packages controller-image-security].each do |name|
-  arch = name == 'compatibility-arm64' ? 'arm64' : 'amd64'
-  security = %w[validate-release-packages controller-image-security].include?(name)
-  compatibility = name.start_with?('compatibility-')
-  next if security
-  prefixes = compatibility ? %w[helpers session] : %w[helpers]
-  prefixes.each do |prefix|
-    {'id' => 'artifact-id', 'sha256' => 'sha256'}.each do |input, output|
-      abort "#{name} lost #{prefix} identity" unless release_jobs.fetch(name).dig('with', "#{prefix}-#{input}") == "${{ needs.#{prefix}-#{arch}.outputs.#{output} }}"
-    end
-  end
-end
 publish = release.fetch('jobs').fetch('publish-release-packages')
 publish_names = publish.fetch('steps').map { |step| step['name'] }
 bind_index = publish_names.index('Verify accepted bindings before any stable Registry write')
@@ -283,5 +173,5 @@ gate_command = release_gate.fetch('steps').find { |step| step.dig('env', 'RESULT
     end
   end
 end
-puts 'Native workflow matrix, producer identity and job-result boundaries passed'
+puts 'Current candidate workflow, producer identity and job-result boundaries passed'
 RUBY

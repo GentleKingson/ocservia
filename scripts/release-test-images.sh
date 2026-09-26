@@ -6,8 +6,6 @@ mode="${1:?build or load}" component="${2:?fixture component}" arch="${3:?archit
 [[ "${arch}" == amd64 || "${arch}" == arm64 ]]
 case "${component}" in
   test-helpers) names=(probe relay) ;;
-  session-base) names=(node workflow-tools) ;;
-  rpm-test) names=(rpm) ;;
   *) exit 2 ;;
 esac
 if [[ "${mode}" == build ]]; then
@@ -23,9 +21,6 @@ for name in "${names[@]}"; do
     case "${name}" in
       probe) file=rust/g6-runtime.Dockerfile; args+=(--target g6-probe-runtime) ;;
       relay) file=deploy/production/relay.Dockerfile; args+=(--no-cache-filter relay-runtime) ;;
-      node) file=scripts/single-relay-node.Dockerfile ;;
-      workflow-tools) file=deploy/database-e2e/Dockerfile; args+=(--target workflow-tools) ;;
-      rpm) file=scripts/release-rpm-test.Dockerfile ;;
     esac
     started="$(date +%s)"
     bash scripts/g6-buildx-cache.sh "release-fixture-${name}-${arch}" true "fixture-${name}" \
