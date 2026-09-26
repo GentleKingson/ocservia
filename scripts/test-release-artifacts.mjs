@@ -13,7 +13,7 @@ const seal = value => {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 };
 try {
-  for (const name of ["gateway", "control", "transport", "backup"]) fs.writeFileSync(path.join(root, `${name}-linux-amd64.tar`), name);
+  for (const name of ["gateway", "control", "transport", "backup", "edge", "relay", "signer", "mysql_backup", "mariadb_backup"]) fs.writeFileSync(path.join(root, `${name}-linux-amd64.tar`), name);
   const value = artifactManifest(root, identity);
   const digest = seal(value);
   verifyArtifacts(root, identity, digest);

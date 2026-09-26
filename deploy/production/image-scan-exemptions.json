@@ -2,6 +2,33 @@
   "comment": "Findings recorded here are excluded from the release image scan gate. Every entry must bind the exact finding it covers - image, package, installed version, and vulnerability id - match the digest-pinned base image the image is actually built from, carry a reason, and stay inside its review_by date; an expired exemption, a new CVE on the same package, or a base image change fails the gate again. Everything else with an available fix at High or Critical still fails the publish.",
   "exemptions": [
     {
+      "image": "mysql_backup",
+      "package": "openssl",
+      "installed_version": "1:3.5.8-1.0.1.el9_8",
+      "vulnerability_id": "ELSA-2026-50075",
+      "base_image": "mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d",
+      "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50075.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-1473.html fixes the same 12 CVEs in 1:3.5.1-7.0.1.el9_7; installed non-FIPS 1:3.5.8-1.0.1.el9_8 includes those fixes. Both native reports and vendor records independently reviewed. Other advisories remain gated.",
+      "review_by": "2026-10-26"
+    },
+    {
+      "image": "mysql_backup",
+      "package": "openssl-libs",
+      "installed_version": "1:3.5.8-1.0.1.el9_8",
+      "vulnerability_id": "ELSA-2026-50075",
+      "base_image": "mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d",
+      "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50075.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-1473.html fixes the same 12 CVEs in 1:3.5.1-7.0.1.el9_7; installed non-FIPS 1:3.5.8-1.0.1.el9_8 includes those fixes. Both native reports and vendor records independently reviewed. Other advisories remain gated.",
+      "review_by": "2026-10-26"
+    },
+    {
+      "image": "mysql_backup",
+      "package": "gnutls",
+      "installed_version": "3.8.10-8.el9_8",
+      "vulnerability_id": "ELSA-2026-50346",
+      "base_image": "mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d",
+      "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50346.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-20612.html fixes the same 13 CVEs in 3.8.10-4.el9_8; installed non-FIPS 3.8.10-8.el9_8 RPM changelog retains all fixes. Both native reports and vendor records independently reviewed. Other advisories remain gated.",
+      "review_by": "2026-10-26"
+    },
+    {
       "image": "backup",
       "package": "libpcre2-8-0",
       "installed_version": "10.42-1",

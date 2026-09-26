@@ -11,18 +11,19 @@ const workspace = process.env.T07_WORKSPACE;
 const browser = await chromium.launch({ headless: true });
 const observations = [];
 try {
-  const context = await browser.newContext({ baseURL: "https://localhost", locale: "en-US" });
+  const origin = process.env.OCSERV_CONTROLLER_PUBLIC_URL || "https://localhost";
+  const context = await browser.newContext({ baseURL: origin, locale: "en-US" });
   const page = await context.newPage();
-  const approver = await browser.newContext({ baseURL: "https://localhost" });
+  const approver = await browser.newContext({ baseURL: origin });
   const approvalPage = await approver.newPage();
   const requesterApprovalPage = await context.newPage();
-  const headers = { Origin: "https://localhost", "X-Workspace-ID": workspace };
+  const headers = { Origin: origin, "X-Workspace-ID": workspace };
   await approvalPage.goto("/approvals");
   await expect(approvalPage).toHaveURL(/\/login$/);
   await approvalPage.getByLabel("Username", { exact: true }).fill("t07-approver");
   await approvalPage.getByLabel("Password", { exact: true }).fill(fs.readFileSync(`${work}/private/approver-password`, "utf8").trim());
   await approvalPage.getByRole("button", { name: "Sign in", exact: true }).click();
-  await approvalPage.waitForURL("https://localhost/");
+  await approvalPage.waitForURL(`${origin}/`);
   await expect(approvalPage.getByLabel("Workspace")).toContainText("T07");
   if (await approvalPage.getByLabel("Workspace").inputValue() !== workspace)
     await approvalPage.getByLabel("Workspace").selectOption(workspace);
@@ -70,7 +71,7 @@ try {
   await page.getByLabel("Username", { exact: true }).fill("t07-requester");
   await page.getByLabel("Password", { exact: true }).fill(fs.readFileSync(`${work}/private/requester-password`, "utf8").trim());
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.waitForURL("https://localhost/");
+  await page.waitForURL(`${origin}/`);
   await page.goto(`/nodes/${node}`);
   await expect(page.getByRole("heading", { name: "t07-native", level: 1, exact: true })).toBeVisible();
   await expect(page.getByLabel("Workspace")).toContainText("T07");

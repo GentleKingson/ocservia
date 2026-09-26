@@ -47,7 +47,7 @@ STUB
 }
 
 write_grype_stub() {
-  local matches_json="$1" db_built="${2:-2026-09-22T00:00:00Z}"
+  local matches_json="$1" db_built="${2-2026-09-22T00:00:00Z}"
   cat >"${stub_dir}/grype" <<STUB
 #!/usr/bin/env bash
 trace="\${CI_STUB_TRACE:?}"
@@ -268,6 +268,18 @@ jq -e '.images.gateway.platforms["linux-amd64"].gate == "pass"' "${summary}" >/d
 
 # An archive without a readable manifest.json must fail closed instead of
 # guessing what was scanned.
+write_fixtures
+: >"${archives_tsv}"
+for name in edge relay signer mysql_backup mariadb_backup; do
+  for arch in amd64 arm64; do
+    printf '%s\t%s\t%s\n' "$name" "$arch" "${work_dir}/gateway-linux-${arch}.tar" >>"${archives_tsv}"
+  done
+done
+write_grype_stub ""
+run_scan >/dev/null 2>&1
+jq -e '.images.signer.base_image == "scratch" and (.images | length == 5) and
+  all(.images[].platforms[]; .gate == "pass")' "${summary}" >/dev/null
+write_fixtures
 make_archive "${work_dir}/gateway-linux-amd64.tar" false
 rm -rf "${output_dir}"
 if run_scan >"${work_dir}/stdout.log" 2>&1; then

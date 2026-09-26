@@ -38,3 +38,8 @@ build_image gateway deploy/production/gateway.Dockerfile
 build_image control control-plane/Dockerfile
 build_image transport rust/transportd.Dockerfile
 build_image backup deploy/production/backup.Dockerfile
+build_image edge deploy/production/edge.Dockerfile
+build_image relay deploy/production/relay.Dockerfile
+build_image signer deploy/production/signer.Dockerfile
+build_image mysql_backup deploy/production/backup.mysql.Dockerfile
+build_image mariadb_backup deploy/production/backup.mariadb.Dockerfile

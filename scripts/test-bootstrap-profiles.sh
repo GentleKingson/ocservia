@@ -121,6 +121,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
               .github/workflows/release-products.yml .github/workflows/release-product-upgrade.yml
               .github/workflows/release-test-images.yml .github/workflows/release-compatibility.yml
               .github/workflows/release-business.yml .github/workflows/release-business-diagnostic.yml
+              .github/workflows/release-integrated-candidate.yml
               .github/workflows/g6-harness-core.yml
               rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
   files.each do |source|
