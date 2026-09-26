@@ -411,7 +411,9 @@ export RELAY_ACCESS_TOKEN_SOURCE="${OCSERV_SECRET_DIR}/relay-access-token"
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${work}/command.pub.pem"
 export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
 export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=production
-bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFACT_DIR}/managed-prepare.log"
+managed_options=(--version "v${VERSION}")
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi
+bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-prepare.log"
 grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
 record signed_native_package_and_managed_prepare
 
@@ -459,7 +461,7 @@ T07_USER_HASH="$(openssl pkey -pubin -in "${work}/user.pub.pem" -outform DER | s
 T07_P12_HASH="$(sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout -outform DER | sha256sum | cut -d' ' -f1)"
 python3 "${ROOT}/scripts/release-business-api.py" token
 sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
-bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFACT_DIR}/managed-enrollment.log"
+bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
 grep -q '^PENDING_APPROVAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
 export T07_NODE
 T07_NODE="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
@@ -507,7 +509,7 @@ if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   record production_signer_approved_binding
 fi
 sudo systemctl enable --now ocservia-privd ocservia-agent
-bash "${ROOT}/deploy/managed-node/install.sh" --version "v${VERSION}" >"${ARTIFACT_DIR}/managed-active.log"
+bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -q SERVICES_ACTIVE "${ARTIFACT_DIR}/managed-active.log"
 record native_node_services
 if [[ "${BUSINESS_PROFILE}" == extended ]]; then
