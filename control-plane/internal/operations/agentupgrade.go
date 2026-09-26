@@ -327,20 +327,6 @@ func (s *Service) rolloutNodeEligibility(now time.Time, node rolloutNodeObservat
 	if !trusted {
 		return "missing_release_metadata", [sha256.Size]byte{}, false
 	}
-	var reason string
-	switch telemetry.ClassifyAgentVersion(node.AgentVersion, target) {
-	case telemetry.AgentVersionStateUnknown:
-		reason = "unknown_version"
-	case telemetry.AgentVersionStateCurrent:
-		reason = "already_current"
-	case telemetry.AgentVersionStateAhead:
-		reason = "ahead"
-	case telemetry.AgentVersionStateUpgradeAvailable:
-		reason = ""
-	}
-	if reason != "" {
-		return reason, [sha256.Size]byte{}, false
-	}
 	if !node.CapabilityOK {
 		return "missing_capability", [sha256.Size]byte{}, false
 	}

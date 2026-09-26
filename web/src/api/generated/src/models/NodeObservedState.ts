@@ -125,7 +125,7 @@ export interface NodeObservedState {
    */
   architecture?: NodeObservedStateArchitectureEnum;
   /**
-   * Read-time derivation gating the single-node upgrade workflow: upgrade_available version state, online fresh node with the approved upgrade capability, a trusted release for its architecture, and no conflicting active upgrade.
+   * Read-time derivation gating the single-node upgrade workflow: online fresh node with the approved upgrade capability, a trusted release for its architecture, and no conflicting active upgrade.
    * @type {boolean}
    * @memberof NodeObservedState
    */

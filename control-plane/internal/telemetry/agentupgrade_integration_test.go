@@ -103,6 +103,15 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	var encoded struct {
 		AgentUpgradeEligible bool `json:"agent_upgrade_eligible"`
 	}
+	for _, state := range []string{"current", "ahead", "unknown", ""} {
+		candidate := node
+		candidate.AgentVersionState = state
+		candidate.AgentUpgradeEligible = false
+		service.applyAgentUpgradeEligibility(ctx, &candidate)
+		if !candidate.AgentUpgradeEligible {
+			t.Fatalf("display version state %q blocked target eligibility", state)
+		}
+	}
 	if err := json.Unmarshal(mustJSON(t, node), &encoded); err != nil {
 		t.Fatal(err)
 	}

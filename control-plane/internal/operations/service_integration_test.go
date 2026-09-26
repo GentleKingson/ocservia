@@ -264,17 +264,24 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 	}
 }
 
-func TestAgentUpgradeAuthoritativeVersionFenceIntegration(t *testing.T) {
-	service, pool, workspaceID, nodeID := integrationService(t)
-	ctx := context.Background()
-	observeUpgradeNode(t, pool, nodeID, "2.1.0", 0)
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
-		t.Fatal(err)
-	}
-	request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-authoritative-fence", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-authoritative-fence", Traceparent: testTraceparent}
-	approveOperation(t, pool, workspaceID, &request)
-	if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, ErrStaleRevision) {
-		t.Fatalf("target older than authoritative observed version error = %v", err)
+func TestAgentUpgradeWithoutVersionOrderIntegration(t *testing.T) {
+	for _, observed := range []string{"1.0.0", "2.0.0", "2.1.0", "", "unknown"} {
+		t.Run("observed-"+observed, func(t *testing.T) {
+			service, pool, workspaceID, nodeID := integrationService(t)
+			ctx := context.Background()
+			if observed != "" {
+				observeUpgradeNode(t, pool, nodeID, observed, 0)
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
+				t.Fatal(err)
+			}
+			request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-explicit-target", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-explicit-target", Traceparent: testTraceparent}
+			approveOperation(t, pool, workspaceID, &request)
+			operation, replayed, err := service.CreateSynthetic(ctx, request)
+			if err != nil || replayed || operation.AgentUpgradeState != "queued" {
+				t.Fatalf("explicit target: operation=%+v replayed=%v err=%v", operation, replayed, err)
+			}
+		})
 	}
 }
 

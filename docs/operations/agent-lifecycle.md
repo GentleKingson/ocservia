@@ -314,8 +314,10 @@ between 1 and 512 unique `(version, architecture)` releases; a missing,
 unreadable, malformed, or ambiguous file fails Controller startup. There is no
 GitHub or registry synchronization: publishing a release means placing the
 signed package triple in each node's local spool and adding the exact digest
-to this file. The API additionally rejects a target that is not newer than the
-node's observed agent version, and the request must carry the node's current
+to this file. In the pending v1.1.0 policy reset, an explicit trusted target is
+not rejected because it is lower, equal, higher or the source version is unknown.
+The displayed version classification is informational, not execution authority.
+The request must still carry the node's current
 revision (`If-Match`) plus an independent approval bound to the exact
 `node + version + digest + architecture` release identity.
 

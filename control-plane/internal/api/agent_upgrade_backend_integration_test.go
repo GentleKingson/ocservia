@@ -25,8 +25,8 @@ import (
 )
 
 // Run through real HTTP authentication and the restricted runtime on every
-// backend. Preparation is not execution authorization: approval and upgrade
-// deliberately have different version checks, while the intent stays atomic.
+// backend. Preparation is not execution authorization: the trusted target
+// still requires independent approval, while the intent stays atomic.
 func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	b, owner := authenticationBackendFixtureWithIsolation(t, true)
 	f := newApplyHTTPFixtureWithBackend(t, b, owner)
@@ -118,9 +118,9 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		}{
 			{"missing-package", "amd64", "1.2.0", "3.0.0", "release-not-trusted", 409},
 			{"unknown-architecture", "riscv64", "1.2.0", "2.0.0", "release-not-trusted", 409},
-			{"unknown-version", "amd64", "unknown", "2.0.0", "target-not-newer", 201},
-			{"same-version", "amd64", "2.0.0", "2.0.0", "target-not-newer", 201},
-			{"downgrade", "amd64", "1.2.0", "1.0.0", "target-not-newer", 201},
+			{"unknown-version", "amd64", "unknown", "2.0.0", "approval-required", 201},
+			{"same-version", "amd64", "2.0.0", "2.0.0", "approval-required", 201},
+			{"downgrade", "amd64", "1.2.0", "1.0.0", "approval-required", 201},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				setObservation(tc.arch, tc.observed)
@@ -217,6 +217,9 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 			t.Fatalf("duplicate upgrade intent: %d %v", count, err)
 		}
 		setObservation("amd64", "2.0.0")
-		problem(post("2.0.0", approval.ID, "accepted"), 409, "target-not-newer", "")
+		replay = post("2.0.0", approval.ID, "accepted")
+		if replay.Code != 202 || replay.Header().Get("Idempotency-Replayed") != "true" || replay.Header().Get("Location") != w.Header().Get("Location") {
+			t.Fatalf("replay after version observation changed: %d %s", replay.Code, replay.Body)
+		}
 	})
 }

@@ -125,9 +125,9 @@ func TestRolloutNodeEligibility(t *testing.T) {
 			node.LastHeartbeatAt = value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
 		}, "2.0.0", "", true},
 		{"missing release metadata", func(node *rolloutNodeObservation) { node.Architecture = "" }, "2.0.0", "missing_release_metadata", false},
-		{"unknown version", func(node *rolloutNodeObservation) { node.AgentVersion = "" }, "2.0.0", "unknown_version", false},
-		{"already current", func(node *rolloutNodeObservation) { node.AgentVersion = "2.0.0" }, "2.0.0", "already_current", false},
-		{"ahead", func(node *rolloutNodeObservation) { node.AgentVersion = "3.0.0" }, "2.0.0", "ahead", false},
+		{"unknown version", func(node *rolloutNodeObservation) { node.AgentVersion = "" }, "2.0.0", "", true},
+		{"already current", func(node *rolloutNodeObservation) { node.AgentVersion = "2.0.0" }, "2.0.0", "", true},
+		{"ahead", func(node *rolloutNodeObservation) { node.AgentVersion = "3.0.0" }, "2.0.0", "", true},
 		{"missing capability", func(node *rolloutNodeObservation) { node.CapabilityOK = false }, "2.0.0", "missing_capability", false},
 		{"upgrade in progress", func(node *rolloutNodeObservation) { node.UpgradeActive = true }, "2.0.0", "upgrade_in_progress", false},
 	}

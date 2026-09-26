@@ -2969,7 +2969,7 @@ components:
           type: boolean
           description: >-
             Read-time derivation gating the single-node upgrade workflow:
-            upgrade_available version state, online fresh node with the
+            online fresh node with the
             approved upgrade capability, a trusted release for its
             architecture, and no conflicting active upgrade.
         ocserv_version: { type: string, minLength: 1, maxLength: 128 }

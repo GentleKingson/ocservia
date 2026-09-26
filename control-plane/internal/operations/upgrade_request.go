@@ -10,14 +10,12 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac/rbacstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 )
 
 var (
 	ErrUpgradeArchitectureUnknown = errors.New("node package architecture is unknown")
 	ErrUpgradeReleaseNotTrusted   = errors.New("agent release is not trusted")
-	ErrUpgradeTargetNotNewer      = errors.New("agent upgrade target is not newer")
 )
 
 // AgentUpgradeTarget is a value snapshot of an operator-provisioned release,
@@ -33,14 +31,8 @@ type AgentUpgradeTarget struct {
 // idempotent intent transaction. In particular, do not replace ExpectedVersion
 // with a newly read node version here: that would change replay identity.
 func (s *Service) PrepareAgentUpgrade(ctx context.Context, workspaceID, nodeID uuid.UUID, version string) (AgentUpgradeTarget, error) {
-	target, observedVersion, err := s.agentUpgradeTarget(ctx, workspaceID, nodeID, version)
-	if err != nil {
-		return AgentUpgradeTarget{}, err
-	}
-	if observedVersion == "" || telemetry.ClassifyAgentVersion(observedVersion, target.Version) != telemetry.AgentVersionStateUpgradeAvailable {
-		return AgentUpgradeTarget{}, ErrUpgradeTargetNotNewer
-	}
-	return target, nil
+	target, _, err := s.agentUpgradeTarget(ctx, workspaceID, nodeID, version)
+	return target, err
 }
 
 // AgentUpgradeApprovalBinding pins the same trusted target as preparation.

@@ -148,7 +148,7 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	if response := post(t, operator, "upgrade-untrusted", `"revision-1"`, validBody("3.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "release-not-trusted") {
 		t.Fatalf("untrusted release status=%d body=%s", response.Code, response.Body.String())
 	}
-	if response := post(t, operator, "upgrade-older", `"revision-1"`, validBody("1.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "target-not-newer") {
+	if response := post(t, operator, "upgrade-older", `"revision-1"`, validBody("1.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "approval-required") {
 		t.Fatalf("older release status=%d body=%s", response.Code, response.Body.String())
 	}
 	if response := post(t, operator, "upgrade-unapproved", `"revision-1"`, validBody("2.0.0", uuid.Must(uuid.NewV7()).String())); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "approval-required") {
@@ -214,9 +214,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	nodeIDs := []uuid.UUID{uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}
 	slices.SortFunc(nodeIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
 	canaryID, batchID, otherID := nodeIDs[0], nodeIDs[1], nodeIDs[2]
-	offlineNodeID, currentNodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	offlineNodeID, incapableNodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	operatorBinding := uuid.Must(uuid.NewV7())
-	allNodes := append([]uuid.UUID{offlineNodeID, currentNodeID}, nodeIDs...)
+	allNodes := append([]uuid.UUID{offlineNodeID, incapableNodeID}, nodeIDs...)
 	fixtures := []struct {
 		query string
 		args  []any
@@ -250,7 +250,11 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		struct {
 			query string
 			args  []any
-		}{"UPDATE node_observed_snapshots SET agent_version='2.0.0' WHERE node_id=$1", []any{currentNodeID}},
+		}{"UPDATE node_observed_snapshots SET agent_version='2.0.0' WHERE node_id=$1", []any{canaryID}},
+		struct {
+			query string
+			args  []any
+		}{"UPDATE node_capabilities SET approved=false WHERE node_id=$1", []any{incapableNodeID}},
 		struct {
 			query string
 			args  []any
@@ -419,7 +423,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	for _, exclusion := range created.Excluded {
 		exclusionReasons[exclusion.NodeID] = exclusion.Reason
 	}
-	if exclusionReasons[offlineNodeID.String()] != "offline" || exclusionReasons[currentNodeID.String()] != "already_current" {
+	if exclusionReasons[offlineNodeID.String()] != "offline" || exclusionReasons[incapableNodeID.String()] != "missing_capability" {
 		t.Fatalf("exclusion reasons = %+v", created.Excluded)
 	}
 	assertExclusions := func(label string, rollout rolloutResponse) {
@@ -428,7 +432,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		for _, exclusion := range rollout.Excluded {
 			reasons[exclusion.NodeID] = exclusion.Reason
 		}
-		if len(reasons) != 2 || reasons[offlineNodeID.String()] != "offline" || reasons[currentNodeID.String()] != "already_current" {
+		if len(reasons) != 2 || reasons[offlineNodeID.String()] != "offline" || reasons[incapableNodeID.String()] != "missing_capability" {
 			t.Fatalf("%s rollout exclusions = %+v", label, rollout.Excluded)
 		}
 	}

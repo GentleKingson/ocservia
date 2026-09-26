@@ -96,8 +96,8 @@ an absent Operations service leaves upgrade approval preparation disabled.
 
 Preparation does not replace `CreateSynthetic`'s transaction. Node locking,
 caller-supplied expected version, replay ordering, capability/attestation checks,
-observed-version recheck, bound approval consumption and active-upgrade guard
-remain there unchanged. Approval binds a trusted target without promising that
+observed-version recording, bound approval consumption and active-upgrade guard
+remain there. Approval binds a trusted target without promising that
 it is newer or executable. Single-node requests retain their existing ability
 to queue for offline nodes; rollout admission and scheduling are not reused or
 changed.
