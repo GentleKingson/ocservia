@@ -255,6 +255,5 @@ def after():
 
 
 if __name__ == '__main__':
-    if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
-        raise SystemExit('disposable hosted runner required')
+    run('bash', ROOT / 'scripts/release-business-environment.sh')
     {'prepare': prepare, 'import': import_binding, 'before': before, 'after': after, 'seal': seal}[sys.argv[1]]()

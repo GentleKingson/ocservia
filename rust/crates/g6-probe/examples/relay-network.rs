@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.global_v4.is_some(),
         "QUIC discovery returned no IPv4 address"
     );
+    println!("quic_global_v4={}", report.global_v4.unwrap());
     endpoint.close().await;
     println!("quic_address_discovery=PASS");
     Ok(())

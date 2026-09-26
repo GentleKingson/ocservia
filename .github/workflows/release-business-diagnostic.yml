@@ -137,7 +137,9 @@ jobs:
                 "real_vpn_business_and_recovery"] - .passed_checkpoints | length) == 0
              end)' "${EVIDENCE}/result.json" >/dev/null
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+            grep -Fx integrated_entry_and_internal_tls "${EVIDENCE}/checkpoints.txt"
             if [[ "$CONTROLLER_ARCH" == amd64 ]]; then
+              grep -Fx integrated_recreation_and_authorized_sse "${EVIDENCE}/checkpoints.txt"
             jq -e --arg sha "$CANDIDATE_SHA" '.candidate_sha == $sha and .primary_occtl_preserved == true and
               .before_auth == true and .revoked_rejected == true and .control_auth == true and
               .refresh == "signed-export-atomic-install-sighup"' "${EVIDENCE}/crl-acceptance.json"
