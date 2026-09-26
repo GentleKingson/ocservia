@@ -54,7 +54,7 @@ command alone, when assessing its benefit.
 `npm run lint` and `npm run typecheck` still prepare their generated client.
 
 - Quick database feedback on BuildServer: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
-- All supported database units: use `DATABASE_TEST_SCOPE=compatibility` for PostgreSQL 17/18, MySQL and MariaDB; this is Full CI's key compatibility scope, not comprehensive acceptance.
+- All supported database units: use `DATABASE_TEST_SCOPE=smoke` for PostgreSQL 17/18, MySQL and MariaDB; Full CI checks current initialization and runtime behavior on each unit, not historical compatibility or comprehensive acceptance.
 - Deep database migrations or failure scenarios, explicitly opt-in: `make database-integration`
 - Go and transport local integration: `make integration`
 - Browser or runtime behavior: `make e2e`

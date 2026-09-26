@@ -15,7 +15,6 @@ case "${profile}" in
   *) echo 'CI profile must be quick or full' >&2; exit 2 ;;
 esac
 database_scope=smoke
-if [[ "${profile}" == full ]]; then database_scope=compatibility; fi
 flags=(run_docs run_go run_rust run_web run_database run_ci_tools run_installers)
 for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
