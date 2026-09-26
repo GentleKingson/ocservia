@@ -2,13 +2,21 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { candidateArtifacts } from "./release-upgrade-contract.mjs";
 
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+export function validateCandidate(version, sha, workflowSHA, head) {
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version ?? "")) throw new Error("invalid plain version");
+  if (!/^[0-9a-f]{40}$/.test(sha ?? "") || sha !== workflowSHA || sha !== head)
+    throw new Error("candidate SHA must equal workflow SHA and checkout HEAD");
+}
+function candidateArtifacts(component, arch, version) {
+  const rpm = arch === "amd64" ? "x86_64" : "aarch64";
+  return component === "agent" ? [`ocservia-agent_${version}-1_${arch}.deb`,
+    `ocservia-agent-${version}-1.${rpm}.rpm`, `ocservia-agent-${version}-linux-${arch}.tar.gz`] :
+    ["gateway", "control", "transport", "backup", "edge", "relay", "signer", "mysql_backup", "mariadb_backup"].map(name => `${name}-linux-${arch}.tar`);
+}
 const fixtureFiles = {
   "test-helpers": ["probe.tar", "relay.tar", "ocservia-g6-tunnel"],
-  "session-base": ["node.tar", "workflow-tools.tar"],
-  "rpm-test": ["rpm.tar"],
 };
 export function artifactManifest(directory, identity) {
   if (!/^[0-9a-f]{40}$/.test(identity.sha) || !/^\d+\.\d+\.\d+$/.test(identity.version) ||

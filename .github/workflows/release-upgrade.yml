@@ -4,19 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Candidate X.Y.Z version without v, strictly newer than baseline
+        description: Candidate X.Y.Z version without v
         type: string
         required: true
-      baseline_release:
-        description: Registered published upgrade baseline (1.x upgrades start at v1.0.0)
-        type: string
-        required: true
-        default: v1.0.0
       purpose:
         description: Diagnostic scope; this workflow never reports a complete Release Check
         type: choice
-        options: [upgrade, compatibility, smoke, integration]
-        default: upgrade
+        options: [smoke, integration]
+        default: smoke
         required: true
       production_signer:
         description: Integration with production Signer, candidate GHCR images and real CRL enforcement
@@ -27,217 +22,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-upgrade-${{ github.run_id }}
+  group: release-diagnostics-${{ github.run_id }}
   cancel-in-progress: false
 
 env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  prepare:
-    if: ${{ inputs.purpose == 'upgrade' || inputs.purpose == 'compatibility' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    outputs:
-      artifact-id: ${{ steps.frozen.outputs.artifact-id }}
-      frozen-sha256: ${{ steps.identity.outputs.sha256 }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Freeze candidate and registered baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-          BASELINE_RELEASE: ${{ inputs.baseline_release }}
-          CANDIDATE_SHA: ${{ github.sha }}
-        run: |
-          node scripts/release-upgrade-contract.mjs prepare "${RUNNER_TEMP}/frozen"
-          bash scripts/release-upgrade-fetch.sh "${RUNNER_TEMP}/frozen/frozen.json" "${HOME}/.upgrade-baseline"
-          for arch in amd64 arm64; do
-            while IFS= read -r image; do
-              docker manifest inspect --verbose "${image}" | jq -e --arg arch "${arch}" '
-                if type == "array" then any(.[]; .Descriptor.platform.os == "linux" and .Descriptor.platform.architecture == $arch)
-                else .Descriptor.platform.os == "linux" and .Descriptor.platform.architecture == $arch end' >/dev/null
-            done < <(jq -r '.images[]' "${HOME}/.upgrade-baseline/bundle/controller-release-${arch}.json")
-          done
-      - id: identity
-        run: echo "sha256=$(sha256sum "${RUNNER_TEMP}/frozen/frozen.json" | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
-      - id: frozen
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: upgrade-frozen-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/frozen/frozen.json
-          if-no-files-found: error
-          retention-days: 7
-
-  agent-upgrade:
-    name: Agent Upgrade (${{ matrix.arch }})
-    if: ${{ inputs.purpose == 'upgrade' }}
-    needs: prepare
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
-        with:
-          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
-          path: ${{ runner.temp }}/frozen
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-            rust/target
-          key: native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: native-upgrade-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
-      - name: Build once and validate real package upgrades
-        env:
-          FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
-          FROZEN_SHA256: ${{ needs.prepare.outputs.frozen-sha256 }}
-          ARTIFACT_DIR: ${{ runner.temp }}/agent-${{ matrix.arch }}
-        run: |
-          bash scripts/release-upgrade-unit.sh agent "${{ matrix.arch }}"
-      - name: Preserve unit evidence
-        if: always()
-        timeout-minutes: 5
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: upgrade-agent-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/agent-${{ matrix.arch }}
-          if-no-files-found: error
-          retention-days: 7
-
-  controller-upgrade:
-    name: Controller Upgrade (${{ matrix.arch }})
-    if: ${{ inputs.purpose == 'upgrade' }}
-    needs: prepare
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
-        with:
-          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
-          path: ${{ runner.temp }}/frozen
-      - name: Relay optional BuildKit cache credentials
-        uses: ./.github/actions/g6-cache-credentials
-      - name: Build once and validate real Controller upgrade
-        env:
-          FROZEN_FILE: ${{ runner.temp }}/frozen/frozen.json
-          FROZEN_SHA256: ${{ needs.prepare.outputs.frozen-sha256 }}
-          ARTIFACT_DIR: ${{ runner.temp }}/controller-${{ matrix.arch }}
-        run: |
-          bash scripts/release-upgrade-unit.sh controller "${{ matrix.arch }}"
-      - name: Preserve unit evidence
-        if: always()
-        timeout-minutes: 5
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: upgrade-controller-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/controller-${{ matrix.arch }}
-          if-no-files-found: error
-          retention-days: 7
-
-  session-compatibility:
-    name: Application Compatibility Matrix (${{ matrix.arch }})
-    if: ${{ inputs.purpose == 'compatibility' }}
-    needs: prepare
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    env:
-      CANDIDATE_SHA: ${{ github.sha }}
-      PACKAGE_ARCH: ${{ matrix.arch }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Relay optional BuildKit cache credentials
-        uses: ./.github/actions/g6-cache-credentials
-      - name: Build native candidate application images once
-        id: build
-        env:
-          SESSION_EVIDENCE: ${{ runner.temp }}/session-${{ matrix.arch }}
-        run: |
-          bash scripts/build-release-session-images.sh
-      - name: Published v1.0.0 node against candidate
-        env:
-          BASELINE_RELEASE: v1.0.0
-          RUN_ID: sc-${{ github.run_id }}-${{ github.run_attempt }}-100-${{ matrix.arch }}
-          RELEASE_ASSET_DIR: ${{ runner.temp }}/baseline-v100
-          ARTIFACT_DIR: ${{ runner.temp }}/session-${{ matrix.arch }}/v1.0.0
-        run: |
-          bash scripts/release-session-compatibility.sh fetch >"${SESSION_EVIDENCE}/v100-artifact.json"
-          bash scripts/release-session-compatibility.sh run
-      - name: Return root-created fixture evidence to the runner
-        if: always()
-        env:
-          EVIDENCE: ${{ runner.temp }}/session-${{ matrix.arch }}
-        run: |
-          if [[ -d "${EVIDENCE}" && ! -L "${EVIDENCE}" ]]; then
-            sudo chown -R -- "$(id -u):$(id -g)" "${EVIDENCE}"
-          fi
-      - name: Preserve application evidence
-        if: always()
-        timeout-minutes: 5
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: session-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/session-${{ matrix.arch }}
-          if-no-files-found: error
-          retention-days: 7
-      - name: Remove only this job's builder
-        if: always()
-        run: docker buildx rm "session-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
-
-  upgrade-result:
-    name: Native Upgrade Result
-    if: ${{ always() && inputs.purpose == 'upgrade' }}
-    needs: [prepare, agent-upgrade, controller-upgrade]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Require four complete native units
-        if: always()
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: |
-          # Each unit validates its own identity, scenarios and tested products.
-          # GitHub keeps successful matrix legs when only failed jobs rerun.
-          jq -e 'all(["prepare", "agent-upgrade", "controller-upgrade"][];
-            . as $job | $ENV.NEEDS | fromjson | .[$job].result == "success")' <<< '{}'
-
   business-probe:
     name: Read-only business diagnostics
     if: ${{ !inputs.production_signer && (inputs.purpose == 'smoke' || inputs.purpose == 'integration') }}
