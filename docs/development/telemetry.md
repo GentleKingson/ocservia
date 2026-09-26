@@ -46,35 +46,14 @@ rebuild authoritative state through REST after connecting or reconnecting.
 
 ## Upgrade and rollback
 
-The migration numbers and down-SQL instructions below describe historical
-PostgreSQL boundaries, not the current generic rollback path. Apply the
-installed release's complete backend history and use the guarded
-[Controller rollback](../how-to/controller-rollback.md). MySQL/MariaDB use
-their own append-only manifests and verified revision history; PostgreSQL
-down migrations do not apply to them. Preserve quarantine and cursor evidence
-through any backend-specific recovery.
+Run the target's owner-only database initialization and use the explicit
+[Controller rollback](../how-to/controller-rollback.md) for a binary rollback.
+The current tree provides no database down migrations or historical
+cross-version acceptance. MySQL/MariaDB use their own immutable manifests and
+execution receipts, not PostgreSQL migration numbers.
 
-Apply database migration `000005_telemetry_observed` before deploying the new
-Controller, transportd, Agent, or Web images. The protocol change is additive,
-so older Agents continue to connect without emitting telemetry.
-
-Migration `000022_transport_event_quarantine` adds the durable global cursor
-and quarantine evidence. Deploy it before a Controller using the resilient
-ingestion path. Its down migration refuses to discard existing quarantine
-evidence. It also refuses to remove a durable cursor that the previous
-Controller cannot recover from `transport_events`. Before an explicit schema
-rollback, preserve and clear the quarantine evidence, resolve the underlying
-incident, and let the new Controller commit a later valid event. The down
-migration verifies that this accepted event is both the durable cursor and the
-latest legacy cursor; an archived quarantined tail alone is not sufficient.
-
-For a Controller rollback across migration `000022`, first stop event-ingestion
-writers while the new Controller is still the schema authority, satisfy the
-cursor compatibility guard, and apply the `000022` down migration. Only then
-start the previous Controller binary. The Agent does not need to roll back for
-this database-only protocol change.
-
-If the older I07 telemetry schema must also be removed, preserve any needed
-history, stop I07 writers and scheduler roles, then apply
-`000005_telemetry_observed.down.sql`. This removes I07 telemetry history and
-read models; it does not alter node trust or enrollment state.
+Preserve telemetry history, quarantine, durable cursors and node trust through
+any backend-specific recovery. Stop affected writers and resolve the underlying
+incident before resuming ingestion. Use a forward fix or an explicitly planned
+isolated restore; do not clear evidence or reset cursors to make an older
+binary start.

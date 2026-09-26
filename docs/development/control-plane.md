@@ -185,6 +185,6 @@ deploy/compose/compose.sh down --volumes
 ```
 
 For persisted or shipped schema changes, do not rely on historical manual
-down-chains. Use a forward fix or a controlled database restore. Migration
-down/up behavior is verified by the current database integration harness; see
+down-chains. The current tree no longer ships down SQL or tests historical
+down/up compatibility. Use a forward fix or a controlled database restore; see
 [database recovery](../operations/incident-recovery.md#database-recovery) for the matching restore workflow.

@@ -248,6 +248,7 @@ break-glass rotation in the target environment.
 
 For rollback, stop new writes, preserve audit, identity, session, approval, and
 alert tables, and deploy the previous binary only after active OIDC sessions are
-revoked or their expiry is accepted. The down migration is suitable only when
-these new records are intentionally discarded; normal production rollback is a
-binary rollback followed by a forward fix.
+revoked or their expiry is accepted. Database down migrations are not provided.
+Preserve these records and use a forward fix or an explicitly planned isolated
+restore; a binary rollback does not reverse database changes or guarantee that
+the previous binary can use current state.
