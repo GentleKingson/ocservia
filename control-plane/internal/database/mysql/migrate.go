@@ -242,9 +242,8 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 		}
 	}
 	var stored, engine string
-	var version int
 	var dirty bool
-	err = conn.QueryRowContext(ctx, "SELECT engine,manifest_checksum,version,dirty FROM backend_migrations WHERE singleton=1").Scan(&engine, &stored, &version, &dirty)
+	err = conn.QueryRowContext(ctx, "SELECT engine,manifest_checksum,dirty FROM backend_migrations WHERE singleton=1").Scan(&engine, &stored, &dirty)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Refuse adopting an existing schema as an empty initialization.
 		var count int
@@ -257,21 +256,19 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 		if _, err = conn.ExecContext(ctx, "INSERT INTO backend_migrations(singleton,engine,manifest_checksum) VALUES(1,?,?)", b.engine, sum); err != nil {
 			return safeError(err)
 		}
+		dirty = true
 	} else {
 		if err != nil {
 			return safeError(err)
 		}
-		if engine != string(b.engine) || stored != sum || version < 0 || version > m.Version {
+		if engine != string(b.engine) || stored != sum {
 			return ErrChecksum
 		}
 		if dirty && repairChecksum == "" {
 			return ErrDirty
 		}
-		if !dirty && version != m.Version {
-			return ErrSchema
-		}
 	}
-	if repairChecksum != "" && dirty {
+	if repairChecksum != "" && dirty && stored != "" {
 		if _, err = conn.ExecContext(ctx, "UPDATE backend_migrations SET repair_count=repair_count+1,updated_at=CURRENT_TIMESTAMP(6) WHERE singleton=1"); err != nil {
 			return safeError(err)
 		}
@@ -292,6 +289,10 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 			rows.Close()
 			return ErrChecksum
 		}
+		if !dirty && state != "verified" {
+			rows.Close()
+			return ErrDirty
+		}
 		if len(states) > 0 && states[len(states)-1] != "verified" {
 			rows.Close()
 			return ErrChecksum
@@ -303,7 +304,7 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 	if err != nil {
 		return safeError(err)
 	}
-	if version == m.Version && (len(states) != len(m.Steps) || dirty) {
+	if !dirty && len(states) != len(m.Steps) {
 		return ErrSchema
 	}
 	for i, s := range m.Steps {
@@ -346,7 +347,7 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 			return safeError(err)
 		}
 	}
-	if version == m.Version {
+	if !dirty {
 		return b.validateOn(ctx, conn, m, sum, 0)
 	}
 	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -354,7 +355,7 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 		return safeError(err)
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "UPDATE backend_migrations SET version=?,dirty=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE singleton=1", m.Version); err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE backend_migrations SET version=IF(version=0,?,version),dirty=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE singleton=1", m.Version); err != nil {
 		return safeError(err)
 	}
 	return safeError(tx.Commit())
@@ -407,16 +408,15 @@ func (b *Backend) validateBaselineReceipts(ctx context.Context, conn *sql.Conn, 
 		}
 	}
 	var checksum, engine string
-	var version int
 	var dirty bool
-	err := conn.QueryRowContext(ctx, "SELECT engine,manifest_checksum,version,dirty FROM backend_migrations WHERE singleton=1").Scan(&engine, &checksum, &version, &dirty)
+	err := conn.QueryRowContext(ctx, "SELECT engine,manifest_checksum,dirty FROM backend_migrations WHERE singleton=1").Scan(&engine, &checksum, &dirty)
 	if err != nil {
 		return safeError(err)
 	}
 	if dirty {
 		return ErrDirty
 	}
-	if checksum != sum || engine != string(b.engine) || version != m.Version {
+	if checksum != sum || engine != string(b.engine) {
 		return ErrChecksum
 	}
 	rows, err := conn.QueryContext(ctx, "SELECT ordinal,name,checksum,state FROM backend_migration_steps ORDER BY ordinal")

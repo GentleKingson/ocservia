@@ -79,18 +79,56 @@ func TestRealInitializationAndHistory(t *testing.T) {
 	}
 	// Historical range metadata is not authority to reject current execution.
 	for _, query := range []string{
-		`UPDATE backend_migrations SET controller_schema=9001,minimum_controller_schema=9000`,
+		`UPDATE backend_migrations SET version=9001,controller_schema=9001,minimum_controller_schema=9000`,
 		`INSERT INTO controller_schema_compatibility(singleton,current_schema,minimum_compatible_controller_schema) VALUES(1,9001,9000) ON DUPLICATE KEY UPDATE current_schema=9001,minimum_compatible_controller_schema=9000`,
+		`INSERT INTO backend_schema_revisions(version,parent_checksum,manifest_checksum,state,verified_at) VALUES(9001,REPEAT('a',64),REPEAT('b',64),'verified',CURRENT_TIMESTAMP(6))`,
+		`INSERT INTO backend_schema_revision_steps(version,ordinal,name,checksum,state,verified_at) VALUES(9001,1,'opaque_completed_step',REPEAT('c',64),'verified',CURRENT_TIMESTAMP(6))`,
 	} {
 		if _, err := b.Exec(ctx, query); err != nil {
 			t.Fatal(err)
 		}
 	}
+	opaqueReceipts := func() string {
+		t.Helper()
+		var receipt string
+		if err := b.QueryRow(ctx, `SELECT CONCAT_WS('|',m.version,r.version,r.parent_checksum,r.manifest_checksum,r.state,r.repair_count,r.started_at,r.verified_at,s.ordinal,s.name,s.checksum,s.state,s.started_at,s.verified_at) FROM backend_migrations m JOIN backend_schema_revisions r ON r.version=9001 JOIN backend_schema_revision_steps s ON s.version=r.version`).Scan(&receipt); err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	before := opaqueReceipts()
 	if err := b.Migrate(ctx, ""); err != nil {
 		t.Fatal("unused compatibility metadata blocked initialization", err)
 	}
+	if err := b.PrepareControllerTelemetry(ctx); err != nil {
+		t.Fatal("opaque completed receipts blocked current startup", err)
+	}
 	if err := b.ValidateSchema(ctx); err != nil {
 		t.Fatal("unused compatibility metadata blocked current validation", err)
+	}
+	if after := opaqueReceipts(); after != before {
+		t.Fatal("initialization rewrote opaque completed receipts", before, after)
+	}
+	sum, err := ManifestChecksum(b.engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"backend_schema_revisions", "backend_schema_revision_steps"} {
+		if _, err := b.Exec(ctx, "UPDATE "+table+" SET state='running' WHERE version=9001"); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
+			t.Fatal("unknown unfinished work accepted", table, err)
+		}
+		if err := b.Migrate(ctx, sum); !errors.Is(err, ErrDirty) {
+			t.Fatal("unknown unfinished work repaired without its content", table, err)
+		}
+		if err := b.ValidateSchema(ctx); !errors.Is(err, ErrDirty) {
+			t.Fatal("unknown unfinished work passed validation", table, err)
+		}
+		if _, err := b.Exec(ctx, "UPDATE "+table+" SET state='verified' WHERE version=9001"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := b.Exec(ctx, "UPDATE backend_migrations SET manifest_checksum=REPEAT('0',64)"); err != nil {
 		t.Fatal(err)
