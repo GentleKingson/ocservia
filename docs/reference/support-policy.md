@@ -1,5 +1,45 @@
 # 1.0 support and versioning policy
 
+## v1.1.0 policy reset (pending release)
+
+This is the approved policy for the unreleased `v1.1.0` candidate, not a claim
+that implementation or acceptance has finished. The 1.0 policy below records
+the published line; its version windows, deprecation timetable and additive-only
+`1.x` promise do not govern this explicitly breaking policy reset. Existing
+published tags, artifacts and release history are unchanged.
+
+`v1.1.0` removes software upgrade, downgrade and rollback compatibility
+admission, historical migration compatibility probes, legacy deployment
+auto-conversion, and historical release compatibility matrices and gates.
+This includes the public `--schema-compatibility-check` CLI. There is no
+minimum source or rollback version, fixed upgrade source, version allowlist,
+force/skip switch, or replacement capability/schema-number version fence.
+Install, upgrade and rollback remain explicit operations on verified targets;
+version format and version display remain, but version ordering is not authority
+to accept or reject an operation.
+
+Keep artifact signatures, trusted keys, hashes, source commit and architecture
+binding; real command capabilities; authorization and approvals; idempotency,
+replay protection and ownership fences; Signer identity and monotonic revision;
+transactions, atomic state commits and real failure propagation. Database
+initialization, applied records, known migration content integrity and actual
+service/database readiness remain required. Removing historical deployment
+conversion must also remove its automatic network/configuration/data changes,
+not leave destructive actions behind without their former guards.
+
+Acceptance covers the current candidate on the supported architectures,
+deployment modes and database products, with security, integration and resilience
+checks. It does not certify historical upgrade/downgrade/migration paths.
+Cross-version operations may fail or damage state; absence of a compatibility
+rejection is not a safety guarantee. Never automatically reverse database
+migrations, reset identities or overwrite persistent state. Existing installed
+old scripts retain their original behavior. Operators needing a different
+deployment layout must explicitly redeploy rather than expect legacy conversion.
+Release notes must identify removed public entrypoints and these risks, and must
+not describe `v1.1.0` as a fully backward-compatible SemVer minor.
+
+## Published 1.0 policy
+
 Status: this is the support policy for the ocservia **1.0 release line**.
 `v1.0.1` is the first recommended stable baseline for production deployments.
 `v1.0.0` is an already published, upgradeable transitional 1.0 release, not
