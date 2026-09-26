@@ -12,7 +12,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
-	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
 )
 
@@ -34,8 +33,7 @@ func validateBootstrapPasswords(cfg config.Config) error {
 
 // A nil result means the requested one-shot command has finished.
 type startupState struct {
-	audit         *audit.Manager
-	schemaVersion int64
+	audit *audit.Manager
 }
 
 func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg config.Config, logger *slog.Logger) (*startupState, error) {
@@ -48,13 +46,6 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 	defer cancel()
 	if err := conn.ValidateDeployment(databaseCtx); err != nil {
 		return nil, fmt.Errorf("validate database deployment: %w", err)
-	}
-	if cfg.SchemaCompatibilityCheck > 0 {
-		if _, err := backend.ControllerSchema(databaseCtx, cfg.SchemaCompatibilityCheck); err != nil {
-			return nil, fmt.Errorf("validate schema compatibility: %w", err)
-		}
-		logger.Info("database schema compatibility check passed", "schema", cfg.SchemaCompatibilityCheck)
-		return nil, nil
 	}
 	if cfg.MigrateOnly {
 		auditManager, err := newAuditManager(backend, cfg)
@@ -72,13 +63,6 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 		}
 		logger.Info("database migrations complete")
 		return nil, nil
-	}
-	expectedSchemaVersion, err := migrations.LatestSchemaVersion()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := backend.ControllerSchema(databaseCtx, expectedSchemaVersion); err != nil {
-		return nil, fmt.Errorf("validate database schema: %w", err)
 	}
 	auditManager, err := newAuditManager(backend, cfg)
 	if err != nil {
@@ -116,7 +100,7 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 		return nil, fmt.Errorf("validate required runtime database capabilities: %w", err)
 	}
 
-	return &startupState{audit: auditManager, schemaVersion: expectedSchemaVersion}, nil
+	return &startupState{audit: auditManager}, nil
 }
 
 func newAuditManager(backend database.Backend, cfg config.Config) (*audit.Manager, error) {

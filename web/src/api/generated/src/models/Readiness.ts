@@ -25,12 +25,6 @@ export interface Readiness {
    * @memberof Readiness
    */
   status: ReadinessStatusEnum;
-  /**
-   *
-   * @type {number}
-   * @memberof Readiness
-   */
-  schemaVersion: number;
 }
 
 /**
@@ -49,13 +43,6 @@ export function instanceOfReadiness(value: object): value is Readiness {
   if (!("status" in value) || value["status"] === undefined) return false;
   if (value["status"] !== "ok") return false;
 
-  if (
-    (!("schemaVersion" in (value as Record<string, any>)) &&
-      !("schema_version" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["schemaVersion"] === undefined &&
-      (value as Record<string, any>)["schema_version"] === undefined)
-  )
-    return false;
   return true;
 }
 
@@ -72,7 +59,6 @@ export function ReadinessFromJSONTyped(
   }
   return {
     status: json["status"],
-    schemaVersion: json["schema_version"],
   };
 }
 
@@ -90,6 +76,5 @@ export function ReadinessToJSONTyped(
 
   return {
     status: value["status"],
-    schema_version: value["schemaVersion"],
   };
 }

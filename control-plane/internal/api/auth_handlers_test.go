@@ -43,7 +43,6 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, issuer stri
 		t.Fatal(err)
 	}
 	config := testHTTPConfig(false)
-	config.ExpectedSchema = 1
 	s := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: service, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvals.NewBackend(postgres.WrapPool(pool))})
 	return s
 }

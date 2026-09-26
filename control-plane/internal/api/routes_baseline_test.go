@@ -118,7 +118,7 @@ POST /api/v1/approval-requests/{approval_id}`
 
 func baselineServer(t *testing.T, dev bool) *Server {
 	t.Helper()
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "baseline", Commit: "fixture", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, dev, "", 36)
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{Version: "baseline", Commit: "fixture", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, dev, "")
 	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 	return s
 }

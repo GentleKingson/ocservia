@@ -286,22 +286,6 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   assert_local_bootstrap_schema "${container}" ocservia
   latest_owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia_latest?sslmode=disable"
   latest_runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia_latest?sslmode=disable"
-  compatibility_before="$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc \
-    "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")"
-  OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
-    "${BIN}" --schema-compatibility-check=36 \
-    >"${TMP_ROOT}/pg${major}-schema-compatibility-check.log" 2>&1
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc \
-    "SELECT \"current_schema\", minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton")" = "${compatibility_before}"
-  if OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
-    "${BIN}" --schema-compatibility-check=33 \
-    >"${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log" 2>&1; then
-    echo "schema compatibility check accepted a Controller below the declared minimum" >&2
-    exit 1
-  fi
-  grep -Fq 'schema compatibility does not allow Controller schema 33' \
-    "${TMP_ROOT}/pg${major}-schema-compatibility-rejected.log"
-
   # CLI bootstrap and role lifecycle fixtures must not alter the shared
   # database used by the authentication and migration acceptance below.
   clone_database "${container}" ocservia ocservia_startup
@@ -525,9 +509,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 -race ./internal/coordination ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./migrations -run '^TestControllerSchemaCompatibility.*Integration$' -count=1)
+    go test -p 1 ./migrations -run '^TestMigrationFailureIsAtomicIntegration$' -count=1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/api -run '^TestReadinessHonorsSchemaCompatibilityContractIntegration$' -count=1)
+    go test -p 1 ./internal/api -run '^TestReadinessRequiresDatabaseConnectivityIntegration$' -count=1)
 
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \

@@ -53,7 +53,6 @@ type Server struct {
 	devAuth           bool
 	devAuthToken      string
 	browserOrigin     string
-	expectedSchema    int64
 	localSlice        *localslice.Service
 	localSliceMu      sync.RWMutex
 	localSimulator    bool
@@ -96,7 +95,6 @@ type HTTPConfig struct {
 	RequestTimeout     time.Duration
 	DevAuth            bool
 	DevAuthToken       string
-	ExpectedSchema     int64
 	BrowserOrigin      string
 	AuthTrustedProxies []netip.Prefix
 	EventStreams       eventstream.Config
@@ -141,7 +139,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	if service, ok := modules.UserOperations.(*useroperations.Service); ok && service == nil {
 		modules.UserOperations = nil
 	}
-	s := &Server{backend: backend, build: build, logger: logger, bodyLimit: config.BodyLimit, requestTimeout: config.RequestTimeout, devAuth: config.DevAuth, devAuthToken: config.DevAuthToken, expectedSchema: config.ExpectedSchema,
+	s := &Server{backend: backend, build: build, logger: logger, bodyLimit: config.BodyLimit, requestTimeout: config.RequestTimeout, devAuth: config.DevAuth, devAuthToken: config.DevAuthToken,
 		auth: authorization.Authentication, rbac: authorization.RBAC, approvals: authorization.Approvals, audit: authorization.Audit, certificates: modules.Certificates, configPlanLookup: modules.ConfigPlans}
 	s.EnableBrowserOrigin(config.BrowserOrigin)
 	s.ConfigureAuthProxies(config.AuthTrustedProxies)
@@ -169,8 +167,8 @@ var _ nodehttp.Reader = (*telemetrystore.Service)(nil)
 
 // NewBackend is a default-only compatibility constructor. Optional modules and
 // authentication are explicitly disabled, not waiting for later injection.
-func NewBackend(address string, backend database.Backend, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
-	s, err := NewServer(HTTPConfig{Address: address, BodyLimit: bodyLimit, RequestTimeout: requestTimeout, DevAuth: devAuth, DevAuthToken: devAuthToken, ExpectedSchema: expectedSchema, EventStreams: eventstream.DefaultConfig()}, backend, build, logger, Modules{}, Authorization{})
+func NewBackend(address string, backend database.Backend, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string) *Server {
+	s, err := NewServer(HTTPConfig{Address: address, BodyLimit: bodyLimit, RequestTimeout: requestTimeout, DevAuth: devAuth, DevAuthToken: devAuthToken, EventStreams: eventstream.DefaultConfig()}, backend, build, logger, Modules{}, Authorization{})
 	if err != nil {
 		panic(err) // Only the package's valid default configuration is used here.
 	}

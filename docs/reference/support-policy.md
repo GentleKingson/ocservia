@@ -11,7 +11,10 @@ published tags, artifacts and release history are unchanged.
 `v1.1.0` removes software upgrade, downgrade and rollback compatibility
 admission, historical migration compatibility probes, legacy deployment
 auto-conversion, and historical release compatibility matrices and gates.
-This includes the public `--schema-compatibility-check` CLI. There is no
+This includes the public `--schema-compatibility-check` CLI and the readiness
+response's `schema_version` field. Readiness checks current core table reads,
+database permissions and event-stream health, not migration history or a
+Controller schema range. There is no
 minimum source or rollback version, fixed upgrade source, version allowlist,
 force/skip switch, or replacement capability/schema-number version fence.
 Install, upgrade and rollback remain explicit operations on verified targets;

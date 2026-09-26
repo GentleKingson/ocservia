@@ -8,7 +8,6 @@ type PoolStats struct {
 
 // Diagnostics backs Controller readiness and the existing pool metrics.
 type Diagnostics interface {
-	Ping(context.Context) error
+	CheckReadiness(context.Context) error
 	PoolStats() PoolStats
-	ControllerSchema(context.Context, int64) (int64, error)
 }

@@ -121,7 +121,7 @@ func TestLocalUserLifecycleIntegration(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	config := testHTTPConfig(false)
-	config.Address, config.ExpectedSchema, config.BrowserOrigin = "", 32, "https://console.example"
+	config.Address, config.BrowserOrigin = "", "https://console.example"
 	server, err := NewServer(config, postgres.WrapPool(pool), BuildInfo{}, slog.New(slog.NewJSONHandler(&logs, nil)), Modules{}, Authorization{Authentication: svc, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvals.NewBackend(postgres.WrapPool(pool))})
 	if err != nil {
 		t.Fatal(err)

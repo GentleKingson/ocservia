@@ -14,16 +14,11 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		t.Helper()
 		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		if schema, err := runtime.ControllerSchema(bounded, 36); err != nil || schema != 36 {
-			t.Fatalf("runtime schema: %d %v", schema, err)
+		if err := runtime.CheckReadiness(bounded); err != nil {
+			t.Fatalf("runtime connectivity: %v", err)
 		}
 	}
 	ready()
-	for _, expected := range []int64{0, 33, 34, 35, 37, 1 << 40} {
-		if _, err := runtime.ControllerSchema(ctx, expected); !errors.Is(err, ErrSchema) {
-			t.Fatalf("incompatible Controller %d: %v", expected, err)
-		}
-	}
 	for _, change := range []struct{ mutate, restore string }{
 		{`UPDATE backend_migrations SET dirty=true`, `UPDATE backend_migrations SET dirty=false`},
 		// The immutable root receipt stays at 34; revision 25 independently
@@ -35,12 +30,12 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		if n, err := owner.Exec(ctx, change.mutate); err != nil || n != 1 {
 			t.Fatalf("alter schema fixture: %d %v", n, err)
 		}
-		_, checkErr := runtime.ControllerSchema(ctx, 36)
+		checkErr := owner.ValidateSchema(ctx, 36)
 		if _, err := owner.Exec(ctx, change.restore); err != nil {
 			t.Fatal(err)
 		}
 		if checkErr == nil {
-			t.Fatalf("runtime accepted altered schema ledger: %s", change.mutate)
+			t.Fatalf("owner accepted altered schema ledger: %s", change.mutate)
 		}
 		ready()
 	}
@@ -51,7 +46,7 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 	if _, err := owner.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=REPEAT('0',64) WHERE version=3 AND ordinal=1`); err != nil {
 		t.Fatal(err)
 	}
-	_, checkErr := runtime.ControllerSchema(ctx, 36)
+	checkErr := owner.ValidateSchema(ctx, 36)
 	if _, err := owner.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=? WHERE version=3 AND ordinal=1`, checksum); err != nil {
 		t.Fatal(err)
 	}
@@ -65,13 +60,13 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		t.Fatal(err)
 	}
 	bounded, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	_, checkErr = runtime.ControllerSchema(bounded, 36)
+	checkErr = owner.ValidateSchema(bounded, 36)
 	cancel()
 	if err := releaseMigrationConnection(conn, name); err != nil {
 		t.Fatal(err)
 	}
 	if !errors.Is(checkErr, context.DeadlineExceeded) {
-		t.Fatalf("migration lock wait ignored readiness deadline: %v", checkErr)
+		t.Fatalf("migration lock wait ignored validation deadline: %v", checkErr)
 	}
 	ready()
 	if err := owner.ValidateSchema(ctx, 36); err != nil {

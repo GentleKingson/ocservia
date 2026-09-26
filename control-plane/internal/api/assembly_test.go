@@ -30,7 +30,7 @@ import (
 )
 
 func testHTTPConfig(devAuth bool) HTTPConfig {
-	return HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, DevAuth: devAuth, ExpectedSchema: 36, BrowserOrigin: authTestOrigin, EventStreams: eventstream.DefaultConfig()}
+	return HTTPConfig{Address: "127.0.0.1:0", BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, DevAuth: devAuth, BrowserOrigin: authTestOrigin, EventStreams: eventstream.DefaultConfig()}
 }
 
 type constructionReader struct {

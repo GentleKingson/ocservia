@@ -20,13 +20,8 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is not ready", "database dependency is unavailable")
 		return
 	}
-	if err := diagnostics.Ping(ctx); err != nil {
+	if err := diagnostics.CheckReadiness(ctx); err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is not ready", "database dependency is unavailable")
-		return
-	}
-	schema, err := diagnostics.ControllerSchema(ctx, s.expectedSchema)
-	if err != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/schema-unavailable", "Service is not ready", "database schema is unavailable")
 		return
 	}
 	_, platformHub, operationHub := s.eventStreamSnapshots()
@@ -34,7 +29,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/event-stream-unavailable", "Service is not ready", "event stream watcher is recovering")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schema_version": schema})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {

@@ -109,7 +109,7 @@ func TestAuthSourceTrustAndNormalization(t *testing.T) {
 }
 
 func TestAuthRouteAdmissionAndIsolation(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	var err error
 	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	if err != nil {
@@ -144,7 +144,7 @@ func TestAuthRouteAdmissionAndIsolation(t *testing.T) {
 }
 
 func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
-	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	var err error
 	server.auth, err = auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://admin.example.com/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {

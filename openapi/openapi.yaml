@@ -1956,15 +1956,11 @@ components:
     Readiness:
       type: object
       additionalProperties: false
-      required: [status, schema_version]
+      required: [status]
       properties:
         status:
           type: string
           const: ok
-        schema_version:
-          type: integer
-          format: int64
-          minimum: 1
     BuildInfo:
       type: object
       additionalProperties: false

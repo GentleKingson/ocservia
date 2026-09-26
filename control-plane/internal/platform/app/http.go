@@ -39,7 +39,7 @@ type httpServices struct {
 	localSlice     *localslice.Service
 }
 
-func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, expectedSchemaVersion int64, logger *slog.Logger, services httpServices) (*api.Server, error) {
+func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger, services httpServices) (*api.Server, error) {
 	var err error
 	if err := cfg.EventStreams.Validate(); err != nil {
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
@@ -58,7 +58,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 	}
 	server, err := api.NewServer(api.HTTPConfig{
 		Address: cfg.HTTPAddress, BodyLimit: cfg.BodyLimit, RequestTimeout: cfg.RequestTimeout,
-		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken, ExpectedSchema: expectedSchemaVersion,
+		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken,
 		BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
 	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, services.modules,
 		api.Authorization{Authentication: authService, RBAC: rbac.NewBackend(backend), Approvals: approvals.NewBackend(backend), Audit: auditManager})

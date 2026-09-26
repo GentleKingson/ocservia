@@ -40,7 +40,6 @@ type Config struct {
 	LocalBootstrapUsername   string
 	LocalBootstrapPassword   string
 	LocalBootstrapWorkspace  string
-	SchemaCompatibilityCheck int64
 	RuntimeDBRole            string
 	Environment              string
 	HTTPAddress              string
@@ -318,7 +317,6 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	completeBootstrap := fs.Bool("complete-local-bootstrap", false, "complete an eligible pre-R4 Local initialization with an independent approver, then exit")
 	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
-	schemaCompatibilityCheck := fs.Int64("schema-compatibility-check", 0, "validate the stored Controller schema compatibility contract for a schema version, then exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, errors.New("invalid command-line flags")
 	}
@@ -357,7 +355,6 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	cfg.Role = Role(*role)
 	cfg.MigrateOnly = *migrateOnly
-	cfg.SchemaCompatibilityCheck = *schemaCompatibilityCheck
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -370,7 +367,7 @@ func (c Config) Validate() error {
 	if c.DatabaseBackend != "" && c.DatabaseBackend != "postgres" && c.DatabaseBackend != "mysql" && c.DatabaseBackend != "mariadb" {
 		return errors.New("OCSERV_DATABASE_BACKEND must be postgres, mysql or mariadb")
 	}
-	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "" || c.LocalBootstrapApproverUsername == "") {
+	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "" || c.LocalBootstrapApproverUsername == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
 	}
 	switch c.Role {
@@ -386,12 +383,6 @@ func (c Config) Validate() error {
 	}
 	if c.MigrateOnly && strings.TrimSpace(c.RuntimeDBRole) == "" {
 		return errors.New("OCSERV_RUNTIME_DATABASE_ROLE is required with --migrate-only")
-	}
-	if c.SchemaCompatibilityCheck < 0 {
-		return errors.New("--schema-compatibility-check must be positive")
-	}
-	if c.MigrateOnly && c.SchemaCompatibilityCheck > 0 {
-		return errors.New("--migrate-only and --schema-compatibility-check are mutually exclusive")
 	}
 	if err := connection.ValidateOptions(connection.Options{Backend: c.DatabaseBackend, Environment: c.Environment, URL: c.DatabaseURL, CAFile: c.DatabaseTLSCAFile}); err != nil {
 		return err
@@ -457,7 +448,7 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	oneShotDatabaseCommand := c.MigrateOnly || c.SchemaCompatibilityCheck > 0 || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap
+	oneShotDatabaseCommand := c.MigrateOnly || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}

@@ -16,7 +16,7 @@ import (
 )
 
 func TestShutdownWaitsForTimedOutHandler(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Millisecond, false, "", 36)
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Millisecond, false, "")
 	release, finished := make(chan struct{}), make(chan struct{})
 	defer close(release)
 	handler := s.timeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +45,7 @@ func TestShutdownWaitsForTimedOutHandler(t *testing.T) {
 }
 
 func TestShutdownDoesNotReopenEventStreams(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 36)
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := s.Shutdown(ctx); err != nil {
@@ -61,7 +61,7 @@ func TestShutdownDoesNotReopenEventStreams(t *testing.T) {
 }
 
 func TestShutdownTimeoutClosesConnections(t *testing.T) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 36)
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	started, finished := make(chan struct{}), make(chan struct{})
 	s.http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
