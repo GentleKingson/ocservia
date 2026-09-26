@@ -11,6 +11,15 @@ on:
         description: Public test CA PEM, never a private key
         type: string
         default: ''
+      probe_mode:
+        description: Existing P1 fixture or real Integrated Controller
+        type: choice
+        options: [fixture, controller]
+        default: fixture
+      candidate_sha:
+        description: Exact candidate source SHA required for Controller mode
+        type: string
+        default: ''
   push:
     branches: [codex/p1-integrated-network]
     paths:
@@ -44,8 +53,11 @@ jobs:
         env:
           P1_PUBLIC_ADDRESS: ${{ inputs.public_address }}
           P1_PUBLIC_CA_PEM: ${{ inputs.public_ca_pem }}
+          PROBE_MODE: ${{ inputs.probe_mode }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           python3 scripts/probe-integrated-public.py --address "${P1_PUBLIC_ADDRESS}" \
+            --mode "${PROBE_MODE}" --candidate-sha "${CANDIDATE_SHA}" \
             --output "${RUNNER_TEMP}/public-client/result.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()

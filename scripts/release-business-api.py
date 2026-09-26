@@ -506,8 +506,9 @@ def smoke_rollback():
     script = WORK / 'reject-new-config-reload'
     script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
     dropin = WORK / 'config-reload-fault.conf'
-    dropin.write_text('[Service]\nExecReload=\nExecReload=/run/t07-config-reload $MAINPID\n')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/run/t07-config-reload')
+    # /run can be a noexec mount in the isolated systemd container.
+    dropin.write_text('[Service]\nExecReload=\nExecReload=/usr/local/sbin/t07-config-reload $MAINPID\n')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/usr/local/sbin/t07-config-reload')
     run('sudo', 'mkdir', '-p', '/etc/systemd/system/ocserv.service.d')
     run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin),
         '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf')
@@ -527,7 +528,7 @@ def smoke_rollback():
         assert api(f'nodes/{node}')['config_revision'] == 1
         record('smoke_config_plan_rolled_back', operation_id=operation['id'], state=result['config_apply_state'])
     finally:
-        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/run/t07-config-reload')
+        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/usr/local/sbin/t07-config-reload')
         run('sudo', 'systemctl', 'daemon-reload')
 
 
@@ -567,8 +568,8 @@ def configuration():
     script = WORK / 'reject-new-config-reload'
     script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
     dropin = WORK / 'config-reload-fault.conf'
-    dropin.write_text('[Service]\nExecReload=\nExecReload=/run/t07-config-reload $MAINPID\n')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/run/t07-config-reload')
+    dropin.write_text('[Service]\nExecReload=\nExecReload=/usr/local/sbin/t07-config-reload $MAINPID\n')
+    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/usr/local/sbin/t07-config-reload')
     run('sudo', 'mkdir', '-p', '/etc/systemd/system/ocserv.service.d')
     run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin), '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf')
     try:
@@ -582,7 +583,7 @@ def configuration():
         assert snapshot['root_count_state_response'] == '1|applied|1'
         record('complete_config_native_rollback', operation_id=operation['id'], state=result['config_apply_state'], restored_hash=physical_before)
     finally:
-        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/run/t07-config-reload')
+        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/usr/local/sbin/t07-config-reload')
         run('sudo', 'systemctl', 'daemon-reload')
     def owner():
         return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
