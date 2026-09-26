@@ -162,6 +162,20 @@ def rejected_upgrade():
     pending = json.loads((state.parent / 'pending-release.json').read_text())
     assert pending['phase'] == 'failed' and pending['manifest']['source_commit'] == os.environ['CANDIDATE_SHA']
     assert (Path(os.environ['OCSERV_SIGNER_STATE_DIR']) / 'ledger.db').is_file()
+    for name in ('postgres', 'backup'):
+        service = run(COMPOSE, 'ps', '-a', '-q', name).stdout.strip()
+        assert service
+        state = json.loads(run('docker', 'inspect', service).stdout)[0]['State']
+        if state['Status'] == 'created':
+            run('docker', 'start', service)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            state = json.loads(run('docker', 'inspect', service).stdout)[0]['State']
+            assert state['Status'] == 'running' and state['Health']['Status'] != 'unhealthy', state['Status']
+            if state['Health']['Status'] == 'healthy':
+                break
+            time.sleep(2)
+        assert state['Health']['Status'] == 'healthy'
     record('activation_failure_preserves_current_and_pending_state')
 
 
