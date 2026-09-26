@@ -1,12 +1,11 @@
 package result
 
 import (
-	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/atomicjson"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/state"
 )
 
@@ -41,39 +40,5 @@ func Write(path string, phase Phase) error {
 		return errors.New("phase result path must be absolute")
 	}
 	phase.SchemaVersion = PhaseSchemaVersion
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".g6-phase-result-*")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	encoder := json.NewEncoder(temporary)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(phase); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	return errors.Join(directory.Sync(), directory.Close())
+	return atomicjson.Write(path, phase)
 }

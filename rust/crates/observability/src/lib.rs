@@ -1,8 +1,6 @@
-//! Shared structured logging and bounded in-process Agent metrics.
+//! Shared structured logging and runtime task statistics.
 
 #![forbid(unsafe_code)]
-
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Initializes JSON structured logging on stderr using `RUST_LOG` when present.
 ///
@@ -26,41 +24,6 @@ pub fn init(service_name: &'static str) -> Result<(), tracing::subscriber::SetGl
         "service starting"
     );
     Ok(())
-}
-
-/// Minimal counters exported by the Agent/privd boundary in I06.
-#[derive(Debug, Default)]
-pub struct AgentMetrics {
-    reconnects: AtomicU64,
-    privd_failures: AtomicU64,
-    readonly_requests: AtomicU64,
-}
-
-impl AgentMetrics {
-    /// Records an Iroh reconnect attempt.
-    pub fn record_reconnect(&self) {
-        self.reconnects.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Records a privd failure.
-    pub fn record_privd_failure(&self) {
-        self.privd_failures.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Records a read-only collection request.
-    pub fn record_readonly_request(&self) {
-        self.readonly_requests.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Returns `(reconnects, privd_failures, readonly_requests)`.
-    #[must_use]
-    pub fn snapshot(&self) -> (u64, u64, u64) {
-        (
-            self.reconnects.load(Ordering::Relaxed),
-            self.privd_failures.load(Ordering::Relaxed),
-            self.readonly_requests.load(Ordering::Relaxed),
-        )
-    }
 }
 
 /// Spawns a background task that periodically publishes the process's live

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/atomicjson"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/phase"
 )
 
@@ -139,7 +140,7 @@ func TestStoreRejectsTamperedPhasePrefix(t *testing.T) {
 		CompletedPhases: []PhaseRecord{{Name: "build-images", Sequence: 30, CompletedAt: time.Now().UTC()}},
 		UpdatedAt:       time.Now().UTC(),
 	}
-	if err := writeJSONAtomic(filepath.Join(root, "state.json"), tampered); err != nil {
+	if err := atomicjson.Write(filepath.Join(root, "state.json"), tampered); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Open(root, "fd-a", testBinding(), graph, fixedClock()); err == nil {

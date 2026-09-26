@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/atomicjson"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/phase"
 )
 
@@ -324,7 +325,7 @@ func validateUnique(kind string, values []string) error {
 }
 
 func (store *Store) persist() error {
-	return writeJSONAtomic(filepath.Join(store.Root, "state.json"), store.state)
+	return atomicjson.Write(filepath.Join(store.Root, "state.json"), store.state)
 }
 
 func (store *Store) appendEvent(event Event) error {
@@ -341,43 +342,4 @@ func (store *Store) appendEvent(event Event) error {
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	return errors.Join(encodeErr, syncErr, closeErr)
-}
-
-func writeJSONAtomic(path string, value any) error {
-	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, ".g6-state-*")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	encoder := json.NewEncoder(temporary)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	directoryHandle, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	return errors.Join(directoryHandle.Sync(), directoryHandle.Close())
 }
