@@ -65,9 +65,7 @@ the distinct `simulation_result` event type. Agent timestamps remain history
 data and never replace Controller-observed authority timestamps.
 
 Binary rollback must stop new command dispatch and preserve the Agent SQLite
-journal. Applying the version 9 down migration removes the supported-version
-constraint; applying version 8 down removes the persisted hash-version column;
-applying version 7 down deletes result history and simulation-result events.
-Use the version 7 rollback only after that destructive loss is accepted. The
-Agent journal schema is forward compatible and should not be deleted during
-rollback.
+journal and Controller result history. The current tree provides no database
+down-migration path or cross-version journal compatibility guarantee. Use a
+forward fix or an explicitly planned isolated restore; never delete the
+journal or reset replay protection to make an older binary start.
