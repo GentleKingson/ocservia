@@ -214,7 +214,8 @@ fi
 # the exact-value redactor runs; the uploaded results never contain cookies.
 exec >"${work}/private.log" 2>&1
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=t07-ca \
-  -addext basicConstraints=critical,CA:TRUE -keyout "${work}/private/ca.key" -out "${work}/ca.crt"
+  -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
+  -keyout "${work}/private/ca.key" -out "${work}/ca.crt"
 chmod 444 "${work}/ca.crt"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 openssl req -new -newkey rsa:2048 -nodes -subj /CN=localhost \
