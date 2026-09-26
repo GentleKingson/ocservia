@@ -155,6 +155,10 @@ grep -Fq 'clone_database "${container}" ocservia_latest ocservia_policy_api' \
   "${ROOT}/scripts/database-integration.sh"
 grep -Fq 'dropdb -U ocservia_owner ocservia_policy_api' \
   "${ROOT}/scripts/database-integration.sh"
+if grep -Eq 'PRE34_|\.down\.sql|schema-compatibility-check' \
+  "${ROOT}/scripts/database-integration.sh"; then
+  echo 'current PostgreSQL acceptance still runs a historical compatibility path' >&2; exit 1
+fi
 # This small fixture RUNS the slash-separated -run expression, including
 # literal regex metacharacters and a sibling that must never execute.
 mkdir "${tmp}/selection"
