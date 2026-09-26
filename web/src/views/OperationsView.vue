@@ -12,12 +12,7 @@ import {
   workspaceContext,
 } from "../api/workspace";
 import { listAgentRollouts } from "../api/agents";
-import {
-  completeOperationDetail,
-  failOperationDetail,
-  startOperationDetail,
-  type OperationDetailState,
-} from "../shared/operation-detail";
+import type { OperationDetailState } from "../shared/operation-detail";
 import { operationStatusKey } from "../shared/operation-status";
 import { formatTimestamp } from "../shared/timestamp";
 
@@ -26,9 +21,7 @@ const { t } = useI18n();
 const router = useRouter();
 const rollouts = ref<AgentRollout[]>([]);
 const rolloutsUnavailable = ref(false);
-const detailState = ref<OperationDetailState<Operation>>(
-  startOperationDetail(),
-);
+const detailState = ref<OperationDetailState<Operation>>({ error: "" });
 const selectedOperation = computed(() => detailState.value.selected);
 const detailError = computed(() => detailState.value.error);
 const loading = ref(false);
@@ -107,7 +100,7 @@ async function inspectOperation(operationId: string): Promise<void> {
   detailController = controller;
   const sequence = ++detailSequence;
   detailLoading.value = true;
-  detailState.value = startOperationDetail();
+  detailState.value = { error: "" };
   try {
     await getWorkspace();
     const context = workspaceContext();
@@ -120,10 +113,10 @@ async function inspectOperation(operationId: string): Promise<void> {
       current.generation !== context.generation
     )
       return;
-    detailState.value = completeOperationDetail(operation);
+    detailState.value = { selected: operation, error: "" };
   } catch {
     if (controller.signal.aborted || sequence !== detailSequence) return;
-    detailState.value = failOperationDetail(t("operationDetailsUnavailable"));
+    detailState.value = { error: t("operationDetailsUnavailable") };
   } finally {
     if (detailController === controller) {
       detailController = undefined;
@@ -148,7 +141,7 @@ function openRollout(rolloutId: string): void {
 }
 
 function refreshForWorkspace(): void {
-  detailState.value = startOperationDetail();
+  detailState.value = { error: "" };
   void loadOperations();
   void loadRollouts();
 }

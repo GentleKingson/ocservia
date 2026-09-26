@@ -13,6 +13,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
+	"golang.org/x/mod/semver"
 )
 
 // ValidateVersion rejects hash algorithms that this binary cannot verify.
@@ -277,69 +278,10 @@ func ValidAgentUpgradeTargetVersion(version string) bool {
 	if len(version) < 5 || len(version) > 128 {
 		return false
 	}
-	core := version
-	if index := strings.IndexByte(version, '+'); index >= 0 {
-		if !validSemverIdentifiers(version[index+1:], false) {
-			return false
-		}
-		core = version[:index]
-	}
-	if index := strings.IndexByte(core, '-'); index >= 0 {
-		if !validSemverIdentifiers(core[index+1:], true) {
-			return false
-		}
-		core = core[:index]
-	}
-	major, minor, found := strings.Cut(core, ".")
-	if !found {
-		return false
-	}
-	minor, patch, found := strings.Cut(minor, ".")
-	if !found || strings.Contains(patch, ".") {
-		return false
-	}
-	return validSemverNumber(major) && validSemverNumber(minor) && validSemverNumber(patch)
-}
-
-// validSemverIdentifiers validates dot-separated prerelease or build
-// identifiers. Prerelease numeric identifiers must not carry leading zeros;
-// build identifiers are permissive per SemVer 2.0.0.
-func validSemverIdentifiers(value string, prerelease bool) bool {
-	if value == "" {
-		return false
-	}
-	for _, identifier := range strings.Split(value, ".") {
-		if identifier == "" {
-			return false
-		}
-		numeric := true
-		for index := 0; index < len(identifier); index++ {
-			c := identifier[index]
-			if c >= '0' && c <= '9' {
-				continue
-			}
-			numeric = false
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-') {
-				return false
-			}
-		}
-		if numeric && prerelease && !validSemverNumber(identifier) {
-			return false
-		}
-	}
-	return true
-}
-
-func validSemverNumber(value string) bool {
-	if value == "" || len(value) > 1 && value[0] == '0' {
-		return false
-	}
-	for index := 0; index < len(value); index++ {
-		if value[index] < '0' || value[index] > '9' {
-			return false
-		}
-	}
-	return true
+	core, _, _ := strings.Cut(version, "+")
+	core, _, _ = strings.Cut(core, "-")
+	// x/mod also accepts abbreviated versions; release identities do not.
+	return strings.Count(core, ".") == 2 && semver.IsValid("v"+version)
 }
 
 // PopulateV1 fills the versioned hash fields on a reconcilable command envelope.

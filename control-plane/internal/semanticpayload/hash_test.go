@@ -157,7 +157,7 @@ func TestAgentUpgradeReleaseIdentityGrammar(t *testing.T) {
 			t.Fatalf("expected valid target version: %q", version)
 		}
 	}
-	for _, version := range []string{"", "1", "1.2", "1.2.3.4", "01.2.3", "1.02.3", "1.2.03", "v1.2.3", "1.2.3-01", "1.2.3-", "1.2.3+", "1.2.3-alpha..1", "1.2.3-alpha_1", "latest", "1.2.3 ", strings.Repeat("1", 200)} {
+	for _, version := range []string{"", "1", "1.2", "10000", "100.1", "1.2.3.4", "01.2.3", "1.02.3", "1.2.03", "v1.2.3", "1.2.3-01", "1.2.3-", "1.2.3+", "1.2.3-alpha..1", "1.2.3-alpha_1", "latest", "1.2.3 ", strings.Repeat("1", 200)} {
 		if ValidAgentUpgradeTargetVersion(version) {
 			t.Fatalf("expected invalid target version: %q", version)
 		}
