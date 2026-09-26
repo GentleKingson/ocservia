@@ -72,6 +72,39 @@ a separate reconciled operator action. There is no automatic cross-mode
 migration, automatic CRL distribution, HA or forced disconnection of existing
 VPN sessions.
 
+## Candidate pipeline
+
+Dispatch the existing `release-upgrade.yml` with `purpose=integration`,
+`production_signer=true` and the next plain `X.Y.Z` version. This is an explicit
+candidate publication, not a stable tag or Release. Native AMD64/ARM64 producers
+build Agent packages and the nine first-party Controller/Integrated images once.
+The existing scanner gates both platforms before GHCR publication. Ordinary
+diagnostics and clean consumers have read-only permissions; only the candidate
+publication job has `packages:write`.
+
+The `integrated-candidate-<run>-<attempt>` artifact contains signed v2 platform
+manifests, the ephemeral candidate public key, scanned config/Registry digest
+bindings and original producer artifact identities. Retain it, both native
+product artifacts and acceptance evidence before repository retention expires.
+The consumer checks producer-provided checksum/key hashes before pulling; an
+operator must obtain the candidate public key fingerprint through a trusted
+channel, install that key **outside** the bundle, and check out the manifest's
+exact `source_commit`. With the documented Secrets/configuration provisioned,
+use the existing root `controller.sh install --release-file "$MANIFEST"` entry
+point, with `MANIFEST` set to the absolute platform-manifest path. Do not point stable bootstrap at a
+fabricated tag or weaken its published-release source checks. Candidate packages
+may require a read-only GHCR login; never distribute the CI publisher token.
+
+Stable tag builds reuse the original products of a successful main-branch
+Integrated run at the **same SHA and version**, rather than rebuilding binaries
+or images. Missing/expired acceptance artifacts fail closed. Existing stable
+tag binding and release-publishing approval remain required. Stable manifests
+retain accepted per-platform digests, and all nine first-party images must pass
+anonymous Registry reads before a stable Release can be published. A source
+change, including a squash merge, requires a new candidate; never rewrite the
+old manifest's SHA. A successful candidate workflow is not evidence that the
+additional P5 public-network scenarios or a stable Release have run.
+
 ## Network contract
 
 ```text
@@ -134,7 +167,7 @@ streams; this is not proof of original-IP abuse controls behind Edge.
 
 Run locally only on BuildServer, in an isolated checkout. Development builds
 are allowed here; final production-path acceptance must pull approved Registry
-digests instead. NGINX 1.28.3 and Caddy 2.11.4 are digest-pinned; Relay uses the
+digests instead. NGINX 1.30.5 and Caddy 2.11.4 are digest-pinned; Relay uses the
 existing locked iroh-relay 1.2.0 build. No upstream Relay changes are made.
 
 ```bash

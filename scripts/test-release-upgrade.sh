@@ -4,6 +4,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
+(
+  VERSION=1.0.2
+  for PRODUCTION_SIGNER_ACCEPTANCE in false true; do
+    # shellcheck disable=SC1090
+    source <(sed -n '/^managed_options=/,+1p' scripts/release-business-probe.sh)
+    [[ "${managed_options[0]} ${managed_options[1]}" == '--version v1.0.2' ]]
+    if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+      [[ "${managed_options[2]}" == --root-lifecycle && "${#managed_options[@]}" == 3 ]]
+    else
+      [[ "${#managed_options[@]}" == 2 ]]
+    fi
+  done
+)
 # The auth fixture changes only Controller settings. Never race the unchanged
 # transport container against its trust backend, or continue after failed health.
 # shellcheck disable=SC1090
@@ -68,6 +81,8 @@ node scripts/test-release-upgrade.mjs
 bash scripts/test-release-session-compatibility.sh
 node scripts/test-release-selection.mjs
 node scripts/test-release-artifacts.mjs
+node scripts/test-reuse-accepted-products.mjs
+bash scripts/test-controller-candidate.sh
 bash scripts/test-release-test-images.sh
 bash scripts/test-release-rust-cache.sh
 ruby -r yaml -r json - <<'RUBY'
@@ -76,23 +91,35 @@ abort 'upgrade validation must not receive write permissions' unless workflow['p
 jobs = workflow.fetch('jobs')
 ordinary = jobs.fetch('business-probe')
 privileged = jobs.fetch('production-signer-probe')
-abort 'ordinary business diagnostics gained write permissions' unless ordinary['permissions'] == {'contents' => 'read'}
+abort 'ordinary business diagnostics gained write permissions' unless ordinary['permissions'] == {'contents' => 'read', 'packages' => 'read'}
 abort 'ordinary diagnostics must exclude production publication' unless
   ordinary['if'] == "${{ !inputs.production_signer && (inputs.purpose == 'smoke' || inputs.purpose == 'integration') }}" &&
   ordinary.dig('with', 'production_signer') == false
 abort 'candidate publication must be explicitly selected integration' unless
   privileged['if'] == "${{ inputs.production_signer && inputs.purpose == 'integration' }}" &&
-  privileged['permissions'] == {'contents' => 'read', 'packages' => 'write'} &&
+  privileged['permissions'] == {'contents' => 'read', 'packages' => 'read'} &&
   privileged.dig('with', 'production_signer') == true && privileged.dig('with', 'profile') == 'extended'
 abort 'only the opt-in caller may hold write permissions' unless
-  jobs.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['production-signer-probe']
+  jobs.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['production-signer-products']
 diagnostic_path = './.github/workflows/release-business-diagnostic.yml'
 abort 'business callers must use the same checks' unless ordinary['uses'] == diagnostic_path && privileged['uses'] == diagnostic_path
 diagnostic = YAML.safe_load(File.read(diagnostic_path))
-abort 'reusable diagnostics must inherit caller permissions without widening them' if diagnostic.key?('permissions') ||
-  diagnostic.fetch('jobs').values.any? { |job| job.key?('permissions') }
-login = diagnostic.fetch('jobs').fetch('business').fetch('steps').find { |step| step['name'] == 'Authenticate candidate Registry publication' }
-abort 'Registry login must remain opt-in' unless login && login['if'] == 'inputs.production_signer'
+consumer = diagnostic.fetch('jobs').fetch('business')
+producer = jobs.fetch('production-signer-products')
+abort 'clean consumer must be read-only' unless consumer['permissions'] == {'contents' => 'read', 'packages' => 'read'}
+abort 'Registry publication must remain opt-in' unless producer['if'] == "${{ inputs.production_signer && inputs.purpose == 'integration' }}" &&
+  producer['permissions'] == {'contents' => 'read', 'actions' => 'read', 'packages' => 'write'} &&
+  producer['uses'] == './.github/workflows/release-integrated-candidate.yml'
+abort 'diagnostics must contain no write-capable job' if
+  diagnostic.fetch('jobs').values.any? { |job| job.fetch('permissions', {}).values.include?('write') }
+candidate = YAML.safe_load(File.read('.github/workflows/release-integrated-candidate.yml')).fetch('jobs')
+abort 'only publication may write packages' unless
+  candidate.select { |_, job| job.fetch('permissions', {}).values.include?('write') }.keys == ['publish']
+%w[amd64 arm64].each do |arch|
+  abort 'candidate must reuse native release products' unless
+    candidate.fetch(arch)['uses'] == './.github/workflows/release-products.yml' &&
+    candidate.fetch(arch).dig('with', 'arch') == arch
+end
 %w[agent-upgrade controller-upgrade session-compatibility].each do |name|
   matrix = jobs.fetch(name).fetch('strategy').fetch('matrix').fetch('include')
   abort "missing supported architecture: #{name}" unless matrix.map { |row| row['arch'] }.sort == %w[amd64 arm64]
@@ -137,6 +164,11 @@ abort 'fixture invocation must publish one artifact' unless fixture_steps.count 
 end
 products = YAML.safe_load(File.read('.github/workflows/release-products.yml'))
 abort 'product producers must not wait for upgrades' if products.to_json.include?('release-upgrade-unit.sh') || products.to_json.include?('frozen-')
+product_jobs = products.fetch('jobs')
+abort 'stable publication must reuse accepted products instead of building' unless
+  product_jobs.fetch('reuse-accepted')['if'] == "github.event_name == 'push'" &&
+  product_jobs.fetch('build-agent-packages')['if'] == "github.event_name != 'push'" &&
+  product_jobs.fetch('build-controller-images')['if'] == "github.event_name == 'workflow_dispatch'"
 upgrades = YAML.safe_load(File.read('.github/workflows/release-product-upgrade.yml'))
 abort 'upgrades must remain read-only and secret-free' unless upgrades['permissions'] == {'contents' => 'read'} && !upgrades.to_json.include?('secrets')
 unit = upgrades.fetch('jobs').fetch('upgrade')
@@ -203,6 +235,16 @@ end
   end
 end
 publish = release.fetch('jobs').fetch('publish-release-packages')
+publish_names = publish.fetch('steps').map { |step| step['name'] }
+bind_index = publish_names.index('Verify accepted bindings before any stable Registry write')
+push_index = publish_names.index('Push Controller images & assemble multi-platform indexes')
+abort 'accepted bindings must be verified on the publishing runner before Registry writes' unless bind_index && push_index && bind_index < push_index
+binding = publish.fetch('steps').fetch(bind_index)
+abort 'both native legs must reuse the same accepted bundle before publishing' unless
+  binding.dig('env', 'ARM64_EXPECTED') == '${{ needs.build-arm64.outputs.accepted-sha256 }}' &&
+  binding.fetch('run').include?('[[ "$EXPECTED" =~ ^[0-9a-f]{64}$ && "$EXPECTED" == "$ARM64_EXPECTED" ]]')
+abort 'dispatch package validation must not require stable acceptance' if
+  release_jobs.fetch('validate-release-packages').to_json.include?('accepted-integrated')
 abort 'production approval lost' unless publish['environment'] == 'release-publishing'
 abort 'publish bypasses Release Check' unless publish.fetch('needs').include?('release-check')
 abort 'publish must handle optional skips but reject dispatch, cancellation and failed acceptance' unless
