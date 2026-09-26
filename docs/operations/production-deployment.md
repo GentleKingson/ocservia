@@ -372,9 +372,8 @@ long-term lifecycle manager.
 Upgrade validates the confirmed current state and target first, checks the
 target `source_commit` against a clean checkout before any Compose operation,
 checks the current descriptor's dependency and backup health, renders the target Compose configuration,
-pulls target images while the current release is still running, migrates a
-legacy application network when required (see the authentication section below),
-and then runs the existing database migration and `up -d --wait` dependency graph. Release smoke
+pulls target images while the current release is still running, then runs the
+existing database migration and `up -d --wait` dependency graph. Release smoke
 must pass before it atomically rolls the complete manifests into
 `previous-release.json` and `current-release.json`. An equal-version manifest
 that is identical to the current state is a no-op; downgrade attempts are
@@ -599,42 +598,12 @@ automatically follows `OCSERV_GATEWAY_APPLICATION_IP`. An explicit
 `OCSERV_AUTH_TRUSTED_PROXY_CIDRS` overrides that default and must be updated
 when the chosen static IP changes; an explicitly empty value trusts no proxy.
 
-The following v0.4.0 network migration is historical pre-1.0 behavior, not a
-supported path into `1.x`. Those deployments must be
-[redeployed](../getting-started/production.md) under the
-[support policy](../reference/support-policy.md).
-
-Upgrading the legacy v0.4.0 application network requires a maintenance window;
-merely restarting containers does not change network IPAM. The guarded
-`controller.sh upgrade --release-file ...` owns this one-time migration after
-configuration validation and image pulls, before activation. It checks the
-network's Compose ownership, internal bridge topology and attached services,
-then stops/removes only gateway, control-plane and transportd and removes only
-the application network. Normal `up -d --wait` recreates them with the target
-IPAM. PostgreSQL, backup, other networks, named volumes and confirmed lifecycle
-state remain in place. An already matching or absent application network needs
-no removal; unexpected ownership, attachments or non-legacy IPAM fail closed.
-Arbitrary later IPAM changes are not automatically migrated.
-
-Choose a non-overlapping subnet and make existing explicit proxy CIDRs match
-the new static address before upgrading. If network removal or activation
-fails, applications may remain unavailable; pending evidence is retained and
-confirmed manifests are unchanged. Correct the cause and retry the identical
-target, checkout and environment through `upgrade`; it re-inspects the live
-network, including the state where removal already succeeded. Do not delete
-pending state, invoke direct Compose, use `down --volumes`, or purge data.
-Ordinary gateway recreation after migration keeps the same trusted `/32`.
-
-This historical network transition is a **forward-only deployment change** from v0.4.0. The changed
-Compose/security deployment contract makes standard `controller.sh rollback`
-refuse that previous release; database compatibility alone is insufficient.
-Before rollout, verify the backup/PITR recovery path and retain release bundles
-and configuration. Prefer same-target recovery after failure. If that cannot
-restore service, preserve failure evidence and follow the
-[backend-specific recovery procedure](incident-recovery.md#database-recovery) in an isolated
-deployment, validating readiness, authentication and node
-state before redirecting traffic. Do not force old images onto migrated state
-or bypass the rollback deployment-contract guard.
+Legacy application-network detection and automatic conversion have been removed.
+Changing an existing network layout requires an explicit operator redeployment;
+the lifecycle does not remove networks or attached services to force it to fit.
+Preserve durable state and follow [incident recovery](incident-recovery.md)
+when a target cannot start with the existing deployment. A missing compatibility
+rejection is not proof that cross-version state is safe.
 
 The shipped Caddy overwrites `X-Ocservia-Client-IP` with its direct peer address.
 The API accepts this single IP only from configured trusted peers; it ignores

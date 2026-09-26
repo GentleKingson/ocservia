@@ -41,6 +41,10 @@ if [[ "${1:-}" == compose && "${2:-}" == up && "${3:-}" == --help ]]; then
   printf '%s\n' '      --wait                         Wait for services to be running|healthy'
   exit 0
 fi
+if [[ "${1:-}" == network ]]; then
+  echo 'lifecycle must not inspect or convert legacy networks' >&2
+  exit 97
+fi
 if [[ "${1:-}" == version ]]; then
   printf '%s\n' "${MOCK_DOCKER_ARCH:-amd64}"
   exit 0
@@ -59,9 +63,7 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
   "${OCSERV_POSTGRES_IMAGE:-}" "${OCSERV_OTEL_IMAGE:-}" >>"${CONTROLLER_TEST_ENV_LOG}"
 case "${1:-}" in
   config)
-    if [[ "${2:-}" == --format && "${3:-}" == json ]]; then
-      printf '%s\n' '{"name":"ocservia-production","networks":{"application":{"name":"ocservia-production_application","internal":true,"ipam":{"config":[{"subnet":"172.30.240.0/24","ip_range":"172.30.240.128/25"}]}}},"services":{"gateway":{"networks":{"application":{}}},"control-plane":{"networks":{"application":{}}},"transportd":{"networks":{"application":{}}}}}'
-    fi
+    [[ "$*" == 'config --quiet' ]]
     exit "${MOCK_CONFIG_EXIT:-0}"
     ;;
   pull) exit "${MOCK_PULL_EXIT:-0}" ;;
@@ -436,12 +438,11 @@ test "$(stat -c '%u:%a' "${upgrade_success_state}/previous-release.json")" = "$(
 test "$(sed -n '1p' "${upgrade_success_state}/compose.log")" = "ps --format json postgres backup"
 test "$(sed -n '2p' "${upgrade_success_state}/compose.log")" = "config --quiet"
 test "$(sed -n '3p' "${upgrade_success_state}/compose.log")" = "pull"
-test "$(sed -n '4p' "${upgrade_success_state}/compose.log")" = "config --format json"
-test "$(sed -n '5p' "${upgrade_success_state}/compose.log")" = "up -d --wait"
+test "$(sed -n '4p' "${upgrade_success_state}/compose.log")" = "up -d --wait"
 test "$(wc -l <"${upgrade_success_state}/smoke.log")" -eq 1
 grep -Fq -- '--release-file ' "${upgrade_success_state}/smoke.log"
 test "$(find "${upgrade_success_state}" -maxdepth 1 -name '.*release.json.*' -print | wc -l)" -eq 0
-test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 5
+test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 4
 [[ "$(sed -n '1p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
 [[ "$(sed -n '2p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '3p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
@@ -896,7 +897,7 @@ for failure_case in config pull up; do
       ;;
     up)
       grep -Fq 'activation started but was not confirmed successful' "${failure_state}/output.log"
-      test "$(wc -l <"${failure_state}/compose.log")" -eq 5
+      test "$(wc -l <"${failure_state}/compose.log")" -eq 4
       ;;
   esac
 done
