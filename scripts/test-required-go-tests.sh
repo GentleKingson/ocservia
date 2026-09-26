@@ -102,11 +102,11 @@ for mode in check select; do
   fi
 done
 for script in database-integration.sh database-foundation-integration.sh; do
-  for scope in invalid ''; do
+  for scope in invalid '' compatibility; do
   if DATABASE_TEST_SCOPE="${scope}" bash "${ROOT}/scripts/${script}" >"${tmp}/scope.log" 2>&1; then
     echo 'invalid scope accepted' >&2; exit 1
   fi
-  grep -Fq 'DATABASE_TEST_SCOPE must be smoke, compatibility, full or regression' "${tmp}/scope.log"
+  grep -Fq 'DATABASE_TEST_SCOPE must be smoke, full or regression' "${tmp}/scope.log"
   done
 done
 # PostgreSQL full acceptance keeps each package's complete Integration suite;
@@ -247,7 +247,7 @@ grep -q 'test timed out after 1s' "${tmp}/timeout.log"
 test -f "${tmp}/timeout-stopped"
 
 # Run the actual foundation routing with disposable command stubs, not databases.
-cp "${ROOT}/scripts/database-foundation-integration.sh" "${ROOT}/scripts/env.sh" "${tmp}/wrapper/scripts/"
+cp "${ROOT}/scripts/database-foundation-integration.sh" "${ROOT}/scripts/database-postgres-smoke.sh" "${ROOT}/scripts/env.sh" "${tmp}/wrapper/scripts/"
 cp "${ROOT}/scripts/required-go-tests.txt" "${tmp}/wrapper/scripts/"
 mkdir "${tmp}/wrapper/control-plane"
 cat >"${tmp}/wrapper/scripts/required-go-tests.sh" <<'SH'
@@ -298,6 +298,15 @@ grep -q '^backend-policy-userstate --select -race -timeout=10m$' "${tmp}/current
 grep -q '^backend-policy-useroperations --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route"
 echo 'Full current database routing passed'
+for script in database-foundation-integration.sh database-postgres-smoke.sh; do
+  export ROUTE_LOG="${tmp}/${script}.route"
+  PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=17 \
+    bash "${tmp}/wrapper/scripts/${script}" >/dev/null
+  test "$(wc -l <"${ROUTE_LOG}")" -eq 2
+  grep -q '^--smoke ./internal/platform/app TestDatabaseCoreSmoke$' "${ROUTE_LOG}"
+  grep -Eq '^--smoke ./(internal/database/mysql|migrations) TestDatabaseInitializationSmoke$' "${ROUTE_LOG}"
+done
+echo 'Current smoke includes core and initialization checks'
 
 # Basic CI has one explicit entry, not the deep acceptance manifest above.
 mkdir "${tmp}/smoke"

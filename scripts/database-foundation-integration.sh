@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 scope="${DATABASE_TEST_SCOPE-full}"
 case "${scope}" in
-  smoke|compatibility|full|regression) ;;
-  *) echo 'DATABASE_TEST_SCOPE must be smoke, compatibility, full or regression' >&2; exit 2 ;;
+  smoke|full|regression) ;;
+  *) echo 'DATABASE_TEST_SCOPE must be smoke, full or regression' >&2; exit 2 ;;
 esac
 ENGINE="${ENGINE:?ENGINE must be mysql or mariadb}"
 case "${ENGINE}" in
@@ -95,12 +95,10 @@ PORT="$(docker port "${NAME}" 3306/tcp | sed 's/127.0.0.1://')"
 export PR02_ENGINE="${ENGINE}"
 export PR02_TLS_CA_FILE="${TLS_DIR}/server-cert.pem"
 export PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${PORT})/ocservia?tls=false"
-if [[ "${scope}" == smoke || "${scope}" == compatibility ]]; then
+if [[ "${scope}" == smoke ]]; then
   cd "${ROOT}/control-plane"
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
-  if [[ "${scope}" == compatibility ]]; then
-    bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseInitializationSmoke
-  fi
+  bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseInitializationSmoke
   exit 0
 fi
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)
