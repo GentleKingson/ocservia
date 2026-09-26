@@ -3,6 +3,8 @@
 # shellcheck disable=SC2024 # sudo reads protected state; redirects are runner-owned.
 # shellcheck disable=SC2030,SC2031 # Baseline subshell must not replace the target candidate identity.
 set -Eeuo pipefail
+# Imported acceptance helpers must not dirty the exact-source lifecycle checkout.
+export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${ARTIFACT_DIR:?}" "${VERSION:?}" "${CANDIDATE_SHA:?}"
 : "${BUSINESS_PROFILE:=smoke}"

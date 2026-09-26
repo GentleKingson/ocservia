@@ -168,7 +168,9 @@ def rejected_upgrade():
         state = json.loads(run('docker', 'inspect', service).stdout)[0]['State']
         if state['Status'] == 'created':
             run('docker', 'start', service)
-        deadline = time.monotonic() + 120
+        # Backup's configured health interval is five minutes on engines
+        # without fast startup probes; do not retry upgrade while it is starting.
+        deadline = time.monotonic() + 360
         while time.monotonic() < deadline:
             state = json.loads(run('docker', 'inspect', service).stdout)[0]['State']
             assert state['Status'] == 'running' and state['Health']['Status'] != 'unhealthy', state['Status']
