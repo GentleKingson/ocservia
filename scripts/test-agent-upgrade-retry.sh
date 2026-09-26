@@ -45,7 +45,22 @@ P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${p12_hash}
 EOF
 chown root:61000 "${config}/agent.env"
 chmod 640 "${config}/agent.env"
+# A different installed unit layout must not trigger re-enrollment or purge
+# pre-existing artifacts. This fixture still supplies the current trust keys.
+for service in agent privd; do
+  printf '[Service]\nExecStart=/usr/libexec/ocservia/ocservia-%s\n' "${service}" \
+    >"${DESTDIR}/usr/lib/systemd/system/ocservia-${service}.service"
+done
+artifact_dir="${DESTDIR}/var/lib/ocservia-privd/certificates/artifacts"
+mkdir -p "${artifact_dir}"
+artifact="${artifact_dir}/018f0c2e-7b1a-7c3d-8e9f-0123456789ab.p12"
+printf 'existing artifact\n' >"${artifact}"
+chmod 710 "${artifact_dir}"
+sha256sum "${artifact}" >"${work}/artifact.sha256"
 "${new}/scripts/upgrade-agent.sh"
+sha256sum -c "${work}/artifact.sha256"
+test "$(stat -c '%a' "${artifact_dir}")" = 710
+test ! -e "${config}/sealing-keys-bound"
 snapshot="${DESTDIR}/var/lib/ocservia-upgrade/upgrade-backup"
 sha256sum "${snapshot}/"* >"${work}/snapshot"
 "${new}/scripts/upgrade-agent.sh"
@@ -88,28 +103,57 @@ cmp "${new}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia
 sha256sum -c "${work}/snapshot"
 echo 'Identical-package retry preserves rollback; rollback/re-upgrade still works (installer unit test only)'
 
-# A single-Relay operator configuration survives upgrade and same-package
-# retries, but cannot be handed to a snapshot without the new launcher.
+# A direct-executable service needs no launcher. Do not infer old software
+# compatibility from that layout or rewrite the operator's Relay settings.
 "${new}/scripts/rollback-agent.sh"
 rm "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
+printf '[Service]\nExecStart=\nExecStart=/usr/libexec/ocservia/ocservia-agent\n' \
+  >"${DESTDIR}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 printf 'RELAY_URL_A=https://relay-a.example.test\nRELAY_URL_B=\n' >"${config}/relays.env"
 cp "${config}/relays.env" "${work}/single-relays.env"
 "${new}/scripts/upgrade-agent.sh"
 cmp "${config}/relays.env" "${work}/single-relays.env"
 test -f "${snapshot}/ocservia-agent-relays.absent"
 "${new}/scripts/upgrade-agent.sh"
-find "${DESTDIR}" -type f -exec sha256sum {} + | sort >"${work}/before-rollback"
-if "${new}/scripts/rollback-agent.sh" >"${work}/blocked-rollback.log" 2>&1; then
-  echo 'old snapshot accepted single Relay configuration' >&2; exit 1
+# A service actually referring to a missing launcher is still invalid,
+# including in the read-only snapshot check used by identical retries.
+cp -p "${snapshot}/ocservia-agent-relays.conf.previous" "${work}/direct-relays.conf"
+cp -p "${snapshot}/MANIFEST.sha256" "${work}/direct-manifest"
+cp "${new}/deploy/production/systemd/ocservia-agent-relays.conf" "${snapshot}/ocservia-agent-relays.conf.previous"
+(cd "${snapshot}" && sha256sum -- *.previous *.absent) >"${snapshot}/MANIFEST.sha256"
+if "${new}/scripts/rollback-agent.sh" --verify-only >"${work}/missing-launcher.log" 2>&1; then
+  echo 'snapshot accepted a service with its required launcher missing' >&2; exit 1
 fi
-grep -F 'target predates single Relay support' "${work}/blocked-rollback.log"
-find "${DESTDIR}" -type f -exec sha256sum {} + | sort >"${work}/after-rollback"
-cmp "${work}/before-rollback" "${work}/after-rollback"
-printf 'RELAY_URL_A=https://relay-a.example.test\nRELAY_URL_B=https://relay-b.example.test\n' >"${config}/relays.env"
+grep -F 'missing the production Relay launcher required by its service' "${work}/missing-launcher.log"
+cp -p "${work}/direct-relays.conf" "${snapshot}/ocservia-agent-relays.conf.previous"
+cp -p "${work}/direct-manifest" "${snapshot}/MANIFEST.sha256"
 "${new}/scripts/rollback-agent.sh"
+cmp "${config}/relays.env" "${work}/single-relays.env"
 test ! -e "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
+# Verify signed target contents, not capabilities inferred from live settings.
+fixture="${work}/package-fixture"
+mkdir -p "${fixture}"
+cp -a "${new}" "${fixture}/ocservia-agent-1.0.1"
+target="${fixture}/ocservia-agent-1.0.1"
+rm "${target}/.ocservia-package-verified" "${target}/deploy/production/systemd/agent-relays.sh"
+archive="${work}/ocservia-agent-1.0.1-linux-${PACKAGE_ARCH}.tar.gz"
+verify_fixture() {
+  tar -czf "${archive}" -C "${fixture}" ocservia-agent-1.0.1
+  (cd "${work}" && sha256sum "$(basename "${archive}")") >"${archive}.sha256"
+  openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" \
+    -in "${archive}.sha256" -out "${archive}.sha256.sig"
+  bash "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" \
+    "${archive}.sha256.sig" "${work}/public.pem"
+}
+if verify_fixture >"${work}/invalid-package.log" 2>&1; then
+  echo 'package accepted a service with its required launcher missing' >&2; exit 1
+fi
+grep -F 'package is missing the production Relay launcher' "${work}/invalid-package.log"
+cp "${work}/direct-relays.conf" "${target}/deploy/production/systemd/ocservia-agent-relays.conf"
+verify_fixture >"${work}/verified-package"
+test -d "$(cat "${work}/verified-package")"
 "${new}/scripts/upgrade-agent.sh"
 "${new}/scripts/uninstall-agent.sh"
 test ! -e "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
 test -f "${config}/relays.env"
-echo 'Single Relay preservation, legacy rollback preflight and launcher uninstall passed'
+echo 'Explicit target files, Relay configuration preservation and launcher uninstall passed'
