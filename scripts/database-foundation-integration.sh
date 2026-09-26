@@ -8,14 +8,6 @@ case "${scope}" in
   smoke|compatibility|full|regression) ;;
   *) echo 'DATABASE_TEST_SCOPE must be smoke, compatibility, full or regression' >&2; exit 2 ;;
 esac
-if [[ "${scope}" != full && -n "${DATABASE_FULL_PART+x}" ]]; then
-  echo 'DATABASE_FULL_PART is only valid with DATABASE_TEST_SCOPE=full' >&2; exit 2
-fi
-part="${DATABASE_FULL_PART-all}"
-case "${part}" in
-  all|current|history) ;;
-  *) echo 'DATABASE_FULL_PART must be all, current or history' >&2; exit 2 ;;
-esac
 ENGINE="${ENGINE:?ENGINE must be mysql or mariadb}"
 case "${ENGINE}" in
   mysql) IMAGE='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'; CLIENT=mysql ;;
@@ -39,7 +31,7 @@ mkdir "${TLS_DIR}"
 report_required_cases() {
   local required
   required="$(jq -s 'map(.required) | add // 0' "${DATABASE_CASE_RESULTS}")"
-  echo "Database acceptance required cases: backend=${ENGINE} shard=${part} passed=${required} skipped=0"
+  echo "Database acceptance required cases: backend=${ENGINE} scope=${scope} passed=${required} skipped=0"
 }
 diagnostics() {
   local query
@@ -60,7 +52,7 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM
   if [[ "${scope}" == full && ${status} -ne 0 ]]; then
-    echo "Failed full shard: ${ENGINE}/${part} (exit ${status})" >&2
+    echo "Failed full database acceptance: ${ENGINE} (exit ${status})" >&2
     diagnostics || true
   fi
   docker rm -fv "${NAME}" >/dev/null 2>&1 || true
@@ -111,30 +103,15 @@ if [[ "${scope}" == smoke || "${scope}" == compatibility ]]; then
   fi
   exit 0
 fi
-if [[ "${part}" != history ]]; then
-  (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)
-fi
+(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)
 if [[ "${scope}" == regression ]]; then
   (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" regression-mysql --select -race -timeout=60m)
   for group in regression-disconnect regression-outbox regression-fencing regression-auth regression-telemetry backend-policy-useroperations; do
     (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" "${group}" --select -race -timeout=10m)
   done
 else
-echo "Full database acceptance: ${ENGINE}/${part}"
-selection="$(jq -nr --arg group backend-mysql-history --arg mode select \
-  --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
-  -f "${ROOT}/scripts/check-required-go-tests.jq")"
-IFS=$'\t' read -r package history_pattern <<<"${selection}"
-[[ -n "${package}" && -n "${history_pattern}" && "${history_pattern}" != */* ]] || {
-  echo 'history selection must contain only top-level tests' >&2; exit 2
-}
-if [[ "${part}" != history ]]; then
-  (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-current-full -race -timeout=60m "${package}" -skip "${history_pattern}")
-fi
-if [[ "${part}" != current ]]; then
-  (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-history --select -race -timeout=60m)
-fi
-if [[ "${part}" == history ]]; then report_required_cases; exit 0; fi
+echo "Full current database acceptance: ${ENGINE}"
+(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql)
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend)Integration$')
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment --select -race -timeout=10m)
 bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"

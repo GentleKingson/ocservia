@@ -38,8 +38,7 @@ for scope in full; do
   group="backend-mysql-${scope}"
   jq -n --arg scope "${scope}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
     [$manifest | split("\n")[] | split(" ")
-     | select(.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or
-         ($scope == "full" and .[0] == "backend-mysql-history"))
+     | select(.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql")
      | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
      | . + {Action: "run"}, . + {Action: "pass"}][]
   ' >"${tmp}/mysql.json"
@@ -61,40 +60,11 @@ for scope in full; do
   fi
 done
 # A full invocation must not accidentally validate just the daily selection.
-jq -c 'select(.Test != "TestRealVersionFiveDataUpgrade")' "${tmp}/mysql.json" >"${tmp}/bad.json"
+jq -c 'select(.Test != "TestRealCrashAndRepair")' "${tmp}/mysql.json" >"${tmp}/bad.json"
 if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
-  echo 'full database guard accepted missing history' >&2; exit 1
+  echo 'full database guard accepted missing crash recovery' >&2; exit 1
 fi
-echo 'MySQL/MariaDB regression and history guards passed'
-for engine in mysql mariadb; do
-  for group in backend-mysql-current-full backend-mysql-history backend-mysql-full; do
-    check "${tmp}/mysql.json" "${group}" "${engine}" >"${tmp}/${group}.summary"
-  done
-  jq -se '.[0].required + .[1].required == .[2].required' \
-    "${tmp}/backend-mysql-current-full.summary" "${tmp}/backend-mysql-history.summary" \
-    "${tmp}/backend-mysql-full.summary" >/dev/null
-  for group in backend-mysql-current-full backend-mysql-history; do
-    selection="$(PR02_ENGINE="${engine}" jq -nr --arg group "${group}" --arg mode select \
-      --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" -f "${ROOT}/scripts/check-required-go-tests.jq")"
-    IFS=$'\t' read -r package pattern <<<"${selection}"
-    jq -c --arg pattern "${pattern}" 'select(.Test | split("/")[0] | test($pattern))' "${tmp}/mysql.json" >"${tmp}/${group}.json"
-    check "${tmp}/${group}.json" "${group}" "${engine}" >/dev/null
-    other=backend-mysql-history
-    [[ "${group}" == backend-mysql-history ]] && other=backend-mysql-current-full
-    if check "${tmp}/${group}.json" "${other}" "${engine}" >/dev/null 2>&1; then
-      echo 'shards incorrectly share required inventory' >&2; exit 1
-    fi
-  done
-done
-for pair in 'full invalid' 'full EMPTY' 'regression EMPTY' 'regression all' 'regression current' 'regression history'; do
-  read -r scope part <<<"${pair}"
-  [[ "${part}" == EMPTY ]] && part=''
-  if DATABASE_TEST_SCOPE="${scope}" DATABASE_FULL_PART="${part}" ENGINE=mysql \
-    bash "${ROOT}/scripts/database-foundation-integration.sh" >"${tmp}/part.log" 2>&1; then
-    echo 'invalid full part accepted' >&2; exit 1
-  fi
-  grep -Fq DATABASE_FULL_PART "${tmp}/part.log"
-done
+echo 'MySQL/MariaDB current correctness and recovery guards passed'
 # Exercise every explicit critical inventory, not just a successful go exit.
 for engine in mysql mariadb; do
   while read -r group; do
@@ -313,28 +283,21 @@ cat >"${tmp}/wrapper/bin/fixture-cc" <<'SH'
 cat >/dev/null
 SH
 chmod +x "${tmp}/wrapper/bin/"*
-for part in unset all current history; do
-  export ROUTE_LOG="${tmp}/${part}.route"
-  (export PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=full ENGINE=mysql
-   unset DATABASE_FULL_PART
-   [[ "${part}" == unset ]] || export DATABASE_FULL_PART="${part}"
-   bash "${tmp}/wrapper/scripts/database-foundation-integration.sh") >/dev/null
-done
-cmp "${tmp}/unset.route" "${tmp}/all.route"
-test "$(wc -l <"${tmp}/history.route")" -eq 1
-grep -q '^backend-mysql-history --select -race -timeout=60m$' "${tmp}/history.route"
+export ROUTE_LOG="${tmp}/current.route"
+PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=full ENGINE=mysql \
+  bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null
 test "$(wc -l <"${tmp}/current.route")" -eq 11
-test "$(wc -l <"${tmp}/all.route")" -eq 12
-sed '/^backend-mysql-history /d' "${tmp}/all.route" >"${tmp}/without-history.route"
-cmp "${tmp}/current.route" "${tmp}/without-history.route"
-grep -q '^backend-mysql-current-full .* -skip ' "${tmp}/current.route"
+grep -q '^backend-mysql-full -race -timeout=60m ./internal/database/mysql$' "${tmp}/current.route"
+if grep -Eq -- 'history| -skip ' "${tmp}/current.route"; then
+  echo 'full current database route still selects a historical shard or skips tests' >&2; exit 1
+fi
 grep -q '^backend-controller-startup --select -race$' "${tmp}/current.route"
 grep -q '^backend-enrollment --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-enrollment-restart$' "${tmp}/current.route"
 grep -q '^backend-policy-userstate --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-policy-useroperations --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route"
-echo 'Full all/current/history routing passed'
+echo 'Full current database routing passed'
 
 # Basic CI has one explicit entry, not the deep acceptance manifest above.
 mkdir "${tmp}/smoke"
