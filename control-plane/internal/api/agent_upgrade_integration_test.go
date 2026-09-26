@@ -254,6 +254,14 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		struct {
 			query string
 			args  []any
+		}{"UPDATE node_capabilities SET capability='ocserv.agent.upgrade.v1' WHERE node_id=$1", []any{canaryID}},
+		struct {
+			query string
+			args  []any
+		}{"INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',false)", []any{canaryID}},
+		struct {
+			query string
+			args  []any
 		}{"UPDATE node_capabilities SET approved=false WHERE node_id=$1", []any{incapableNodeID}},
 		struct {
 			query string

@@ -47,12 +47,12 @@ func TestRealRolloutCreation(t *testing.T) {
 		if i == 1 {
 			status = "offline"
 		}
-		if i == 2 {
+		if i == 0 {
 			version = "2.0.0"
 		}
 		run(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES(?,?,?,?,?,?)`, UUIDBytes(node), UUIDBytes(workspace), node.String(), status, fixtureTimestamp(t, now), fixtureTimestamp(t, now))
 		run("INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,`system`,path,last_heartbeat_at)VALUES(?,?,?,'boot',?,?,'1.3.0','test','amd64','{}','{}','{}',?)", UUIDBytes(node), stamp, stamp, UUIDBytes(uuid.New()), version, infinity)
-		run(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.agent.upgrade.v2',true)`, UUIDBytes(node))
+		run(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.agent.upgrade.v1',?)`, UUIDBytes(node), i != 2)
 		if i == 0 || i == 3 {
 			credential := id()
 			digest := sha256.Sum256([]byte(node.String()))

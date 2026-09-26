@@ -321,19 +321,16 @@ The request must still carry the node's current
 revision (`If-Match`) plus an independent approval bound to the exact
 `node + version + digest + architecture` release identity.
 
-The Controller only schedules upgrades from nodes that advertise the
-fence-capable `ocserv.agent.upgrade.v2` capability. The upgrade is executed
-by the runner that is already installed on the node, so the first
-N → N+1 hop can only be protected when that runner carries the
-execution-time downgrade fence and the installation commit record. Nodes
-still advertising `ocserv.agent.upgrade.v1` are ineligible. Historical pre-1.0
-package seeding and upgrade fixtures do not provide a supported path into
-`1.x`; redeploy those nodes instead. The release pipeline now starts at the
-published transitional `v1.0.0` baseline and exercises real DEB and RPM
-upgrades on both amd64 and arm64. It checks preservation of identity,
-configuration and durable state without automatically enabling services.
-The separate same-source lifecycle smoke is not cross-version evidence;
-per-candidate native upgrade acceptance remains required.
+The Controller requires a real approved typed-command capability, either
+`ocserv.agent.upgrade.v2` or `ocserv.agent.upgrade.v1`. It selects an actual
+approved name and binds that exact name into the signed command; v2 is
+preferred when both are approved. A v1-only node is not excluded merely for
+lacking the former software downgrade fence. No capability is fabricated,
+and no historical payload conversion is performed.
+
+The installed runner executes the command. Previously installed code retains
+its behavior; accepting a command capability is not a promise of cross-version
+safety. Current-candidate validation does not certify historical combinations.
 
 The operation is created `queued`, and the agent's scheduling acknowledgement
 moves it to the non-terminal `accepted` state — an acknowledged schedule is
@@ -374,8 +371,8 @@ target version, sorted node set, batch size, and `stop_on_failure`. The current
 server contract requires that policy to be true; rollout creation fixes
 `StopOnFailure = true` and does not expose it as a caller-selectable field. The
 target must exist in the trusted release manifest for every selected node's
-architecture, and every selected node must advertise the
-`ocserv.agent.upgrade.v2` capability.
+architecture, and every selected node must advertise an approved
+`ocserv.agent.upgrade.v1` or `ocserv.agent.upgrade.v2` capability.
 
 The console's fleet version badges and the recommended version shown in
 Settings are driven by the operator-pinned `OCSERV_RECOMMENDED_AGENT_VERSION`
