@@ -1,30 +1,23 @@
-# 1.x contracts and compatibility
+# Current contracts and acceptance
 
 ## v1.1.0 transition (pending release)
 
 The approved [v1.1.0 policy reset](support-policy.md#v110-policy-reset-pending-release)
 supersedes the software-version windows, historical release matrix and schema
-compatibility admission below for `v1.1.0`. Their removal is pending
-implementation and current-candidate acceptance; this inventory does not claim
-they have already disappeared. Real command/protocol support, authorization,
+compatibility admission of the published 1.0 policy. Software-version guards
+and historical entrypoints have been removed; final candidate acceptance and publication
+remain pending. Real command/protocol support, authorization,
 artifact integrity, durable state, migration content integrity and current
 readiness remain contracts, not substitutes for a software-version fence.
 
-## Published 1.0 inventory
+## Current candidate scope
 
-Status: contract inventory for the [1.0 support policy](support-policy.md).
-`v1.0.1` is the first recommended production stable baseline; published
-`v1.0.0` remains an upgradeable transitional release. Pre-1.0 deployments must
-be redeployed, not upgraded in place into `1.x`.
-This inventory freezes the review surface, not an unreleased version or an arbitrary `1.x` combination.
-An unchanged ALPN, SemVer major, generated schema, or green source test is not
-proof that two release artifacts interoperate. Production support follows the
-linked policy; additions and withdrawals require explicit review before candidate
-freeze. Exact candidate SHA, artifact identities and acceptance results belong
-in the delivery report, not in this maintenance document.
-The [reviewed rolling-window exclusions](#reviewed-rolling-window-exclusions)
-retain the historical pre-1.0 T05 diagnostic scope. They are not support for
-pre-1.0 entry into `1.x` or acceptance of an unreleased production candidate.
+Validate the exact candidate artifacts on supported architectures, deployment
+modes and database products. Matching version labels, unchanged protocol
+numbers and green source tests do not establish arbitrary cross-version safety.
+The [published 1.0 inventory](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/docs/reference/stable-contracts.md)
+retains the historical matrix, exclusions and results; its removed entrypoints
+are not current requirements. Existing published artifacts are unchanged.
 
 ## Contract owners
 
@@ -33,11 +26,11 @@ pre-1.0 entry into `1.x` or acceptance of an unreleased production candidate.
 | HTTP | [`openapi.yaml`](../../openapi/openapi.yaml): `/api/v1` resources, request/response schemas, strict JSON, authentication, authorization, idempotency, revisions, Problems, pagination and SSE cursor behavior. Preserve the [HTTP baseline](../development/http-baseline.md), including documented error/method precedence. Health/version aliases retain their current behavior. | Go handler/package layout, Web stores, component APIs and generated-client implementation. `/dev` and simulator routes are development-only. |
 | CLI and configuration | Documented Controller `--role`, `--migrate-only`, `OCSERV_*` and exclusive `_FILE` settings; managed-node `agent.env`, `privd.env`, `relays.env` and one-shot enrollment/attestation commands. [Production deployment](../operations/production-deployment.md) and [Agent lifecycle](../operations/agent-lifecycle.md) own names, defaults, secret permissions and failure behavior. | Undocumented flags, debug/probe modes, test environment variables, log wording and local SQLite table access. |
 | Installation and upgrade | Exact release pins; `deploy/production/install.sh`, `controller-bootstrap.sh`, `controller.sh`; `deploy/managed-node/install.sh`; verified node install/upgrade/rollback scripts. Preserve signed manifests, independently provisioned trust, same-target retry and protected confirmed/pending state. | Direct Compose/image replacement, source-tree node installation, unsigned archives and arbitrary package-manager downgrades. |
-| Package names | `ocservia-agent-X.Y.Z-linux-{amd64,arm64}.tar.gz` plus checksum/signature; new DEBs `ocservia-agent_X.Y.Z-1_{amd64,arm64}.deb`; RPMs `ocservia-agent-X.Y.Z-1.{x86_64,aarch64}.rpm`; `controller-release-{amd64,arm64}.json` and existing amd64 alias `controller-release.json`. The [baseline registry](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/scripts/release-upgrade-baselines.json) alone resolves historical DEB filenames without `-1`. | Crate versions such as `0.1.0`, build-directory names and image config IDs as registry manifest digests. |
+| Package names | `ocservia-agent-X.Y.Z-linux-{amd64,arm64}.tar.gz` plus checksum/signature; new DEBs `ocservia-agent_X.Y.Z-1_{amd64,arm64}.deb`; RPMs `ocservia-agent-X.Y.Z-1.{x86_64,aarch64}.rpm`; `controller-release-{amd64,arm64}.json` and existing amd64 alias `controller-release.json`. | Crate versions such as `0.1.0`, build-directory names and image config IDs as registry manifest digests. |
 | Schema and transport | [`proto/`](../../proto/) owns message numbers, enums and services. ALPNs remain `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`; enrollment proof is 1.1, session protocol is negotiated separately. Go/transportd UDS and Agent/privd local protocol are private matched-release interfaces. | Direct Go access to Iroh; arbitrary third-party privd clients; automatic acceptance of new signed-command fields because Protobuf normally permits them. |
 | Signing and hashes | [Command authorization v1](../development/command-authorization-v1.md), session/artifact grants, connection fence v2, fence binding v2 and [privd receipt v1](../development/agent-privd.md) have frozen canonical transcripts. [Semantic v1](../development/command-semantic-hash-v1.md) remains frozen; [v2](../development/command-semantic-hash-v2.md) is current Controller issuance. Proto serialization is never canonical signing input. | Changing an existing hash/transcript to absorb new semantics; inferring semantic v2 from the historical capability string `command.semantic-hash.v1`. |
-| Versions and durable state | Controller/transportd use one candidate source/release; Agent/privd/upgrader are one verified package. Mixed Controller/node versions require the finite matrix below. Preserve journals, root effect store plus HMAC/receipt keys, endpoint identity and revision/fence floors. | Independent Agent/privd swaps or numeric version classification as permission to dispatch. |
-| Database | [Migration contract](../development/control-plane.md): owner-only serialized migrations, restricted runtime role, immutable applied history and explicit compatibility ranges. PostgreSQL schema numbers are not MySQL/MariaDB migration revisions. | Generic down-migration rollback, automatic force-clean, cross-engine migration, or treating additive DDL as automatically backward compatible. |
+| Versions and durable state | Controller/transportd use one candidate source/release; Agent/privd/upgrader are one verified package. Cross-version execution has no compatibility guarantee. Preserve journals, root effect store plus HMAC/receipt keys, endpoint identity and revision/fence floors. | Independent Agent/privd swaps or numeric version classification as permission to dispatch. |
+| Database | [Migration contract](../development/control-plane.md): owner-only serialized migrations, restricted runtime role, execution receipts, known content integrity and actual SQL/dirty-error handling. PostgreSQL schema numbers are not MySQL/MariaDB migration revisions. | Generic down-migration rollback, automatic force-clean, cross-engine migration, or treating additive DDL as automatically backward compatible. |
 
 Generated code is disposable output of Proto/OpenAPI. Use the existing
 `scripts/check-breaking.sh`, `scripts/generate.sh` and
@@ -92,145 +85,27 @@ retained; complete configuration payloads add their own strict-wire cases.
 See [focused commands](../development/testing.md#command-wire-contracts).
 Do not interpret fixture success as execution of an old published Agent.
 
-## Finite release matrix
+## Current application acceptance
 
-The supported native upgrade source for the `v1.0.1` baseline is the published
-transitional `v1.0.0`, registered in
-[`release-upgrade-baselines.json`](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/scripts/release-upgrade-baselines.json)
-at commit `e85ab3fa90d1d5f6e4c53b56b2f5e0278f6da060`, PostgreSQL schema 36.
-Require the four Agent/Controller x amd64/arm64 cells of the
-[native upgrade workflow](../development/release-upgrade-validation.md) on the
-exact candidate. Registration proves artifact identity, not successful fresh
-bootstrap, an accepted upgrade, or arbitrary mixed-version application support.
-Use a matched release for steady-state deployment; upgrade Controller first.
-A temporary 1.x mixed-version window means exactly one pair: the published
-`v1.0.0` Agent/privd/upgrader package against the candidate
-Controller/transportd. Accept that window only after the `v1.0.0` x
-amd64/arm64 application cells below pass on the exact candidate, collected in
-one release run using the exact tested products together with the native upgrade gate; they are part of `1.x`
-release acceptance, not optional diagnostics.
+Use [Release Check](../development/release-checks.md) for actual current-product,
+native package, business, integration, security and selected resilience gates.
+There is no historical native upgrade, mixed-version or migration matrix.
+Lower/equal/higher target regression fixtures test the operation mechanism,
+not an old-release support promise.
 
-### Historical pre-1.0 diagnostics
-
-The following matrix records historical coverage, not supported in-place
-upgrades or rolling deployments into `1.x`. Pre-1.0 users must redeploy.
-These optional diagnostic cells are not formal 1.x release requirements and
-cannot replace the `v1.0.0` native upgrade gate, the `v1.0.0` mixed-version
-application acceptance above, or matched-candidate acceptance.
-The historical releases are real signed assets already registered in
-[`release-upgrade-baselines.json`](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/scripts/release-upgrade-baselines.json):
-
-| Baseline | Immutable source commit | Existing scope |
-| --- | --- | --- |
-| v0.6.0 | `cc8399641dc32083466a9c77369fcb8debf1ee48` | Historical native/application baseline; PostgreSQL schema 36 |
-| v0.6.1 | `1805962fe1a98a22955b3105bfa8ebce7f2ea1eb` | Historical supplemental native/application baseline; PostgreSQL schema 36 |
-
-Use the registry's checksum-manifest and independently anchored key pins, not a
-new download's self-reported digest. Older entries remain registered for
-historical lifecycle tests and artifact provenance, not as formal 1.x upgrade
-sources. Retained runtime compatibility code is not an upgrade-support promise.
-
-For **each** selected baseline — the `v1.0.0` mixed-version acceptance pair or
-a historical diagnostic — and **each** native `amd64` / `arm64` architecture:
-
-| Combination | Executable entry | Acceptance boundary |
-| --- | --- | --- |
-| Published Agent + matching privd/upgrader -> candidate Controller/transportd, dedicated authenticated Relays | `scripts/release-session-compatibility.sh run` | Two required application cells: the `v1.0.0` mixed-version pair on amd64/arm64. Pre-1.0 diagnostics are on-demand only. Required scope: enrollment, grant/fence/receipt, telemetry and approved reload; config revision/rejection and plan replay, CSR, issue/export/revoke approvals, P12 one-use download and persistent Agent/privd restart recovery. The systemd chain uses two real Relays for v0.6.0 and one for `v1.0.0` and v0.6.1; the real-process PKI chain uses two TLS Relays. No historical rebuild. Covered workflows require actual-artifact evidence; the two exclusions below are not positive acceptance. |
-| v0.6.0 node, either architecture: uncertain non-idempotent mutation across all-Relay outage / owner change | Same systemd chain, retaining its strict automatic-recovery assertion | **Excluded: guaranteed automatic mutation recovery.** Query-only `Unknown` requires manual reconciliation. Preserve evidence, reconcile before resuming writes, then upgrade the verified matched node package under the path below. A green run or a newer version alone does not restore this promise. |
-| v0.6.0 / v0.6.1 node, either architecture: positive ConfigPlan apply with candidate Controller | Same PKI chain checks rejection only | **Excluded: successful plan/apply/rollback.** Do not use positive configuration apply in this rolling window. Upgrade to a verified matched node package with a reviewed complete configuration contract and positive plan/apply/recovery acceptance before enabling it; no such qualifying release is established by this matrix. |
-| Published pre-1.0 native package -> newer pre-1.0 candidate package | Existing `release-upgrade.yml`, `baseline_release` set explicitly | Historical DEB Ubuntu and RPM Rocky 9 coverage only; no path into 1.x. |
-| Published pre-1.0 Controller -> newer pre-1.0 candidate Controller, PostgreSQL 17 | Same native workflow | Historical authenticated data/session retention, migration, same-target recovery and guarded rollback/base restore; no path into 1.x. |
-| Candidate node -> historical Controller, or independently mixed Agent/privd | Not admitted to this candidate matrix | Upgrade Controller first; restore only a verified matched snapshot. No downgrade/security-equivalence promise. |
-
-The application cells are single-host fixtures, not cross-fault-domain, native
-package-manager upgrade, all-distro, production OIDC or formal G6 evidence.
-The PKI chain reuses `scripts/database-controller-e2e.sh` on PostgreSQL 17.10
-with verified published node binaries. It has a real authenticated TLS signer
-fixture and real OpenSSL/ocserv processes, not a production CA/HSM. Its fixed
-`systemctl` facade probes real ocserv and sends real signals; only the separate
-systemd chain covers service-manager lifecycle. The default database E2E route
-still uses its existing PostgreSQL 18 image; this does not expand production support.
-
-### Reviewed rolling-window exclusions
-
-**Historical decision: adopted for the finite pre-1.0 T05 rolling window.** Ordinary session,
-approved reload, configuration-plan replay and certificate/P12 workflows remain
-in scope. The two explicit exclusions in the matrix apply on both architectures; an observed
-failure on amd64 does not establish an arm64 exemption. This narrows the
-candidate compatibility promise, not the strict diagnostic tests, root
-permissions or any already-supported deployment. The alternative of adding
-new configuration semantics or automatic mutation reconciliation is deferred
-to a separately reviewed matched-node contract and its runtime acceptance.
-
-**Positive typed configuration apply is excluded for v0.6.0 and v0.6.1 nodes.**
-The v1 allowlist cannot express a complete real ocserv configuration (`device`
-is absent), planning parses the candidate as a complete file, and apply refuses
-unresolved TLS SecretRefs. Do not bypass root validation or substitute a fake
-parser. The matrix proves stale revision refusal, exact plan replay, real parser
-rejection, denied apply and unchanged configuration/revision, not successful
-apply or rollback. Historical adapter errors have no trusted root receipt;
-the Agent retains `Unknown` with `privd_receipt_missing_or_malformed`, never
-promoting it to success or a trusted final failure. Upgrade Controller/transportd
-first, then the signed matched Agent/privd/upgrader package using the existing
-[Agent lifecycle](../operations/agent-lifecycle.md) path. Enable positive apply
-only after that exact combination has a reviewed complete configuration/TLS
-SecretRef contract and passing positive plan/apply/recovery evidence. Neither
-matching binary versions, negotiated capability names nor package-upgrade
-success proves this. Until then, leave this workflow unused; this document
-does not add or claim a version-based API/UI gate.
-The existing same-source I15/I16/I17 checks do not fill that release-level gap.
-
-Matched nodes with the separately negotiated `ocserv.config.complete.plan` and
-`ocserv.config.complete.apply` capabilities use the
+Nodes implementing `ocserv.config.complete.plan` and
+`ocserv.config.complete.apply` use the
 [complete node-local TLS profile](../operations/node-local-config-tls.md).
-The profile does not widen historical-node support. Apply is reload-only:
-startup authentication/listener/worker/socket/TLS bindings must already match
-the node's protected active configuration, otherwise root rejects before
-preparing an effect. Initial activation and TLS version/path changes require
-an explicitly authorized operator maintenance restart, not an automatic
-restart or an apparently successful reload. Final acceptance must include
-actual VPN authentication after apply, exact rollback and durable recovery;
-native parser/occtl health alone is insufficient.
-
-Pending non-idempotent mutations have another explicit boundary: after an
-uncertain dispatch and owner change, recovery may be query-only and retain
-`Unknown` / `manual_reconciliation_required`. In particular, the v0.6.0
-two-Relay cell cannot promise every queued reload will complete automatically
-after an all-Relay outage. Do not resend an uncertain mutation, clear journals
-or extend the deadline to call this a pass. The strict reload-recovery test
-retains its failure; the independent PKI phase still runs and records its own
-exit code. A later green run does not erase the earlier demonstrated boundary.
-**Guaranteed automatic recovery in that v0.6.0 scenario is excluded.** Follow
-[incident recovery](../operations/incident-recovery.md#transport-and-credentials):
-stop new privileged writes, preserve the exact command ID, semantic hash,
-owner/fence history, Agent journal and root effect/receipt evidence, and
-restore the configured Relays without resetting endpoint identities. Compare
-the operation result with trusted durable evidence for that exact command;
-an online node or currently healthy ocserv is not proof of the earlier effect.
-If evidence remains missing or conflicting, keep the operation `Unknown` and
-the affected writes paused for operator reconciliation. Do not invent a
-terminal result, edit durable state or issue a fresh mutation as a retry.
-Upgrade through the verified matched-package lifecycle only after resolving
-the outstanding uncertainty; upgrading is not itself reconciliation. A future
-automatic-recovery promise needs exact-artifact fault/recovery evidence and
-explicit contract review, not just a numerically newer node package.
-
-The runner still exercises the broader all-Relay recovery scenario and
-returns failure when its automatic-success assertion fails. Preserve that
-cell's status, both phase exit codes and the original run/attempt unchanged.
-For scoped contract acceptance, identify the exact excluded failure and
-verify the required workflow checkpoints independently from the retained logs
-and results. Do not relabel a failed aggregate as PASS or waive any other
-failure. A missing required checkpoint still blocks the covered promise.
-If the chain stops at the excluded uncertain-mutation failure, its later
-replay and cold-start checkpoints are not run, not PASS; independent PKI
-restart evidence does not establish those systemd recovery paths.
+Apply remains reload-only: startup authentication/listener/worker/socket/TLS
+bindings must match protected active configuration. Initial activation and
+TLS version/path changes need an explicitly authorized maintenance restart.
+Actual VPN authentication, exact rollback and durable recovery remain acceptance
+requirements; native parser or occtl health alone is insufficient.
 
 ### Matched-release recovery boundary
 
-**Guaranteed automatic recovery of an uncertain non-idempotent mutation is
-excluded for matched releases too**, not only the historical v0.6.0 rolling
-window. Matching Controller/transportd and Agent/privd/upgrader artifacts does
+**Automatic recovery of an uncertain non-idempotent mutation is not guaranteed
+even for matched releases**. Matching Controller/transportd and Agent/privd/upgrader artifacts does
 not establish that an interrupted reload completed, or that it is safe to
 execute it again. Online node status, a new fenced session and healthy ocserv
 are not evidence of the historical command's outcome.
@@ -262,72 +137,6 @@ NOT RUN or BLOCKED, not an expected-result waiver. Restoring a guaranteed
 automatic-recovery promise requires reviewed durable-evidence semantics and
 exact-candidate fault/restart acceptance, not repeated runs or longer timeouts.
 
-### Fixture boundaries
-
-The private CA requires a test-only systemd drop-in, derived from v0.6.0's
-direct ExecStart or v0.6.1's launcher. Published binaries and installed units
-remain unchanged. v0.6.0 rejects single-Relay custom mode (requires 2..8 URLs):
-retain its two-Relay deployment, or upgrade the matched node package to v0.6.1
-before selecting one Relay. Do not substitute duplicate URLs or weaken that
-admission check. The disposable image masks systemd-binfmt rather than changing the
-host's native-admission policy; admission is checked again after the chain.
-
-### Execute one application cell
-
-The integrated [Release Check](../development/release-checks.md) runs the
-supported v1.0.0 application pair on both architectures using exact candidate
-images. For diagnostic iteration, dispatch `release-upgrade.yml` with
-`version`, `baseline_release=v1.0.0` and `purpose=compatibility`.
-The candidate SHA is derived from dispatch. This runs only the supported two
-cells, never the historical pre-1.0 matrix, and does not publish.
-Historical diagnostic scripts below remain available on explicit request.
-
-On BuildServer, `fetch` and `verify` perform only bounded artifact download and
-checksum/signature verification, without extraction, installation or execution:
-
-```bash
-export BASELINE_RELEASE=v0.6.1 PACKAGE_ARCH=arm64
-export RELEASE_ASSET_DIR="$HOME/task-private/releases-v061-arm64"
-bash scripts/release-session-compatibility.sh fetch
-bash scripts/release-session-compatibility.sh verify
-```
-
-The destination must not already exist for `fetch`. Repeat for both registered
-tags and architectures; a verified foreign-architecture archive is not a native
-runtime pass. A corrupted or incomplete set fails instead of falling back.
-
-Run `run` only on an explicitly authorized disposable native systemd VM/runner,
-with matching host, daemon, image and binary architectures. Never unregister binfmt
-or run host installers on shared BuildServer. Use a clean exact candidate
-checkout and [the existing single-Relay setup](../development/single-relay-validation.md#real-agent-chain).
-Set `CANDIDATE_SHA`, `RUNNER_ARCH` (`X64` or `ARM64`), unique `RUN_ID`, private
-`RUNNER_TEMP` and a new `ARTIFACT_DIR`. Supply the five existing image variables
-and `RELEASE_WORKFLOW_IMAGE` as full local `sha256:` image IDs, with native
-architecture. Control, transport, probe and workflow images must carry
-`org.opencontainers.image.revision=CANDIDATE_SHA`
-from their build, not a post-build relabel. Retain their build records and
-registry manifest digests separately; a label alone is not build provenance.
-
-```bash
-bash scripts/release-session-compatibility.sh run
-```
-
-The wrapper verifies the old signed set, reuses the unchanged archive verifier
-inside the isolated node, requires the signed matched node package and checks
-the final Controller-observed Agent version, and records `compatibility-result.json`.
-Missing inputs, mutable image tags, foreign/dirty source, wrong architecture,
-wrong version, absent result or a failed chain cannot pass. Preflight failures
-have no success result. A result is one cell only; require both supported architecture cells on the exact candidate products.
-Independent failed cells may rerun; never combine different product identities. No automatic workflow dispatch or publishing is performed.
-
-Retain sanitized command logs, start/end time and exit code, baseline pins,
-candidate SHA, script/patch digest, exact package/image identities, native
-architecture, topology, tool/Relay/ocserv/crypto/database versions and CI
-run/attempt. Keep secrets out of evidence. After export remove only the named
-task resources, not shared caches, daemon state or another task's fixtures.
-`scripts/test-release-session-compatibility.sh` tests integrity/admission with
-fixtures through the existing release-tools CI route; it is not a runtime cell.
-
 ## Database and recovery matrix
 
 [Production database support](../operations/production-deployment.md#database-support)
@@ -354,31 +163,17 @@ do not reset journals to make an upgrade pass.
 
 ## Freeze and rollout decisions
 
-1. Keep schema authority, canonical versions and strict runtime admission
-   unchanged. No unconditional application compatibility for `1.x`.
-2. Upgrade patched dedicated Relays one at a time, then matched
-   Controller/transportd with owner migration and a verified backend backup.
-   Register/verify root receipt authority and update the matched node package
-   only after the old-node/new-Controller cell is accepted. Stop privileged
-   dispatch while capabilities/keys are not ready. A protocol-compatible old
-   Relay is not a security-equivalent rollback.
-3. Preserve the existing [Controller rollback guards](../how-to/controller-rollback.md)
-   and [matched Agent rollback](../how-to/agent-rollback.md). Changed descriptors
-   or incompatible schema require forward recovery or isolated backend restore,
-   not down-migration or forced state edits. Reconcile Unknown before resuming.
-4. Before the `v1.0.1` production-candidate freeze: collect all four native
-   upgrade cells from `v1.0.0`, the `v1.0.0` node against candidate Controller
-   application cells on both architectures for the mixed-version window, and
-   matched-candidate application acceptance on
-   the exact candidate. Historical pre-1.0 application cells are optional
-   diagnostics, not a formal 1.x release gate. Retain their exclusions and
-   original results without turning them into support promises. Review the
-   database patch set, actual ocserv/distro/crypto versions and recovery
-   evidence separately. T03 transport probes and T04 native ocserv
-   1.5.0 tests remain evidence for their original artifacts, not this candidate's release gate.
+Freeze the candidate source and bind every accepted package/image to that
+source, version, architecture and digest. The final publishing run must validate
+its own exact products; earlier source tests or another run's digest are not
+substitutes. Historical compatibility gates are retired, not skipped successes.
 
-T05's two compatibility decisions are settled within this finite scope, not
-waivers for final-candidate acceptance. Unrun, failed, skipped and excluded
-checks must stay distinct. A pending required check blocks its promise, not
-preparation of the next task. Documentation-only convergence does not transfer
-earlier runtime results to the documentation commit or a later freeze candidate.
+Preserve current trust, real capabilities, approvals, Signer identity/revision,
+journals, receipts and replay/fencing state. Reconcile Unknown before conflicting
+writes. Use verified explicit lifecycle targets; do not reverse SQL, reset
+identity or restore over persistent state to force a target to start.
+Cross-version execution can fail or damage state despite removal of admission.
+
+Unrun, failed, skipped and excluded checks remain distinct. Required failures
+still block publication, and any candidate change requires rechecking its
+affected acceptance and source/artifact bindings.

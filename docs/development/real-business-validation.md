@@ -4,8 +4,8 @@ The release Business Smoke job exercises one
 signed amd64 production path: Controller and native systemd Agent/privd/ocserv
 installation, Local requester/approver login, approved ConfigPlan apply, real
 OpenConnect VPN traffic, automatic ConfigPlan rollback and a fresh VPN check.
-No production binary, service, Relay or VPN is mocked. This is neither Package & Upgrade
-upgrade acceptance nor G6 production readiness.
+No production binary, service, Relay or VPN is mocked. This is neither native
+package acceptance nor G6 production readiness.
 
 Integration is a change-selected specialized check. It retains the original OIDC, PKI/P12/revoke, real-browser,
 single-Relay fault/recovery and cross-source evidence checks until equivalent
@@ -16,9 +16,9 @@ smoke as a 5-15 minute job until its measured timings justify that target.
 
 With explicit authorization to use disposable GitHub-hosted runners, dispatch
 `release-upgrade.yml` on the exact candidate branch with `version`,
-`baseline_release=v1.0.0` and `purpose=smoke` or `purpose=integration`.
-The candidate SHA comes from the actual dispatch context. The baseline
-input is unused in this mode; the ordinary native upgrade remains the default.
+and `purpose=smoke` or `purpose=integration`.
+The candidate SHA comes from the actual dispatch context. There is no baseline
+input or historical upgrade mode.
 This mode does not publish packages/images, create a tag, or modify Secrets.
 Local preparation checks must run in an isolated checkout on `BuildServer`.
 Never run the business driver or its host-installing steps on BuildServer.
@@ -127,17 +127,17 @@ is formally transferred. Publication-dependent immutable download paths belong
 to Publish. Positive configuration apply requires native acceptance
 of the [reviewed complete contract](complete-config-contract.md), not just
 contract approval or unit tests; missing acceptance still blocks readiness. Preserve the
-finite compatibility exclusions and matched-release recovery boundary in
+matched-release recovery boundary in
 [stable contracts](../reference/stable-contracts.md). Do not import earlier T03,
 T04, T05 or Package & Upgrade results as runtime acceptance of the new candidate.
 
 Freeze the candidate before the release workflow. A new candidate cannot borrow
 old product/test results. Independent architecture failures may be rerun with
 producer-bound inputs; shared fault timelines must be rerun together.
-The supported v1.0.0 native upgrade and mixed-version application cells remain
-fixed release requirements. Business success does not replace them.
-Pre-1.0 installations must redeploy into `1.x`; their historical diagnostic
-results are not upgrade support or acceptance of this production baseline.
+Historical native upgrade and mixed-version application cells are retired.
+Business success does not replace retained current-product, security or
+resilience gates. Historical results are not acceptance of this candidate or a
+cross-version safety guarantee.
 
 Existing [single-Relay](single-relay-validation.md) and
 [cross-VM enrollment](real-e2e.md) profiles retain their original scope.

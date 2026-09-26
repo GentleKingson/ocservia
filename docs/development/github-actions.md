@@ -226,8 +226,8 @@ Tag runs execute one integrated round before protected Publish; no extra full
 dry-run is required. Only Publish obtains write permissions and release keys.
 
 The [diagnostic workflow](release-upgrade-validation.md) has one purpose enum
-instead of interacting booleans. Historical pre-1.0 application cells are not
-part of the formal matrix. Existing registered v1.0.0 requirements remain.
+instead of interacting booleans: only current `smoke` or `integration`.
+Historical application and native upgrade cells and baseline inputs are removed.
 
 Product consumers use actual producer artifact IDs plus explicit candidate
 manifest and payload verification. Independent failed jobs may rerun without

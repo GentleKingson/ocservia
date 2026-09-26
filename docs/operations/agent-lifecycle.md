@@ -3,14 +3,14 @@
 > **Technical reference.** For the operator path, start with [Install a managed
 > node](../getting-started/managed-node.md), [Upgrade the Agent](../how-to/agent-upgrade.md),
 > or [Roll back the Agent](../how-to/agent-rollback.md). This document retains
-> package construction, verified staging, sealing-key migration, and durable
+> package construction, verified staging, trust provisioning, and durable
 > lifecycle contracts.
 
-`v1.0.1` is the first recommended production stable baseline; the published
-`v1.0.0` remains a transitional upgrade source. Pre-1.0 installations must be
-[redeployed](../getting-started/managed-node.md), not upgraded in place into
-`1.x`. Historical lifecycle capabilities below do not extend the
-[support policy](../reference/support-policy.md).
+The pending v1.1.0 [policy reset](../reference/support-policy.md) removes source
+version windows and target ordering, not artifact integrity or current trust
+requirements. Cross-version safety is not guaranteed. Historical layout/key
+conversion is no longer automatic; provision the target explicitly or redeploy
+without overwriting retained identity and persistent state.
 
 After its external endpoint is deployed and verified, the operator-hosted thin
 first-install chain is deliberately split:
@@ -374,7 +374,7 @@ its own stable operation ID; a succeeding node is never redispatched. A batch
 advances only when every node in it has a terminal outcome, and any failed,
 unknown, or rolled-back node pauses the rollout. A node that became
 ineligible when its batch was dispatched (offline, stale observation,
-capability withdrawn, version already current or ahead, another upgrade
+capability withdrawn, another upgrade
 active, or no manifest entry) is marked `skipped` with a reason code and the
 rollout pauses. Resuming requeues the failed, unknown, rolled-back, and
 skipped-canary nodes of the current batch for a fresh eligibility check; a
