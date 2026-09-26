@@ -235,27 +235,6 @@ func TestAdapterArgumentsAreFixedAndRunScoped(t *testing.T) {
 	}
 }
 
-func TestSmokeAdapterArgumentsCannotUseFormalRendezvousPaths(t *testing.T) {
-	t.Parallel()
-	options := testOptions(t, "fd-b")
-	options.Profile = "smoke"
-	for phaseName, suffix := range map[string]string{
-		"agents-enroll": "/g6-smoke-agents/nodes.tsv",
-		"promote":       "/g6-smoke-isolation",
-	} {
-		arguments, err := adapterArguments(options, phaseName)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(arguments) != 2 || !strings.HasSuffix(arguments[1], suffix) || strings.Contains(arguments[1], "/g6-rd-") {
-			t.Fatalf("unexpected %s smoke arguments: %v", phaseName, arguments)
-		}
-	}
-	if arguments, err := adapterArguments(options, "smoke-session"); err != nil || len(arguments) != 1 || arguments[0] != "smoke-session" {
-		t.Fatalf("unexpected smoke session adapter: %v, %v", arguments, err)
-	}
-}
-
 func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -319,8 +298,8 @@ func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 func TestPhaseGraphAndRendezvousRegistriesCannotDrift(t *testing.T) {
 	t.Parallel()
 	contracts := rendezvous.Contracts()
-	if len(contracts) != 28 {
-		t.Fatalf("rendezvous contract count = %d, want 28", len(contracts))
+	if len(contracts) != 17 {
+		t.Fatalf("rendezvous contract count = %d, want 17", len(contracts))
 	}
 	profileCounts := map[string]int{}
 	seen := make(map[string]bool, len(contracts))
@@ -339,7 +318,7 @@ func TestPhaseGraphAndRendezvousRegistriesCannotDrift(t *testing.T) {
 			t.Fatalf("rendezvous checkpoint %s has invalid producer phase: %v", contract.Checkpoint, err)
 		}
 	}
-	if profileCounts["formal"] != 17 || profileCounts["smoke"] != 11 {
+	if profileCounts["formal"] != 17 {
 		t.Fatalf("rendezvous profile counts = %v", profileCounts)
 	}
 }
