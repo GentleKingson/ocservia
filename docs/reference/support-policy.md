@@ -100,7 +100,7 @@ full execution before the tag workflow repeats the same checks.
   [Controller](../getting-started/production.md) and
   [managed-node](../getting-started/managed-node.md) deployment paths instead.
   Baseline artifact identities are registered in
-  [`scripts/release-upgrade-baselines.json`](../../scripts/release-upgrade-baselines.json)
+  [`scripts/release-upgrade-baselines.json`](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/scripts/release-upgrade-baselines.json)
   (currently through `v1.0.0`); historical pre-1.0 entries are retained for
   provenance and regression diagnostics, not as supported paths into `1.x`.
   Actual upgrade acceptance requires the

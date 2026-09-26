@@ -1,5 +1,27 @@
 # Package and upgrade validation
 
+## v1.1.0 candidate validation
+
+Historical upgrade and mixed-version compatibility workflows, scripts and
+baseline registry have been removed from the current tree. The old procedures
+below describe the published 1.0 process only; their commands are not current
+entrypoints and are not acceptance requirements for v1.1.0.
+
+Use [Release Check](release-checks.md) for current-candidate validation.
+The retained `Release Diagnostics` workflow accepts only `smoke` or
+`integration`, without `baseline_release` or a version-order requirement:
+
+```bash
+gh workflow run release-upgrade.yml --ref <candidate-branch> \
+  -f version=1.1.0 -f purpose=smoke
+```
+
+Current product signatures, source/architecture identity, native execution and
+failure propagation remain required. Removal is not cross-version safety
+certification. Full documentation consolidation follows the runtime removals.
+
+## Historical 1.0 process
+
 The release graph is [Release Check](release-checks.md). Each architecture
 builds its actual Agent/privd/upgrader package set and Controller images once;
 native installation and supported-baseline upgrade tests consume those bytes.
@@ -15,7 +37,7 @@ mandatory release run and never a complete Release Check.
 | Application | amd64, arm64 | Published v1.0.0 node against the candidate Controller and transport |
 
 The v1.0.0 transitional baseline is registered in
-[`release-upgrade-baselines.json`](../../scripts/release-upgrade-baselines.json).
+[`release-upgrade-baselines.json`](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/scripts/release-upgrade-baselines.json).
 Its registration establishes artifact identity, not upgrade success.
 Historical v0.6.x entries remain available to diagnostic fetch/verify tools;
 they are not supported upgrade paths into 1.x and do not run in the release

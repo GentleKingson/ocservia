@@ -49,7 +49,7 @@ while read -r path selected; do
           expect "${out}" ci_suites 'release g6' ;;
         .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
           expect "${out}" ci_suites guards ;;
-        .github/workflows/release*.yml|scripts/release-upgrade-baselines.json)
+        .github/workflows/release*.yml)
           expect "${out}" ci_suites release ;;
         .github/workflows/g6-harness-core.yml|scripts/g6-pipeline.mjs|scripts/test-g6-resource-sampler.sh|docs/acceptance/g6-*)
           expect "${out}" ci_suites g6 ;;
@@ -116,7 +116,6 @@ scripts/g6-buildx-cache.sh run_ci_tools
 tools/g6-harness/internal/runtime/runtime.go run_ci_tools
 deploy/g6-readiness/relay.toml run_ci_tools
 deploy/package/nfpm.yaml run_ci_tools run_installers
-scripts/release-upgrade-baselines.json run_ci_tools run_installers
 unclassified.conf run_docs run_go run_rust run_web run_database run_ci_tools run_installers
 CASES
 for profile in quick full; do

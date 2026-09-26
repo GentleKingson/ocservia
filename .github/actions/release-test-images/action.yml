@@ -9,7 +9,7 @@ inputs:
     description: Producer manifest digest
   component:
     required: true
-    description: test-helpers, session-base or rpm-test
+    description: test-helpers
   arch:
     required: true
     description: Native architecture
