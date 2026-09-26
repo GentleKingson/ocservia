@@ -121,9 +121,10 @@ scripts/go-check.sh race
 scripts/web-check.sh full
 ```
 
-The database scripts still default to legacy `full` when invoked without a
-scope, preserving existing release/deep callers. `regression` and MySQL
-`DATABASE_FULL_PART=all|current|history` also remain manual-only. Normal CI
+The database scripts default to current-candidate `full` when invoked without a
+scope. Historical database upgrade matrices and the MySQL history shard have
+been removed; current initialization, content integrity and interrupted-SQL
+recovery remain in the full suite. `regression` remains manual-only. Normal CI
 explicitly passes `smoke` (Quick) or `compatibility` (Full).
 Browser checks require Playwright Chromium installed separately. Disaster
 recovery, complex races and fault injection remain in their existing manual
