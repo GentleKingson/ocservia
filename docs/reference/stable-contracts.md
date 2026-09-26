@@ -1,5 +1,17 @@
 # 1.x contracts and compatibility
 
+## v1.1.0 transition (pending release)
+
+The approved [v1.1.0 policy reset](support-policy.md#v110-policy-reset-pending-release)
+supersedes the software-version windows, historical release matrix and schema
+compatibility admission below for `v1.1.0`. Their removal is pending
+implementation and current-candidate acceptance; this inventory does not claim
+they have already disappeared. Real command/protocol support, authorization,
+artifact integrity, durable state, migration content integrity and current
+readiness remain contracts, not substitutes for a software-version fence.
+
+## Published 1.0 inventory
+
 Status: contract inventory for the [1.0 support policy](support-policy.md).
 `v1.0.1` is the first recommended production stable baseline; published
 `v1.0.0` remains an upgradeable transitional release. Pre-1.0 deployments must
