@@ -27,7 +27,7 @@ for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
   test -x "${ROOT}/rust/target/release/${binary}"
 done
 # Every packaged binary must carry exactly this release identity: the Agent
-# heartbeat, the upgrade downgrade fence, and the MANIFEST must all report
+# heartbeat and the MANIFEST must report
 # the same version, otherwise reconciliation can never observe success.
 for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
   reported="$("${ROOT}/rust/target/release/${binary}" --version | awk '{print $NF}')"
@@ -56,7 +56,7 @@ install -m 0755 -- "${ROOT}/deploy/production/systemd/agent-relays.sh" "${packag
 install -m 0755 -- "${ROOT}/scripts/install-agent.sh" "${ROOT}/scripts/upgrade-agent.sh" \
   "${ROOT}/scripts/rollback-agent.sh" "${ROOT}/scripts/uninstall-agent.sh" \
   "${ROOT}/scripts/verify-agent-package.sh" "${package_root}/scripts/"
-printf 'version=%s\narch=%s\nagent_protocol=1.1\nplatform_compatibility=N,N-1 minor\n' \
+printf 'version=%s\narch=%s\nagent_protocol=1.1\n' \
   "${VERSION}" "${PACKAGE_ARCH}" >"${package_root}/MANIFEST"
 
 archive="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-${PACKAGE_ARCH}.tar.gz"

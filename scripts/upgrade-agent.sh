@@ -11,9 +11,6 @@ UPGRADE_STATE_DIR="${UPGRADE_STATE_DIR:-/var/lib/ocservia-upgrade}"
 AGENT_UID="${AGENT_UID:-997}"
 AGENT_GID="${AGENT_GID:-997}"
 BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${UPGRADE_STATE_DIR}/upgrade-backup}"
-ENROLLMENT_TOKEN_FILE="${ENROLLMENT_TOKEN_FILE:-}"
-ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
-ENROLLMENT_MIGRATION_CONFIRMED="${ENROLLMENT_MIGRATION_CONFIRMED:-false}"
 
 validate_verified_package_source() {
   local trusted_root="${DESTDIR}/var/lib/ocservia-upgrade/package-staging"
@@ -306,110 +303,6 @@ validate_password_sealing_keys() {
   done
 }
 
-bind_legacy_password_sealing_keys() {
-  local agent_env="${DESTDIR}${SYSCONFDIR}/ocservia-agent/agent.env"
-  local installed_unit="$1"
-  local marker="${DESTDIR}${SYSCONFDIR}/ocservia-agent/sealing-keys-bound"
-  local controller node_id user_id user_hash p12_id p12_hash expected actual response
-  local marker_uid marker_gid marker_mode marker_links
-  if grep -Fq -- '--user-password-seal-key-id' "${installed_unit}" && \
-    grep -Fq -- '--p12-password-seal-key-id' "${installed_unit}"; then
-    return
-  fi
-  controller="$(sed -n 's/^CONTROLLER_ENDPOINT_ID=//p' "${agent_env}")"
-  node_id="$(sed -n 's/^NODE_ID=//p' "${agent_env}")"
-  user_id="$(sed -n 's/^USER_PASSWORD_SEAL_KEY_ID=//p' "${agent_env}")"
-  user_hash="$(sed -n 's/^USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${agent_env}")"
-  p12_id="$(sed -n 's/^P12_PASSWORD_SEAL_KEY_ID=//p' "${agent_env}")"
-  p12_hash="$(sed -n 's/^P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${agent_env}")"
-  if ! [[ "${controller}" =~ ^[0-9a-f]{64}$ && "${node_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-    upgrade_preflight_error "legacy sealing-key enrollment requires valid Controller EndpointID and node UUIDv7"
-  fi
-  expected="$(printf 'node_id=%s\nuser_key_id=%s\nuser_sha256=%s\np12_key_id=%s\np12_sha256=%s' "${node_id}" "${user_id}" "${user_hash}" "${p12_id}" "${p12_hash}")"
-  if [[ -f "${marker}" && ! -L "${marker}" ]]; then
-    read -r marker_uid marker_gid marker_mode marker_links < <(stat -c '%u %g %a %h' -- "${marker}")
-    actual="$(cat -- "${marker}")"
-    if [[ "${marker_uid}" == 0 && "${marker_gid}" == 0 && "${marker_mode}" == 600 && "${marker_links}" == 1 && "${actual}" == "${expected}" ]]; then
-      return
-    fi
-    upgrade_preflight_error "the existing sealing-key enrollment marker is unsafe or does not match agent.env"
-  fi
-  if [[ -n "${DESTDIR}" ]]; then
-    if [[ "${ENROLLMENT_MIGRATION_CONFIRMED}" != true ]]; then
-      upgrade_preflight_error "legacy package migration must exercise or explicitly simulate one-time sealing-key enrollment"
-    fi
-  else
-    if [[ "${ENROLLMENT_TOKEN_FILE}" != /* || ! "${ENROLLMENT_ENVIRONMENT}" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
-      upgrade_preflight_error "legacy package migration requires absolute ENROLLMENT_TOKEN_FILE and ENROLLMENT_ENVIRONMENT"
-    fi
-    response="$(runuser -u ocserv-agent -- "${ROOT}/rust/target/release/ocservia-agent" \
-      --identity-dir "${STATE_DIR}/identity" \
-      --controller "${controller}" \
-      --enrollment-token-file "${ENROLLMENT_TOKEN_FILE}" \
-      --enrollment-environment "${ENROLLMENT_ENVIRONMENT}" \
-      --user-password-seal-key-id "${user_id}" \
-      --user-password-seal-public-key-sha256 "${user_hash}" \
-      --p12-password-seal-key-id "${p12_id}" \
-      --p12-password-seal-public-key-sha256 "${p12_hash}")" || \
-      upgrade_preflight_error "Controller rejected the existing node sealing-key enrollment"
-    if [[ "${response}" != "${node_id}" ]]; then
-      upgrade_preflight_error "sealing-key enrollment returned a different node identity"
-    fi
-  fi
-  install -o root -g root -m 0600 -- /dev/null "${marker}"
-  printf '%s\n' "${expected}" >"${marker}"
-}
-
-harden_legacy_artifact_spool() {
-  local installed_unit="$1"
-  local directory="${DESTDIR}${PRIVD_STATE_DIR}/certificates/artifacts"
-  local uid mode entry name ancestor ancestor_uid ancestor_mode
-  if grep -Fq -- '--p12-password-seal-key-id' "${installed_unit}"; then
-    return
-  fi
-  if [[ ! -e "${directory}" && ! -L "${directory}" ]]; then
-    return
-  fi
-  if [[ ! -d "${directory}" || -L "${directory}" ]]; then
-    installed_pair_preflight_error "legacy P12 artifact spool must be a real directory"
-  fi
-  for ancestor in \
-    "${DESTDIR}${PRIVD_STATE_DIR}" \
-    "${DESTDIR}${PRIVD_STATE_DIR}/certificates" \
-    "${directory}"; do
-    if [[ ! -d "${ancestor}" || -L "${ancestor}" ]]; then
-      installed_pair_preflight_error "legacy P12 artifact ancestry must contain only real directories"
-    fi
-    read -r ancestor_uid ancestor_mode < <(stat -c '%u %a' -- "${ancestor}")
-    if [[ "${ancestor_uid}" != 0 ]] || (( (8#${ancestor_mode} & 8#022) != 0 )); then
-      installed_pair_preflight_error "legacy P12 artifact ancestry has unsafe ownership or mode"
-    fi
-  done
-  read -r uid mode < <(stat -c '%u %a' -- "${directory}")
-  if [[ "${uid}" != 0 ]]; then
-    installed_pair_preflight_error "legacy P12 artifact spool must be root-owned"
-  fi
-  # Remove group traversal before examining any legacy file. Pre-P1-06
-  # packages have no authenticated root ledger, so every recognized artifact
-  # is untrusted and must be removed without an mtime grace period.
-  chmod 0700 -- "${directory}"
-  for entry in "${directory}"/* "${directory}"/.*; do
-    [[ -e "${entry}" || -L "${entry}" ]] || continue
-    name="$(basename -- "${entry}")"
-    [[ "${name}" != . && "${name}" != .. ]] || continue
-    if [[ "${name}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.p12$ || \
-          "${name}" =~ ^\.[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(p12|chain\.pem)$ ]]; then
-      if [[ ! -f "${entry}" || -L "${entry}" ]] || [[ "$(stat -c '%u:%h' -- "${entry}")" != "0:1" ]]; then
-        installed_pair_preflight_error "legacy P12 artifact entry ${name} has unsafe type, owner, or link count"
-      fi
-      rm -f -- "${entry}"
-    fi
-  done
-  mode="$(stat -c '%a' -- "${directory}")"
-  [[ "${mode}" == 700 ]] || installed_pair_preflight_error "legacy P12 artifact spool could not be hardened"
-  sync -f "${directory}"
-}
-
 if [[ ${EUID} -ne 0 ]]; then
   echo "upgrade-agent.sh must run as root" >&2
   exit 1
@@ -541,13 +434,6 @@ if [[ "${same_install}" == true ]]; then
   fi
   exit 0
 fi
-
-# A pre-P1-06 node has no Controller-side sealing-key binding. Use the verified
-# new Agent binary to bind both descriptors through the existing EndpointID and
-# a fresh operator-issued token only after every rollback source is known-safe.
-# A strict root-owned marker makes a later rollback/re-upgrade deterministic.
-bind_legacy_password_sealing_keys "${installed_agent_unit}"
-harden_legacy_artifact_spool "${installed_privd_unit}"
 
 ensure_root_private_directory "${DESTDIR}${UPGRADE_STATE_DIR}"
 ensure_root_private_directory "${BACKUP_DIR}"

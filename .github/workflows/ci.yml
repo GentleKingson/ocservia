@@ -144,6 +144,8 @@ jobs:
             python3 /source/scripts/test-relay-launchers.py
           docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
             bash /source/scripts/test-release-agent-state-check.sh
+          docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
+            bash /source/scripts/test-agent-upgrade-retry.sh
 
   web:
     needs: ci-relevance

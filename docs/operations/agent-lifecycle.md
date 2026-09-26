@@ -132,29 +132,14 @@ instructions instead of installing an Agent that cannot restart.
 It also requires two distinct enrolled sealing key IDs and public-key
 fingerprints, derives each fingerprint from its root-owned private key, and
 rejects missing, reused, mismatched, symlinked, or unsafe key files before
-changing installed state. For the first upgrade from a release without
-purpose-separated sealing keys, issue a fresh enrollment token bound to the
-node's existing EndpointID, make the root-protected token file readable by the
-`ocserv-agent` group, and run the upgrade with the token path and environment:
-
-```bash
-sudo ENROLLMENT_TOKEN_FILE=/etc/ocservia-agent/sealing-key-enrollment.token \
-  ENROLLMENT_ENVIRONMENT=production \
-  /path/to/verified-package/scripts/upgrade-agent.sh
-```
-
-Before replacing any installed file, the upgrade runs the verified new Agent
-binary as `ocserv-agent`. The Controller accepts this migration only for the
-same workspace and EndpointID, only when the node has no sealing-key binding,
-and only when the signed capability advertisement exactly matches the stored
-supported set. It binds both descriptors atomically, consumes the token, and
-returns the existing node UUID. The upgrade compares that UUID with `NODE_ID`
-and records an exact root-owned marker. A missing token, wrong endpoint,
-changed capability set, partial key binding, or different returned node stops
-the upgrade before binary, unit, backup, or service changes. Delete the token
-file after a successful upgrade. A rolled-back legacy Agent may reconnect only
-with read-only capabilities; mutation capability requires the two exact bound
-descriptors.
+changing installed state. These are current trust requirements, not source
+software version checks. The v1.1.0 package scripts do not automatically enroll
+or rebind keys, reset node identity, or purge existing certificate artifacts
+when applying a target. The former upgrade-time enrollment environment
+variables and marker are no longer used. Provision the target's required
+trust configuration explicitly; missing or invalid configuration still fails.
+Removing historical layout checks does not make arbitrary cross-version
+operations safe or give an installed binary capabilities it does not implement.
 After the preflight, the script retains one matched snapshot of the previous
 Agent and privd binaries, both base systemd units, and the production relay
 drop-in and launcher presence and content under the root-only

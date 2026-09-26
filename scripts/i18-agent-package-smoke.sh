@@ -523,41 +523,8 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
 
 	test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem")" = "0:61000:640" \
 	  || { echo "trusted shared command key metadata changed before upgrade" >&2; exit 1; }
-	if capture_upgrade "${ARTIFACT_DIR}/legacy-upgrade-missing-sealing-enrollment.log"; then
-	  echo "legacy Agent upgrade proceeded without Controller-side sealing-key enrollment" >&2
-	  exit 1
-	fi
-	grep -Fq 'blocked before modification' "${ARTIFACT_DIR}/legacy-upgrade-missing-sealing-enrollment.log"
-	grep -Fq 'one-time sealing-key enrollment' "${ARTIFACT_DIR}/legacy-upgrade-missing-sealing-enrollment.log"
-	assert_rejected_upgrade_untouched "upgrade without sealing-key enrollment"
-
-	legacy_artifact_id="018f0c2e-7b1a-7c3d-8e9f-0123456789ab"
-	legacy_artifact_dir="${rootfs}/var/lib/ocservia-privd/certificates/artifacts"
-	sudo install -d -o root -g 61000 -m 0710 "${rootfs}/var/lib/ocservia-privd"
-	sudo install -d -o root -g 61000 -m 0710 "${rootfs}/var/lib/ocservia-privd/certificates"
-	sudo install -d -o root -g 61000 -m 0710 "${legacy_artifact_dir}"
-	printf 'legacy-p12' >"${work}/legacy-artifact.p12"
-	sudo install -o root -g 61000 -m 0640 "${work}/legacy-artifact.p12" \
-	  "${legacy_artifact_dir}/${legacy_artifact_id}.p12"
-	sudo sh -c 'cd "$1" && exec setpriv --reuid=61000 --regid=61000 --clear-groups test -r "./$2.p12"' \
-	  sh "${legacy_artifact_dir}" "${legacy_artifact_id}" \
-	  || { echo "legacy fixture was not readable by the Agent UID" >&2; exit 1; }
-
-	sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
-	  ENROLLMENT_MIGRATION_CONFIRMED=true \
-	  "${package_root}/scripts/upgrade-agent.sh"
-	test "$(sudo stat -c '%u:%a' -- "${legacy_artifact_dir}")" = "0:700"
-	sudo test ! -e "${legacy_artifact_dir}/${legacy_artifact_id}.p12"
-	if sudo sh -c 'cd "$1" && exec setpriv --reuid=61000 --regid=61000 --clear-groups test -r "./$2.p12"' \
-	  sh "${legacy_artifact_dir}" "${legacy_artifact_id}"; then
-	  echo "Agent UID retained access to a legacy P12 after upgrade" >&2
-	  exit 1
-	fi
-	test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/sealing-keys-bound")" = "0:0:600"
-	sudo grep -Fxq "node_id=00000000-0000-7000-8000-000000000000" \
-	  "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
-	sudo grep -Fxq "user_sha256=${user_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
-	sudo grep -Fxq "p12_sha256=${p12_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
+sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
+  "${package_root}/scripts/upgrade-agent.sh"
 for backup in \
   ocservia-agent.previous \
   ocservia-privd.previous \

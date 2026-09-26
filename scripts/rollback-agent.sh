@@ -190,13 +190,9 @@ if [[ "$(wc -l <"${manifest}")" -eq 9 ]]; then
   resolve_optional_backup ocservia-agent-relays 755
   relay_launcher_backup="${resolved_backup}"
 fi
-if [[ "${verify_only}" == false && "${restore_relay}" == true && -z "${relay_launcher_backup}" ]]; then
-  relay_env="${DESTDIR}/etc/ocservia-agent/relays.env"
-  relay_a="$(sed -n 's/^RELAY_URL_A=//p' "${relay_env}" | tail -n 1)"
-  relay_b="$(sed -n 's/^RELAY_URL_B=//p' "${relay_env}" | tail -n 1)"
-  if [[ "${relay_a}" != https://?* || "${relay_b}" != https://?* || "${relay_a}" == "${relay_b}" ]]; then
-    rollback_error "target predates single Relay support; first restore a valid, distinct HTTPS A/B configuration and both Relay services"
-  fi
+if [[ "${restore_relay}" == true && -z "${relay_launcher_backup}" ]] &&
+  grep -Fq '/usr/libexec/ocservia/ocservia-agent-relays' "${relay_backup}"; then
+  rollback_error "rollback snapshot is missing the production Relay launcher required by its service"
 fi
 
 if [[ "${verify_only}" == true ]]; then
