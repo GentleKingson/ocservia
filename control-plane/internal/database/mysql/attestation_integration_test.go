@@ -202,7 +202,7 @@ func TestRealPrivdAttestationWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = owner.ValidateSchema(ctx, 36); err != nil {
+	if err = owner.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

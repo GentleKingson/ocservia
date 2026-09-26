@@ -15,7 +15,7 @@ import (
 // accounts; only obsolete telemetry rollup DELETE grants are revoked here.
 // The acceptance harness creates and checks those accounts independently.
 var runtimePrivileges = []struct{ privileges, tables string }{
-	{"SELECT", "backend_migrations,backend_migration_steps,backend_schema_revisions,backend_schema_revision_steps,controller_schema_compatibility,roles,upstream_sync_records,telemetry_legacy_migration"},
+	{"SELECT", "backend_migrations,backend_migration_steps,backend_schema_revisions,backend_schema_revision_steps,roles,upstream_sync_records,telemetry_legacy_migration"},
 	{"SELECT,INSERT,UPDATE,DELETE", "workspaces,nodes,operations,local_auth_attempts,local_slice_jobs,commands,outbox_events,command_attempts,node_command_leases,operation_events,node_sessions"},
 	{"SELECT,INSERT,UPDATE", "telemetry_rollups_5m,telemetry_rollups_1h"},
 	{"DELETE", "user_policy_enforcements"},

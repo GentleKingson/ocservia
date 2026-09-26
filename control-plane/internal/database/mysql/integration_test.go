@@ -74,11 +74,23 @@ func TestRealInitializationAndHistory(t *testing.T) {
 	if err := b.Migrate(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 36); err != nil {
+	if err := b.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 33); !errors.Is(err, ErrSchema) {
-		t.Fatal("incorrect compatibility accepted")
+	// Historical range metadata is not authority to reject current execution.
+	for _, query := range []string{
+		`UPDATE backend_migrations SET controller_schema=9001,minimum_controller_schema=9000`,
+		`INSERT INTO controller_schema_compatibility(singleton,current_schema,minimum_compatible_controller_schema) VALUES(1,9001,9000) ON DUPLICATE KEY UPDATE current_schema=9001,minimum_compatible_controller_schema=9000`,
+	} {
+		if _, err := b.Exec(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Migrate(ctx, ""); err != nil {
+		t.Fatal("unused compatibility metadata blocked initialization", err)
+	}
+	if err := b.ValidateSchema(ctx); err != nil {
+		t.Fatal("unused compatibility metadata blocked current validation", err)
 	}
 	if _, err := b.Exec(ctx, "UPDATE backend_migrations SET manifest_checksum=REPEAT('0',64)"); err != nil {
 		t.Fatal(err)
@@ -215,7 +227,7 @@ func TestRealCrashAndRepair(t *testing.T) {
 	if err := b.Migrate(ctx, sum); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ValidateSchema(ctx, 36); err != nil {
+	if err := b.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

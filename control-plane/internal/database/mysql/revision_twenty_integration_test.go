@@ -115,7 +115,7 @@ func TestRealVersionNineteenDesiredUpgrade(t *testing.T) {
 	if _, err := b.Exec(ctx, `UPDATE desired_users SET updated_at=? WHERE node_id=?`, value.EndTimestamp, UUIDBytes(node)); err == nil {
 		t.Fatal("out-of-range time accepted")
 	}
-	if err := b.ValidateSchema(ctx, 36); err != nil {
+	if err := b.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

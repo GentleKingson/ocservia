@@ -107,7 +107,7 @@ if [[ "${scope}" == smoke || "${scope}" == compatibility ]]; then
   cd "${ROOT}/control-plane"
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
   if [[ "${scope}" == compatibility ]]; then
-    bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseUpgradeSmoke
+    bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseInitializationSmoke
   fi
   exit 0
 fi

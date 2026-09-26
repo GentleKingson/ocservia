@@ -72,7 +72,7 @@ func TestRealVersionTwoReceiptsSurviveNextRevision(t *testing.T) {
 		if !reflect.DeepEqual(before, versionTwoReceipts(t, b)) {
 			t.Fatal("published receipts changed")
 		}
-		if err := b.ValidateSchema(context.Background(), 36); err != nil {
+		if err := b.ValidateSchema(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -141,7 +141,7 @@ func TestRealNextRevisionCrashAfterData(t *testing.T) {
 	if !reflect.DeepEqual(before, versionTwoReceipts(t, b)) {
 		t.Fatal("repair rewrote old receipts")
 	}
-	if err = b.ValidateSchema(ctx, 36); err != nil {
+	if err = b.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

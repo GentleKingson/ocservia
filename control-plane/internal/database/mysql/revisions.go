@@ -26,13 +26,11 @@ type revisionPlan struct {
 	Steps []revisionStep `json:"steps"`
 }
 type revision struct {
-	Version                 int                     `json:"version"`
-	PreviousChecksum        string                  `json:"previous_checksum,omitempty"`
-	Engine                  Engine                  `json:"engine"`
-	ControllerSchema        int                     `json:"controller_schema"`
-	MinimumControllerSchema int                     `json:"minimum_controller_schema"`
-	Parents                 map[string]revisionPlan `json:"parents"`
-	MetadataHashes          map[string]string       `json:"metadata_hashes"`
+	Version          int                     `json:"version"`
+	PreviousChecksum string                  `json:"previous_checksum,omitempty"`
+	Engine           Engine                  `json:"engine"`
+	Parents          map[string]revisionPlan `json:"parents"`
+	MetadataHashes   map[string]string       `json:"metadata_hashes"`
 }
 
 const revisionsDDL = `CREATE TABLE IF NOT EXISTS backend_schema_revisions (
@@ -80,7 +78,7 @@ func loadRevision(engine Engine) (revision, string, error) {
 	if err != nil || json.Unmarshal(data, &r) != nil {
 		return r, "", ErrChecksum
 	}
-	if r.Engine != engine || r.Version != 2 || r.ControllerSchema != 34 || r.MinimumControllerSchema != 34 || len(r.Parents) != 2 {
+	if r.Engine != engine || r.Version != 2 || len(r.Parents) != 2 {
 		return r, "", ErrChecksum
 	}
 	if len(r.MetadataHashes) != 2 || len(r.MetadataHashes["backend_schema_revisions"]) != 64 || len(r.MetadataHashes["backend_schema_revision_steps"]) != 64 {
