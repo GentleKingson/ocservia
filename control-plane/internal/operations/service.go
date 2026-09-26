@@ -26,7 +26,6 @@ import (
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
-	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -430,9 +429,6 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			} else {
 				observedVersion = observed.AgentVersion
 			}
-		}
-		if telemetry.ClassifyAgentVersion(observedVersion, request.TargetVersion) != telemetry.AgentVersionStateUpgradeAvailable {
-			return Operation{}, false, ErrStaleRevision
 		}
 		request.FromVersion = observedVersion
 		if request.RolloutID != uuid.Nil {

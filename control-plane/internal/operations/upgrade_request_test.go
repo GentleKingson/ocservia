@@ -83,10 +83,10 @@ func TestAgentUpgradePreparation(t *testing.T) {
 		{name: "unsupported-architecture", target: "2.0.0", architecture: "riscv64", observed: "1.0.0", prepareErr: ErrUpgradeReleaseNotTrusted, approvalErr: ErrUpgradeReleaseNotTrusted},
 		{name: "catalog-before-version", target: "3.0.0", architecture: "amd64", prepareErr: ErrUpgradeReleaseNotTrusted, approvalErr: ErrUpgradeReleaseNotTrusted},
 		{name: "no-catalog", target: "2.0.0", architecture: "amd64", noCatalog: true, prepareErr: ErrUpgradeReleaseNotTrusted, approvalErr: ErrUpgradeReleaseNotTrusted},
-		{name: "unobserved-version", target: "2.0.0", architecture: "amd64", prepareErr: ErrUpgradeTargetNotNewer},
-		{name: "unknown-version", target: "2.0.0", architecture: "amd64", observed: "unknown", prepareErr: ErrUpgradeTargetNotNewer},
-		{name: "same-version", target: "2.0.0", architecture: "amd64", observed: "2.0.0", prepareErr: ErrUpgradeTargetNotNewer},
-		{name: "downgrade", target: "1.0.0", architecture: "amd64", observed: "1.2.0", prepareErr: ErrUpgradeTargetNotNewer},
+		{name: "unobserved-version", target: "2.0.0", architecture: "amd64"},
+		{name: "unknown-version", target: "2.0.0", architecture: "amd64", observed: "unknown"},
+		{name: "same-version", target: "2.0.0", architecture: "amd64", observed: "2.0.0"},
+		{name: "downgrade", target: "1.0.0", architecture: "amd64", observed: "1.2.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &upgradePreparationStore{workspace: workspace, architecture: tc.architecture, version: tc.observed, err: tc.readErr}

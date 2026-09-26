@@ -113,8 +113,6 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "the node has not reported its package architecture yet")
 		case errors.Is(err, operationstore.ErrUpgradeReleaseNotTrusted):
 			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "no trusted release exists for the requested version and architecture")
-		case errors.Is(err, operationstore.ErrUpgradeTargetNotNewer):
-			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/target-not-newer", "Target is not an upgrade", "the requested target version must be newer than the observed agent version")
 		default:
 			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node does not exist")
 		}
