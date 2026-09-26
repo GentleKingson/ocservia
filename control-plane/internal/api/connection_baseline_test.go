@@ -70,7 +70,7 @@ func (s *baselineEventStore) Get(context.Context, uuid.UUID) (operationstore.Ope
 	return operationstore.Operation{State: "running"}, nil
 }
 
-func (b *baselineBlockedDatabase) Ping(ctx context.Context) error {
+func (b *baselineBlockedDatabase) CheckReadiness(ctx context.Context) error {
 	close(b.started)
 	<-ctx.Done()
 	<-b.release
@@ -78,9 +78,6 @@ func (b *baselineBlockedDatabase) Ping(ctx context.Context) error {
 	return ctx.Err()
 }
 func (*baselineBlockedDatabase) PoolStats() database.PoolStats { return database.PoolStats{} }
-func (*baselineBlockedDatabase) ControllerSchema(context.Context, int64) (int64, error) {
-	return 36, nil
-}
 
 func TestHTTPTimeoutAndSSEBaseline(t *testing.T) {
 	b := &baselineBlockedDatabase{started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}

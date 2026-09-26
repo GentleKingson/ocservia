@@ -33,7 +33,7 @@ func TestHTTPAssemblyFailureOwnership(t *testing.T) {
 			if failure == "authentication" {
 				cfg.LocalAuth = true
 			}
-			server, err := newHTTPServer(life, cfg, BuildInfo{}, stoppedBackend{}, nil, 36, quietLogger(), httpServices{})
+			server, err := newHTTPServer(life, cfg, BuildInfo{}, stoppedBackend{}, nil, quietLogger(), httpServices{})
 			if failure == "none" {
 				if err != nil || server == nil || life.http != server {
 					t.Fatalf("ownership not transferred before listen: %v", err)
@@ -65,7 +65,7 @@ func TestNonAPIRolesSkipHTTPConstruction(t *testing.T) {
 			// Both SSE and authentication would fail if the HTTP path ran.
 			cfg := config.Config{Role: role, LocalAuth: true, ShutdownTimeout: time.Second, UserOperationConcurrency: 1, AgentUpgradeReconcile: time.Minute}
 			backend := stoppedBackend{}
-			err := runRoles(ctx, cfg, BuildInfo{}, backend, audit.NewBackendManager(backend, nil), 36, quietLogger())
+			err := runRoles(ctx, cfg, BuildInfo{}, backend, audit.NewBackendManager(backend, nil), quietLogger())
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("non-API role constructed HTTP/authentication: %v", err)
 			}

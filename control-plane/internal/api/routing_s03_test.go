@@ -131,7 +131,7 @@ func TestOrdinaryHTTPPathBoundaries(t *testing.T) {
 }
 
 func BenchmarkRouteMethods(b *testing.B) {
-	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 36)
+	s := NewBackend("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "")
 	b.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 	for _, tc := range []struct{ name, path string }{
 		{"ordinary-static", "/api/v1/auth/login"},

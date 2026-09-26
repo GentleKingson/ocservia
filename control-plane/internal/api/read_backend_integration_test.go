@@ -174,15 +174,6 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 		t.Fatalf("pool metrics: %+v", metrics)
 	}
 	w = get("/readyz", uuid.Nil, nil, http.StatusOK)
-	var ready struct {
-		Schema int64 `json:"schema_version"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &ready); err != nil || ready.Schema != 36 {
-		t.Fatalf("schema readiness: %s %v", w.Body, err)
-	}
-	server.expectedSchema = 37
-	get("/readyz", uuid.Nil, nil, http.StatusServiceUnavailable)
-	server.expectedSchema = 36
 	get("/readyz", uuid.Nil, nil, http.StatusOK)
 	exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, bindingID)
 	w = get("/api/v1/workspaces", uuid.Nil, cookie, http.StatusOK)
