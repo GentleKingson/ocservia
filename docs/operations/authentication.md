@@ -256,20 +256,17 @@ function that generates a different UUID version.
 
 #### PostgreSQL
 
-Inspect the applied history and compatibility metadata:
+Inspect the applied execution records:
 
 ```sql
 SELECT version, name FROM schema_migrations ORDER BY version;
-SELECT current_schema, minimum_compatible_controller_schema
-FROM controller_schema_compatibility;
 ```
 
-The history must cover the installed release's `control-plane/migrations`
-and agree with the compatibility row. Migration `000034` is specifically the
-historical PostgreSQL two-principal Local-bootstrap compatibility boundary; it
-is not the current migration target or a MySQL/MariaDB revision number.
-The normal migration/startup checks also verify history checksums; a maximum
-version alone is insufficient.
+Owner initialization checks known SQL names/checksums and records completed
+execution to prevent repeated DDL. Unknown completed records are preserved,
+not treated as a software version rejection. Neither a maximum number nor
+frozen compatibility metadata proves current readiness or cross-version safety.
+Readiness uses current reads and permissions, not this history query.
 
 PostgreSQL stores the workspace ID as native `uuid` and the times as
 `timestamptz`. On an empty database, provision the workspace:
@@ -294,13 +291,12 @@ SELECT version, state, manifest_checksum FROM backend_schema_revisions ORDER BY 
 The engine must match the deployment, `dirty` must be false, and every appended
 revision required by the installed release must be present and `verified`.
 The baseline row's `version` is not the latest appended revision or Controller
-schema version. The legacy `controller_schema_compatibility` row also belongs
-to the frozen baseline, not the latest appended Controller compatibility range.
-The owner migration checks schema shape; runtime startup and bootstrap validate
-the complete receipt/checksum chain and the latest embedded revision's
-`controller_schema`/`minimum_controller_schema`. Do not infer current
-compatibility from the baseline row, manually mark a dirty migration clean, or
-copy PostgreSQL migration numbers into these tables.
+schema version. Frozen compatibility fields are historical data, not admission
+authority. Owner initialization verifies known content, receipts and actual
+schema requirements. Runtime startup checks current telemetry structures and
+permissions; readiness checks current core reads and stream health. Do not
+manually mark a dirty migration clean, rewrite receipts, or copy PostgreSQL
+migration numbers into these tables.
 
 At the current migrated schema, workspace IDs are `VARBINARY(16)` with an exact
 16-byte length constraint, using unswapped RFC UUID byte order.
@@ -519,13 +515,11 @@ or leases created after that transaction commits.
 PostgreSQL migration `000033` created the table and expiry index; MySQL/MariaDB
 provide them through their own baseline and time-storage revisions. The normal migration runner
 grants only SELECT/INSERT/UPDATE/DELETE on this table to the runtime role; Owner
-or TRUNCATE permissions are not needed. The minimum compatible Controller schema
-was 33 at the PostgreSQL policy's introduction because older binaries did not
-enforce it; the installed release's current compatibility metadata remains
-authoritative. Drain/stop older Local
-login instances before migration and replacement; do not mix old and new login
-handlers. Reverting this migration removes backoff state and requires stopping
-schema-33 Controllers and the normal coordinated schema/metadata rollback.
+or TRUNCATE permissions are not needed. There is no minimum Controller schema
+admission check. Stop affected Local login instances before replacement and
+verify the target's real authentication behavior before resuming service.
+Preserve backoff state; binary rollback does not reverse the database or
+establish safe mixed-version login handling.
 
 This is bounded account protection, not a solution to targeted denial of login:
 an attacker can still cause temporary account cooldown, and a saturated table

@@ -1,14 +1,13 @@
 # Upgrade the Controller
 
-Upgrade an installed Controller to a newer signed release using the guarded
+Apply an explicitly selected signed Controller release using the protected
 lifecycle. The lifecycle keeps the current release running while it validates
 the target and records pending evidence.
 
-For formal `1.x`, this procedure starts from `v1.0.0` or a later 1.x release.
-`v1.0.0` is a published transitional upgrade source; `v1.0.1` is the first
-recommended production stable baseline. Pre-1.0 installations must
-[redeploy](../getting-started/production.md), not upgrade in place or use
-`v1.0.0` as a bridge. See the [support policy](../reference/support-policy.md).
+The v1.1.0 lifecycle does not impose a source-version window, target ordering
+or descriptor-equality requirement. Cross-version safety is not guaranteed,
+and historical deployment conversion is not provided. See the
+[support policy](../reference/support-policy.md).
 
 ## Before you begin
 
@@ -18,8 +17,8 @@ recommended production stable baseline. Pre-1.0 installations must
 - The required production environment and secrets are still available.
 - Confirm the selected database backend/deployment and its
   [recovery procedure](../operations/incident-recovery.md#database-recovery).
-- Review the target's production deployment descriptor and schema compatibility;
-  neither a newer version number nor an additive migration guarantees rollback.
+- Review the target's deployment and persistent-state requirements; neither a
+  version number nor an additive migration guarantees safe execution or rollback.
 
 ## Command
 
@@ -48,7 +47,7 @@ new schema migration and is repeatable. Keep the selected authentication mode,
 session and audit secrets (including the audit event key ID/file), database TLS
 CA and backend/role settings intact; the production descriptors supply these
 to the migration service. Do not replace the runtime database secret with an
-owner secret or bypass signature, source, or compatibility checks.
+owner secret or bypass signature, source, architecture or authorization checks.
 
 Confirm the migration service completed successfully and subsequent maintenance
 completes without `user_operations.cleanup_failed`. That error means cleanup
@@ -70,23 +69,17 @@ A failed target remains in `pending-release.json` with evidence and the
 confirmed release state is unchanged. Correct the cause and retry the
 identical target. Do not use `install` to retry an existing installation.
 
-Network migration can leave the application services stopped or the application
-network absent after a failure. Keep the target checkout, environment, signed
-bundle and pending state intact; correct the reported cause and rerun the same
-`upgrade` command. It inspects live network state and resumes without deleting
-volumes or the database network. Do not delete pending evidence or substitute
-direct Compose commands.
+The lifecycle does not detect and convert the old application network layout.
+It uses the verified target source and target Compose files; actual configuration
+or startup errors remain failures. Keep the checkout, environment, signed bundle
+and pending state intact. Do not delete evidence or substitute direct Compose.
 
-The v0.4.0 network/security transition is a historical **forward-only deployment
-change**, not an upgrade path into `1.x` or the complete rollback rule for later
-releases. The lifecycle compares the actual current/previous deployment descriptors and database
-compatibility; changed deployment contracts can reject rollback even with a
-compatible schema. If same-target recovery is impossible, preserve failure
+If same-target recovery is impossible, preserve failure
 evidence and select the [backend-specific recovery procedure](../operations/incident-recovery.md#database-recovery):
 PostgreSQL backup/PITR within its scope, or MySQL/MariaDB isolated logical
 restore, without implying equivalent recovery capabilities. Complete its
 fencing, audit and unfinished-work checks before redirecting traffic or enabling
 commands. Do not force old images onto the partially upgraded deployment.
 
-For state transitions, source matching, migration compatibility, and failure
+For state transitions, source matching, database initialization, and failure
 semantics, see [Production deployment reference](../operations/production-deployment.md).

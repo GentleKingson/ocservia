@@ -29,9 +29,11 @@ For PostgreSQL credential exposure, use `deploy/production/rotate-postgres-crede
 Stop new writes and reconcile every Unknown operation. Use the guarded
 [Controller rollback](../how-to/controller-rollback.md) or
 [Agent rollback](../how-to/agent-rollback.md), respecting the selected artifact's
-protocol, schema and deployment-descriptor compatibility. Controller rollback
+actual protocol, configuration and persistent-state requirements. Version order,
+schema ranges and descriptor equality are not admission gates in v1.1.0 and do
+not provide a safety guarantee. Controller rollback
 does not run a down migration or restore a database. If same-target upgrade
-recovery and compatible rollback are impossible, use database recovery below.
+recovery and explicit rollback cannot restore service, use database recovery below.
 Record the exact release, source SHA, migration, backup and audit checkpoint.
 
 ## Database recovery

@@ -266,16 +266,17 @@ allow unsigned fallback, dispatch CI or change repository rules as part of P0.
 | Existing standalone + v1 | Preserve install/start/upgrade/rollback behavior and exact schema. New reader may consume v1; old reader is not expected to consume v2. |
 | Standalone + v2 | Only after P3/P4 prove explicit backend/mode variants. External Relay and HTTPS Signer remain independent operator dependencies. |
 | Fresh Integrated + v2 | Only after P1-P6 gates; both native `linux/amd64` and `linux/arm64` images must be accepted before claiming both. |
-| Same-mode upgrade | Verified backup, database migration/compatibility checks, Signer state compatibility and protected lifecycle state precede activation. Unknown effects block conflicting work. |
-| Same-mode rollback | Existing previous-release guards plus target-readable Signer state. Never roll back images automatically after partial activation or downgrade schema/state blindly. Preserve CA, issued serials and revocations. |
+| Same-mode upgrade | Verified target source/artifacts, owner-only database initialization, actual Signer identity/revision and protected lifecycle state precede activation. No software-version or schema-range admission. Unknown effects block conflicting work. |
+| Same-mode rollback | Verified explicit target and target-readable Signer state, without version-order or descriptor-equality gates. Never roll back images automatically after partial activation or reverse schema/state blindly. Preserve CA, issued serials and revocations. |
 | Standalone <-> Integrated | No automatic in-place conversion or cross-mode rollback in the first version. Reject before changing ports/state; operator-planned maintenance migration is a separate authorized task. |
 | Incompatible DB or Signer state | Forward recovery or an explicitly planned isolated restore. A pre-upgrade Signer backup alone may lose later issuance/revocations: reconcile them before resuming. No generic down migration. |
-| Nodes / protocols | Keep existing ALPN, enrollment proof, purpose-separated keys and finite release compatibility matrix. No pre-1.0 in-place upgrade promise, process merging or guarantee of recovering every Unknown mutation. |
+| Nodes / protocols | Keep existing ALPN, enrollment proof, purpose-separated keys and real command capability checks. Validate the current candidate, not a historical release matrix. No cross-version safety, process merging or guaranteed recovery of every Unknown mutation. |
 
-P3 records Signer state version with the release and refuses activation if its
-reader/writer compatibility is unknown. P2 supplies that compatibility range
-and crash-safe migration/backup procedure. Restoring Controller and Signer
-independently is not proof of a consistent recovery point.
+Signer state must remain authentic, readable by the selected implementation,
+and bound to its issuer with monotonic revision. A state encoding is not an
+ocservia release-version window. Never reset identity, rewind revision or
+overwrite persistent state to make a target start. Restoring Controller and
+Signer independently is not proof of a consistent recovery point.
 
 ## Ownership and acceptance
 

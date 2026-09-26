@@ -20,23 +20,18 @@ This restores the Agent and `privd` binaries, their matching systemd units,
 and the production relay drop-in and launcher state together. Do not restore only one
 binary.
 
-## Single-relay compatibility
+## Target requirements
 
-The pre-change implementation (verified at v0.5.2) requires two custom relay
-URLs. Before rolling back to it, restore two valid, distinct HTTPS URLs in
-`/etc/ocservia-agent/relays.env` and restore both relay services. The current
-rollback entry point rejects a single-relay configuration before stopping
-services or modifying files when the snapshot predates the optional-relay
-launcher. Eight-entry historical snapshots remain readable; new snapshots
-also record the launcher's presence or absence. Operator configuration,
-identity and trust material are preserved, not silently rewritten.
+The v1.1.0 verifier and rollback script no longer infer a software version from
+the absence of a Relay launcher or reject it on that basis. A launcher actually
+referenced by a service unit must still exist, and snapshot integrity, trust
+and configuration requirements still apply. Operator configuration, identity
+and persistent state are preserved, not silently converted or reset.
 
-The current archive verifier similarly guards a legacy candidate on an
-installed production node. This cannot intercept an already-installed
-historical script, direct execution of old package scripts, or a direct
-package-manager downgrade. Do not use those paths with a single-relay
-configuration. A valid dual configuration is a prerequisite, not a waiver of
-the existing snapshot, trust, sealing-key or release compatibility checks.
+The selected binary may fail with the existing configuration or data. Absence
+of a version rejection is not a cross-version safety guarantee, and installed
+old scripts retain their original behavior. Package-manager downgrade is not
+the matched-snapshot recovery operation described here.
 
 ## Verify
 

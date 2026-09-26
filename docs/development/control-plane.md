@@ -96,25 +96,22 @@ Database migrations run as a separate one-shot process using `--migrate-only`,
 an owner connection in `OCSERV_DATABASE_URL`, and the unprivileged role named
 by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives
 only the runtime role credentials. Migration execution serializes schema
-changes, validates the complete applied history, and grants the runtime
+changes, validates known applied content, and grants the runtime
 role ordinary data access while keeping audit events read/append-only.
 PostgreSQL grants `SELECT`/`INSERT`; MySQL/MariaDB additionally grant a narrow
 column UPDATE privilege for locking reads, while immutable triggers reject
-actual updates. PostgreSQL uses an advisory lock and transactional SQL migrations;
-its migration `000029` introduced the singleton `controller_schema_compatibility`
-row. MySQL/MariaDB use a dedicated connection's `GET_LOCK` for migration
+actual updates. PostgreSQL uses an advisory lock and transactional SQL migrations.
+MySQL/MariaDB use a dedicated connection's `GET_LOCK` for migration
 serialization, immutable backend manifests and journaled, verified steps because
 DDL can implicitly commit. Their revision numbers are not PostgreSQL migration
-numbers; dirty or mismatched history fails closed, not automatic force-clean.
-PostgreSQL readiness accepts an expected Controller schema only when
-`minimum_compatible_controller_schema <= expected <= current_schema` and its
-applied history agrees with the compatibility row. MySQL/MariaDB validate
-the full baseline/appended receipts and the latest embedded revision's
-`minimum_controller_schema <= expected <= controller_schema`; their legacy
-compatibility row remains part of the frozen baseline, not the latest range.
-Missing, malformed or unaccounted-for future metadata fails closed. Every later migration starts with
-an exact range; a lower minimum requires explicit compatibility review and
-backend-specific migration metadata, not a version-number substitution.
+numbers. Actual dirty execution, mismatched known content and SQL failures
+remain errors, not automatic force-clean. Unknown completed receipts are not a
+software-version rejection and are preserved. Initialization does not reverse
+SQL or reset persistent state. Frozen compatibility metadata in published SQL
+is retained as historical data, not maintained or used for admission.
+Readiness checks current core reads, permissions and event-stream health, not
+migration history or Controller schema ranges. Current startup also validates
+the actual telemetry objects and runtime privileges it needs.
 
 Business stores share transaction ownership, atomic audit/business writes,
 bounded cleanup and fencing semantics through `internal/database`. PostgreSQL
@@ -160,11 +157,9 @@ infer storage representation from a similarly named column; consult its store
 and appended migration. See [database preparation](../operations/authentication.md#database-preparation)
 for a current workspace example.
 
-An additive migration is not automatically backward-compatible: verify all old
-Controller queries and writes before lowering the minimum. Destructive cleanup
-must follow an expand, deploy/migrate, and contract sequence, such as a
-post-deployment migration after all consumers stop depending on the old shape.
-The compatibility row is not a backup. Use [backend-specific recovery](../operations/incident-recovery.md#database-recovery):
+An additive migration is not a cross-version safety guarantee. Do not rewrite
+published migration SQL or discard data to make a target start. Execution
+receipts are not a backup. Use [backend-specific recovery](../operations/incident-recovery.md#database-recovery):
 PostgreSQL backup/PITR within its scope or MySQL/MariaDB logical restore, not
 equivalent HA/PITR guarantees.
 
