@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Disposable hosted runner only. Smoke and extended profiles retain separate scope.
 # shellcheck disable=SC2024 # sudo reads protected state; redirects are runner-owned.
+# shellcheck disable=SC2030,SC2031 # Baseline subshell must not replace the target candidate identity.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${ARTIFACT_DIR:?}" "${VERSION:?}" "${CANDIDATE_SHA:?}"
@@ -9,7 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${INTEGRATED_INSTALL_ONLY:=false}"
 [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == false || "$BUSINESS_PROFILE" == extended ]]
 [[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
-[[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]
+bash "$ROOT/scripts/release-business-environment.sh"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
 [[ "${GITHUB_SHA:?}" == "${CANDIDATE_SHA}" && "$(git -C "${ROOT}" rev-parse HEAD)" == "${CANDIDATE_SHA}" ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" && "$(ps -p 1 -o comm=)" == systemd ]]
@@ -46,6 +47,11 @@ export OCSERV_CERTIFICATE_SIGNER_URL=https://signer.unavailable.invalid
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   [[ "$EUID" == 0 && -n "${CANDIDATE_BUNDLE:-}" && -n "${CANDIDATE_PRODUCTS:-}" ]]
   gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
+  if [[ -n "${INTEGRATED_PUBLIC_ADDRESS:-}" ]]; then
+    [[ "${INTEGRATED_DISPOSABLE_CONTAINER:-}" == true ]]
+    python3 -c 'import ipaddress,sys; assert ipaddress.ip_address(sys.argv[1]).version == 4 and ipaddress.ip_address(sys.argv[1]).is_global' "$INTEGRATED_PUBLIC_ADDRESS"
+    gateway="$INTEGRATED_PUBLIC_ADDRESS"
+  fi
   export OCSERV_DEPLOYMENT_MODE=integrated OCSERV_HTTPS_ADDRESS=0.0.0.0
   export OCSERV_PUBLIC_HOST="controller.${gateway}.sslip.io" OCSERV_RELAY_PUBLIC_HOST="relay.${gateway}.sslip.io"
   export OCSERV_CONTROLLER_PUBLIC_URL="https://${OCSERV_PUBLIC_HOST}" OCSERV_PUBLIC_ORIGIN="https://${OCSERV_PUBLIC_HOST}"
@@ -296,7 +302,27 @@ openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${work}/bundle/S
 cp "${manifest}" "${ARTIFACT_DIR}/candidate-manifest.json"
 fi
 next_stage controller_install
-"${ROOT}/deploy/production/controller.sh" install --release-file "${manifest}"
+if [[ -n "${INTEGRATED_BASELINE_SOURCE:-}" ]]; then
+  [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "${INTEGRATED_DISPOSABLE_CONTAINER:-}" == true ]]
+  mkdir -m 700 "$work/baseline-bundle" "$ARTIFACT_DIR/baseline"
+  cp -R "${INTEGRATED_BASELINE_BUNDLE:?}/." "$work/baseline-bundle/"
+  install -m 600 "$work/baseline-bundle/candidate-signing.pub.pem" "$work/baseline-release.pub.pem"
+  (
+    export CANDIDATE_BUNDLE="$work/baseline-bundle" ARTIFACT_DIR="$ARTIFACT_DIR/baseline"
+    export CANDIDATE_BUNDLE_SHA256="${INTEGRATED_BASELINE_BUNDLE_SHA256:?}"
+    export CANDIDATE_KEY_SHA256="${INTEGRATED_BASELINE_KEY_SHA256:?}"
+    export CANDIDATE_SHA="${INTEGRATED_BASELINE_SHA:?}" VERSION="${INTEGRATED_BASELINE_VERSION:?}"
+    export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="$work/baseline-release.pub.pem"
+    bash "$ROOT/scripts/consume-controller-candidate.sh"
+    "$INTEGRATED_BASELINE_SOURCE/deploy/production/controller.sh" install \
+      --release-file "$CANDIDATE_BUNDLE/controller-release-${CONTROLLER_ARCH}.json"
+  )
+  python3 "$ROOT/scripts/release-integrated-acceptance.py" rejected_upgrade
+  "${ROOT}/deploy/production/controller.sh" upgrade --release-file "${manifest}"
+  record integrated_first_install_and_upgrade
+else
+  "${ROOT}/deploy/production/controller.sh" install --release-file "${manifest}"
+fi
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   T07_SIGNER_CONTAINER="$(compose ps -q signer)"
   T07_RELAY_CONTAINER="$(compose ps -q relay)"
@@ -304,6 +330,10 @@ fi
 curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" | \
   jq -e --arg sha "${CANDIDATE_SHA}" --arg v "${VERSION}" '.commit == $sha and .version == $v' >/dev/null
 record signed_controller_lifecycle
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  python3 "$ROOT/scripts/release-integrated-acceptance.py" entry
+  record integrated_entry_and_internal_tls
+fi
 if [[ "$INTEGRATED_INSTALL_ONLY" == true ]]; then
   [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]
   "$ROOT/deploy/production/controller.sh" uninstall
@@ -382,7 +412,7 @@ fi
 next_stage native_node
 # The candidate is not a published Release. Verify the real signed package
 # locally, then exercise the official managed-node convergence/preparation.
-deb="${OUTPUT_DIR}/ocservia-agent_${VERSION}-1_amd64.deb"
+deb="${OUTPUT_DIR}/ocservia-agent_${VERSION}-1_${CONTROLLER_ARCH}.deb"
 sha256sum "${deb}" >"${work}/package.sha256"
 openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${work}/package.sha256" -out "${work}/package.sig"
 openssl pkeyutl -verify -rawin -pubin -inkey "${work}/trusted-release.pub.pem" \
@@ -397,7 +427,7 @@ fi
 sha256sum -c "${work}/package.sha256"
 record real_signature_and_tamper_rejection
 sudo install -d -m 755 /etc/ocservia
-node_key="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-amd64.tar.gz.sha256.pub.pem"
+node_key="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-${CONTROLLER_ARCH}.tar.gz.sha256.pub.pem"
 sudo install -m 644 "${node_key}" /etc/ocservia/release-signing.pub.pem
 export EXPECTED_RELEASE_KEY_SHA256
 EXPECTED_RELEASE_KEY_SHA256="$(openssl pkey -pubin -in "${node_key}" -outform DER | sha256sum | cut -d' ' -f1)"
@@ -570,5 +600,10 @@ if [[ "${BUSINESS_PROFILE}" == extended ]]; then
   next_stage supplemental_business
   python3 "${ROOT}/scripts/release-business-api.py" business
   record real_vpn_business_and_recovery
+fi
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  next_stage integrated_recovery
+  python3 "$ROOT/scripts/release-integrated-acceptance.py" recovery
+  record integrated_recreation_and_authorized_sse
 fi
 next_stage complete
