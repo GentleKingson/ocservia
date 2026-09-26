@@ -48,14 +48,10 @@ export async function listAuthorizedWorkspaces(
 }
 
 export async function getWorkspace(): Promise<Workspace> {
-  if (selectedWorkspace) return selectedWorkspace;
-  const page = await listAuthorizedWorkspaces();
-  const remembered = sessionStorage.getItem(workspaceKey);
-  const workspace =
-    page.find((candidate) => candidate.id === remembered) ?? page[0];
-  if (!workspace) throw new Error("No authorized workspace is available");
-  setSelectedWorkspace(workspace);
-  return workspace;
+  if (!selectedWorkspace) await listAuthorizedWorkspaces();
+  if (!selectedWorkspace)
+    throw new Error("No authorized workspace is available");
+  return selectedWorkspace;
 }
 
 export async function selectWorkspace(workspaceId: string): Promise<Workspace> {

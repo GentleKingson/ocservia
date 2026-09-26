@@ -126,32 +126,6 @@ reject("local probe builds must assemble from the shared G6 runtime graph") unle
     probe_build.fetch("target") == "g6-probe-runtime"
 RUBY
 
-smoke_session_phase="$(sed -n '/^phase_smoke_session() {/,/^}/p' "${FD_B}")"
-grep -q 'g6rd_capture_agent_readiness "${NODES_FILE}"' <<<"${smoke_session_phase}" || {
-  echo "the pre-promotion smoke session must use the active FD-A controller view" >&2
-  exit 1
-}
-grep -q '\$1 == "g6-fd-b-01"' <<<"${smoke_session_phase}" || {
-  echo "the authenticated smoke command must target an Agent across the failure-domain boundary" >&2
-  exit 1
-}
-grep -q 'smoke_command_succeeded "${key}" "${node}"' <<<"${smoke_session_phase}" || {
-  echo "the authenticated smoke command must wait through unknown-outcome reconciliation" >&2
-  exit 1
-}
-grep -q 'g6rd_release_synthetic_barriers' <<<"${smoke_session_phase}" || {
-  echo "the smoke session must release the formal load fixture before its command" >&2
-  exit 1
-}
-if grep -q 'wait_commands_settled' <<<"${smoke_session_phase}"; then
-  echo "the smoke session must not accept an intermediate unknown command as success" >&2
-  exit 1
-fi
-if grep -q 'g6rd_probe_node_connection' <<<"${smoke_session_phase}"; then
-  echo "the pre-promotion FD-B smoke phase must not require a nonexistent local transport socket" >&2
-  exit 1
-fi
-
 # Debian already assigns UID 65534 to nobody. The probe must reuse that
 # account rather than attempting to create a duplicate numeric identity.
 if grep -Eq 'useradd.*--uid 65534' "${G6_RUNTIME_DOCKERFILE}"; then
@@ -4833,8 +4807,7 @@ done
 
 runtime_result_helper="$(sed -n '/^g6rd_write_runtime_result() {/,/^}/p' "${LIB}")"
 for token in 'harness/state.json' 'harness/events.jsonl' 'harness/phase-results' \
-  'ARTIFACT_DIR}/rendezvous' 'harness/resources.json' 'harness/frozen-binary-manifest.tsv' \
-  'failure.class' 'failure.code' '--failure-class' '--failure-code'; do
+  'ARTIFACT_DIR}/rendezvous' 'harness/resources.json' 'harness/frozen-binary-manifest.tsv'; do
   grep -qF -- "${token}" <<<"${runtime_result_helper}" || {
     echo "raw runtime evidence is missing typed harness artifact: ${token}" >&2
     exit 1

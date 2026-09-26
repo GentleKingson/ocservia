@@ -32,27 +32,20 @@ append() {
 }
 
 render() {
-  local file="${1:?timing file is required}" metadata stages artifacts images rendezvous
+  local file="${1:?timing file is required}"
   [[ -f "${file}.tsv" ]] || return 0
-  metadata="$(mktemp)"
-  stages="$(mktemp)"
-  artifacts="$(mktemp)"
-  images="$(mktemp)"
-  rendezvous="$(mktemp)"
-  trap 'rm -f -- "${metadata}" "${stages}" "${artifacts}" "${images}" "${rendezvous}"' RETURN
-  awk -F '\t' '$1 == "meta" { print $2 "\t" $3 }' "${file}.tsv" >"${metadata}"
-  awk -F '\t' '$1 == "duration" { print $2 "\t" $3 }' "${file}.tsv" >"${stages}"
-  awk -F '\t' '$1 == "artifact" { print $2 "\t" $3 }' "${file}.tsv" >"${artifacts}"
-  awk -F '\t' '$1 == "image" { print $2 "\t" $3 "\t" $4 }' "${file}.tsv" >"${images}"
-  awk -F '\t' '$1 == "rendezvous" { print $2 "\t" $3 }' "${file}.tsv" >"${rendezvous}"
-  jq -n \
-    --slurpfile metadata <(jq -Rn '[inputs | split("\t") | {key: .[0], value: .[1]}]' <"${metadata}") \
-    --slurpfile stages <(jq -Rn '[inputs | split("\t") | {name: .[0], duration_ms: (.[1] | tonumber)}]' <"${stages}") \
-    --slurpfile artifacts <(jq -Rn '[inputs | split("\t") | {key: .[0], value: (.[1] | tonumber)}]' <"${artifacts}") \
-    --slurpfile images <(jq -Rn '[inputs | split("\t") | {key: .[0], value: {bytes: (.[1] | tonumber), image_id: .[2]}}]' <"${images}") \
-    --slurpfile rendezvous <(jq -Rn '[inputs | split("\t") | {key: .[0], value: (.[1] | tonumber)}]' <"${rendezvous}") \
-    '$metadata[0] | from_entries as $m | {job: $m.job, profile: $m.profile, candidate_sha: $m.candidate_sha, run_id: $m.run_id, run_attempt: $m.run_attempt, stages: $stages[0], artifact_bytes: ($artifacts[0] | from_entries), images: ($images[0] | from_entries), rendezvous: ($rendezvous[0] | from_entries)}' \
-    >"${file}"
+  jq -Rn '
+    reduce (inputs | split("\t")) as $row
+      ({metadata: {}, stages: [], artifact_bytes: {}, images: {}, rendezvous: {}};
+       if $row[0] == "meta" then .metadata[$row[1]] = $row[2]
+       elif $row[0] == "duration" then .stages += [{name: $row[1], duration_ms: ($row[2] | tonumber)}]
+       elif $row[0] == "artifact" then .artifact_bytes[$row[1]] = ($row[2] | tonumber)
+       elif $row[0] == "image" then .images[$row[1]] = {bytes: ($row[2] | tonumber), image_id: $row[3]}
+       elif $row[0] == "rendezvous" then .rendezvous[$row[1]] = ($row[2] | tonumber)
+       else . end)
+    | .metadata as $m | del(.metadata)
+    | . + {job: $m.job, profile: $m.profile, candidate_sha: $m.candidate_sha, run_id: $m.run_id, run_attempt: $m.run_attempt}
+  ' "${file}.tsv" >"${file}"
 }
 
 command="${1:-}"

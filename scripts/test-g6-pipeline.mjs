@@ -58,5 +58,40 @@ try {
   const env = { GITHUB_SHA: binding["candidate-sha"], GITHUB_RUN_ID: "424242", GITHUB_RUN_ATTEMPT: "3",
     G6_AUTHORITY: "engineering", G6_PIPELINE_NEEDS: JSON.stringify({ "g6-rd-fd-a": { outputs: { "release-manifest-digest": "f".repeat(64) } } }) };
   assert.notEqual(workflowOptions(env)["environment-id"], workflowOptions({ ...env, GITHUB_RUN_ATTEMPT: "4" })["environment-id"]);
+  const diagnostics = join(root, "diagnostics");
+  const record = (path, value) => {
+    const file = join(diagnostics, path);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, JSON.stringify(value));
+  };
+  const summarize = (status = "failed") => {
+    runtimeResult({ ...binding, root: diagnostics, domain: "fd-b", status });
+    verifySource(diagnostics, expected, "fd-b");
+    return JSON.parse(readFileSync(join(diagnostics, "runtime-result.json"), "utf8"));
+  };
+  mkdirSync(diagnostics);
+  assert.deepEqual(summarize().failure, { class: "harness_contract_failed", code: "runtime_job_failed" });
+  assert.equal(summarize().last_phase, "unknown");
+  record("harness/runtime/state.json", { completed_phases: [{ name: "prepare" }] });
+  assert.equal(summarize().last_phase, "prepare");
+  record("harness/runtime/state.json", { active_phase: { name: "promote" }, completed_phases: [{ name: "prepare" }] });
+  assert.equal(summarize("cancelled").last_phase, "promote");
+  assert.equal(summarize("cancelled").status, "cancelled");
+  const peerFailure = { class: "peer_failed", code: "peer_job_failed" };
+  record("harness/rendezvous/older.result.json", { status: "failed", checkpoint: "older", completed_at: "2026-01-01T00:00:00Z", failure: peerFailure });
+  record("harness/rendezvous/newer.result.json", { status: "failed", checkpoint: "newer", completed_at: "2026-01-02T00:00:00Z", failure: peerFailure });
+  record("harness/rendezvous/ignored.json", { status: "failed", checkpoint: "ignored", completed_at: "2026-01-03T00:00:00Z", failure: peerFailure });
+  assert.equal(summarize().last_phase, "newer");
+  assert.deepEqual(summarize().failure, peerFailure);
+  const phaseFailure = { class: "phase_timeout", code: "phase_deadline_exceeded" };
+  record("harness/runtime/phase-results/010.json", { status: "failed", phase: "prepare", sequence: 10, failure: phaseFailure });
+  record("harness/runtime/phase-results/020.json", { status: "failed", phase: "build-images", sequence: 20, failure: phaseFailure });
+  record("harness/runtime/phase-results/030.json", { status: "passed", phase: "tunnel-up", sequence: 30, failure: null });
+  assert.equal(summarize().last_phase, "build-images");
+  assert.deepEqual(summarize("cancelled").failure, phaseFailure);
+  assert.equal(summarize("passed").failure, null);
+  assert.equal(summarize("passed").evidence_complete, true);
+  record("harness/runtime/phase-results/040.json", { status: "failed", phase: "invalid", sequence: 40, failure: {} });
+  assert.throws(() => summarize(), /class and code/);
 } finally { rmSync(root, { recursive: true }); }
 console.log("Raw integrity, candidate/run binding, traversal, incomplete runtime and builder failures checked");

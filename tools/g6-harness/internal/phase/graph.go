@@ -116,45 +116,6 @@ var graphs = map[string]Graph{
 	},
 }
 
-var smokeGraphs = map[string]Graph{
-	"fd-a": {
-		Profile: "smoke", Domain: "fd-a",
-		Phases: []Definition{
-			{Name: "prepare", Sequence: 10, Timeout: 10 * time.Minute},
-			{Name: "import-peer-tunnel-nodes", Sequence: 20, Timeout: 2 * time.Minute, RequiresConsumed: []string{"smoke-tunnel-fd-b"}, RequiresManifested: []string{"smoke-tunnel-fd-a"}},
-			{Name: "build-images", Sequence: 30, Timeout: 10 * time.Minute},
-			{Name: "tunnel-up", Sequence: 40, Timeout: 5 * time.Minute},
-			{Name: "publish-shared-secrets", Sequence: 50, Timeout: 2 * time.Minute, RequiresConsumed: []string{"smoke-shared-recipient-key"}},
-			{Name: "primary-up", Sequence: 60, Timeout: 15 * time.Minute, RequiresManifested: []string{"smoke-shared-trust-ready"}},
-			{Name: "agents-enroll", Sequence: 70, Timeout: 15 * time.Minute, RequiresManifested: []string{"smoke-primary-ready"}},
-			{Name: "transport-trust-reload", Sequence: 80, Timeout: 10 * time.Minute, RequiresConsumed: []string{"smoke-fd-b-agents-enrolled"}, RequiresManifested: []string{"smoke-fd-a-agent-inventory"}},
-			{Name: "agents-start", Sequence: 90, Timeout: 10 * time.Minute, RequiresManifested: []string{"smoke-transport-trust-ready"}},
-			{Name: "smoke-isolate", Sequence: 100, Timeout: 10 * time.Minute, RequiresConsumed: []string{"smoke-session"}},
-			{Name: "smoke-evidence", Sequence: 110, Timeout: 10 * time.Minute, RequiresConsumed: []string{"smoke-promotion-complete"}, RequiresManifested: []string{"smoke-primary-isolated"}},
-		},
-		Segments: []Segment{{Name: "prepare", Phases: []string{"prepare"}}, {Name: "bootstrap", Phases: []string{"import-peer-tunnel-nodes", "build-images", "tunnel-up"}}, {Name: "shared-trust", Phases: []string{"publish-shared-secrets"}}, {Name: "primary", Phases: []string{"primary-up"}}, {Name: "enroll", Phases: []string{"agents-enroll"}}, {Name: "transport-trust", Phases: []string{"transport-trust-reload"}}, {Name: "activate-agents", Phases: []string{"agents-start"}}, {Name: "isolate", Phases: []string{"smoke-isolate"}}, {Name: "evidence", Phases: []string{"smoke-evidence"}}},
-	},
-	"fd-b": {
-		Profile: "smoke", Domain: "fd-b",
-		Phases: []Definition{
-			{Name: "prepare", Sequence: 10, Timeout: 10 * time.Minute},
-			{Name: "import-peer-tunnel-nodes", Sequence: 20, Timeout: 2 * time.Minute, RequiresConsumed: []string{"smoke-tunnel-fd-a"}, RequiresManifested: []string{"smoke-tunnel-fd-b"}},
-			{Name: "build-images", Sequence: 30, Timeout: 10 * time.Minute},
-			{Name: "publish-shared-recipient-key", Sequence: 35, Timeout: 2 * time.Minute},
-			{Name: "materialize-runtime", Sequence: 40, Timeout: 3 * time.Minute, RequiresConsumed: []string{"smoke-shared-trust-ready"}},
-			{Name: "relay-up", Sequence: 50, Timeout: 5 * time.Minute},
-			{Name: "tunnel-up", Sequence: 60, Timeout: 5 * time.Minute},
-			{Name: "standby-bootstrap", Sequence: 70, Timeout: 15 * time.Minute, RequiresConsumed: []string{"smoke-primary-ready"}},
-			{Name: "agents-enroll", Sequence: 80, Timeout: 15 * time.Minute, RequiresConsumed: []string{"smoke-fd-a-agent-inventory"}},
-			{Name: "agents-start", Sequence: 90, Timeout: 10 * time.Minute, RequiresConsumed: []string{"smoke-transport-trust-ready"}, RequiresManifested: []string{"smoke-fd-b-agents-enrolled"}},
-			{Name: "smoke-session", Sequence: 100, Timeout: 10 * time.Minute},
-			{Name: "promote", Sequence: 110, Timeout: 8 * time.Minute, RequiresConsumed: []string{"smoke-primary-isolated"}, RequiresManifested: []string{"smoke-session"}},
-			{Name: "smoke-evidence", Sequence: 120, Timeout: 10 * time.Minute, RequiresManifested: []string{"smoke-promotion-complete"}},
-		},
-		Segments: []Segment{{Name: "prepare", Phases: []string{"prepare"}}, {Name: "bootstrap", Phases: []string{"import-peer-tunnel-nodes", "build-images", "publish-shared-recipient-key"}}, {Name: "peer-runtime", Phases: []string{"materialize-runtime", "relay-up", "tunnel-up"}}, {Name: "standby", Phases: []string{"standby-bootstrap"}}, {Name: "enroll", Phases: []string{"agents-enroll"}}, {Name: "activate-agents", Phases: []string{"agents-start"}}, {Name: "session", Phases: []string{"smoke-session"}}, {Name: "promote", Phases: []string{"promote"}}, {Name: "evidence", Phases: []string{"smoke-evidence"}}},
-	},
-}
-
 var manifestedByCheckpoint = map[string]struct {
 	Domain string
 	Phase  string
@@ -178,27 +139,11 @@ var manifestedByCheckpoint = map[string]struct {
 	"final-freeze-request":       {Domain: "fd-b", Phase: "final-freeze"},
 }
 
-var smokeManifestedByCheckpoint = map[string]struct{ Domain, Phase string }{
-	"smoke-tunnel-fd-a": {"fd-a", "prepare"}, "smoke-tunnel-fd-b": {"fd-b", "prepare"},
-	"smoke-shared-recipient-key": {"fd-b", "publish-shared-recipient-key"},
-	"smoke-shared-trust-ready":   {"fd-a", "publish-shared-secrets"}, "smoke-primary-ready": {"fd-a", "primary-up"},
-	"smoke-fd-a-agent-inventory": {"fd-a", "agents-enroll"}, "smoke-fd-b-agents-enrolled": {"fd-b", "agents-enroll"},
-	"smoke-transport-trust-ready": {"fd-a", "transport-trust-reload"}, "smoke-session": {"fd-b", "smoke-session"},
-	"smoke-primary-isolated": {"fd-a", "smoke-isolate"}, "smoke-promotion-complete": {"fd-b", "promote"},
-}
-
 func ResolveProfileGraph(profile, domain string) (Graph, error) {
 	if profile == "" || profile == "formal" {
 		return ResolveGraph(domain)
 	}
-	if profile != "smoke" {
-		return Graph{}, fmt.Errorf("unsupported harness profile %q", profile)
-	}
-	graph, ok := smokeGraphs[domain]
-	if !ok {
-		return Graph{}, fmt.Errorf("unsupported failure domain %q", domain)
-	}
-	return graph, nil
+	return Graph{}, fmt.Errorf("unsupported harness profile %q", profile)
 }
 
 func ResolveProfileSegment(profile, domain, name string) (Graph, Segment, error) {
@@ -258,13 +203,10 @@ func RequiredManifestPhase(domain, checkpoint string) (string, error) {
 }
 
 func RequiredManifestPhaseForProfile(profile, domain, checkpoint string) (string, error) {
-	manifested := manifestedByCheckpoint
-	if profile == "smoke" {
-		manifested = smokeManifestedByCheckpoint
-	} else if profile != "" && profile != "formal" {
+	if profile != "" && profile != "formal" {
 		return "", fmt.Errorf("unsupported harness profile %q", profile)
 	}
-	requirement, ok := manifested[checkpoint]
+	requirement, ok := manifestedByCheckpoint[checkpoint]
 	if !ok || requirement.Domain != domain {
 		return "", fmt.Errorf("checkpoint %q is not produced by %s", checkpoint, domain)
 	}

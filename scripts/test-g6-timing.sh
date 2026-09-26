@@ -9,7 +9,16 @@ timing_file="${fixture}/nested/timing.json"
 rendezvous_dir="${fixture}/rendezvous"
 candidate="$(printf 'a%.0s' {1..40})"
 
-"${TIMING}" init "${timing_file}" test smoke "${candidate}" 123 1
+"${TIMING}" init "${timing_file}" test formal "${candidate}" 123 1
+jq -e --arg candidate "${candidate}" '. == {
+  job: "test", profile: "formal", candidate_sha: $candidate, run_id: "123", run_attempt: "1",
+  stages: [], artifact_bytes: {}, images: {}, rendezvous: {}
+}' "${timing_file}" >/dev/null
+printf 'abc' >"${fixture}/artifact"
+"${TIMING}" artifact "${timing_file}" raw "${fixture}/artifact"
+printf 'def' >>"${fixture}/artifact"
+"${TIMING}" artifact "${timing_file}" raw "${fixture}/artifact"
+jq -e '.artifact_bytes == {raw: 6}' "${timing_file}" >/dev/null
 "${TIMING}" start "${timing_file}" runner_preparation
 "${TIMING}" end "${timing_file}" runner_preparation
 mkdir -p "${rendezvous_dir}"

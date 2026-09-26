@@ -181,6 +181,32 @@ function runtimeResult(values) {
   if (!["fd-a", "fd-b"].includes(domain)) fail("domain must be fd-a or fd-b");
   if (!["passed", "failed", "cancelled"].includes(status)) fail("runtime status is invalid");
   const binding = bindingFromOptions(values);
+  let lastPhase = values["last-phase"] || (status === "passed" ? "runtime_complete" : "unknown");
+  let failure = null;
+  if (status !== "passed") {
+    const latestFailure = (directory, suffix, order) => {
+      if (!existsSync(directory)) return undefined;
+      return walkFiles(directory)
+        .filter((name) => name.endsWith(suffix))
+        .map((name) => readJson(join(directory, name)))
+        .filter((result) => result.status === "failed" && result.failure != null)
+        .reduce((latest, result) => !latest || result[order] >= latest[order] ? result : latest, undefined);
+    };
+    const failed = latestFailure(join(root, "harness/runtime/phase-results"), ".json", "sequence")
+      ?? latestFailure(join(root, "harness/rendezvous"), ".result.json", "completed_at");
+    if (failed) {
+      lastPhase = failed.phase ?? failed.checkpoint ?? "rendezvous";
+      failure = { class: failed.failure.class, code: failed.failure.code };
+      if (!failure.class || !failure.code) fail("runtime failure must include class and code");
+    } else {
+      const statePath = join(root, "harness/runtime/state.json");
+      if (existsSync(statePath)) {
+        const state = readJson(statePath);
+        lastPhase = state.active_phase?.name ?? state.completed_phases?.at(-1)?.name ?? "unknown";
+      }
+      failure = { class: "harness_contract_failed", code: "runtime_job_failed" };
+    }
+  }
   const result = {
     schema_version: RUNTIME_SCHEMA,
     ...binding,
@@ -188,13 +214,8 @@ function runtimeResult(values) {
     domain_run_id: values["domain-run-id"] || `${binding.run_id}-${domain}`,
     status,
     evidence_complete: status === "passed",
-    last_phase: values["last-phase"] || (status === "passed" ? "runtime_complete" : "unknown"),
-    failure: status === "passed"
-      ? null
-      : {
-          class: values["failure-class"] || "harness_contract_failed",
-          code: values["failure-code"] || "runtime_job_failed",
-        },
+    last_phase: lastPhase,
+    failure,
   };
   writeJson(output, result);
   writeJson(join(root, "source-manifest.json"), sourceManifest(root, binding, domain));
@@ -273,7 +294,6 @@ function parse(command, args) {
     "runtime-result": {
       ...common, root: { type: "string" }, output: { type: "string" }, domain: { type: "string" },
       status: { type: "string" }, "last-phase": { type: "string" }, "domain-run-id": { type: "string" },
-      "failure-class": { type: "string" }, "failure-code": { type: "string" },
     },
     assemble: {
       ...common, "fd-a": { type: "string" }, "fd-b": { type: "string" }, output: { type: "string" },
