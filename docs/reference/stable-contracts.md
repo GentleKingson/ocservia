@@ -337,9 +337,9 @@ the actual server, client and backup image versions/digests per acceptance run.
 
 | Version and deployment | Existing verification entry | Recovery and uncovered scope |
 | --- | --- | --- |
-| PostgreSQL 17 bundled (current fixture 17.10) | `PG_MAJOR=17 DATABASE_TEST_SCOPE=compatibility scripts/database-integration.sh`; `scripts/i18-backup-restore-smoke.sh` | Verified base backup; [PITR](../operations/postgres-pitr-restore.md)/[failover](../operations/postgres-failover.md) only within their explicit topology/gates. Not established by database CI. |
+| PostgreSQL 17 bundled (current fixture 17.10) | `PG_MAJOR=17 DATABASE_TEST_SCOPE=smoke scripts/database-integration.sh`; `scripts/i18-backup-restore-smoke.sh` | Verified base backup; [PITR](../operations/postgres-pitr-restore.md)/[failover](../operations/postgres-failover.md) only within their explicit topology/gates. Not established by database CI. |
 | PostgreSQL 17 external | Same backend checks plus `scripts/i18-external-postgres-backup-restore-smoke.sh` | Verified TLS owner/runtime/backup connections and base restore. No automatic managed external HA/PITR. |
-| MySQL 8.4.10 external | `ENGINE=mysql DATABASE_TEST_SCOPE=compatibility bash scripts/database-foundation-integration.sh`; `ENGINE=mysql scripts/i18-mysql-backup-restore-smoke.sh` | Backend-specific logical backup/isolated restore. No bundled deployment, cross-engine migration or PostgreSQL HA/PITR claim. |
+| MySQL 8.4.10 external | `ENGINE=mysql DATABASE_TEST_SCOPE=smoke bash scripts/database-foundation-integration.sh`; `ENGINE=mysql scripts/i18-mysql-backup-restore-smoke.sh` | Backend-specific logical backup/isolated restore. No bundled deployment, cross-engine migration or PostgreSQL HA/PITR claim. |
 | MariaDB 12.3.2 external | Same two entries with `ENGINE=mariadb` | Same logical-restore boundary, independently tested engine, not an alias for a MySQL pass. |
 | PostgreSQL 18 CI; bundled MySQL/MariaDB | PG18 existing CI remains; bundled MySQL/MariaDB launcher rejects | Not production support. Keep tests and production admission distinct. |
 

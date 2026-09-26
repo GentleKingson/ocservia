@@ -4,7 +4,7 @@
 
 One `.github/workflows/ci.yml` runs on PRs, main pushes and manual dispatch.
 Automatic runs use **Quick**. Manual dispatch accepts `quick|full`, defaulting
-to **Full**. Full means **key compatibility checks on all supported units**,
+to **Full**. Full means **current-candidate checks on all supported units**,
 not comprehensive acceptance. Product database support has not changed.
 
 Warm-cache goals are 3-5 minutes for Quick and 8-10 minutes for Full, excluding
@@ -36,13 +36,13 @@ Runtime DDL denial is the small retained failure path: it verifies the
 Controller is not accidentally tested with owner credentials. MySQL/MariaDB
 retain production configuration and verified TLS in this same flow.
 
-Full adds **one direct upgrade per unit** in a separate schema on the same
-service: PostgreSQL schema 35 -> current 36; MySQL/MariaDB immutable revision
-25 -> current 26. These use the real migration runners and preserve seeded
-business data. They are schema compatibility checks, not native release
-upgrade certification. There is no separate history job or exhaustive revision
-matrix, and no second Controller build. Core tests use `-count=1`, never
-cached test results, and do not use `-race`.
+Both profiles also run current empty-database initialization and identical
+retry in a separate schema on the same service. These checks preserve current
+business data and execution receipts. PostgreSQL also rejects known migration
+checksum corruption; these checks do not certify historical upgrades. Full adds the remaining
+supported database products/versions, not an ocservia version matrix. There is
+no second Controller build. Smoke tests use `-count=1`, never cached test
+results, and do not use `-race`.
 
 `required-go-tests.sh --smoke <package> <test>` checks only the explicit
 top-level test's run/final-pass events. A missing or skipped entry fails.
@@ -125,7 +125,7 @@ The database scripts default to current-candidate `full` when invoked without a
 scope. Historical database upgrade matrices and the MySQL history shard have
 been removed; current initialization, content integrity and interrupted-SQL
 recovery remain in the full suite. `regression` remains manual-only. Normal CI
-explicitly passes `smoke` (Quick) or `compatibility` (Full).
+explicitly passes `smoke` for both Quick and Full.
 Browser checks require Playwright Chromium installed separately. Disaster
 recovery, complex races and fault injection remain in their existing manual
 G6/deep scripts; no scheduled workflow was added.
@@ -197,9 +197,9 @@ scripts/bootstrap.sh go-test
 scripts/go-check.sh standard
 DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh
 DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh
-# Full: use compatibility for PG_MAJOR=17 and 18, ENGINE=mysql and mariadb.
-DATABASE_TEST_SCOPE=compatibility PG_MAJOR=18 scripts/database-integration.sh
-DATABASE_TEST_SCOPE=compatibility ENGINE=mariadb bash scripts/database-foundation-integration.sh
+# Full also runs PG_MAJOR=18 and ENGINE=mariadb with the same current smoke.
+DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh
+DATABASE_TEST_SCOPE=smoke ENGINE=mariadb bash scripts/database-foundation-integration.sh
 RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash scripts/i18-mysql-backup-restore-smoke.sh
 RUN_ID=local-mariadb ARTIFACT_DIR="$PWD/.cache/recovery-mariadb" ENGINE=mariadb bash scripts/i18-mysql-backup-restore-smoke.sh
 ```
@@ -213,8 +213,8 @@ acceptance.
 ## Release workflow
 
 The [Release Check](release-checks.md) owns the complete release graph, including
-the existing Full CI invocation, exact product builds, Package & Upgrade,
-supported application compatibility, Business Smoke, selected Integration and
+the existing Full CI invocation, exact product builds, current package smoke,
+supported application combinations, Business Smoke, selected Integration and
 Resilience, and existing security checks. It is not added to PR required checks.
 The initial migration selects every supported check; normal selection uses the
 entire diff from the last published Release.
