@@ -8,10 +8,12 @@ lifecycle.
 - The current deployment is stopped or no longer accepting new writes if the
   incident requires it.
 - The protected `previous-release.json` exists in the Controller state root.
-- You have reconciled every `Unknown` operation and confirmed the database
-  compatibility and backup boundary for the incident.
+- You have reconciled every `Unknown` operation and assessed the database,
+  configuration and backup risks for the incident. The lifecycle no longer
+  certifies cross-version compatibility.
 - Confirm the database backend/deployment and the actual current/previous
   production descriptors, not just the release version numbers.
+- The target `source_commit` is available locally or in its retained clean source checkout.
 
 ## Command
 
@@ -23,24 +25,24 @@ The command selects only the protected previous release. It does not accept an
 operator-selected manifest and does not run a database down migration or
 restore.
 
-The optional-relay launcher and dedicated transport egress network change the
-production deployment descriptors. This transition is also **forward-only**
-through the guarded rollback entry point: old images do not contain the new
-launcher. Restoring two valid HTTPS relay URLs and both relay services is
-necessary before using any old version that requires two, but does not make
-the descriptor mismatch safe or bypass its guard. Recover forward or use the
-documented isolated recovery procedure; do not substitute old images into the
-new Compose deployment. Historical scripts and direct image replacement are
-outside the current preflight's control.
+The v1.1.0 lifecycle does not compare software versions, migration numbers or
+deployment descriptors to decide whether rollback is permitted. It uses the
+target manifest's exact source commit for Compose and smoke, not the caller's
+deployment files with another release's images. A different source is retained
+as a clean Git checkout under the protected state root so bind-mounted files
+remain available for later start/uninstall operations. Missing source, dirty
+checkout, invalid platform or actual configuration/runtime failure still fails.
+An identical target is a no-op; a different artifact is not treated as installed
+merely because its version string matches.
 
-Rollback also requires an unchanged production deployment contract. The static
-gateway/application IPAM and security transition from v0.4.0 is a historical
-**forward-only deployment change**; this command intentionally refuses that
-rollback. Later releases are checked against their own descriptors and schema
-compatibility, not only this historical boundary. For a failed upgrade, first retry the identical target through
-the guarded lifecycle. If it cannot be recovered, preserve the evidence and
-follow [backend-specific recovery](../operations/incident-recovery.md#database-recovery)
-in an isolated deployment, rather than bypassing the deployment-contract guard.
+The normal target Compose graph runs forward initialization where required.
+It does not reverse migrations, restore a database, reset Signer identity or
+automatically convert legacy networks. Cross-version operations can fail or
+damage state despite the absence of a compatibility rejection. Old installed
+scripts retain their old behavior. For a failed operation, preserve pending
+evidence and retry the identical target, or use
+[backend-specific recovery](../operations/incident-recovery.md#database-recovery)
+in an isolated deployment.
 
 ## Verify
 
@@ -52,7 +54,7 @@ authenticated application and node paths.
 
 The confirmed release state remains unchanged and pending failure evidence is
 retained for a same-target retry. Do not redeploy old images manually. If the
-database cannot satisfy the compatibility contract, select recovery by backend:
+target cannot run against the existing state, select recovery by backend:
 PostgreSQL [backup](../operations/postgres-backup.md) or
 [PITR](../operations/postgres-pitr-restore.md) within the documented scope;
 MySQL/MariaDB [logical restore](../operations/mysql-backup.md), which is not
@@ -62,4 +64,4 @@ before restoring traffic or command authority. Backup verification alone is
 not a production reopening gate.
 
 See [Production deployment reference](../operations/production-deployment.md)
-for the compatibility and filesystem contracts.
+for the target integrity and filesystem contracts.

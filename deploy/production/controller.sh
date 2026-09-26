@@ -11,6 +11,7 @@ PREVIOUS_RELEASE=""
 PENDING_RELEASE=""
 STAGED_RELEASE=""
 CANONICAL_RELEASE=""
+SOURCE_CHECKOUT_TMP=""
 PENDING_MANIFEST_TMP=""
 PENDING_PREVIOUS_TMP=""
 PENDING_ACTIVE=false
@@ -155,22 +156,44 @@ normalize_release_file_path() {
   RELEASE_FILE="${path}"
 }
 
-validate_source_tree() {
-  local manifest="${1:-${STAGED_RELEASE}}" manifest_commit current_commit dirty
+select_release_source() {
+  local manifest="${1:-${STAGED_RELEASE}}" manifest_commit current_commit dirty source_root
   manifest_commit="$(jq -er -s '.[0].source_commit' "${manifest}")"
   if ! current_commit="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)"; then
     fail "Controller release must be installed from a Git checkout"
   fi
-  [[ "${current_commit}" == "${manifest_commit}" ]] ||
+  source_root="${ROOT}"
+  if [[ "${current_commit}" != "${manifest_commit}" ]]; then
+    source_root="${STATE_ROOT}/source-${manifest_commit}"
+    if [[ ! -e "${source_root}" && ! -L "${source_root}" ]]; then
+      git -C "${ROOT}" cat-file -e "${manifest_commit}^{commit}" 2>/dev/null ||
+        fail "release source_commit cannot be resolved locally"
+      SOURCE_CHECKOUT_TMP="$(mktemp -d "${STATE_ROOT}/.source.XXXXXX")" ||
+        fail "cannot allocate release source checkout"
+      # Keep target bind mounts available after this command; never rewrite
+      # an existing checkout or substitute the caller's deployment files.
+      if ! (umask 022; git clone --quiet --no-hardlinks --no-checkout "${ROOT}" "${SOURCE_CHECKOUT_TMP}" &&
+        git -C "${SOURCE_CHECKOUT_TMP}" checkout --quiet --detach "${manifest_commit}"); then
+        fail "cannot prepare release source checkout"
+      fi
+      mv -- "${SOURCE_CHECKOUT_TMP}" "${source_root}" || fail "cannot retain release source checkout"
+      SOURCE_CHECKOUT_TMP=""
+    fi
+    require_absolute_canonical_path "release source checkout" "${source_root}"
+    validate_ancestor "${source_root}"
+  fi
+  [[ "$(git -C "${source_root}" rev-parse HEAD)" == "${manifest_commit}" ]] ||
     fail "checkout HEAD does not match release manifest source_commit"
-  if ! git -C "${ROOT}" diff --quiet --exit-code -- .; then
+  if ! git -C "${source_root}" diff --quiet --exit-code -- .; then
     fail "checkout has unstaged changes; refusing to install a release"
   fi
-  if ! git -C "${ROOT}" diff --cached --quiet --exit-code -- .; then
+  if ! git -C "${source_root}" diff --cached --quiet --exit-code -- .; then
     fail "checkout has staged changes; refusing to install a release"
   fi
-  dirty="$(git -C "${ROOT}" status --porcelain --untracked-files=all)"
+  dirty="$(git -C "${source_root}" status --porcelain --untracked-files=all)"
   [[ -z "${dirty}" ]] || fail "checkout has untracked changes"
+  COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${source_root}/deploy/production/compose.sh}"
+  SMOKE_SCRIPT="${OCSERV_CONTROLLER_SMOKE_SH:-${source_root}/deploy/production/controller-release-smoke.sh}"
 }
 
 validate_manifest_file() {
@@ -341,6 +364,9 @@ validate_prerequisites() {
 
 cleanup() {
   local status=$?
+  if [[ -n "${SOURCE_CHECKOUT_TMP}" && -d "${SOURCE_CHECKOUT_TMP}" ]]; then
+    rm -rf -- "${SOURCE_CHECKOUT_TMP}"
+  fi
   if [[ -n "${STAGED_RELEASE}" && -e "${STAGED_RELEASE}" ]]; then
     rm -f -- "${STAGED_RELEASE}"
   fi
@@ -557,38 +583,6 @@ commit_install_state() {
   PENDING_ACTIVE=false
 }
 
-compare_decimal_strings() {
-  local left="$1" right="$2"
-  while [[ "${#left}" -gt 1 && "${left}" == 0* ]]; do left="${left#0}"; done
-  while [[ "${#right}" -gt 1 && "${right}" == 0* ]]; do right="${right#0}"; done
-  if ((${#left} < ${#right})); then
-    echo -1
-  elif ((${#left} > ${#right})); then
-    echo 1
-  elif [[ "${left}" == "${right}" ]]; then
-    echo 0
-  elif [[ "${left}" < "${right}" ]]; then
-    echo -1
-  else
-    echo 1
-  fi
-}
-
-compare_semver() {
-  local left="$1" right="$2" left_major left_minor left_patch right_major right_minor right_patch part
-  IFS=. read -r left_major left_minor left_patch <<<"${left}"
-  IFS=. read -r right_major right_minor right_patch <<<"${right}"
-  for part in "${left_major}" "${left_minor}" "${left_patch}" "${right_major}" "${right_minor}" "${right_patch}"; do
-    [[ "${part}" =~ ^[0-9]+$ ]] || return 2
-  done
-  local comparison
-  comparison="$(compare_decimal_strings "${left_major}" "${right_major}")"
-  if [[ "${comparison}" != 0 ]]; then echo "${comparison}"; return; fi
-  comparison="$(compare_decimal_strings "${left_minor}" "${right_minor}")"
-  if [[ "${comparison}" != 0 ]]; then echo "${comparison}"; return; fi
-  compare_decimal_strings "${left_patch}" "${right_patch}"
-}
-
 check_current_database_and_backup_health() {
   local health_json required_json health_label="database backup" backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
   local services=(backup)
@@ -611,46 +605,6 @@ check_current_database_and_backup_health() {
   ' <<<"${health_json}" >/dev/null; then
     fail "current ${health_label} services are not healthy; current release remains unchanged"
   fi
-}
-
-check_rollback_database_compatibility() {
-  local previous_migration="$1"
-  if ! "${COMPOSE_LAUNCHER}" run --rm --no-deps migrate \
-    "--schema-compatibility-check=${previous_migration}"; then
-    fail "database compatibility preflight failed for rollback target; current release remains unchanged"
-  fi
-}
-
-production_descriptor_paths() {
-  local compose_file="${ROOT}/deploy/production/compose.yaml"
-  printf '%s\n' \
-    "deploy/production/compose.sh" \
-    "deploy/production/transportd-relays.sh" \
-    "deploy/production/compose.oidc.yaml" \
-    "deploy/production/compose.relay-ca.yaml" \
-    "deploy/production/compose.external-mysql.yaml" \
-    "deploy/production/compose.external-postgres.yaml" \
-    "deploy/production/compose.postgres.yaml" \
-    "deploy/production/compose.yaml"
-  if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
-    printf '%s\n' "deploy/production/integrated/compose.yaml" \
-      "deploy/production/integrated/compose.signer.yaml" \
-      "deploy/production/integrated/Caddyfile" \
-      "deploy/production/relay/compose.yaml" "deploy/production/relay/relay.toml"
-  fi
-  grep -Eo '\./[^[:space:]:]+' "${compose_file}" | sort -u | while IFS= read -r source; do
-    printf 'deploy/production/%s\n' "${source#./}"
-  done
-}
-
-validate_production_deployment_contract() {
-  local current_commit="$1" previous_commit="$2" descriptor
-  while IFS= read -r descriptor; do
-    [[ -n "${descriptor}" ]] || continue
-    if ! git -C "${ROOT}" diff --quiet --exit-code "${previous_commit}" "${current_commit}" -- "${descriptor}"; then
-      fail "production deployment descriptor changed since previous release: ${descriptor}"
-    fi
-  done < <(production_descriptor_paths)
 }
 
 commit_upgrade_state() {
@@ -732,7 +686,7 @@ install_controller() {
   stage_and_validate_manifest
   map_manifest_images "${STAGED_RELEASE}"
   release_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
-  validate_source_tree
+  select_release_source
   validate_prerequisites
   check_manifest_platform "${STAGED_RELEASE}"
 
@@ -771,7 +725,7 @@ install_controller() {
 }
 
 upgrade_controller() {
-  local current_version target_version comparison
+  local target_version
   prepare_state_root
   CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
   PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
@@ -784,30 +738,22 @@ upgrade_controller() {
   validate_release_file_path "${RELEASE_FILE}"
   verify_release_bundle
   stage_and_validate_manifest
-  validate_source_tree
-  current_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
+  select_release_source
   target_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
-  comparison="$(compare_semver "${target_version}" "${current_version}")" ||
-    fail "release versions are not valid SemVer"
-
-  case "${comparison}" in
-    -1) fail "upgrade does not perform downgrade" ;;
-    0)
-      if cmp -s "${CURRENT_RELEASE}" "${STAGED_RELEASE}"; then
-        echo "Controller ${target_version} is already current; no-op"
-        return
-      fi
-      fail "target release version matches current but the manifest differs"
-      ;;
-    1) ;;
-    *) fail "release versions are not valid SemVer" ;;
-  esac
+  if cmp -s "${CURRENT_RELEASE}" "${STAGED_RELEASE}"; then
+    echo "Controller ${target_version} is already current; no-op"
+    return
+  fi
 
   validate_prerequisites
   check_manifest_platform "${STAGED_RELEASE}"
+  select_release_source "${CURRENT_RELEASE}"
+  validate_prerequisites
   map_manifest_images "${CURRENT_RELEASE}"
   check_current_database_and_backup_health
 
+  select_release_source
+  validate_prerequisites
   map_manifest_images "${STAGED_RELEASE}"
   ensure_pending_release "${CURRENT_RELEASE}"
   if ! "${COMPOSE_LAUNCHER}" config --quiet; then
@@ -830,8 +776,7 @@ upgrade_controller() {
 }
 
 rollback_controller() {
-  local current_version previous_version comparison current_commit previous_commit
-  local current_migration previous_migration target_version
+  local target_version
   prepare_state_root
   CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
   PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
@@ -843,26 +788,10 @@ rollback_controller() {
   validate_previous_release
   [[ -e "${PREVIOUS_RELEASE}" ]] || fail "previous release state is missing; refusing to rollback"
   if cmp -s "${CURRENT_RELEASE}" "${PREVIOUS_RELEASE}"; then
-    fail "current and previous release states must not be identical"
+    select_release_source "${CURRENT_RELEASE}"
+    echo "Controller target is already current; no-op"
+    return
   fi
-
-  current_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
-  previous_version="$(jq -er -s '.[0].release_version' "${PREVIOUS_RELEASE}")"
-  comparison="$(compare_semver "${previous_version}" "${current_version}")" ||
-    fail "release versions are not valid SemVer"
-  [[ "${comparison}" == -1 ]] ||
-    fail "previous release version must be lower than current release version"
-
-  validate_source_tree "${CURRENT_RELEASE}"
-  current_commit="$(jq -er -s '.[0].source_commit' "${CURRENT_RELEASE}")"
-  previous_commit="$(jq -er -s '.[0].source_commit' "${PREVIOUS_RELEASE}")"
-  git -C "${ROOT}" cat-file -e "${previous_commit}^{commit}" 2>/dev/null ||
-    fail "previous release source_commit cannot be resolved locally"
-
-  current_migration="$(jq -er -s '.[0].database_migration' "${CURRENT_RELEASE}")"
-  previous_migration="$(jq -er -s '.[0].database_migration' "${PREVIOUS_RELEASE}")"
-  map_manifest_images "${CURRENT_RELEASE}"
-  validate_production_deployment_contract "${current_commit}" "${previous_commit}"
 
   STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
     fail "cannot allocate rollback target staging file"
@@ -871,14 +800,15 @@ rollback_controller() {
   validate_manifest_file "rollback target release" "${STAGED_RELEASE}"
   target_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
 
+  select_release_source
   ensure_pending_release "${CURRENT_RELEASE}" true
+  select_release_source "${CURRENT_RELEASE}"
   validate_prerequisites
   check_manifest_platform "${STAGED_RELEASE}"
   map_manifest_images "${CURRENT_RELEASE}"
   check_current_database_and_backup_health
-  if [[ "${current_migration}" != "${previous_migration}" ]]; then
-    check_rollback_database_compatibility "${previous_migration}"
-  fi
+  select_release_source
+  validate_prerequisites
   map_manifest_images "${STAGED_RELEASE}"
   if ! "${COMPOSE_LAUNCHER}" config --quiet; then
     fail "production preflight failed for rollback target; current release remains unchanged"
@@ -888,25 +818,7 @@ rollback_controller() {
   fi
   checkpoint_signer
   mark_pending_phase rollback-activation "${CURRENT_RELEASE}"
-  if [[ "${current_migration}" != "${previous_migration}" ]]; then
-    # The compatibility preflight already validated the database. Do not let
-    # the previous Controller image run the normal migration service against
-    # a newer schema during this activation.
-    local rollback_services=(backup)
-    if [[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]]; then
-      rollback_services=(postgres backup)
-    fi
-    if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
-      rollback_services+=(otel-collector)
-    fi
-    rollback_services+=(transportd control-plane gateway)
-    if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
-      rollback_services+=(signer relay edge)
-    fi
-    if ! "${COMPOSE_LAUNCHER}" up -d --wait --no-deps "${rollback_services[@]}"; then
-      fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
-    fi
-  elif ! "${COMPOSE_LAUNCHER}" up -d --wait; then
+  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
     fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
   fi
 
@@ -975,7 +887,7 @@ uninstall_controller() {
   acquire_lock
   reconcile_completed_pending
   validate_uninstall_state
-  validate_source_tree "${CURRENT_RELEASE}"
+  select_release_source "${CURRENT_RELEASE}"
   validate_prerequisites false
   map_manifest_images "${CURRENT_RELEASE}"
 
@@ -1011,7 +923,7 @@ start_controller() {
   acquire_lock
   reconcile_completed_pending
   validate_uninstall_state
-  validate_source_tree "${CURRENT_RELEASE}"
+  select_release_source "${CURRENT_RELEASE}"
   validate_prerequisites
   check_manifest_platform "${CURRENT_RELEASE}"
   map_manifest_images "${CURRENT_RELEASE}"

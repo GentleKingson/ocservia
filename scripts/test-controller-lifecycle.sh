@@ -69,9 +69,6 @@ case "${1:-}" in
   pull) exit "${MOCK_PULL_EXIT:-0}" ;;
   stop) exit 0 ;;
   up)
-    if [[ "${MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION:-0}" == 1 ]]; then
-      [[ "$*" == "up -d --wait --no-deps postgres backup${OCSERV_OTEL_BACKEND_ENDPOINT:+ otel-collector} transportd control-plane gateway" ]]
-    fi
     exit "${MOCK_UP_EXIT:-0}"
     ;;
   down)
@@ -100,15 +97,7 @@ case "${1:-}" in
         *) exit 97 ;;
       esac
     fi
-    [[ "${2:-}" == "--rm" && "${3:-}" == "--no-deps" && "${4:-}" == "migrate" && "${5:-}" == --schema-compatibility-check=* ]]
-    requested_schema="${5#*=}"
-    [[ "${requested_schema}" =~ ^[0-9]+$ ]]
-    if [[ "${MOCK_SCHEMA_QUERY_EXIT:-0}" != 0 || "${MOCK_SCHEMA_METADATA_EXIT:-0}" != 0 ]]; then
-      exit 1
-    fi
-    current_schema="${MOCK_SCHEMA_CURRENT:-30}"
-    minimum_schema="${MOCK_SCHEMA_MINIMUM:-29}"
-    (( requested_schema >= minimum_schema && requested_schema <= current_schema ))
+    exit 97
     ;;
   *) exit 97 ;;
 esac
@@ -425,7 +414,7 @@ refresh_bundle_dir "${fixture}/release"
 target_source_state="${fixture}/target-source-mismatch"
 seed_upgrade_state "${target_source_state}"
 expect_upgrade_failure "${target_source_state}" "${target_source_mismatch}" \
-  'checkout HEAD does not match release manifest source_commit' env
+  'release source_commit cannot be resolved locally' env
 test ! -e "${target_source_state}/compose.log"
 
 upgrade_success_state="${fixture}/upgrade-success"
@@ -533,143 +522,35 @@ same_release_state="${fixture}/rollback-same-release"
 seed_upgrade_state "${same_release_state}"
 cp -- "${release_file}" "${same_release_state}/previous-release.json"
 chmod 600 "${same_release_state}/previous-release.json"
-if run_controller_rollback "${same_release_state}" env >"${same_release_state}/output.log" 2>&1; then
-  echo "rollback of the same release was accepted" >&2
-  exit 1
-fi
-grep -Fq 'current and previous release states must not be identical' "${same_release_state}/output.log"
+run_controller_rollback "${same_release_state}" env
+cmp -s "${release_file}" "${same_release_state}/current-release.json"
 test ! -e "${same_release_state}/compose.log"
 
 not_older_state="${fixture}/rollback-not-older"
 seed_upgrade_state "${not_older_state}"
 cp -- "${next_release_file}" "${not_older_state}/previous-release.json"
 chmod 600 "${not_older_state}/previous-release.json"
-if run_controller_rollback "${not_older_state}" env >"${not_older_state}/output.log" 2>&1; then
-  echo "rollback to a newer release was accepted" >&2
-  exit 1
-fi
-grep -Fq 'previous release version must be lower' "${not_older_state}/output.log"
-test ! -e "${not_older_state}/compose.log"
+run_controller_rollback "${not_older_state}" env
+cmp -s "${next_release_file}" "${not_older_state}/current-release.json"
+cmp -s "${release_file}" "${not_older_state}/previous-release.json"
+test -s "${not_older_state}/compose.log"
 
 different_schema_previous="${fixture}/release/controller-release-schema-different.json"
 cross_schema_current="${fixture}/release/controller-release-schema-current.json"
-rollback_schema="$(jq -er '.database_migration' "${release_file}")"
 jq '.database_migration += 1' "${next_release_file}" >"${cross_schema_current}"
 cp -- "${release_file}" "${different_schema_previous}"
 refresh_bundle_dir "${fixture}/release"
-schema_state="${fixture}/rollback-schema-different"
-seed_upgrade_state "${schema_state}"
-cp -- "${cross_schema_current}" "${schema_state}/current-release.json"
-cp -- "${different_schema_previous}" "${schema_state}/previous-release.json"
-chmod 600 "${schema_state}/current-release.json" "${schema_state}/previous-release.json"
-if run_controller_rollback "${schema_state}" env MOCK_SCHEMA_METADATA_EXIT=1 >"${schema_state}/output.log" 2>&1; then
-  echo "cross-schema rollback was accepted" >&2
-  exit 1
-fi
-grep -Fq 'database compatibility preflight failed for rollback target' "${schema_state}/output.log"
-cmp -s "${cross_schema_current}" "${schema_state}/current-release.json"
-cmp -s "${different_schema_previous}" "${schema_state}/previous-release.json"
-test "$(sed -n '1p' "${schema_state}/compose.log")" = "ps --format json postgres backup"
-test "$(sed -n '2p' "${schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=${rollback_schema}"
-test "$(wc -l <"${schema_state}/compose.log")" -eq 2
-
-compatible_cross_schema_state="${fixture}/rollback-compatible-cross-schema"
-seed_upgrade_state "${compatible_cross_schema_state}"
-cp -- "${cross_schema_current}" "${compatible_cross_schema_state}/current-release.json"
-cp -- "${different_schema_previous}" "${compatible_cross_schema_state}/previous-release.json"
-chmod 600 "${compatible_cross_schema_state}/current-release.json" "${compatible_cross_schema_state}/previous-release.json"
-run_controller_rollback "${compatible_cross_schema_state}" env \
-  MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 \
-  MOCK_SCHEMA_CURRENT="${rollback_schema}" MOCK_SCHEMA_MINIMUM="${rollback_schema}"
-cmp -s "${different_schema_previous}" "${compatible_cross_schema_state}/current-release.json"
-cmp -s "${cross_schema_current}" "${compatible_cross_schema_state}/previous-release.json"
-test "$(sed -n '2p' "${compatible_cross_schema_state}/compose.log")" = "run --rm --no-deps migrate --schema-compatibility-check=${rollback_schema}"
-test "$(sed -n '3p' "${compatible_cross_schema_state}/compose.log")" = "config --quiet"
-test "$(sed -n '4p' "${compatible_cross_schema_state}/compose.log")" = "pull"
-test "$(sed -n '5p' "${compatible_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup transportd control-plane gateway"
-test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '2p')" = "ghcr.io/gentlekingson/ocservia/control@${next_digest}"
-test "$(cut -f2 "${compatible_cross_schema_state}/compose-env.log" | sed -n '5p')" = "ghcr.io/gentlekingson/ocservia/control@${digest}"
-
-otel_cross_schema_state="${fixture}/rollback-compatible-cross-schema-otel"
-seed_upgrade_state "${otel_cross_schema_state}"
-cp -- "${cross_schema_current}" "${otel_cross_schema_state}/current-release.json"
-cp -- "${different_schema_previous}" "${otel_cross_schema_state}/previous-release.json"
-chmod 600 "${otel_cross_schema_state}/current-release.json" "${otel_cross_schema_state}/previous-release.json"
-run_controller_rollback "${otel_cross_schema_state}" env MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 \
-  MOCK_SCHEMA_CURRENT="${rollback_schema}" MOCK_SCHEMA_MINIMUM="${rollback_schema}" \
-  OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
-test "$(sed -n '5p' "${otel_cross_schema_state}/compose.log")" = "up -d --wait --no-deps postgres backup otel-collector transportd control-plane gateway"
-
-minimum_schema_state="${fixture}/rollback-schema-minimum"
-seed_upgrade_state "${minimum_schema_state}"
-cp -- "${cross_schema_current}" "${minimum_schema_state}/current-release.json"
-cp -- "${different_schema_previous}" "${minimum_schema_state}/previous-release.json"
-chmod 600 "${minimum_schema_state}/current-release.json" "${minimum_schema_state}/previous-release.json"
-if run_controller_rollback "${minimum_schema_state}" env MOCK_SCHEMA_MINIMUM=31 >"${minimum_schema_state}/output.log" 2>&1; then
-  echo "rollback below compatibility minimum was accepted" >&2
-  exit 1
-fi
-grep -Fq 'database compatibility preflight failed for rollback target' "${minimum_schema_state}/output.log"
-cmp -s "${cross_schema_current}" "${minimum_schema_state}/current-release.json"
-cmp -s "${different_schema_previous}" "${minimum_schema_state}/previous-release.json"
-test "$(wc -l <"${minimum_schema_state}/compose.log")" -eq 2
-
-current_schema_state="${fixture}/rollback-schema-current"
-seed_upgrade_state "${current_schema_state}"
-cp -- "${cross_schema_current}" "${current_schema_state}/current-release.json"
-cp -- "${different_schema_previous}" "${current_schema_state}/previous-release.json"
-chmod 600 "${current_schema_state}/current-release.json" "${current_schema_state}/previous-release.json"
-if run_controller_rollback "${current_schema_state}" env MOCK_SCHEMA_CURRENT=29 >"${current_schema_state}/output.log" 2>&1; then
-  echo "rollback above the current database schema was accepted" >&2
-  exit 1
-fi
-grep -Fq 'database compatibility preflight failed for rollback target' "${current_schema_state}/output.log"
-cmp -s "${cross_schema_current}" "${current_schema_state}/current-release.json"
-cmp -s "${different_schema_previous}" "${current_schema_state}/previous-release.json"
-test "$(wc -l <"${current_schema_state}/compose.log")" -eq 2
-
-missing_compatibility_state="${fixture}/rollback-schema-missing"
-seed_upgrade_state "${missing_compatibility_state}"
-cp -- "${cross_schema_current}" "${missing_compatibility_state}/current-release.json"
-cp -- "${different_schema_previous}" "${missing_compatibility_state}/previous-release.json"
-chmod 600 "${missing_compatibility_state}/current-release.json" "${missing_compatibility_state}/previous-release.json"
-if run_controller_rollback "${missing_compatibility_state}" env MOCK_SCHEMA_QUERY_EXIT=1 >"${missing_compatibility_state}/output.log" 2>&1; then
-  echo "rollback with missing compatibility metadata was accepted" >&2
-  exit 1
-fi
-grep -Fq 'database compatibility preflight failed for rollback target' "${missing_compatibility_state}/output.log"
-cmp -s "${cross_schema_current}" "${missing_compatibility_state}/current-release.json"
-cmp -s "${different_schema_previous}" "${missing_compatibility_state}/previous-release.json"
-test "$(wc -l <"${missing_compatibility_state}/compose.log")" -eq 2
-
-malformed_compatibility_state="${fixture}/rollback-schema-malformed"
-seed_upgrade_state "${malformed_compatibility_state}"
-cp -- "${cross_schema_current}" "${malformed_compatibility_state}/current-release.json"
-cp -- "${different_schema_previous}" "${malformed_compatibility_state}/previous-release.json"
-chmod 600 "${malformed_compatibility_state}/current-release.json" "${malformed_compatibility_state}/previous-release.json"
-if run_controller_rollback "${malformed_compatibility_state}" env MOCK_SCHEMA_METADATA_EXIT=1 >"${malformed_compatibility_state}/output.log" 2>&1; then
-  echo "rollback with malformed compatibility metadata was accepted" >&2
-  exit 1
-fi
-grep -Fq 'database compatibility preflight failed for rollback target' "${malformed_compatibility_state}/output.log"
-cmp -s "${cross_schema_current}" "${malformed_compatibility_state}/current-release.json"
-cmp -s "${different_schema_previous}" "${malformed_compatibility_state}/previous-release.json"
-test "$(wc -l <"${malformed_compatibility_state}/compose.log")" -eq 2
-
-query_failure_state="${fixture}/rollback-schema-query-failure"
-seed_upgrade_state "${query_failure_state}"
-cp -- "${cross_schema_current}" "${query_failure_state}/current-release.json"
-cp -- "${different_schema_previous}" "${query_failure_state}/previous-release.json"
-chmod 600 "${query_failure_state}/current-release.json" "${query_failure_state}/previous-release.json"
-if run_controller_rollback "${query_failure_state}" env MOCK_SCHEMA_QUERY_EXIT=1 >"${query_failure_state}/output.log" 2>&1; then
-  echo "rollback after compatibility query failure was accepted" >&2
-  exit 1
-fi
-grep -Fq 'database compatibility preflight failed for rollback target' "${query_failure_state}/output.log"
-cmp -s "${cross_schema_current}" "${query_failure_state}/current-release.json"
-cmp -s "${different_schema_previous}" "${query_failure_state}/previous-release.json"
-test "$(wc -l <"${query_failure_state}/compose.log")" -eq 2
-
+for schema in 1 100; do
+  schema_state="${fixture}/rollback-schema-${schema}"
+  seed_upgrade_state "${schema_state}"
+  cp -- "${next_release_file}" "${schema_state}/current-release.json"
+  jq --argjson schema "${schema}" '.database_migration=$schema' "${release_file}" >"${schema_state}/previous-release.json"
+  chmod 600 "${schema_state}/current-release.json" "${schema_state}/previous-release.json"
+  run_controller_rollback "${schema_state}" env
+  test "$(jq -r '.database_migration' "${schema_state}/current-release.json")" = "${schema}"
+  test "$(sed -n '4p' "${schema_state}/compose.log")" = 'up -d --wait'
+  test "$(wc -l <"${schema_state}/compose.log")" -eq 4
+done
 incompatible_pending_state="${fixture}/rollback-incompatible-pending"
 seed_upgrade_state "${incompatible_pending_state}"
 cp -- "${next_release_file}" "${incompatible_pending_state}/current-release.json"
@@ -683,48 +564,59 @@ fi
 grep -Fq 'pending release transaction is not compatible with rollback' "${incompatible_pending_state}/output.log"
 test ! -e "${incompatible_pending_state}/compose.log"
 
-descriptor_change_commit="$(git -C "${ROOT}" log -1 --format='%H' -- deploy/production/compose.yaml)"
-descriptor_previous_commit="$(git -C "${ROOT}" rev-parse "${descriptor_change_commit}^")"
-descriptor_previous="${fixture}/release/controller-release-descriptor-previous.json"
-jq --arg source "${descriptor_previous_commit}" '.source_commit = $source' "${release_file}" >"${descriptor_previous}"
-descriptor_state="${fixture}/rollback-descriptor-change"
-seed_upgrade_state "${descriptor_state}"
-cp -- "${next_release_file}" "${descriptor_state}/current-release.json"
-cp -- "${descriptor_previous}" "${descriptor_state}/previous-release.json"
-chmod 600 "${descriptor_state}/current-release.json" "${descriptor_state}/previous-release.json"
-if run_controller_rollback "${descriptor_state}" env >"${descriptor_state}/output.log" 2>&1; then
-  echo "changed production deployment descriptor was accepted" >&2
-  exit 1
-fi
-grep -Fq 'production deployment descriptor changed since previous release' "${descriptor_state}/output.log"
-test ! -e "${descriptor_state}/compose.log"
-
-# Isolate an overlay-only change so another descriptor cannot mask this guard.
-real_git="$(command -v git)"
-cat >"${bin}/git" <<'EOF'
+# The lifecycle implementation stays current, but target deployment files come
+# from the manifest commit, even when descriptors differ. No historical release.
+source_repo="${fixture}/source-repo"
+mkdir -p "${source_repo}/deploy/production" "${source_repo}/scripts"
+cp "${CONTROLLER}" "${source_repo}/deploy/production/controller.sh"
+cp "${ROOT}/scripts/verify-controller-release-bundle.sh" "${source_repo}/scripts/"
+cp "${bin}/controller-release-smoke.sh" "${source_repo}/deploy/production/"
+cat >"${source_repo}/deploy/production/compose.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${3:-}" == diff && "${!#}" == deploy/production/compose.relay-ca.yaml ]]; then
-  exit 1
-fi
-exec "${CONTROLLER_TEST_REAL_GIT}" "$@"
+echo target >>"${CONTROLLER_TEST_SOURCE_LOG}"
+exec "${SOURCE_TEST_COMPOSE}" "$@"
 EOF
-chmod 755 "${bin}/git"
-relay_ca_state="${fixture}/rollback-relay-ca-descriptor"
-seed_upgrade_state "${relay_ca_state}"
-cp -- "${next_release_file}" "${relay_ca_state}/current-release.json"
-cp -- "${release_file}" "${relay_ca_state}/previous-release.json"
-chmod 600 "${relay_ca_state}/current-release.json" "${relay_ca_state}/previous-release.json"
-if run_controller_rollback "${relay_ca_state}" env CONTROLLER_TEST_REAL_GIT="${real_git}" >"${relay_ca_state}/output.log" 2>&1; then
-  echo "changed Relay CA deployment overlay was accepted" >&2
-  exit 1
+chmod 755 "${source_repo}/deploy/production/compose.sh"
+git -C "${source_repo}" init -q
+git -C "${source_repo}" add .
+git -C "${source_repo}" -c user.name=Test -c user.email=test@example.invalid commit -qm target
+source_target="$(git -C "${source_repo}" rev-parse HEAD)"
+sed -i 's/echo target/echo current/' "${source_repo}/deploy/production/compose.sh"
+git -C "${source_repo}" add .
+git -C "${source_repo}" -c user.name=Test -c user.email=test@example.invalid commit -qm current
+source_current="$(git -C "${source_repo}" rev-parse HEAD)"
+source_state="${fixture}/source-state"
+seed_upgrade_state "${source_state}"
+jq --arg source "${source_current}" '.source_commit=$source' "${next_release_file}" >"${source_state}/current-release.json"
+jq --arg source "${source_target}" '.source_commit=$source' "${release_file}" >"${source_state}/previous-release.json"
+chmod 600 "${source_state}/current-release.json" "${source_state}/previous-release.json"
+saved_controller="${CONTROLLER}"
+CONTROLLER="${source_repo}/deploy/production/controller.sh"
+source_env=(env OCSERV_CONTROLLER_COMPOSE_SH= OCSERV_CONTROLLER_SMOKE_SH=
+  "CONTROLLER_TEST_SOURCE_LOG=${source_state}/sources.log" "SOURCE_TEST_COMPOSE=${bin}/compose.sh")
+run_controller_rollback "${source_state}" "${source_env[@]}"
+test "$(cat "${source_state}/sources.log")" = "$(printf 'current\ntarget\ntarget\ntarget')"
+test "$(git -C "${source_state}/source-${source_target}" rev-parse HEAD)" = "${source_target}"
+test "$(jq -r .source_commit "${source_state}/current-release.json")" = "${source_target}"
+: >"${source_state}/sources.log"
+run_source_start() {
+  PATH="${bin}:${PATH}" CONTROLLER_TEST_LOG="${source_state}/compose.log" \
+    CONTROLLER_TEST_ENV_LOG="${source_state}/compose-env.log" \
+    CONTROLLER_TEST_SMOKE_LOG="${source_state}/smoke.log" \
+    OCSERV_CONTROLLER_STATE_ROOT="${source_state}" \
+    "${source_env[@]}" "${CONTROLLER}" start
+}
+run_source_start
+test "$(cat "${source_state}/sources.log")" = "$(printf 'target\ntarget\ntarget')"
+printf '\n# tampered\n' >>"${source_state}/source-${source_target}/deploy/production/compose.sh"
+: >"${source_state}/sources.log"
+if run_source_start >"${source_state}/dirty.log" 2>&1; then
+  echo 'dirty target source checkout accepted' >&2; exit 1
 fi
-grep -Fq 'production deployment descriptor changed since previous release: deploy/production/compose.relay-ca.yaml' "${relay_ca_state}/output.log"
-cmp -s "${next_release_file}" "${relay_ca_state}/current-release.json"
-cmp -s "${release_file}" "${relay_ca_state}/previous-release.json"
-test ! -e "${relay_ca_state}/pending-release.json"
-test ! -e "${relay_ca_state}/compose.log"
-rm -- "${bin}/git"
+grep -Fq 'checkout has unstaged changes' "${source_state}/dirty.log"
+test ! -s "${source_state}/sources.log"
+CONTROLLER="${saved_controller}"
 
 unresolvable_previous="${fixture}/release/controller-release-unresolvable-previous.json"
 jq --arg source "$(printf 'e%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${unresolvable_previous}"
@@ -738,7 +630,7 @@ if run_controller_rollback "${unresolvable_state}" env >"${unresolvable_state}/o
   echo "unresolvable rollback source commit was accepted" >&2
   exit 1
 fi
-grep -Fq 'previous release source_commit cannot be resolved locally' "${unresolvable_state}/output.log"
+grep -Fq 'release source_commit cannot be resolved locally' "${unresolvable_state}/output.log"
 test ! -e "${unresolvable_state}/compose.log"
 
 for rollback_failure in config pull up; do
@@ -783,7 +675,6 @@ cp -- "${different_schema_previous}" "${rollback_cross_schema_smoke_failure_stat
 chmod 600 "${rollback_cross_schema_smoke_failure_state}/current-release.json" "${rollback_cross_schema_smoke_failure_state}/previous-release.json"
 if run_controller_rollback "${rollback_cross_schema_smoke_failure_state}" env \
   MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION=1 MOCK_SMOKE_EXIT=1 \
-  MOCK_SCHEMA_CURRENT="${rollback_schema}" MOCK_SCHEMA_MINIMUM="${rollback_schema}" \
   >"${rollback_cross_schema_smoke_failure_state}/output.log" 2>&1; then
   echo "cross-schema rollback smoke failure was accepted" >&2
   exit 1
@@ -852,13 +743,23 @@ test ! -e "${partial_upgrade_state}/compose.log"
 downgrade_state="${fixture}/downgrade"
 seed_upgrade_state "${downgrade_state}"
 cp -- "${next_release_file}" "${downgrade_state}/current-release.json"
-if run_controller_upgrade "${downgrade_state}" "${release_file}" env >"${downgrade_state}/output.log" 2>&1; then
-  echo "downgrade was accepted" >&2
-  exit 1
-fi
-grep -Fq 'upgrade does not perform downgrade' "${downgrade_state}/output.log"
-cmp -s "${next_release_file}" "${downgrade_state}/current-release.json"
-test ! -e "${downgrade_state}/compose.log"
+run_controller_upgrade "${downgrade_state}" "${release_file}" env
+cmp -s "${release_file}" "${downgrade_state}/current-release.json"
+cmp -s "${next_release_file}" "${downgrade_state}/previous-release.json"
+test -s "${downgrade_state}/compose.log"
+
+same_version_target="${fixture}/release/same-version-different-artifact.json"
+jq '.release_version="0.2.0" | .release_tag="v0.2.0"' "${next_release_file}" >"${same_version_target}"
+refresh_bundle_dir "${fixture}/release"
+same_version_state="${fixture}/same-version-different-artifact"
+seed_upgrade_state "${same_version_state}"
+run_controller_upgrade "${same_version_state}" "${same_version_target}" env
+cmp -s "${same_version_target}" "${same_version_state}/current-release.json"
+cmp -s "${release_file}" "${same_version_state}/previous-release.json"
+test -s "${same_version_state}/compose.log"
+: >"${same_version_state}/compose.log"
+run_controller_upgrade "${same_version_state}" "${same_version_target}" env
+test ! -s "${same_version_state}/compose.log"
 
 invalid_upgrade_state="${fixture}/invalid-upgrade"
 seed_upgrade_state "${invalid_upgrade_state}"
@@ -962,7 +863,7 @@ source_mismatch="${fixture}/release/source-mismatch.json"
 jq --arg source "$(printf 'c%.0s' {1..40})" '.source_commit = $source' "${release_file}" >"${source_mismatch}"
 refresh_bundle_dir "${fixture}/release"
 expect_failure "${fixture}/source-mismatch" "${source_mismatch}" \
-  'checkout HEAD does not match release manifest source_commit' false env
+  'release source_commit cannot be resolved locally' false env
 
 config_state="${fixture}/config-failure"
 mkdir -m 700 -- "${config_state}"
@@ -1087,7 +988,7 @@ if run_controller_uninstall "${uninstall_source_mismatch_state}" \
   echo "uninstall with a mismatched checkout was accepted" >&2
   exit 1
 fi
-grep -Fq 'checkout HEAD does not match release manifest source_commit' \
+grep -Fq 'release source_commit cannot be resolved locally' \
   "${uninstall_source_mismatch_state}/output.log"
 test ! -e "${uninstall_source_mismatch_state}/compose.log"
 
