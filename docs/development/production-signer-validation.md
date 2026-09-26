@@ -55,7 +55,10 @@ security assertions and migration validation were not relaxed. The initial
 Rust formatting check failed on newly inserted test code; rustfmt corrected it.
 The affected checks were rerun successfully.
 
-## Remaining acceptance boundaries
+## Initial acceptance boundaries
+
+The following status is the original pre-PR record, not the final PR #271
+result. Subsequent exact-SHA acceptance is recorded below.
 
 - NOT_RUN: full Controller/agent/privd daemon business E2E and Registry-pulled
   production-path acceptance. The Rust check runs the real decryption adapter,
@@ -67,9 +70,9 @@ The affected checks were rerun successfully.
 - Disabling retired node bindings remains an explicit offline operation.
   Backups cannot prove freshness without an independently reconciled revision.
 
-These boundaries are P3/P4/P5/P6 handoffs in the runtime document, not claims of
-production readiness. No commit, push, merge, Registry upload or production
-deployment was performed. Task-owned test containers, images, private fixture
+These were P3/P4/P5/P6 handoffs, not claims of production readiness. At this
+initial checkpoint no commit, push, merge, Registry upload or production
+deployment had been performed. Task-owned test containers, images, private fixture
 keys and directories are removed after retaining this record; shared caches and
 unrelated tasks are not cleaned.
 
@@ -93,6 +96,15 @@ occtl socket path; ocserv 1.2.4 removes that path on shutdown even when its
 control socket is disabled. This interfered with the primary node's health
 check. The harness now assigns separate occtl/PID paths and asserts the
 primary socket identity and actual occtl query survive CRL-node shutdown.
-All gates must be rerun on the corrected candidate; earlier partial results
-must not be inherited as its acceptance. Final run evidence belongs to the
-exact tested SHA and the acceptance PR, which is created only after success.
+That failed run is not superseded in place or relabeled as passing.
+
+The corrected candidate `a617d4f2e7ad47b0ef45dec0d357e7fe17d78f61` passed the
+complete AMD64 real Controller/Agent/privd business chain in
+[run 36160201644, attempt 1](https://github.com/GentleKingson/ocservia/actions/runs/36160201644).
+This includes both sealing purposes, P12, CRL revoked rejection with an
+unrevoked login control, configuration rollback, VPN and single-Relay recovery.
+[PR #271](https://github.com/GentleKingson/ocservia/pull/271) was subsequently
+merged as `0c33509cbc5491cd83b9a1a6bf439f6b40669cb4`. The full business pass
+belongs to `a617d4f`, not that squash commit or any later Integrated candidate.
+The [Integrated deployment record](../../deploy/production/integrated/README.md)
+tracks the later unified lifecycle and its separate acceptance scope.

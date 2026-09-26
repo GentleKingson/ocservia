@@ -83,8 +83,9 @@ next-update and audit revision as CRL number. Run it through the protected
 operator workflow and publish atomically to the intended verifier separately.
 Reason text remains in the ledger; CRL reason code is unspecified. A 204 revoke
 is not proof of node cleanup, VPN session termination or CRL distribution.
-P5/P6 must prove verifier installation/refresh/enforcement. There is no public
-CRL endpoint or OCSP service in P2.
+The exact-SHA [validation record](production-signer-validation.md) distinguishes
+real verifier refresh/enforcement from unit checks. There is no public CRL
+endpoint or OCSP service; refresh is an explicit operator responsibility.
 
 ## Trusted public-key transfer
 
@@ -123,8 +124,9 @@ there is no HTTP key registration endpoint.
    pending work, stop Signer and run `disable --node UUID`. Restart Signer.
    Disabled bindings persist and cannot be reactivated or replaced. A newly
    enrolled node identity needs a new approved import. Controller revocation
-   does not automatically disable Signer's offline mapping; P6 must include
-   this explicit step in decommissioning.
+   does not automatically disable Signer's offline mapping. Complete both
+   Controller retirement and this explicit Signer step using the
+   [Integrated maintenance procedure](../../deploy/production/integrated/README.md#operator-lifecycle-and-maintenance).
 
 Signer never receives Controller database credentials. Its HTTP sealing path
 selects only the imported mapping and uses RSA-OAEP-SHA256/MGF1-SHA256, empty
@@ -203,13 +205,17 @@ designated Registry images and separately prove real daemon/workflow execution.
 
 With operator authorization for candidate publication, dispatch
 `release-upgrade.yml` with `purpose=integration`, `production_signer=true` and
-the candidate version on its exact branch. This opt-in path publishes six
-candidate images under unique SHA/run/attempt GHCR tags, removes their local
-tags, pulls their immutable digests and installs the Controller through the
-signed candidate manifest. It does not publish a Release or change stable tags.
-The ordinary smoke/integration caller has only `contents: read`; a separate
-opt-in integration caller alone grants `packages: write`. Both call the same
-reusable business workflow, which inherits rather than widens caller permissions.
+the candidate version on its exact branch. This opt-in path natively builds
+and scans nine first-party images on AMD64 and ARM64, publishes unique
+SHA/run/attempt GHCR tags, and signs the platform manifests binding their
+Registry digests plus the upstream database/observability images. A clean
+consumer pulls those digests and installs through the existing Integrated
+lifecycle. It does not publish a Release or change stable tags.
+The ordinary diagnostic path and shared reusable business consumer are
+read-only. Only the explicit candidate publication job has `packages: write`;
+the consumer does not inherit that write permission. See the
+[candidate pipeline](../../deploy/production/integrated/README.md#candidate-pipeline)
+for exact-source verification, retained artifacts and stable promotion rules.
 
 The extended native daemon checks use the production Signer with an online
 intermediate, approved Controller export and actual node public-key export.
@@ -224,5 +230,5 @@ sessions. Raw keys, credentials and login cookies remain private to the runner.
 
 `registry-pulls.jsonl`, `crl-acceptance.json` and the existing API, root-receipt,
 browser and business evidence are retained as sanitized Actions artifacts.
-Missing files or failed assertions block acceptance; the workflow must finish
-successfully before creating an acceptance PR.
+Missing files or failed assertions block acceptance and merge. A PR opened
+while validation is running is not evidence of acceptance.
