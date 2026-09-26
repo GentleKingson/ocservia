@@ -2019,7 +2019,8 @@ fn payload_authorization(
         Some(command_envelope::Payload::AgentUpgrade(_)) => (
             128,
             "agent.upgrade",
-            ocservia_contracts::agent_upgrade::AGENT_UPGRADE_CAPABILITY,
+            ocservia_contracts::agent_upgrade::supported_capability(&envelope.required_capability)
+                .ok_or(AuthorizationError::PayloadUnsupported)?,
         ),
         _ => return Err(AuthorizationError::PayloadUnsupported),
     })

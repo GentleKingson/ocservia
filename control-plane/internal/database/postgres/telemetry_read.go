@@ -47,7 +47,7 @@ func (s telemetryReadStore) Node(ctx context.Context, id uuid.UUID) (telemetryre
 }
 func (s telemetryReadStore) UpgradeEligibility(ctx context.Context, id uuid.UUID) (bool, error) {
 	var capable, conflict bool
-	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v2' AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, id).Scan(&capable, &conflict)
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability IN ('ocserv.agent.upgrade.v1','ocserv.agent.upgrade.v2') AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, id).Scan(&capable, &conflict)
 	return capable && !conflict, err
 }
 func (s telemetryReadStore) Sessions(ctx context.Context, id uuid.UUID, after string, limit int) ([]telemetryread.Session, error) {
