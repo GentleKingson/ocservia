@@ -1362,7 +1362,14 @@ fn validate_payload(
         }
         Some(command_envelope::Payload::AgentUpgrade(payload)) => {
             validate_agent_upgrade(payload)?;
-            (AGENT_UPGRADE_CAPABILITY, Vec::new(), true)
+            (
+                ocservia_contracts::agent_upgrade::supported_capability(
+                    &envelope.required_capability,
+                )
+                .ok_or(CommandError::Rejected("capability_rejected"))?,
+                Vec::new(),
+                true,
+            )
         }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     })
@@ -2126,7 +2133,11 @@ mod tests {
                 ("config.apply", "ocserv.config.apply")
             }
             Some(command_envelope::Payload::AgentUpgrade(_)) => {
-                ("agent.upgrade", "ocserv.agent.upgrade.v2")
+                if envelope.required_capability == "ocserv.agent.upgrade.v1" {
+                    ("agent.upgrade", "ocserv.agent.upgrade.v1")
+                } else {
+                    ("agent.upgrade", "ocserv.agent.upgrade.v2")
+                }
             }
             _ => panic!("test command payload is unsupported"),
         };
@@ -3594,6 +3605,29 @@ mod tests {
         );
         validate_command(&envelope, &upgrade_context(node_id, 100))
             .expect("typed upgrade command validates with negotiated capability");
+        for capability in ocservia_contracts::agent_upgrade::AGENT_UPGRADE_CAPABILITIES {
+            let mut signed = envelope.clone();
+            signed.required_capability = (*capability).to_owned();
+            authorize_test_command(&mut signed);
+            let mut negotiated = context(node_id, 100);
+            negotiated.capabilities = capabilities(&[capability]);
+            validate_command(&signed, &negotiated).expect("actual advertised command");
+            let other = if *capability == "ocserv.agent.upgrade.v1" {
+                "ocserv.agent.upgrade.v2"
+            } else {
+                "ocserv.agent.upgrade.v1"
+            };
+            negotiated.capabilities = capabilities(&[other]);
+            assert_eq!(rejected_code(&signed, &negotiated), "capability_rejected");
+            signed.required_capability = other.to_owned();
+            assert!(
+                validate_command(&signed, &negotiated).is_err(),
+                "capability is signature-bound"
+            );
+        }
+        let mut unknown = envelope;
+        unknown.required_capability = "ocserv.agent.upgrade.v999".to_owned();
+        assert!(validate_command(&unknown, &upgrade_context(node_id, 100)).is_err());
     }
 
     #[test]
@@ -3682,7 +3716,7 @@ mod tests {
         wrong_capability.required_capability = "ocserv.users.write".to_owned();
         assert_eq!(
             rejected_code(&wrong_capability, &command_context),
-            "command_authorization_capability_mismatch"
+            "capability_rejected"
         );
 
         let mut wrong_action = base.clone();

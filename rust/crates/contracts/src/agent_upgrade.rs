@@ -7,10 +7,23 @@
 
 #![forbid(unsafe_code)]
 
-/// Session capability for the typed agent upgrade command with an
-/// installation commit record. It does not promise software-version-order
-/// admission or cross-version compatibility.
+/// Preferred session capability for the typed agent upgrade command.
+/// Neither command name promises software-version-order admission or
+/// cross-version compatibility.
 pub const AGENT_UPGRADE_CAPABILITY: &str = "ocserv.agent.upgrade.v2";
+
+/// Both advertised names implement the same typed command payload.
+pub const AGENT_UPGRADE_CAPABILITIES: &[&str] =
+    &[AGENT_UPGRADE_CAPABILITY, "ocserv.agent.upgrade.v1"];
+
+/// Resolve only a real typed-command capability, never a version threshold.
+#[must_use]
+pub fn supported_capability(value: &str) -> Option<&'static str> {
+    AGENT_UPGRADE_CAPABILITIES
+        .iter()
+        .copied()
+        .find(|capability| *capability == value)
+}
 
 /// Release package architectures of the published native agent packages.
 pub const AGENT_UPGRADE_ARCHITECTURES: &[&str] = &["amd64", "arm64"];

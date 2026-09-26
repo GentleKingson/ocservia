@@ -108,6 +108,7 @@ type CreateRequest struct {
 	PackageSHA256       []byte
 	Architecture        string
 	FromVersion         string
+	upgradeCapability   string
 	// RolloutID binds a generated node upgrade to its durable fleet rollout.
 	// The rollout approval was consumed once at rollout creation; dispatch
 	// validates against the consumed binding instead of consuming again.
@@ -387,8 +388,18 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("check operation capability: %w", err)
 		}
+		if !approved && request.Kind == AgentUpgrade {
+			capability = "ocserv.agent.upgrade.v1"
+			approved, err = intentStore.HasCapability(ctx, request.NodeID, capability)
+			if err != nil {
+				return Operation{}, false, fmt.Errorf("check operation capability: %w", err)
+			}
+		}
 		if !approved {
 			return Operation{}, false, ErrCapabilityMissing
+		}
+		if request.Kind == AgentUpgrade {
+			request.upgradeCapability = capability
 		}
 	}
 	if request.Kind == SessionDisconnect || request.Kind == SessionTerminate {
@@ -1040,6 +1051,9 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 }
 
 func requestCapability(request CreateRequest) string {
+	if request.Kind == AgentUpgrade && request.upgradeCapability != "" {
+		return request.upgradeCapability
+	}
 	if request.CompleteCandidate != nil {
 		if request.Kind == ConfigPlan {
 			return configprofile.PlanCapability
@@ -1070,9 +1084,6 @@ func capabilityFor(kind SyntheticKind) string {
 	case CertificateRevoke:
 		return "ocserv.certificate.revoke"
 	case AgentUpgrade:
-		// v2 is fence-capable: the source runner executes the upgrade with
-		// the execution-time downgrade fence and installation commit record.
-		// Scheduling from a v1-only node would run the first hop unprotected.
 		return "ocserv.agent.upgrade.v2"
 	default:
 		return ""

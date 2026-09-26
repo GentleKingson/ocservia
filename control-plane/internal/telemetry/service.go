@@ -684,9 +684,6 @@ func (s *Service) applyAgentUpgradeEligibility(ctx context.Context, node *Node) 
 	if err != nil {
 		return
 	}
-	// Only nodes that advertise the fence-capable v2 capability are eligible:
-	// a v1 source runner would execute the first hop without the
-	// execution-time downgrade fence and installation commit record.
 	var eligible bool
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := telemetryread.From(tx)

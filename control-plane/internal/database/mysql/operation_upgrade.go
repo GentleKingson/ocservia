@@ -18,7 +18,7 @@ func (s operationStore) LockAgentObservation(ctx context.Context, node uuid.UUID
 }
 
 func (s operationStore) LockUpgradeCapability(ctx context.Context, node uuid.UUID) (v bool, err error) {
-	err = s.QueryRow(ctx, `SELECT approved FROM node_capabilities WHERE node_id=? AND capability='ocserv.agent.upgrade.v2' FOR UPDATE`, UUIDBytes(node)).Scan(&v)
+	err = s.QueryRow(ctx, `SELECT approved FROM node_capabilities WHERE node_id=? AND capability IN ('ocserv.agent.upgrade.v1','ocserv.agent.upgrade.v2') ORDER BY approved DESC,capability DESC LIMIT 1 FOR UPDATE`, UUIDBytes(node)).Scan(&v)
 	return
 }
 
@@ -30,7 +30,7 @@ func (s operationStore) HasActiveUpgrade(ctx context.Context, node uuid.UUID) (v
 func (s operationStore) RolloutObservation(ctx context.Context, node, workspace uuid.UUID) (v operationstore.RolloutObservation, err error) {
 	v.NodeID = node
 	err = s.QueryRow(ctx, `SELECT n.status,COALESCE(o.architecture,''),COALESCE(o.agent_version,''),o.last_heartbeat_at,
-		EXISTS(SELECT 1 FROM node_capabilities c WHERE c.node_id=n.id AND c.capability='ocserv.agent.upgrade.v2' AND c.approved=true),
+		EXISTS(SELECT 1 FROM node_capabilities c WHERE c.node_id=n.id AND c.capability IN ('ocserv.agent.upgrade.v1','ocserv.agent.upgrade.v2') AND c.approved=true),
 		EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.node_id=n.id AND u.completed_at IS NULL AND u.state IN ('queued','accepted','running','unknown'))
 		FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=? AND n.workspace_id=?`, UUIDBytes(node), UUIDBytes(workspace)).Scan(&v.Status, &v.Architecture, &v.AgentVersion, &v.LastHeartbeatAt, &v.CapabilityOK, &v.UpgradeActive)
 	return

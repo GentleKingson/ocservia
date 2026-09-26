@@ -42,7 +42,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	f.exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES(?,?,'active',?)`, node, []byte(key), at)
 	f.exec(`INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, `INSERT INTO privd_attestation_enrollment_credentials(id,node_id,secret_sha256,controller_nonce,credential_context_sha256,expires_at,consumed_at,created_by_identity_id,created_by_session_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, credential, node, []byte(key), []byte(key), []byte(key), expires, at, f.requester.principal.IdentityID, f.requester.principal.SessionID, at)
 	f.exec(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id) VALUES($1,$2,'ed25519',$3,'active',$4,$5,$6,$7)`, `INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at,registration_credential_id) VALUES(?,?,'ed25519',?,'active',?,?,?,?)`, node, privdattestation.PublicKeyID(key), []byte(key), at, at, at, credential)
-	for _, capability := range []string{"ocserv.agent.upgrade.v2", privdattestation.AttestationCapability} {
+	for _, capability := range []string{"ocserv.agent.upgrade.v1", privdattestation.AttestationCapability} {
 		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES(?,?,true)`, node, capability)
 	}
 	manifest := filepath.Join(t.TempDir(), "releases.json")
@@ -196,6 +196,9 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		upgrade := envelope.GetAgentUpgrade()
+		if envelope.GetRequiredCapability() != "ocserv.agent.upgrade.v1" {
+			t.Fatalf("command did not bind the node's actual capability: %q", envelope.GetRequiredCapability())
+		}
 		if upgrade.GetTargetVersion() != "2.0.0" || upgrade.GetArchitecture() != "amd64" || !bytes.Equal(upgrade.GetPackageSha256(), bytes.Repeat([]byte{0x43}, 32)) {
 			t.Fatalf("command release identity: %v", upgrade)
 		}
