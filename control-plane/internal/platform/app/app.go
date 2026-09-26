@@ -55,10 +55,10 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	if err != nil || startup == nil {
 		return err
 	}
-	return runRoles(ctx, cfg, build, backend, startup.audit, startup.schemaVersion, logger)
+	return runRoles(ctx, cfg, build, backend, startup.audit, logger)
 }
 
-func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, expectedSchemaVersion int64, logger *slog.Logger) (runErr error) {
+func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger *slog.Logger) (runErr error) {
 	life := newLifecycle(ctx, cfg.ShutdownTimeout, logger)
 	stopPprof := startPprof(cfg.PprofAddress, logger)
 	defer func() {
@@ -172,7 +172,7 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		services.enrollment = enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
 		services.transport, services.fences = controlTransport, fenceExecutor
 	}
-	server, err := newHTTPServer(life, cfg, build, backend, auditManager, expectedSchemaVersion, logger, services)
+	server, err := newHTTPServer(life, cfg, build, backend, auditManager, logger, services)
 	if err != nil {
 		return err
 	}

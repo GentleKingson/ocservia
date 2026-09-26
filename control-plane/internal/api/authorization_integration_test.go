@@ -560,7 +560,7 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := testHTTPConfig(false)
-	config.BodyLimit, config.ExpectedSchema = 1024, 1
+	config.BodyLimit = 1024
 	server := newTestServer(t, config, postgres.WrapPool(pool), Modules{}, Authorization{Authentication: authService, RBAC: rbac.NewBackend(postgres.WrapPool(pool)), Approvals: approvalstore.NewBackend(postgres.WrapPool(pool))})
 	server.EnableOperations(apiOperationService(pool))
 

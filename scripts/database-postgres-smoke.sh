@@ -42,7 +42,7 @@ unset PR02_DSN PR02_ENGINE
 cd "${ROOT}/control-plane"
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
 if [[ "${DATABASE_TEST_SCOPE:-smoke}" == compatibility ]]; then
-  docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'CREATE DATABASE upgrade_smoke' >/dev/null
-  export OCSERV_TEST_UPGRADE_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/upgrade_smoke?sslmode=disable"
-  bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./migrations TestDatabaseUpgradeSmoke
+  docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'CREATE DATABASE initialization_smoke' >/dev/null
+  export OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/initialization_smoke?sslmode=disable"
+  bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./migrations TestDatabaseInitializationSmoke
 fi

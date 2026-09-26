@@ -79,7 +79,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 			t.Error(err)
 		}
 	})
-	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "s01"}, runtime.Store, nil, 36, quietLogger(), services)
+	server, err := newHTTPServer(life, cfg, BuildInfo{Version: "s01"}, runtime.Store, nil, quietLogger(), services)
 	if err != nil || life.http != server {
 		t.Fatal("production assembly ownership", err)
 	}

@@ -189,13 +189,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	if err := run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err != nil {
 		t.Fatal("owner CLI migration", err)
 	}
-	if err := run(runtimeOptions, nil, "--schema-compatibility-check=36"); err != nil {
-		t.Fatal("runtime CLI schema validation", err)
-	}
 	if !smoke {
-		if err := run(runtimeOptions, nil, "--schema-compatibility-check=999"); err == nil {
-			t.Fatal("unsupported Controller schema accepted")
-		}
 		if err := run(runtimeOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err == nil {
 			t.Fatal("runtime account performed owner migration")
 		}
