@@ -18,7 +18,7 @@ export const readJSON = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 export function candidateArtifacts(component, arch, version) {
   return component === "agent" ? [`ocservia-agent_${version}-1_${arch}.deb`,
     `ocservia-agent-${version}-1.${architectures[arch].rpm}.rpm`, `ocservia-agent-${version}-linux-${arch}.tar.gz`] :
-    ["gateway", "control", "transport", "backup"].map(name => `${name}-linux-${arch}.tar`);
+    ["gateway", "control", "transport", "backup", "edge", "relay", "signer", "mysql_backup", "mariadb_backup"].map(name => `${name}-linux-${arch}.tar`);
 }
 export function requireThat(condition, message) { if (!condition) throw new Error(message); }
 export function compareVersions(a, b) {

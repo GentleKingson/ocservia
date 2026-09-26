@@ -11,36 +11,75 @@ on:
       production_signer:
         type: boolean
         default: false
+      bundle-id:
+        type: string
+        default: ''
+      bundle-sha256:
+        type: string
+        default: ''
+      key-sha256:
+        type: string
+        default: ''
+      agent-amd64-id:
+        type: string
+        default: ''
+      agent-amd64-sha256:
+        type: string
+        default: ''
+      agent-arm64-id:
+        type: string
+        default: ''
+      agent-arm64-sha256:
+        type: string
+        default: ''
 
-# Inherit the caller's permissions: ordinary diagnostics are read-only.
-# Only the opt-in production-signer caller grants packages: write.
+# Both ordinary diagnostics and candidate consumers are read-only.
+# Publication is a separate opt-in producer in release-upgrade.yml.
 env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
   business:
-    name: Native Candidate Business (${{ inputs.profile }}, amd64)
-    runs-on: ubuntu-24.04
+    name: Native Candidate Business (${{ inputs.profile }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ inputs.production_signer && fromJSON('["amd64","arm64"]') || fromJSON('["amd64"]') }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
     env:
       VERSION: ${{ inputs.version }}
       CANDIDATE_SHA: ${{ github.sha }}
       BUSINESS_PROFILE: ${{ inputs.profile }}
       PRODUCTION_SIGNER_ACCEPTANCE: ${{ inputs.production_signer }}
+      CONTROLLER_ARCH: ${{ matrix.arch }}
+      INTEGRATED_INSTALL_ONLY: ${{ matrix.arch == 'arm64' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Relay optional BuildKit cache credentials
-        uses: ./.github/actions/g6-cache-credentials
-      - name: Authenticate candidate Registry publication
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         if: inputs.production_signer
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          test "$BUSINESS_PROFILE" = extended
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        with:
+          artifact-ids: ${{ inputs.bundle-id }}
+          path: ${{ runner.temp }}/candidate
+      - uses: ./.github/actions/release-artifacts
+        if: inputs.production_signer
+        with:
+          artifact-id: ${{ matrix.arch == 'arm64' && inputs.agent-arm64-id || inputs.agent-amd64-id }}
+          sha256: ${{ matrix.arch == 'arm64' && inputs.agent-arm64-sha256 || inputs.agent-amd64-sha256 }}
+          component: agent
+          arch: ${{ matrix.arch }}
+          version: ${{ inputs.version }}
+          path: ${{ runner.temp }}/products
+      - name: Relay optional BuildKit cache credentials
+        if: ${{ !inputs.production_signer }}
+        uses: ./.github/actions/g6-cache-credentials
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: ${{ !inputs.production_signer }}
         with:
           path: |
             .cache/downloads
@@ -53,7 +92,29 @@ jobs:
       - name: Signed production lifecycle and native business validation
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
-        run: bash scripts/release-business-probe.sh
+          CANDIDATE_BUNDLE: ${{ inputs.production_signer && format('{0}/candidate', runner.temp) || '' }}
+          CANDIDATE_PRODUCTS: ${{ inputs.production_signer && format('{0}/products', runner.temp) || '' }}
+          CANDIDATE_BUNDLE_SHA256: ${{ inputs.bundle-sha256 }}
+          CANDIDATE_KEY_SHA256: ${{ inputs.key-sha256 }}
+          AGENT_MANIFEST_SHA256: ${{ matrix.arch == 'arm64' && inputs.agent-arm64-sha256 || inputs.agent-amd64-sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+            sudo install -d -m 700 "${RUNNER_TEMP}/candidate-docker"
+            trap 'sudo rm -rf -- "${RUNNER_TEMP}/candidate-docker"' EXIT
+            printf '%s' "$GH_TOKEN" | sudo docker --config "${RUNNER_TEMP}/candidate-docker" login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            export DOCKER_CONFIG="${RUNNER_TEMP}/candidate-docker"
+            sudo --preserve-env=ARTIFACT_DIR,VERSION,CANDIDATE_SHA,BUSINESS_PROFILE,PRODUCTION_SIGNER_ACCEPTANCE,CANDIDATE_BUNDLE,CANDIDATE_PRODUCTS,CANDIDATE_BUNDLE_SHA256,CANDIDATE_KEY_SHA256,AGENT_MANIFEST_SHA256,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,RUNNER_ENVIRONMENT,CONTROLLER_ARCH,INTEGRATED_INSTALL_ONLY \
+              --preserve-env=DOCKER_CONFIG,RUNNER_ARCH bash scripts/release-business-probe.sh
+          else
+            bash scripts/release-business-probe.sh
+          fi
+      - name: Return sanitized evidence to the runner
+        if: ${{ always() && inputs.production_signer }}
+        run: |
+          if [[ -d "${RUNNER_TEMP}/business-evidence" && ! -L "${RUNNER_TEMP}/business-evidence" ]]; then
+            sudo chown -R -- "$(id -u):$(id -g)" "${RUNNER_TEMP}/business-evidence"
+          fi
       - name: Require complete scoped business evidence
         env:
           EVIDENCE: ${{ runner.temp }}/business-evidence
@@ -66,7 +127,9 @@ jobs:
             "${EVIDENCE}/result.json" >/dev/null
           jq -e --arg profile "${PROFILE}" --arg sha "${CANDIDATE_SHA}" '
             .profile == $profile and .candidate_sha == $sha and .probe_status == "PASS" and
-            (if $profile == "smoke" then
+            (if .planned_topology.architecture == "arm64" then
+              (["signed_controller_lifecycle", "integrated_native_install_restart"] - .passed_checkpoints | length) == 0
+             elif $profile == "smoke" then
               (["approved_config_apply_and_vpn_user", "real_vpn_after_config_apply",
                 "config_plan_automatic_rollback", "real_vpn_after_rollback"] - .passed_checkpoints | length) == 0
              else
@@ -74,15 +137,19 @@ jobs:
                 "real_vpn_business_and_recovery"] - .passed_checkpoints | length) == 0
              end)' "${EVIDENCE}/result.json" >/dev/null
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+            grep -Fx integrated_entry_and_internal_tls "${EVIDENCE}/checkpoints.txt"
+            if [[ "$CONTROLLER_ARCH" == amd64 ]]; then
+              grep -Fx integrated_recreation_and_authorized_sse "${EVIDENCE}/checkpoints.txt"
             jq -e --arg sha "$CANDIDATE_SHA" '.candidate_sha == $sha and .primary_occtl_preserved == true and
               .before_auth == true and .revoked_rejected == true and .control_auth == true and
               .refresh == "signed-export-atomic-install-sighup"' "${EVIDENCE}/crl-acceptance.json"
-            test "$(wc -l < "${EVIDENCE}/registry-pulls.jsonl")" -eq 6
-            jq -se --arg sha "$CANDIDATE_SHA" 'length == 6 and all(.[];
-              .candidate_sha == $sha and (.reference | startswith("ghcr.io/")) and
+              grep -Fx production_signer_approved_binding "${EVIDENCE}/checkpoints.txt"
+            fi
+            test "$(wc -l < "${EVIDENCE}/registry-pulls.jsonl")" -eq 11
+            jq -se --arg sha "$CANDIDATE_SHA" 'length == 11 and all(.[];
+              .candidate_sha == $sha and (.reference | test("^(ghcr.io|docker.io)/")) and
               (.reference | test("@sha256:[0-9a-f]{64}$")) and .pulled == true)' \
               "${EVIDENCE}/registry-pulls.jsonl"
-            grep -Fx production_signer_approved_binding "${EVIDENCE}/checkpoints.txt"
           fi
       - name: Mark evidence upload start
         if: always()
@@ -92,7 +159,7 @@ jobs:
         id: business_evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: business-${{ inputs.profile }}-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: business-${{ inputs.profile }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/business-evidence
           if-no-files-found: error
           retention-days: 7
@@ -108,7 +175,7 @@ jobs:
             echo "Artifact upload: $(( $(date +%s) - $(cat "${RUNNER_TEMP}/business-upload-start") )) seconds"
           } >>"${GITHUB_STEP_SUMMARY}"
       - name: Retain native build cache even when a business assertion fails
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !inputs.production_signer }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |

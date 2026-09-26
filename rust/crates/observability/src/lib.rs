@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-/// Initializes JSON structured logging using `RUST_LOG` when present.
+/// Initializes JSON structured logging on stderr using `RUST_LOG` when present.
 ///
 /// # Errors
 ///
@@ -12,6 +12,7 @@ pub fn init(service_name: &'static str) -> Result<(), tracing::subscriber::SetGl
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let subscriber = tracing_subscriber::fmt()
         .json()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .with_current_span(true)
         .with_span_list(true)
@@ -117,6 +118,36 @@ impl std::error::Error for StatsWriteError {
             Self::Clock(error) => Some(error),
             Self::Write { source, .. } => Some(source),
         }
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    #[test]
+    fn structured_logs_do_not_pollute_command_output() {
+        const CHILD: &str = "OCSERV_LOG_OUTPUT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            super::init("output-test").expect("logging starts");
+            println!("01900000-0000-7000-8000-000000000001");
+            tracing::info!("connection closed after command result");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "output_tests::structured_logs_do_not_pollute_command_output",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("RUST_LOG", "info")
+            .output()
+            .expect("child test runs");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("stdout UTF-8");
+        let stderr = String::from_utf8(output.stderr).expect("stderr UTF-8");
+        assert!(stdout.contains("01900000-0000-7000-8000-000000000001"));
+        assert!(!stdout.contains("connection closed after command result"));
+        assert!(stderr.contains("connection closed after command result"));
     }
 }
 

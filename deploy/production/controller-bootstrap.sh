@@ -73,6 +73,14 @@ INSTALL_ENV_NAMES=(
   OCSERV_DATABASE_BACKUP_NAME
   OCSERV_DATABASE_BACKUP_USER
   OCSERV_DATABASE_BACKUP_IMAGE
+  OCSERV_DEPLOYMENT_MODE
+  OCSERV_RELAY_PUBLIC_HOST
+  OCSERV_RELAY_SECRET_DIR
+  OCSERV_SIGNER_SECRET_DIR
+  OCSERV_SIGNER_STATE_DIR
+  OCSERV_EDGE_GATEWAY_IP
+  OCSERV_EDGE_GATEWAY_SUBNET
+  OCSERV_EDGE_GATEWAY_IP_RANGE
   OCSERV_CERTIFICATE_SIGNER_URL
   OCSERV_CONTROLLER_ENDPOINT_ID
   OCSERV_CONTROLLER_PUBLIC_URL
@@ -308,6 +316,9 @@ select_lifecycle() {
   if [[ "${ROOT_LIFECYCLE}" == true ]]; then
     echo "lifecycle: root (explicit --root-lifecycle)"
     return
+  fi
+  if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]] && (( EUID != 0 )); then
+    fail "Integrated requires explicit --root-lifecycle for private Signer custody"
   fi
   if ! command -v docker >/dev/null 2>&1; then
     ROOT_LIFECYCLE=true

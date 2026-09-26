@@ -580,6 +580,22 @@ jobs:
         run: scripts/bootstrap.sh package-tools
       - name: Prepare versioned bootstrap assets
         run: scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"
+      - name: Download the accepted candidate bindings
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          artifact-ids: ${{ needs.build-amd64.outputs.accepted-id }}
+          path: ${{ runner.temp }}/accepted-integrated
+      - name: Verify accepted bindings before any stable Registry write
+        env:
+          EXPECTED: ${{ needs.build-amd64.outputs.accepted-sha256 }}
+          ARM64_EXPECTED: ${{ needs.build-arm64.outputs.accepted-sha256 }}
+        run: |
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ && "$EXPECTED" == "$ARM64_EXPECTED" ]]
+          cd "${RUNNER_TEMP}/accepted-integrated"
+          [[ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" == "$EXPECTED" ]]
+          sha256sum --strict -c SHA256SUMS
+          jq -e --arg sha "$GITHUB_SHA" --arg version "$version" \
+            '.source_commit == $sha and .version == $version' producer.json
       - name: Login to GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ github.token }}
@@ -597,7 +613,7 @@ jobs:
           output_dir="${RUNNER_TEMP}/controller-release"
           mkdir -p "${output_dir}"
           : >"${output_dir}/security-bindings.tsv"
-          for name in gateway control transport backup; do
+          for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
             refs=()
             binding_rows=()
             for arch in amd64 arm64; do
@@ -631,6 +647,11 @@ jobs:
                 echo "could not read the pushed digest for ${arch_tag}" >&2
                 exit 1
               fi
+              accepted_ref="$(jq -er --arg name "$name" '.images[$name]' "${RUNNER_TEMP}/accepted-integrated/controller-release-${arch}.json")"
+              [[ "$accepted_ref" == "${CONTROLLER_IMAGE_PREFIX}/${name}@${digest}" ]] || {
+                echo "stable push changed accepted ${name}/${arch} content; refusing promotion" >&2
+                exit 1
+              }
               binding_rows+=("$(printf '%s\tlinux-%s\t%s\t%s' "${name}" "${arch}" "${digest}" "${scanned_digest}")")
               refs+=("${CONTROLLER_IMAGE_PREFIX}/${name}@${digest}")
             done
@@ -678,10 +699,11 @@ jobs:
           set -euo pipefail
           output_dir="${RUNNER_TEMP}/controller-release"
           image_ref() {
-            awk -F '\t' -v name="$1" '$1 == name { print $2 }' "${output_dir}/image-refs.tsv"
+            jq -er --arg name "$1" '.images[$name]' "${RUNNER_TEMP}/accepted-integrated/controller-release-${platform}.json"
           }
           for platform in amd64 arm64; do
             scripts/generate-controller-release-manifest.mjs \
+              --manifest-version 2 \
               --output "${output_dir}/controller-release-${platform}.json" \
               --platform "linux/${platform}" \
               --release-version "${version}" \
@@ -692,20 +714,24 @@ jobs:
               --image "control=$(image_ref control)" \
               --image "transport=$(image_ref transport)" \
               --image "backup=$(image_ref backup)" \
-              --image "postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f" \
-              --image "otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
+              --image "edge=$(image_ref edge)" \
+              --image "relay=$(image_ref relay)" \
+              --image "signer=$(image_ref signer)" \
+              --image "mysql_backup=$(image_ref mysql_backup)" \
+              --image "mariadb_backup=$(image_ref mariadb_backup)" \
+              --image "postgres=$(image_ref postgres)" \
+              --image "otel=$(image_ref otel)"
           done
-          # The bindings record is signed evidence, so it must agree with the
-          # manifests operators actually consume: every index digest it binds
-          # has to be the exact reference both release manifests ship.
+          # Operator manifests keep the accepted per-platform digest; stable
+          # convenience indexes contain those same immutable image manifests.
           for platform in amd64 arm64; do
-            for name in gateway control transport backup; do
-              bound_digest="$(jq -er --arg name "${name}" '.images[$name].index_digest' \
+            for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+              bound_digest="$(jq -er --arg name "${name}" --arg arch "linux-${platform}" '.images[$name].platforms[$arch].manifest_digest' \
                 "${output_dir}/controller-image-security-bindings.json")"
               manifest_ref="$(jq -er --arg name "${name}" '.images[$name]' \
                 "${output_dir}/controller-release-${platform}.json")"
               [[ "${manifest_ref}" == *@"${bound_digest}" ]] || {
-                echo "security bindings index digest for ${name} does not match controller-release-${platform}.json: ${bound_digest} vs ${manifest_ref}" >&2
+                echo "security bindings platform digest for ${name} does not match controller-release-${platform}.json: ${bound_digest} vs ${manifest_ref}" >&2
                 exit 1
               }
             done
@@ -753,13 +779,23 @@ jobs:
           CONTROL_DIGEST: ${{ steps.controller-index.outputs.control_digest }}
           TRANSPORT_DIGEST: ${{ steps.controller-index.outputs.transport_digest }}
           BACKUP_DIGEST: ${{ steps.controller-index.outputs.backup_digest }}
+          EDGE_DIGEST: ${{ steps.controller-index.outputs.edge_digest }}
+          RELAY_DIGEST: ${{ steps.controller-index.outputs.relay_digest }}
+          SIGNER_DIGEST: ${{ steps.controller-index.outputs.signer_digest }}
+          MYSQL_BACKUP_DIGEST: ${{ steps.controller-index.outputs.mysql_backup_digest }}
+          MARIADB_BACKUP_DIGEST: ${{ steps.controller-index.outputs.mariadb_backup_digest }}
         run: |
           set -euo pipefail
           for image in \
             "gateway=${GATEWAY_DIGEST}" \
             "control=${CONTROL_DIGEST}" \
             "transport=${TRANSPORT_DIGEST}" \
-            "backup=${BACKUP_DIGEST}"; do
+            "backup=${BACKUP_DIGEST}" \
+            "edge=${EDGE_DIGEST}" \
+            "relay=${RELAY_DIGEST}" \
+            "signer=${SIGNER_DIGEST}" \
+            "mysql_backup=${MYSQL_BACKUP_DIGEST}" \
+            "mariadb_backup=${MARIADB_BACKUP_DIGEST}"; do
             name="${image%%=*}"
             digest="${image#*=}"
             token="$(curl --fail --silent --show-error --get \

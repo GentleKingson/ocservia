@@ -109,6 +109,9 @@ controller_dockerfile_for() {
     control) printf 'control-plane/Dockerfile\n' ;;
     transport) printf 'rust/transportd.Dockerfile\n' ;;
     backup) printf 'deploy/production/backup.Dockerfile\n' ;;
+    edge|relay|signer) printf 'deploy/production/%s.Dockerfile\n' "$1" ;;
+    mysql_backup) printf 'deploy/production/backup.mysql.Dockerfile\n' ;;
+    mariadb_backup) printf 'deploy/production/backup.mariadb.Dockerfile\n' ;;
     *) return 1 ;;
   esac
 }
@@ -117,6 +120,7 @@ image_base_reference() {
   local dockerfile="$1"
   awk '
     /^FROM[ \t]/ && $2 ~ /^[^@[:space:]]+@sha256:[0-9a-f]{64}$/ { base = $2 }
+    /^FROM[ \t]+scratch([ \t]|$)/ { base = "scratch" }
     END { if (base != "") print base; else exit 1 }
   ' "${ROOT:?}/${dockerfile}"
 }
@@ -127,7 +131,7 @@ image_base_reference() {
 declare -A archive_for=()
 declare -A image_seen=()
 while IFS=$'\t' read -r name arch archive; do
-  [[ "${name}" =~ ^[a-z][a-z0-9-]*$ ]] || {
+  [[ "${name}" =~ ^[a-z][a-z0-9_-]*$ ]] || {
     echo "invalid image name row: ${name}" >&2
     exit 1
   }

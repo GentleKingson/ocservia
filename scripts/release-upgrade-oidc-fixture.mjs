@@ -5,6 +5,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 const directory = process.argv[2];
 const issuer = process.argv[3];
+const redirectURI = process.argv[5] || "https://localhost/api/v1/auth/callback";
 const secret = fs.readFileSync(`${directory}/oidc-client-secret`, "utf8").trim();
 // Optional task-owned fault input; the native upgrade fixture leaves it unset.
 const fault = () => process.argv[4] ? fs.readFileSync(process.argv[4], "utf8").trim() : "";
@@ -27,7 +28,7 @@ https.createServer({ key: fs.readFileSync(`${directory}/tls.key`), cert: fs.read
     }
     const p = url.searchParams;
     if (p.get("client_id") !== "upgrade" || p.get("response_type") !== "code" || p.get("code_challenge_method") !== "S256" ||
-      p.get("redirect_uri") !== "https://localhost/api/v1/auth/callback" || !p.get("nonce")) return json(400, { error: "invalid_request" });
+      p.get("redirect_uri") !== redirectURI || !p.get("nonce")) return json(400, { error: "invalid_request" });
     const code = crypto.randomBytes(32).toString("hex");
     codes.set(code, { nonce: p.get("nonce"), challenge: p.get("code_challenge"), expires: Date.now() + 60000 });
     const target = new URL(p.get("redirect_uri"));
@@ -42,7 +43,7 @@ https.createServer({ key: fs.readFileSync(`${directory}/tls.key`), cert: fs.read
     if (!basic && !(p.get("client_id") === "upgrade" && p.get("client_secret") === secret)) return json(401, { error: "invalid_client" });
     const code = codes.get(p.get("code")); codes.delete(p.get("code"));
     if (!code || code.expires < Date.now() || p.get("grant_type") !== "authorization_code" ||
-      p.get("redirect_uri") !== "https://localhost/api/v1/auth/callback" ||
+      p.get("redirect_uri") !== redirectURI ||
       crypto.createHash("sha256").update(p.get("code_verifier") || "").digest("base64url") !== code.challenge) return json(400, { error: "invalid_grant" });
     const now = Math.floor(Date.now() / 1000);
     const mode = fault();

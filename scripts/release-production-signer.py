@@ -17,6 +17,8 @@ STATE = WORK / 'production-signer'
 EVIDENCE = Path(os.environ['ARTIFACT_DIR'])
 CONTAINER = os.environ['T07_SIGNER_CONTAINER']
 IMAGE = os.environ['T07_SIGNER_IMAGE']
+INTEGRATED = os.environ.get('OCSERV_DEPLOYMENT_MODE') == 'integrated'
+SIGNER_URL = 'https://signer:9443' if INTEGRATED else 'https://localhost:19444'
 NODE_CRL = Path('/etc/ocservia-p2-crl')
 
 
@@ -36,7 +38,7 @@ def admin(*args):
 def health():
     for _ in range(30):
         result = subprocess.run(['docker', 'exec', CONTAINER, '/ocserv-signer', 'health',
-                                 '--url', 'https://localhost:19444/healthz'],
+                                 '--url', SIGNER_URL + '/healthz'],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if result.returncode == 0:
             return
@@ -65,8 +67,19 @@ def prepare():
     sources = {'issuer-chain.pem': WORK / 'issuer-chain.pem', 'issuer-key.pem': PRIVATE / 'issuer-key.pem',
                'tls-cert.pem': WORK / 'secrets/tls.crt', 'tls-key.pem': PRIVATE / 'tls.key',
                'api-token': PRIVATE / 'certificate-signer-token', 'tls-ca.pem': WORK / 'ca.crt'}
+    if INTEGRATED:
+        run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=signer',
+            '-keyout', PRIVATE / 'signer-tls.key', '-out', WORK / 'signer-tls.csr')
+        (WORK / 'signer-tls.ext').write_text('subjectAltName=DNS:signer\nextendedKeyUsage=serverAuth\n')
+        run('openssl', 'x509', '-req', '-days', '1', '-in', WORK / 'signer-tls.csr',
+            '-CA', WORK / 'ca.crt', '-CAkey', PRIVATE / 'ca.key', '-CAcreateserial',
+            '-extfile', WORK / 'signer-tls.ext', '-out', WORK / 'signer-tls.crt')
+        sources.update({'tls-cert.pem': WORK / 'signer-tls.crt', 'tls-key.pem': PRIVATE / 'signer-tls.key'})
     for name, source in sources.items():
-        run('sudo', 'install', '-o', '65532', '-g', '65532', '-m', '400', source, STATE / 'secrets' / name)
+        mode = '444' if INTEGRATED and name == 'tls-ca.pem' else '400'
+        run('sudo', 'install', '-o', '65532', '-g', '65532', '-m', mode, source, STATE / 'secrets' / name)
+    if INTEGRATED:
+        return  # The single production lifecycle owns the first init and serve.
     admin('init')
     run('docker', 'run', '-d', '--name', CONTAINER, '--read-only', '--cap-drop=ALL',
         '--security-opt=no-new-privileges:true', '--network', 'container:' + os.environ['T07_OIDC_CONTAINER'],
@@ -148,7 +161,7 @@ def signer_request(path, payload, headers):
     return json.loads(run('sudo', 'nsenter', '--target', pid, '--net', 'curl', '--fail', '--silent',
                           '--show-error', '--cacert', WORK / 'ca.crt', '--config', PRIVATE / 'signer-curl.conf',
                           *args, '--data-binary', '@' + str(PRIVATE / 'signer-request'),
-                          'https://localhost:19444' + path))
+                          *(['--resolve', 'signer:9443:127.0.0.1'] if INTEGRATED else []), SIGNER_URL + path))
 
 
 def seal():
@@ -242,6 +255,5 @@ def after():
 
 
 if __name__ == '__main__':
-    if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
-        raise SystemExit('disposable hosted runner required')
+    run('bash', ROOT / 'scripts/release-business-environment.sh')
     {'prepare': prepare, 'import': import_binding, 'before': before, 'after': after, 'seal': seal}[sys.argv[1]]()

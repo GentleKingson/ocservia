@@ -126,6 +126,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
       - if: needs.ci-relevance.outputs.run_rust == 'true'
         run: scripts/bootstrap.sh rust-basic
@@ -137,6 +138,8 @@ jobs:
           bash scripts/test-managed-node-install.sh
           bash scripts/test-controller-install.sh
           bash scripts/test-controller-bootstrap.sh
+          bash scripts/test-controller-lifecycle.sh
+          bash scripts/test-production-auth-config.sh
           docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
             python3 /source/scripts/test-relay-launchers.py
           docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \

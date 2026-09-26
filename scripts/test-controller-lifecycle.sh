@@ -65,6 +65,7 @@ case "${1:-}" in
     exit "${MOCK_CONFIG_EXIT:-0}"
     ;;
   pull) exit "${MOCK_PULL_EXIT:-0}" ;;
+  stop) exit 0 ;;
   up)
     if [[ "${MOCK_REQUIRE_CROSS_SCHEMA_ACTIVATION:-0}" == 1 ]]; then
       [[ "$*" == "up -d --wait --no-deps postgres backup${OCSERV_OTEL_BACKEND_ENDPOINT:+ otel-collector} transportd control-plane gateway" ]]
@@ -86,6 +87,17 @@ case "${1:-}" in
     exit "${MOCK_PS_EXIT:-0}"
     ;;
   run)
+    if [[ "${4:-}" == signer ]]; then
+      case "${5:-}" in
+        init) exit "${MOCK_SIGNER_INIT_EXIT:-0}" ;;
+        inspect)
+          [[ "${MOCK_SIGNER_INSPECT_EXIT:-0}" == 0 ]] || exit 1
+          printf '{"state_version":1,"issuer_sha256":"%064d","policy":"rsa-client-v1-24h","revision":%s}\n' 1 "${MOCK_SIGNER_REVISION:-4}"
+          exit 0
+          ;;
+        *) exit 97 ;;
+      esac
+    fi
     [[ "${2:-}" == "--rm" && "${3:-}" == "--no-deps" && "${4:-}" == "migrate" && "${5:-}" == --schema-compatibility-check=* ]]
     requested_schema="${5#*=}"
     [[ "${requested_schema}" =~ ^[0-9]+$ ]]
@@ -1101,7 +1113,9 @@ test "$(sed -n '2p' "${uninstall_state}/compose.log")" = "down"
 start_state="${fixture}/start"
 seed_upgrade_state "${start_state}"
 run_controller_start "${start_state}"
-test "$(sed -n '1p' "${start_state}/compose.log")" = "up -d --wait"
+test "$(sed -n '1p' "${start_state}/compose.log")" = "config --quiet"
+test "$(sed -n '2p' "${start_state}/compose.log")" = "pull"
+test "$(sed -n '3p' "${start_state}/compose.log")" = "up -d --wait"
 test "$(wc -l <"${start_state}/smoke.log")" -eq 1
 grep -Fq -- '--release-file ' "${start_state}/smoke.log"
 IFS=$'\t' read -r start_gateway start_control start_transport start_backup start_postgres start_otel \
@@ -1245,4 +1259,69 @@ if run_controller_uninstall "${fixture}/uninstall-unknown-flag" --unexpected \
 fi
 grep -Fq 'usage:' "${after_unknown_uninstall}"
 
+integrated_release="${fixture}/release/integrated.json"
+jq --arg ref "registry.test/image@${digest}" '.manifest_version = 2 | .signer_state_version = 1 |
+  .images += {edge:$ref, relay:$ref, signer:$ref, mysql_backup:$ref, mariadb_backup:$ref}' \
+  "${release_file}" >"${integrated_release}"
+refresh_bundle_dir "${fixture}/release"
+integrated_state="${fixture}/integrated"
+expect_failure "${fixture}/integrated-v1" "${release_file}" "requires a v2 release manifest" false env OCSERV_DEPLOYMENT_MODE=integrated
+for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .images.signer' 'del(.images.mysql_backup)'; do
+  rejected="${fixture}/release/integrated-rejected.json"
+  jq "${filter}" "${integrated_release}" >"${rejected}"
+  refresh_bundle_dir "${fixture}/release"
+  rejection_state="$(mktemp -d "${fixture}/v2-rejection.XXXXXX")"
+  if run_controller "${rejection_state}" "${rejected}" env >"${rejection_state}/output.log" 2>&1; then
+    echo "invalid v2 manifest accepted: ${filter}" >&2; exit 1
+  fi
+  grep -Fq 'release manifest is invalid' "${rejection_state}/output.log"
+  test ! -e "${rejection_state}/compose.log"
+done
+mkdir -m 700 "${integrated_state}"
+if run_controller "${integrated_state}" "${integrated_release}" env OCSERV_DEPLOYMENT_MODE=integrated \
+  OCSERV_SIGNER_STATE_DIR="${integrated_state}" MOCK_SMOKE_EXIT=1 >"${integrated_state}/failure.log" 2>&1; then
+  echo "Integrated smoke failure was accepted" >&2; exit 1
+fi
+test "$(sed -n '1p' "${integrated_state}/compose.log")" = "config --quiet"
+test "$(sed -n '2p' "${integrated_state}/compose.log")" = pull
+test -f "${integrated_state}/signer-init-attempted"
+test -f "${integrated_state}/signer-checkpoint.json"
+run_controller "${integrated_state}" "${integrated_release}" env OCSERV_SIGNER_STATE_DIR="${integrated_state}"
+test "$(grep -Fc 'run --rm --no-deps signer init' "${integrated_state}/compose.log")" = 1
+cmp -s "${integrated_release}" "${integrated_state}/current-release.json"
+if OCSERV_DEPLOYMENT_MODE=standalone run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
+  echo "Integrated mode change was accepted" >&2; exit 1
+fi
+grep -Fq 'deployment mode cannot change' "${integrated_state}/failure.log"
+if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
+  echo "Integrated database switch was accepted" >&2; exit 1
+fi
+grep -Fq 'database deployment cannot change' "${integrated_state}/failure.log"
+if MOCK_SIGNER_INSPECT_EXIT=1 run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
+  echo "missing Signer ledger was accepted on start" >&2; exit 1
+fi
+if MOCK_SIGNER_REVISION=3 run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
+  echo "Signer revision downgrade was accepted" >&2; exit 1
+fi
+grep -Fq 'minimum revision changed' "${integrated_state}/failure.log"
+jq -e '.revision == 4' "${integrated_state}/signer-checkpoint.json" >/dev/null
+test "$(grep -Fc 'run --rm --no-deps signer init' "${integrated_state}/compose.log")" = 1
+run_controller_start "${integrated_state}"
+run_controller_uninstall "${integrated_state}"
+test -f "${integrated_state}/signer-checkpoint.json"
+test -f "${integrated_state}/signer-init-attempted"
+if run_controller_uninstall "${integrated_state}" --purge-data >"${integrated_state}/failure.log" 2>&1; then
+  echo "Integrated identity purge was accepted" >&2; exit 1
+fi
+init_failure="${fixture}/integrated-init-failure"
+mkdir -m 700 "${init_failure}"
+if run_controller "${init_failure}" "${integrated_release}" env OCSERV_DEPLOYMENT_MODE=integrated \
+  OCSERV_SIGNER_STATE_DIR="${init_failure}" MOCK_SIGNER_INIT_EXIT=1 >"${init_failure}/failure.log" 2>&1; then
+  echo "Signer init failure was accepted" >&2; exit 1
+fi
+if run_controller "${init_failure}" "${integrated_release}" env OCSERV_SIGNER_STATE_DIR="${init_failure}" \
+  MOCK_SIGNER_INSPECT_EXIT=1 >"${init_failure}/failure.log" 2>&1; then
+  echo "uncertain Signer init was repeated" >&2; exit 1
+fi
+test "$(grep -Fc 'run --rm --no-deps signer init' "${init_failure}/compose.log")" = 1
 echo "Controller lifecycle tests passed"
