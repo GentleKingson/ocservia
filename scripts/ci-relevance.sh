@@ -52,7 +52,7 @@ classify_path() {
       tools_suite release; tools_suite g6 ;;
     docs/acceptance/g6-*.json|docs/acceptance/g6-slo.yaml|\
     .github/workflows/g6-*|.github/actions/g6-*/*|deploy/g6-*/*|\
-    tools/g6-harness/*|scripts/*g6*|scripts/testdata/pre34-telemetry-runtime.patch)
+    tools/g6-harness/*|scripts/*g6*)
       tools_suite g6 ;;
     proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
     web/*|scripts/web-check.sh) run_web=true ;;
