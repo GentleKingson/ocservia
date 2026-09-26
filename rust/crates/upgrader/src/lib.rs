@@ -798,28 +798,6 @@ impl UpgradeRunner {
                 ),
             );
         }
-        // Execution-time downgrade fence: the authorization was an upgrade
-        // when it was scheduled, but the host may have moved on since. The
-        // currently running release identity (this runner ships with the
-        // installed package) must still be strictly older than the target.
-        // The already-replaced crash-recovery branch above is exempt: its
-        // binaries match the authorized package, so the operation finished.
-        if !replaced
-            && !ocservia_contracts::agent_upgrade::is_strict_upgrade(
-                ocservia_contracts::agent_upgrade::release_version(),
-                &intent.target_version,
-            )
-        {
-            return refuse(
-                operation_dir,
-                intent,
-                UpgradeStoreError::Package(format!(
-                    "target version {} is not newer than the running release {}",
-                    intent.target_version,
-                    ocservia_contracts::agent_upgrade::release_version()
-                )),
-            );
-        }
         write_atomic(
             &operation_dir.join("state"),
             format!("{}\n", OperationState::Running.as_str()).as_bytes(),
@@ -2481,41 +2459,47 @@ echo \"${pkg}\"
     }
 
     #[test]
-    fn runner_refuses_a_target_not_newer_than_the_running_release() {
-        // "0.0.0" predates every publishable release, so the fence refuses
-        // regardless of the identity embedded in this test build.
-        let package = fake_lifecycle_tree_with_version("downgrade-fence", "0.0.0");
-        let intent = UpgradeIntent::new(
-            *Uuid::now_v7().as_bytes(),
-            *Uuid::now_v7().as_bytes(),
+    fn runner_applies_targets_without_version_order_and_retries_by_artifact() {
+        for target in [
             "0.0.0",
-            package.archive_digest,
-            ocservia_contracts::agent_upgrade::runtime_architecture().expect("host architecture"),
-            [0x55; 32],
-        )
-        .expect("downgrade intent");
-        scheduler(&package.root)
-            .schedule_and_trigger(&intent)
-            .expect("schedule");
-        let runner = UpgradeRunner::new(package.root.clone());
-        let failure = runner
-            .run(&intent.operation_id.to_string())
-            .expect_err("stale target version");
-        assert!(matches!(failure, UpgradeStoreError::Package(_)));
-        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
-        assert_eq!(
-            load_state(&operation_dir).expect("durable failure"),
-            OperationState::Failed
-        );
-        let result = fs::read_to_string(operation_dir.join("result")).expect("result evidence");
-        assert!(result.contains("state=failed"));
-        assert!(result.contains("not newer than the running release"));
-        // The refusal happens before any lifecycle side effect.
-        assert_eq!(
-            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
-            ""
-        );
-        fs::remove_dir_all(&package.root).expect("cleanup");
+            ocservia_contracts::agent_upgrade::release_version(),
+            "999.0.0",
+        ] {
+            let package = fake_lifecycle_tree_with_version("explicit-target", target);
+            let intent = UpgradeIntent::new(
+                *Uuid::now_v7().as_bytes(),
+                *Uuid::now_v7().as_bytes(),
+                target,
+                package.archive_digest,
+                ocservia_contracts::agent_upgrade::runtime_architecture()
+                    .expect("host architecture"),
+                [0x55; 32],
+            )
+            .expect("explicit target intent");
+            scheduler(&package.root)
+                .schedule_and_trigger(&intent)
+                .expect("schedule");
+            let runner = UpgradeRunner::new(package.root.clone());
+            assert_eq!(
+                runner
+                    .run(&intent.operation_id.to_string())
+                    .expect("apply target"),
+                OperationState::Succeeded
+            );
+            let runs = fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter");
+            assert!(!runs.is_empty(), "target must actually be installed");
+            assert_eq!(
+                runner
+                    .run(&intent.operation_id.to_string())
+                    .expect("completed retry"),
+                OperationState::Succeeded
+            );
+            assert_eq!(
+                fs::read_to_string(&package.lifecycle_runs).expect("counter"),
+                runs
+            );
+            fs::remove_dir_all(&package.root).expect("cleanup");
+        }
     }
 
     #[test]
