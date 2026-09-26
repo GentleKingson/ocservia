@@ -161,8 +161,8 @@ type Node struct {
 	AgentVersionState       string `json:"agent_version_state"`
 	RecommendedAgentVersion string `json:"recommended_agent_version,omitempty"`
 	Architecture            string `json:"architecture,omitempty"`
-	// AgentUpgradeEligible is a read-time derivation: an upgrade_available
-	// version state, an online fresh node with the upgrade capability, a
+	// AgentUpgradeEligible is a read-time derivation: an online fresh node
+	// with the upgrade capability, a
 	// trusted release for its architecture, and no conflicting active upgrade.
 	AgentUpgradeEligible bool            `json:"agent_upgrade_eligible"`
 	OcservVersion        string          `json:"ocserv_version,omitempty"`
@@ -669,12 +669,12 @@ func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
 }
 
 // applyAgentUpgradeEligibility derives the single-node upgrade workflow gate
-// from durable state: an upgrade_available version state, an online fresh
+// from durable state: an online fresh
 // node with the approved upgrade capability, a trusted release for its
 // architecture, and no conflicting active upgrade. It is never persisted and
 // fails closed on any lookup error.
 func (s *Service) applyAgentUpgradeEligibility(ctx context.Context, node *Node) {
-	if s.agentUpgradeCatalog == nil || node.AgentVersionState != "upgrade_available" || node.ConnectionState != "online" || node.Freshness != "fresh" || node.Architecture == "" {
+	if s.agentUpgradeCatalog == nil || node.ConnectionState != "online" || node.Freshness != "fresh" || node.Architecture == "" {
 		return
 	}
 	if _, trusted := s.agentUpgradeCatalog.Lookup(node.RecommendedAgentVersion, node.Architecture); !trusted {
