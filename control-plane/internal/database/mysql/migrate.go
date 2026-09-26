@@ -36,12 +36,10 @@ type step struct {
 	SchemaHash string `json:"schema_hash"`
 }
 type manifest struct {
-	Version                 int               `json:"version"`
-	ControllerSchema        int               `json:"controller_schema"`
-	MinimumControllerSchema int               `json:"minimum_controller_schema"`
-	Engine                  Engine            `json:"engine"`
-	Steps                   []step            `json:"steps"`
-	MetadataHashes          map[string]string `json:"metadata_hashes"`
+	Version        int               `json:"version"`
+	Engine         Engine            `json:"engine"`
+	Steps          []step            `json:"steps"`
+	MetadataHashes map[string]string `json:"metadata_hashes"`
 }
 
 var ErrDirty = errors.New("experimental database: migration in progress; inspect schema and explicitly repair with the manifest checksum")
@@ -62,7 +60,7 @@ func decodeManifest(engine Engine, data []byte) (manifest, string, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return m, "", ErrChecksum
 	}
-	if m.Engine != engine || m.Version != 1 || m.ControllerSchema != 34 || m.MinimumControllerSchema != 34 || len(m.Steps) == 0 {
+	if m.Engine != engine || m.Version != 1 || len(m.Steps) == 0 {
 		return m, "", ErrChecksum
 	}
 	seen := map[string]bool{}
@@ -356,10 +354,7 @@ func (b *Backend) migrateBaseline(ctx context.Context, conn *sql.Conn, m manifes
 		return safeError(err)
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "INSERT INTO controller_schema_compatibility(singleton,current_schema,minimum_compatible_controller_schema) VALUES(1,?,?)", m.ControllerSchema, m.MinimumControllerSchema); err != nil {
-		return safeError(err)
-	}
-	if _, err = tx.ExecContext(ctx, "UPDATE backend_migrations SET version=?,dirty=FALSE,controller_schema=?,minimum_controller_schema=?,updated_at=CURRENT_TIMESTAMP(6) WHERE singleton=1", m.Version, m.ControllerSchema, m.MinimumControllerSchema); err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE backend_migrations SET version=?,dirty=FALSE,updated_at=CURRENT_TIMESTAMP(6) WHERE singleton=1", m.Version); err != nil {
 		return safeError(err)
 	}
 	return safeError(tx.Commit())
@@ -412,9 +407,9 @@ func (b *Backend) validateBaselineReceipts(ctx context.Context, conn *sql.Conn, 
 		}
 	}
 	var checksum, engine string
-	var version, current, minimum int
+	var version int
 	var dirty bool
-	err := conn.QueryRowContext(ctx, "SELECT engine,manifest_checksum,version,dirty,controller_schema,minimum_controller_schema FROM backend_migrations WHERE singleton=1").Scan(&engine, &checksum, &version, &dirty, &current, &minimum)
+	err := conn.QueryRowContext(ctx, "SELECT engine,manifest_checksum,version,dirty FROM backend_migrations WHERE singleton=1").Scan(&engine, &checksum, &version, &dirty)
 	if err != nil {
 		return safeError(err)
 	}
@@ -423,16 +418,6 @@ func (b *Backend) validateBaselineReceipts(ctx context.Context, conn *sql.Conn, 
 	}
 	if checksum != sum || engine != string(b.engine) || version != m.Version {
 		return ErrChecksum
-	}
-	if current != m.ControllerSchema || minimum != m.MinimumControllerSchema {
-		return ErrSchema
-	}
-	var c, min int
-	if err = conn.QueryRowContext(ctx, "SELECT current_schema,minimum_compatible_controller_schema FROM controller_schema_compatibility WHERE singleton=1").Scan(&c, &min); err != nil {
-		return safeError(err)
-	}
-	if c != current || min != minimum {
-		return ErrSchema
 	}
 	rows, err := conn.QueryContext(ctx, "SELECT ordinal,name,checksum,state FROM backend_migration_steps ORDER BY ordinal")
 	if err != nil {

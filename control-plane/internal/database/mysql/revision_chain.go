@@ -108,14 +108,7 @@ func loadRevisionChain(engine Engine) ([]revisionArtifact, error) {
 		if err != nil || json.Unmarshal(data, &next) != nil {
 			return nil, ErrChecksum
 		}
-		expectedController := 34
-		if version == 24 {
-			expectedController = 35
-		}
-		if version >= 25 {
-			expectedController = 36
-		}
-		if next.Engine != engine || next.Version != version || next.PreviousChecksum != sum || next.ControllerSchema != expectedController || next.MinimumControllerSchema != expectedController || len(next.Parents) != len(snapshots) || len(next.MetadataHashes) != 2 {
+		if next.Engine != engine || next.Version != version || next.PreviousChecksum != sum || len(next.Parents) != len(snapshots) || len(next.MetadataHashes) != 2 {
 			return nil, ErrChecksum
 		}
 		for name, hash := range r.MetadataHashes {
@@ -454,14 +447,10 @@ func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []re
 	return validateRevisionSnapshot(ctx, conn, snapshot)
 }
 
-func (b *Backend) ValidateSchema(ctx context.Context, expectedController int) (result error) {
+func (b *Backend) ValidateSchema(ctx context.Context) (result error) {
 	chain, err := loadRevisionChain(b.engine)
 	if err != nil {
 		return err
-	}
-	latest := chain[len(chain)-1]
-	if expectedController < latest.MinimumControllerSchema || expectedController > latest.ControllerSchema {
-		return ErrSchema
 	}
 	conn, name, err := migrationConnection(ctx, b)
 	if err != nil {

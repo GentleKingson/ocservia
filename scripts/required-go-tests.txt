@@ -1,5 +1,5 @@
 # Manual regression/deep acceptance only. Basic CI uses explicit --smoke entrypoints.
-backend-mysql-history internal/database/mysql TestDatabaseUpgradeSmoke
+backend-mysql-history internal/database/mysql TestDatabaseInitializationSmoke
 # group package (relative to control-plane) exact test/subtest name [PR02_ENGINE]
 # PR-06 policy, configuration, certificate and upgrade acceptance.
 backend-policy-userstate internal/userstate TestUserStateBackendIntegration

@@ -218,7 +218,7 @@ func TestRealLocalSliceLifecycle(t *testing.T) {
 	if err := owner.QueryRow(ctx, `SELECT count(*) FROM nodes`).Scan(&countAfter); err != nil || countAfter != countBefore {
 		t.Fatal("partial creation", countBefore, countAfter, err)
 	}
-	if err := owner.ValidateSchema(ctx, 36); err != nil {
+	if err := owner.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
