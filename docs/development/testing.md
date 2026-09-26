@@ -156,7 +156,7 @@ the additional dependencies for the entrypoint being used:
 | `test-bootstrap-profiles.sh` | Ruby, tar, gzip, a SHA-256 utility and jq; disposable platform/preflight fixtures run only for CI/tooling changes |
 | `docs-check.sh` | Git; no toolchain or platform self-tests |
 | `go-check.sh race` (also the race part of `full`) | `CGO_ENABLED=1`, a C compiler selected by `go env CC`, linker and C development headers; no Docker requirement |
-| `database-integration.sh` smoke/compatibility | Go, jq, setsid, Docker CLI and daemon; no race/compiler probe |
+| `database-integration.sh` smoke | Go, jq, setsid, Docker CLI and daemon; no race/compiler probe |
 | `database-integration.sh` manual regression/full | Also needs race prerequisites, Ruby, Python 3, curl, sha256sum; legacy full also needs patch |
 | `database-foundation-integration.sh` | Go, jq, setsid, Python 3, OpenSSL with `req -addext`, Docker CLI and daemon; only manual regression/full need race prerequisites, legacy full diagnostics also use timeout |
 

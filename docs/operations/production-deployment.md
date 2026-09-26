@@ -99,10 +99,10 @@ and automatic Compose `.env` files, using only the exported lifecycle configurat
 use the endpoint setting, not a manually selected profile, to enable observability.
 The release manifest still pins all six images, including `otel` for later opt-in.
 
-The first release with optional OTEL changes the production deployment contract.
-Standard rollback to a release before this change is refused by the existing
-descriptor guard. Record this rollback boundary in release notes; do not bypass
-the guard or treat database compatibility as deployment compatibility.
+The optional OTEL layout is part of the target's production deployment files.
+The lifecycle resolves the verified target source rather than requiring its
+descriptor to equal the current one. This does not convert historical layouts
+or guarantee that an arbitrary target can run against existing state.
 
 ## Secrets and release trust
 
@@ -475,31 +475,22 @@ claiming that purge completed.
 Controller rollback and uninstall remain `controller.sh` operations over the
 protected lifecycle state. Neither operation downloads or re-enters Stage-0.
 
-PostgreSQL compatibility is authoritative in the singleton
-`controller_schema_compatibility` row, introduced by migration `000029`. Its
-`current_schema` must agree with the applied migration history, and a Controller
-is ready only when its expected schema is within the declared range
-`minimum_compatible_controller_schema <= expected <= current_schema`. The
-baseline is exact. A future migration may lower the minimum only after proving
-that the older Controller does not depend on the changed database shape;
-additive changes are not automatically compatible. Destructive cleanup belongs
-to a later contract phase after consumers have moved to the expanded shape.
-Missing, malformed, or undeclared future metadata keeps the Controller
-unready. MySQL/MariaDB validate their own immutable baseline and appended
-revision receipts/checksums plus the latest embedded revision's
-`minimum_controller_schema <= expected <= controller_schema`. Their legacy
-`controller_schema_compatibility` row is frozen baseline metadata, not the
-latest revision's compatibility range. Backend revision numbers are not
-PostgreSQL schema versions. The lifecycle consumes this backend-validated
-compatibility result; do not substitute an operator's standalone SQL query.
-This metadata is not a backup; use [backend-specific database recovery](incident-recovery.md#database-recovery).
+The target's owner-only database initialization preserves execution receipts,
+checks known migration content, serializes execution and propagates actual SQL
+and partial-execution failures. PostgreSQL, MySQL and MariaDB do not compare a
+Controller schema range or reject an unknown completed receipt as a software
+version policy. Frozen compatibility metadata remains historical data; it is
+not readiness authority. Readiness checks current core reads, permissions and
+event-stream health, with current functional startup requirements still enforced.
+No database reverse migration or automatic state restore accompanies a binary
+rollback. Use [backend-specific database recovery](incident-recovery.md#database-recovery).
 
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
 Lifecycle acceptance keeps separate evidence for five boundaries: Compose
 container health and dependency readiness; functional release identity from the
-release smoke; application rollback of the last confirmed release; database
-compatibility from the backend's verified schema contract; and
+release smoke; explicit target application and failure-state handling; current
+database initialization, permissions and business behavior; and
 disaster recovery through the selected backend's documented procedure. Passing one boundary
 does not establish the others.
 

@@ -1,19 +1,17 @@
 # Upgrade the Agent
 
-Install a newer published Agent package on a managed node. Native package
+Apply an explicitly selected signed Agent package on a managed node. Native package
 installation invokes the same verified repository lifecycle as the archive
 path.
 
-For formal `1.x`, this procedure starts from `v1.0.0` or a later 1.x release.
-`v1.0.0` is a published transitional upgrade source; `v1.0.1` is the first
-recommended production stable baseline. Upgrade the Controller first.
-Pre-1.0 nodes must [redeploy](../getting-started/managed-node.md), not upgrade
-in place or use `v1.0.0` as a bridge. See the [support policy](../reference/support-policy.md).
+The v1.1.0 scripts do not impose a source-version window or target-version
+ordering. This does not guarantee safe cross-version operation; installed old
+scripts retain their behavior. Historical deployment conversion is not provided.
+See the [support policy](../reference/support-policy.md).
 
 ## Before you begin
 
-- The target package matches the host architecture and is newer than the
-  installed release.
+- The verified target package matches the host architecture.
 - Follow the [native package trust contract](../operations/agent-lifecycle.md#native-installer-packages):
   verify the out-of-band release-key fingerprint, `SHA256SUMS.sig`, and the
   selected package checksum before invoking the package manager as root.
@@ -59,4 +57,4 @@ same package. If the new pair was installed and must be restored, use the
 [Agent rollback](agent-rollback.md) command.
 
 See [Agent lifecycle reference](../operations/agent-lifecycle.md) for verified
-staging, sealing-key migration, and Controller-driven rollout behavior.
+staging, explicit trust provisioning, and Controller-driven rollout behavior.

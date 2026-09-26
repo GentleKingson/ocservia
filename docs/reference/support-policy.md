@@ -1,10 +1,10 @@
-# 1.0 support and versioning policy
+# Support and versioning policy
 
 ## v1.1.0 policy reset (pending release)
 
 This is the approved policy for the unreleased `v1.1.0` candidate, not a claim
-that implementation or acceptance has finished. The 1.0 policy below records
-the published line; its version windows, deprecation timetable and additive-only
+that final acceptance or publication has finished. The archived 1.0 policy
+records the published line; its version windows, deprecation timetable and additive-only
 `1.x` promise do not govern this explicitly breaking policy reset. Existing
 published tags, artifacts and release history are unchanged.
 
@@ -41,77 +41,27 @@ deployment layout must explicitly redeploy rather than expect legacy conversion.
 Release notes must identify removed public entrypoints and these risks, and must
 not describe `v1.1.0` as a fully backward-compatible SemVer minor.
 
-## Published 1.0 policy
+## Published history and version format
 
-Status: this is the support policy for the ocservia **1.0 release line**.
-`v1.0.1` is the first recommended stable baseline for production deployments.
-`v1.0.0` is an already published, upgradeable transitional 1.0 release, not
-the recommended production baseline. Pre-1.0 installations have no supported
-in-place upgrade path into formal `1.x`; operators must redeploy, not upgrade
-through `v1.0.0` as a bridge.
-This document defines policy only. Contract surfaces are owned by
-[stable contracts](stable-contracts.md); platform facts are owned by the
-operational guides referenced below and are not duplicated here.
-Production recommendations apply to published tagged artifacts; this policy
-does not turn an unreleased candidate or an unrun acceptance check into a pass.
+The [published 1.0 policy](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/docs/reference/support-policy.md)
+records the original additive-only promise, fixed upgrade source, deprecation
+schedule and finite release matrix. Those software-version promises do not
+govern the v1.1.0 reset; past release facts and immutable assets are unchanged.
+This document does not turn an unreleased candidate or an unrun check into a
+production recommendation.
 
-## Versioning
+Release identities remain plain `X.Y.Z` SemVer syntax. Version ordering is not
+execution authority. The explicitly chosen v1.1.0 release removes public
+surfaces and compatibility guarantees despite its minor-version label; it must
+not be described as fully backward compatible. A candidate is frozen source
+plus its exact products, not a `-rc.N` publishing scheme.
 
-ocservia follows [Semantic Versioning](https://semver.org/) for the 1.0 line.
-
-- The public contract is exactly the surface frozen in
-  [stable contracts](stable-contracts.md): the OpenAPI `/api/v1` HTTP contract,
-  documented CLI and configuration settings, installation and upgrade scripts,
-  published package names, protocol ALPNs and message numbers, signing and
-  semantic-hash transcripts, and durable state obligations.
-- Within `1.x`, public contract changes are additive. Removing or breaking a
-  public contract surface requires a new major version (`2.0`) and a reviewed
-  migration path.
-- Package-internal details — Go/Rust/Web internals, generated code, image
-  config identities, database schema numbers — are not public contract and may
-  change within the line as long as the documented upgrade path preserves data.
-
-Releases are plain `X.Y.Z` SemVer. The release workflow rejects non-SemVer
-input, and there is no `-rc.N` scheme: a **release candidate** is a frozen
-branch plus the candidate artifacts built from its exact SHA. The integrated
-[Release Check](../development/release-checks.md) validates the exact products
-before publication. Manual dry-run is optional debugging, not a second required
-full execution before the tag workflow repeats the same checks.
-
-## Compatibility and deprecation
-
-- **Controller and node version window.** The supported deployment runs a
-  matched Controller/transportd release with a matched Agent/privd/upgrader
-  package, as defined by the version and durable-state contract in
-  [stable contracts](stable-contracts.md). Mixing a published historical
-  1.x node with a newer Controller is supported only inside the
-  [finite release matrix](stable-contracts.md#finite-release-matrix) and its
-  recorded exclusions, with the published `v1.0.0`-node against
-  candidate-Controller application cells as the exact-pair evidence; upgrade
-  the Controller first. There is no
-  security-equivalent downgrade promise.
-- **Deprecation.** A public contract surface may be deprecated only through a
-  release-notes announcement in the minor release that introduces the
-  deprecation. A deprecated surface keeps working through at least the next
-  minor release; removal happens no earlier than the following minor release
-  and requires its own release-note entry. Anything not listed in
-  [stable contracts](stable-contracts.md) is private and can change without a
-  deprecation notice.
-- **Upgrade and recovery paths.** `v1.0.0` is the earliest supported source for
-  in-place upgrades within `1.x`, including the transition to `v1.0.1`.
-  Pre-1.0 deployments must follow the fresh
-  [Controller](../getting-started/production.md) and
-  [managed-node](../getting-started/managed-node.md) deployment paths instead.
-  Baseline artifact identities are registered in
-  [`scripts/release-upgrade-baselines.json`](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/scripts/release-upgrade-baselines.json)
-  (currently through `v1.0.0`); historical pre-1.0 entries are retained for
-  provenance and regression diagnostics, not as supported paths into `1.x`.
-  Actual upgrade acceptance requires the
-  [native release upgrade workflow](../development/release-upgrade-validation.md).
-  Rollback follows the guarded
-  [Controller rollback](../how-to/controller-rollback.md) and
-  [matched Agent rollback](../how-to/agent-rollback.md) procedures; interrupted
-  or uncertain operations follow [incident recovery](../operations/incident-recovery.md).
+[Release Check](../development/release-checks.md) validates current products.
+Dispatch remains a non-publishing dry-run; tag-triggered publication retains
+its checks, protected environment and signing boundaries. Explicit lifecycle
+operations use verified targets, not a minimum source version or a bridge
+release. Package-manager behavior is not overridden. Unknown outcomes require
+[incident recovery](../operations/incident-recovery.md), not blind replay.
 
 ## Supported platforms
 
@@ -121,7 +71,7 @@ a second support matrix.
 | Surface | Supported scope | Authority |
 | --- | --- | --- |
 | Controller OS/architecture | Linux `amd64` and `arm64` release artifacts | [Production deployment](../operations/production-deployment.md) |
-| Agent native packages | DEB on Ubuntu 24.04, RPM on Rocky 9, `amd64`/`arm64` | [Agent lifecycle](../operations/agent-lifecycle.md), [native upgrade validation](../development/release-upgrade-validation.md) |
+| Agent native packages | DEB on Ubuntu 24.04, RPM on Rocky 9, `amd64`/`arm64` | [Agent lifecycle](../operations/agent-lifecycle.md), [current package validation](../development/release-upgrade-validation.md) |
 | Databases | PostgreSQL 17 bundled or external; MySQL 8.4.10 external; MariaDB 12.3.2 external | [Database support](../operations/production-deployment.md#database-support) |
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` | See note below |
 | Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated relays](../operations/dedicated-relays.md) |

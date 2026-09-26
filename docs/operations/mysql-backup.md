@@ -29,7 +29,7 @@ Restore only into a new isolated server. Run the matching image with
 `scripts/mysql-restore-verify.sh`, an absolute completed backup directory, and
 a mode-`0600` target administrator client file. The verifier rejects checksum
 damage, backend mismatch, unsafe artifacts, and a pre-existing target database,
-then reports schema compatibility, audit authentication shape, identities,
+then checks the restored fixture's metadata, audit authentication shape, identities,
 scheduler epoch, idempotency rows, and unfinished operations/commands.
 
 The restore tool never redirects the Controller or grants command authority.

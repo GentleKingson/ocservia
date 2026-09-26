@@ -19,7 +19,7 @@ operating the system.
 
 ## Protocols and state
 
-- [1.x stable contracts and finite compatibility matrix](stable-contracts.md)
+- [Current contracts and candidate acceptance](stable-contracts.md)
 - [Controller command authorization v1](../development/command-authorization-v1.md)
 - [Command semantic hash v1](../development/command-semantic-hash-v1.md) and [v2](../development/command-semantic-hash-v2.md)
 - [Contracts and toolchains](../development/contracts.md)
