@@ -186,6 +186,15 @@ describe("API transport and session contracts", () => {
 });
 
 describe("Workspace authority and events", () => {
+  it("rejects an empty authorized Workspace list", async () => {
+    const api = await loadAPI();
+    fetchMock.mockResolvedValueOnce(json({ items: [] }));
+    await expect(api.getWorkspace()).rejects.toThrow(
+      "No authorized workspace is available",
+    );
+    expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
+  });
+
   it("coalesces discovery, remembers selection and advances generation only on changes", async () => {
     storage.set("ocservia.workspace-id", beta.id);
     const api = await loadAPI();
