@@ -147,6 +147,22 @@ def rejected_upgrade():
     assert result.returncode != 0 and 'release bundle authenticity verification failed' in result.stderr
     assert state.read_bytes() == before and run(COMPOSE, 'ps', '-q').stdout == containers
     record('invalid_signature_rejected_before_service_stop')
+    # Hold only this disposable environment's published port to force a real
+    # activation failure after verification/pull, then retry the same manifest.
+    run('docker', 'stop', container('edge'))
+    with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(('0.0.0.0', 443))
+        occupied.listen()
+        result = run(ROOT / 'deploy/production/controller.sh', 'upgrade', '--release-file',
+                     Path(os.environ['CANDIDATE_BUNDLE']) /
+                     f"controller-release-{os.environ['CONTROLLER_ARCH']}.json", check=False)
+    assert result.returncode != 0 and 'activation started but was not confirmed successful' in result.stderr
+    assert state.read_bytes() == before
+    pending = json.loads((state.parent / 'pending-release.json').read_text())
+    assert pending['phase'] == 'failed' and pending['manifest']['source_commit'] == os.environ['CANDIDATE_SHA']
+    assert (Path(os.environ['OCSERV_SIGNER_STATE_DIR']) / 'ledger.db').is_file()
+    record('activation_failure_preserves_current_and_pending_state')
 
 
 def public_sources():
@@ -211,6 +227,8 @@ def rollback_and_upgrade(api, identities, identity_files):
     if not os.environ.get('INTEGRATED_BASELINE_SOURCE'):
         return
     before = revocation_check()
+    checkpoint = Path(os.environ['OCSERV_CONTROLLER_STATE_ROOT']) / 'signer-checkpoint.json'
+    previous_checkpoint = json.loads(checkpoint.read_text())
     run(ROOT / 'deploy/production/controller.sh', 'rollback')
     status, body, _ = request(os.environ['OCSERV_PUBLIC_HOST'], '/api/v1/version')
     assert status == 200 and json.loads(body)['commit'] == os.environ['INTEGRATED_BASELINE_SHA']
@@ -226,8 +244,12 @@ def rollback_and_upgrade(api, identities, identity_files):
     api.transport_ready()
     api.trust_controller()
     assert run('sha256sum', *identity_files).stdout == identities
+    current_checkpoint = json.loads(checkpoint.read_text())
+    assert all(current_checkpoint[key] == previous_checkpoint[key] for key in ('state_version', 'issuer_sha256', 'policy'))
+    assert current_checkpoint['revision'] >= previous_checkpoint['revision']
     record('rollback_and_reupgrade_preserve_revocation_and_identity',
-           baseline_sha=baseline['source_commit'], crl_before=before, crl_after_rollback=reverted)
+           baseline_sha=baseline['source_commit'], crl_before=before, crl_after_rollback=reverted,
+           checkpoint_before=previous_checkpoint, checkpoint_after=current_checkpoint)
 
 
 def recovery():
@@ -235,7 +257,9 @@ def recovery():
     identity_files = ['/var/lib/ocservia-agent/identity/endpoint.key',
                       '/var/lib/ocservia-agent/identity/controller.endpoint',
                       '/etc/ocservia-agent/user-password-seal-private.pem',
-                      '/etc/ocservia-agent/p12-password-seal-private.pem']
+                      '/etc/ocservia-agent/p12-password-seal-private.pem',
+                      WORK / 'production-signer/secrets/issuer-key.pem',
+                      WORK / 'production-signer/secrets/issuer-chain.pem']
     identities = run('sha256sum', *identity_files).stdout
     agent_start = run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value').stdout
     old = {name: container(name) for name in ('control-plane', 'transportd', 'gateway', 'relay', 'edge', 'signer')}
