@@ -5,7 +5,64 @@ per-release details are on the
 [GitHub Releases](https://github.com/GentleKingson/ocservia/releases) page;
 this file records the change categories per release line. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and ocservia uses
-[Semantic Versioning](https://semver.org/).
+[Semantic Versioning](https://semver.org/), except for the explicitly breaking
+compatibility-policy reset in v1.1.0 described below.
+
+## [1.1.0]
+
+### Breaking Policy Change
+
+- v1.1.0 removes software-version compatibility admission and the previous
+  cross-version support promise. Despite the chosen minor version number, this
+  is not a fully backward-compatible SemVer minor release. Acceptance covers
+  the current candidate, not arbitrary upgrades, downgrades, or shared databases.
+- An explicitly selected, valid, authorized target is no longer rejected merely
+  because its version is lower, equal, higher, or not comparable to an observed
+  source version. This does not make that operation safe or guarantee success.
+  Previously installed scripts and published releases are not changed retroactively.
+
+### Removed
+
+- Controller upgrade/rollback version-order, schema-range, and deployment-descriptor
+  compatibility gates; Agent version-order admission across API preflight,
+  operation creation, rollout eligibility, scheduling, and the Rust executor.
+- The public `--schema-compatibility-check` CLI, its configuration/startup mode,
+  and the readiness response's `schema_version` field. Readiness checks actual
+  current service and database availability instead of historical compatibility.
+- PostgreSQL, MySQL, and MariaDB historical version-range and unknown-completed-
+  migration admission gates, unused PostgreSQL down SQL, and dedicated historical
+  upgrade/downgrade/mixed-version matrices, workflows, scripts, and fixtures.
+- Automatic legacy Controller application-network conversion, legacy Agent key
+  reenrollment and PKCS#12 conversion, and missing-launcher inference of an old
+  package's single-Relay incompatibility. Unsupported layouts require deliberate
+  redeployment planning; they are not silently converted or destroyed.
+
+### Retained
+
+- Exact target source checkout for Controller lifecycle operations, artifact-based
+  retry identity, atomic state commits, and real execution failures. A reused
+  version string does not make different artifacts identical.
+- Target version syntax/display; signed package and image identity, trusted keys,
+  checksums, source commit and architecture binding; actual referenced launchers
+  and safe package extraction. No new force/skip compatibility switches exist.
+- Real command capability checks, RBAC and approvals, command binding, idempotency,
+  replay protection, generation/lease fencing, and Signer identity and revision.
+- Current database initialization, execution receipts, known migration content
+  integrity, locks/transactions, partial-failure handling, and owner/runtime
+  privilege separation. Unknown unfinished work and real SQL errors still fail.
+- Current standalone and integrated deployment boundaries, native Linux amd64 and
+  arm64 products, supported OS/runtime requirements, PostgreSQL 17/18, MySQL 8.4,
+  and MariaDB 12.3 validation. No automatic deployment-mode or database-backend
+  conversion is introduced. See the [current support policy](docs/reference/support-policy.md).
+
+### Operational Risk
+
+- Cross-version replacement can fail or leave an older executable unable to read
+  persistent data. Plan backups, recovery, and any required redeployment before
+  changing versions; an absent compatibility rejection is not a safety verdict.
+- No automatic reverse database migration, persistent-state overwrite, identity
+  reset, or production deployment is performed by this policy change. Current
+  correctness, security, integration, and resilience checks remain release gates.
 
 ## [1.0.1]
 
