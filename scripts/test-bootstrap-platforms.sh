@@ -161,7 +161,7 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
   %w[gofmt jq setsid tee ruby python3 openssl curl sha256sum patch timeout].each { |name| script("#{bin}/#{name}", 'exit 0') }
   script("#{bin}/docker", '[[ "${FIXTURE_DOCKER:-0}" == 0 ]]')
   script("#{bin}/cc", 'exit 1')
-  env = {'PATH' => bin, 'FIXTURE_LAUNCHED' => "#{work}/launched", 'DATABASE_TEST_SCOPE' => 'regression', 'ENGINE' => 'mysql', 'DATABASE_FULL_PART' => nil}
+  env = {'PATH' => bin, 'FIXTURE_LAUNCHED' => "#{work}/launched", 'DATABASE_TEST_SCOPE' => 'regression', 'ENGINE' => 'mysql'}
   [ ['go-check.sh', 'standard', 'go'], ['go-check.sh', 'standard', 'gofmt'],
     ['required-go-tests.sh', 'unit', 'setsid'], ['test-required-go-tests.sh', nil, 'ruby'],
     ['test-bootstrap-profiles.sh', nil, 'ruby'], ['database-integration.sh', nil, 'ruby'],

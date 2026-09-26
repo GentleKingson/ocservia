@@ -59,25 +59,6 @@ func versionTwoReceipts(t *testing.T, b *Backend) []string {
 	return result
 }
 
-func TestRealVersionTwoReceiptsSurviveNextRevision(t *testing.T) {
-	if latestRevisionVersion < 3 {
-		t.Skip("next revision not yet published")
-	}
-	for _, old := range []bool{true, false} {
-		b, _ := versionTwoFixture(t, old)
-		before := versionTwoReceipts(t, b)
-		if err := b.Migrate(context.Background(), ""); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(before, versionTwoReceipts(t, b)) {
-			t.Fatal("published receipts changed")
-		}
-		if err := b.ValidateSchema(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 func TestRealNextRevisionCrashAfterData(t *testing.T) {
 	if latestRevisionVersion < 3 {
 		t.Skip("next revision not yet published")

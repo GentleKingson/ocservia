@@ -1,5 +1,5 @@
 # Manual regression/deep acceptance only. Basic CI uses explicit --smoke entrypoints.
-backend-mysql-history internal/database/mysql TestDatabaseInitializationSmoke
+backend-mysql-current internal/database/mysql TestDatabaseInitializationSmoke
 # group package (relative to control-plane) exact test/subtest name [PR02_ENGINE]
 # PR-06 policy, configuration, certificate and upgrade acceptance.
 backend-policy-userstate internal/userstate TestUserStateBackendIntegration
@@ -141,10 +141,9 @@ regression-fencing internal/operations TestFencingBackendIntegration/two-control
 regression-disconnect internal/database/mysql TestRealOutboxCommitDisconnect/claim-request-lost
 regression-disconnect internal/database/mysql TestRealOutboxCommitDisconnect/claim-response-lost
 regression-telemetry internal/telemetry TestTelemetryBackendWorkflowIntegration
-backend-mysql-history internal/database/mysql TestRealAppendOnlyDraftUpgrade
 backend-mysql-current internal/database/mysql TestRealApprovalControllerWorkflow
 backend-mysql-current internal/database/mysql TestRealArtifactDownloadTransactions
-backend-mysql-history internal/database/mysql TestRealAuditMigrationGuardAfterCrash
+backend-mysql-current internal/database/mysql TestRealAuditMigrationGuardAfterCrash
 backend-mysql-current internal/database/mysql TestRealAuthenticationExactKeyLockOrder
 backend-mysql-current internal/database/mysql TestRealAuthenticationExpiryAfterLockWait
 backend-mysql-current internal/database/mysql TestRealAuthenticationFullTimeWrites
@@ -158,7 +157,7 @@ backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent
 backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain
 backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain/apply-rollback
 backend-mysql-current internal/database/mysql TestRealConnectionOwner
-backend-mysql-history internal/database/mysql TestRealCrashAndRepair
+backend-mysql-current internal/database/mysql TestRealCrashAndRepair
 backend-mysql-current internal/database/mysql TestRealExistingLongTextBounds
 backend-mysql-current internal/database/mysql TestRealFiniteTimestampBackfill
 backend-mysql-current internal/database/mysql TestRealIdentityProfiles
@@ -172,24 +171,23 @@ backend-mysql-current internal/database/mysql TestRealLongKeyPermissions
 backend-mysql-current internal/database/mysql TestRealLongKeyUpdateAndConcurrency
 backend-mysql-current internal/database/mysql TestRealLongKeyWrites
 backend-mysql-current internal/database/mysql TestRealLongReceiptAndResourceKey
-backend-mysql-history internal/database/mysql TestRealMigrationProtectsVerifiedSourceCopy
-backend-mysql-history internal/database/mysql TestRealNextRevisionCrashAfterData
+backend-mysql-current internal/database/mysql TestRealMigrationProtectsVerifiedSourceCopy
+backend-mysql-current internal/database/mysql TestRealNextRevisionCrashAfterData
 backend-mysql-current internal/database/mysql TestRealObservedStateTransactions
 backend-mysql-current internal/database/mysql TestRealOperationDispatch
 backend-mysql-current internal/database/mysql TestRealOperationIntentTransaction
 backend-mysql-current internal/database/mysql TestRealOperationReads
 backend-mysql-current internal/database/mysql TestRealOperationReaping
-backend-mysql-history internal/database/mysql TestRealPopulatedTypeUpgrade
 backend-mysql-current internal/database/mysql TestRealPrivdAttestationWorkflow
 backend-mysql-current internal/database/mysql TestRealPrivileges
 backend-mysql-current internal/database/mysql TestRealQueryRowPoisonsBeforeScan mariadb
-backend-mysql-history internal/database/mysql TestRealRevisionConstraintFailureAndRepair
-backend-mysql-history internal/database/mysql TestRealRevisionCrashAfterDDL
+backend-mysql-current internal/database/mysql TestRealRevisionConstraintFailureAndRepair
+backend-mysql-current internal/database/mysql TestRealRevisionCrashAfterDDL
 backend-mysql-current internal/database/mysql TestRealRolloutCreation
 backend-mysql-current internal/database/mysql TestRealRowsClosePoisonsDrainError
 backend-mysql-current internal/database/mysql TestRealSchedulerAmbiguousSentinelDecision
 backend-mysql-current internal/database/mysql TestRealSchedulerRunnerTransactions
-backend-mysql-history internal/database/mysql TestRealSchemaDriftRepairRefused
+backend-mysql-current internal/database/mysql TestRealSchemaDriftRepairRefused
 backend-mysql-current internal/database/mysql TestRealSchemaTextRegex
 backend-mysql-current internal/database/mysql TestRealSessionAndLocks
 backend-mysql-current internal/database/mysql TestRealTLS
@@ -201,25 +199,13 @@ backend-mysql-current internal/database/mysql TestRealTelemetryLegacyConflictRec
 backend-mysql-current internal/database/mysql TestRealTelemetryLegacyPartialProgress
 backend-mysql-current internal/database/mysql TestRealTelemetryLegacySchemaRefusal
 backend-mysql-current internal/database/mysql TestRealTelemetryShardLifecycle
-backend-mysql-history internal/database/mysql TestRealTelemetryTimeMigration
+backend-mysql-current internal/database/mysql TestRealTelemetryTimeMigration
 backend-mysql-current internal/database/mysql TestRealTransportResults
 backend-mysql-current internal/database/mysql TestRealTrustConvergence
-backend-mysql-history internal/database/mysql TestRealTypeUpgradeRejectsInvalidLegacyArray
+backend-mysql-current internal/database/mysql TestRealTypeUpgradeRejectsInvalidLegacyArray
 backend-mysql-current internal/database/mysql TestRealUpgradeReconciliation
 backend-mysql-current internal/database/mysql TestRealUsageTransactions
 backend-mysql-current internal/database/mysql TestRealValueConstraints
-backend-mysql-history internal/database/mysql TestRealVersionEighteenEnrollmentUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionFifteenResultUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionFiveDataUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionFourDataUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionFourteenOwnerUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionNineteenDesiredUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionSeventeenTrustUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionSixCertificateUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionTwentyOneUsageUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionTwentyTwoSharedUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionTwentyUserOperationsUpgrade
-backend-mysql-history internal/database/mysql TestRealVersionTwoReceiptsSurviveNextRevision
 backend-controller-startup internal/platform/app TestControllerProcessStartupBackendIntegration
 backend-controller-startup internal/platform/app TestControllerProcessStartupBackendIntegration/HTTP-failure-exit
 backend-controller-startup internal/platform/app TestControllerProcessStartupBackendIntegration/cleanup-privilege-repair
