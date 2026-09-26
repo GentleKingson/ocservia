@@ -38,6 +38,6 @@ Planning and apply never turn a stale caller revision into success by rereading
 and substituting the current revision; a stale expected revision fails.
 
 Before rolling back configuration planning, stop new plan creation and reconcile
-or expire every nonterminal plan command. The down migration refuses to proceed
-while such work exists and retains terminal typed command history for audit and
-recovery compatibility.
+or expire every nonterminal plan command. Preserve terminal typed command
+history for audit and recovery. The current tree has no database down-migration
+path; use a forward fix or an explicitly planned isolated restore.

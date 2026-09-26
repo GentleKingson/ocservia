@@ -32,11 +32,9 @@ at `/api/v1/operations/queue-metrics`, including unpublished count, oldest age,
 queue depth, and unknown count. Where used, PostgreSQL notifications are wakeups only;
 polling remains the recovery mechanism.
 
-The following is the historical PostgreSQL I09 removal boundary, not the
-current Controller rollback procedure. Use the guarded
-[Controller lifecycle](../how-to/controller-rollback.md) and backend-specific
-recovery for an installed release; do not apply this SQL to MySQL/MariaDB.
-Historical schema removal disables the worker/API version first, waits for active leases to
-expire, and then applies migration `000006_operations_outbox.down.sql`. The down
-migration removes I09 command history, so production rollback should normally
-be a forward fix while retained operations still require investigation.
+Use the [Controller lifecycle](../how-to/controller-rollback.md) and
+backend-specific recovery for an installed release. The current tree has no
+database down-migration path. Stop affected writers and reconcile active work;
+preserve operation and command history for investigation. Prefer a forward fix
+to destructive schema removal. A binary rollback does not reverse database
+changes or certify cross-version operation.

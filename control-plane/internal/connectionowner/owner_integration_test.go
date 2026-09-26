@@ -2,7 +2,6 @@ package connectionowner
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"os"
 	"testing"
@@ -310,44 +309,6 @@ func TestConnectionOwnerAssertBlocksTakeoverIntegration(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("takeover did not finish after the fenced transaction committed")
-	}
-}
-
-// TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration proves the
-// real Acquire path continues past a retained per-node epoch on a re-upgraded
-// schema. It is environment-gated so the migration lifecycle harness can
-// point it at the exact node whose epoch survived a rollback cycle.
-func TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration(t *testing.T) {
-	nodeHex := os.Getenv("OCSERV_TEST_RETAINED_NODE_HEX")
-	if nodeHex == "" {
-		t.Skip("OCSERV_TEST_RETAINED_NODE_HEX not set")
-	}
-	raw, err := hex.DecodeString(nodeHex)
-	if err != nil || len(raw) != 16 {
-		t.Fatalf("invalid OCSERV_TEST_RETAINED_NODE_HEX: %q", nodeHex)
-	}
-	pool := testPool(t)
-	ctx := context.Background()
-	var node [16]byte
-	copy(node[:], raw)
-
-	retained, err := ReadStateBackend(ctx, postgres.WrapPool(pool), node)
-	if err != nil {
-		t.Fatalf("read retained ownership state: %v", err)
-	}
-	if retained.Epoch < 1 {
-		t.Fatalf("retained epoch must be at least one, got %d", retained.Epoch)
-	}
-	forceExpire(t, pool, node)
-	term, err := AcquireBackend(ctx, postgres.WrapPool(pool), node, testIdentity(t), testConnection(t), 30*time.Second)
-	if err != nil {
-		t.Fatalf("real takeover over retained state: %v", err)
-	}
-	if term.Epoch() <= retained.Epoch {
-		t.Fatalf("takeover epoch = %d, want > retained epoch %d", term.Epoch(), retained.Epoch)
-	}
-	if err := term.AssertCurrentBackend(ctx, postgres.WrapPool(pool)); err != nil {
-		t.Fatalf("new owner assert after takeover: %v", err)
 	}
 }
 
