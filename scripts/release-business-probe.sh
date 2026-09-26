@@ -114,10 +114,13 @@ cleanup() {
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg profile "${BUSINESS_PROFILE}" \
     --arg arch "$CONTROLLER_ARCH" --argjson install_only "$INTEGRATED_INSTALL_ONLY" \
+    --argjson disposable_container "${INTEGRATED_DISPOSABLE_CONTAINER:-false}" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
     '{candidate_sha:$sha,candidate_version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,
+      execution_environment:(if $disposable_container then "BuildServer isolated Docker/systemd" else "GitHub-hosted runner" end),
+      run_identity:"candidate producer workflow run and attempt",
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),

@@ -206,6 +206,7 @@ def public_sources():
         matched = [event for event in events if event.get('event') == 'auth.result'
                    and event.get('request_id') == row['request_id']]
         assert len(matched) == 1 and matched[0]['source_ip'] == row['public_client_ip'], matched
+        row['source_ip_status'] = 'PASS: matched server auth.result; spoofed headers ignored'
     record('external_public_sources', clients=rows, spoofed_headers_ignored=True)
 
 
