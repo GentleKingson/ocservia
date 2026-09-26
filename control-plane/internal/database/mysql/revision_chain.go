@@ -133,9 +133,13 @@ func loadRevisionChain(engine Engine) ([]revisionArtifact, error) {
 	return chain, nil
 }
 
-// Read the complete ledger, not just MAX(version). Unknown versions, omitted
-// parents, dirty predecessors and orphan/reordered step receipts are refused.
+// Verify known content without treating the embedded catalog as a version window.
+// Unknown completed receipts are preserved; unknown unfinished work cannot be repaired here.
 func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionArtifact, parent string) ([]string, [][]string, error) {
+	known := make(map[int]int, len(chain))
+	for i, artifact := range chain {
+		known[artifact.Version] = i
+	}
 	rows, err := conn.QueryContext(ctx, `SELECT version,parent_checksum,manifest_checksum,state FROM backend_schema_revisions ORDER BY version`)
 	if err != nil {
 		return nil, nil, safeError(err)
@@ -146,6 +150,13 @@ func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionAr
 		var previous, sum, state string
 		if err = rows.Scan(&version, &previous, &sum, &state); err != nil {
 			break
+		}
+		if _, ok := known[version]; !ok {
+			if state != "verified" {
+				err = ErrDirty
+				break
+			}
+			continue
 		}
 		i := len(states)
 		expectedParent := parent
@@ -162,8 +173,8 @@ func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionAr
 		err = rows.Err()
 	}
 	rows.Close()
-	if errors.Is(err, ErrChecksum) {
-		return nil, nil, ErrChecksum
+	if errors.Is(err, ErrChecksum) || errors.Is(err, ErrDirty) {
+		return nil, nil, err
 	}
 	if err != nil {
 		return nil, nil, safeError(err)
@@ -180,8 +191,14 @@ func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionAr
 		if err = rows.Scan(&version, &ordinal, &name, &sum, &state); err != nil {
 			return nil, nil, safeError(err)
 		}
-		i := version - 2
-		if i < 0 || i >= len(states) {
+		i, ok := known[version]
+		if !ok {
+			if state != "verified" {
+				return nil, nil, ErrDirty
+			}
+			continue
+		}
+		if i >= len(states) {
 			return nil, nil, ErrChecksum
 		}
 		plan, ok := chain[i].Parents[parent]
