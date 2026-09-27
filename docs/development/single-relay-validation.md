@@ -151,10 +151,10 @@ no re-enrollment, reapproval, public fallback or claimed standby switch is allow
 
 ## Package Lifecycle And Cleanup
 
-Reuse `i18-agent-package-smoke.sh`, `release-native-package-smoke.sh` and
-`release-baseline-upgrade-smoke.sh` in disposable systemd/packaging containers.
-The baseline upgrade uses the verified published v0.5.2 assets; it does not
-publish anything. For native tests that launch sibling Docker containers,
+Reuse `i18-agent-package-smoke.sh` and `release-native-package-smoke.sh` for
+current packages in disposable systemd/packaging containers. Historical
+baseline upgrades are retired; follow [current package validation](release-upgrade-validation.md).
+For native tests that launch sibling Docker containers,
 `RUNNER_TEMP` must be mounted at the same absolute path on BuildServer and in
 the parent container. Test ARM64 deb and Rocky Linux 9 rpm on this ARM64 host;
 do not report an unexecuted architecture matrix as passing.

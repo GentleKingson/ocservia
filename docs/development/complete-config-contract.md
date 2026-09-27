@@ -90,7 +90,8 @@ boundary even when another attempt succeeds.
 
 Support remains blocked until focused protocol, Controller transaction, root
 path/TLS, native parser/apply/reload/rollback/restart and real-browser tests pass.
-The final exact candidate then requires a complete business run and fresh
-v0.6.2-to-0.7.0 T06 native upgrade gate on both architectures. Contract approval
+The final exact candidate requires the current business and native package
+checks selected by [Release Check](release-checks.md), including both supported
+architectures. Historical release upgrade gates are retired. Contract approval
 alone does not advertise a capability, enable a runtime path or transfer older
 candidate evidence.

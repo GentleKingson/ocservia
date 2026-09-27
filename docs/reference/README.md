@@ -7,7 +7,7 @@ operating the system.
 ## System and security
 
 - [Architecture and trust boundaries](../architecture.md)
-- [1.0 support and versioning policy](support-policy.md)
+- [Current support and versioning policy](support-policy.md)
 - [Production deployment and Controller lifecycle](../operations/production-deployment.md)
 - [Agent package lifecycle](../operations/agent-lifecycle.md)
 - [Bootstrap endpoint hosting and trust](../operations/bootstrap-hosting.md)
@@ -35,7 +35,7 @@ operating the system.
 ## Validation and release engineering
 
 - [GitHub Actions validation](../development/github-actions.md)
-- [Native release upgrade validation](../development/release-upgrade-validation.md)
+- [Current package validation](../development/release-upgrade-validation.md)
 - [Cross-VM real E2E validation](../development/real-e2e.md)
 - [P1 resilience and initial capacity validation](../development/p1-resilience-capacity.md)
 - [G6 readiness harness](../development/g6-readiness.md)
