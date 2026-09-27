@@ -52,13 +52,22 @@ if grep -qE '^[[:space:]]*paths[[:space:]]*=' "${CONFIG}"; then
   echo "path-based exemptions are forbidden in the G6 evidence scan config" >&2
   exit 1
 fi
-if grep -qE '^[[:space:]]*\[\[?rules\]?\]' "${CONFIG}"; then
-  echo "the G6 evidence scan config must not replace or add detection rules" >&2
-  exit 1
-fi
+# Only the reviewed curl command-boundary correction may override a rule.
+# No rule disabling, entropy changes, new rule allowlists, or report suppression.
+python3 - "${CONFIG}" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    config = tomllib.load(source)
+assert config["extend"] == {"useDefault": True}
+rules = config.get("rules", [])
+assert len(rules) == 1 and rules[0]["id"] == "curl-auth-user"
+assert set(rules[0]) == {"id", "regex"} and rules[0]["regex"]
+PY
 
 total_scans="$(grep -c 'gitleaks dir' "${WORKFLOW}" || true)"
-configured_scans="$(grep 'gitleaks dir' "${WORKFLOW}" | grep -cF -- '--config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml"' || true)"
+configured_scans="$(grep 'gitleaks dir' "${WORKFLOW}" | grep -cF -- '--config scripts/g6-secret-scan.toml' || true)"
 total_scans="${total_scans:-0}"
 configured_scans="${configured_scans:-0}"
 [[ "${total_scans}" -eq 3 && "${configured_scans}" -eq 3 ]] || {
