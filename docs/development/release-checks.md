@@ -1,14 +1,16 @@
 # Release Check
 
-One release workflow owns the candidate from build to publication. Tag runs
-validate once before Publish; a manual dry-run is a debugging option, not a
-second mandatory release round. `Basic CI Result` keeps its existing name
-and PR routing. Release Check is not a required check for every PR.
+Tag publication promotes products from a successful current Integrated
+acceptance on `main` for the exact source SHA and version. It does not rebuild
+them. The tag run validates the imported products before protected Publish;
+a separate `release.yml` dry-run is a debugging option, not a substitute for
+Integrated acceptance. `Basic CI Result` keeps its existing name and PR routing.
+Release Check is not a required check for every PR.
 
 | Responsibility | Release execution |
 | --- | --- |
 | Full CI | Existing key Go/Rust/Web/database checks once |
-| Build | One actual Agent/privd/upgrader package build and Controller image set per supported architecture |
+| Products | Integrated acceptance builds Agent/privd/upgrader packages and Controller images on both native architectures; tag runs import those accepted products without rebuilding |
 | Packages | Current-candidate native package smoke and complete dual-architecture package identity checks |
 | Business Smoke | Signed deployment, separate authenticated principals, apply, real VPN, automatic rollback and VPN again |
 | Integration | Change-selected OIDC, PKI, browser and distinct recovery assertions |
@@ -28,7 +30,8 @@ Native test-image preparation runs alongside product builds. Shared probe/Relay
 images and the tunnel are sealed for current Business and Resilience checks.
 Consumers use producer artifact IDs, verify
 manifest and payload digests, and check image architecture and source labels.
-No cache hit or mutable registry tag substitutes for the same-run artifact.
+Tag runs import verified accepted products into their own run artifacts; no
+cache hit or mutable registry tag substitutes for those producer-bound bytes.
 G6 wraps the verified Agent payload; its fault domains retain isolated state.
 Release Check requires all selected consumers to succeed, transitively gating
 their fixture producers. Focused fixture and gate tests run through
@@ -87,9 +90,25 @@ Re-signing/repackaging may change installers but cannot rebuild or alter the
 tested payload archive. Final signature, trust root and payload validation
 remain required. Read-only checks never obtain the production signing key.
 
-Use `release.yml` with `version=1.0.1`, `arch=all` on the candidate branch
-for the initial full dry-run. This does not publish, create tags or change
-production Secrets. Follow [native validation](release-upgrade-validation.md)
+Before creating a release tag:
+
+1. Freeze the merged candidate SHA on `main` and select its plain `X.Y.Z` version.
+2. With candidate Registry-write authorization, run `release-upgrade.yml` on
+   `main` with that version, `purpose=integration` and `production_signer=true`.
+   Wait for the whole workflow to succeed and verify its `head_sha` matches the
+   candidate. This publishes run-bound candidate images, not a formal Release.
+3. Keep its candidate bundle and product artifacts for both architectures
+   available. The tag path
+   verifies the exact SHA/version, producer IDs and digests; absent, expired or
+   mismatched accepted products fail publication, with no rebuild fallback.
+4. After required acceptance and publication authorization, create the new
+   `vX.Y.Z` tag directly on that SHA. Tag Release checks, protected-environment
+   approval, final signing and publication still apply. Never move a public tag.
+
+For a separate full dry-run, dispatch `release.yml` with the selected `version`
+and `arch=all` on the candidate branch. This does not publish, create tags or
+change production Secrets, and its products cannot replace the required
+Integrated acceptance. Follow [current package validation](release-upgrade-validation.md)
 and [Resilience](g6-readiness.md) for environment and rerun boundaries.
 
 Preserve actual job/step timings, cache state and sanitized failure details.

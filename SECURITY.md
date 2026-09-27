@@ -5,17 +5,15 @@
 Security fixes are provided for the latest published release line only. The
 latest published release line is the most recent formally published minor
 release line, not the default branch, unreleased commits, pull requests,
-release candidates, or draft releases. Version compatibility, deprecation
-windows, and the supported platform set follow the
-[1.0 support and versioning policy](docs/reference/support-policy.md); from
-the 1.0 release line onward, public contract changes within `1.x` are
-additive.
+release candidates, or draft releases. The supported platform set and retained
+safety contracts follow the [current support policy](docs/reference/support-policy.md).
 
-`v1.0.1` is designated as the first recommended production stable baseline
-once published. The published
-`v1.0.0` is transitional and remains supported as an upgrade source, not as a
-recommendation for new deployments. Pre-1.0 installations must be redeployed
-to enter `1.x`; there is no supported in-place upgrade path.
+Published `v1.1.0` removes software-version compatibility admission and the
+previous cross-version support promise, including the additive-only `1.x`
+promise. This breaking policy change does not relax signature verification,
+authorization, replay protection, Signer identity/revision or persistent-state
+integrity. An operation is not guaranteed safe merely because no version gate
+rejects it; plan backups, recovery and any required redeployment explicitly.
 
 | Version | Supported |
 | --- | --- |

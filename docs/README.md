@@ -29,7 +29,7 @@ Use these documents to deploy, operate, and understand ocservia. Start with the 
 
 - [Architecture](architecture.md)
 - [Security policy](../SECURITY.md)
-- [1.0 support and versioning policy](reference/support-policy.md)
+- [Current support and versioning policy](reference/support-policy.md)
 - [Technical reference](reference/README.md)
 
 ## Deployment reference
@@ -46,7 +46,7 @@ Use these documents to deploy, operate, and understand ocservia. Start with the 
 - [Control-plane development](development/control-plane.md)
 - [Contracts and toolchains](development/contracts.md)
 - [GitHub Actions validation](development/github-actions.md)
-- [Native release upgrade validation](development/release-upgrade-validation.md)
+- [Current package validation](development/release-upgrade-validation.md)
 - [Readiness harness contracts](acceptance/README.md)
 
 ## Documentation scope

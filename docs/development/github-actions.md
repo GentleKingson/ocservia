@@ -212,8 +212,8 @@ acceptance.
 
 ## Release workflow
 
-The [Release Check](release-checks.md) owns the complete release graph, including
-the existing Full CI invocation, exact product builds, current package smoke,
+The [Release Check](release-checks.md) gates the release graph, including
+the existing Full CI invocation, exact accepted products, current package checks,
 supported application combinations, Business Smoke, selected Integration and
 Resilience, and existing security checks. It is not added to PR required checks.
 The initial migration selects every supported check; normal selection uses the
@@ -222,11 +222,17 @@ entire diff from the last published Release.
 Dispatch `release.yml` with `version` and `arch=all` for a full dry-run.
 It never publishes, writes to production registries or reads the production
 signing key. `arch=amd64` or `arm64` is diagnostic only and skips Release Check.
-Tag runs execute one integrated round before protected Publish; no extra full
-dry-run is required. Only Publish obtains write permissions and release keys.
+Before a tag run, `release-upgrade.yml` must complete Integrated acceptance on
+`main` for the exact SHA/version with `purpose=integration` and
+`production_signer=true`. This explicitly authorized mode writes candidate
+images to GHCR. Tag runs import its verified products without rebuilding, then
+run their own selected checks before protected Publish. A separate Release
+dry-run cannot replace that acceptance. Only the formal Publish job obtains
+the production release signing key and writes stable release assets/images.
 
-The [diagnostic workflow](release-upgrade-validation.md) has one purpose enum
-instead of interacting booleans: only current `smoke` or `integration`.
+The [diagnostic workflow](release-upgrade-validation.md) accepts current
+`smoke` or `integration`, plus an opt-in `production_signer` boolean for
+Integrated candidate publication and real Signer acceptance.
 Historical application and native upgrade cells and baseline inputs are removed.
 
 Product consumers use actual producer artifact IDs plus explicit candidate

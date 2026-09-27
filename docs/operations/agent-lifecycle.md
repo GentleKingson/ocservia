@@ -6,7 +6,7 @@
 > package construction, verified staging, trust provisioning, and durable
 > lifecycle contracts.
 
-The pending v1.1.0 [policy reset](../reference/support-policy.md) removes source
+The published v1.1.0 [policy reset](../reference/support-policy.md) removes source
 version windows and target ordering, not artifact integrity or current trust
 requirements. Cross-version safety is not guaranteed. Historical layout/key
 conversion is no longer automatic; provision the target explicitly or redeploy
@@ -299,7 +299,7 @@ between 1 and 512 unique `(version, architecture)` releases; a missing,
 unreadable, malformed, or ambiguous file fails Controller startup. There is no
 GitHub or registry synchronization: publishing a release means placing the
 signed package triple in each node's local spool and adding the exact digest
-to this file. In the pending v1.1.0 policy reset, an explicit trusted target is
+to this file. Under the v1.1.0 policy reset, an explicit trusted target is
 not rejected because it is lower, equal, higher or the source version is unknown.
 The displayed version classification is informational, not execution authority.
 The request must still carry the node's current

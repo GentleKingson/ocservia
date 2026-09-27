@@ -1,9 +1,11 @@
 # Support and versioning policy
 
-## v1.1.0 policy reset (pending release)
+## v1.1.0 policy reset
 
-This is the approved policy for the unreleased `v1.1.0` candidate, not a claim
-that final acceptance or publication has finished. The archived 1.0 policy
+This policy took effect with the published
+[`v1.1.0` release](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0).
+Its release notes link the exact-source acceptance and publication runs; later
+candidates require their own validation. The archived 1.0 policy
 records the published line; its version windows, deprecation timetable and additive-only
 `1.x` promise do not govern this explicitly breaking policy reset. Existing
 published tags, artifacts and release history are unchanged.
