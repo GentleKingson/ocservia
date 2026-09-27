@@ -29,6 +29,51 @@ command -v jq >/dev/null || {
 fixture="$(mktemp -d)"
 trap 'rm -rf "${fixture}"' EXIT
 
+# The default curl rule joins separate commands. The override must stop there,
+# while detecting the very same value when it really is a curl credential.
+mkdir -p "${fixture}/curl-boundary"
+scan_curl() {
+  local expected="$1" code=0
+  shift
+  rm -f "${fixture}/curl-report.json"
+  gitleaks dir --no-banner --redact --no-color --exit-code 10 --report-format json \
+    --report-path "${fixture}/curl-report.json" "$@" "${fixture}/curl-boundary" \
+    >"${fixture}/curl-scan.log" 2>&1 || code=$?
+  if [[ "${code}" -eq "$((expected * 10))" ]] && jq -e --argjson expected "${expected}" \
+    'length == $expected and all(.[]; .RuleID == "curl-auth-user")' \
+    "${fixture}/curl-report.json" >/dev/null; then
+    return
+  fi
+  echo "curl boundary fixture expected ${expected} finding(s), exit=${code}" >&2
+  exit 1
+}
+record="${fixture}/curl-boundary/commands.sh"
+for separator in $'\n' $'\r\n' '; ' ' && ' ' | '; do
+  printf 'curl --fail https://example.test/healthz%sdocker run --user %s image\n' \
+    "${separator}" '65534:65532' >"${record}"
+  scan_curl 1
+  scan_curl 0 --config "${CONFIG}"
+done
+for prefix in 'curl -u ' 'curl --user=' $'curl \\\n--user ' \
+  $'curl --fail \\\n  --user ' $'curl --fail \\\r\n  --user ' \
+  'curl --url "https://example.test/?a=1&b=2" --user ' \
+  $'curl --header "X-Note: first\nsecond" --user '; do
+  printf '%s%s\n' "${prefix}" '65534:65532' >"${record}"
+  scan_curl 1 --config "${CONFIG}"
+done
+curl_secret="$(openssl rand -hex 16)"
+for quote in '' '"' "'"; do
+  printf 'curl --user %soperator:%s%s https://example.test/\n' \
+    "${quote}" "${curl_secret}" "${quote}" >"${record}"
+  scan_curl 1 --config "${CONFIG}"
+done
+# Configuration errors must not masquerade as a credential finding.
+if (scan_curl 1 --config "${fixture}/missing.toml") >/dev/null 2>&1; then
+  echo "curl detector errors must not count as detected credentials" >&2
+  exit 1
+fi
+rm -rf "${fixture}/curl-boundary" "${fixture}/curl-report.json" "${fixture}/curl-scan.log"
+
 # Each new exemption must reproduce under defaults, pass under the config,
 # and leave other values in the same field/file/line visible. Inspect a single
 # finding per case so another hit or a detector error cannot fake rejection.
