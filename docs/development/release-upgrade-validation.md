@@ -15,8 +15,21 @@ gh workflow run release-upgrade.yml --ref <candidate-branch> \
 ```
 
 Choose an exact candidate branch. Dispatch derives its source SHA and checks
-checkout identity; version remains plain `X.Y.Z`. These diagnostics never
-publish and are not a complete Release Check.
+checkout identity; version remains plain `X.Y.Z`. The default
+`production_signer=false` mode has read-only Registry permissions and does not
+publish packages or images. It is not a complete Release Check.
+
+With explicit candidate Registry-write authorization, select
+`purpose=integration` and `production_signer=true` to build and publish
+run-bound candidate GHCR images and execute current native Integrated/real
+Signer acceptance. This uses the production Signer implementation in isolated
+tests, not a production deployment. It neither creates a release tag nor
+publishes a formal GitHub Release or uses the production release signing key.
+
+Formal tag publication requires this Integrated mode to succeed on `main` for
+the exact tag SHA/version, with the accepted artifacts still available. A
+default smoke/integration diagnostic pass or a `release.yml` dry-run alone
+does not satisfy that requirement. Follow the [publication sequence](release-checks.md).
 
 ## Current native products
 

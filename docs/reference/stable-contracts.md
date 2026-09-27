@@ -1,12 +1,14 @@
 # Current contracts and acceptance
 
-## v1.1.0 transition (pending release)
+## v1.1.0 transition
 
-The approved [v1.1.0 policy reset](support-policy.md#v110-policy-reset-pending-release)
+The published [v1.1.0 policy reset](support-policy.md#v110-policy-reset)
 supersedes the software-version windows, historical release matrix and schema
 compatibility admission of the published 1.0 policy. Software-version guards
-and historical entrypoints have been removed; final candidate acceptance and publication
-remain pending. Real command/protocol support, authorization,
+and historical entrypoints have been removed. The
+[release notes](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0)
+record that release's acceptance; they do not certify later candidates.
+Real command/protocol support, authorization,
 artifact integrity, durable state, migration content integrity and current
 readiness remain contracts, not substitutes for a software-version fence.
 

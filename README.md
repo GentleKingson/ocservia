@@ -9,7 +9,7 @@
 ocservia does not replace ocserv and does not carry VPN traffic. Each VPN server still runs ocserv. ocservia gives operators one place to deploy managed nodes, watch their health, manage users and groups, review sessions and bans, prepare configuration changes, and run controlled upgrades.
 
 > [!NOTE]
-> `v1.0.1` is designated as the first recommended stable baseline for production deployments once published. `v1.0.0` is a published transitional release supported as an upgrade source, not recommended for new deployments. Pre-1.0 installations must be redeployed to enter `1.x`; in-place upgrades are not supported. Pin an exact published release and follow the [1.0 support and versioning policy](docs/reference/support-policy.md).
+> Pin an exact [published release](https://github.com/GentleKingson/ocservia/releases). Starting with `v1.1.0`, software-version compatibility admission and the previous cross-version support promise are removed. This is a breaking policy change despite the minor version number; an accepted target is not a guarantee of cross-version safety. Follow the [current support policy](docs/reference/support-policy.md).
 
 ## Core features
 
@@ -111,7 +111,7 @@ See [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a
 - [Install a managed node](docs/getting-started/managed-node.md)
 - [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/how-to/troubleshooting.md)
-- [1.0 support and versioning policy](docs/reference/support-policy.md)
+- [Current support and versioning policy](docs/reference/support-policy.md)
 - [Technical reference](docs/reference/README.md)
 
 ## Developing
@@ -127,7 +127,7 @@ GitHub Actions remains the merge-time validation environment. See [Contributor v
 
 ## Status
 
-The first recommended production stable baseline is `v1.0.1` once published. The published `v1.0.0` remains an upgradeable transitional 1.0 release. Pre-1.0 has no supported in-place upgrade path into formal `1.x`, including via `v1.0.0`; redeploy instead. The [1.0 support and versioning policy](docs/reference/support-policy.md) freezes public contract surfaces for `1.x`, requires a new major version for breaking changes, and indexes the validated platform set. See [Releases](https://github.com/GentleKingson/ocservia/releases) for published versions and assets; an unreleased candidate is not a published production release.
+[`v1.1.0`](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0) is published. The [current support policy](docs/reference/support-policy.md) defines retained safety contracts, validated platforms and cross-version risks; it does not promise fully backward-compatible changes throughout `1.x`. See [Releases](https://github.com/GentleKingson/ocservia/releases) for current published versions and assets. The default branch and unreleased candidates are not published production releases.
 
 The P1 harness provides manual, single-host validation outside Basic CI, not a production capacity guarantee. See [P1 resilience and capacity](docs/development/p1-resilience-capacity.md) for details.
 
