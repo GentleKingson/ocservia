@@ -430,7 +430,9 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 	if len(m.checkpointKey) < sha256.Size {
 		return errors.New("audit checkpoint key is unavailable")
 	}
-	return database.Within(ctx, m.backend, database.RepeatableRead, func(tx database.Tx) error {
+	// Lease renewal can invalidate this snapshot before the final fence check.
+	// Retry only a rolled-back transaction, rechecking the chain and the fence.
+	return database.WithinRetry(ctx, m.backend, database.RepeatableRead, func(tx database.Tx) error {
 		if err := LockChainTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
