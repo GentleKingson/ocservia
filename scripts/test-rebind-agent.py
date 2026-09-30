@@ -77,6 +77,13 @@ class RebindTests(unittest.TestCase):
              patch.object(rebind.subprocess, 'run', side_effect=options.get('runner', self.runner)):
             rebind.commit(self.operation, self.state, {}, self.account)
 
+    def test_packaged_p12_environment_names_are_valid(self):
+        rebind.atomic_write(rebind.CONF / 'agent.env', b'P12_PASSWORD_SEAL_KEY_ID=default-p12\nP12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=abcd\n')
+        self.assertEqual(rebind.environment()['P12_PASSWORD_SEAL_KEY_ID'], 'default-p12')
+        rebind.atomic_write(rebind.CONF / 'agent.env', b'P12_PASSWORD_SEAL_KEY_ID=one\nP12_PASSWORD_SEAL_KEY_ID=two\n')
+        with self.assertRaises(RuntimeError):
+            rebind.environment()
+
     def test_commit_preserves_source_and_publishes_one_complete_authority(self):
         self.commit()
         active = rebind.decode_binding(rebind.secure_read(rebind.ACTIVE))

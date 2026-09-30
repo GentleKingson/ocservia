@@ -17,9 +17,9 @@ RUN cargo build --locked --release --package ocservia-g6-probe --package ocservi
     && cp target/release/ocservia-g6-probe target/release/ocservia-g6-tunnel /out/probe/
 
 FROM g6-rust-source AS g6-agent-builder
-RUN cargo build --locked --release --package ocservia-agent --package ocservia-privd \
+RUN cargo build --locked --release --package ocservia-agent --package ocservia-privd --package ocservia-upgrader \
     && mkdir -p /out/agent \
-    && cp target/release/ocservia-agent target/release/ocservia-privd /out/agent/
+    && cp target/release/ocservia-agent target/release/ocservia-privd target/release/ocservia-upgrader /out/agent/
 
 # Mirrors the runtime-base stage of rust/transportd.Dockerfile.
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS transportd-runtime-base
@@ -91,6 +91,7 @@ ENTRYPOINT ["/usr/local/libexec/ocservia-agent-supervisor"]
 FROM g6-agent-base AS g6-agent-runtime
 COPY --from=g6-agent-builder /out/agent/ocservia-agent /usr/local/bin/ocservia-agent
 COPY --from=g6-agent-builder /out/agent/ocservia-privd /usr/local/bin/ocservia-privd
+COPY --from=g6-agent-builder /out/agent/ocservia-upgrader /usr/local/bin/ocservia-upgrader
 
 # The named build context is the verified release archive, not another build.
 FROM g6-agent-base AS g6-agent-candidate

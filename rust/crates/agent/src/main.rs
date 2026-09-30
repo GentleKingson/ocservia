@@ -2749,14 +2749,15 @@ fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
             "enrollment token must be process-owned mode 0600 or root:agent mode 0640",
         ));
     }
-    let mut raw = Vec::with_capacity(44);
-    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 45), &mut raw)?;
+    let mut raw = Vec::with_capacity(50);
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 51), &mut raw)?;
     let raw = Zeroizing::new(raw);
     let token = std::str::from_utf8(&raw)
         .map_err(|_| invalid("enrollment token must be UTF-8"))?
         .trim_end_matches(['\n', '\r']);
-    if token.len() != 43
-        || !token
+    let encoded = token.strip_prefix("obt1_").unwrap_or(token);
+    if encoded.len() != 43
+        || !encoded
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
@@ -5073,6 +5074,22 @@ mod tests {
             valid_token
         );
 
+        for value in [format!("obt1_{valid_token}"), valid_token.clone()] {
+            std::fs::write(&token, format!("{value}\r\n")).expect("write supported token");
+            assert_eq!(
+                read_enrollment_token(&token).expect("supported token"),
+                value
+            );
+        }
+        for value in [
+            format!("obt2_{valid_token}"),
+            format!("obt1_{valid_token}extra"),
+            "obt1_short".to_owned(),
+        ] {
+            std::fs::write(&token, value).expect("write malformed token");
+            assert!(read_enrollment_token(&token).is_err());
+        }
+        std::fs::write(&token, format!("obt1_{valid_token}")).expect("restore valid token");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
             .expect("make token insecure");
         assert!(read_enrollment_token(&token).is_err());
