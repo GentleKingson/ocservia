@@ -153,7 +153,19 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	f.admin = f.login("e2e-admin", adminPassword)
 	f.approver = f.login("e2e-approver", approverPassword)
 
-	identityArgs := []string{"--identity-dir", f.root + "/agent/identity", "--controller", endpointID}
+	identityDirectory, journalPath, privdSocket := f.root+"/agent/identity", f.root+"/agent/journal.db", f.root+"/privd/privd.sock"
+	if os.Getenv("OCSERV_REBIND_E2E") != "" {
+		identityDirectory, journalPath, privdSocket = "/var/lib/ocservia-agent/identity", "/var/lib/ocservia-agent/agent.db", "/run/ocserv-platform/privd.sock"
+		for path, uid := range map[string]int{"/var/lib/ocservia-agent": 65533, "/var/lib/ocservia-privd": 0, "/var/lib/ocservia-upgrade": 0, "/etc/ocservia-agent": 0, "/run/ocserv-platform": 0} {
+			if err := os.MkdirAll(path, 0750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(path, uid, 65533); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	identityArgs := []string{"--identity-dir", identityDirectory, "--controller", endpointID}
 	prepared := f.run(65533, 65533, nil, "/usr/local/bin/ocservia-agent", append(append([]string{}, identityArgs...), "--prepare-enrollment")...)
 	agentEndpoint := strings.TrimSpace(string(prepared))
 	if decoded, err := hex.DecodeString(agentEndpoint); err != nil || len(decoded) != 32 {
@@ -192,11 +204,11 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	body["credential"] = e2eString(t, credential, "credential")
 	f.api(nil, "POST", nodePath+"/privd-attestation-keys:register", body, nil, http.StatusCreated)
 	f.api(nil, "POST", nodePath+"/privd-attestation-keys:register", body, nil, http.StatusUnauthorized)
-	privdArgs := []string{"--socket", f.root + "/privd/privd.sock", "--agent-uid", "65533", "--node-id", nodeID, "--controller-command-key-file", f.root + "/privd/verification.pem", "--attestation-key-file", attestationKey, "--user-password-seal-key-file", f.root + "/privd/user.key", "--p12-password-seal-key-file", f.root + "/privd/p12.key"}
+	privdArgs := []string{"--socket", privdSocket, "--agent-uid", "65533", "--node-id", nodeID, "--controller-command-key-file", f.root + "/privd/verification.pem", "--attestation-key-file", attestationKey, "--user-password-seal-key-file", f.root + "/privd/user.key", "--p12-password-seal-key-file", f.root + "/privd/p12.key"}
 	privdArgs = append(privdArgs, sealArgs...)
 	f.start("privd", 0, 65533, nil, "/usr/local/bin/ocservia-privd", privdArgs...)
-	f.wait("root supervisor socket", func() bool { _, err := os.Stat(f.root + "/privd/privd.sock"); return err == nil })
-	agentArgs = append(agentArgs, "--journal", f.root+"/agent/journal.db", "--node-id", nodeID, "--privd-socket", f.root+"/privd/privd.sock", "--controller-command-key-file", f.root+"/agent/verification.pem")
+	f.wait("root supervisor socket", func() bool { _, err := os.Stat(privdSocket); return err == nil })
+	agentArgs = append(agentArgs, "--journal", journalPath, "--node-id", nodeID, "--privd-socket", privdSocket, "--controller-command-key-file", f.root+"/agent/verification.pem")
 	f.start("agent", 65533, 65533, nil, "/usr/local/bin/ocservia-agent", agentArgs...)
 	f.wait("fenced Agent connected with persisted telemetry", func() bool {
 		node := f.api(f.admin, "GET", nodePath, nil, nil, http.StatusOK)
@@ -233,6 +245,11 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		}
 	}
 	f.certificateWorkflow(nodePath)
+	if disposition := os.Getenv("OCSERV_REBIND_E2E"); disposition != "" {
+		f.createRebindSourceUser(nodePath)
+		f.rebindWorkflow(nodeID, agentEndpoint, endpointID, sealArgs, privdArgs, capabilities, disposition, runtimeOptions)
+		return
+	}
 	f.userWorkflow(nodePath)
 	for _, path := range []string{nodePath + "/sessions", nodePath + "/ip-bans", "/api/v1/operations", "/api/v1/operations/summary", "/api/v1/operations/queue-metrics", "/api/v1/events", "/api/v1/audit/events"} {
 		f.api(f.admin, "GET", path, nil, nil, http.StatusOK)
@@ -299,7 +316,11 @@ func newControllerE2E(t *testing.T) *controllerE2E {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 13*time.Minute)
 	t.Cleanup(cancel)
-	f := &controllerE2E{t: t, ctx: ctx, root: "/run/pr02-e2e", artifacts: os.Getenv("OCSERV_E2E_ARTIFACT_DIR"), client: &http.Client{Timeout: 10 * time.Second}}
+	return newControllerE2EAt(t, ctx, "/run/pr02-e2e")
+}
+
+func newControllerE2EAt(t *testing.T, ctx context.Context, root string) *controllerE2E {
+	f := &controllerE2E{t: t, ctx: ctx, root: root, artifacts: os.Getenv("OCSERV_E2E_ARTIFACT_DIR"), client: &http.Client{Timeout: 10 * time.Second}}
 	if f.artifacts == "" {
 		t.Fatal("isolated artifact directory required")
 	}
