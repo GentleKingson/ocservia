@@ -8,15 +8,19 @@ trap 'rm -rf "${temporary}"' EXIT INT TERM
 git -C "${temporary}" init -q
 mkdir -p "${temporary}/scripts"
 cp "${ROOT}/scripts/check-public-repository.sh" "${temporary}/scripts/"
-printf '%s\n' '# local control' >"${temporary}/AGENTS.md"
+printf '%s\n' '# public project instructions' >"${temporary}/AGENTS.md"
 git -C "${temporary}" add -f AGENTS.md scripts/check-public-repository.sh
+"${temporary}/scripts/check-public-repository.sh" "${temporary}"
+
+printf '%s\n' '# local control' >"${temporary}/AGENTS.override.md"
+git -C "${temporary}" add -f AGENTS.override.md
 
 if "${temporary}/scripts/check-public-repository.sh" "${temporary}" >/dev/null 2>&1; then
-  echo "policy check accepted forbidden AGENTS.md" >&2
+  echo "policy check accepted forbidden AGENTS.override.md" >&2
   exit 1
 fi
 
-rm "${temporary}/AGENTS.md"
+rm "${temporary}/AGENTS.override.md"
 mkdir -p "${temporary}/.ocservia-control"
 printf '%s\n' 'private' >"${temporary}/.ocservia-control/prompt.md"
 git -C "${temporary}" add -Af

@@ -1,9 +1,9 @@
 # Validate a change
 
 Use the smallest validation that covers the code or documentation you changed.
-Run local compilation, lint, static checks and tests through `ssh BuildServer`,
-in a task-isolated checkout. Do not substitute another host if it is unavailable;
-report the blocked checks. GitHub Actions remains authoritative for the exact
+Run compilation, lint, static checks and tests in an authorized, task-isolated
+environment with the required dependencies. Report blocked checks when that
+environment is unavailable. GitHub Actions remains authoritative for the exact
 pull request commit; local results are not CI results.
 
 ## Choose the validation scope
@@ -28,9 +28,9 @@ index and preserve the user's staging state.
 For first-time environment preparation, use the supported bootstrap profile
 for the selected check and host, with versions from `toolchains.lock`.
 `make bootstrap` selects `all`; it is not required for every edit and is not
-supported on every architecture. See the [Linux ARM64 dependencies and supported profiles](#linux-arm64-go-validation-on-buildserver)
-before preparing BuildServer. Reuse a correctly prepared environment instead
-of reinstalling it for each change.
+supported on every architecture. See the [Linux ARM64 dependencies and supported profiles](#linux-arm64-go-validation)
+before preparing a Linux ARM64 environment. Reuse a correctly prepared
+environment instead of reinstalling it for each change.
 
 For module-local iteration, keep using `make test-go`, `make test-rust` or
 `make test-web`. `make test` intentionally runs all three modules; it is not
@@ -53,7 +53,7 @@ command alone, when assessing its benefit.
 `web`. The hook override applies only to that explicit lint command. Independent
 `npm run lint` and `npm run typecheck` still prepare their generated client.
 
-- Quick database feedback on BuildServer: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
+- Quick database feedback: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
 - All supported database units: use `DATABASE_TEST_SCOPE=smoke` for PostgreSQL 17/18, MySQL and MariaDB; Full CI checks current initialization and runtime behavior on each unit, not historical compatibility or comprehensive acceptance.
 - Deep database migrations or failure scenarios, explicitly opt-in: `make database-integration`
 - Go and transport local integration: `make integration`
@@ -89,7 +89,7 @@ types and new payload alternatives do not silently pass. Descriptors never
 generate the production allowlist. New fields require explicit protocol
 version, capability and strict-policy compatibility review.
 
-Run focused checks on BuildServer in an isolated checkout:
+Run focused checks in an authorized, isolated checkout:
 
 ```bash
 (cd control-plane && go test -race -count=1 -skip Integration ./internal/commandauth ./internal/contractpolicy ./internal/privdattestation)
@@ -115,11 +115,11 @@ for their own contracts and are not replaced by these fixtures. PR-05 changes
 test coverage and its fixture allowlist, not protocol version, ALPN, canonical
 bytes or runtime dependencies.
 
-## Linux ARM64 Go validation on BuildServer
+## Linux ARM64 Go validation
 
-Run local validation through `ssh BuildServer`. Bootstrap installs repository
-tools, not system packages. Linux `aarch64` supports `go-test` and retains the
-existing `rust-basic` and `native-packages` paths. Other ARM64 profiles (including
+Bootstrap installs repository tools, not system packages. Linux `aarch64`
+supports `go-test` and retains the existing `rust-basic` and `native-packages`
+paths. Other ARM64 profiles (including
 `all`, `native`, Web, quality and security profiles) fail before installation:
 their Node, sccache or quality-tool artifact mappings are not supplied. Linux
 AMD64 and Darwin ARM64 keep their existing mappings; this ARM64 procedure does
@@ -190,7 +190,6 @@ group/world-writable directories, even sticky `/tmp`. Long paths can also
 exceed Unix socket limits. Keep all task resources separate:
 
 ```bash
-ssh BuildServer
 task="$(mktemp -d "$HOME/oa-XXXXXX")"
 git clone https://github.com/GentleKingson/ocservia.git "$task/repo"
 cd "$task/repo"
@@ -272,7 +271,7 @@ measurements remain historical records, not instructions to wrap Go now.
 ## Bundled PostgreSQL initialization
 
 Run the focused initializer regression only in an authorized, isolated
-BuildServer environment, using a private checkout directory, host root, Python
+environment, using a private checkout directory, host root, Python
 3, `setpriv`, and a local Docker daemon. Do not use a production host, real
 credentials, or existing database volumes. Select the target release's
 digest-pinned PostgreSQL 17 image rather than `latest`:
