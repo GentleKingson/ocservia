@@ -246,6 +246,19 @@ const upgradeEligible = computed(
     Boolean(currentNode.value?.recommendedAgentVersion),
 );
 
+function actionAvailable(action: string): boolean {
+  return (
+    readReady.value &&
+    currentNode.value?.effectiveActions?.[action]?.allowed === true
+  );
+}
+function actionExplanation(action: string): string {
+  const availability = currentNode.value?.effectiveActions?.[action];
+  return availability?.allowed
+    ? ""
+    : t("action_" + (availability?.reason ?? "unknown"));
+}
+
 function openAction(
   kind: "disconnect" | "terminate" | "unban" | "reload" | "upgradeAgent",
   target: string,
@@ -502,8 +515,8 @@ async function submitPolicy(): Promise<void> {
           <div class="node-actions">
             <button
               type="button"
-              :disabled="operationBusy"
-              :title="$t('reloadOcserv')"
+              :disabled="operationBusy || !actionAvailable('service.reload')"
+              :title="actionExplanation('service.reload') || $t('reloadOcserv')"
               @click="openAction('reload', '', $t('reloadOcserv'))"
             >
               <Power :size="15" />{{ $t("reload") }}
@@ -525,6 +538,12 @@ async function submitPolicy(): Promise<void> {
               <ArrowUpCircle :size="15" />{{ $t("upgradeAgent") }}
             </button>
           </div>
+          <p
+            v-if="!actionAvailable('service.reload')"
+            class="action-availability-note"
+          >
+            {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
+          </p>
           <div
             v-if="fleet.latestOperation"
             class="operation-status"
@@ -706,7 +725,8 @@ async function submitPolicy(): Promise<void> {
               v-if="stateTab === 'users'"
               type="button"
               class="icon-command"
-              :title="$t('createUser')"
+              :disabled="operationBusy || !actionAvailable('user.manage')"
+              :title="actionExplanation('user.manage') || $t('createUser')"
               @click="openDesired('create')"
             >
               <UserPlus :size="15" />
@@ -715,12 +735,27 @@ async function submitPolicy(): Promise<void> {
               v-else
               type="button"
               class="icon-command"
-              :title="$t('applyGroup')"
+              :disabled="operationBusy || !actionAvailable('group.manage')"
+              :title="actionExplanation('group.manage') || $t('applyGroup')"
               @click="openDesired('group')"
             >
               <ListPlus :size="15" />
             </button>
           </div>
+          <p
+            v-if="
+              !actionAvailable(
+                stateTab === 'users' ? 'user.manage' : 'group.manage',
+              )
+            "
+            class="action-availability-note"
+          >
+            {{
+              actionExplanation(
+                stateTab === "users" ? "user.manage" : "group.manage",
+              )
+            }}
+          </p>
           <div class="desired-state-list" v-if="stateTab === 'users'">
             <div v-for="item in usersState" :key="item.name">
               <span
@@ -738,7 +773,7 @@ async function submitPolicy(): Promise<void> {
                 <button
                   v-if="item.desiredVersion"
                   type="button"
-                  :disabled="operationBusy"
+                  :disabled="operationBusy || !item.desiredVersion"
                   :title="$t('quotaAndExpiry')"
                   @click="openPolicy(item.name)"
                 >
@@ -747,7 +782,11 @@ async function submitPolicy(): Promise<void> {
                 <button
                   v-if="recoveryDialogKind(item) === 'create'"
                   type="button"
-                  :disabled="operationBusy || !item.desiredVersion"
+                  :disabled="
+                    operationBusy ||
+                    !actionAvailable('user.manage') ||
+                    !item.desiredVersion
+                  "
                   :title="$t('retryCreateUser')"
                   @click="
                     openDesired('create', item.name, item.desiredVersion ?? 0)
@@ -758,7 +797,11 @@ async function submitPolicy(): Promise<void> {
                 <button
                   v-else-if="recoveryDialogKind(item) === 'rotate'"
                   type="button"
-                  :disabled="operationBusy || !item.desiredVersion"
+                  :disabled="
+                    operationBusy ||
+                    !actionAvailable('user.manage') ||
+                    !item.desiredVersion
+                  "
                   :title="$t('retryRotatePassword')"
                   @click="
                     openDesired('rotate', item.name, item.desiredVersion ?? 0)
@@ -770,7 +813,11 @@ async function submitPolicy(): Promise<void> {
                   v-else-if="recoveryDialogKind(item) === 'disable'"
                   type="button"
                   class="danger"
-                  :disabled="operationBusy || !item.desiredVersion"
+                  :disabled="
+                    operationBusy ||
+                    !actionAvailable('user.manage') ||
+                    !item.desiredVersion
+                  "
                   :title="$t('retryDisableUser')"
                   @click="
                     openDesired('disable', item.name, item.desiredVersion ?? 0)
@@ -781,7 +828,11 @@ async function submitPolicy(): Promise<void> {
                 <button
                   v-else-if="recoveryDialogKind(item) === 'enable'"
                   type="button"
-                  :disabled="operationBusy || !item.desiredVersion"
+                  :disabled="
+                    operationBusy ||
+                    !actionAvailable('user.manage') ||
+                    !item.desiredVersion
+                  "
                   :title="$t('retryEnableUser')"
                   @click="
                     openDesired('enable', item.name, item.desiredVersion ?? 0)
@@ -792,7 +843,11 @@ async function submitPolicy(): Promise<void> {
                 <button
                   v-if="!item.recoveryRequired"
                   type="button"
-                  :disabled="operationBusy || !item.desiredVersion"
+                  :disabled="
+                    operationBusy ||
+                    !actionAvailable('user.manage') ||
+                    !item.desiredVersion
+                  "
                   :title="$t('rotatePassword')"
                   @click="
                     openDesired('rotate', item.name, item.desiredVersion ?? 0)
@@ -803,7 +858,11 @@ async function submitPolicy(): Promise<void> {
                 <button
                   v-if="!item.recoveryRequired && item.desiredEnabled === false"
                   type="button"
-                  :disabled="operationBusy || !item.desiredVersion"
+                  :disabled="
+                    operationBusy ||
+                    !actionAvailable('user.manage') ||
+                    !item.desiredVersion
+                  "
                   :title="$t('enableUser')"
                   @click="
                     openDesired('enable', item.name, item.desiredVersion ?? 0)
@@ -815,7 +874,11 @@ async function submitPolicy(): Promise<void> {
                   v-else-if="!item.recoveryRequired"
                   type="button"
                   class="danger"
-                  :disabled="operationBusy || !item.desiredVersion"
+                  :disabled="
+                    operationBusy ||
+                    !actionAvailable('user.manage') ||
+                    !item.desiredVersion
+                  "
                   :title="$t('disableUser')"
                   @click="
                     openDesired('disable', item.name, item.desiredVersion ?? 0)
@@ -844,7 +907,7 @@ async function submitPolicy(): Promise<void> {
                 v-if="recoveryDialogKind(item) === 'group'"
                 type="button"
                 class="icon-command"
-                :disabled="operationBusy"
+                :disabled="operationBusy || !actionAvailable('group.manage')"
                 :title="$t('retryApplyGroup')"
                 @click="
                   openDesired('group', item.name, item.desiredVersion ?? 0)
@@ -856,7 +919,7 @@ async function submitPolicy(): Promise<void> {
                 v-else-if="!item.recoveryRequired"
                 type="button"
                 class="icon-command"
-                :disabled="operationBusy"
+                :disabled="operationBusy || !actionAvailable('group.manage')"
                 :title="$t('applyGroup')"
                 @click="
                   openDesired('group', item.name, item.desiredVersion ?? 0)
@@ -878,13 +941,23 @@ async function submitPolicy(): Promise<void> {
             <span>{{ $t("configPlan") }}</span>
             <button
               type="button"
-              :disabled="operationBusy || currentConfigRevision === undefined"
+              :disabled="
+                operationBusy ||
+                currentConfigRevision === undefined ||
+                !actionAvailable('config.plan')
+              "
               :title="$t('configPlan')"
               @click="openConfigPlan"
             >
               {{ $t("plan") }}
             </button>
           </div>
+          <p
+            v-if="!actionAvailable('config.plan')"
+            class="action-availability-note"
+          >
+            {{ actionExplanation("config.plan") }}
+          </p>
         </section>
 
         <section id="node-certificates" class="detail-section">
@@ -892,11 +965,19 @@ async function submitPolicy(): Promise<void> {
             <h2>{{ $t("certificatesSection") }}</h2>
           </header>
           <div class="detail-section-actions">
-            <span>{{ $t("certificateLifecycle") }}</span>
+            <span
+              >{{ $t("certificateLifecycle")
+              }}<small v-if="!actionAvailable('certificate.issue')">
+                · {{ actionExplanation("certificate.issue") }}</small
+              ></span
+            >
             <button
               type="button"
-              :disabled="operationBusy"
-              :title="$t('certificateLifecycle')"
+              :disabled="operationBusy || !actionAvailable('certificate.read')"
+              :title="
+                actionExplanation('certificate.read') ||
+                $t('certificateLifecycle')
+              "
               @click="openCertificate"
             >
               {{ $t("certificate") }}
@@ -916,7 +997,13 @@ async function submitPolicy(): Promise<void> {
           <h2>{{ $t("certificateLifecycle") }}</h2>
           <code>{{ currentNode?.name }}</code>
         </header>
-        <template v-if="!certificate">
+        <p
+          v-if="!actionAvailable('certificate.issue')"
+          class="action-availability-note"
+        >
+          {{ $t("requestCsr") }}: {{ actionExplanation("certificate.issue") }}
+        </p>
+        <template v-if="!certificate && actionAvailable('certificate.issue')">
           <label for="certificate-cn">{{ $t("commonName") }}</label>
           <input
             id="certificate-cn"
@@ -931,7 +1018,7 @@ async function submitPolicy(): Promise<void> {
             maxlength="4096"
           />
         </template>
-        <template v-else>
+        <template v-else-if="certificate">
           <div class="config-plan-result" aria-live="polite">
             <span class="freshness-badge" :class="certificate.state">{{
               certificate.state
@@ -996,7 +1083,11 @@ async function submitPolicy(): Promise<void> {
             v-if="!certificate"
             type="submit"
             class="primary"
-            :disabled="certificateLoading || !certificateReason.trim()"
+            :disabled="
+              certificateLoading ||
+              !actionAvailable('certificate.issue') ||
+              !certificateReason.trim()
+            "
           >
             {{ $t("requestCsr") }}
           </button>
@@ -1009,6 +1100,7 @@ async function submitPolicy(): Promise<void> {
             class="primary"
             :disabled="
               certificateLoading ||
+              !actionAvailable('certificate.issue') ||
               !certificateApproval.trim() ||
               !certificateReason.trim()
             "
@@ -1025,6 +1117,7 @@ async function submitPolicy(): Promise<void> {
               type="button"
               :disabled="
                 certificateLoading ||
+                !actionAvailable('certificate.private_key.export') ||
                 Boolean(certificateGrant?.downloadToken) ||
                 !certificateReason.trim()
               "
@@ -1044,7 +1137,11 @@ async function submitPolicy(): Promise<void> {
             <button
               type="button"
               class="danger"
-              :disabled="certificateLoading || !certificateReason.trim()"
+              :disabled="
+                certificateLoading ||
+                !actionAvailable('certificate.revoke') ||
+                !certificateReason.trim()
+              "
               @click="revokeCurrentCertificate"
             >
               {{ $t("revoke") }}
@@ -1372,6 +1469,12 @@ async function submitPolicy(): Promise<void> {
               {{ warning }}
             </li>
           </ul>
+          <p
+            v-if="!actionAvailable('config.apply')"
+            class="action-availability-note"
+          >
+            {{ $t("apply") }}: {{ actionExplanation("config.apply") }}
+          </p>
           <template v-if="configPlan.validation === 'valid'">
             <label for="config-apply-approval">{{ $t("approvalId") }}</label>
             <input
@@ -1391,6 +1494,7 @@ async function submitPolicy(): Promise<void> {
               :disabled="
                 configLoading ||
                 !canSubmitConfigPlan ||
+                !actionAvailable('config.apply') ||
                 !configApplyApproval.trim() ||
                 !configApplyReason.trim()
               "
@@ -1418,7 +1522,10 @@ async function submitPolicy(): Promise<void> {
             type="submit"
             class="primary"
             :disabled="
-              configLoading || !canSubmitConfigPlan || !configReason.trim()
+              configLoading ||
+              !canSubmitConfigPlan ||
+              !actionAvailable('config.plan') ||
+              !configReason.trim()
             "
           >
             {{ $t("plan") }}

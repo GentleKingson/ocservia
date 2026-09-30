@@ -12,6 +12,10 @@ const node = {
   name: "Config node",
   version: 1,
   config_revision: 7,
+  effective_actions: {
+    "config.plan": { allowed: true, reason: "available" },
+    "config.apply": { allowed: true, reason: "available" },
+  },
   trust_status: "active",
   connection_state: "online",
   freshness: "fresh",

@@ -13,6 +13,13 @@
  */
 
 import { mapValues } from "../runtime";
+import type { NodeActionAvailability } from "./NodeActionAvailability";
+import {
+  NodeActionAvailabilityFromJSON,
+  NodeActionAvailabilityFromJSONTyped,
+  NodeActionAvailabilityToJSON,
+  NodeActionAvailabilityToJSONTyped,
+} from "./NodeActionAvailability";
 import type { ConnectionPathState } from "./ConnectionPathState";
 import {
   ConnectionPathStateFromJSON,
@@ -52,6 +59,12 @@ export interface NodeObservedState {
    * @memberof NodeObservedState
    */
   version: number;
+  /**
+   * Advisory action availability on the authorized node detail read, derived from current approved capabilities, node trust and the caller's existing resource-scoped permissions. Absent means unknown. Availability does not replace write-time checks, template-specific capabilities, approval, revision, sealing-key, secret-reference or operation constraints.
+   * @type {{ [key: string]: NodeActionAvailability; }}
+   * @memberof NodeObservedState
+   */
+  effectiveActions?: { [key: string]: NodeActionAvailability };
   /**
    * Current node_config_state.revision for ConfigPlan expected_revision, not the node version or desired configuration revision. Zero means no configuration state exists yet or its revision is zero. An absent field means unknown, never zero. Clients must not submit a revision they cannot represent exactly (for JavaScript, a safe integer).
    * @type {number}
@@ -281,6 +294,10 @@ export function NodeObservedStateFromJSONTyped(
     id: json["id"],
     name: json["name"],
     version: json["version"],
+    effectiveActions:
+      json["effective_actions"] == null
+        ? undefined
+        : mapValues(json["effective_actions"], NodeActionAvailabilityFromJSON),
     configRevision:
       json["config_revision"] == null ? undefined : json["config_revision"],
     trustStatus: json["trust_status"],
@@ -338,6 +355,10 @@ export function NodeObservedStateToJSONTyped(
     id: value["id"],
     name: value["name"],
     version: value["version"],
+    effective_actions:
+      value["effectiveActions"] == null
+        ? undefined
+        : mapValues(value["effectiveActions"], NodeActionAvailabilityToJSON),
     config_revision: value["configRevision"],
     trust_status: value["trustStatus"],
     connection_state: value["connectionState"],
