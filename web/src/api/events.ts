@@ -1,4 +1,8 @@
-import { EventsApi, type PlatformEventPage } from "@ocservia/api-client";
+import {
+  EventsApi,
+  type AuditEventPage,
+  type PlatformEventPage,
+} from "@ocservia/api-client";
 import { configuration, devAuthToken, requestInit } from "./transport";
 import { getWorkspace, workspaceID } from "./workspace";
 
@@ -31,6 +35,16 @@ export async function listEvents(
       ...(after ? { after } : {}),
       ...(order ? { order } : {}),
     },
+    requestInit(signal),
+  );
+}
+
+export async function listAuditEvents(
+  signal?: AbortSignal,
+): Promise<AuditEventPage> {
+  const xWorkspaceID = await workspaceID();
+  return events.listAuditEvents(
+    { xWorkspaceID, pageSize: 50 },
     requestInit(signal),
   );
 }
