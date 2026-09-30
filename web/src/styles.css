@@ -1305,6 +1305,13 @@ h1 {
   min-width: 820px;
 }
 .audit-table td {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
   overflow-wrap: anywhere;
   vertical-align: top;
+}
+
+.audit-table tbody tr {
+  cursor: default;
 }

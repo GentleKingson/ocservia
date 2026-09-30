@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { RefreshCw } from "@lucide/vue";
 import { ResponseError, type AuditEventPage } from "@ocservia/api-client";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -78,12 +79,19 @@ onBeforeUnmount(() => {
         <p>{{ $t("workspace") }}</p>
         <h1>{{ $t("audit") }}</h1>
       </div>
-      <button type="button" :disabled="loading" @click="refresh">
-        {{ $t("refresh") }}
+      <button
+        type="button"
+        class="icon-command page-command"
+        :disabled="loading"
+        :title="$t('refresh')"
+        :aria-label="$t('refresh')"
+        @click="refresh"
+      >
+        <RefreshCw :size="16" />
       </button>
     </div>
     <p>{{ $t("auditRecentBound") }}</p>
-    <p v-if="error" role="alert">
+    <p v-if="error" class="operation-error page-error" role="alert">
       {{ error }}
       <button type="button" :disabled="loading" @click="refresh">
         {{ $t("loginRetry") }}
@@ -97,12 +105,10 @@ onBeforeUnmount(() => {
       {{ $t("auditEmpty") }}
     </p>
     <div v-if="items.length" class="audit-table-wrap">
-      <table class="node-table audit-table">
-        <caption class="sr-only">
-          {{
-            $t("auditRecentBound")
-          }}
-        </caption>
+      <table
+        class="node-table audit-table"
+        :aria-label="$t('auditRecentBound')"
+      >
         <thead>
           <tr>
             <th>{{ $t("auditTime") }}</th>
