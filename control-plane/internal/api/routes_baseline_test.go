@@ -29,6 +29,7 @@ const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
 // F-1 restores the registered ConfigPlan Apply route's POST method rule.
 // R2-01 changes eight business wrappers to fixed, explicit actions.
 // R2-02 moves only the three ConfigPlan handler/wrapper expressions.
+// Repair PR-11 adds GET on the existing approval collection path.
 // "self" identifies endpoint validation, not requireOperationAuth. This is a
 // test inventory, never an input to production routing or authorization.
 const routeBaseline = `GET /livez|s.live|GET|public
@@ -288,8 +289,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 			return true
 		})
 	}
-	if len(registered) != 72 || len(explicitActions) != 13 {
-		t.Fatalf("registrations/actions = %d/%d, want 72/13", len(registered), len(explicitActions))
+	if len(registered) != 73 || len(explicitActions) != 13 {
+		t.Fatalf("registrations/actions = %d/%d, want 73/13", len(registered), len(explicitActions))
 	}
 	if forwarders != 1 {
 		t.Fatalf("registration forwarders = %d, want exactly one", forwarders)
@@ -299,8 +300,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 	for _, rule := range s.registeredMethods {
 		derived += len(rule.methods)
 	}
-	if derived != 61 || len(s.registeredMethods) != 57 || compatibilityRegistrations != 11 {
-		t.Fatalf("derived registrations/shapes/compatibility = %d/%d/%d, want 61/57/11", derived, len(s.registeredMethods), compatibilityRegistrations)
+	if derived != 62 || len(s.registeredMethods) != 57 || compatibilityRegistrations != 11 {
+		t.Fatalf("derived registrations/shapes/compatibility = %d/%d/%d, want 62/57/11", derived, len(s.registeredMethods), compatibilityRegistrations)
 	}
 	for _, line := range strings.Split(routeBaseline, "\n") {
 		fields := strings.Split(line, "|")
