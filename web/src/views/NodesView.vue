@@ -142,6 +142,14 @@ async function submitRollout(): Promise<void> {
       </article>
     </section>
     <section class="fleet-list-panel">
+      <p class="fleet-refresh-status" role="status" aria-live="polite">
+        <template v-if="fleet.initialized && fleet.loading">{{
+          $t("fleetRefreshing")
+        }}</template>
+        <template v-else-if="fleet.initialized && fleet.unavailable">{{
+          $t("fleetRefreshFailed")
+        }}</template>
+      </p>
       <div class="node-table-wrap">
         <table class="node-table fleet-table">
           <thead>
@@ -222,7 +230,11 @@ async function submitRollout(): Promise<void> {
         </table>
         <div
           v-if="
-            fleet.loading || (!fleet.unavailable && fleet.nodes.length === 0)
+            (!fleet.initialized && fleet.loading) ||
+            (fleet.initialized &&
+              !fleet.loading &&
+              !fleet.unavailable &&
+              fleet.nodes.length === 0)
           "
           class="empty-state"
         >
@@ -230,7 +242,11 @@ async function submitRollout(): Promise<void> {
             fleet.loading ? $t("loading") : $t("noNodes")
           }}</span>
         </div>
-        <div v-else-if="fleet.unavailable" class="empty-state" role="alert">
+        <div
+          v-else-if="!fleet.initialized && fleet.unavailable"
+          class="empty-state"
+          role="alert"
+        >
           <Server :size="24" /><span>{{ $t("systemsUnavailable") }}</span>
         </div>
       </div>
