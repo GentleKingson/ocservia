@@ -59,21 +59,13 @@ const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if std::env::args().nth(1).as_deref() == Some("--binding-version") {
-        println!("1");
-        return Ok(());
-    }
-    // The packaging pipeline verifies the binary's embedded release
-    // identity before it is shipped, so --version stays a read-only
-    // query that works for any caller.
-    if std::env::args().any(|argument| argument == "--version") {
-        println!(
-            "ocservia-agent {}",
-            ocservia_contracts::agent_upgrade::release_version()
-        );
+    if print_version_query() {
         return Ok(());
     }
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
+    if stage_rebind_if_requested()? {
+        return Ok(());
+    }
     let mut config = parse_args()?;
     if prepare_enrollment_if_requested(&config)? {
         return Ok(());
@@ -166,6 +158,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+fn print_version_query() -> bool {
+    if std::env::args().nth(1).as_deref() == Some("--binding-version") {
+        println!("1");
+        return true;
+    }
+    // The packaging pipeline verifies the binary's embedded release
+    // identity before it is shipped, so --version stays a read-only
+    // query that works for any caller.
+    if std::env::args().any(|argument| argument == "--version") {
+        println!(
+            "ocservia-agent {}",
+            ocservia_contracts::agent_upgrade::release_version()
+        );
+        return true;
+    }
+    false
+}
+
 /// Fails closed unless every read-only privd snapshot probe succeeded, so an
 /// Agent never reports a healthy session against a broken supervisor.
 fn require_healthy_snapshot(
@@ -198,6 +208,25 @@ fn prepare_enrollment_if_requested(config: &Config) -> Result<bool, io::Error> {
         return Ok(false);
     }
     println!("{}", prepare_enrollment(config)?);
+    Ok(true)
+}
+
+fn stage_rebind_if_requested() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let args: Vec<_> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) != Some("--stage-rebind") {
+        return Ok(false);
+    }
+    if args.len() != 6 {
+        return Err(invalid("--stage-rebind requires source-dir target-dir Agent-EndpointID source-Controller target-Controller").into());
+    }
+    let identity = ocservia_agent_identity::Identity::stage_rebind(
+        Path::new(&args[1]),
+        Path::new(&args[2]),
+        args[3].parse()?,
+        args[4].parse()?,
+        args[5].parse()?,
+    )?;
+    println!("{}", identity.endpoint_id());
     Ok(true)
 }
 
@@ -594,6 +623,11 @@ fn negotiate_and_activate_session(
         i64::try_from(now.as_secs())?,
         now.subsec_nanos(),
     )?;
+    if let Some(grant) = &response.session_grant {
+        session
+            .journal
+            .record_verified_session_grant(&grant.encode_to_vec())?;
+    }
     Ok(session_mode)
 }
 

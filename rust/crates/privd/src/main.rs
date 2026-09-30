@@ -20,6 +20,10 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if env::args().nth(1).as_deref() == Some("--verify-rebind-session") {
+        verify_rebind_session()?;
+        return Ok(());
+    }
     if env::args().nth(1).as_deref() == Some("--binding-version") {
         println!("1");
         return Ok(());
@@ -82,6 +86,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cleanup = remove_socket(&config.socket);
     result?;
     cleanup?;
+    Ok(())
+}
+
+fn verify_rebind_session() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::SessionGrantV1;
+    use prost::Message as _;
+    use std::io::Read as _;
+    let binding = ocservia_command_authorization::local_binding::LocalBinding::load_active()?
+        .ok_or_else(|| invalid("no committed Controller binding"))?;
+    let mut bytes = Vec::new();
+    std::io::stdin().take(65537).read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        return Err(invalid("session evidence too large").into());
+    }
+    let grant = SessionGrantV1::decode(bytes.as_slice())?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    ControllerCommandKeyring::new(vec![binding.command_key])?.verify_session_grant(
+        &grant,
+        binding.node_id.as_bytes(),
+        &binding.endpoint,
+        now,
+    )?;
+    println!(
+        "{}",
+        grant
+            .issued_at
+            .ok_or_else(|| invalid("session issuance missing"))?
+            .seconds
+    );
     Ok(())
 }
 

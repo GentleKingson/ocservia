@@ -9,6 +9,7 @@ umask 077
 mkdir -p "${work}/source/rust/target/release" "${work}/source/scripts" "${work}/products" "${work}/rootfs"
 cp -a "${ROOT}/deploy" "${work}/source/"
 cp "${ROOT}/scripts/"{package-agent,install-agent,upgrade-agent,rollback-agent,uninstall-agent,verify-agent-package}.sh "${work}/source/scripts/"
+cp "${ROOT}/scripts/rebind-agent.py" "${work}/source/scripts/"
 export DESTDIR="${work}/rootfs" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true
 export OUTPUT_DIR="${work}/products" AGENT_SIGNING_KEY="${work}/signing.key" SOURCE_DATE_EPOCH=1786147200
 case "$(uname -m)" in aarch64) export PACKAGE_ARCH=arm64 ;; x86_64) export PACKAGE_ARCH=amd64 ;; *) exit 2 ;; esac

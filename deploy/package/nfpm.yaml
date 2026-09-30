@@ -19,6 +19,8 @@ homepage: https://github.com/GentleKingson/ocservia
 license: Apache-2.0
 depends:
   - openssl
+  - python3
+  - util-linux
 contents:
   - src: payload/usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz
     dst: /usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz

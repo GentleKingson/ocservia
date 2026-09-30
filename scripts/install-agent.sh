@@ -69,6 +69,7 @@ validate_verified_package_source() {
     "${ROOT}/scripts/rollback-agent.sh" \
     "${ROOT}/scripts/uninstall-agent.sh" \
     "${ROOT}/scripts/verify-agent-package.sh" \
+    "${ROOT}/scripts/rebind-agent.py" \
     "${ROOT}/deploy/systemd/agent.env.example" \
     "${ROOT}/deploy/systemd/ocservia-agent.service" \
     "${ROOT}/deploy/systemd/ocservia-privd.service" \
@@ -225,6 +226,7 @@ install -m 0755 -- "${ROOT}/rust/target/release/ocservia-agent" "${DESTDIR}${PRE
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-privd" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-upgrader" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
 install -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
+install -m 0755 -- "${ROOT}/scripts/rebind-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rebind"
 install -m 0755 -- "${ROOT}/scripts/verify-agent-package.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
 install -m 0755 -- "${ROOT}/deploy/production/systemd/agent-relays.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-relays"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-agent.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
