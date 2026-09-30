@@ -89,3 +89,24 @@ deleting a database must never be used to clear quarantine.
 
 Rebind performs no historical cleanup. The safety and retention boundaries are
 specified in the [rebind contract](../development/controller-rebind.md).
+
+
+## Independent local retention
+
+Installation enables one host-wide `ocservia-agent-retention.timer`. It runs
+hourly; inspect failures with `journalctl -u ocservia-agent-retention.service`.
+To change defaults, create root-owned `/etc/ocservia-agent/retention.env` with
+mode `0600`:
+
+```ini
+OCSERV_AGENT_RETIRED_BINDING_RETENTION_DAYS=30
+OCSERV_REBIND_HISTORY_RETENTION_DAYS=365
+```
+
+The permitted ranges are 7–180 and 90–2555 days respectively. Zero, negative,
+unknown and duplicate settings are errors. Each invocation validates the file
+before cleanup; run `sudo /usr/libexec/ocservia/ocservia-agent-retention` to
+validate and perform one bounded pass. The worker compacts ordinary retired
+results and expired rebind details. It preserves keys, authority tombstones,
+privileged proofs, revision/fence floors and all unresolved recovery evidence.
+Changing retention never clears mutation quarantine.

@@ -1,0 +1,20 @@
+[Unit]
+Description=Ocservia retired binding history retention
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/libexec/ocservia/ocservia-agent-retention
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ReadWritePaths=-/var/lib/ocservia-agent -/var/lib/ocservia-rebind -/var/lib/ocservia-upgrade
+UMask=0077
+TimeoutStartSec=10min
