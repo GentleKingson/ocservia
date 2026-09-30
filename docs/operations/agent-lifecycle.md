@@ -387,3 +387,26 @@ Rollout state is durable: it survives Controller restarts and console
 sessions unchanged. Reading a rollout requires `operation.read`; creating and
 resuming require `agent.upgrade`; a rollout is visible and resumable only
 inside its workspace.
+
+
+## UTC and network-monitor diagnostics
+
+Use UTC when correlating Agent, privd, Controller and browser observations:
+
+```sh
+journalctl --utc -u ocservia-agent -u ocservia-privd --since '2026-09-30 00:00:00 UTC'
+systemctl cat ocservia-agent.service
+systemctl show ocservia-agent.service -p FragmentPath -p DropInPaths -p RestrictAddressFamilies
+```
+
+Startup `service.version`, the Agent version CLI and heartbeat use the same
+release version. Browser diagnostic timestamps show UTC and retain fractional
+precision; extended-year and infinite values remain textual.
+
+The default Agent unit permits AF_NETLINK for the transport network monitor.
+When investigating a netlink initialization warning, inspect the effective unit
+and drop-ins on the affected host, then verify address/route-change observation
+in an isolated systemd node. A corrected repository default does not prove the
+cause of a historical host warning. Keep the other sandbox settings intact;
+Controller connectivity or a heartbeat alone does not prove the network monitor
+is healthy.

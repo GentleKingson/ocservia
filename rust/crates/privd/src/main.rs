@@ -49,7 +49,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("HOST_PREFLIGHT_OK (read-only)");
         return Ok(());
     }
-    ocservia_observability::init("ocservia-privd")?;
+    ocservia_observability::init(
+        "ocservia-privd",
+        ocservia_contracts::agent_upgrade::release_version(),
+    )?;
     let (config, resources, limits) = parse_args()?;
     let adapter = Adapter::new(resources, limits);
     adapter.cleanup_stale_user_staging().await?;
