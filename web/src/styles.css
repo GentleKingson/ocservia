@@ -1297,3 +1297,21 @@ h1 {
 .state-dot.paused {
   background: #c97c22;
 }
+
+.audit-table-wrap {
+  overflow-x: auto;
+}
+.audit-table {
+  min-width: 820px;
+}
+.audit-table td {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+
+.audit-table tbody tr {
+  cursor: default;
+}

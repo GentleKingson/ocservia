@@ -8,10 +8,7 @@ import RolloutDetailView from "../views/RolloutDetailView.vue";
 import SettingsView from "../views/SettingsView.vue";
 import ApprovalsView from "../views/ApprovalsView.vue";
 
-const AuditPlaceholderView = {
-  template:
-    '<main class="empty-view"><h1>{{ $t(String($route.name)) }}</h1></main>',
-};
+import AuditView from "../views/AuditView.vue";
 
 // The development simulator stays reachable only on development runtimes
 // (vite dev server or a build with a development auth token); production
@@ -43,7 +40,7 @@ export const routeRecords: RouteRecordRaw[] = [
     name: "rollout-detail",
     component: RolloutDetailView,
   },
-  { path: "/audit", name: "audit", component: AuditPlaceholderView },
+  { path: "/audit", name: "audit", component: AuditView },
   { path: "/settings", name: "settings", component: SettingsView },
   ...(developmentRuntime
     ? [
