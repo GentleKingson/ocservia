@@ -155,7 +155,12 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 			telemetry:    telemetryService.Maintain,
 			certificates: certificateService.Maintain,
 			audit:        auditManager.CheckpointAll,
-			retention:    history.RunOnce,
+			retention: func(ctx context.Context) error {
+				if err := history.RunOnce(ctx); err != nil {
+					return err
+				}
+				return auditManager.CompactDetails(ctx, cfg.HistoryRetention.AuditDays)
+			},
 		}
 		if cfg.TestSchedulerEvidence {
 			work.evidence = func(ctx context.Context, session *coordination.Session) error {

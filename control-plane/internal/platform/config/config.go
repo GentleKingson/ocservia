@@ -257,6 +257,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	for name, target := range map[string]*int{
 		"OCSERV_RETIRED_NODE_RETENTION_DAYS":   &cfg.HistoryRetention.RetiredNodeDays,
 		"OCSERV_COMMAND_DETAIL_RETENTION_DAYS": &cfg.HistoryRetention.CommandDays,
+		"OCSERV_AUDIT_RETENTION_DAYS":          &cfg.HistoryRetention.AuditDays,
 	} {
 		if err := setInt(lookup, name, target); err != nil {
 			return Config{}, err

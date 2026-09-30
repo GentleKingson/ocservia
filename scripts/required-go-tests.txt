@@ -257,6 +257,7 @@ backend-auth internal/api TestAuthenticationBackendSafetyIntegration/absent-sing
 backend-auth internal/api TestAuthenticationBackendLegacyIntegration
 backend-audit-postgres internal/database/postgres TestAuditRBACControllerIntegration
 backend-audit-mysql internal/database/mysql TestRealAuditRBACController
+backend-coordination internal/operations TestAuditRetentionBackendIntegration
 backend-coordination internal/operations TestHistoryRetentionBackendIntegration
 backend-coordination internal/operations TestOutboxBackendIntegration
 backend-coordination internal/operations TestOutboxBackendIntegration/atomic-intent-and-ambiguous-commit

@@ -1,0 +1,343 @@
+{
+  "version": 29,
+  "previous_checksum": "c9777539237c92ae2a155bb4be443adc8f8d21e9054f4bb3bf6dc3bcb68ca482",
+  "engine": "mysql",
+  "parents": {
+    "9ad53381a9a75ae5e0594e4c958c326d1718914e1263964edee2679856f1a2c2": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_insert` BEFORE INSERT ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4773c63246e106dcefc690e13e13e9831aab421b2b22f595a7f708af25d57169",
+          "before": "",
+          "after": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_update` BEFORE UPDATE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "ae10115d4246c6aaca3ca221e5c13c8507a9d5bb6c3dcec15367da3b4bb600a9",
+          "before": "",
+          "after": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_delete` BEFORE DELETE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "340f8817ef6ae2143435cb58a4b50b7c2f997a3ef9d4cd9e36c7aeaaad9cf117",
+          "before": "",
+          "after": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e"
+        },
+        {
+          "name": "migrate_v4_time_telemetry_security_events_insert",
+          "object": "migrate_v4_time_telemetry_security_events_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_telemetry_security_events_insert` BEFORE INSERT ON `telemetry_security_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "bed7182e080bd47ad6166a7a4b555cc008d302e386118c2e07242e970e78055e",
+          "before": "",
+          "after": "2cafd484222404d74553a798f645e421f11317f04bce04401c475db55c9cf49b"
+        },
+        {
+          "name": "migrate_v4_time_telemetry_security_events_update",
+          "object": "migrate_v4_time_telemetry_security_events_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_telemetry_security_events_update` BEFORE UPDATE ON `telemetry_security_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "435bd6881cb5c95a67eacb2adf7bde8b1491ae5252e076f6a5f40790991d0886",
+          "before": "",
+          "after": "bfd0992b433b058762b86fc5f194951d22c97870c65485e8839c42970cda9ec2"
+        },
+        {
+          "name": "migrate_v4_time_telemetry_security_events_delete",
+          "object": "migrate_v4_time_telemetry_security_events_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_telemetry_security_events_delete` BEFORE DELETE ON `telemetry_security_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9d54321c19f4a142dea95fe0827b0f6c50004f4946470902aeef437f8b5fd026",
+          "before": "",
+          "after": "acb1df880adf4711d62f4e67a38cee41b343680de9afce48616bda9d61a75713"
+        },
+        {
+          "name": "audit_compaction_columns",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events ADD COLUMN details_compacted_at BIGINT NULL, ADD COLUMN compaction_key_id VARBINARY(128) NULL, ADD COLUMN compaction_mac VARBINARY(32) NULL, ADD CONSTRAINT audit_compaction_evidence CHECK ((details_compacted_at IS NULL AND compaction_key_id IS NULL AND compaction_mac IS NULL) OR (details_compacted_at IS NOT NULL AND compaction_key_id IS NOT NULL AND compaction_mac IS NOT NULL AND OCTET_LENGTH(compaction_key_id) BETWEEN 1 AND 128 AND OCTET_LENGTH(compaction_mac)=32 AND auth_version=1 AND reason IS NULL AND before_summary IS NULL AND after_summary IS NULL)), ADD INDEX audit_detail_retention_idx(details_compacted_at,occurred_at,id)",
+          "checksum": "adfdb000be47835698dbfc07a71f191628ebbabbc8cc4972ef2aca43346414fe",
+          "before": "0e826d5483283a796f49742b484de06ae7239a6d3751fd27912a8571bb26d539",
+          "after": "e906eaf8253d146c5e6da7fc520f27829a22859fe53349f4a31dbed609df28ec"
+        },
+        {
+          "name": "audit_compaction_drop_guard",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER audit_events_reject_update",
+          "checksum": "81603e6cf5dca7a2e76ca0682eb6a3bd6785f7cdc93d4e1a68b2f9b964cdfb90",
+          "before": "afd5324f7ffcc1b1805b6e40e1ec9a4f4f6ef2b61161ca2e43c4867af4cb14ef",
+          "after": ""
+        },
+        {
+          "name": "audit_compaction_guard",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_events_reject_update BEFORE UPDATE ON audit_events FOR EACH ROW BEGIN IF NOT (\n OLD.details_compacted_at IS NULL AND OLD.auth_version=1 AND BINARY OLD.action\u003c\u003eBINARY 'audit.auth.transition'\n AND NEW.details_compacted_at IS NOT NULL AND OLD.occurred_at\u003c=NEW.details_compacted_at-7776000000000\n AND NEW.details_compacted_at\u003c=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)\n AND NEW.reason IS NULL AND NEW.before_summary IS NULL AND NEW.after_summary IS NULL\n AND (CAST(NEW.`id` AS BINARY)\u003c=\u003eCAST(OLD.`id` AS BINARY)) AND (CAST(NEW.`workspace_id` AS BINARY)\u003c=\u003eCAST(OLD.`workspace_id` AS BINARY)) AND (CAST(NEW.`occurred_at` AS BINARY)\u003c=\u003eCAST(OLD.`occurred_at` AS BINARY)) AND (CAST(NEW.`actor_type` AS BINARY)\u003c=\u003eCAST(OLD.`actor_type` AS BINARY)) AND (CAST(NEW.`actor_id` AS BINARY)\u003c=\u003eCAST(OLD.`actor_id` AS BINARY)) AND (CAST(NEW.`source_session_id` AS BINARY)\u003c=\u003eCAST(OLD.`source_session_id` AS BINARY)) AND (CAST(NEW.`action` AS BINARY)\u003c=\u003eCAST(OLD.`action` AS BINARY)) AND (CAST(NEW.`resource_type` AS BINARY)\u003c=\u003eCAST(OLD.`resource_type` AS BINARY)) AND (CAST(NEW.`resource_id` AS BINARY)\u003c=\u003eCAST(OLD.`resource_id` AS BINARY)) AND (CAST(NEW.`node_id` AS BINARY)\u003c=\u003eCAST(OLD.`node_id` AS BINARY)) AND (CAST(NEW.`request_id` AS BINARY)\u003c=\u003eCAST(OLD.`request_id` AS BINARY)) AND (CAST(NEW.`trace_id` AS BINARY)\u003c=\u003eCAST(OLD.`trace_id` AS BINARY)) AND (CAST(NEW.`command_id` AS BINARY)\u003c=\u003eCAST(OLD.`command_id` AS BINARY)) AND (CAST(NEW.`approval_id` AS BINARY)\u003c=\u003eCAST(OLD.`approval_id` AS BINARY)) AND (CAST(NEW.`result` AS BINARY)\u003c=\u003eCAST(OLD.`result` AS BINARY)) AND (CAST(NEW.`error_type` AS BINARY)\u003c=\u003eCAST(OLD.`error_type` AS BINARY)) AND (CAST(NEW.`previous_event_hash` AS BINARY)\u003c=\u003eCAST(OLD.`previous_event_hash` AS BINARY)) AND (CAST(NEW.`event_hash` AS BINARY)\u003c=\u003eCAST(OLD.`event_hash` AS BINARY)) AND (CAST(NEW.`auth_version` AS BINARY)\u003c=\u003eCAST(OLD.`auth_version` AS BINARY)) AND (CAST(NEW.`event_key_id` AS BINARY)\u003c=\u003eCAST(OLD.`event_key_id` AS BINARY)) AND (CAST(NEW.`event_mac` AS BINARY)\u003c=\u003eCAST(OLD.`event_mac` AS BINARY))) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit permits only authenticated aged detail compaction'; END IF; END",
+          "checksum": "3288d27e7fde1d86af802c866948fd149cdc304ef9d4c856abea5fb5a3998fef",
+          "before": "",
+          "after": "ba2087afbd4d5fdeffeabade078bd579b78df879f939345e33199d5cfe6817fb"
+        },
+        {
+          "name": "audit_compact_detail",
+          "object": "audit_compact_detail",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE audit_compact_detail(IN p_id VARBINARY(16),IN p_hash VARBINARY(32),IN p_key VARBINARY(128),IN p_mac VARBINARY(32),IN p_at BIGINT) SQL SECURITY DEFINER BEGIN UPDATE audit_events SET reason=NULL,before_summary=NULL,after_summary=NULL,details_compacted_at=p_at,compaction_key_id=p_key,compaction_mac=p_mac WHERE id=p_id AND event_hash=p_hash AND details_compacted_at IS NULL AND auth_version=1 AND BINARY action\u003c\u003eBINARY 'audit.auth.transition' AND occurred_at\u003c=p_at-7776000000000 AND p_at\u003c=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED); SELECT ROW_COUNT()=1; END",
+          "checksum": "48e32b39ed0afce74adcf3dbbfab99ea8c8419300c0df25b8946ea371ad044cd",
+          "before": "",
+          "after": "4b15b21344c4e118d13e5a58743d17c7a416efa70b4576d466c6fe39f09e3cc8"
+        },
+        {
+          "name": "security_detail_columns",
+          "object": "telemetry_security_events",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_security_events ADD COLUMN details_compacted_at BIGINT NULL, ADD COLUMN detail_sha256 VARBINARY(32) NULL, ADD CONSTRAINT security_detail_evidence CHECK ((details_compacted_at IS NULL AND detail_sha256 IS NULL) OR (details_compacted_at IS NOT NULL AND detail_sha256 IS NOT NULL AND OCTET_LENGTH(detail_sha256)=32 AND BINARY detail=BINARY '{}')), ADD INDEX security_detail_retention_idx(details_compacted_at,observed_at,event_id)",
+          "checksum": "3347f44fd863abd0a618135f3ad2b7cb77607eaecb2a8e03d5c5d8aedb5589c5",
+          "before": "c736861c1f7c95c0bfa674e072e0e3e6eee8611cd610c7d7b5eec79f30f1071a",
+          "after": "53b330f15111a22f197885bce02d9de5c55cd3f1bec5c0a2a01643018554c0c6"
+        },
+        {
+          "name": "security_compact_details",
+          "object": "security_compact_details",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE security_compact_details(IN p_cutoff BIGINT) SQL SECURITY DEFINER BEGIN UPDATE telemetry_security_events SET detail_sha256=UNHEX(SHA2(detail,256)),detail='{}',details_compacted_at=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED) WHERE details_compacted_at IS NULL AND observed_at\u003cLEAST(p_cutoff,CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)-7776000000000) ORDER BY observed_at,event_id LIMIT 32; END",
+          "checksum": "45ad675b79e25289c06493072c3fe144baa97ba2d2fb569b3a881c75727dbf71",
+          "before": "",
+          "after": "87a9648de7e89b83a9ab3287a2ef22d67a667a7760d54acee75933488cd07035"
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_insert`",
+          "checksum": "a6beecda06254ecb621268b02420cb9f4be7981d1b484561aae356aff310b458",
+          "before": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_update`",
+          "checksum": "d681747b01fdccb13a8620c4163128badd6284ec63918d651f3f0d5edddd4149",
+          "before": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_delete`",
+          "checksum": "0c4c4d00c5a42063ecc98d3da4cc115be920638a199fb4354879a231a35b015d",
+          "before": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_telemetry_security_events_insert",
+          "object": "migrate_v4_time_telemetry_security_events_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_telemetry_security_events_insert`",
+          "checksum": "70058d99a58e9eb8aa02627706884a112fc662e1b126a35fed8257c94758bfe1",
+          "before": "2cafd484222404d74553a798f645e421f11317f04bce04401c475db55c9cf49b",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_telemetry_security_events_update",
+          "object": "migrate_v4_time_telemetry_security_events_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_telemetry_security_events_update`",
+          "checksum": "39b15b4be03cf8de3e92e5b5e528f268ca9edafbf5c74722c020604b21ed8645",
+          "before": "bfd0992b433b058762b86fc5f194951d22c97870c65485e8839c42970cda9ec2",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_telemetry_security_events_delete",
+          "object": "migrate_v4_time_telemetry_security_events_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_telemetry_security_events_delete`",
+          "checksum": "03f411d774442aee791650be2d423e9df1370edd26e8bea16e6d9e82555d6587",
+          "before": "acb1df880adf4711d62f4e67a38cee41b343680de9afce48616bda9d61a75713",
+          "after": ""
+        }
+      ]
+    },
+    "f04cb4c7ad10885d4dad1d90c8bc92789fa0bf403e5e3316c384a1a8d233ea8f": {
+      "steps": [
+        {
+          "name": "migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_insert` BEFORE INSERT ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "4773c63246e106dcefc690e13e13e9831aab421b2b22f595a7f708af25d57169",
+          "before": "",
+          "after": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_update` BEFORE UPDATE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "ae10115d4246c6aaca3ca221e5c13c8507a9d5bb6c3dcec15367da3b4bb600a9",
+          "before": "",
+          "after": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a"
+        },
+        {
+          "name": "migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_audit_events_delete` BEFORE DELETE ON `audit_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "340f8817ef6ae2143435cb58a4b50b7c2f997a3ef9d4cd9e36c7aeaaad9cf117",
+          "before": "",
+          "after": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e"
+        },
+        {
+          "name": "migrate_v4_time_telemetry_security_events_insert",
+          "object": "migrate_v4_time_telemetry_security_events_insert",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_telemetry_security_events_insert` BEFORE INSERT ON `telemetry_security_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "bed7182e080bd47ad6166a7a4b555cc008d302e386118c2e07242e970e78055e",
+          "before": "",
+          "after": "2cafd484222404d74553a798f645e421f11317f04bce04401c475db55c9cf49b"
+        },
+        {
+          "name": "migrate_v4_time_telemetry_security_events_update",
+          "object": "migrate_v4_time_telemetry_security_events_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_telemetry_security_events_update` BEFORE UPDATE ON `telemetry_security_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "435bd6881cb5c95a67eacb2adf7bde8b1491ae5252e076f6a5f40790991d0886",
+          "before": "",
+          "after": "bfd0992b433b058762b86fc5f194951d22c97870c65485e8839c42970cda9ec2"
+        },
+        {
+          "name": "migrate_v4_time_telemetry_security_events_delete",
+          "object": "migrate_v4_time_telemetry_security_events_delete",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER `migrate_v4_time_telemetry_security_events_delete` BEFORE DELETE ON `telemetry_security_events` FOR EACH ROW BEGIN DECLARE holder BIGINT; SET holder=IS_USED_LOCK(CONCAT('ocservia:',LEFT(SHA2(DATABASE(),256),48))); IF holder IS NULL OR holder\u003c\u003eCONNECTION_ID() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='time migration requires exclusive writer'; END IF; END",
+          "checksum": "9d54321c19f4a142dea95fe0827b0f6c50004f4946470902aeef437f8b5fd026",
+          "before": "",
+          "after": "acb1df880adf4711d62f4e67a38cee41b343680de9afce48616bda9d61a75713"
+        },
+        {
+          "name": "audit_compaction_columns",
+          "object": "audit_events",
+          "kind": "table",
+          "sql": "ALTER TABLE audit_events ADD COLUMN details_compacted_at BIGINT NULL, ADD COLUMN compaction_key_id VARBINARY(128) NULL, ADD COLUMN compaction_mac VARBINARY(32) NULL, ADD CONSTRAINT audit_compaction_evidence CHECK ((details_compacted_at IS NULL AND compaction_key_id IS NULL AND compaction_mac IS NULL) OR (details_compacted_at IS NOT NULL AND compaction_key_id IS NOT NULL AND compaction_mac IS NOT NULL AND OCTET_LENGTH(compaction_key_id) BETWEEN 1 AND 128 AND OCTET_LENGTH(compaction_mac)=32 AND auth_version=1 AND reason IS NULL AND before_summary IS NULL AND after_summary IS NULL)), ADD INDEX audit_detail_retention_idx(details_compacted_at,occurred_at,id)",
+          "checksum": "adfdb000be47835698dbfc07a71f191628ebbabbc8cc4972ef2aca43346414fe",
+          "before": "0e826d5483283a796f49742b484de06ae7239a6d3751fd27912a8571bb26d539",
+          "after": "e906eaf8253d146c5e6da7fc520f27829a22859fe53349f4a31dbed609df28ec"
+        },
+        {
+          "name": "audit_compaction_drop_guard",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER audit_events_reject_update",
+          "checksum": "81603e6cf5dca7a2e76ca0682eb6a3bd6785f7cdc93d4e1a68b2f9b964cdfb90",
+          "before": "afd5324f7ffcc1b1805b6e40e1ec9a4f4f6ef2b61161ca2e43c4867af4cb14ef",
+          "after": ""
+        },
+        {
+          "name": "audit_compaction_guard",
+          "object": "audit_events_reject_update",
+          "kind": "trigger",
+          "sql": "CREATE TRIGGER audit_events_reject_update BEFORE UPDATE ON audit_events FOR EACH ROW BEGIN IF NOT (\n OLD.details_compacted_at IS NULL AND OLD.auth_version=1 AND BINARY OLD.action\u003c\u003eBINARY 'audit.auth.transition'\n AND NEW.details_compacted_at IS NOT NULL AND OLD.occurred_at\u003c=NEW.details_compacted_at-7776000000000\n AND NEW.details_compacted_at\u003c=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)\n AND NEW.reason IS NULL AND NEW.before_summary IS NULL AND NEW.after_summary IS NULL\n AND (CAST(NEW.`id` AS BINARY)\u003c=\u003eCAST(OLD.`id` AS BINARY)) AND (CAST(NEW.`workspace_id` AS BINARY)\u003c=\u003eCAST(OLD.`workspace_id` AS BINARY)) AND (CAST(NEW.`occurred_at` AS BINARY)\u003c=\u003eCAST(OLD.`occurred_at` AS BINARY)) AND (CAST(NEW.`actor_type` AS BINARY)\u003c=\u003eCAST(OLD.`actor_type` AS BINARY)) AND (CAST(NEW.`actor_id` AS BINARY)\u003c=\u003eCAST(OLD.`actor_id` AS BINARY)) AND (CAST(NEW.`source_session_id` AS BINARY)\u003c=\u003eCAST(OLD.`source_session_id` AS BINARY)) AND (CAST(NEW.`action` AS BINARY)\u003c=\u003eCAST(OLD.`action` AS BINARY)) AND (CAST(NEW.`resource_type` AS BINARY)\u003c=\u003eCAST(OLD.`resource_type` AS BINARY)) AND (CAST(NEW.`resource_id` AS BINARY)\u003c=\u003eCAST(OLD.`resource_id` AS BINARY)) AND (CAST(NEW.`node_id` AS BINARY)\u003c=\u003eCAST(OLD.`node_id` AS BINARY)) AND (CAST(NEW.`request_id` AS BINARY)\u003c=\u003eCAST(OLD.`request_id` AS BINARY)) AND (CAST(NEW.`trace_id` AS BINARY)\u003c=\u003eCAST(OLD.`trace_id` AS BINARY)) AND (CAST(NEW.`command_id` AS BINARY)\u003c=\u003eCAST(OLD.`command_id` AS BINARY)) AND (CAST(NEW.`approval_id` AS BINARY)\u003c=\u003eCAST(OLD.`approval_id` AS BINARY)) AND (CAST(NEW.`result` AS BINARY)\u003c=\u003eCAST(OLD.`result` AS BINARY)) AND (CAST(NEW.`error_type` AS BINARY)\u003c=\u003eCAST(OLD.`error_type` AS BINARY)) AND (CAST(NEW.`previous_event_hash` AS BINARY)\u003c=\u003eCAST(OLD.`previous_event_hash` AS BINARY)) AND (CAST(NEW.`event_hash` AS BINARY)\u003c=\u003eCAST(OLD.`event_hash` AS BINARY)) AND (CAST(NEW.`auth_version` AS BINARY)\u003c=\u003eCAST(OLD.`auth_version` AS BINARY)) AND (CAST(NEW.`event_key_id` AS BINARY)\u003c=\u003eCAST(OLD.`event_key_id` AS BINARY)) AND (CAST(NEW.`event_mac` AS BINARY)\u003c=\u003eCAST(OLD.`event_mac` AS BINARY))) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit permits only authenticated aged detail compaction'; END IF; END",
+          "checksum": "3288d27e7fde1d86af802c866948fd149cdc304ef9d4c856abea5fb5a3998fef",
+          "before": "",
+          "after": "ba2087afbd4d5fdeffeabade078bd579b78df879f939345e33199d5cfe6817fb"
+        },
+        {
+          "name": "audit_compact_detail",
+          "object": "audit_compact_detail",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE audit_compact_detail(IN p_id VARBINARY(16),IN p_hash VARBINARY(32),IN p_key VARBINARY(128),IN p_mac VARBINARY(32),IN p_at BIGINT) SQL SECURITY DEFINER BEGIN UPDATE audit_events SET reason=NULL,before_summary=NULL,after_summary=NULL,details_compacted_at=p_at,compaction_key_id=p_key,compaction_mac=p_mac WHERE id=p_id AND event_hash=p_hash AND details_compacted_at IS NULL AND auth_version=1 AND BINARY action\u003c\u003eBINARY 'audit.auth.transition' AND occurred_at\u003c=p_at-7776000000000 AND p_at\u003c=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED); SELECT ROW_COUNT()=1; END",
+          "checksum": "48e32b39ed0afce74adcf3dbbfab99ea8c8419300c0df25b8946ea371ad044cd",
+          "before": "",
+          "after": "4b15b21344c4e118d13e5a58743d17c7a416efa70b4576d466c6fe39f09e3cc8"
+        },
+        {
+          "name": "security_detail_columns",
+          "object": "telemetry_security_events",
+          "kind": "table",
+          "sql": "ALTER TABLE telemetry_security_events ADD COLUMN details_compacted_at BIGINT NULL, ADD COLUMN detail_sha256 VARBINARY(32) NULL, ADD CONSTRAINT security_detail_evidence CHECK ((details_compacted_at IS NULL AND detail_sha256 IS NULL) OR (details_compacted_at IS NOT NULL AND detail_sha256 IS NOT NULL AND OCTET_LENGTH(detail_sha256)=32 AND BINARY detail=BINARY '{}')), ADD INDEX security_detail_retention_idx(details_compacted_at,observed_at,event_id)",
+          "checksum": "3347f44fd863abd0a618135f3ad2b7cb77607eaecb2a8e03d5c5d8aedb5589c5",
+          "before": "c736861c1f7c95c0bfa674e072e0e3e6eee8611cd610c7d7b5eec79f30f1071a",
+          "after": "53b330f15111a22f197885bce02d9de5c55cd3f1bec5c0a2a01643018554c0c6"
+        },
+        {
+          "name": "security_compact_details",
+          "object": "security_compact_details",
+          "kind": "procedure",
+          "sql": "CREATE PROCEDURE security_compact_details(IN p_cutoff BIGINT) SQL SECURITY DEFINER BEGIN UPDATE telemetry_security_events SET detail_sha256=UNHEX(SHA2(detail,256)),detail='{}',details_compacted_at=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED) WHERE details_compacted_at IS NULL AND observed_at\u003cLEAST(p_cutoff,CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)-7776000000000) ORDER BY observed_at,event_id LIMIT 32; END",
+          "checksum": "45ad675b79e25289c06493072c3fe144baa97ba2d2fb569b3a881c75727dbf71",
+          "before": "",
+          "after": "87a9648de7e89b83a9ab3287a2ef22d67a667a7760d54acee75933488cd07035"
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_insert",
+          "object": "migrate_v4_time_audit_events_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_insert`",
+          "checksum": "a6beecda06254ecb621268b02420cb9f4be7981d1b484561aae356aff310b458",
+          "before": "3d3229b5a3e15c82be5b66cae467eab30075186661ae1d3e13387b913eb7f4f7",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_update",
+          "object": "migrate_v4_time_audit_events_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_update`",
+          "checksum": "d681747b01fdccb13a8620c4163128badd6284ec63918d651f3f0d5edddd4149",
+          "before": "ebe0c23ed6d2056d0e46ebf5e2cebcb1b74cb7b6a60d9b61ffae7cdb485ba42a",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_audit_events_delete",
+          "object": "migrate_v4_time_audit_events_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_audit_events_delete`",
+          "checksum": "0c4c4d00c5a42063ecc98d3da4cc115be920638a199fb4354879a231a35b015d",
+          "before": "06fa28dcce2d477ccf1455ab326b2e255236e8311914a676d4fbdeb2559f933e",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_telemetry_security_events_insert",
+          "object": "migrate_v4_time_telemetry_security_events_insert",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_telemetry_security_events_insert`",
+          "checksum": "70058d99a58e9eb8aa02627706884a112fc662e1b126a35fed8257c94758bfe1",
+          "before": "2cafd484222404d74553a798f645e421f11317f04bce04401c475db55c9cf49b",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_telemetry_security_events_update",
+          "object": "migrate_v4_time_telemetry_security_events_update",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_telemetry_security_events_update`",
+          "checksum": "39b15b4be03cf8de3e92e5b5e528f268ca9edafbf5c74722c020604b21ed8645",
+          "before": "bfd0992b433b058762b86fc5f194951d22c97870c65485e8839c42970cda9ec2",
+          "after": ""
+        },
+        {
+          "name": "drop_migrate_v4_time_telemetry_security_events_delete",
+          "object": "migrate_v4_time_telemetry_security_events_delete",
+          "kind": "trigger",
+          "sql": "DROP TRIGGER `migrate_v4_time_telemetry_security_events_delete`",
+          "checksum": "03f411d774442aee791650be2d423e9df1370edd26e8bea16e6d9e82555d6587",
+          "before": "acb1df880adf4711d62f4e67a38cee41b343680de9afce48616bda9d61a75713",
+          "after": ""
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006",
+    "backend_schema_revisions": "e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"
+  }
+}

@@ -28,6 +28,7 @@ import (
 //go:embed mysql/000026.json mariadb/000026.json
 //go:embed mysql/000027.json mariadb/000027.json
 //go:embed mysql/000028.json mariadb/000028.json
+//go:embed mysql/000029.json mariadb/000029.json
 var manifests embed.FS
 
 type step struct {

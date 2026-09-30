@@ -3357,6 +3357,11 @@ components:
         workspace_id: { $ref: "#/components/schemas/UuidV7" }
         events: { type: integer, format: int64, minimum: 0 }
         valid: { type: boolean }
+        compacted_events:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Events whose aged detail is replaced by an authenticated retained record.
         checkpoint_valid: { type: boolean }
     Problem:
       type: object

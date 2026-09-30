@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -20,6 +21,9 @@ type Store interface {
 	AddCheckpoint(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []byte, []byte) error
 	Workspaces(context.Context) (database.Rows, error)
 	CheckpointHash(context.Context, uuid.UUID, uuid.UUID) ([]byte, error)
+	ExpiredDetails(context.Context, value.Timestamp) (database.Rows, error)
+	CompactDetails(context.Context, uuid.UUID, []byte, string, []byte, value.Timestamp) error
+	CompactSecurity(context.Context, value.Timestamp) error
 }
 
 type Provider interface{ AuditStore() Store }
