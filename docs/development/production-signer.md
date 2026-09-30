@@ -51,7 +51,8 @@ certificates. `health --url https://signer:9443/healthz` verifies HTTPS using
 `--tls-ca`; it rejects redirects. Health can use loopback only if SAN permits.
 Restart after repairing a storage fault; restarting does not erase state.
 
-The three POST paths are exactly `/sign`, `/sign/revoke`, `/sign/seal`.
+The POST paths are exactly `/sign`, `/sign/revoke`, `/sign/seal`, and
+`/sign/public-key`.
 JSON requests are capped at 64 KiB, raw sealing requests at 512 bytes and then
 the actual RSA-OAEP capacity (190 bytes for RSA-2048). At most 32 requests enter
 business handling; excess returns 503. Header/read/write/idle timeouts are
@@ -232,3 +233,33 @@ sessions. Raw keys, credentials and login cookies remain private to the runner.
 browser and business evidence are retained as sanitized Actions artifacts.
 Missing files or failed assertions block acceptance and merge. A PR opened
 while validation is running is not evidence of acceptance.
+
+
+## Browser password sealing
+
+The authenticated `POST /sign/public-key` accepts only `node_id` and
+`purpose=user_password`. It reads the enabled durable binding established by
+`import-binding`, and returns its workspace, node, endpoint, version, key ID,
+SHA-256 fingerprint and RSA SPKI DER (standard base64). It uses the existing
+Bearer authentication, admission limits and JSON bounds. Disabled or missing
+bindings are rejected, including after restart; no private keys are returned.
+The fifteen-minute import freshness check is not a key expiry time.
+
+Controller `GET /api/v1/nodes/{node_id}/user-password-sealing-key` requires the
+existing node-scoped `user.manage` permission. The API role reuses its configured
+HTTPS Signer and dedicated CA client. Enrollment checks the response against
+current node/workspace/endpoint state, approved `ocserv.users.write` capability
+and the enrolled purpose/version/key ID/fingerprint, then verifies SPKI digest,
+RSA size and exponent. Mismatches return 409; an unavailable source returns 503.
+Responses use `Cache-Control: no-store`. A rotated descriptor requires matching
+trusted provisioning; this read never imports or replaces a binding.
+
+The Create user and Rotate password dialogs accept ordinary passwords. In a
+secure browser context, WebCrypto seals UTF-8 bytes with RSA-OAEP/SHA-256
+(MGF1-SHA-256, empty label) into the existing version-1 `user_password` envelope.
+Only ciphertext reaches the existing mutation API. The page clears input
+before asynchronous work and clears byte buffers on success, failure or stale
+completion; closing, changing node/workspace, and unmounting cancel the read.
+Passwords are never placed in receipts, URLs, logs, analytics or browser storage.
+Retry after failure requires re-entry. Existing mutation authorization, desired
+revision, signed command and privd checks remain in force.

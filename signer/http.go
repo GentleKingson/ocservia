@@ -40,7 +40,7 @@ func (s *service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		return
 	}
-	if r.URL.Path != "/sign" && r.URL.Path != "/sign/revoke" && r.URL.Path != "/sign/seal" {
+	if r.URL.Path != "/sign" && r.URL.Path != "/sign/revoke" && r.URL.Path != "/sign/seal" && r.URL.Path != "/sign/public-key" {
 		http.NotFound(w, r)
 		return
 	}
@@ -93,6 +93,18 @@ func (s *service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			err = statusError(400)
 		} else {
 			response, err = s.seal(node, use, body)
+		}
+	} else if r.URL.Path == "/sign/public-key" {
+		var req struct {
+			NodeID  string `json:"node_id"`
+			Purpose string `json:"purpose"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&req) != nil || decoder.Decode(new(any)) != io.EOF || !validUUID(req.NodeID) || req.Purpose != "user_password" {
+			err = statusError(400)
+		} else {
+			response, err = s.userPasswordPublicKey(req.NodeID)
 		}
 	} else {
 		var req struct {

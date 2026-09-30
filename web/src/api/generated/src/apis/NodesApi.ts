@@ -94,6 +94,11 @@ import {
   UserGroupStatePageToJSON,
 } from "../models/UserGroupStatePage";
 import {
+  type UserPasswordSealingKey,
+  UserPasswordSealingKeyFromJSON,
+  UserPasswordSealingKeyToJSON,
+} from "../models/UserPasswordSealingKey";
+import {
   type UserPolicy,
   UserPolicyFromJSON,
   UserPolicyToJSON,
@@ -111,6 +116,10 @@ export interface CreatePrivdAttestationCredentialRequest {
 }
 
 export interface GetNodeRequest {
+  nodeId: string;
+}
+
+export interface GetNodeUserPasswordSealingKeyRequest {
   nodeId: string;
 }
 
@@ -396,6 +405,78 @@ export class NodesApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<NodeObservedState> {
     const response = await this.getNodeRaw(requestParameters, initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getNodeUserPasswordSealingKey without sending the request
+   */
+  async getNodeUserPasswordSealingKeyRequestOpts(
+    requestParameters: GetNodeUserPasswordSealingKeyRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling getNodeUserPasswordSealingKey().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/user-password-sealing-key`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Requires user.manage. Validates the enabled Signer binding against the current approved node endpoint and sealing descriptor. No key TTL is implied. Responses are not cacheable.
+   * Read a verified node public key for browser password sealing
+   */
+  async getNodeUserPasswordSealingKeyRaw(
+    requestParameters: GetNodeUserPasswordSealingKeyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<UserPasswordSealingKey>> {
+    const requestOptions =
+      await this.getNodeUserPasswordSealingKeyRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      UserPasswordSealingKeyFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Requires user.manage. Validates the enabled Signer binding against the current approved node endpoint and sealing descriptor. No key TTL is implied. Responses are not cacheable.
+   * Read a verified node public key for browser password sealing
+   */
+  async getNodeUserPasswordSealingKey(
+    requestParameters: GetNodeUserPasswordSealingKeyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<UserPasswordSealingKey> {
+    const response = await this.getNodeUserPasswordSealingKeyRaw(
+      requestParameters,
+      initOverrides,
+    );
     return await response.value();
   }
 

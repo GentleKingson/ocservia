@@ -179,3 +179,30 @@ func (s *service) seal(node, use string, plaintext []byte) (map[string]any, erro
 	}
 	return map[string]any{"sealed": encrypted, "key_id": selected.KeyID, "version": selected.Version, "purpose": use}, nil
 }
+
+// Read only the durable binding accepted by importBinding. Its import deadline
+// is not a lifetime for the enrolled key; disabling the binding revokes reads.
+func (s *service) userPasswordPublicKey(node string) (map[string]any, error) {
+	var response map[string]any
+	err := s.db.View(func(tx *bolt.Tx) error {
+		var b binding
+		data := tx.Bucket([]byte("bindings")).Get([]byte(node))
+		if data == nil {
+			return statusError(403)
+		}
+		if json.Unmarshal(data, &b) != nil || b.NodeID != node || validateBinding(b) != nil {
+			return invalidState
+		}
+		if b.Disabled {
+			return statusError(403)
+		}
+		for _, k := range b.Keys {
+			if k.Purpose == "user_password" {
+				response = map[string]any{"workspace_id": b.WorkspaceID, "node_id": b.NodeID, "endpoint_id": b.EndpointID, "purpose": k.Purpose, "version": k.Version, "key_id": k.KeyID, "public_key_sha256": k.Digest, "public_key_der": append([]byte(nil), k.DER...)}
+				return nil
+			}
+		}
+		return statusError(403)
+	})
+	return response, err
+}

@@ -101,6 +101,7 @@ export * from "./UserGroupResourceState";
 export * from "./UserGroupStatePage";
 export * from "./UserOperationMetrics";
 export * from "./UserPasswordSealedSecretV1";
+export * from "./UserPasswordSealingKey";
 export * from "./UserPolicy";
 export * from "./UserPolicyRequest";
 export * from "./Workspace";
