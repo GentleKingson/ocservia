@@ -86,6 +86,9 @@ const renderer = createRenderer<object, object>({
 });
 
 interface View {
+  detailState: string;
+  detailLoading: boolean;
+  selectRouteNode(): Promise<void>;
   configDialog: boolean;
   configLoading: boolean;
   configError: string;
@@ -838,3 +841,19 @@ describe("node workflow context isolation", () => {
     expect(view.policyDialog).toEqual({ username: "bob" });
   });
 });
+
+it.each([
+  ["notFound", "not-found"],
+  ["unavailable", "unavailable"],
+])(
+  "uses the node response to classify %s rather than a cached list",
+  async (error, expected) => {
+    const view = await mount();
+    mocks.fleet.nodes = [{ id: "some-other-node" }];
+    mocks.fleet.selected = undefined;
+    mocks.fleet.selectionError = error;
+    await view.selectRouteNode();
+    expect(view.detailLoading).toBe(false);
+    expect(view.detailState).toBe(expected);
+  },
+);
