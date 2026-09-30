@@ -4,7 +4,7 @@ import (
 	"context"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
+	historyretention "github.com/GentleKingson/ocservia/control-plane/internal/historyretention/store"
 	"github.com/google/uuid"
 )
 
