@@ -262,14 +262,7 @@ impl Journal {
                 PRIMARY KEY(resource_type,resource_key)
              ) STRICT;",
         )?;
-        let retired: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_metadata WHERE key='retired_binding')",
-            [],
-            |row| row.get(0),
-        )?;
-        if retired {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
+        reject_retired_binding(&connection)?;
         migrate_command_journal(&connection)?;
         migrate_applied_resource_revisions(&connection)?;
         let integrity: String =
@@ -1008,6 +1001,18 @@ impl Journal {
 /// New databases already include every column via the `CREATE TABLE` statement.
 /// Pre-existing databases are upgraded with `ALTER TABLE … ADD COLUMN` guarded
 /// by a `PRAGMA table_info` presence check.
+fn reject_retired_binding(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let retired: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_metadata WHERE key='retired_binding')",
+        [],
+        |row| row.get(0),
+    )?;
+    if retired {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
 fn migrate_command_journal(connection: &Connection) -> Result<(), rusqlite::Error> {
     if !has_column(connection, "error_code")? {
         connection.execute(
