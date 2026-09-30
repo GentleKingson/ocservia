@@ -74,7 +74,7 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test"}`, workspaceID.String())))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test","expected_endpoint_id":"1111111111111111111111111111111111111111111111111111111111111111"}`, workspaceID.String())))
 	request.Header.Set("Content-Type", "application/json")
 	request = request.WithContext(context.WithValue(request.Context(), requestIDKey{}, uuid.Must(uuid.NewV7()).String()))
 	response := httptest.NewRecorder()
@@ -83,11 +83,17 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 		t.Fatalf("bootstrap token status=%d cache-control=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
 	}
 	var body struct {
-		Token string `json:"token"`
+		Token string    `json:"token"`
+		ID    uuid.UUID `json:"id"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || !strings.HasPrefix(body.Token, enrollment.BootstrapTokenPrefix) {
 		t.Fatalf("bootstrap token response=%q err=%v", body.Token, err)
 	}
+	var endpoint string
+	if err := pool.QueryRow(ctx, `SELECT encode(expected_endpoint_id,'hex') FROM node_bootstrap_tokens WHERE id=$1`, body.ID).Scan(&endpoint); err != nil || endpoint != strings.Repeat("11", 32) {
+		t.Fatalf("endpoint restriction not persisted: %q %v", endpoint, err)
+	}
+
 }
 
 func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error) {

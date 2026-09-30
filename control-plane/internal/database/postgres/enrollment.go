@@ -27,7 +27,7 @@ func (s enrollmentStore) WorkspaceExists(ctx context.Context, id uuid.UUID) (v b
 
 func (s enrollmentStore) InsertToken(ctx context.Context, v enrollmentstore.Token, bootstrap bool) error {
 	if bootstrap {
-		_, err := s.Exec(ctx, `INSERT INTO node_bootstrap_tokens(id,workspace_id,token_hash,expected_environment,expected_node_name,expires_at,created_by,created_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, v.ID, v.WorkspaceID, v.Hash, v.Environment, v.ExpectedName, v.ExpiresAt, v.CreatedBy, v.CreatedAt)
+		_, err := s.Exec(ctx, `INSERT INTO node_bootstrap_tokens(id,workspace_id,token_hash,expected_environment,expected_node_name,expires_at,created_by,created_at,expected_endpoint_id)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, v.ID, v.WorkspaceID, v.Hash, v.Environment, v.ExpectedName, v.ExpiresAt, v.CreatedBy, v.CreatedAt, v.ExpectedEndpoint)
 		return err
 	}
 	_, err := s.Exec(ctx, `INSERT INTO enrollment_tokens(id,workspace_id,token_hash,expected_environment,expected_node_name,expected_endpoint_id,expires_at,created_by,created_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, v.ID, v.WorkspaceID, v.Hash, v.Environment, v.ExpectedName, v.Endpoint, v.ExpiresAt, v.CreatedBy, v.CreatedAt)
@@ -39,11 +39,11 @@ func (s enrollmentStore) TokenByHash(ctx context.Context, hash []byte, bootstrap
 	if bootstrap {
 		endpoint = "bound_endpoint_id"
 	}
-	q := `SELECT id,workspace_id,expected_environment,expected_node_name,` + endpoint + `,expires_at,consumed_at,consumed_node_id,created_at FROM ` + enrollmentTokenTable(bootstrap) + ` WHERE token_hash=$1`
+	q := `SELECT id,workspace_id,expected_environment,expected_node_name,` + endpoint + `,expires_at,consumed_at,consumed_node_id,created_at,expected_endpoint_id FROM ` + enrollmentTokenTable(bootstrap) + ` WHERE token_hash=$1`
 	if lock {
 		q += " FOR UPDATE"
 	}
-	err = s.QueryRow(ctx, q, hash).Scan(&v.ID, &v.WorkspaceID, &v.Environment, &v.ExpectedName, &v.Endpoint, &v.ExpiresAt, &v.ConsumedAt, &v.ConsumedNode, &v.CreatedAt)
+	err = s.QueryRow(ctx, q, hash).Scan(&v.ID, &v.WorkspaceID, &v.Environment, &v.ExpectedName, &v.Endpoint, &v.ExpiresAt, &v.ConsumedAt, &v.ConsumedNode, &v.CreatedAt, &v.ExpectedEndpoint)
 	return
 }
 

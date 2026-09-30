@@ -125,6 +125,10 @@ func TestAuthorRevisionTwentySix(t *testing.T) {
 	authorRevision(t, 26, TelemetryLookupSteps(testOptions(t).Engine))
 }
 
+func TestAuthorRevisionTwentySeven(t *testing.T) {
+	authorRevision(t, 27, []LongKeyStep{{Name: "bootstrap_endpoint_authority", Object: "node_bootstrap_tokens", Kind: "table", SQL: "ALTER TABLE node_bootstrap_tokens ADD COLUMN expected_endpoint_id VARBINARY(32) NULL CHECK (expected_endpoint_id IS NULL OR OCTET_LENGTH(expected_endpoint_id)=32)"}})
+}
+
 func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	output := os.Getenv("PR02_AUTHOR_DIRECTORY")
 	if output == "" {
