@@ -125,6 +125,7 @@ DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 OS_RELEASE_FILE="${OCSERV_MANAGED_NODE_OS_RELEASE:-/etc/os-release}"
 SYSROOT="${OCSERV_MANAGED_NODE_SYSROOT:-}"
 AGENT_BINARY="${SYSROOT}/usr/libexec/ocservia/ocservia-agent"
+PRIVD_BINARY="${SYSROOT}/usr/libexec/ocservia/ocservia-privd"
 RELAY_DROPIN="${SYSROOT}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 REQUEST_MARKER="${SYSROOT}/etc/ocservia/agent-install-production-relays"
 TRUSTED_FINGERPRINT_FILE="/etc/ocservia/trusted-release-key.sha256"
@@ -1250,6 +1251,11 @@ else
   verify_release_trust
   install_native_package
 fi
+# The verified native payload owns host validation. Run as root, before any
+# registration identity, sealing material, final configuration or token use.
+[[ -x "${PRIVD_BINARY}" ]] || fail "the native package did not install ${PRIVD_BINARY}"
+priv "${PRIVD_BINARY}" --host-preflight ||
+  fail "host preflight failed before enrollment; follow the resource diagnostic, correct the host deliberately, and rerun"
 resolve_agent_group
 detect_enrolled_node
 if [[ -z "${ENROLLED_NODE_ID}" ]]; then
