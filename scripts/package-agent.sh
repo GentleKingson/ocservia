@@ -55,7 +55,7 @@ install -m 0644 -- "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf
 install -m 0755 -- "${ROOT}/deploy/production/systemd/agent-relays.sh" "${package_root}/deploy/production/systemd/"
 install -m 0755 -- "${ROOT}/scripts/install-agent.sh" "${ROOT}/scripts/upgrade-agent.sh" \
   "${ROOT}/scripts/rollback-agent.sh" "${ROOT}/scripts/uninstall-agent.sh" \
-  "${ROOT}/scripts/verify-agent-package.sh" "${package_root}/scripts/"
+  "${ROOT}/scripts/verify-agent-package.sh" "${ROOT}/scripts/rebind-agent.py" "${package_root}/scripts/"
 printf 'version=%s\narch=%s\nagent_protocol=1.1\n' \
   "${VERSION}" "${PACKAGE_ARCH}" >"${package_root}/MANIFEST"
 
