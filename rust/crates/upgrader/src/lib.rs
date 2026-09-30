@@ -619,12 +619,27 @@ pub fn read_recent_results(
 #[derive(Clone, Debug)]
 pub struct UpgradeRunner {
     root: PathBuf,
+    binding_operations: Option<PathBuf>,
 }
 
 impl UpgradeRunner {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            binding_operations: None,
+        }
+    }
+
+    /// Selects the operations namespace from the same committed root binding
+    /// used by privd. Existing callers and isolated fixtures retain their root.
+    #[must_use]
+    pub fn with_binding(
+        mut self,
+        binding: &ocservia_command_authorization::local_binding::LocalBinding,
+    ) -> Self {
+        self.binding_operations = Some(binding.upgrade_directory());
+        self
     }
 
     #[must_use]
@@ -634,6 +649,11 @@ impl UpgradeRunner {
 
     #[must_use]
     pub fn operations_dir(&self) -> PathBuf {
+        if let Some(path) = &self.binding_operations {
+            return self
+                .root
+                .join(path.components().skip(1).collect::<PathBuf>());
+        }
         self.root.join("var/lib/ocservia-upgrade/operations")
     }
 

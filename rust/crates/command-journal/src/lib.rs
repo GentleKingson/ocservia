@@ -112,6 +112,47 @@ pub struct AppliedResourceRevision<'a> {
 }
 
 impl Journal {
+    /// Pins a fresh namespace to its Controller and `NodeID`, or verifies its pin.
+    /// Existing unbound command/recovery state cannot be adopted by rebind.
+    ///
+    /// # Errors
+    /// Refuses authority mismatch or unbound nonempty recovery state.
+    pub fn bind_authority(
+        &mut self,
+        node: &[u8; 16],
+        controller: &[u8; 32],
+    ) -> Result<(), rusqlite::Error> {
+        let binding = [node.as_slice(), controller.as_slice()].concat();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let stored: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT value FROM agent_metadata WHERE key='controller_binding'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(stored) = stored {
+            if stored != binding {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else {
+            let occupied: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM command_journal) OR EXISTS(SELECT 1 FROM agent_metadata) OR EXISTS(SELECT 1 FROM applied_resource_revisions) OR EXISTS(SELECT 1 FROM synthetic_effects)",
+                [], |row| row.get(0),
+            )?;
+            if occupied {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            transaction.execute(
+                "INSERT INTO agent_metadata(key,value) VALUES('controller_binding',?1)",
+                [binding],
+            )?;
+        }
+        transaction.commit()
+    }
+
     /// Opens an owner-controlled database and enforces the required `SQLite` pragmas.
     ///
     /// # Errors
@@ -1128,6 +1169,39 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    #[test]
+    fn binding_namespace_refuses_old_identity_and_unbound_recovery_state() {
+        let path = temporary_path("binding");
+        let mut journal = Journal::open(&path).unwrap();
+        journal.bind_authority(&[1; 16], &[2; 32]).unwrap();
+        journal.raise_owner_fence_epoch_floor(42).unwrap();
+        drop(journal);
+        let mut reopened = Journal::open(&path).unwrap();
+        reopened.bind_authority(&[1; 16], &[2; 32]).unwrap();
+        assert!(reopened.bind_authority(&[3; 16], &[2; 32]).is_err());
+        assert!(reopened.bind_authority(&[1; 16], &[4; 32]).is_err());
+        assert_eq!(reopened.owner_fence_epoch_floor().unwrap(), 42);
+        drop(reopened);
+        cleanup(&path);
+
+        let old_path = temporary_path("unbound");
+        let mut old = Journal::open(&old_path).unwrap();
+        old.accept_command(&[1; 16], &[2; 16], &[3; 32], 2, 10)
+            .unwrap();
+        old.transition_command(
+            &[1; 16],
+            &[CommandState::Accepted],
+            CommandState::Unknown,
+            None,
+            None,
+            11,
+        )
+        .unwrap();
+        assert!(old.bind_authority(&[4; 16], &[5; 32]).is_err());
+        drop(old);
+        cleanup(&old_path);
     }
 
     #[test]

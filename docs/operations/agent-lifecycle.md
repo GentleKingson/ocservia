@@ -225,7 +225,7 @@ responsibility ends there: the unit is `Type=exec`, so the handoff returns as
 soon as the runner binary starts, and no upgrade can destroy the process that
 still owes the command result. The unit has no `[Install]` section — it exists
 only to be started by privd — and refuses to run without the committed intent
-(`ConditionPathExists`).
+(validated by the runner in the active binding's operations namespace).
 
 Each operation directory holds three fixed records, all root-owned mode `0600`,
 written atomically (write, fsync, rename): `intent` (schema version, operation

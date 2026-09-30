@@ -39,6 +39,24 @@ impl std::fmt::Debug for Identity {
 }
 
 impl Identity {
+    /// Loads an already enrolled identity without ever generating missing state.
+    ///
+    /// # Errors
+    /// Refuses absent, unsafe or mismatched identity and Controller material.
+    pub fn load_existing(
+        directory: &Path,
+        controller: EndpointId,
+        expected_endpoint: EndpointId,
+    ) -> io::Result<Self> {
+        validate_existing_directory(directory)?;
+        let key = read_key(&mut secure_open(&directory.join(KEY_FILE))?)?;
+        let pinned = read_endpoint(&mut secure_open(&directory.join(CONTROLLER_FILE))?)?;
+        if key.public() != expected_endpoint || pinned != controller {
+            return Err(invalid("enrolled identity or Controller pin mismatch"));
+        }
+        Ok(Self { key, controller })
+    }
+
     /// Stages the same endpoint identity for an explicitly selected Controller.
     ///
     /// This does not activate the target or alter the source pin. The privileged

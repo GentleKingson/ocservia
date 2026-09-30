@@ -2441,6 +2441,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2 0.10.9",
+ "uuid",
 ]
 
 [[package]]
@@ -2617,6 +2618,7 @@ name = "ocservia-upgrader"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "ocservia-command-authorization",
  "ocservia-contracts",
  "ocservia-observability",
  "rustix",
