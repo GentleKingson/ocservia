@@ -25,6 +25,9 @@ export const i18n = createI18n({
       overview: "Overview",
       nodes: "Nodes",
       fleet: "Fleet",
+      fleetRefreshing: "Refreshing nodes…",
+      fleetRefreshFailed:
+        "Refresh failed. Showing the last successful snapshot.",
       operations: "Operations",
       audit: "Audit",
       auditRecentBound: "Most recent 50 audit records in this workspace",
