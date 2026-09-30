@@ -83,3 +83,23 @@ npx playwright test config-plan.spec.ts certificate-lifecycle.spec.ts --project=
 This validates existing Plan/Apply and certificate/P12 UI interactions, not a
 live Controller, database recovery or installation. No backend, API schema,
 generated client, dependency or store-framework change is part of this split.
+
+## Advisory action availability
+
+The authorized node detail read includes `effective_actions`. Telemetry derives
+node trust and approved capabilities through the existing Operations Store;
+Node HTTP asks its parent-supplied callback to apply the same resource-scoped
+RBAC checks as writes. The callback carries the original request context and
+adds no authorization store or permission engine to the module. Reads fail
+closed on lookup errors, and the caller-specific detail response is not cached.
+List reads do not perform these additional lookups.
+
+NodeDetail disables the relevant actions and explains missing capability,
+trust or role permissions before a form is filled. Certificate browsing uses
+its separate read permission. This remains advisory: writes still enforce
+capabilities, role checks, sealing keys, versions, approvals, secret references
+and command-specific constraints. Configuration forms identify their template
+source and captured revision; generated results identify the full redacted
+candidate without inventing current field values. Existing desired/observed
+fields distinguish unmanaged resources and missing observations in the display,
+without changing convergence records or taking over existing accounts.

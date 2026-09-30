@@ -70,7 +70,7 @@ func TestNodeHTTPBoundary(t *testing.T) {
 			})
 		}
 	}
-	wantFields := map[string]string{"reader": "nodehttp.Reader", "logger": "*slog.Logger", "workspace": "func(*http.Request) uuid.UUID"}
+	wantFields := map[string]string{"reader": "nodehttp.Reader", "logger": "*slog.Logger", "workspace": "func(*http.Request) uuid.UUID", "canAct": "func(*http.Request, string) (bool, error)"}
 	handler := reflect.TypeOf(nodehttp.Handler{})
 	if handler.NumField() != len(wantFields) {
 		t.Fatal("node handler dependency set changed")

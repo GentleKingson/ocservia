@@ -74,6 +74,14 @@ export const i18n = createI18n({
       navigation: "Primary navigation",
       fleetStatus: "Fleet status",
       liveTelemetry: "Live telemetry",
+      action_missing_capability:
+        "This node has no approved capability for this action.",
+      action_node_unavailable:
+        "The node has not been activated or has been revoked.",
+      action_forbidden: "Your role does not allow this action on this node.",
+      action_authorization_unavailable: "Action permissions could not be read.",
+      action_unknown:
+        "Action availability has not been read. Refresh the node details.",
       configTemplateSource:
         "Template draft · Current values have not been read. These defaults are not the node’s current configuration.",
       configSourceRevision: "Configuration revision bound to this request",

@@ -128,6 +128,16 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if err != nil || unobserved.ObservedAt != nil || unobserved.Freshness != "never" {
 		t.Fatalf("missing snapshot: %+v %v", unobserved, err)
 	}
+	if unobserved.EffectiveActions["user.manage"].Allowed {
+		t.Fatal("readonly node advertised user writes")
+	}
+	exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.users.write',true)`, node)
+	writable, err := service.GetNode(ctx, node)
+	if err != nil || !writable.EffectiveActions["user.manage"].Allowed || writable.EffectiveActions["group.manage"].Allowed {
+		t.Fatalf("approved action read: %+v %v", writable.EffectiveActions, err)
+	}
+	exec(`UPDATE node_capabilities SET approved=false WHERE node_id=$1`, `UPDATE node_capabilities SET approved=false WHERE node_id=?`, node)
+
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	wireID, instance := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	wire, err := proto.Marshal(&agentv1.TelemetryBatch{BatchId: wireID[:], NodeId: node[:], Sequence: 0, Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH, Snapshot: &agentv1.ObservedSnapshot{ObservedAt: timestamppb.New(now.Add(-time.Minute)), BootId: "wire", AgentInstanceId: instance[:], AgentVersion: "0.1.0", OcservVersion: "1.3.0", OsRelease: "debian", OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`)}})

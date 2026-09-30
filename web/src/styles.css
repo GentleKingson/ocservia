@@ -1396,3 +1396,13 @@ h1 {
   line-height: 1.5;
   white-space: normal;
 }
+
+.action-availability-note {
+  margin: 8px 18px 16px;
+  color: #66746f;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.operation-dialog .action-availability-note {
+  margin: 0;
+}
