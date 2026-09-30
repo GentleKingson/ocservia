@@ -365,7 +365,8 @@ func (s *Service) ListPending(ctx context.Context, workspace, actor, after uuid.
 	defer rows.Close()
 	items := make([]Approval, 0, limit)
 	for rows.Next() {
-		record, err := scan(rows)
+		var record Approval
+		err := rows.Scan(&record.ID, &record.WorkspaceID, &record.RequesterID, &record.ApproverID, &record.Action, &record.ResourceType, &record.ResourceID, &record.Reason, &record.Status, &record.ExpiresAt, &record.CreatedAt)
 		if err != nil {
 			return nil, false, err
 		}

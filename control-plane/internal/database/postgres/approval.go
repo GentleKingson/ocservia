@@ -59,7 +59,7 @@ func (s approvalStore) AuthorityResources(ctx context.Context, id uuid.UUID) (da
 }
 
 func (s approvalStore) ListPending(ctx context.Context, workspace, actor, after uuid.UUID, limit int, at time.Time) (database.Rows, error) {
-	return s.Query(ctx, `SELECT a.id,a.workspace_id,a.requester_id,a.approver_id,a.action,a.resource_type,a.resource_id,a.reason,a.status,a.expires_at,a.created_at,'',NULL FROM approval_requests a
+	return s.Query(ctx, `SELECT a.id,a.workspace_id,a.requester_id,a.approver_id,a.action,a.resource_type,a.resource_id,a.reason,a.status,a.expires_at,a.created_at FROM approval_requests a
     WHERE a.workspace_id=$1 AND a.status='pending' AND a.expires_at>$2 AND a.requester_id<>$3 AND a.id>$4
     AND EXISTS(SELECT 1 FROM approval_authority_resources WHERE approval_id=a.id)
     AND NOT EXISTS(SELECT 1 FROM approval_authority_resources scope WHERE scope.approval_id=a.id AND (scope.workspace_id<>a.workspace_id OR NOT EXISTS(
