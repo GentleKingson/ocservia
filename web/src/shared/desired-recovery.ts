@@ -21,3 +21,15 @@ export function recoveryDialogKind(
       return undefined;
   }
 }
+
+export function resourceStatusKey(resource: UserGroupResourceState): string {
+  if (resource.desiredVersion === undefined) return "resourceUnmanaged";
+  if (
+    resource.convergence === "pending" ||
+    resource.convergence === "offline_pending"
+  )
+    return "convergence_" + resource.convergence;
+  if (resource.observedRevision === undefined || !resource.observedAt)
+    return "resourceNotObserved";
+  return "convergence_" + resource.convergence;
+}

@@ -677,13 +677,16 @@ h1 {
   font-size: 10px;
   color: #6b7873;
 }
-.desired-state-list small.converged {
+.desired-state-list small.converged,
+.desired-state-list small.convergence_converged {
   color: #176d47;
 }
-.desired-state-list small.drifted {
+.desired-state-list small.drifted,
+.desired-state-list small.convergence_drifted {
   color: #a33d37;
 }
-.desired-state-list small.offline_pending {
+.desired-state-list small.offline_pending,
+.desired-state-list small.convergence_offline_pending {
   color: #8c5418;
 }
 .desired-state-list p {
@@ -1384,4 +1387,12 @@ h1 {
 }
 .skeleton-line:last-child {
   width: 50%;
+}
+
+.config-source-note {
+  margin: 0;
+  color: #66746f;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: normal;
 }
