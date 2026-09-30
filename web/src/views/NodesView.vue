@@ -8,6 +8,7 @@ import { useRouter } from "vue-router";
 import { createAgentRollout } from "../api/agents";
 import { useFleetStore } from "../shared/fleet";
 import { formatTimestamp } from "../shared/timestamp";
+import { agentVersionLabel } from "../shared/agent-version";
 
 const fleet = useFleetStore();
 const router = useRouter();
@@ -216,12 +217,9 @@ async function submitRollout(): Promise<void> {
               </td>
               <td>
                 <span>{{ node.agentVersion ?? $t("notAvailable") }}</span>
-                <span
-                  v-if="node.agentVersionState"
-                  class="version-badge"
-                  :class="node.agentVersionState"
-                  >{{ $t(node.agentVersionState) }}</span
-                >
+                <span class="version-badge" :class="node.agentVersionState">{{
+                  $t(agentVersionLabel(node))
+                }}</span>
               </td>
               <td>{{ node.ocservVersion ?? $t("notAvailable") }}</td>
               <td>{{ node.sessionCount }}</td>

@@ -247,7 +247,7 @@ test("switching workspaces replaces every overview number and list", async ({
           {
             id: "019fc0a4-6d92-765c-a8a1-4af556614ce1",
             node_id: alphaNodeA,
-            type: "connected",
+            type: "telemetry",
             traceparent: "00-trace-span-01",
             occurred_at: "2026-08-26T08:00:00Z",
           },
@@ -256,7 +256,7 @@ test("switching workspaces replaces every overview number and list", async ({
           {
             id: "019fc0a4-6d92-765c-a8a1-4af556614ce2",
             node_id: betaNodeA,
-            type: "heartbeat",
+            type: "path_changed",
             traceparent: "00-trace-span-01",
             occurred_at: "2026-08-26T09:00:00Z",
           },
@@ -274,6 +274,15 @@ test("switching workspaces replaces every overview number and list", async ({
   await expect(page.getByTestId("overview-operations")).toHaveText("1");
   await expect(page.getByTestId("overview-connectivity")).toHaveText("1");
   await expect(
+    page.getByText("Last observed direct paths", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("overview-connectivity").locator(".."),
+  ).toContainText("Includes offline nodes");
+  await expect(page.getByTestId("overview-events")).toContainText(
+    "Telemetry observation",
+  );
+  await expect(
     page.getByTestId("overview-events").getByText("Alpha node A"),
   ).toBeVisible();
   await expect(
@@ -286,6 +295,9 @@ test("switching workspaces replaces every overview number and list", async ({
   await expect(page.getByTestId("overview-sessions")).toHaveText("5");
   await expect(page.getByTestId("overview-operations")).toHaveText("0");
   await expect(page.getByTestId("overview-connectivity")).toHaveText("0");
+  await expect(page.getByTestId("overview-events")).toContainText(
+    "Connection path changed",
+  );
   await expect(page.getByTestId("overview-events")).toContainText(
     "Beta node A",
   );

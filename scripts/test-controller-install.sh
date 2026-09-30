@@ -96,6 +96,7 @@ bootstrap_log="${INSTALL_TEST_BOOTSTRAP_LOG:-${OCSERV_CONTROLLER_STATE_ROOT:-/no
 printf 'launcher:%s\n' "${SUDO_USER:-<unset>}" >>"${bootstrap_log}"
 printf '%s\n' "$*" >>"${bootstrap_log}"
 printf 'OCSERV_PUBLIC_HOST=%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${bootstrap_log}"
+printf 'recommended:%s\n' "${OCSERV_RECOMMENDED_AGENT_VERSION-<unset>}" >>"${bootstrap_log}"
 printf 'proxy-network:%s,%s,%s\n' "${OCSERV_APPLICATION_SUBNET:-}" "${OCSERV_APPLICATION_IP_RANGE:-}" "${OCSERV_GATEWAY_APPLICATION_IP:-}" >>"${bootstrap_log}"
 printf 'otel:%s\n' "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" >>"${bootstrap_log}"
 printf 'OCSERV_SECRET_DIR=%s\n' "${OCSERV_SECRET_DIR:-<unset>}" >>"${bootstrap_log}"
@@ -654,6 +655,7 @@ if can_root; then
     reset_checkout
     cat >"${repo}/install.env" <<EOF
 OCSERV_PUBLIC_HOST=controller-root-file.example.test
+OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
 OCSERV_SECRET_DIR=${fixture}/root-file-secrets
 OCSERV_BACKUP_DIR=${fixture}/root-file-backup
 OCSERV_CONTROLLER_STATE_ROOT=${state_root}
@@ -676,6 +678,8 @@ EOF
     assert_log_contains "${root_sudo_log}" "OCSERV_INSTALL_ENV_RESOLVED=1"
     assert_log_contains "${root_sudo_log}" "OCSERV_PUBLIC_HOST=controller-root-file.example.test"
     assert_log_contains "${root_sudo_log}" "OCSERV_CONTROLLER_STATE_ROOT=${state_root}"
+    assert_log_contains "${root_sudo_log}" "OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0"
+    assert_log_contains "${root_bootstrap_log}" "recommended:0.2.0"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-root-file.example.test"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_SECRET_DIR=${fixture}/root-file-secrets"
     assert_log_contains "${root_bootstrap_log}" "install --backup-dir ${fixture}/root-file-backup"
@@ -720,6 +724,7 @@ install_docker_client_stub
 cat >"${repo}/install.env" <<EOF
 OCSERV_BACKUP_DIR=${fixture}/file-backup
 OCSERV_PUBLIC_HOST=controller-file.example.test
+OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
 OCSERV_HTTPS_ADDRESS=10.0.0.9
 OCSERV_APPLICATION_SUBNET=198.18.80.0/24
 OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
@@ -733,6 +738,7 @@ assert_log_contains "${bootstrap_log}" "install --backup-dir ${fixture}/file-bac
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-file.example.test"
 assert_log_contains "${bootstrap_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
 assert_log_contains "${bootstrap_log}" "otel:otel.example.test:4317"
+assert_log_contains "${bootstrap_log}" "recommended:0.2.0"
 echo "install.env values load without dirtying the release checkout"
 
 # 8a. an explicit shell variable wins over install.env.
@@ -741,12 +747,14 @@ reset_checkout
 install_docker_client_stub
 cat >"${repo}/install.env" <<EOF
 OCSERV_PUBLIC_HOST=controller-file.example.test
+OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
 OCSERV_BACKUP_DIR=${fixture}/file-backup
 EOF
-EXTRA_ENV=("OCSERV_PUBLIC_HOST=controller-env.example.test")
+EXTRA_ENV=("OCSERV_PUBLIC_HOST=controller-env.example.test" "OCSERV_RECOMMENDED_AGENT_VERSION=0.3.0")
 capture_from "${repo}"
 assert_status 0 "an explicit shell variable must win over install.env"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-env.example.test"
+assert_log_contains "${bootstrap_log}" "recommended:0.3.0"
 if grep -q "controller-file.example.test" "${bootstrap_log}"; then
   die "the file value must not override the explicit shell variable: $(cat -- "${bootstrap_log}")"
 fi
@@ -760,10 +768,12 @@ reset_checkout
 install_docker_client_stub
 cat >"${repo}/install.env" <<EOF
 OCSERV_BACKUP_DIR=${fixture}/file-backup
+OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
 EOF
-EXTRA_ENV=("OCSERV_BACKUP_DIR=")
+EXTRA_ENV=("OCSERV_BACKUP_DIR=" "OCSERV_RECOMMENDED_AGENT_VERSION=")
 capture_from "${repo}"
 assert_status 0 "an explicitly empty shell variable must win over install.env"
+assert_log_contains "${bootstrap_log}" "recommended:"
 assert_log_contains "${bootstrap_log}" "install"
 if grep -q -- "--backup-dir" "${bootstrap_log}"; then
   die "install.env must not fill the deliberately emptied OCSERV_BACKUP_DIR: $(cat -- "${bootstrap_log}")"

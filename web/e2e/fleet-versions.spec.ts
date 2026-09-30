@@ -143,7 +143,9 @@ test("shows server-derived version badges on the fleet list", async ({
     "Update available",
   );
   const unknownRow = page.locator("tr", { hasText: "node-unknown" });
-  await expect(unknownRow.locator(".version-badge")).toHaveText("Unknown");
+  await expect(unknownRow.locator(".version-badge")).toHaveText(
+    "No version observation",
+  );
   const aheadRow = page.locator("tr", { hasText: "node-ahead" });
   await expect(aheadRow.locator(".version-badge")).toHaveText("Ahead");
 });
@@ -195,4 +197,55 @@ test("shows the recommended agent version in settings", async ({ page }) => {
       has: page.getByText("Recommended Agent version"),
     }),
   ).toContainText(recommended);
+});
+
+test("distinguishes an unset recommendation from a failed settings read", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/version", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "dev", commit: "unknown", role: "all" }),
+    }),
+  );
+  await page.goto("/settings");
+  await expect(
+    page.getByText("Recommendation not configured", { exact: true }),
+  ).toBeVisible();
+  await page.route("**/api/v1/version", (route) =>
+    route.fulfill({ status: 503 }),
+  );
+  await page.reload();
+  await expect(
+    page.getByText("Recommendation could not be loaded", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Recommendation not configured", { exact: true }),
+  ).toHaveCount(0);
+});
+
+test("retains observed versions when there is no recommendation", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/nodes?**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: nodes.map((node) => {
+          const item: Record<string, unknown> = { ...node };
+          delete item.recommended_agent_version;
+          return item;
+        }),
+        page: { has_more: false },
+      }),
+    }),
+  );
+  await page.goto("/nodes");
+  const row = page.locator("tr", { hasText: "node-update" });
+  await expect(row).toContainText("0.1.1");
+  await expect(row.locator(".version-badge")).toHaveText(
+    "Recommendation not configured",
+  );
 });
