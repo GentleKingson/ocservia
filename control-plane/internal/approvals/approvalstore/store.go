@@ -12,6 +12,7 @@ type Store interface {
 	AddAuthority(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) error
 	AddBatchItem(context.Context, uuid.UUID, int, uuid.UUID, string, string, int64) error
 	Get(context.Context, uuid.UUID, bool) database.Row
+	ListPending(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, time.Time) (database.Rows, error)
 	Authorized(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	Approve(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
 	ValidBound(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string, uuid.UUID, []byte, bool) (bool, error)

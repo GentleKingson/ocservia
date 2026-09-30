@@ -252,3 +252,19 @@ revoked or their expiry is accepted. Database down migrations are not provided.
 Preserve these records and use a forward fix or an explicitly planned isolated
 restore; a binary rollback does not reverse database changes or guarantee that
 the previous binary can use current state.
+
+
+The console Approvals page discovers independent pending requests via
+`GET /api/v1/approval-requests` in the selected workspace. `page_size` defaults
+to 50 and accepts 1–200; `cursor` is the opaque last approval ID returned in
+`page.next_cursor`. IDs sort ascending and remain usable after a decision or
+expiry. Each response is bounded and permission-filtered before the limit:
+all authority resources must be covered by a current SecurityAdmin or
+PlatformAdmin binding created no later than the request's authority snapshot.
+Self-authored, expired, approved and consumed requests are excluded. Existing
+workspace-prefix and authority/role indexes support the scope predicates.
+Refresh starts at the first page; new requests may appear on later pages.
+The list omits the content/hash summaries. Clicking a request fetches the
+existing immutable detail and explicit hash-bound
+review. Listing does not authorize a decision or consume an approval; the
+existing decision and consumption checks remain authoritative.

@@ -89,3 +89,17 @@ func (s approvalStore) ValidBound(ctx context.Context, id, workspace, requester 
 func (s approvalStore) AuthorityResources(ctx context.Context, id uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT workspace_id,resource_type,resource_id FROM approval_authority_resources WHERE approval_id=? ORDER BY resource_type,resource_id`, UUIDBytes(id))
 }
+
+func (s approvalStore) ListPending(ctx context.Context, workspace, actor, after uuid.UUID, limit int, at time.Time) (database.Rows, error) {
+	stamp, err := value.FromTime(at)
+	if err != nil {
+		return nil, err
+	}
+	return s.Query(ctx, `SELECT a.id,a.workspace_id,a.requester_id,a.approver_id,a.action,a.resource_type,a.resource_id,a.reason,a.status,a.expires_at,a.created_at FROM approval_requests a
+    WHERE a.workspace_id=? AND a.status='pending' AND a.expires_at>? AND a.requester_id<>? AND a.id>?
+    AND EXISTS(SELECT 1 FROM approval_authority_resources WHERE approval_id=a.id)
+    AND NOT EXISTS(SELECT 1 FROM approval_authority_resources scope WHERE scope.approval_id=a.id AND (scope.workspace_id<>a.workspace_id OR NOT EXISTS(
+      SELECT 1 FROM role_bindings binding WHERE binding.identity_id=? AND binding.workspace_id=scope.workspace_id AND binding.created_at<=a.authority_snapshot_at
+      AND binding.role_name IN ('SecurityAdmin','PlatformAdmin') AND (binding.resource_type='workspace' OR (CAST(binding.resource_type AS BINARY)=CAST(scope.resource_type AS BINARY) AND binding.resource_id=scope.resource_id)))))
+    ORDER BY a.id ASC LIMIT ?`, UUIDBytes(workspace), stamp, UUIDBytes(actor), UUIDBytes(after), UUIDBytes(actor), limit)
+}
