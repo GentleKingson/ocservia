@@ -168,6 +168,10 @@ identity and preserving required audit material.
 
 ## Journal storage monitoring
 
+The [Controller rebind and retention contract](../development/controller-rebind.md)
+defines the explicit authority-transfer and cleanup boundaries for the planned
+capability. It is not an available operational rebind procedure.
+
 The command journal has no automatic retention policy. Monitor it independently
 of Agent connectivity; normal authorized commands also accumulate durable state.
 From a reviewed checkout, run this read-only Linux probe as `ocserv-agent` (or
