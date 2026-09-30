@@ -192,3 +192,26 @@ two Controllers, including these cases:
 Wire transcript, semantic hash, protobuf field numbers and existing REST
 behavior remain stable. Reuse enrollment, approval, revocation, trust convergence
 and database transaction abstractions; no federation or automatic failover.
+
+
+The real-process acceptance runner exercises both source dispositions:
+
+```sh
+OCSERV_REBIND_E2E=revoked scripts/database-controller-e2e.sh postgres all
+OCSERV_REBIND_E2E=unreachable scripts/database-controller-e2e.sh postgres all
+```
+
+It starts independent Controller databases, transport identities and command
+keys, uses the existing private TLS relays, and runs the installed local rebind
+CLI against real Agent/privd binaries and Ocserv. The target requires normal
+bootstrap possession, independent approval and root attestation registration.
+The test verifies unchanged endpoint/business/key bytes, a new NodeID, a fresh
+signed session after restart, and a successful target user mutation. It restores
+an unavailable source and submits an unexpired original source envelope directly
+to privd as the Agent UID, requiring an authority rejection. Finally it runs the
+independent worker before and after the fixture's retention cutoff and checks
+that old command identities/proofs and a retired tombstone survive.
+
+The container has no systemd PID 1: its systemctl adapter only supervises real
+processes and translates Ocserv probes/reload. Enrollment, sessions, command
+signatures, root effects, database state and retention are not mocked.

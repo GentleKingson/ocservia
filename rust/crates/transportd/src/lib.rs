@@ -2713,7 +2713,11 @@ fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<()
     {
         return Err(protocol_error("endpoint identity mismatch"));
     }
-    if request.token.len() != 43 || request.nonce.len() < 16 || request.nonce.len() > 64 {
+    let token = request
+        .token
+        .strip_prefix("obt1_")
+        .unwrap_or(&request.token);
+    if token.len() != 43 || request.nonce.len() < 16 || request.nonce.len() > 64 {
         return Err(protocol_error("enrollment credential or nonce is invalid"));
     }
     if request.capabilities.is_empty()
@@ -3904,6 +3908,13 @@ mod tests {
         ocservia_agent_identity::authorize_enrollment(&mut request, &key)
             .expect("sign enrollment request");
         assert!(validate_enrollment(&request, key.public()).is_ok());
+        let mut bootstrap = request.clone();
+        bootstrap.token = format!("obt1_{}", request.token);
+        ocservia_agent_identity::authorize_enrollment(&mut bootstrap, &key)
+            .expect("sign bootstrap request");
+        assert!(validate_enrollment(&bootstrap, key.public()).is_ok());
+        bootstrap.token.push('a');
+        assert!(validate_enrollment(&bootstrap, key.public()).is_err());
         assert!(validate_enrollment(&request, SecretKey::generate().public()).is_err());
         let mut unicode = request;
         unicode.capabilities = vec!["界".repeat(128)];

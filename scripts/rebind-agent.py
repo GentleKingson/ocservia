@@ -161,7 +161,7 @@ def environment():
         if not line.strip() or line.lstrip().startswith('#'):
             continue
         key, separator, value = line.partition('=')
-        require(separator and key not in result and re.fullmatch(r'[A-Z_]+', key), 'invalid or duplicate agent.env assignment')
+        require(separator and key not in result and re.fullmatch(r'[A-Z_][A-Z0-9_]*', key), 'invalid or duplicate agent.env assignment')
         values = shlex.split(value)
         require(len(values) == 1, 'agent.env values must be explicit single values')
         result[key] = values[0]
@@ -234,10 +234,14 @@ def current_binding(env):
 
 
 def agent(command, account, timeout=90):
-    return subprocess.run([str(BIN / 'ocservia-agent')] + command, check=True,
-                          user=account.pw_uid, group=account.pw_gid, extra_groups=[],
-                          env={'PATH': '/usr/bin:/bin', 'RUST_LOG': 'warn'},
-                          capture_output=True, timeout=timeout).stdout.decode().strip()
+    try:
+        return subprocess.run([str(BIN / 'ocservia-agent')] + command, check=True,
+                              user=account.pw_uid, group=account.pw_gid, extra_groups=[],
+                              env={'PATH': '/usr/bin:/bin', 'RUST_LOG': 'warn'},
+                              capture_output=True, timeout=timeout).stdout.decode().strip()
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.decode(errors='replace')[-2048:].strip()
+        raise RuntimeError('Agent operation failed: ' + detail) from error
 
 
 def save(operation, state):
