@@ -588,6 +588,22 @@ impl Adapter {
             .is_ok()
     }
 
+    /// Checks the host's read-only startup snapshot before enrollment.
+    /// This does not initialize stores, clean staging, or mutate ocserv.
+    ///
+    /// # Errors
+    /// Returns the same bounded resource/parser errors as ordinary snapshots.
+    pub async fn host_preflight(&self) -> Result<(), AdapterError> {
+        self.user_list().await?;
+        self.group_list().await?;
+        self.ocserv_version().await?;
+        self.config_fingerprint().await?;
+        self.service_status().await?;
+        self.session_list().await?;
+        self.ip_ban_list().await?;
+        Ok(())
+    }
+
     /// Returns the fixed `ocserv.service` state.
     ///
     /// # Errors
@@ -4635,6 +4651,55 @@ mod tests {
         assert!(parse_version(b"ocserv 1.5.1\n").is_err());
         assert!(parse_version(b"ocserv development\n").is_err());
         assert!(parse_version(&[0xff]).is_err());
+    }
+
+    #[tokio::test]
+    async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
+        let directory = std::env::temp_dir().join(format!("ocservia-preflight-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let program = directory.join("snapshot-command");
+        write_executable(&program, b"#!/bin/sh\ncase \"$1\" in\n--version) echo 'ocserv 1.3.0';;\nshow) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n--json) echo '[]';;\n*) exit 99;;\nesac\n");
+        let config = directory.join("ocserv.conf");
+        std::fs::write(&config, b"tcp-port = 443\n").expect("config");
+        let users = directory.join("ocpasswd");
+        write_user_fixture(&users, b"alice::private-hash");
+        let resources = FixedResources::new(
+            program.clone(),
+            program.clone(),
+            program,
+            config.clone(),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
+        )
+        .expect("resources")
+        .with_user_resources(
+            PathBuf::from("/bin/false"),
+            users.clone(),
+            PathBuf::from("/bin/false"),
+            directory.join("absent-key.pem"),
+            "user-key".into(),
+        )
+        .expect("user resources")
+        .with_effect_store(
+            directory.join("absent.sqlite3"),
+            directory.join("absent.key"),
+        )
+        .expect("store");
+        let adapter = Adapter::new(resources, Limits::default());
+        adapter.host_preflight().await.expect("healthy snapshot");
+        assert_eq!(std::fs::read(&config).expect("config"), b"tcp-port = 443\n");
+        assert_eq!(
+            std::fs::read(&users).expect("users"),
+            b"alice::private-hash"
+        );
+        assert!(!directory.join("absent.sqlite3").exists());
+        assert!(!directory.join("absent.key").exists());
+        assert!(!directory.join("absent-key.pem").exists());
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o644)).expect("mode");
+        assert!(matches!(
+            adapter.host_preflight().await,
+            Err(AdapterError::ResourceMetadata { reason: "mode", .. })
+        ));
+        std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[tokio::test]

@@ -34,6 +34,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
         return Ok(());
     }
+    if env::args().nth(1).as_deref() == Some("--host-preflight") {
+        if env::args().len() != 2 {
+            return Err(invalid("--host-preflight accepts no additional arguments").into());
+        }
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        if let Err(error) = adapter.host_preflight().await {
+            eprintln!("host preflight failed: {error}");
+            eprintln!(
+                "Check the named resource and ocserv/occtl access; correct it deliberately, then rerun. No host state was changed."
+            );
+            return Err(error.into());
+        }
+        println!("HOST_PREFLIGHT_OK (read-only)");
+        return Ok(());
+    }
     ocservia_observability::init("ocservia-privd")?;
     let (config, resources, limits) = parse_args()?;
     let adapter = Adapter::new(resources, limits);
