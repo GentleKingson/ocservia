@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 hex.workspace = true
+ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization" }
 ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 ocservia-observability = { version = "=0.1.0", path = "../observability" }
 rustix.workspace = true

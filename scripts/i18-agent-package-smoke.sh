@@ -634,6 +634,21 @@ assert_rejected_rollback_untouched() {
     || { echo "${reason} modified installed files" >&2; exit 1; }
 }
 
+printf '%s\n' ocservia-binding-v1 018f0c2e-7b1a-7c3d-8e9f-0123456789ab \
+  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a \
+  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a \
+  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a \
+  clear >"${work}/active-binding"
+sudo install -o root -g root -m 0640 "${work}/active-binding" \
+  "${rootfs}/etc/ocservia-agent/active-binding"
+if capture_rollback "${ARTIFACT_DIR}/rollback-binding-unaware.log"; then
+  echo "rollback accepted a snapshot that cannot enforce the committed binding" >&2
+  exit 1
+fi
+grep -Fq 'cannot enforce the committed Controller binding' "${ARTIFACT_DIR}/rollback-binding-unaware.log"
+assert_rejected_rollback_untouched "rollback with binding-unaware binaries"
+sudo rm -- "${rootfs}/etc/ocservia-agent/active-binding"
+
 printf 'replacement' >"${work}/replacement"
 sudo install -o root -g root -m 0755 "${work}/replacement" \
   "${backup_dir}/ocservia-agent.previous"

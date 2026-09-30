@@ -20,6 +20,10 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if env::args().nth(1).as_deref() == Some("--binding-version") {
+        println!("1");
+        return Ok(());
+    }
     let mut args = env::args().skip(1);
     if args.next().as_deref() == Some("attestation-registration") {
         println!("{}", attestation_registration(args)?);
@@ -236,10 +240,17 @@ fn parse_args_from(
     }
     let owner = rustix::process::geteuid().as_raw();
     let group = rustix::process::getegid().as_raw();
-    let keys = command_key_files
-        .iter()
-        .map(|path| load_verification_key(path, owner, group))
-        .collect::<Result<Vec<_>, _>>()?;
+    let binding = ocservia_command_authorization::local_binding::LocalBinding::load_active()?;
+    let keys = if let Some(binding) = &binding {
+        node_id = Some(*binding.node_id.as_bytes());
+        upgrade_operations_dir = binding.upgrade_directory();
+        vec![binding.command_key]
+    } else {
+        command_key_files
+            .iter()
+            .map(|path| load_verification_key(path, owner, group))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let command_keys = ControllerCommandKeyring::new(keys)
         .map_err(|_| invalid("Controller command verification keyring invalid"))?;
     let user_seal_key_file =
@@ -264,7 +275,7 @@ fn parse_args_from(
         attestation_key_id = %key_id(&attestation_key.verifying_key()),
         "loaded root-owned privd attestation key"
     );
-    let resources = FixedResources::default()
+    let mut resources = FixedResources::default()
         .with_password_sealing_keys(
             user_seal_key_file,
             user_seal_key_id.ok_or_else(|| invalid("--user-password-seal-key-id is required"))?,
@@ -272,6 +283,16 @@ fn parse_args_from(
             p12_seal_key_id.ok_or_else(|| invalid("--p12-password-seal-key-id is required"))?,
         )
         .map_err(|_| invalid("password sealing key configuration invalid"))?;
+    if let Some(binding) = &binding {
+        let directory = binding.effect_directory();
+        resources = resources
+            .with_effect_store(
+                directory.join("desired-effects.sqlite3"),
+                directory.join("desired-effects.key"),
+            )
+            .map_err(|_| invalid("binding effect paths invalid"))?
+            .with_mutations_blocked(binding.mutations_blocked);
+    }
     Ok((
         ServerConfig {
             socket,

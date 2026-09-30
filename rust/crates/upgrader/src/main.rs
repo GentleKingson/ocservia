@@ -6,6 +6,10 @@ use std::process::ExitCode;
 use ocservia_upgrader::UpgradeRunner;
 
 fn main() -> ExitCode {
+    if env::args().nth(1).as_deref() == Some("--binding-version") {
+        println!("1");
+        return ExitCode::SUCCESS;
+    }
     // The packaging pipeline verifies the binary's embedded release
     // identity before it is shipped; --version stays read-only.
     if env::args().nth(1).as_deref() == Some("--version") {
@@ -30,7 +34,17 @@ fn main() -> ExitCode {
         eprintln!("ocservia-upgrader: observability unavailable: {failure}");
         return ExitCode::from(2);
     }
-    let runner = UpgradeRunner::new(root);
+    let mut runner = UpgradeRunner::new(root);
+    if runner.is_real_host() {
+        match ocservia_command_authorization::local_binding::LocalBinding::load_active() {
+            Ok(Some(binding)) => runner = runner.with_binding(&binding),
+            Ok(None) => {}
+            Err(failure) => {
+                eprintln!("ocservia-upgrader: binding unavailable: {failure}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     match runner.run(&operation) {
         Ok(state) => {
             println!(

@@ -59,6 +59,10 @@ const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if std::env::args().nth(1).as_deref() == Some("--binding-version") {
+        println!("1");
+        return Ok(());
+    }
     // The packaging pipeline verifies the binary's embedded release
     // identity before it is shipped, so --version stays a read-only
     // query that works for any caller.
@@ -70,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
-    let config = parse_args()?;
+    let mut config = parse_args()?;
     if prepare_enrollment_if_requested(&config)? {
         return Ok(());
     }
@@ -81,9 +85,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if run_one_shot_mode(&config).await? {
         return Ok(());
     }
-    let command_keys = load_controller_command_keys(&config)?;
+    let binding = ocservia_command_authorization::local_binding::LocalBinding::load_active()?;
+    let command_keys = if let Some(binding) = &binding {
+        apply_local_binding(&mut config, binding)?;
+        Some(ControllerCommandKeyring::new(vec![binding.command_key])?)
+    } else {
+        load_controller_command_keys(&config)?
+    };
     let relay_tls_roots = std::sync::Arc::new(load_relay_tls_roots(&config)?);
     let mut journal = Journal::open(&config.journal)?;
+    if let Some(binding) = &binding {
+        journal.bind_authority(binding.node_id.as_bytes(), &binding.controller)?;
+    }
     let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
     // The startup snapshot is a health gate: it fails fast when privd or the
@@ -109,7 +122,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let node_id = config
         .node_id
         .ok_or_else(|| invalid("--node-id is required"))?;
-    let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    let identity = if let Some(binding) = &binding {
+        ocservia_agent_identity::Identity::load_existing(
+            &config.identity_dir,
+            controller,
+            EndpointId::from_bytes(&binding.endpoint)?,
+        )?
+    } else {
+        ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?
+    };
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(u32::try_from(MAX_WRITE_QUEUE)?))
         .build();
@@ -2371,6 +2392,20 @@ struct Config {
     stats_file: Option<PathBuf>,
     relay_ca_file: Option<PathBuf>,
     synthetic_barrier_file: Option<PathBuf>,
+}
+
+fn apply_local_binding(
+    config: &mut Config,
+    binding: &ocservia_command_authorization::local_binding::LocalBinding,
+) -> io::Result<()> {
+    config.controller = Some(
+        EndpointId::from_bytes(&binding.controller)
+            .map_err(|_| invalid("binding Controller EndpointID invalid"))?,
+    );
+    config.node_id = Some(binding.node_id);
+    config.identity_dir = binding.agent_directory().join("identity");
+    config.journal = binding.agent_directory().join("agent.db");
+    Ok(())
 }
 
 /// Loads the PEM relay certificate authority as additional relay TLS roots.

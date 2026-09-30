@@ -3,7 +3,8 @@ Description=Ocservia durable standalone upgrade runner (%i)
 # privd commits the immutable intent, then starts this fixed unit. Type=exec
 # returns control to privd as soon as the runner binary is exec'd, so privd
 # never waits for - and never lives inside - the upgrade it authorized.
-ConditionPathExists=/var/lib/ocservia-upgrade/operations/%i/intent
+# The runner validates the committed intent in the active binding namespace.
+# A fixed legacy path condition would suppress all upgrades after rebind.
 
 [Service]
 Type=exec
