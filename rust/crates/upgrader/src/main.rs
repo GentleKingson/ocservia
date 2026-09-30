@@ -23,7 +23,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(failure) = ocservia_observability::init("ocservia-upgrader") {
+    if let Err(failure) = ocservia_observability::init(
+        "ocservia-upgrader",
+        ocservia_contracts::agent_upgrade::release_version(),
+    ) {
         eprintln!("ocservia-upgrader: observability unavailable: {failure}");
         return ExitCode::from(2);
     }

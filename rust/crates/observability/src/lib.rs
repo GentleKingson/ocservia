@@ -7,7 +7,10 @@
 /// # Errors
 ///
 /// Returns an error when a global subscriber was already installed.
-pub fn init(service_name: &'static str) -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
+pub fn init(
+    service_name: &'static str,
+    release_version: &'static str,
+) -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let subscriber = tracing_subscriber::fmt()
@@ -20,7 +23,7 @@ pub fn init(service_name: &'static str) -> Result<(), tracing::subscriber::SetGl
     tracing::subscriber::set_global_default(subscriber)?;
     tracing::info!(
         service.name = service_name,
-        service.version = env!("CARGO_PKG_VERSION"),
+        service.version = release_version,
         "service starting"
     );
     Ok(())
@@ -127,7 +130,7 @@ mod output_tests {
     fn structured_logs_do_not_pollute_command_output() {
         const CHILD: &str = "OCSERV_LOG_OUTPUT_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            super::init("output-test").expect("logging starts");
+            super::init("output-test", "9.8.7").expect("logging starts");
             println!("01900000-0000-7000-8000-000000000001");
             tracing::info!("connection closed after command result");
             return;
@@ -148,6 +151,12 @@ mod output_tests {
         assert!(stdout.contains("01900000-0000-7000-8000-000000000001"));
         assert!(!stdout.contains("connection closed after command result"));
         assert!(stderr.contains("connection closed after command result"));
+        let starting = stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["fields"]["message"] == "service starting")
+            .expect("startup log present");
+        assert_eq!(starting["fields"]["service.version"], "9.8.7");
     }
 }
 
