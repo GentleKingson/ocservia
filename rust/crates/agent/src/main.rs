@@ -74,7 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if prepare_enrollment_if_requested(&config)? {
         return Ok(());
     }
-    ocservia_observability::init("ocservia-agent")?;
+    ocservia_observability::init(
+        "ocservia-agent",
+        ocservia_contracts::agent_upgrade::release_version(),
+    )?;
     if run_one_shot_mode(&config).await? {
         return Ok(());
     }
@@ -4770,6 +4773,9 @@ mod tests {
                     event = events.next() => {
                         let event = event.expect("event stream remains open").expect("valid event");
                         if event.r#type == i32::from(TransportEventType::Telemetry) {
+                            let batch = TelemetryBatch::decode(event.payload.as_slice()).expect("telemetry batch");
+                            assert_eq!(batch.snapshot.expect("heartbeat snapshot").agent_version,
+                                ocservia_contracts::agent_upgrade::release_version());
                             return;
                         }
                     }

@@ -53,10 +53,15 @@ function eventLabel(type: string): string {
 }
 
 function timeLabel(value: Date | string): string {
-  if (typeof value !== "string") return value.toLocaleTimeString();
+  if (typeof value !== "string")
+    return Number.isFinite(value.getTime())
+      ? value.toISOString().slice(11, 19) + " UTC"
+      : String(value);
   if (!/^\d{4}-/.test(value)) return value;
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : value;
+  return Number.isFinite(date.getTime())
+    ? date.toISOString().slice(11, 19) + " UTC"
+    : value;
 }
 
 onMounted(async () => {

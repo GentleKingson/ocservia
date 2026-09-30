@@ -174,3 +174,16 @@ describe("telemetry timestamps", () => {
     expect(PlatformEventToJSON(event)).toEqual(eventWire);
   });
 });
+
+it("displays UTC across offsets without losing microseconds", () => {
+  expect(formatTimestamp("2026-09-30T16:00:00.123456+08:00")).toBe(
+    "2026-09-30 08:00:00.123456 UTC",
+  );
+  expect(formatTimestamp("2026-09-30T08:00:00.123456Z")).toBe(
+    "2026-09-30 08:00:00.123456 UTC",
+  );
+  expect(formatTimestamp("2026-09-30T01:00:00-07:00")).toBe(
+    "2026-09-30 08:00:00 UTC",
+  );
+  expect(formatTimestamp("2026-invalid")).toBe("2026-invalid");
+});
