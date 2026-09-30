@@ -39,6 +39,80 @@ impl std::fmt::Debug for Identity {
 }
 
 impl Identity {
+    /// Stages the same endpoint identity for an explicitly selected Controller.
+    ///
+    /// This does not activate the target or alter the source pin. The privileged
+    /// lifecycle must switch the complete binding only after enrollment and
+    /// approval; a staged identity alone grants no privileged mutation authority.
+    /// The caller must serialize lifecycle operations and supply an owner-only
+    /// destination parent. Existing destinations and incomplete staging are
+    /// refused, never overwritten or repaired by generating a new endpoint key.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing/insecure source state, identity or pin mismatches, an
+    /// unchanged Controller, existing staging/destination, or persistence errors.
+    pub fn stage_rebind(
+        source: &Path,
+        destination: &Path,
+        expected_endpoint: EndpointId,
+        expected_controller: EndpointId,
+        target_controller: EndpointId,
+    ) -> Result<Self, io::Error> {
+        if expected_controller == target_controller || !destination.is_absolute() {
+            return Err(invalid(
+                "rebind requires a different Controller and absolute destination",
+            ));
+        }
+        // Unlike provision, rebind must never create missing source material.
+        validate_existing_directory(source)?;
+        let key = read_key(&mut secure_open(&source.join(KEY_FILE))?)?;
+        let controller = read_endpoint(&mut secure_open(&source.join(CONTROLLER_FILE))?)?;
+        if key.public() != expected_endpoint || controller != expected_controller {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "rebind source identity or Controller does not match",
+            ));
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| invalid("missing rebind parent"))?;
+        validate_existing_directory(parent)?;
+        let name = destination
+            .file_name()
+            .ok_or_else(|| invalid("missing rebind name"))?;
+        if path_exists(destination)? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "rebind destination exists",
+            ));
+        }
+        let mut staging_name = name.to_os_string();
+        staging_name.push(".staging");
+        let staging = parent.join(&staging_name);
+        std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
+        let bytes = Zeroizing::new(key.to_bytes());
+        create_secret_file(&staging.join(KEY_FILE), bytes.as_ref())?;
+        create_secret_file(
+            &staging.join(CONTROLLER_FILE),
+            hex::encode(target_controller.as_bytes()).as_bytes(),
+        )?;
+        File::open(&staging)?.sync_all()?;
+        let parent_file = File::open(parent)?;
+        rustix::fs::renameat_with(
+            &parent_file,
+            &staging_name,
+            &parent_file,
+            name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )?;
+        parent_file.sync_all()?;
+        Ok(Self {
+            key,
+            controller: target_controller,
+        })
+    }
+
     /// Creates the endpoint key once and refuses any later controller substitution.
     ///
     /// # Errors
@@ -286,6 +360,21 @@ fn ensure_directory(path: &Path) -> Result<(), io::Error> {
     Ok(())
 }
 
+fn validate_existing_directory(path: &Path) -> Result<(), io::Error> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "rebind directory must be existing and owner-only",
+        ));
+    }
+    Ok(())
+}
+
 fn create_key(path: &Path) -> Result<SecretKey, io::Error> {
     let key = SecretKey::generate();
     let bytes = Zeroizing::new(key.to_bytes());
@@ -313,6 +402,7 @@ fn secure_open(path: &Path) -> Result<File, io::Error> {
     if !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.mode() & 0o077 != 0
+        || metadata.nlink() != 1
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -411,6 +501,75 @@ mod tests {
         assert!(!directory.join(KEY_FILE).exists());
         assert!(directory.join(CONTROLLER_FILE).exists());
         std::fs::remove_dir_all(directory).expect("remove identity fixture");
+    }
+
+    #[test]
+    fn rebind_staging_preserves_endpoint_and_source_pin() {
+        let root = test_dir().with_extension("rebind");
+        let _ = std::fs::remove_dir_all(&root);
+        ensure_directory(&root).expect("parent");
+        let source = root.join("source");
+        let target = root.join("target");
+        let old = SecretKey::generate().public();
+        let new = SecretKey::generate().public();
+        let identity = Identity::provision(&source, old).expect("source");
+        let staged = Identity::stage_rebind(&source, &target, identity.endpoint_id(), old, new)
+            .expect("stage");
+        assert_eq!(staged.endpoint_id(), identity.endpoint_id());
+        assert_eq!(staged.controller_endpoint_id(), new);
+        assert_eq!(
+            Identity::provision(&source, old).unwrap().endpoint_id(),
+            identity.endpoint_id()
+        );
+        assert!(Identity::provision(&source, new).is_err());
+        assert!(Identity::provision(&target, old).is_err());
+        assert_eq!(
+            Identity::provision(&target, new).unwrap().endpoint_id(),
+            identity.endpoint_id()
+        );
+        assert!(
+            Identity::stage_rebind(&source, &target, identity.endpoint_id(), old, new).is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rebind_refuses_wrong_source_and_partial_or_linked_state() {
+        let root = test_dir().with_extension("rebind-refusal");
+        let _ = std::fs::remove_dir_all(&root);
+        ensure_directory(&root).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        let old = SecretKey::generate().public();
+        let new = SecretKey::generate().public();
+        let identity = Identity::provision(&source, old).unwrap();
+        for (endpoint, controller, next) in [
+            (new, old, new),
+            (identity.endpoint_id(), new, old),
+            (identity.endpoint_id(), old, old),
+        ] {
+            assert!(Identity::stage_rebind(&source, &target, endpoint, controller, next).is_err());
+            assert!(!target.exists());
+        }
+        // A crash before directory publication cannot become an active identity.
+        ensure_directory(&root.join("target.staging")).unwrap();
+        assert!(
+            Identity::stage_rebind(&source, &target, identity.endpoint_id(), old, new).is_err()
+        );
+        assert!(!target.exists());
+        std::fs::remove_dir(root.join("target.staging")).unwrap();
+        std::fs::hard_link(source.join(KEY_FILE), root.join("linked-key")).unwrap();
+        assert!(
+            Identity::stage_rebind(&source, &target, identity.endpoint_id(), old, new).is_err()
+        );
+        std::fs::remove_file(root.join("linked-key")).unwrap();
+        std::fs::remove_file(source.join(KEY_FILE)).unwrap();
+        assert!(
+            Identity::stage_rebind(&source, &target, identity.endpoint_id(), old, new).is_err()
+        );
+        assert!(!source.join(KEY_FILE).exists());
+        assert!(!target.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
