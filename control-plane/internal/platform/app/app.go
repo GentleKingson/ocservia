@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
+	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
@@ -144,12 +145,17 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		// context, which aborts fenced transactions before they can commit.
 		leader := coordination.NewRunnerBackend(backend, identity, 15*time.Second, 5*time.Second, logger)
 
+		history, err := historyretention.New(backend, cfg.HistoryRetention)
+		if err != nil {
+			return err
+		}
 		work := maintenanceWork{
 			users:        userOperationsService.RunOnce,
 			rollouts:     operationService.AdvanceAgentRollouts,
 			telemetry:    telemetryService.Maintain,
 			certificates: certificateService.Maintain,
 			audit:        auditManager.CheckpointAll,
+			retention:    history.RunOnce,
 		}
 		if cfg.TestSchedulerEvidence {
 			work.evidence = func(ctx context.Context, session *coordination.Session) error {

@@ -22,7 +22,7 @@ func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.
 	}
 	// The outer ingress transaction owns the node. Lock the outbox separately
 	// before reading dispatch state, matching completion and reaping order.
-	err = s.QueryRow(ctx, `SELECT c.envelope,c.state,c.created_at,a.id IS NOT NULL,
+	err = s.QueryRow(ctx, `SELECT c.envelope,c.state,c.created_at,c.details_compacted_at IS NOT NULL,a.id IS NOT NULL,
 		COALESCE(a.id,UNHEX(REPEAT('00',16))),IF(a.id IS NULL,UNHEX(REPEAT('00',16)),l.lease_token)
 		FROM commands c JOIN operations p ON p.command_id=c.id
 		LEFT JOIN outbox_events o ON o.command_id=c.id
@@ -31,7 +31,7 @@ func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.
 		 AND o.locked_by=l.worker_id AND o.locked_until>TIMESTAMPDIFF(MICROSECOND,'2000-01-01',CURRENT_TIMESTAMP(6))
 		LEFT JOIN command_attempts a ON a.command_id=l.command_id AND a.outbox_event_id=o.id AND a.worker_id=l.worker_id
 		 AND a.attempt_number=o.attempts AND a.state='sending' AND a.finished_at IS NULL
-		WHERE c.id=? AND c.node_id=?`, UUIDBytes(command), UUIDBytes(node)).Scan(&v.Envelope, &v.State, &v.CreatedAt, &v.DispatchInFlight, &v.AttemptID, &v.LeaseToken)
+		WHERE c.id=? AND c.node_id=?`, UUIDBytes(command), UUIDBytes(node)).Scan(&v.Envelope, &v.State, &v.CreatedAt, &v.Compacted, &v.DispatchInFlight, &v.AttemptID, &v.LeaseToken)
 	return
 }
 func (s commandResultStore) Receipt(ctx context.Context, key string, effect []byte, sequence uint64) (id uuid.UUID, digest []byte, err error) {

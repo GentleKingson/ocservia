@@ -16,6 +16,7 @@ import (
 // remaining steps in the same pass to continue.
 type maintenanceWork struct {
 	users, rollouts, telemetry, certificates, audit func(context.Context) error
+	retention                                       func(context.Context) error
 	evidence                                        func(context.Context, *coordination.Session) error
 }
 
@@ -45,6 +46,11 @@ func (w maintenanceWork) run(sessionCtx context.Context, session *coordination.S
 	certificateSpan.End()
 	if err := w.audit(sessionCtx); err != nil {
 		return err
+	}
+	if w.retention != nil {
+		if err := w.retention(sessionCtx); err != nil {
+			return err
+		}
 	}
 	if w.evidence != nil {
 		if err := w.evidence(sessionCtx, session); err != nil {

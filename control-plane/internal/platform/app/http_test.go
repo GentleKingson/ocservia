@@ -9,6 +9,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
+	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 )
 
@@ -63,7 +64,7 @@ func TestNonAPIRolesSkipHTTPConstruction(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			// Both SSE and authentication would fail if the HTTP path ran.
-			cfg := config.Config{Role: role, LocalAuth: true, ShutdownTimeout: time.Second, UserOperationConcurrency: 1, AgentUpgradeReconcile: time.Minute}
+			cfg := config.Config{HistoryRetention: historyretention.DefaultPolicy(), Role: role, LocalAuth: true, ShutdownTimeout: time.Second, UserOperationConcurrency: 1, AgentUpgradeReconcile: time.Minute}
 			backend := stoppedBackend{}
 			err := runRoles(ctx, cfg, BuildInfo{}, backend, audit.NewBackendManager(backend, nil), quietLogger())
 			if !errors.Is(err, context.Canceled) {

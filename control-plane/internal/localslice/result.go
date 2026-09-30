@@ -81,6 +81,9 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	if err != nil {
 		return fmt.Errorf("load command envelope for result: %w", err)
 	}
+	if stored.Compacted {
+		return invalidCommandResult("command detail is retired; terminal identity remains immutable")
+	}
 	envelopeBytes, currentState := stored.Envelope, stored.State
 	dispatchInFlight := stored.DispatchInFlight
 	inFlightAttemptID, inFlightLeaseToken := stored.AttemptID, stored.LeaseToken

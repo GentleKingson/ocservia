@@ -20,6 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
+	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
 	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"
 )
@@ -34,6 +35,7 @@ const (
 )
 
 type Config struct {
+	HistoryRetention         historyretention.Policy
 	Role                     Role
 	MigrateOnly              bool
 	BootstrapLocalAdmin      bool
@@ -109,6 +111,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		TransportTimeout: 3 * time.Second, TransportQueue: 256, OwnerLeaseTTL: 30 * time.Second, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
 		AgentUpgradeReconcile: 30 * time.Minute,
 		EventStreams:          eventstream.DefaultConfig(),
+		HistoryRetention:      historyretention.DefaultPolicy(),
 		TransportUID:          uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
@@ -249,6 +252,17 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		cfg.OwnerLeaseTTL = 30 * time.Second
 	}
 	if err := setInt(lookup, "OCSERV_USER_OPERATION_CONCURRENCY", &cfg.UserOperationConcurrency); err != nil {
+		return Config{}, err
+	}
+	for name, target := range map[string]*int{
+		"OCSERV_RETIRED_NODE_RETENTION_DAYS":   &cfg.HistoryRetention.RetiredNodeDays,
+		"OCSERV_COMMAND_DETAIL_RETENTION_DAYS": &cfg.HistoryRetention.CommandDays,
+	} {
+		if err := setInt(lookup, name, target); err != nil {
+			return Config{}, err
+		}
+	}
+	if err := cfg.HistoryRetention.Validate(); err != nil {
 		return Config{}, err
 	}
 	for name, target := range map[string]*int{

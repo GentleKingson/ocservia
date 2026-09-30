@@ -22,7 +22,7 @@ func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.
 	}
 	// A separate statement establishes outbox-before-command ordering and a
 	// fresh snapshot after waiting for a concurrent dispatch completion.
-	err = s.QueryRow(ctx, `SELECT c.envelope,c.state,c.created_at,f.attempt_id IS NOT NULL,
+	err = s.QueryRow(ctx, `SELECT c.envelope,c.state,c.created_at,c.details_compacted_at IS NOT NULL,f.attempt_id IS NOT NULL,
 		COALESCE(f.attempt_id,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE(f.lease_token,'00000000-0000-0000-0000-000000000000'::uuid)
 		FROM commands c JOIN operations p ON p.command_id=c.id
 		LEFT JOIN LATERAL (SELECT a.id AS attempt_id,l.lease_token FROM outbox_events o
@@ -30,7 +30,7 @@ func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.
 		 JOIN command_attempts a ON a.command_id=l.command_id AND a.outbox_event_id=o.id AND a.worker_id=l.worker_id
 		 WHERE o.command_id=c.id AND l.leased_until>clock_timestamp() AND o.locked_by=l.worker_id AND o.locked_until>clock_timestamp()
 		 AND a.attempt_number=o.attempts AND a.state='sending' AND a.finished_at IS NULL LIMIT 1) f ON true
-		WHERE c.id=$1 AND c.node_id=$2`, command, node).Scan(&v.Envelope, &v.State, &v.CreatedAt, &v.DispatchInFlight, &v.AttemptID, &v.LeaseToken)
+		WHERE c.id=$1 AND c.node_id=$2`, command, node).Scan(&v.Envelope, &v.State, &v.CreatedAt, &v.Compacted, &v.DispatchInFlight, &v.AttemptID, &v.LeaseToken)
 	return
 }
 
