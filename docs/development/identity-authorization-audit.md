@@ -48,8 +48,15 @@ this requirement.
 Audit intents commit with business writes. Agent terminal results append a
 separate event. Every new row authenticates its canonical event hash with a
 domain-separated application HMAC; signed checkpoints use a separate key.
-Audit rows and checkpoints are append-only, and the verification endpoint checks
-the hash chain, every event MAC, and the latest checkpoint. A failed audit insert rolls back
+Audit identities, original hashes/MACs and checkpoints are immutable. Ordinary
+UPDATE, DELETE and TRUNCATE remain denied. A separate bounded retention pass may
+clear aged reason/before/after detail through a narrow database routine after
+verifying its original hash and MAC. It authenticates the retained record and
+original proof with the distinct `ocservia/audit-detail-compaction/v1` MAC domain;
+chain links and checkpoint hashes do not change. The verification endpoint checks
+both original and compaction MACs, the hash chain and latest checkpoint, and reports
+`compacted_events` so verified retained evidence is distinguishable from full detail.
+Legacy unsigned rows and their transition anchor are not compacted. A failed audit insert rolls back
 the business transaction. Chain hashing uses the persisted microsecond clock
 value, and summaries are parsed to their logical JSON representation before
 canonicalization, so writer and reader agree even for whitespace around a

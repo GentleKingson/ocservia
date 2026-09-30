@@ -110,7 +110,7 @@ if [[ "${scope}" == regression ]]; then
 else
 echo "Full current database acceptance: ${ENGINE}"
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql)
-(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend|HistoryRetentionBackend)Integration$')
+(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend|HistoryRetentionBackend|AuditRetentionBackend)Integration$')
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment --select -race -timeout=10m)
 bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-userstate --select -race -timeout=10m)

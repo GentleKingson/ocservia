@@ -6,6 +6,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -32,7 +33,7 @@ func (s auditStore) Append(ctx context.Context, args []any) error {
 	return err
 }
 func (s auditStore) Events(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
-	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspace)
+	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac,details_compacted_at,compaction_key_id,compaction_mac FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspace)
 }
 func (s auditStore) RecentEvents(ctx context.Context, workspace uuid.UUID, limit int) (database.Rows, error) {
 	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,approval_id,result,reason,error_type,previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT $2`, workspace, limit)
@@ -60,4 +61,21 @@ func (s auditStore) CheckpointHash(ctx context.Context, workspace, event uuid.UU
 	var hash []byte
 	err := s.QueryRow(ctx, `SELECT through_event_hash FROM audit_checkpoints WHERE workspace_id=$1 AND through_event_id=$2`, workspace, event).Scan(&hash)
 	return hash, err
+}
+
+func (s auditStore) ExpiredDetails(ctx context.Context, cutoff value.Timestamp) (database.Rows, error) {
+	return s.Query(ctx, `SELECT workspace_id,id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac,details_compacted_at,compaction_key_id,compaction_mac FROM audit_events WHERE details_compacted_at IS NULL AND auth_version=1 AND action<>'audit.auth.transition' AND occurred_at<$1 ORDER BY occurred_at,id LIMIT 32 FOR UPDATE SKIP LOCKED`, cutoff)
+}
+func (s auditStore) CompactDetails(ctx context.Context, id uuid.UUID, hash []byte, key string, mac []byte, at value.Timestamp) error {
+	var changed bool
+	err := s.QueryRow(ctx, `SELECT audit_compact_detail($1,$2,$3,$4,$5)`, id, hash, key, mac, at).Scan(&changed)
+	if err == nil && !changed {
+		return database.ErrNotFound
+	}
+	return err
+}
+
+func (s auditStore) CompactSecurity(ctx context.Context, cutoff value.Timestamp) error {
+	_, err := s.Exec(ctx, `SELECT security_compact_details($1)`, cutoff)
+	return err
 }
