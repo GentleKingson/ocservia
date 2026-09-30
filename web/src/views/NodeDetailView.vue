@@ -37,7 +37,10 @@ import {
   type UserPolicyForm,
 } from "../adapters/user-policy";
 import UserPolicyFields from "../upstream/UserPolicyFields.vue";
-import { recoveryDialogKind } from "../shared/desired-recovery";
+import {
+  recoveryDialogKind,
+  resourceStatusKey,
+} from "../shared/desired-recovery";
 import { useFleetStore } from "../shared/fleet";
 import { operationStatusKey } from "../shared/operation-status";
 import { workspaceChangedEvent } from "../api/workspace";
@@ -89,6 +92,7 @@ const readReady = computed(
 const {
   configDialog,
   currentConfigRevision,
+  configSourceRevision,
   canSubmitConfigPlan,
   configPlan,
   configOperation,
@@ -721,8 +725,8 @@ async function submitPolicy(): Promise<void> {
             <div v-for="item in usersState" :key="item.name">
               <span
                 ><strong>{{ item.name }}</strong
-                ><small :class="item.convergence">{{
-                  $t("convergence_" + item.convergence)
+                ><small :class="resourceStatusKey(item)">{{
+                  $t(resourceStatusKey(item))
                 }}</small
                 ><small
                   v-if="item.recoveryRequired && !item.recoveryMutationKind"
@@ -827,8 +831,8 @@ async function submitPolicy(): Promise<void> {
             <div v-for="item in groupsState" :key="item.name">
               <span
                 ><strong>{{ item.name }}</strong
-                ><small :class="item.convergence">{{
-                  $t("convergence_" + item.convergence)
+                ><small :class="resourceStatusKey(item)">{{
+                  $t(resourceStatusKey(item))
                 }}</small
                 ><small
                   v-if="item.recoveryRequired && !item.recoveryMutationKind"
@@ -1246,6 +1250,14 @@ async function submitPolicy(): Promise<void> {
           <h2>{{ $t("configPlan") }}</h2>
           <code>{{ currentNode?.name }}</code>
         </header>
+        <p class="config-source-note" role="note">
+          {{ $t("configTemplateSource") }}
+        </p>
+        <p class="config-source-note">
+          {{ $t("configSourceRevision") }}:
+          <code>{{ configSourceRevision }}</code>
+        </p>
+        <p class="config-source-note">{{ $t("configRiskFields") }}</p>
         <label for="config-port">{{ $t("tcpPort") }}</label>
         <input
           id="config-port"
@@ -1347,6 +1359,11 @@ async function submitPolicy(): Promise<void> {
             <label>{{ $t("materializedHash") }}</label>
             <code>{{ configPlan.materializedHash }}</code>
           </template>
+          <p class="config-source-note">{{ $t("configCandidateSource") }}</p>
+          <p class="config-source-note">
+            {{ $t("configSourceRevision") }}:
+            <code>{{ configPlan.expectedRevision }}</code>
+          </p>
           <pre v-if="configPlan.diffRedacted">{{
             configPlan.diffRedacted
           }}</pre>
