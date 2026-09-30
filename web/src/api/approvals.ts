@@ -1,9 +1,12 @@
 import {
   OperationsApi,
   type Approval,
+  type ApprovalPage,
   type ApprovalDecision,
 } from "@ocservia/api-client";
 import { configuration, requestInit } from "./transport";
+
+import { workspaceID } from "./workspace";
 
 const operations = new OperationsApi(configuration);
 
@@ -19,4 +22,15 @@ export function approveRequest(
   approvalDecision: ApprovalDecision,
 ): Promise<Approval> {
   return operations.approveRequest({ approvalId, approvalDecision });
+}
+
+export async function listPendingApprovals(
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<ApprovalPage> {
+  const xWorkspaceID = await workspaceID();
+  return operations.listPendingApprovals(
+    { xWorkspaceID, pageSize: 50, ...(cursor ? { cursor } : {}) },
+    requestInit(signal),
+  );
 }

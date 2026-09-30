@@ -1,6 +1,7 @@
 package api
 
 // Frozen from e41b9a78e74c5920fe4741061800c1b8e8f56dc1 for S-02 differential tests.
+// Repair PR-11 extends only /api/v1/approval-requests to GET_OR_POST.
 // Never used by production routing.
 
 import (
@@ -47,11 +48,13 @@ func s02BaselineRouteMethod(path string) (string, bool) {
 		return http.MethodGet, true
 	case "/api/v1/auth/login":
 		return "GET_OR_POST", true
+	case "/api/v1/approval-requests":
+		return "GET_OR_POST", true
 	case "/api/v1/nodes":
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
 		return http.MethodPost, true
-	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/change-password", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
+	case "/api/v1/enrollment-tokens", "/api/v1/node-bootstrap-tokens", "/api/v1/auth/logout", "/api/v1/auth/change-password", "/api/v1/auth/break-glass", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
 		return http.MethodPost, true
 	}
 	if path == "/api/v1/secret-provider-refs" {

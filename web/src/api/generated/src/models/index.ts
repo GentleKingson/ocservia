@@ -7,6 +7,7 @@ export * from "./AgentRolloutPage";
 export * from "./AgentUpgradeRequest";
 export * from "./Approval";
 export * from "./ApprovalDecision";
+export * from "./ApprovalPage";
 export * from "./ApprovalRequest";
 export * from "./ApprovalRequestAgentRollout";
 export * from "./ApprovalRequestAgentUpgrade";
