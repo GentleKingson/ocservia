@@ -1,0 +1,37 @@
+{
+  "version": 27,
+  "previous_checksum": "30bc6f6659188d549f469889b635dd3e115f5e457c5457f90e5abcb78093fdce",
+  "engine": "mariadb",
+  "parents": {
+    "1d0c6d6b9bcd7b64dba44f74b0d96700258f2e60f217dfa207168904776606b6": {
+      "steps": [
+        {
+          "name": "bootstrap_endpoint_authority",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE node_bootstrap_tokens ADD COLUMN expected_endpoint_id VARBINARY(32) NULL CHECK (expected_endpoint_id IS NULL OR OCTET_LENGTH(expected_endpoint_id)=32)",
+          "checksum": "31d3846120c537fb64b64eb351b70a5068313424d1f678079eecc21bffe9cf37",
+          "before": "11176596763f2a1d7737a49ba2bd5bb52cbc892c151e4b25d324203d9b36f0c1",
+          "after": "75d88e6a51acb1d05c1384656a647124013eea4218edc35040bb4b846140ee0e"
+        }
+      ]
+    },
+    "38a2195542671c49527493e96db1972c0151b1a0f95a8203f0a77f33fde7280c": {
+      "steps": [
+        {
+          "name": "bootstrap_endpoint_authority",
+          "object": "node_bootstrap_tokens",
+          "kind": "table",
+          "sql": "ALTER TABLE node_bootstrap_tokens ADD COLUMN expected_endpoint_id VARBINARY(32) NULL CHECK (expected_endpoint_id IS NULL OR OCTET_LENGTH(expected_endpoint_id)=32)",
+          "checksum": "31d3846120c537fb64b64eb351b70a5068313424d1f678079eecc21bffe9cf37",
+          "before": "11176596763f2a1d7737a49ba2bd5bb52cbc892c151e4b25d324203d9b36f0c1",
+          "after": "75d88e6a51acb1d05c1384656a647124013eea4218edc35040bb4b846140ee0e"
+        }
+      ]
+    }
+  },
+  "metadata_hashes": {
+    "backend_schema_revision_steps": "0b7565e3acd541e9c38ca77bf007c633db76261857214828a35a6afda549f0ab",
+    "backend_schema_revisions": "4858942ba77cd360fb504b26ce78df5f04a1e989415c38fd21dabcea13be8e3f"
+  }
+}

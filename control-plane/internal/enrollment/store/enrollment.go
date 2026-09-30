@@ -14,6 +14,7 @@ type Token struct {
 	Environment, CreatedBy           string
 	ExpectedName                     *string
 	Endpoint                         []byte
+	ExpectedEndpoint                 []byte
 	ConsumedNode                     *uuid.UUID
 	ExpiresAt, ConsumedAt, CreatedAt value.Timestamp
 }

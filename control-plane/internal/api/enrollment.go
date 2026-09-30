@@ -26,11 +26,12 @@ type tokenRequest struct {
 }
 
 type bootstrapTokenRequest struct {
-	WorkspaceID      string `json:"workspace_id"`
-	Environment      string `json:"environment"`
-	ExpectedNodeName string `json:"expected_node_name"`
-	TTLSeconds       int64  `json:"ttl_seconds"`
-	Reason           string `json:"reason"`
+	ExpectedEndpointID string `json:"expected_endpoint_id"`
+	WorkspaceID        string `json:"workspace_id"`
+	Environment        string `json:"environment"`
+	ExpectedNodeName   string `json:"expected_node_name"`
+	TTLSeconds         int64  `json:"ttl_seconds"`
+	Reason             string `json:"reason"`
 }
 
 type approvalRequest struct {
@@ -98,11 +99,20 @@ func (s *Server) createNodeBootstrapToken(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "workspace_id is outside the authorized scope")
 		return
 	}
+	var endpoint []byte
+	if body.ExpectedEndpointID != "" {
+		var err error
+		endpoint, err = hex.DecodeString(body.ExpectedEndpointID)
+		if err != nil || len(endpoint) != 32 || strings.ToLower(body.ExpectedEndpointID) != body.ExpectedEndpointID {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "expected_endpoint_id must be 32-byte lowercase hex")
+			return
+		}
+	}
 	if !validEnrollmentTTLSeconds(body.TTLSeconds) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
 		return
 	}
-	token, err := s.enrollment.CreateBootstrapToken(r.Context(), enrollment.BootstrapTokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r)})
+	token, err := s.enrollment.CreateBootstrapToken(r.Context(), enrollment.BootstrapTokenSpec{ExpectedEndpointID: endpoint, WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
 		return

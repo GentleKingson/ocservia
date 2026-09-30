@@ -349,11 +349,18 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("enrollment audit chain", verified, err)
 	}
 
-	bootstrap, err := s.CreateBootstrapToken(ctx, BootstrapTokenSpec{WorkspaceID: workspace, Environment: "test", ActorID: "operator", Reason: "bootstrap", RequestID: uuid.NewString()})
+	bootstrapEndpoint := endpointFixture(102)
+	bootstrap, err := s.CreateBootstrapToken(ctx, BootstrapTokenSpec{ExpectedEndpointID: bootstrapEndpoint, WorkspaceID: workspace, Environment: "test", ActorID: "operator", Reason: "bootstrap", RequestID: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bootstrapEndpoint := endpointFixture(102)
+	wrongEndpoint := enrollmentRequest(bootstrap.Value, endpointFixture(103))
+	if err := s.ValidateEnrollment(ctx, wrongEndpoint); !errors.Is(err, ErrInvalidToken) {
+		t.Fatal("prebound token validated another endpoint", err)
+	}
+	if _, err := s.Enroll(ctx, wrongEndpoint); !errors.Is(err, ErrInvalidToken) {
+		t.Fatal("prebound token consumed by another endpoint", err)
+	}
 	bootstrapRequest := enrollmentRequest(bootstrap.Value, bootstrapEndpoint)
 	negative, positive := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
 	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, `UPDATE node_bootstrap_tokens SET created_at=?,expires_at=? WHERE id=?`, negative, positive, bootstrap.ID)
@@ -368,7 +375,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	if replay, err := s.Enroll(ctx, bootstrapRequest); err != nil || !bytes.Equal(replay.GetNodeId(), bootstrapped.GetNodeId()) {
 		t.Fatal("bound bootstrap retry with expired token", replay, err)
 	}
-	if _, err := s.Enroll(ctx, enrollmentRequest(bootstrap.Value, endpointFixture(103))); !errors.Is(err, ErrEndpointMismatch) {
+	if _, err := s.Enroll(ctx, enrollmentRequest(bootstrap.Value, endpointFixture(103))); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("bootstrap endpoint substitution", err)
 	}
 	wideEndpoint := endpointFixture(104)

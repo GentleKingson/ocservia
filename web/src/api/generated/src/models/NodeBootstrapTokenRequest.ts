@@ -38,6 +38,12 @@ export interface NodeBootstrapTokenRequest {
    */
   expectedNodeName?: string;
   /**
+   * Optional possession-bound Agent EndpointID; set this for Controller rebind.
+   * @type {string}
+   * @memberof NodeBootstrapTokenRequest
+   */
+  expectedEndpointId?: string;
+  /**
    *
    * @type {number}
    * @memberof NodeBootstrapTokenRequest
@@ -90,6 +96,10 @@ export function NodeBootstrapTokenRequestFromJSONTyped(
       json["expected_node_name"] == null
         ? undefined
         : json["expected_node_name"],
+    expectedEndpointId:
+      json["expected_endpoint_id"] == null
+        ? undefined
+        : json["expected_endpoint_id"],
     ttlSeconds: json["ttl_seconds"] == null ? undefined : json["ttl_seconds"],
     reason: json["reason"],
   };
@@ -113,6 +123,7 @@ export function NodeBootstrapTokenRequestToJSONTyped(
     workspace_id: value["workspaceId"],
     environment: value["environment"],
     expected_node_name: value["expectedNodeName"],
+    expected_endpoint_id: value["expectedEndpointId"],
     ttl_seconds: value["ttlSeconds"],
     reason: value["reason"],
   };
