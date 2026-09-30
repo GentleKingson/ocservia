@@ -46,7 +46,7 @@ authorized principal.
 2. Give Stage-1 the protected source path and run the pinned installer. It
    prepares the identity, enrolls immediately, deletes the plaintext source
    after success, writes `agent.env` atomically, and stops at
-   `PENDING_APPROVAL` without enabling or starting a service.
+   `ENROLLED_LOCAL` without enabling or starting a service.
 
    ```bash
    export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
@@ -217,3 +217,37 @@ bootstrap and this enrollment never start or enable a service themselves.
 
 - [Install a managed node](../getting-started/managed-node.md)
 - [Node enrollment reference](../development/enrollment.md)
+
+## Recover an uncertain enrollment response
+
+Keep the original EndpointID, identity directory and protected token material when
+an enrollment response is lost or SSH is interrupted. For a bootstrap token,
+rerun the same installer with the original bootstrap binding; the existing
+same-endpoint recovery can return an enrollment that the Controller already
+committed. Do not create a new identity or authorization merely because the
+client did not receive a response.
+
+Legacy endpoint-bound enrollment tokens do not have that bootstrap replay
+contract. An administrator must first find the node by its original EndpointID
+in the Controller inventory before deciding whether a new token is required.
+Approval expiry requires a fresh approval request bound to the current content
+and an independent approver; it does not imply a new node identity.
+
+`ENROLLED_LOCAL` confirms the persisted local Node ID; `SERVICES_ACTIVE` confirms
+only both local units are enabled and active. The installer has no administrator
+session and marks Controller trust, connection and freshness as `NOT_OBSERVED`.
+On the Controller host, read `GET /api/v1/nodes/{node_id}` with the authorized
+workspace/session and inspect `trust_status`, `connection_state` and `freshness`.
+The approval/activation response's `status` describes a different transition.
+Do not transfer that administrator session to the Node.
+
+After confirmed local enrollment, the installer removes only its fixed protected
+enrollment-token copy. A rerun finishes this cleanup after validating the existing
+identity and binding, including after interruption between configuration commit
+and cleanup. Unsafe metadata fails closed. The bootstrap source is removed only
+by the successful enrollment invocation that used it; a rerun does not delete an
+arbitrary newly configured source. Failed or uncertain enrollment retains recovery
+material. Long-term identity, Relay token, public trust and sealing private keys
+are retained. Power loss or SIGKILL can interrupt cleanup; rerun and inspect the
+local summary. Enrollment copies remain root:ocserv-agent `0640`, so the Node can
+read them; they are not converted to root-only files.

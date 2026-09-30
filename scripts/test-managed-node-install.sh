@@ -1380,8 +1380,11 @@ as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token"
   "${sysroot}/etc/ocservia-agent/enrollment-token"
 capture_root
 assert_status 0 "enrollment with preserved keys must succeed"
-assert_output "PENDING_APPROVAL"
+assert_output "ENROLLED_LOCAL"
 assert_output "NODE_ID: ${MOCK_NODE_ID}"
+assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
+assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
+assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
 [[ "$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/user-password-seal-private.pem" | awk '{print $1}')" == "${user_key_digest}" ]] ||
   die "the existing user-password sealing key must be preserved byte for byte"
 [[ "$(as_root sha256sum -- "${sysroot}/etc/ocservia-agent/p12-password-seal-private.pem" | awk '{print $1}')" == "${p12_key_digest}" ]] ||
@@ -1425,6 +1428,7 @@ printf '23\n' >"${enroll_exit_file}"
 capture_root
 assert_status 1 "a failed enrollment must fail the bootstrap"
 assert_output "enrollment failed"
+assert_output "first query the Controller by that EndpointID"
 as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${sysroot}/etc/ocservia-agent/agent.env" ||
   die "a failed enrollment must not finalize agent.env"
 as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token" ||
@@ -1442,8 +1446,12 @@ chmod 0600 -- "${fixture}/node-bootstrap-token"
 EXTRA_ENV=("BOOTSTRAP_TOKEN_SOURCE=${fixture}/node-bootstrap-token")
 capture_root
 assert_status 0 "a protected bootstrap token must enroll in one run"
-assert_output "PENDING_APPROVAL"
+assert_output "ENROLLED_LOCAL"
+assert_output "SERVICES: NOT_OBSERVED"
 assert_output "NODE_ID: ${MOCK_NODE_ID}"
+assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
+assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
+assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
 if grep -qF -- "${bootstrap_secret}" <<<"${RUN_OUTPUT}" || grep -qF -- "${bootstrap_secret}" "${agent_log}"; then
   die "the bootstrap token plaintext must never appear in output or Agent arguments"
 fi
@@ -1456,11 +1464,11 @@ assert_log_empty "${systemctl_log}"
 bootstrap_enrollment_calls="$(grep -c -- "--enrollment-token-file" "${agent_log}")"
 capture_root
 assert_status 0 "an enrolled node must tolerate the unchanged bootstrap source configuration"
-assert_output "PENDING_APPROVAL"
+assert_output "ENROLLED_LOCAL"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${bootstrap_enrollment_calls}" ]] ||
   die "an enrolled rerun with the consumed bootstrap source configured must not enroll again"
 assert_systemctl_read_only
-echo "a protected bootstrap token reaches PENDING_APPROVAL and reruns with unchanged configuration"
+echo "a protected bootstrap token reaches ENROLLED_LOCAL and reruns with unchanged configuration"
 
 # 15b. bootstrap enrollment failure keeps the protected source for an
 # idempotent retry and does not finalize agent.env.
@@ -1472,6 +1480,8 @@ EXTRA_ENV=("BOOTSTRAP_TOKEN_SOURCE=${fixture}/node-bootstrap-token")
 capture_root
 assert_status 1 "a failed bootstrap enrollment must fail closed"
 assert_output "enrollment failed"
+assert_output "same bootstrap source"
+assert_output "Do not request a new token"
 [[ -e "${fixture}/node-bootstrap-token" ]] ||
   die "a failed bootstrap enrollment must retain its protected source"
 as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${sysroot}/etc/ocservia-agent/agent.env" ||
@@ -1479,7 +1489,7 @@ as_root grep -qx "NODE_ID=00000000-0000-7000-8000-000000000000" "${sysroot}/etc/
 : >"${enroll_exit_file}"
 capture_root
 assert_status 0 "the same-endpoint bootstrap retry must converge"
-assert_output "PENDING_APPROVAL"
+assert_output "ENROLLED_LOCAL"
 [[ ! -e "${fixture}/node-bootstrap-token" ]] ||
   die "the converged bootstrap retry must remove its protected source"
 assert_log_empty "${systemctl_log}"
@@ -1498,7 +1508,7 @@ for single_b in unset empty; do
   as_root install -o root -g ocserv-agent -m 0640 "${fixture}/enrollment-token" "${sysroot}/etc/ocservia-agent/enrollment-token"
   capture_root
   assert_status 0
-  assert_output "PENDING_APPROVAL"
+  assert_output "ENROLLED_LOCAL"
   enrollment_line="$(grep -- '--enrollment-token-file' "${agent_log}")"
   [[ "$(grep -o -- '--relay-url' <<<"${enrollment_line}" | wc -l)" -eq 1 ]] || die 'registration must receive one URL'
   assert_log_contains "${agent_log}" "--relay-url https://relay-a.example.test --relay-token-file"
@@ -1524,7 +1534,7 @@ printf 'mock one-time enrollment token bytes\n' >"${fixture}/enrollment-token"
 as_root install -o root -g ocserv-agent -m 640 "${fixture}/enrollment-token" "${sysroot}/etc/ocservia-agent/enrollment-token"
 capture_root
 assert_status 0
-assert_output PENDING_APPROVAL
+assert_output ENROLLED_LOCAL
 assert_log_contains "${agent_log}" "--relay-ca-file ${ca}"
 capture_root
 assert_status 0
@@ -1548,7 +1558,7 @@ assert_output 'readable PEM certificate'
 echo 'protected additional Relay CA enrollment and read-only rerun checks passed'
 
 # 16. a valid protected token completes enrollment: the exact CLI contract,
-# atomic agent.env finalization, token consumption, PENDING_APPROVAL.
+# atomic agent.env finalization, token consumption, ENROLLED_LOCAL.
 scenario
 capture_root
 assert_status 0
@@ -1557,8 +1567,11 @@ as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token"
   "${sysroot}/etc/ocservia-agent/enrollment-token"
 capture_root
 assert_status 0 "the enrollment rerun must succeed"
-assert_output "PENDING_APPROVAL"
+assert_output "ENROLLED_LOCAL"
 assert_output "NODE_ID: ${MOCK_NODE_ID}"
+assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
+assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
+assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
 for argument in \
   "--identity-dir ${sysroot}/var/lib/ocservia-agent/identity" \
   "--controller ${controller_id}" \
@@ -1584,20 +1597,23 @@ as_root grep -qx "AGENT_ENDPOINT_ID=${MOCK_ENDPOINT_ID}" "${sysroot}/etc/ocservi
 if as_root test -e "${sysroot}/etc/ocservia-agent/enrollment-token"; then
   die "the one-time enrollment token file must be consumed after success"
 fi
-# A fresh enrollment prints PENDING_APPROVAL directly; the activation-state
+# A fresh enrollment prints ENROLLED_LOCAL directly; the activation-state
 # observation only belongs to later converged reruns.
 assert_log_empty "${systemctl_log}"
-echo "a valid token completes enrollment to PENDING_APPROVAL"
+echo "a valid token completes enrollment to ENROLLED_LOCAL"
 
 # 17. a rerun after enrollment does not re-enroll and stays at
-# PENDING_APPROVAL while the services are not enabled; a stale token is
+# ENROLLED_LOCAL while the services are not enabled; a stale token is
 # reported, never reused.
 enrollment_calls="$(grep -c -- "--enrollment-token-file" "${agent_log}")"
 curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
 capture_root
 assert_status 0 "the post-enrollment rerun must succeed"
-assert_output "PENDING_APPROVAL"
+assert_output "ENROLLED_LOCAL"
 assert_output "NODE_ID: ${MOCK_NODE_ID}"
+assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
+assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
+assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "a rerun after enrollment must not enroll again"
 [[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
@@ -1607,12 +1623,13 @@ printf 'mock stale enrollment token bytes\n' >"${fixture}/enrollment-token"
 as_root install -o root -g ocserv-agent -m 0640 -- "${fixture}/enrollment-token" \
   "${sysroot}/etc/ocservia-agent/enrollment-token"
 capture_root
-assert_status 0 "a rerun with a stale token must stay at PENDING_APPROVAL"
-assert_output "stale token"
+assert_status 0 "a rerun with a stale token must stay at ENROLLED_LOCAL"
+assert_output "known stale token copy"
+as_root test ! -e "${sysroot}/etc/ocservia-agent/enrollment-token" || die "confirmed local registration did not clean the known token copy"
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "a stale token must never trigger a second enrollment"
 assert_systemctl_read_only
-echo "post-enrollment reruns stay at PENDING_APPROVAL"
+echo "post-enrollment reruns stay at ENROLLED_LOCAL"
 
 # 17a. after the independent approval and the operator's enable step, a
 # rerun reports the enabled+active services without any further mutation:
@@ -1624,8 +1641,11 @@ capture_root
 assert_status 0 "the post-activation rerun must succeed"
 assert_output "SERVICES_ACTIVE"
 assert_output "NODE_ID: ${MOCK_NODE_ID}"
-if grep -q "PENDING_APPROVAL" <<<"${RUN_OUTPUT}"; then
-  die "an activated node must not be reported as PENDING_APPROVAL"
+assert_output "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
+assert_output "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
+assert_output "CONTROLLER_FRESHNESS: NOT_OBSERVED"
+if grep -q "ENROLLED_LOCAL" <<<"${RUN_OUTPUT}"; then
+  die "an activated node must not be reported as ENROLLED_LOCAL"
 fi
 [[ "$(grep -c -- "--enrollment-token-file" "${agent_log}")" == "${enrollment_calls}" ]] ||
   die "the post-activation rerun must not enroll again"

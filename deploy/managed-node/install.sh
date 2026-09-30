@@ -18,7 +18,7 @@
 # When the operator provisions either token source,
 # rerunning this same entrypoint completes enrollment, atomically writes the
 # final /etc/ocservia-agent/agent.env, consumes the one-time token file, and
-# stops at PENDING_APPROVAL.
+# stops at ENROLLED_LOCAL.
 #
 # Reruns converge without repeating completed work: when the native package
 # of this exact release is already installed under the production relay
@@ -80,7 +80,7 @@
 #   # the strict non-executing loader embedded below — the same contract as
 #   # deploy/lib/install-env.sh; explicit shell variables always win over the
 #   # file)
-#   deploy/managed-node/install.sh --version vX.Y.Z   # -> PENDING_APPROVAL
+#   deploy/managed-node/install.sh --version vX.Y.Z   # -> ENROLLED_LOCAL
 #   # Without BOOTSTRAP_TOKEN_SOURCE, this stops at ENROLLMENT_READY instead;
 #   # create an endpoint-bound token for the printed EndpointID, install it as
 #   # /etc/ocservia-agent/enrollment-token root:ocserv-agent 0640, and rerun.
@@ -1142,16 +1142,36 @@ services_enabled_and_active() {
   done
 }
 
-print_pending_approval() {
-  echo "PENDING_APPROVAL"
+print_controller_unobserved() {
+  echo "CONTROLLER_TRUST_STATUS: NOT_OBSERVED"
+  echo "CONTROLLER_CONNECTION_STATE: NOT_OBSERVED"
+  echo "CONTROLLER_FRESHNESS: NOT_OBSERVED"
+  echo "next: use an administrator session on the Controller host to GET /api/v1/nodes/${1}; approval/activation responses use status, inventory uses trust_status, connection_state and freshness"
+}
+
+print_enrolled_local() {
+  echo "ENROLLED_LOCAL"
   echo "NODE_ID: ${1}"
-  echo "next: approve the node as described in docs/how-to/enroll-node.md#approve-the-node, then enable ocservia-privd.service and ocservia-agent.service; the bootstrap never starts or enables a service"
+  echo "SERVICES: ${2:-NOT_OBSERVED}"
+  print_controller_unobserved "${1}"
+  echo "next: verify approval in the Controller (docs/how-to/enroll-node.md#approve-the-node), then deliberately enable ocservia-privd.service and ocservia-agent.service; the bootstrap never starts or enables a service"
 }
 
 print_services_active() {
   echo "SERVICES_ACTIVE"
   echo "NODE_ID: ${1}"
-  echo "next: both managed-node services are enabled and active; confirm the node reports online in the Controller inventory (the bootstrap cannot observe Controller-side approval)"
+  print_controller_unobserved "${1}"
+  echo "both local services are enabled and active; this does not establish Controller activation, online state or fresh telemetry"
+}
+
+cleanup_enrollment_copy() {
+  if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then return; fi
+  if ! priv test -f "${ENROLLMENT_TOKEN_FILE}" || priv test -L "${ENROLLMENT_TOKEN_FILE}" \
+    || [[ "$(stat_string "${ENROLLMENT_TOKEN_FILE}")" != "0:${AGENT_GID}:640:1" ]]; then
+    fail "registered node has an unsafe enrollment token copy; inspect ${ENROLLMENT_TOKEN_FILE} deliberately (expected one-link root:ocserv-agent 0640)"
+  fi
+  priv rm -f -- "${ENROLLMENT_TOKEN_FILE}"
+  echo "removed the known stale token copy after confirming the local enrollment binding"
 }
 
 converge_enrollment() {
@@ -1183,13 +1203,11 @@ converge_enrollment() {
     rerun_instruction="rerun deploy/managed-node/install.sh"
   fi
   if [[ -n "${ENROLLED_NODE_ID}" ]]; then
-    if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
-      echo "an enrollment token file is present but this node is already enrolled; remove the stale token file" >&2
-    fi
+    cleanup_enrollment_copy
     if services_enabled_and_active; then
       print_services_active "${ENROLLED_NODE_ID}"
     else
-      print_pending_approval "${ENROLLED_NODE_ID}"
+      print_enrolled_local "${ENROLLED_NODE_ID}" NOT_ENABLED_AND_ACTIVE
     fi
     return
   fi
@@ -1215,7 +1233,12 @@ converge_enrollment() {
     --p12-password-seal-public-key-sha256 "${P12_SEAL_DESCRIPTOR}" \
     "${relay_args[@]}" \
     --relay-token-file "${RELAY_TOKEN_FILE}")" ||
-    fail "enrollment failed; the identity and prepared configuration are unchanged — create a fresh one-time token and rerun (a token is one-time and short-lived)"
+    {
+      if [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]]; then
+        fail "enrollment failed or its response is unknown; preserve the original EndpointID, identity and bootstrap binding; rerun with the same bootstrap source to recover the committed result. Do not request a new token before checking the Controller"
+      fi
+      fail "enrollment failed or its response is unknown; preserve the original EndpointID and token copy. Endpoint-bound tokens do not provide bootstrap replay recovery: first query the Controller by that EndpointID, then follow docs/how-to/enroll-node.md before creating any new authorization"
+    }
   node_id="$(printf '%s\n' "${node_id}" | awk 'NF {last=$0} END {print last}')"
   is_final_node_id "${node_id}" ||
     fail "enrollment did not return a valid UUIDv7 node ID"
@@ -1225,12 +1248,12 @@ converge_enrollment() {
     "${USER_PASSWORD_SEAL_KEY_ID}" "${USER_SEAL_DESCRIPTOR}" \
     "${P12_PASSWORD_SEAL_KEY_ID}" "${P12_SEAL_DESCRIPTOR}" >"${staging}"
   write_config_atomic "${staging}" "${AGENT_ENV_FILE}" 0640
-  priv rm -f -- "${ENROLLMENT_TOKEN_FILE}"
+  cleanup_enrollment_copy
   if [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]]; then
     priv rm -f -- "${BOOTSTRAP_TOKEN_SOURCE}"
   fi
   echo "enrollment complete; final ${AGENT_ENV_FILE} written and the one-time token file consumed"
-  print_pending_approval "${node_id}"
+  print_enrolled_local "${node_id}"
 }
 
 validate_sysroot
