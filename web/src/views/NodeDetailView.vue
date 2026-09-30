@@ -24,6 +24,7 @@ import type { NodeObservedState } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
+import AccessibleDialog from "../shared/AccessibleDialog.vue";
 import { formatTimestamp } from "../shared/timestamp";
 
 import { workspaceContext } from "../api/workspace";
@@ -168,6 +169,8 @@ watch(
 );
 
 function closeNodeDialogs(): void {
+  desiredDialog.value = undefined;
+  pendingAction.value = undefined;
   configDialog.value = false;
   certificateDialog.value = false;
   policyDialog.value = undefined;
@@ -194,12 +197,7 @@ async function selectRouteNode(): Promise<void> {
     return;
   }
   detailState.value =
-    fleet.selectionError === "notFound" ||
-    (fleet.initialized &&
-      fleet.nodes.length > 0 &&
-      !fleet.nodes.some((node) => node.id === nodeId))
-      ? "not-found"
-      : "unavailable";
+    fleet.selectionError === "notFound" ? "not-found" : "unavailable";
 }
 
 async function initialize(): Promise<void> {
@@ -396,18 +394,68 @@ async function submitPolicy(): Promise<void> {
           ><ArrowLeft :size="15" />{{ $t("backToNodes") }}</RouterLink
         >
         <p>{{ $t("nodeDetail") }}</p>
-        <h1>{{ currentNode?.name ?? routeNodeId }}</h1>
+        <h1>
+          {{
+            currentNode?.name ??
+            fleet.nodes?.find((node) => node.id === routeNodeId)?.name ??
+            $t("nodeDetail")
+          }}
+        </h1>
       </div>
       <span class="health" :class="{ unavailable: fleet.unavailable }"
         ><i></i
         >{{
-          $t(fleet.unavailable ? "systemsUnavailable" : "liveTelemetry")
+          $t(
+            detailLoading
+              ? "nodeLoading"
+              : fleet.unavailable || detailState === "unavailable"
+                ? "systemsUnavailable"
+                : currentNode
+                  ? currentNode.freshness === "fresh"
+                    ? "latestObservation"
+                    : currentNode.freshness
+                  : "notObserved",
+          )
         }}</span
       >
     </div>
 
-    <div v-if="detailLoading" class="detail-state" role="status">
-      <Server :size="24" /><span>{{ $t("nodeLoading") }}</span>
+    <div
+      v-if="detailLoading"
+      class="detail-skeleton"
+      aria-busy="true"
+      role="status"
+      :aria-label="$t('nodeLoading')"
+    >
+      <div class="detail-nav" aria-hidden="true">
+        <span
+          v-for="label in [
+            'nodeOverview',
+            'sessions',
+            'usersAndGroups',
+            'configurationSection',
+            'certificatesSection',
+          ]"
+          :key="label"
+          >{{ $t(label) }}</span
+        >
+      </div>
+      <div class="node-detail node-detail-page" aria-hidden="true">
+        <section
+          v-for="label in [
+            'nodeOverview',
+            'sessions',
+            'usersAndGroups',
+            'configurationSection',
+            'certificatesSection',
+          ]"
+          :key="label"
+          class="detail-section skeleton-section"
+        >
+          <h2>{{ $t(label) }}</h2>
+          <div v-for="row in 3" :key="row" class="skeleton-line"></div>
+        </section>
+      </div>
     </div>
     <div v-else-if="detailState === 'not-found'" class="detail-state">
       <Server :size="24" /><span>{{ $t("nodeNotFound") }}</span>
@@ -1060,14 +1108,14 @@ async function submitPolicy(): Promise<void> {
       </form>
     </div>
 
-    <div
+    <AccessibleDialog
       v-if="desiredDialog"
-      class="dialog-backdrop"
-      @click.self="desiredDialog = undefined"
+      labelledby="node-desired-dialog-title"
+      @close="desiredDialog = undefined"
     >
       <form class="operation-dialog" @submit.prevent="submitDesired">
         <header>
-          <h2>
+          <h2 id="node-desired-dialog-title">
             {{
               $t(
                 desiredDialog.kind === "create"
@@ -1147,7 +1195,7 @@ async function submitPolicy(): Promise<void> {
           </button>
         </footer>
       </form>
-    </div>
+    </AccessibleDialog>
 
     <div
       v-if="policyDialog"

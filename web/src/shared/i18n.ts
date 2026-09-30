@@ -74,6 +74,7 @@ export const i18n = createI18n({
       navigation: "Primary navigation",
       fleetStatus: "Fleet status",
       liveTelemetry: "Live telemetry",
+      latestObservation: "Latest observation",
       onlineNodes: "Online nodes",
       relayPaths: "Relay paths",
       activeSessions: "Active sessions",
