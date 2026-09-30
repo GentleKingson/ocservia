@@ -106,6 +106,30 @@ durable progress where required, and idempotent retry. No per-node timers and
 no cleanup inside rebind. Existing telemetry maintenance retains its own
 14-day raw, 90-day five-minute and 13-calendar-month hourly windows.
 
+The scheduler currently compacts terminal command payloads and retired-node
+ordinary snapshots independently of rebind. Each transaction takes at most 32
+commands or nodes (at most 32 session rows per selected node), and checks the
+scheduler leadership fence before commit. Marked command rows are skipped on
+retry. `OCSERV_COMMAND_DETAIL_RETENTION_DAYS` and
+`OCSERV_RETIRED_NODE_RETENTION_DAYS` configure these cutoffs.
+
+Command compaction requires both command and operation terminal state, an expired
+signed envelope and database expiry, completed outbox publication, no lease,
+no sending/Unknown attempt or Unknown result, and no unresolved associated
+configuration, artifact or upgrade projection. It replaces command/outbox payloads
+with a non-dispatchable evidence header and records the original envelope digest.
+Identities, request/idempotency hashes, terminal outcome, authorization signatures,
+semantic hashes, revision/fence claims and privileged result proofs remain.
+Configuration-plan payloads/results remain because later approval and recovery
+read them. Late results cannot mutate a compacted command; late dispatch bookkeeping
+cannot restore its full payload.
+
+Retired-node cleanup requires a revoked endpoint and no unresolved command or
+projection. It removes bounded session snapshots and clears ordinary health/path
+JSON, retaining the node and endpoint revocation records. Audit/security and local
+rebind detail require their own authenticated/retired-state compaction before their
+configured cutoffs can be applied; command retention never deletes those records.
+
 | Data | Default | Configuration range | Safety boundary |
 | --- | --- | --- | --- |
 | Retired node ordinary history | 90 days | 30–730 days | Retain node identity, revocation and required references |

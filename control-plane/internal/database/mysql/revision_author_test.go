@@ -129,6 +129,10 @@ func TestAuthorRevisionTwentySeven(t *testing.T) {
 	authorRevision(t, 27, []LongKeyStep{{Name: "bootstrap_endpoint_authority", Object: "node_bootstrap_tokens", Kind: "table", SQL: "ALTER TABLE node_bootstrap_tokens ADD COLUMN expected_endpoint_id VARBINARY(32) NULL CHECK (expected_endpoint_id IS NULL OR OCTET_LENGTH(expected_endpoint_id)=32)"}})
 }
 
+func TestAuthorRevisionTwentyEight(t *testing.T) {
+	authorRevision(t, 28, []LongKeyStep{{Name: "command_history_compaction", Object: "commands", Kind: "table", SQL: "ALTER TABLE commands ADD COLUMN details_compacted_at BIGINT NULL, ADD COLUMN envelope_sha256 VARBINARY(32) NULL, ADD CONSTRAINT commands_compaction_evidence CHECK ((details_compacted_at IS NULL AND envelope_sha256 IS NULL) OR (details_compacted_at IS NOT NULL AND envelope_sha256 IS NOT NULL AND OCTET_LENGTH(envelope_sha256)=32 AND state IN ('succeeded','failed','rejected','expired','rolled_back','superseded'))), ADD INDEX commands_retention_idx(details_compacted_at,updated_at,id)"}})
+}
+
 func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 	output := os.Getenv("PR02_AUTHOR_DIRECTORY")
 	if output == "" {
