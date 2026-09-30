@@ -59,6 +59,7 @@ validate_verified_package_source() {
     "${ROOT}/scripts/install-agent.sh" \
     "${ROOT}/scripts/upgrade-agent.sh" \
     "${ROOT}/scripts/rollback-agent.sh" \
+    "${ROOT}/scripts/rebind-agent.py" \
     "${ROOT}/scripts/uninstall-agent.sh" \
     "${ROOT}/deploy/systemd/agent.env.example" \
     "${ROOT}/deploy/systemd/ocservia-agent.service" \
@@ -349,6 +350,11 @@ fi
 validate_controller_command_key
 validate_password_sealing_keys
 
+ensure_root_private_directory "${DESTDIR}${UPGRADE_STATE_DIR}"
+[[ ! -L "${DESTDIR}${UPGRADE_STATE_DIR}/.binding-lifecycle.lock" ]] || installed_pair_preflight_error "unsafe lifecycle lock"
+exec 9>"${DESTDIR}${UPGRADE_STATE_DIR}/.binding-lifecycle.lock"
+flock -n 9 || installed_pair_preflight_error "another binding/package lifecycle operation is active"
+
 installed_agent="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 installed_privd="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
 installed_upgrader="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
@@ -428,6 +434,7 @@ done
 cmp -s "${ROOT}/scripts/verify-agent-package.sh" "${installed_verifier}" || same_install=false
 cmp -s "${ROOT}/deploy/production/systemd/agent-relays.sh" "${installed_relay_launcher}" || same_install=false
 cmp -s "${ROOT}/scripts/rollback-agent.sh" "${installed_rollback}" || same_install=false
+cmp -s "${ROOT}/scripts/rebind-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rebind" || same_install=false
 if [[ "${INSTALL_PRODUCTION_RELAYS:-false}" == true || -e "${installed_relay_dropin}" ]]; then
   cmp -s "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" "${installed_relay_dropin}" || same_install=false
 fi

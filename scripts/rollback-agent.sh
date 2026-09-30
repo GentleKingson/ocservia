@@ -123,6 +123,11 @@ if [[ "$(stat -c '%u:%g:%a' -- "${DESTDIR}${UPGRADE_STATE_DIR}")" != "0:0:700" |
 fi
 
 manifest="${BACKUP_DIR}/MANIFEST.sha256"
+if [[ "${verify_only}" != true ]]; then
+  [[ ! -L "${DESTDIR}${UPGRADE_STATE_DIR}/.binding-lifecycle.lock" ]] || rollback_error "unsafe lifecycle lock"
+  exec 9>"${DESTDIR}${UPGRADE_STATE_DIR}/.binding-lifecycle.lock"
+  flock -n 9 || rollback_error "another binding/package lifecycle operation is active"
+fi
 validate_file "${manifest}" 600
 if [[ "$(wc -l <"${manifest}")" -ne 8 && "$(wc -l <"${manifest}")" -ne 9 ]] || \
   awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-agent-relays\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|ocservia-agent-verify\.(previous|absent))$/ || NF != 2 || seen[$2]++ { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then

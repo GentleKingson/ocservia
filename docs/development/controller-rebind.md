@@ -1,6 +1,7 @@
 # Controller rebind and retention contract
 
-Status: implementation contract; this document does not make rebind available.
+Status: implementation contract. The [local rebind procedure](../how-to/rebind-controller.md)
+implements the manual lifecycle; independent retention has its own safety gates.
 Baseline: `95581ec89ee73c9b7403291078b8cefe1c43527d`.
 
 The identity crate now provides `Identity::stage_rebind`: it verifies the
@@ -23,8 +24,8 @@ and sealing keys stay in their existing locations. A namespaced Agent journal
 also pins its Controller/NodeID and refuses adoption of unbound recovery state.
 
 All services and upgrade runners must be stopped before publishing the selector.
-Publication alone is not a supported administrator procedure until the local
-lifecycle supplies its preflight, enrollment, recovery and audit steps. Upgrade
+Publication alone is not a supported administrator procedure: use the local
+lifecycle's preflight, enrollment, recovery and audit steps. Upgrade
 and rollback preflight require binding-aware binaries once the selector exists;
 they must not install a binary which ignores this authority boundary.
 

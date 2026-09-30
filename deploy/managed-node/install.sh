@@ -890,6 +890,9 @@ prepare_bootstrap_token() {
 }
 
 detect_enrolled_node() {
+  if priv test -e "${AGENT_CONF_DIR}/active-binding" || priv test -L "${AGENT_CONF_DIR}/active-binding"; then
+    fail "this node has an explicit Controller rebind; use ocservia-agent-rebind for binding recovery and the native package lifecycle for upgrades, not bootstrap enrollment"
+  fi
   # Establishes whether this node already completed enrollment, before any
   # step that could create node state. The enrolled state is a validation
   # boundary: from here on the bootstrap must not regenerate identity or

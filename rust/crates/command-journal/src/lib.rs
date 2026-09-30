@@ -112,6 +112,22 @@ pub struct AppliedResourceRevision<'a> {
 }
 
 impl Journal {
+    /// Stores an already verified grant for independent local rebind confirmation.
+    /// This is observation evidence, never a substitute for signature verification.
+    ///
+    /// # Errors
+    /// Refuses empty/oversized grants or database failure.
+    pub fn record_verified_session_grant(&self, grant: &[u8]) -> Result<(), rusqlite::Error> {
+        if grant.is_empty() || grant.len() > 65536 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.connection.execute(
+            "INSERT INTO agent_metadata(key,value) VALUES('verified_session_grant',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [grant],
+        )?;
+        Ok(())
+    }
+
     /// Pins a fresh namespace to its Controller and `NodeID`, or verifies its pin.
     /// Existing unbound command/recovery state cannot be adopted by rebind.
     ///
