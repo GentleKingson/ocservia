@@ -26,6 +26,7 @@ import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
 import AccessibleDialog from "../shared/AccessibleDialog.vue";
 import { formatTimestamp } from "../shared/timestamp";
+import { agentVersionLabel } from "../shared/agent-version";
 
 import { workspaceContext } from "../api/workspace";
 import { useNodeConfiguration } from "../features/configuration/useNodeConfiguration";
@@ -592,27 +593,25 @@ async function submitPolicy(): Promise<void> {
               <dd>
                 {{ currentNode.agentVersion ?? $t("notAvailable") }}
                 <span
-                  v-if="currentNode.agentVersionState"
                   class="version-badge"
                   :class="currentNode.agentVersionState"
-                  >{{ $t(currentNode.agentVersionState) }}</span
+                  >{{ $t(agentVersionLabel(currentNode)) }}</span
                 >
               </dd>
             </div>
             <div>
               <dt>{{ $t("versionState") }}</dt>
               <dd>
-                {{
-                  currentNode.agentVersionState
-                    ? $t(currentNode.agentVersionState)
-                    : $t("notAvailable")
-                }}
+                {{ $t(agentVersionLabel(currentNode)) }}
               </dd>
             </div>
             <div>
               <dt>{{ $t("recommendedAgentVersion") }}</dt>
               <dd>
-                {{ currentNode.recommendedAgentVersion ?? $t("notAvailable") }}
+                {{
+                  currentNode.recommendedAgentVersion ||
+                  $t("recommendationNotConfigured")
+                }}
               </dd>
             </div>
             <div>

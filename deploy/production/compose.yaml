@@ -76,6 +76,7 @@ services:
       OCSERV_PUBLIC_ORIGIN: ${OCSERV_PUBLIC_ORIGIN:-https://${OCSERV_PUBLIC_HOST}}
       OCSERV_SESSION_KEY_FILE: /run/secrets/session_key
       OCSERV_SESSION_TTL: ${OCSERV_SESSION_TTL:-8h}
+      OCSERV_RECOMMENDED_AGENT_VERSION: ${OCSERV_RECOMMENDED_AGENT_VERSION:-}
       OCSERV_AUDIT_CHECKPOINT_KEY_FILE: /run/secrets/audit_checkpoint_key
       OCSERV_AUDIT_EVENT_KEY_ID: ${OCSERV_AUDIT_EVENT_KEY_ID:?set the audit event HMAC key ID}
       OCSERV_AUDIT_EVENT_KEY_FILE: /run/secrets/audit_event_key
@@ -111,6 +112,7 @@ services:
       OCSERV_PUBLIC_ORIGIN: ${OCSERV_PUBLIC_ORIGIN:-https://${OCSERV_PUBLIC_HOST}}
       OCSERV_SESSION_KEY_FILE: /run/secrets/session_key
       OCSERV_SESSION_TTL: ${OCSERV_SESSION_TTL:-8h}
+      OCSERV_RECOMMENDED_AGENT_VERSION: ${OCSERV_RECOMMENDED_AGENT_VERSION:-}
       OCSERV_AUDIT_CHECKPOINT_KEY_FILE: /run/secrets/audit_checkpoint_key
       OCSERV_AUDIT_EVENT_KEY_ID: ${OCSERV_AUDIT_EVENT_KEY_ID:?set the audit event HMAC key ID}
       OCSERV_AUDIT_EVENT_KEY_FILE: /run/secrets/audit_event_key

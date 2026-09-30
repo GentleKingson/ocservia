@@ -362,7 +362,17 @@ architecture, and every selected node must advertise an approved
 The console's fleet version badges and the recommended version shown in
 Settings are driven by the operator-pinned `OCSERV_RECOMMENDED_AGENT_VERSION`
 (SemVer); it classifies observed versions but never schedules anything by
-itself.
+itself. Set it in the Controller section of `install.env` or export it in
+the invoking shell before the production installer/bootstrap. The resolved
+value is forwarded through the root lifecycle to the migrate and control-plane
+containers. An explicitly empty export overrides the file and clears the
+recommendation. Recreate the control-plane through the documented Controller
+upgrade procedure after changing this setting on an existing installation
+(see [production deployment](production-deployment.md)). Export the value in
+that lifecycle invocation too: `controller.sh` does not load `install.env`.
+Without a recommendation, observed versions remain visible and cannot be
+compared to a target. Invalid nonempty SemVer values are rejected by Controller
+configuration validation.
 
 Batch 0 is a mandatory single-node canary. Later batches start only after the
 canary reaches `succeeded`; a failed or skipped canary pauses the rollout, and

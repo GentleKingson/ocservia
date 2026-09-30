@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getWorkspace, workspaceContext } from "../src/api/workspace";
 import { listNodes } from "../src/api/nodes";
+import { agentVersionLabel } from "../src/shared/agent-version";
 import { useFleetStore } from "../src/shared/fleet";
 
 vi.mock("../src/api/workspace", () => ({
@@ -143,4 +144,29 @@ describe("version intelligence presentation", () => {
       'recommendedAgentVersion: "Recommended Agent version"',
     );
   });
+});
+
+it("explains missing observations and recommendations without comparing versions", () => {
+  const node = versionNode("node", "unknown", "0.1.0");
+  expect(agentVersionLabel(versionNode("node", "unknown"))).toBe(
+    "versionNotObserved",
+  );
+  expect(agentVersionLabel(node)).toBe("recommendationNotConfigured");
+  expect(agentVersionLabel({ ...node, recommendedAgentVersion: "0.2.0" })).toBe(
+    "versionNotComparable",
+  );
+  for (const state of [
+    "current",
+    "ahead",
+    "upgrade_available",
+    "unsupported",
+  ] as const) {
+    expect(
+      agentVersionLabel({
+        ...node,
+        recommendedAgentVersion: "0.2.0",
+        agentVersionState: state,
+      }),
+    ).toBe(state);
+  }
 });
