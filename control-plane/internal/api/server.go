@@ -149,7 +149,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	if authorization.RBAC != nil {
 		authorizer = authorization.RBAC
 	}
-	s.nodeHTTP = nodehttp.New(modules.Nodes, logger, workspace)
+	s.nodeHTTP = nodehttp.New(modules.Nodes, logger, workspace, s.nodeActionAllowed)
 	s.configPlanHTTP = configplanhttp.New(modules.ConfigPlans, configPlanRequestInfo, s.allowConfigPlanSecret)
 	s.userOpsHTTP = useroperationshttp.New(modules.UserOperations, authorizer, userOperationsRequestInfo, logger)
 	if err := s.initEventStreams(config.EventStreams); err != nil {

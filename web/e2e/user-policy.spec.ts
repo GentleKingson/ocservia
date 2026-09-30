@@ -6,6 +6,9 @@ const node = {
   id: nodeId,
   name: "Policy node",
   version: 1,
+  effective_actions: {
+    "user.manage": { allowed: true, reason: "available" },
+  },
   trust_status: "active",
   connection_state: "online",
   freshness: "fresh",

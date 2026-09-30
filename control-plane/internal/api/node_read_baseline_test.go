@@ -95,6 +95,10 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	nodeJSON := func(id uuid.UUID, sessions int) string {
 		return fmt.Sprintf(`{"id":%q,"name":%q,"version":7,"config_revision":0,"trust_status":"active","connection_state":"offline","freshness":"never","agent_version_state":"unknown","agent_upgrade_eligible":false,"dropped":{"security":0,"health":0,"aggregate":0,"raw":0},"session_count":%d}`, id, "node-"+id.String(), sessions)
 	}
+	detailJSON := func(id uuid.UUID, sessions int) string {
+		return strings.TrimSuffix(nodeJSON(id, sessions), "}") + `,"effective_actions":{"user.manage":{"allowed":false,"reason":"missing_capability"},"group.manage":{"allowed":false,"reason":"missing_capability"},"config.plan":{"allowed":false,"reason":"missing_capability"},"config.apply":{"allowed":false,"reason":"missing_capability"},"certificate.read":{"allowed":true,"reason":"available"},"certificate.issue":{"allowed":false,"reason":"missing_capability"},"certificate.revoke":{"allowed":false,"reason":"missing_capability"},"certificate.private_key.export":{"allowed":false,"reason":"missing_capability"},"service.reload":{"allowed":false,"reason":"missing_capability"}}}`
+	}
+
 	// The routes already exist, and real authentication/resource errors must
 	// still precede the absent reader (including a typed-nil service).
 	for _, path := range []string{"/api/v1/nodes", nodePath, nodePath + "/sessions", nodePath + "/ip-bans", nodePath + "/telemetry"} {
@@ -106,9 +110,9 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	assertBaselineProblem(t, get(foreignPath, ws, cookie), foreignPath, 403, "forbidden", "Access denied", "the principal is not authorized for this resource and action")
 	readService := telemetry.NewBackend(b)
 	s = newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: readService}, authorization)
-	assertBaselineJSON(t, get(nodePath, uuid.Nil, cookie), nodeJSON(ids[0], 0))
+	assertBaselineJSON(t, get(nodePath, uuid.Nil, cookie), detailJSON(ids[0], 0))
 	// Resource ownership, not a caller-supplied workspace header, selects a node's scope.
-	assertBaselineJSON(t, get(nodePath, other, cookie), nodeJSON(ids[0], 0))
+	assertBaselineJSON(t, get(nodePath, other, cookie), detailJSON(ids[0], 0))
 	var first50 []string
 	for _, id := range ids[:50] {
 		first50 = append(first50, nodeJSON(id, 0))
@@ -149,7 +153,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	assertBaselineJSON(t, get(nodePath+"/sessions?page_size=1", ws, cookie), `{"items":[`+sessionJSON(0)+`],"page":{"has_more":true,"next_cursor":"s00"}}`)
 	assertBaselineJSON(t, get(nodePath+"/sessions?cursor=s49", ws, cookie), `{"items":[`+sessionJSON(50)+`],"page":{"has_more":false}}`)
 	assertBaselineJSON(t, get(nodePath+"/sessions?cursor=zzz", ws, cookie), `{"items":[],"page":{"has_more":false}}`)
-	assertBaselineJSON(t, get(nodePath, ws, cookie), nodeJSON(ids[0], 51))
+	assertBaselineJSON(t, get(nodePath, ws, cookie), detailJSON(ids[0], 51))
 	for _, query := range []string{"", "?cursor=invalid&page_size=0"} {
 		assertBaselineJSON(t, get(nodePath+"/ip-bans"+query, ws, cookie), `{"items":[{"ip":"192.0.2.9","seconds_remaining":20},{"ip":"2001:db8::20"}]}`)
 	}
@@ -254,6 +258,30 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	if reader.calls.Load() != 4 {
 		t.Fatal("adjacent route reached Reader")
 	}
+
+	t.Run("action-permissions", func(t *testing.T) {
+		exec := func(pg, my string, args ...any) { t.Helper(); authSafetyExec(t, b, pg, my, args...) }
+		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, `INSERT INTO node_capabilities(node_id,capability,approved)VALUES(?,'ocserv.users.write',true)`, ids[0])
+		w := get(nodePath, ws, cookie)
+		var node telemetry.Node
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &node) != nil {
+			t.Fatalf("action read: %d %s", w.Code, w.Body)
+		}
+		if node.EffectiveActions["user.manage"].Allowed || node.EffectiveActions["user.manage"].Reason != "forbidden" {
+			t.Fatalf("Viewer gained action: %+v", node.EffectiveActions)
+		}
+		exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
+		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'UserManager','node',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'UserManager','node',?,?)`, binding, identity, ws, ids[0], stamp)
+		w = get(nodePath, ws, cookie)
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &node) != nil || !node.EffectiveActions["user.manage"].Allowed {
+			t.Fatalf("node-scoped UserManager lost action: %d %s", w.Code, w.Body)
+		}
+		if node.EffectiveActions["group.manage"].Allowed {
+			t.Fatal("missing group capability became available")
+		}
+		exec(`DELETE FROM role_bindings WHERE id=$1`, `DELETE FROM role_bindings WHERE id=?`, binding)
+		exec(`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES($1,$2,$3,'Viewer','node',$4,$5)`, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at) VALUES(?,?,?,'Viewer','node',?,?)`, binding, identity, ws, ids[0], stamp)
+	})
 
 	t.Run("configured-service", func(t *testing.T) {
 		// Match application assembly: configure recommendation and catalog on

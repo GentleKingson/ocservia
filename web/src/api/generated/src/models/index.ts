@@ -48,6 +48,7 @@ export * from "./GroupApplyRequest";
 export * from "./Health";
 export * from "./ListNodeCertificates200Response";
 export * from "./LocalLoginRequest";
+export * from "./NodeActionAvailability";
 export * from "./NodeApproval";
 export * from "./NodeBootstrapToken";
 export * from "./NodeBootstrapTokenRequest";

@@ -440,3 +440,15 @@ func (s *Server) hasOperationPrincipal(r *http.Request) bool {
 	}
 	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(strings.TrimPrefix(authorization, prefix))), []byte(s.devAuthToken)) == 1
 }
+
+func (s *Server) nodeActionAllowed(r *http.Request, action string) (bool, error) {
+	actor := principal(r)
+	if s.rbac == nil && actor.Issuer != "development" {
+		return false, nil
+	}
+	_, err := s.authorizeRouteAction(r, actor, action)
+	if errors.Is(err, rbac.ErrForbidden) || errors.Is(err, database.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}

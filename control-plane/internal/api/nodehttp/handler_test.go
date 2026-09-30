@@ -80,7 +80,7 @@ func (s *readerStub) HistoryFrom(ctx context.Context, id uuid.UUID, metric, reso
 // the real guard and Local sessions.
 func testMux(t *testing.T, reader Reader, ws uuid.UUID, log io.Writer) *http.ServeMux {
 	t.Helper()
-	h := New(reader, slog.New(slog.NewTextHandler(log, nil)), func(*http.Request) uuid.UUID { return ws })
+	h := New(reader, slog.New(slog.NewTextHandler(log, nil)), func(*http.Request) uuid.UUID { return ws }, nil)
 	mux := http.NewServeMux()
 	h.Register(mux, func(action string, next http.HandlerFunc) http.HandlerFunc {
 		if action != "node.read" {
@@ -286,7 +286,7 @@ func TestNodeReadContext(t *testing.T) {
 }
 
 func TestNodeRoutesRequireGuard(t *testing.T) {
-	h := New(nil, slog.Default(), func(*http.Request) uuid.UUID { return uuid.Nil })
+	h := New(nil, slog.Default(), func(*http.Request) uuid.UUID { return uuid.Nil }, nil)
 	t.Run("missing", func(t *testing.T) {
 		defer func() {
 			if recover() == nil {

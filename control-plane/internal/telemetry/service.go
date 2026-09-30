@@ -20,6 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
@@ -172,6 +173,9 @@ type Node struct {
 	Path                 json.RawMessage `json:"path,omitempty"`
 	Dropped              DropCounters    `json:"dropped"`
 	SessionCount         int             `json:"session_count"`
+
+	// Only detail reads derive action availability; list reads omit it.
+	EffectiveActions map[string]ActionAvailability `json:"effective_actions,omitempty"`
 }
 
 type HistoryPoint = telemetryhistory.Point
@@ -651,18 +655,28 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
 	var stored telemetryread.Node
+	var actions map[string]ActionAvailability
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := telemetryread.From(tx)
 		if err != nil {
 			return err
 		}
 		stored, err = store.Node(ctx, id)
+		if err != nil {
+			return err
+		}
+		operations, err := operationstore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		actions, err = nodeActions(ctx, operations, id, stored.Status)
 		return err
 	})
 	if err != nil {
 		return Node{}, err
 	}
 	node := readNode(stored, s.now())
+	node.EffectiveActions = actions
 	s.applyAgentVersionState(&node)
 	s.applyAgentUpgradeEligibility(ctx, &node)
 	return node, nil

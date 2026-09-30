@@ -14,17 +14,18 @@ import (
 
 // Handler owns the node read routes, not authentication or service lifecycle.
 type Handler struct {
+	canAct    func(*http.Request, string) (bool, error)
 	reader    Reader
 	logger    *slog.Logger
 	workspace func(*http.Request) uuid.UUID
 }
 
 // New requires access to the workspace already selected by the authorization guard.
-func New(reader Reader, logger *slog.Logger, workspace func(*http.Request) uuid.UUID) *Handler {
+func New(reader Reader, logger *slog.Logger, workspace func(*http.Request) uuid.UUID, canAct func(*http.Request, string) (bool, error)) *Handler {
 	if workspace == nil {
 		panic("nodehttp: authorized workspace accessor is required")
 	}
-	return &Handler{reader: reader, logger: logger, workspace: workspace}
+	return &Handler{reader: reader, logger: logger, workspace: workspace, canAct: canAct}
 }
 
 func (h *Handler) listNodes(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +70,25 @@ func (h *Handler) getNode(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Node unavailable", "node state could not be read")
 		return
 	}
+
+	for action, available := range node.EffectiveActions {
+		if h.canAct == nil {
+			available.Allowed = false
+			available.Reason = "authorization_unavailable"
+		} else {
+			allowed, err := h.canAct(r, action)
+			if err != nil {
+				httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/authorization-unavailable", "Action availability unavailable", "node action permissions could not be read")
+				return
+			}
+			if !allowed {
+				available.Allowed = false
+				available.Reason = "forbidden"
+			}
+		}
+		node.EffectiveActions[action] = available
+	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, node)
 }
 

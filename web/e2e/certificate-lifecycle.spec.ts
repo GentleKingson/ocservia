@@ -12,6 +12,12 @@ const node = {
   id: nodeId,
   name: "Certificate node",
   version: 1,
+  effective_actions: {
+    "certificate.read": { allowed: true, reason: "available" },
+    "certificate.issue": { allowed: true, reason: "available" },
+    "certificate.private_key.export": { allowed: true, reason: "available" },
+    "certificate.revoke": { allowed: true, reason: "available" },
+  },
   trust_status: "active",
   connection_state: "online",
   freshness: "fresh",
