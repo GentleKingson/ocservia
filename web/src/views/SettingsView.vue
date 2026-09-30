@@ -12,23 +12,33 @@ const workspace = ref<Workspace>();
 const buildInfo = ref<BuildInfo>();
 const loading = ref(true);
 const unavailable = ref(false);
+const buildUnavailable = ref(false);
+let loadSequence = 0;
 
 async function loadWorkspace(): Promise<void> {
+  const sequence = ++loadSequence;
   loading.value = true;
   unavailable.value = false;
+  buildUnavailable.value = false;
   buildInfo.value = undefined;
   try {
     const [workspaceResult, buildResult] = await Promise.all([
       getWorkspace(),
-      getVersion().catch(() => undefined),
+      getVersion().then(
+        (value) => ({ value, unavailable: false }),
+        () => ({ value: undefined, unavailable: true }),
+      ),
     ]);
+    if (sequence !== loadSequence) return;
     workspace.value = workspaceResult;
-    buildInfo.value = buildResult;
+    buildInfo.value = buildResult.value;
+    buildUnavailable.value = buildResult.unavailable;
   } catch {
+    if (sequence !== loadSequence) return;
     workspace.value = undefined;
     unavailable.value = true;
   } finally {
-    loading.value = false;
+    if (sequence === loadSequence) loading.value = false;
   }
 }
 
@@ -41,6 +51,7 @@ onMounted(() => {
   void loadWorkspace();
 });
 onBeforeUnmount(() => {
+  loadSequence++;
   window.removeEventListener(workspaceChangedEvent, refreshForWorkspace);
 });
 </script>
@@ -103,7 +114,12 @@ onBeforeUnmount(() => {
           <div>
             <dt>{{ $t("recommendedAgentVersion") }}</dt>
             <dd>
-              {{ buildInfo?.recommendedAgentVersion ?? $t("notAvailable") }}
+              {{
+                buildUnavailable
+                  ? $t("recommendationUnavailable")
+                  : buildInfo?.recommendedAgentVersion ||
+                    $t("recommendationNotConfigured")
+              }}
             </dd>
           </div>
         </dl>

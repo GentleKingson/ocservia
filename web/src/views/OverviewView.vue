@@ -47,6 +47,8 @@ function eventLabel(type: string): string {
     command_result: "eventCommandResult",
     simulation_result: "eventCommandResult",
     heartbeat: "eventHeartbeat",
+    telemetry: "eventTelemetry",
+    path_changed: "eventPathChanged",
     error: "eventError",
   };
   return labels[type] ?? type;
@@ -158,7 +160,7 @@ onBeforeUnmount(() => {
       </article>
       <article>
         <div>
-          <span>{{ $t("connectivity") }}</span>
+          <span>{{ $t("lastObservedDirectPaths") }}</span>
           <strong data-testid="overview-connectivity">{{
             fleetLoading ? "…" : fleet.unavailable ? "–" : fleet.direct
           }}</strong>
@@ -169,7 +171,7 @@ onBeforeUnmount(() => {
             }}</template>
             <template v-else
               >{{ fleet.direct }} {{ $t("direct") }} · {{ fleet.relay }}
-              {{ $t("relay") }}</template
+              {{ $t("relay") }} · {{ $t("pathCountsIncludeOffline") }}</template
             >
           </small>
         </div>
