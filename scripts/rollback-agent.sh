@@ -195,6 +195,22 @@ if [[ "${restore_relay}" == true && -z "${relay_launcher_backup}" ]] &&
   rollback_error "rollback snapshot is missing the production Relay launcher required by its service"
 fi
 
+binding_node=""
+active_binding="${DESTDIR}/etc/ocservia-agent/active-binding"
+if [[ -e "${active_binding}" || -L "${active_binding}" ]]; then
+  validate_root_ancestry "$(dirname -- "${active_binding}")"
+  [[ -f "${active_binding}" && ! -L "${active_binding}" ]] || rollback_error "unsafe Controller binding"
+  read -r binding_uid binding_mode binding_links < <(stat -c '%u %a %h' -- "${active_binding}")
+  [[ "${binding_uid}" == 0 && "${binding_links}" == 1 && ( "${binding_mode}" == 640 || "${binding_mode}" == 440 ) ]] || rollback_error "unsafe Controller binding metadata"
+  binding_node="$(sed -n '2p' "${active_binding}")"
+  [[ "${binding_node}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || rollback_error "invalid Controller binding node"
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    [[ "$("${BACKUP_DIR}/${binary}.previous" --binding-version)" == 1 ]] ||
+      rollback_error "snapshot ${binary} cannot enforce the committed Controller binding"
+  done
+fi
+
+
 if [[ "${verify_only}" == true ]]; then
   echo "Matched rollback snapshot verified without modification"
   exit 0
@@ -239,6 +255,9 @@ fi
 # release afterwards.
 mark_operations_rolled_back() {
   local operations="${DESTDIR}${UPGRADE_STATE_DIR}/operations" entry state staging
+  if [[ -n "${binding_node:-}" ]]; then
+    operations="${DESTDIR}${UPGRADE_STATE_DIR}/bindings/${binding_node}/operations"
+  fi
   [[ -d "${operations}" ]] || return 0
   for entry in "${operations}"/*; do
     [[ -d "${entry}" ]] || continue
@@ -258,6 +277,7 @@ mark_operations_rolled_back() {
     sync -f "${entry}"
   done
 }
+
 
 if [[ -z "${DESTDIR}" ]]; then
   systemctl stop 'ocservia-upgrader@*.service' 2>/dev/null || true

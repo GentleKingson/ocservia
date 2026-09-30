@@ -2078,6 +2078,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebound_authority_denies_old_node_key_and_quarantines_uncertain_effects() {
+        let old_signing = SigningKey::from_bytes(&[8; 32]);
+        let new_signing = SigningKey::from_bytes(&[9; 32]);
+        let keys = keyring(&new_signing);
+        let old_node = *Uuid::now_v7().as_bytes();
+        let new_node = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let (adapter, resources, counter, directory) = test_adapter();
+        for (signing, node) in [
+            (&old_signing, old_node),
+            (&old_signing, new_node),
+            (&new_signing, old_node),
+        ] {
+            let command = signed_service_reload(signing, node, now, now + 60);
+            assert_permission_denied(
+                &dispatch(command_request(command), &new_node, &keys, &adapter).await,
+            );
+            assert!(!counter.exists());
+        }
+        let command = signed_service_reload(&new_signing, new_node, now, now + 60);
+        let quarantined = Adapter::new(resources.with_mutations_blocked(true), Limits::default());
+        let denied = dispatch(
+            command_request(command.clone()),
+            &new_node,
+            &keys,
+            &quarantined,
+        )
+        .await;
+        assert!(matches!(
+            denied.result,
+            Some(privd_response::Result::Error(_))
+        ));
+        assert!(!counter.exists());
+        let accepted = dispatch(command_request(command), &new_node, &keys, &adapter).await;
+        assert!(
+            matches!(accepted.result, Some(privd_response::Result::Mutation(ref result)) if result.applied)
+        );
+        assert_eq!(std::fs::read(counter).unwrap(), b"x");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn signed_effect_executes_once_and_replays_after_restart() {
         let signing = SigningKey::from_bytes(&[8; 32]);
         let keys = keyring(&signing);

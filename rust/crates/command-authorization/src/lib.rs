@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod local_binding;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;

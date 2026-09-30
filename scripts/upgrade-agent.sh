@@ -308,6 +308,12 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 validate_verified_package_source
+if [[ -e "${DESTDIR}${SYSCONFDIR}/ocservia-agent/active-binding" || -L "${DESTDIR}${SYSCONFDIR}/ocservia-agent/active-binding" ]]; then
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    [[ "$("${ROOT}/rust/target/release/${binary}" --binding-version)" == 1 ]] ||
+      upgrade_preflight_error "target ${binary} does not support the committed Controller binding"
+  done
+fi
 
 if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" || "${DESTDIR}" == */ ) ]] || \
   [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${PRIVD_STATE_DIR}" != /* || "${UPGRADE_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
