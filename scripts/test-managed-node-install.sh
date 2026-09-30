@@ -221,6 +221,20 @@ esac
 exit 0
 EOF
 
+cat >"${bin}/privd-stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
+[[ "$*" == --host-preflight ]] || exit 2
+printf '%s\n' "$*" >>"${root}/logs/preflight.log"
+if [[ -s "${root}/preflight-failure" ]]; then
+  echo 'resource=ocpasswd reason=mode actual=0644 expected=0600' >&2
+  exit 1
+fi
+echo 'HOST_PREFLIGHT_OK (read-only)'
+EOF
+chmod 0755 "${bin}/privd-stub"
+
 cat >"${bin}/native-install" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -246,6 +260,7 @@ install -d -m 0755 -- "${conf}" \
   "${OCSERV_MANAGED_NODE_SYSROOT}/var/lib/ocservia-agent" \
   "${OCSERV_MANAGED_NODE_SYSROOT}/usr/lib/systemd/system/ocservia-agent.service.d"
 install -m 0755 -- "${root}/bin/agent-stub" "${OCSERV_MANAGED_NODE_SYSROOT}/usr/libexec/ocservia/ocservia-agent"
+install -m 0755 -- "${root}/bin/privd-stub" "${OCSERV_MANAGED_NODE_SYSROOT}/usr/libexec/ocservia/ocservia-privd"
 printf '[Service]\nEnvironmentFile=/etc/ocservia-agent/relays.env\n' \
   >"${OCSERV_MANAGED_NODE_SYSROOT}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 printf 'RELAY_URL_A=https://relay-a.example.com\nRELAY_URL_B=https://relay-b.example.com\n' >"${conf}/relays.env"
@@ -649,6 +664,7 @@ assert_systemctl_read_only() {
 }
 
 scenario() {
+  rm -f "${fixture}/preflight-failure" "${logs}/preflight.log"
   reset_state
   reset_checkout
   SCRIPT_UNDER_TEST="${repo}/deploy/managed-node/install.sh"
@@ -1943,5 +1959,21 @@ EOF
 else
   echo "root-lifecycle forwarding case skipped: running as root" >&2
 fi
+
+# The real installer must stop before preparing an identity or consuming a token.
+scenario
+printf 'fail\n' >"${fixture}/preflight-failure"
+printf 'original bootstrap token\n' >"${fixture}/preflight-token"
+chmod 0600 "${fixture}/preflight-token"
+EXTRA_ENV=("BOOTSTRAP_TOKEN_SOURCE=${fixture}/preflight-token")
+capture_root --version "v${VERSION}"
+assert_status 1
+assert_output "resource=ocpasswd reason=mode actual=0644 expected=0600"
+assert_output "host preflight failed before enrollment"
+assert_log_empty "${agent_log}"
+[[ ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" ]] || die "preflight created an identity"
+grep -q 'NODE_ID=00000000-0000-7000-8000-000000000000' "${sysroot}/etc/ocservia-agent/agent.env" || die "preflight wrote final node configuration"
+grep -qx 'original bootstrap token' "${fixture}/preflight-token" || die "preflight consumed the bootstrap token"
+echo "host preflight stops enrollment before identity and final configuration"
 
 echo "Managed node install tests passed"
