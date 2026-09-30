@@ -9,6 +9,7 @@ import (
 )
 
 type ResultCommand struct {
+	Compacted             bool
 	Envelope              []byte
 	State                 string
 	CreatedAt             value.Timestamp

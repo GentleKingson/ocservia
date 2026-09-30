@@ -152,7 +152,7 @@ func (s operationStore) CompletedDispatch(ctx context.Context, d operationstore.
 }
 
 func (s operationStore) SaveTerminalEnvelope(ctx context.Context, id uuid.UUID, envelope []byte) error {
-	_, err := s.Exec(ctx, `UPDATE commands SET envelope=? WHERE id=?`, envelope, UUIDBytes(id))
+	_, err := s.Exec(ctx, `UPDATE commands SET envelope=? WHERE id=? AND details_compacted_at IS NULL`, envelope, UUIDBytes(id))
 	return err
 }
 
