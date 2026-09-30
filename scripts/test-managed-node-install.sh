@@ -1971,8 +1971,8 @@ assert_status 1
 assert_output "resource=ocpasswd reason=mode actual=0644 expected=0600"
 assert_output "host preflight failed before enrollment"
 assert_log_empty "${agent_log}"
-[[ ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" ]] || die "preflight created an identity"
-grep -q 'NODE_ID=00000000-0000-7000-8000-000000000000' "${sysroot}/etc/ocservia-agent/agent.env" || die "preflight wrote final node configuration"
+as_root test ! -e "${sysroot}/var/lib/ocservia-agent/identity/endpoint.key" || die "preflight created an identity"
+as_root grep -q 'NODE_ID=00000000-0000-7000-8000-000000000000' "${sysroot}/etc/ocservia-agent/agent.env" || die "preflight wrote final node configuration"
 grep -qx 'original bootstrap token' "${fixture}/preflight-token" || die "preflight consumed the bootstrap token"
 echo "host preflight stops enrollment before identity and final configuration"
 
