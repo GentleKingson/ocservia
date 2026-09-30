@@ -17,7 +17,7 @@ first-install chain is deliberately split:
 
 ```text
 Stage-0 -> exact vX.Y.Z Stage-1 -> signed checksum -> native package
-        -> identity/sealing -> Bootstrap Enrollment -> PENDING_APPROVAL
+        -> identity/sealing -> Bootstrap Enrollment -> ENROLLED_LOCAL
         -> independent approval -> service activation
 ```
 
