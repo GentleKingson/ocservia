@@ -26,7 +26,7 @@ mkdir -p "${work}/source/scripts" "${work}/source/rust/target/release" "${work}/
   /etc/ocservia-agent /var/lib/ocservia-agent/identity /var/lib/ocservia-upgrade/upgrade-backup
 cp -a "${ROOT}/deploy" "${work}/source/"
 cp "${ROOT}/scripts/"{package-agent,install-agent,upgrade-agent,rollback-agent,uninstall-agent,verify-agent-package}.sh "${work}/source/scripts/"
-cp "${ROOT}/scripts/rebind-agent.py" "${work}/source/scripts/"
+cp "${ROOT}/scripts/"{rebind-agent,retain-agent}.py "${work}/source/scripts/"
 cat >"${work}/binary.c" <<'C'
 #include <stdio.h>
 #include <string.h>

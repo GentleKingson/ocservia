@@ -70,6 +70,9 @@ validate_verified_package_source() {
     "${ROOT}/scripts/uninstall-agent.sh" \
     "${ROOT}/scripts/verify-agent-package.sh" \
     "${ROOT}/scripts/rebind-agent.py" \
+    "${ROOT}/scripts/retain-agent.py" \
+    "${ROOT}/deploy/systemd/ocservia-agent-retention.service" \
+    "${ROOT}/deploy/systemd/ocservia-agent-retention.timer" \
     "${ROOT}/deploy/systemd/agent.env.example" \
     "${ROOT}/deploy/systemd/ocservia-agent.service" \
     "${ROOT}/deploy/systemd/ocservia-privd.service" \
@@ -226,12 +229,17 @@ install -m 0755 -- "${ROOT}/rust/target/release/ocservia-agent" "${DESTDIR}${PRE
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-privd" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-upgrader" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
 install -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
+install -m 0755 -- "${ROOT}/scripts/retain-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-retention"
 install -m 0755 -- "${ROOT}/scripts/rebind-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rebind"
 install -m 0755 -- "${ROOT}/scripts/verify-agent-package.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
 install -m 0755 -- "${ROOT}/deploy/production/systemd/agent-relays.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-relays"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-agent.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-privd.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-upgrader@.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"
+
+for unit in ocservia-agent-retention.service ocservia-agent-retention.timer; do
+  install -m 0644 -- "${ROOT}/deploy/systemd/${unit}" "${DESTDIR}${PREFIX}/lib/systemd/system/${unit}"
+done
 
 printf 'AGENT_UID=%s\nPRIVD_ATTESTATION_KEY_FILE=/var/lib/ocservia-privd/attestation.key\nUSER_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/user-password-seal-private.pem\nP12_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/p12-password-seal-private.pem\n' "${AGENT_UID}" >"${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"
 chmod 0640 -- "${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"
@@ -252,4 +260,5 @@ fi
 
 if [[ -z "${DESTDIR}" ]]; then
   systemctl daemon-reload
+  systemctl enable --now ocservia-agent-retention.timer
 fi
