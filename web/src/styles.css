@@ -1315,3 +1315,36 @@ h1 {
 .audit-table tbody tr {
   cursor: default;
 }
+
+.fleet-refresh-status {
+  min-height: 20px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #6a7772;
+}
+.nodes-view .node-table-wrap {
+  overflow-x: auto;
+}
+.fleet-table {
+  min-width: 1000px;
+}
+.fleet-table th:nth-child(1) {
+  width: 44px;
+}
+.fleet-table th:nth-child(2) {
+  width: 180px;
+}
+.fleet-table th:nth-child(5) {
+  width: 110px;
+}
+.fleet-table th:nth-child(6) {
+  width: 100px;
+}
+.fleet-table th:nth-child(10) {
+  width: 85px;
+}
+@media (max-width: 760px) {
+  .fleet-table {
+    min-width: 560px;
+  }
+}
