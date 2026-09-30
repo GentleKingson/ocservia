@@ -1985,23 +1985,52 @@ fn parse_secret_user_records(bytes: &[u8]) -> Result<Vec<SecretUserRecord>, Adap
     }
     let mut records = Vec::new();
     let mut memberships = 0_usize;
-    for line in utf8(bytes)?.lines().filter(|line| !line.is_empty()) {
+    let mut seen = HashMap::new();
+    let text = std::str::from_utf8(bytes).map_err(|_| AdapterError::UserFileFormat {
+        reason: "invalid_utf8",
+        line: 0,
+        fields: 0,
+        first_line: None,
+    })?;
+    for (index, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_number = index + 1;
+        let fields = line.split(':').count();
+        let malformed = |reason| AdapterError::UserFileFormat {
+            reason,
+            line: line_number,
+            fields,
+            first_line: None,
+        };
         if records.len() == MAX_MANAGED_RESOURCES {
             return Err(AdapterError::OutputLimit);
         }
-        let mut parts = line.split(':');
-        let username = parts.next().ok_or(AdapterError::MalformedOutput)?;
-        let groups = parts.next().ok_or(AdapterError::MalformedOutput)?;
-        let hash = parts.next().ok_or(AdapterError::MalformedOutput)?;
-        if parts.next().is_some() || hash.is_empty() {
-            return Err(AdapterError::MalformedOutput);
+        if fields != 3 {
+            return Err(malformed("field_count"));
         }
-        validate_name(username).map_err(|_| AdapterError::MalformedOutput)?;
+        let mut parts = line.split(':');
+        let username = parts.next().ok_or_else(|| malformed("field_count"))?;
+        let groups = parts.next().ok_or_else(|| malformed("field_count"))?;
+        let hash = parts.next().ok_or_else(|| malformed("field_count"))?;
+        if hash.is_empty() {
+            return Err(malformed("empty_hash"));
+        }
+        validate_name(username).map_err(|_| malformed("invalid_username"))?;
+        if let Some(first_line) = seen.insert(username, line_number) {
+            return Err(AdapterError::UserFileFormat {
+                reason: "duplicate_username",
+                line: line_number,
+                fields,
+                first_line: Some(first_line),
+            });
+        }
         for group in groups.split(',').filter(|group| !group.is_empty()) {
             if matches!(group, "*" | "x") {
                 continue;
             }
-            validate_name(group).map_err(|_| AdapterError::MalformedOutput)?;
+            validate_name(group).map_err(|_| malformed("invalid_group"))?;
             memberships = memberships.saturating_add(1);
             if memberships > MAX_MANAGED_RESOURCES {
                 return Err(AdapterError::OutputLimit);
@@ -2014,12 +2043,6 @@ fn parse_secret_user_records(bytes: &[u8]) -> Result<Vec<SecretUserRecord>, Adap
         });
     }
     records.sort_by(|left, right| left.username.cmp(&right.username));
-    if records
-        .windows(2)
-        .any(|pair| pair[0].username == pair[1].username)
-    {
-        return Err(AdapterError::MalformedOutput);
-    }
     Ok(records)
 }
 
@@ -3935,8 +3958,40 @@ fn open_user_directory(path: &Path) -> Result<(File, OsString, u32, u32), Adapte
 
 fn validate_user_directory(directory: &File, uid: u32) -> Result<(), AdapterError> {
     let metadata = directory.metadata().map_err(AdapterError::Io)?;
-    if !metadata.is_dir() || metadata.uid() != uid || metadata.permissions().mode() & 0o022 != 0 {
-        return Err(AdapterError::InvalidResource);
+    check_resource(
+        "ocpasswd_parent",
+        "file_type_directory",
+        u64::from(metadata.is_dir()),
+        1,
+    )?;
+    check_resource(
+        "ocpasswd_parent",
+        "owner_uid",
+        u64::from(metadata.uid()),
+        u64::from(uid),
+    )?;
+    check_resource(
+        "ocpasswd_parent",
+        "writable_mode_bits",
+        u64::from(metadata.mode() & 0o022),
+        0,
+    )?;
+    Ok(())
+}
+
+fn check_resource(
+    resource: &'static str,
+    reason: &'static str,
+    actual: u64,
+    expected: u64,
+) -> Result<(), AdapterError> {
+    if actual != expected {
+        return Err(AdapterError::ResourceMetadata {
+            resource,
+            reason,
+            actual,
+            expected,
+        });
     }
     Ok(())
 }
@@ -3947,14 +4002,31 @@ fn validate_authoritative_user_file(
     gid: u32,
 ) -> Result<std::fs::Metadata, AdapterError> {
     let metadata = file.metadata().map_err(AdapterError::Io)?;
-    if !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != uid
-        || metadata.gid() != gid
-        || metadata.permissions().mode() & 0o777 != USER_FILE_MODE
-    {
-        return Err(AdapterError::InvalidResource);
-    }
+    check_resource(
+        "ocpasswd",
+        "file_type_regular",
+        u64::from(metadata.is_file()),
+        1,
+    )?;
+    check_resource("ocpasswd", "link_count", metadata.nlink(), 1)?;
+    check_resource(
+        "ocpasswd",
+        "owner_uid",
+        u64::from(metadata.uid()),
+        u64::from(uid),
+    )?;
+    check_resource(
+        "ocpasswd",
+        "group_gid",
+        u64::from(metadata.gid()),
+        u64::from(gid),
+    )?;
+    check_resource(
+        "ocpasswd",
+        "mode",
+        u64::from(metadata.mode() & 0o777),
+        u64::from(USER_FILE_MODE),
+    )?;
     Ok(metadata)
 }
 
@@ -3979,7 +4051,17 @@ async fn read_user_file(path: &Path, optional: bool) -> Result<Zeroizing<Vec<u8>
     ) {
         Ok(file) => File::from(file),
         Err(rustix::io::Errno::NOENT) if optional => return Ok(Zeroizing::new(Vec::new())),
-        Err(error) => return Err(AdapterError::Io(error.into())),
+        Err(error) => {
+            return Err(AdapterError::ResourceIo {
+                resource: "ocpasswd",
+                reason: if error == rustix::io::Errno::LOOP {
+                    "symlink"
+                } else {
+                    "open_failed"
+                },
+                source: error.into(),
+            });
+        }
     };
     validate_authoritative_user_file(&file, uid, gid)?;
     let mut file = tokio::fs::File::from_std(file).take((MAX_USER_FILE_BYTES + 1) as u64);
@@ -4175,6 +4257,26 @@ async fn read_bounded(
 pub enum AdapterError {
     /// Trusted resources must be absolute paths.
     InvalidResource,
+    /// A fixed resource failed a metadata check; values contain no file contents.
+    ResourceMetadata {
+        resource: &'static str,
+        reason: &'static str,
+        actual: u64,
+        expected: u64,
+    },
+    /// A fixed resource could not be opened without following links.
+    ResourceIo {
+        resource: &'static str,
+        reason: &'static str,
+        source: io::Error,
+    },
+    /// A password record failed parsing; only physical positions and counts are retained.
+    UserFileFormat {
+        reason: &'static str,
+        line: usize,
+        fields: usize,
+        first_line: Option<usize>,
+    },
     /// An operation argument was not in its canonical typed form.
     InvalidRequest,
     /// A session identifier belongs to a prior host boot.
@@ -4199,6 +4301,44 @@ impl std::fmt::Display for AdapterError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidResource => write!(formatter, "fixed resource path invalid"),
+            Self::ResourceMetadata {
+                resource,
+                reason,
+                actual,
+                expected,
+            } => {
+                if *reason == "mode" || *reason == "writable_mode_bits" {
+                    write!(
+                        formatter,
+                        "resource={resource} reason={reason} actual={actual:04o} expected={expected:04o}"
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "resource={resource} reason={reason} actual={actual} expected={expected}"
+                    )
+                }
+            }
+            Self::ResourceIo {
+                resource,
+                reason,
+                source,
+            } => write!(formatter, "resource={resource} reason={reason}: {source}"),
+            Self::UserFileFormat {
+                reason,
+                line,
+                fields,
+                first_line,
+            } => {
+                write!(
+                    formatter,
+                    "resource=ocpasswd reason={reason} line={line} fields={fields} expected_fields=3"
+                )?;
+                if let Some(first) = first_line {
+                    write!(formatter, " first_line={first}")?;
+                }
+                Ok(())
+            }
             Self::InvalidRequest => write!(formatter, "fixed operation argument invalid"),
             Self::StaleBoot => write!(formatter, "session boot identity is stale"),
             Self::Unavailable => write!(formatter, "fixed local resource unavailable"),
@@ -4217,7 +4357,7 @@ impl std::fmt::Display for AdapterError {
 impl std::error::Error for AdapterError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Io(error) | Self::ResourceIo { source: error, .. } => Some(error),
             _ => None,
         }
     }
@@ -4226,11 +4366,14 @@ impl std::error::Error for AdapterError {
 impl From<AdapterError> for PrivdError {
     fn from(error: AdapterError) -> Self {
         let kind = match &error {
-            AdapterError::InvalidResource | AdapterError::MalformedOutput => {
-                ErrorKind::MalformedOutput
-            }
+            AdapterError::InvalidResource
+            | AdapterError::MalformedOutput
+            | AdapterError::ResourceMetadata { .. }
+            | AdapterError::UserFileFormat { .. } => ErrorKind::MalformedOutput,
             AdapterError::InvalidRequest | AdapterError::StaleBoot => ErrorKind::InvalidRequest,
-            AdapterError::Unavailable | AdapterError::Io(_) => ErrorKind::Unavailable,
+            AdapterError::Unavailable | AdapterError::Io(_) | AdapterError::ResourceIo { .. } => {
+                ErrorKind::Unavailable
+            }
             AdapterError::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             AdapterError::OutputLimit => ErrorKind::OutputLimit,
             AdapterError::CapacityExceeded => ErrorKind::CapacityExceeded,
@@ -5281,6 +5424,130 @@ mod tests {
         assert!(parse_groups_from_user_file(b"alice:staff;id:$6$hash\n").is_err());
     }
 
+    #[test]
+    fn user_file_diagnostics_preserve_physical_lines_and_redact_records() {
+        for (input, reason, line, fields, first_line) in [
+            (
+                "\nalice:staff:private-hash:bob:other-hash",
+                "field_count",
+                2,
+                5,
+                None,
+            ),
+            (
+                "alice::private-hash\n\nalice:x:other-hash",
+                "duplicate_username",
+                3,
+                3,
+                Some(1),
+            ),
+            ("\nalice::", "empty_hash", 2, 3, None),
+            ("../alice::private-hash", "invalid_username", 1, 3, None),
+            ("alice:staff;id:private-hash", "invalid_group", 1, 3, None),
+        ] {
+            let error = parse_user_file(input.as_bytes()).expect_err("invalid record");
+            assert!(matches!(&error, AdapterError::UserFileFormat {
+                reason: r, line: l, fields: f, first_line: first,
+            } if *r == reason && *l == line && *f == fields && *first == first_line));
+            let debug = format!("{error:?}");
+            let wire = PrivdError::from(error);
+            assert_eq!(wire.kind, i32::from(ErrorKind::MalformedOutput));
+            for output in [debug, wire.detail] {
+                assert!(!output.contains("private-hash"));
+                assert!(!output.contains("other-hash"));
+                assert!(!output.contains("alice"));
+            }
+        }
+        for input in [
+            "",
+            "\n\n",
+            "alice::x",
+            "alice::arbitrary-length-hash\n\nbob:x:!",
+        ] {
+            parse_user_file(input.as_bytes()).expect("previously supported records");
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_diagnostics_distinguish_mode_owner_group_links_and_missing() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-resource-diagnostic-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let path = directory.join("ocpasswd");
+        assert!(
+            read_optional_user_file(&path)
+                .await
+                .expect("optional absence")
+                .is_empty()
+        );
+        assert!(matches!(
+            read_user_file(&path, false).await,
+            Err(AdapterError::ResourceIo {
+                reason: "open_failed",
+                ..
+            })
+        ));
+        write_user_fixture(&path, b"alice::private-hash");
+        read_user_file(&path, false).await.expect("0600 accepted");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("mode");
+        let error = read_user_file(&path, false)
+            .await
+            .expect_err("0644 rejected");
+        assert!(matches!(
+            error,
+            AdapterError::ResourceMetadata {
+                reason: "mode",
+                actual: 0o644,
+                expected: 0o600,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("actual=0644 expected=0600"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        let file = File::open(&path).expect("file");
+        let (uid, gid) = authoritative_user_owner();
+        assert!(matches!(
+            validate_authoritative_user_file(&file, uid + 1, gid),
+            Err(AdapterError::ResourceMetadata {
+                reason: "owner_uid",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_authoritative_user_file(&file, uid, gid + 1),
+            Err(AdapterError::ResourceMetadata {
+                reason: "group_gid",
+                ..
+            })
+        ));
+        let link = directory.join("link");
+        std::fs::hard_link(&path, &link).expect("hardlink");
+        assert!(matches!(
+            read_user_file(&path, false).await,
+            Err(AdapterError::ResourceMetadata {
+                reason: "link_count",
+                ..
+            })
+        ));
+        std::fs::remove_file(&link).expect("remove hardlink");
+        std::os::unix::fs::symlink(&path, &link).expect("symlink");
+        assert!(matches!(
+            read_user_file(&link, true).await,
+            Err(AdapterError::ResourceIo {
+                reason: "symlink",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_authoritative_user_file(&File::open(&directory).expect("directory"), uid, gid),
+            Err(AdapterError::ResourceMetadata {
+                reason: "file_type_regular",
+                ..
+            })
+        ));
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
     #[tokio::test]
     async fn ocpasswd_publish_enforces_owner_mode_links_and_real_parent() {
         let directory =
@@ -5322,7 +5589,7 @@ mod tests {
             .expect("make legacy file unsafe");
         assert!(matches!(
             adapter.user_list().await,
-            Err(AdapterError::InvalidResource)
+            Err(AdapterError::ResourceMetadata { .. })
         ));
         std::fs::set_permissions(&users, std::fs::Permissions::from_mode(USER_FILE_MODE))
             .expect("restore secure mode");
@@ -5331,7 +5598,7 @@ mod tests {
         std::fs::hard_link(&users, &second_link).expect("hard link fixture");
         assert!(matches!(
             adapter.user_list().await,
-            Err(AdapterError::InvalidResource)
+            Err(AdapterError::ResourceMetadata { .. })
         ));
         std::fs::remove_file(&second_link).expect("remove hard link fixture");
 
@@ -5346,7 +5613,7 @@ mod tests {
             .expect("make parent unsafe");
         assert!(matches!(
             adapter.user_list().await,
-            Err(AdapterError::InvalidResource)
+            Err(AdapterError::ResourceMetadata { .. })
         ));
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
             .expect("restore fixture directory");
