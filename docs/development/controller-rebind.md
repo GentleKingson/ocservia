@@ -126,9 +126,14 @@ cannot restore its full payload.
 
 Retired-node cleanup requires a revoked endpoint and no unresolved command or
 projection. It removes bounded session snapshots and clears ordinary health/path
-JSON, retaining the node and endpoint revocation records. Audit/security and local
-rebind detail require their own authenticated/retired-state compaction before their
-configured cutoffs can be applied; command retention never deletes those records.
+JSON, retaining the node and endpoint revocation records. Audit/security detail uses `OCSERV_AUDIT_RETENTION_DAYS` (365, range 90–2555).
+Each pass verifies at most 32 original audit records before removing reason and
+before/after summaries, preserving an independently authenticated compact record
+and every original chain/checkpoint link. Corrupt or unknown-key evidence stops
+the entire batch. Database routines enforce a 90-day minimum and deny ordinary
+runtime mutation. At most 32 old security-event detail objects are replaced by
+a digest and retained identity/severity/timestamps. Raw telemetry and rollups are
+not touched. Local rebind detail still requires its separate retired-state worker.
 
 | Data | Default | Configuration range | Safety boundary |
 | --- | --- | --- | --- |

@@ -25,7 +25,7 @@ func TestHistoryRetentionConfiguration(t *testing.T) {
 	for _, item := range []struct {
 		name             string
 		minimum, maximum int
-	}{{"OCSERV_RETIRED_NODE_RETENTION_DAYS", 30, 730}, {"OCSERV_COMMAND_DETAIL_RETENTION_DAYS", 30, 365}} {
+	}{{"OCSERV_RETIRED_NODE_RETENTION_DAYS", 30, 730}, {"OCSERV_COMMAND_DETAIL_RETENTION_DAYS", 30, 365}, {"OCSERV_AUDIT_RETENTION_DAYS", 90, 2555}} {
 		for _, days := range []int{-1, 0, item.minimum - 1, item.minimum, item.maximum, item.maximum + 1} {
 			_, err := load(item.name, strconv.Itoa(days))
 			valid := days >= item.minimum && days <= item.maximum

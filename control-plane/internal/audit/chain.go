@@ -59,10 +59,11 @@ type ChainRecord struct {
 }
 
 type Verification struct {
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	Events      int64     `json:"events"`
-	Valid       bool      `json:"valid"`
-	Checkpoint  bool      `json:"checkpoint_valid"`
+	WorkspaceID     uuid.UUID `json:"workspace_id"`
+	Events          int64     `json:"events"`
+	CompactedEvents int64     `json:"compacted_events"`
+	Valid           bool      `json:"valid"`
+	Checkpoint      bool      `json:"checkpoint_valid"`
 }
 
 type Manager struct {
@@ -322,12 +323,14 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 	for rows.Next() {
 		record := ChainRecord{WorkspaceID: workspaceID}
 		var resourceID *uuid.UUID
-		var storedPrevious, storedHash, eventMAC []byte
+		var storedPrevious, storedHash, eventMAC, compactionMAC []byte
+		var compactedAt value.Timestamp
+		var compactionKeyID *string
 		var authVersion int16
 		var eventKeyID *string
 		var at value.Timestamp
 		var before, after value.JSONB
-		if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC); err != nil {
+		if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC, &compactedAt, &compactionKeyID, &compactionMAC); err != nil {
 			return chainVerification{}, err
 		}
 		record.At, err = at.Time()
@@ -343,7 +346,14 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 			return chainVerification{}, err
 		}
 		digest := sha256.Sum256(payload)
-		if subtle.ConstantTimeCompare(storedPrevious, previous) != 1 || subtle.ConstantTimeCompare(storedHash, digest[:]) != 1 {
+		hashValid := subtle.ConstantTimeCompare(storedHash, digest[:]) == 1
+		if compactedAt.Valid {
+			hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, compactedAt, compactionKeyID, compactionMAC)
+			verified.CompactedEvents++
+		} else if compactionKeyID != nil || len(compactionMAC) != 0 {
+			hashValid = false
+		}
+		if subtle.ConstantTimeCompare(storedPrevious, previous) != 1 || !hashValid {
 			verified.Valid = false
 		}
 		switch authVersion {

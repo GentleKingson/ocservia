@@ -27,7 +27,7 @@ var runtimePrivileges = []struct{ privileges, tables string }{
 	{"UPDATE(lock_key)", "business_locks"},
 	{"SELECT,UPDATE(key_name)", "exact_key_guards"},
 	// MySQL requires a write privilege for current locking reads. The
-	// unconditional audit_events_reject_update trigger rejects even no-ops.
+	// audit_events_reject_update rejects runtime direct updates, including no-ops.
 	{"UPDATE(event_hash)", "audit_events"},
 }
 
@@ -107,6 +107,11 @@ func (b *Backend) GrantRuntimePrivileges(ctx context.Context, account string) er
 			if !errors.As(err, &serverError) || serverError.Number != 1147 {
 				return safeError(err)
 			}
+		}
+	}
+	for _, procedure := range []string{"audit_compact_detail", "security_compact_details"} {
+		if _, err := b.Exec(ctx, "GRANT EXECUTE ON PROCEDURE `"+name+"`."+procedure+" TO "+quoted); err != nil {
+			return err
 		}
 	}
 	if _, err := b.Exec(ctx, "GRANT EXECUTE ON PROCEDURE `"+name+"`.telemetry_prune_rollups TO "+quoted); err != nil {

@@ -38,6 +38,12 @@ export interface AuditVerification {
    */
   valid: boolean;
   /**
+   * Events whose aged detail is replaced by an authenticated retained record.
+   * @type {number}
+   * @memberof AuditVerification
+   */
+  compactedEvents?: number;
+  /**
    *
    * @type {boolean}
    * @memberof AuditVerification
@@ -85,6 +91,8 @@ export function AuditVerificationFromJSONTyped(
     workspaceId: json["workspace_id"],
     events: json["events"],
     valid: json["valid"],
+    compactedEvents:
+      json["compacted_events"] == null ? undefined : json["compacted_events"],
     checkpointValid: json["checkpoint_valid"],
   };
 }
@@ -105,6 +113,7 @@ export function AuditVerificationToJSONTyped(
     workspace_id: value["workspaceId"],
     events: value["events"],
     valid: value["valid"],
+    compacted_events: value["compactedEvents"],
     checkpoint_valid: value["checkpointValid"],
   };
 }

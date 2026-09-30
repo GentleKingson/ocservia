@@ -155,6 +155,10 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"REVOKE ALL ON FUNCTION telemetry_ensure_month_partition(timestamptz) FROM " + identifier,
 		"REVOKE DELETE, TRUNCATE ON telemetry_rollups_5m, telemetry_rollups_1h FROM " + identifier,
 		"GRANT EXECUTE ON FUNCTION telemetry_prune_rollups(timestamptz) TO " + identifier,
+		// A column write privilege permits locking reads; the trigger still rejects runtime writes.
+		"GRANT UPDATE(event_hash) ON audit_events TO " + identifier,
+		"GRANT EXECUTE ON FUNCTION audit_compact_detail(uuid,bytea,text,bytea,timestamptz) TO " + identifier,
+		"GRANT EXECUTE ON FUNCTION security_compact_details(timestamptz) TO " + identifier,
 	}
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {

@@ -18,12 +18,12 @@ import (
 
 const BatchSize = 32
 
-type Policy struct{ RetiredNodeDays, CommandDays int }
+type Policy struct{ RetiredNodeDays, CommandDays, AuditDays int }
 
-func DefaultPolicy() Policy { return Policy{90, 90} }
+func DefaultPolicy() Policy { return Policy{90, 90, 365} }
 func (p Policy) Validate() error {
-	if p.RetiredNodeDays < 30 || p.RetiredNodeDays > 730 || p.CommandDays < 30 || p.CommandDays > 365 {
-		return errors.New("invalid history retention days: retired node 30–730, command 30–365; zero does not disable retention")
+	if p.RetiredNodeDays < 30 || p.RetiredNodeDays > 730 || p.CommandDays < 30 || p.CommandDays > 365 || p.AuditDays < 90 || p.AuditDays > 2555 {
+		return errors.New("invalid history retention days: retired node 30–730, command 30–365, audit 90–2555; zero does not disable retention")
 	}
 	return nil
 }
