@@ -169,6 +169,13 @@ export const i18n = createI18n({
       noIpBans: "No active IP bans",
       reason: "Reason",
       approvalId: "Approval ID",
+      nextPage: "Next page",
+      pendingApprovals: "Pending approvals",
+      approvalQueueScope:
+        "Requests you can independently approve in this workspace. Refresh to see changes.",
+      approvalQueueUnavailable:
+        "Pending approvals could not be loaded. Refresh to retry.",
+      noPendingApprovals: "No pending requests you can approve",
       approvals: "Approvals",
       inspectApproval: "Inspect approval",
       approvalDetails: "Approval details",

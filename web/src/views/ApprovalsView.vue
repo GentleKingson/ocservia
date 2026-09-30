@@ -8,7 +8,11 @@ import {
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
-import { approveRequest, getApproval } from "../api/approvals";
+import {
+  approveRequest,
+  getApproval,
+  listPendingApprovals,
+} from "../api/approvals";
 import {
   getWorkspace,
   workspaceChangedEvent,
@@ -32,6 +36,93 @@ let sequence = 0;
 let loadedContext: WorkspaceContext | undefined;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 const expired = ref(false);
+
+const queue = ref<Approval[]>([]);
+const queueLoading = ref(false);
+const queueInitialized = ref(false);
+const queueError = ref("");
+const nextCursor = ref("");
+let queueController: AbortController | undefined;
+let queueSequence = 0;
+
+function invalidateQueue(): void {
+  queueSequence++;
+  queueController?.abort();
+  queueController = undefined;
+  queue.value = [];
+  nextCursor.value = "";
+  queueError.value = "";
+  queueLoading.value = false;
+  queueInitialized.value = false;
+}
+
+async function loadQueue(cursor = ""): Promise<void> {
+  const ticket = ++queueSequence;
+  queueController?.abort();
+  queueController = new AbortController();
+  const signal = queueController.signal;
+  queueLoading.value = true;
+  queueError.value = "";
+  const contextMatches = (context: WorkspaceContext): boolean => {
+    const workspace = workspaceContext();
+    return (
+      ticket === queueSequence &&
+      workspace.id === context.id &&
+      workspace.generation === context.generation
+    );
+  };
+  let context: WorkspaceContext | undefined;
+  try {
+    await getWorkspace();
+    if (ticket !== queueSequence) return;
+    context = workspaceContext();
+    const page = await listPendingApprovals(cursor || undefined, signal);
+    if (!contextMatches(context)) return;
+    if (
+      page.items.some(
+        (item) => item.workspaceId !== context?.id || item.status !== "pending",
+      )
+    )
+      throw new Error("invalid approval page");
+    queue.value = page.items;
+    nextCursor.value = page.page.hasMore ? (page.page.nextCursor ?? "") : "";
+    queueInitialized.value = true;
+  } catch (cause) {
+    if (
+      ticket !== queueSequence ||
+      signal.aborted ||
+      (context && !contextMatches(context))
+    )
+      return;
+    // Clear stale actionable rows after a permission or refresh failure.
+    queue.value = [];
+    nextCursor.value = "";
+    queueInitialized.value = false;
+    queueError.value = t(
+      cause instanceof ResponseError && cause.response.status === 403
+        ? "approvalForbidden"
+        : "approvalQueueUnavailable",
+    );
+  } finally {
+    if (ticket === queueSequence) queueLoading.value = false;
+  }
+}
+
+function refresh(): void {
+  void loadApproval();
+  void loadQueue();
+}
+
+function refreshWorkspace(): void {
+  invalidateQueue();
+  lookupId.value = "";
+  refresh();
+}
+
+function inspectQueued(value: Approval): void {
+  if (submitting.value || queueLoading.value) return;
+  void router.push({ name: "approvals", params: { approvalId: value.id } });
+}
 
 function current(context: WorkspaceContext, ticket: number): boolean {
   const workspace = workspaceContext();
@@ -165,6 +256,7 @@ async function approve(): Promise<void> {
     )
       throw new Error(t("approvalUnavailable"));
     display(result);
+    void loadQueue();
   } catch (cause) {
     if (!current(context, ticket)) return;
     // A lost POST response is not permission to send the decision again.
@@ -187,11 +279,12 @@ watch(
   },
 );
 onMounted(() => {
-  window.addEventListener(workspaceChangedEvent, loadApproval);
-  void loadApproval();
+  window.addEventListener(workspaceChangedEvent, refreshWorkspace);
+  refresh();
 });
 onBeforeUnmount(() => {
-  window.removeEventListener(workspaceChangedEvent, loadApproval);
+  window.removeEventListener(workspaceChangedEvent, refreshWorkspace);
+  invalidateQueue();
   invalidate();
 });
 </script>
@@ -206,14 +299,69 @@ onBeforeUnmount(() => {
       <button
         type="button"
         class="icon-command page-command"
-        :disabled="loading || submitting"
+        :disabled="loading || queueLoading || submitting"
         :title="$t('refresh')"
         :aria-label="$t('refresh')"
-        @click="loadApproval"
+        @click="refresh"
       >
         <RefreshCw :size="16" />
       </button>
     </div>
+    <section class="approval-queue" :aria-label="$t('pendingApprovals')">
+      <h2>{{ $t("pendingApprovals") }}</h2>
+      <p>{{ $t("approvalQueueScope") }}</p>
+      <p v-if="queueLoading" role="status">{{ $t("loading") }}</p>
+      <p v-else-if="queueError" class="operation-error" role="alert">
+        {{ queueError }}
+      </p>
+      <p v-else-if="queueInitialized && !queue.length">
+        {{ $t("noPendingApprovals") }}
+      </p>
+      <div v-if="queue.length" class="approval-queue-table">
+        <table>
+          <thead>
+            <tr>
+              <th>{{ $t("approvalAction") }}</th>
+              <th>{{ $t("approvalResource") }}</th>
+              <th>{{ $t("approvalRequester") }}</th>
+              <th>{{ $t("state") }}</th>
+              <th>{{ $t("expires") }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in queue" :key="item.id">
+              <td>
+                <button
+                  type="button"
+                  class="queue-inspect"
+                  :disabled="submitting || queueLoading"
+                  @click="inspectQueued(item)"
+                >
+                  {{ item.action }}
+                </button>
+              </td>
+              <td>
+                {{ item.resourceType }} <code>{{ item.resourceId }}</code>
+              </td>
+              <td>
+                <code>{{ item.requesterId }}</code>
+              </td>
+              <td>{{ item.status }}</td>
+              <td>{{ formatTimestamp(item.expiresAt) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <button
+        v-if="nextCursor"
+        type="button"
+        class="primary-button"
+        :disabled="queueLoading || submitting"
+        @click="loadQueue(nextCursor)"
+      >
+        {{ $t("nextPage") }}
+      </button>
+    </section>
     <form class="approval-lookup" @submit.prevent="inspect">
       <label for="approval-lookup">{{ $t("approvalId") }}</label>
       <input
@@ -306,6 +454,39 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.approval-queue h2 {
+  font-size: 18px;
+}
+.approval-queue > p {
+  color: #64748b;
+}
+.approval-queue-table {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 16px 0;
+}
+.approval-queue table {
+  width: 100%;
+  min-width: 800px;
+  border-collapse: collapse;
+}
+.approval-queue th,
+.approval-queue td {
+  text-align: left;
+  padding: 12px;
+  border-bottom: 1px solid #dce2e9;
+  overflow-wrap: anywhere;
+}
+.queue-inspect {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: #215c51;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .approval-lookup {
   display: grid;
   grid-template-columns: auto minmax(0, 32rem) 36px;

@@ -1715,6 +1715,21 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /approval-requests:
+    get:
+      operationId: listPendingApprovals
+      summary: List independent pending approvals actionable by the current principal
+      description: Filters the selected workspace and every resource under the original authority snapshot before pagination. Excludes the requester and expired, approved or consumed requests. Ordered by immutable approval ID ascending; cursors remain usable after decisions or expiry. New requests may appear on later pages; refresh starts from the beginning.
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A bounded page of actionable pending approvals.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalPage" } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
     post:
       operationId: createApprovalRequest
       summary: Request independent approval for a high-risk action
@@ -3250,6 +3265,16 @@ components:
           type: string
           pattern: "^[0-9a-f]{64}$"
           description: Required when approving a content-bound request; must match the details read before deciding.
+    ApprovalPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/Approval" }
+        page: { $ref: "#/components/schemas/PageInfo" }
     Approval:
       type: object
       additionalProperties: false

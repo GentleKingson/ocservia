@@ -44,6 +44,11 @@ import {
   ApprovalDecisionToJSON,
 } from "../models/ApprovalDecision";
 import {
+  type ApprovalPage,
+  ApprovalPageFromJSON,
+  ApprovalPageToJSON,
+} from "../models/ApprovalPage";
+import {
   type ApprovalRequest,
   ApprovalRequestFromJSON,
   ApprovalRequestToJSON,
@@ -230,6 +235,12 @@ export interface ListAgentRolloutsRequest {
 }
 
 export interface ListOperationsRequest {
+  xWorkspaceID?: string;
+  cursor?: string;
+  pageSize?: number;
+}
+
+export interface ListPendingApprovalsRequest {
   xWorkspaceID?: string;
   cursor?: string;
   pageSize?: number;
@@ -1880,6 +1891,81 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<OperationPage> {
     const response = await this.listOperationsRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for listPendingApprovals without sending the request
+   */
+  async listPendingApprovalsRequestOpts(
+    requestParameters: ListPendingApprovalsRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    if (requestParameters["cursor"] != null) {
+      queryParameters["cursor"] = requestParameters["cursor"];
+    }
+
+    if (requestParameters["pageSize"] != null) {
+      queryParameters["page_size"] = requestParameters["pageSize"];
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/approval-requests`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Filters the selected workspace and every resource under the original authority snapshot before pagination. Excludes the requester and expired, approved or consumed requests. Ordered by immutable approval ID ascending; cursors remain usable after decisions or expiry. New requests may appear on later pages; refresh starts from the beginning.
+   * List independent pending approvals actionable by the current principal
+   */
+  async listPendingApprovalsRaw(
+    requestParameters: ListPendingApprovalsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<ApprovalPage>> {
+    const requestOptions =
+      await this.listPendingApprovalsRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      ApprovalPageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Filters the selected workspace and every resource under the original authority snapshot before pagination. Excludes the requester and expired, approved or consumed requests. Ordered by immutable approval ID ascending; cursors remain usable after decisions or expiry. New requests may appear on later pages; refresh starts from the beginning.
+   * List independent pending approvals actionable by the current principal
+   */
+  async listPendingApprovals(
+    requestParameters: ListPendingApprovalsRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<ApprovalPage> {
+    const response = await this.listPendingApprovalsRaw(
       requestParameters,
       initOverrides,
     );

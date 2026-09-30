@@ -104,6 +104,7 @@ func (s *Server) registerCertificateRoutes(mux httpx.Registrar, compat *http.Ser
 }
 
 func (s *Server) registerAuthorizationRoutes(mux httpx.Registrar, compat *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/approval-requests", s.requireOperationAuth(s.listPendingApprovals))
 	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
 	compat.HandleFunc("GET /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.getApproval))
 	compat.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))

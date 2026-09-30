@@ -93,7 +93,7 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 	if action == "" {
 		return nil, rbac.ErrForbidden
 	}
-	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/approval-requests" || r.URL.Path == "/api/v1/agent-rollouts")) || (r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/") || r.URL.Path == "/api/v1/agent-rollouts")) {
+	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/approval-requests" || r.URL.Path == "/api/v1/agent-rollouts")) || (r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/") || r.URL.Path == "/api/v1/agent-rollouts" || r.URL.Path == "/api/v1/approval-requests")) {
 		workspaceID, err := s.selectWorkspace(r, principal, action)
 		if err != nil {
 			return nil, err
@@ -329,6 +329,9 @@ func routeAction(r *http.Request) string {
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/approval-requests/"):
 		return "approval.approve"
 	case path == "/api/v1/approval-requests":
+		if r.Method == http.MethodGet {
+			return "approval.approve"
+		}
 		return "approval.request"
 	case strings.HasPrefix(path, "/api/v1/audit"):
 		if strings.HasSuffix(path, ":verify") {

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getApproval: vi.fn(),
+  listPendingApprovals: vi.fn(),
   approveRequest: vi.fn(),
   getWorkspace: vi.fn(),
   workspaceContext: vi.fn(),
@@ -35,6 +36,13 @@ const renderer = createRenderer<object, object>({
   patchProp: () => {},
 });
 interface View {
+  queue: Approval[];
+  queueLoading: boolean;
+  queueInitialized: boolean;
+  queueError: string;
+  nextCursor: string;
+  loadQueue(cursor?: string): Promise<void>;
+  inspectQueued(value: Approval): void;
   approval?: Approval;
   reason: string;
   reviewed: boolean;
@@ -89,6 +97,10 @@ beforeEach(() => {
   mocks.workspaceContext.mockReturnValue({ id: "workspace-a", generation: 1 });
   mocks.getWorkspace.mockResolvedValue({ id: "workspace-a" });
   mocks.getApproval.mockResolvedValue({ ...pending });
+  mocks.listPendingApprovals.mockResolvedValue({
+    items: [],
+    page: { hasMore: false },
+  });
   mocks.approveRequest.mockResolvedValue({
     ...pending,
     status: "approved",
@@ -226,5 +238,81 @@ describe("approval review", () => {
     await result;
     expect(view.approval).toBeUndefined();
     expect(view.error).toBe("forbidden");
+  });
+});
+
+describe("pending approval queue", () => {
+  it("loads bounded pages and opens the existing detail route", async () => {
+    mocks.listPendingApprovals.mockResolvedValueOnce({
+      items: [pending],
+      page: { hasMore: true, nextCursor: "cursor-a" },
+    });
+    const view = await mount();
+    expect(view.queue).toEqual([pending]);
+    expect(view.nextCursor).toBe("cursor-a");
+    view.inspectQueued(pending);
+    expect(mocks.push).toHaveBeenCalledWith({
+      name: "approvals",
+      params: { approvalId: pending.id },
+    });
+    await view.loadQueue(view.nextCursor);
+    expect(mocks.listPendingApprovals).toHaveBeenLastCalledWith(
+      "cursor-a",
+      expect.any(AbortSignal),
+    );
+    expect(view.queueInitialized).toBe(true);
+    expect(view.queue).toEqual([]);
+    expect(view.nextCursor).toBe("");
+  });
+  it.each([403, 503])(
+    "clears stale pending rows after HTTP %s",
+    async (status) => {
+      mocks.listPendingApprovals.mockResolvedValueOnce({
+        items: [pending],
+        page: { hasMore: false },
+      });
+      const view = await mount();
+      mocks.listPendingApprovals.mockRejectedValueOnce(
+        new ResponseError(new Response(null, { status })),
+      );
+      await view.loadQueue();
+      expect(view.queue).toEqual([]);
+      expect(view.queueInitialized).toBe(false);
+      expect(view.queueError).toBe(
+        status === 403 ? "approvalForbidden" : "approvalQueueUnavailable",
+      );
+      await view.loadQueue();
+      expect(view.queueError).toBe("");
+      expect(view.queueInitialized).toBe(true);
+    },
+  );
+  it("rejects a response from another workspace", async () => {
+    mocks.listPendingApprovals.mockResolvedValueOnce({
+      items: [{ ...pending, workspaceId: "workspace-b" }],
+      page: { hasMore: false },
+    });
+    const view = await mount();
+    expect(view.queue).toEqual([]);
+    expect(view.queueError).toBe("approvalQueueUnavailable");
+  });
+  it("drops delayed queue responses after a workspace switch", async () => {
+    let resolveOld!: (value: object) => void;
+    mocks.listPendingApprovals.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const view = await mount();
+    mocks.workspaceContext.mockReturnValue({
+      id: "workspace-b",
+      generation: 2,
+    });
+    window.dispatchEvent(new Event("workspace"));
+    await flush();
+    resolveOld({ items: [pending], page: { hasMore: false } });
+    await flush();
+    expect(view.queue).toEqual([]);
+    expect(view.queueInitialized).toBe(true);
   });
 });

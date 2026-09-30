@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -398,4 +399,40 @@ func writeApprovalError(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Approval unavailable", "approval state is temporarily unavailable")
 	}
+}
+
+func (s *Server) listPendingApprovals(w http.ResponseWriter, r *http.Request) {
+	if s.approvals == nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service unavailable", "approval service is unavailable")
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("page_size"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 200 {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Invalid page size", "page_size must be between 1 and 200")
+			return
+		}
+		limit = value
+	}
+	after := uuid.Nil
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		value, err := uuid.Parse(raw)
+		if err != nil || value.Version() != 7 {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Invalid cursor", "cursor must be a UUIDv7 approval ID")
+			return
+		}
+		after = value
+	}
+	items, more, err := s.approvals.ListPending(r.Context(), workspace(r), principal(r).IdentityID, after, limit)
+	if err != nil {
+		writeApprovalError(w, r, err)
+		return
+	}
+	page := map[string]any{"has_more": more}
+	if more {
+		page["next_cursor"] = items[len(items)-1].ID.String()
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "page": page})
 }

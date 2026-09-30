@@ -346,3 +346,36 @@ func approvalSummary(value Approval) json.RawMessage {
 	result, _ := json.Marshal(map[string]any{"request_hash": value.RequestHash, "request_summary": summary})
 	return result
 }
+
+// ListPending returns only independent requests the actor can approve under the
+// original authority snapshot. SQL filters every resource before pagination.
+func (s *Service) ListPending(ctx context.Context, workspace, actor, after uuid.UUID, limit int) ([]Approval, bool, error) {
+	if workspace == uuid.Nil || actor == uuid.Nil || limit < 1 || limit > 200 || (after != uuid.Nil && after.Version() != 7) {
+		return nil, false, ErrInvalid
+	}
+	data, err := store(s.backend)
+	if err != nil {
+		return nil, false, err
+	}
+	rows, err := data.ListPending(ctx, workspace, actor, after, limit+1, s.now())
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]Approval, 0, limit)
+	for rows.Next() {
+		record, err := scan(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		items = append(items, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	more := len(items) > limit
+	if more {
+		items = items[:limit]
+	}
+	return items, more, nil
+}

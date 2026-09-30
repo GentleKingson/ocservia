@@ -96,7 +96,8 @@ GET /api/v1/artifacts/{artifact_id}|s.requireOperationAuth(s.downloadArtifact)|G
 POST /api/v1/secret-provider-refs|s.requireOperationAuth(s.createSecretRef)|POST|secret.manage
 GET /api/v1/secret-provider-refs/{secret_ref_id}|s.requireOperationAuth(s.getSecretRef)|GET|secret.read
 POST /api/v1/secret-provider-refs/{secret_ref_action}|s.requireOperationAuth(s.rotateSecretRef)|POST|secret.manage
-POST /api/v1/approval-requests|s.requireOperationAuth(s.createApproval)|POST|approval.request
+GET /api/v1/approval-requests|s.requireOperationAuth(s.listPendingApprovals)|GET, POST|approval.approve
+POST /api/v1/approval-requests|s.requireOperationAuth(s.createApproval)|GET, POST|approval.request
 GET /api/v1/approval-requests/{approval_id}|s.requireOperationAuth(s.getApproval)|GET|approval.approve
 POST /api/v1/approval-requests/{approval_id}|s.requireOperationAuth(s.approveRequest)|POST|approval.approve
 GET /api/v1/audit/events|s.requireOperationAuth(s.listAuditEvents)|GET|audit.read
