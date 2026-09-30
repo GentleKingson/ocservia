@@ -349,6 +349,7 @@ func approvalSummary(value Approval) json.RawMessage {
 
 // ListPending returns only independent requests the actor can approve under the
 // original authority snapshot. SQL filters every resource before pagination.
+// Content/hash details are omitted; reviewers fetch the immutable detail by ID.
 func (s *Service) ListPending(ctx context.Context, workspace, actor, after uuid.UUID, limit int) ([]Approval, bool, error) {
 	if workspace == uuid.Nil || actor == uuid.Nil || limit < 1 || limit > 200 || (after != uuid.Nil && after.Version() != 7) {
 		return nil, false, ErrInvalid

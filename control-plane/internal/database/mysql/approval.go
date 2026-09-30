@@ -95,7 +95,7 @@ func (s approvalStore) ListPending(ctx context.Context, workspace, actor, after 
 	if err != nil {
 		return nil, err
 	}
-	return s.Query(ctx, `SELECT a.id,a.workspace_id,a.requester_id,a.approver_id,a.action,a.resource_type,a.resource_id,a.reason,a.status,a.expires_at,a.created_at,COALESCE(LOWER(HEX(a.request_hash)),''),a.request_summary FROM approval_requests a
+	return s.Query(ctx, `SELECT a.id,a.workspace_id,a.requester_id,a.approver_id,a.action,a.resource_type,a.resource_id,a.reason,a.status,a.expires_at,a.created_at,'',NULL FROM approval_requests a
     WHERE a.workspace_id=? AND a.status='pending' AND a.expires_at>? AND a.requester_id<>? AND a.id>?
     AND EXISTS(SELECT 1 FROM approval_authority_resources WHERE approval_id=a.id)
     AND NOT EXISTS(SELECT 1 FROM approval_authority_resources scope WHERE scope.approval_id=a.id AND (scope.workspace_id<>a.workspace_id OR NOT EXISTS(

@@ -264,6 +264,7 @@ PlatformAdmin binding created no later than the request's authority snapshot.
 Self-authored, expired, approved and consumed requests are excluded. Existing
 workspace-prefix and authority/role indexes support the scope predicates.
 Refresh starts at the first page; new requests may appear on later pages.
-Clicking a request opens the existing immutable detail and explicit hash-bound
+The list omits the content/hash summaries. Clicking a request fetches the
+existing immutable detail and explicit hash-bound
 review. Listing does not authorize a decision or consume an approval; the
 existing decision and consumption checks remain authoritative.

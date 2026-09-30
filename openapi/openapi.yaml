@@ -1726,7 +1726,7 @@ paths:
         - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
-          description: A bounded page of actionable pending approvals.
+          description: A bounded page of actionable pending approval metadata; content and hash summaries are omitted and must be fetched from the detail endpoint.
           content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalPage" } } }
         "403": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }

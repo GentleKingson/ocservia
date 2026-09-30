@@ -77,6 +77,9 @@ func TestPendingApprovalQueueBackendIntegration(t *testing.T) {
 	if len(items) != 1 || items[0].ID != first.ID || !more || cursor != first.ID.String() {
 		t.Fatalf("filtered first page: %+v %v %q", items, more, cursor)
 	}
+	if items[0].RequestHash != "" || len(items[0].RequestSummary) != 0 {
+		t.Fatal("queue returned full approval content")
+	}
 	if _, err := f.s.approvals.Approve(t.Context(), approvals.Decision{ApprovalID: first.ID, ApproverID: f.approver.principal.IdentityID, SessionID: f.approver.principal.SessionID, Reason: "independent review", RequestID: uuid.NewString(), ExpectedRequestHash: first.RequestHash}); err != nil {
 		t.Fatal(err)
 	}
