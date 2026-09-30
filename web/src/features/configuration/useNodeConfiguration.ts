@@ -308,6 +308,7 @@ export function useNodeConfiguration({
   return {
     configDialog,
     currentConfigRevision,
+    configSourceRevision: computed(() => configPlanSource.value?.revision),
     canSubmitConfigPlan,
     configPlan,
     configOperation,

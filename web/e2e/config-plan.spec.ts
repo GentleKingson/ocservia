@@ -17,6 +17,7 @@ const node = {
   freshness: "fresh",
   dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
   session_count: 0,
+  ocserv: { udp_port: 443 },
 };
 
 test("submits a typed configuration plan and renders a safe diff", async ({
@@ -154,14 +155,26 @@ test("submits a typed configuration plan and renders a safe diff", async ({
   await page.goto("/nodes");
   await page.getByText("Config node").click();
   await page.getByTitle("Configuration plan").click();
+  await expect(
+    page.getByText("Template draft · Current values have not been read.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(page.getByLabel("UDP port")).toHaveValue("0");
   await page.getByLabel("TCP port").fill("8443");
-  await page.getByLabel("Maximum clients").fill("256");
+  await page.getByLabel("Maximum clients", { exact: true }).fill("256");
   await page.getByLabel("Certificate reference").fill(certificateSecretRefId);
   await page.getByLabel("Private key reference").fill(privateKeySecretRefId);
   await page.getByLabel("Reason").fill("review edge configuration");
   await page.getByRole("button", { name: "Plan", exact: true }).last().click();
 
   await expect(page.getByText("valid", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(
+      "Redacted full candidate · Current field values are unknown.",
+      { exact: false },
+    ),
+  ).toBeVisible();
   await expect(page.locator("pre")).toContainText("tcp-port = 443");
   await expect(page.locator("pre")).not.toContainText("tls/server-private-key");
   expect(submitted).toMatchObject({
@@ -196,7 +209,9 @@ test("submits a typed configuration plan and renders a safe diff", async ({
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByTitle("Configuration plan").click();
   await expect(page.getByText("valid", { exact: true })).toBeVisible();
-  await expect(page.getByText(planId, { exact: true })).toBeVisible();
+  await expect(
+    page.locator(".config-plan-result").getByText(planId, { exact: true }),
+  ).toBeVisible();
   expect(planRequests).toBe(1);
 
   await page.locator("#config-apply-approval").fill(approvalId);

@@ -74,6 +74,15 @@ export const i18n = createI18n({
       navigation: "Primary navigation",
       fleetStatus: "Fleet status",
       liveTelemetry: "Live telemetry",
+      configTemplateSource:
+        "Template draft · Current values have not been read. These defaults are not the node’s current configuration.",
+      configSourceRevision: "Configuration revision bound to this request",
+      configRiskFields:
+        "Review the full candidate before Apply, especially TCP/UDP ports, authentication, network/DNS, routes and certificate/key references. Apply requires its own approval.",
+      configCandidateSource:
+        "Redacted full candidate · Current field values are unknown. This is not a field-by-field comparison with the active configuration.",
+      resourceUnmanaged: "Observed only · not managed",
+      resourceNotObserved: "Managed · observation missing",
       latestObservation: "Latest observation",
       onlineNodes: "Online nodes",
       relayPaths: "Relay paths",
