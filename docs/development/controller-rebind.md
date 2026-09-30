@@ -133,7 +133,22 @@ and every original chain/checkpoint link. Corrupt or unknown-key evidence stops
 the entire batch. Database routines enforce a 90-day minimum and deny ordinary
 runtime mutation. At most 32 old security-event detail objects are replaced by
 a digest and retained identity/severity/timestamps. Raw telemetry and rollups are
-not touched. Local rebind detail still requires its separate retired-state worker.
+not touched.
+
+The host-wide `ocservia-agent-retention.timer` runs hourly with randomized delay.
+It scans at most 32 operation records per pass using a durable cursor and the
+shared binding lifecycle lock. Only verified, inactive, unquarantined bindings
+older than the configured cutoff qualify. Missing/corrupt privileged evidence,
+unresolved commands/effects/artifacts or upgrades block cleanup. Each retired
+Agent journal transaction compacts at most 32 nonprivileged result details into
+hashes, retaining command identities, terminal outcomes and all revision/fence
+floors. Privileged results and root-authenticated effect evidence remain intact.
+Journal writes run as the Agent account; root only coordinates protected state.
+A retired marker prevents reopening that journal for execution. Endpoint key
+copies and original legacy paths remain available for package compatibility.
+After the separate rebind-history cutoff, verified completed operations lose
+their bootstrap token and ordinary detail fields; the binding transition,
+source disposition and protected tombstone remain.
 
 | Data | Default | Configuration range | Safety boundary |
 | --- | --- | --- | --- |

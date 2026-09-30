@@ -24,10 +24,12 @@ if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" ) ]]; then
 fi
 
 if [[ -z "${DESTDIR}" ]]; then
-  systemctl disable --now ocservia-agent.service ocservia-privd.service 2>/dev/null || true
-  systemctl stop 'ocservia-upgrader@*.service' 2>/dev/null || true
+  systemctl disable --now ocservia-agent.service ocservia-privd.service ocservia-agent-retention.timer 2>/dev/null || true
+  systemctl stop ocservia-agent-retention.service 'ocservia-upgrader@*.service' 2>/dev/null || true
 fi
-rm -f "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service" \
+rm -f "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent-retention.service" \
+  "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent-retention.timer" \
+  "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service" \
   "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service" \
   "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service" \
   "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
@@ -36,6 +38,7 @@ rm -f "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback" \
+  "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-retention" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rebind" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify" \
   "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-relays"

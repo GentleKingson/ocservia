@@ -148,6 +148,8 @@ jobs:
             bash /source/scripts/test-agent-upgrade-retry.sh
           docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
             python3 /source/scripts/test-rebind-agent.py
+          docker run --rm --network none -v "$PWD:/source:ro" node:24.18.0-bookworm \
+            python3 /source/scripts/test-retain-agent.py
 
   web:
     needs: ci-relevance

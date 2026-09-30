@@ -60,6 +60,9 @@ validate_verified_package_source() {
     "${ROOT}/scripts/upgrade-agent.sh" \
     "${ROOT}/scripts/rollback-agent.sh" \
     "${ROOT}/scripts/rebind-agent.py" \
+    "${ROOT}/scripts/retain-agent.py" \
+    "${ROOT}/deploy/systemd/ocservia-agent-retention.service" \
+    "${ROOT}/deploy/systemd/ocservia-agent-retention.timer" \
     "${ROOT}/scripts/uninstall-agent.sh" \
     "${ROOT}/deploy/systemd/agent.env.example" \
     "${ROOT}/deploy/systemd/ocservia-agent.service" \
@@ -428,12 +431,13 @@ fi
 for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
   cmp -s "${ROOT}/rust/target/release/${binary}" "${DESTDIR}${PREFIX}/libexec/ocservia/${binary}" || same_install=false
 done
-for unit in ocservia-agent.service ocservia-privd.service ocservia-upgrader@.service; do
+for unit in ocservia-agent.service ocservia-privd.service ocservia-upgrader@.service ocservia-agent-retention.service ocservia-agent-retention.timer; do
   cmp -s "${ROOT}/deploy/systemd/${unit}" "${DESTDIR}${PREFIX}/lib/systemd/system/${unit}" || same_install=false
 done
 cmp -s "${ROOT}/scripts/verify-agent-package.sh" "${installed_verifier}" || same_install=false
 cmp -s "${ROOT}/deploy/production/systemd/agent-relays.sh" "${installed_relay_launcher}" || same_install=false
 cmp -s "${ROOT}/scripts/rollback-agent.sh" "${installed_rollback}" || same_install=false
+cmp -s "${ROOT}/scripts/retain-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-retention" || same_install=false
 cmp -s "${ROOT}/scripts/rebind-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rebind" || same_install=false
 if [[ "${INSTALL_PRODUCTION_RELAYS:-false}" == true || -e "${installed_relay_dropin}" ]]; then
   cmp -s "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" "${installed_relay_dropin}" || same_install=false

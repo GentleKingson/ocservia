@@ -262,6 +262,14 @@ impl Journal {
                 PRIMARY KEY(resource_type,resource_key)
              ) STRICT;",
         )?;
+        let retired: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_metadata WHERE key='retired_binding')",
+            [],
+            |row| row.get(0),
+        )?;
+        if retired {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         migrate_command_journal(&connection)?;
         migrate_applied_resource_revisions(&connection)?;
         let integrity: String =
@@ -1185,6 +1193,23 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    #[test]
+    fn retired_journal_cannot_be_reactivated() {
+        let path =
+            std::env::temp_dir().join(format!("retired-journal-{}.db", uuid::Uuid::now_v7()));
+        let journal = Journal::open(&path).unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO agent_metadata(key,value) VALUES('retired_binding',?1)",
+                [vec![1_u8; 48]],
+            )
+            .unwrap();
+        drop(journal);
+        assert!(Journal::open(&path).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
