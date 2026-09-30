@@ -90,6 +90,96 @@ retains the OIDC overlay when recreating the Controller. The overlay is covered
 by the existing deployment-descriptor rollback guard; do not bypass that guard
 to roll back across this deployment change.
 
+## Local login from a terminal and 401 diagnosis
+
+The Web login form and terminal client use the same Local endpoint:
+`POST /api/v1/auth/login`, JSON fields `username` and `password`, and
+`Content-Type: application/json`. Supply the exact configured HTTPS
+`OCSERV_PUBLIC_ORIGIN` as `Origin`; a missing or different origin is rejected.
+OIDC login instead starts with `GET /api/v1/auth/login`. Local login does not
+accept an OIDC token or workspace field in its JSON body.
+
+Run this on the administrator's workstation or Controller host, with an existing
+Local account. The password is prompted without echo and never appears in shell
+history, arguments or diagnostic output. The private request, response headers
+and cookie jar are removed on exit. Do not use `curl -v`, tracing, or `set -x`;
+headers can contain session cookies. Do not transfer the administrator cookie jar
+to a managed Node.
+
+```sh
+(
+  set -eu
+  umask 077
+  : "${OCSERV_PUBLIC_ORIGIN:?set the exact configured HTTPS public origin}"
+  case "${OCSERV_PUBLIC_ORIGIN}" in https://*) ;; *) exit 2 ;; esac
+  auth_tmp="$(mktemp -d)"
+  trap 'rm -rf -- "${auth_tmp}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  python3 - "${auth_tmp}/login.json" <<'PYTHON'
+import getpass
+import json
+import sys
+with open("/dev/tty", encoding="utf-8") as terminal:
+    sys.stdin = terminal
+    username = input("Local username: ")
+    password = getpass.getpass("Local password: ")
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"username": username, "password": password}, output)
+del password
+PYTHON
+  login_status="$(curl --silent --show-error \
+    --output "${auth_tmp}/login-result.json" \
+    --dump-header "${auth_tmp}/login-headers" \
+    --cookie-jar "${auth_tmp}/session.cookies" \
+    --write-out '%{http_code}' \
+    -H "Origin: ${OCSERV_PUBLIC_ORIGIN}" -H 'Content-Type: application/json' \
+    --data-binary "@${auth_tmp}/login.json" \
+    "${OCSERV_PUBLIC_ORIGIN}/api/v1/auth/login")"
+  rm -f -- "${auth_tmp}/login.json"
+  printf 'login POST: HTTP %s\n' "${login_status}"
+  awk 'tolower($1) == "x-request-id:" {print "login Request-ID:", $2}' \
+    "${auth_tmp}/login-headers"
+  [ "${login_status}" = 204 ] || exit 1
+  workspace_status="$(curl --silent --show-error \
+    --cookie "${auth_tmp}/session.cookies" \
+    --output "${auth_tmp}/workspaces.json" \
+    --dump-header "${auth_tmp}/workspace-headers" \
+    --write-out '%{http_code}' \
+    "${OCSERV_PUBLIC_ORIGIN}/api/v1/workspaces")"
+  printf 'authenticated workspaces GET: HTTP %s\n' "${workspace_status}"
+  awk 'tolower($1) == "x-request-id:" {print "workspaces Request-ID:", $2}' \
+    "${auth_tmp}/workspace-headers"
+  [ "${workspace_status}" = 200 ] || exit 1
+  cat "${auth_tmp}/workspaces.json"
+)
+```
+
+A `204` login response establishes the session; the following authenticated GET
+checks that the client retained it. Use an authorized returned workspace ID in
+`X-Workspace-ID` for workspace-scoped APIs. Keep `Origin` on later browser-session
+mutations; login success does not grant a role or permission in every workspace.
+Do not keep retrying bad requests while an account/source cooldown is active.
+
+| Failure stage | Check and correlate |
+| --- | --- |
+| Login POST 400/415 | Exact URL/method, JSON field names/types, Content-Type; internal `invalid_request` |
+| Login POST 403 | Exact Origin and request context; internal `origin_rejected` |
+| Login POST 401 | Generic credentials rejection or account protection; distinguish internal `credentials_rejected` / `account_limited` using the login Request-ID |
+| Login POST 429/503 | Admission limits, capacity or infrastructure; inspect the existing internal reason codes |
+| Login 204, protected API 401 | That API's Request-ID, cookie retention, HTTPS host/path, session expiry/revocation; this is a separate request from login |
+| Protected API 403 | Principal role, selected workspace and resource scope; authentication success alone is insufficient |
+
+The server returns `X-Request-ID`; use it to correlate the fixed, redacted
+`auth.result.reason_code` fields in [Authentication security logs](#authentication-security-logs-r6).
+Sampling can suppress individual events; inspect `auth.summary` counts too.
+Public errors deliberately do not disclose whether an account exists. Never send
+passwords, cookie values, request bodies or raw response headers in an incident
+report. Record the stage, status, request ID and relevant non-secret request
+shape. The historical “terminal 401, Web success” report has an unconfirmed root cause until
+those requests can be correlated; this procedure does not establish an
+authentication-algorithm defect.
+
 ## OIDC provider setup
 
 Retain Authorization Code flow with **PKCE S256**. Register the exact callback
