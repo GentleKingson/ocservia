@@ -3,6 +3,14 @@
 Status: implementation contract; this document does not make rebind available.
 Baseline: `95581ec89ee73c9b7403291078b8cefe1c43527d`.
 
+The identity crate now provides `Identity::stage_rebind`: it verifies the
+expected source EndpointID and Controller pin, copies the existing endpoint
+key into a separate owner-only identity directory, and publishes that directory
+with a durable no-replace rename. It never changes the source pin. A partial
+staging directory is evidence of an incomplete preparation and is refused on
+retry. This primitive is not an activation API; the privileged binding lifecycle
+and operational CLI must still enforce the complete transition below.
+
 ## Authority and identity
 
 Rebind is an explicit privileged operation on the managed node. It transfers
