@@ -30,6 +30,7 @@ const baselineID = "019fc0a4-6d92-765c-a8a1-4af556614cc3"
 // R2-01 changes eight business wrappers to fixed, explicit actions.
 // R2-02 moves only the three ConfigPlan handler/wrapper expressions.
 // Repair PR-11 adds GET on the existing approval collection path.
+// Repair PR-12 adds an authorized node public sealing key read.
 // "self" identifies endpoint validation, not requireOperationAuth. This is a
 // test inventory, never an input to production routing or authorization.
 const routeBaseline = `GET /livez|s.live|GET|public
@@ -73,6 +74,7 @@ GET /api/v1/nodes/{node_id}|guard("node.read", h.getNode)|GET|node.read
 GET /api/v1/nodes/{node_id}/sessions|guard("node.read", h.listNodeSessions)|GET|node.read
 GET /api/v1/nodes/{node_id}/ip-bans|guard("node.read", h.listNodeIPBans)|GET|node.read
 GET /api/v1/nodes/{node_id}/telemetry|guard("node.read", h.listNodeTelemetry)|GET|node.read
+GET /api/v1/nodes/{node_id}/user-password-sealing-key|s.requireOperationAuth(s.getUserPasswordSealingKey)|GET|user.manage
 GET /api/v1/nodes/{node_id}/user-group-state|s.requireOperationAuth(s.listUserGroupState)|GET|node.read
 POST /api/v1/nodes/{node_id}/users|s.requireOperationAuth(s.createUser)|POST|user.manage
 POST /api/v1/nodes/{node_id}/users/{user_action}|s.requireOperationAuth(s.userAction)|POST|user.manage
@@ -289,8 +291,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 			return true
 		})
 	}
-	if len(registered) != 73 || len(explicitActions) != 13 {
-		t.Fatalf("registrations/actions = %d/%d, want 73/13", len(registered), len(explicitActions))
+	if len(registered) != 74 || len(explicitActions) != 13 {
+		t.Fatalf("registrations/actions = %d/%d, want 74/13", len(registered), len(explicitActions))
 	}
 	if forwarders != 1 {
 		t.Fatalf("registration forwarders = %d, want exactly one", forwarders)
@@ -300,8 +302,8 @@ func TestHTTPRouteInventory(t *testing.T) {
 	for _, rule := range s.registeredMethods {
 		derived += len(rule.methods)
 	}
-	if derived != 62 || len(s.registeredMethods) != 57 || compatibilityRegistrations != 11 {
-		t.Fatalf("derived registrations/shapes/compatibility = %d/%d/%d, want 62/57/11", derived, len(s.registeredMethods), compatibilityRegistrations)
+	if derived != 63 || len(s.registeredMethods) != 58 || compatibilityRegistrations != 11 {
+		t.Fatalf("derived registrations/shapes/compatibility = %d/%d/%d, want 63/58/11", derived, len(s.registeredMethods), compatibilityRegistrations)
 	}
 	for _, line := range strings.Split(routeBaseline, "\n") {
 		fields := strings.Split(line, "|")

@@ -108,6 +108,7 @@ type Service struct {
 	controllerVersion    string
 	signer               *commandauth.Signer
 	ownerSessions        ownersession.SessionOpener
+	publicKeys           userPasswordPublicKeySource
 }
 
 func NewBackend(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {

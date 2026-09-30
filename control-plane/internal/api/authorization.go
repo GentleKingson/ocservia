@@ -284,7 +284,7 @@ func routeAction(r *http.Request) string {
 		return "service.reload"
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/agent-upgrade"):
 		return "agent.upgrade"
-	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"):
+	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"), strings.HasSuffix(path, "/user-password-sealing-key"):
 		return "user.manage"
 	case path == "/api/v1/agent-rollouts":
 		if r.Method == http.MethodPost {

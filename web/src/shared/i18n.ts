@@ -225,6 +225,19 @@ export const i18n = createI18n({
       retryRotatePassword: "Retry password rotation",
       retryApplyGroup: "Retry group apply",
       manualReconciliationRequired: "Manual reconciliation required",
+      password: "Password",
+      passwordSealingHelp:
+        "Your password is sealed in this browser with the verified node public key. Re-enter it after a failed attempt.",
+      passwordKeyUnavailable:
+        "The verified public key is unavailable. Check the Signer binding and availability, then retry.",
+      passwordKeyForbidden:
+        "You do not have permission to read this node's password sealing key.",
+      passwordKeyChanged:
+        "The node key binding changed or is invalid. Verify the current Signer binding before retrying.",
+      passwordCryptoUnavailable:
+        "Password sealing needs WebCrypto in a secure browser context (HTTPS).",
+      passwordTooLong:
+        "The password is empty or exceeds this key's RSA-OAEP UTF-8 byte limit.",
       secretKeyId: "Secret key ID",
       sealedPassword: "Sealed password",
       members: "Members",
