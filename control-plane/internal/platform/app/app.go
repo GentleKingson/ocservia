@@ -122,11 +122,13 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 		fenceExecutor = observer
 	}
 	var certificateService *certificates.Service
+	var publicKeySigner *certificates.HTTPSigner
 	if cfg.CertificateSignerURL != "" {
 		signer, signerErr := certificates.NewHTTPSignerWithCA(cfg.CertificateSignerURL, cfg.CertificateSignerToken, cfg.CertificateSignerTimeout, cfg.CertificateSignerCAFile)
 		if signerErr != nil {
 			return fmt.Errorf("configure external certificate signer: %w", signerErr)
 		}
+		publicKeySigner = signer
 		certificateService = certificates.NewBackend(backend, operationService, signer, signer, controlTransport, commandSigner)
 	} else {
 		certificateService = certificates.NewBackend(backend, operationService, nil, nil, nil, nil)
@@ -170,6 +172,9 @@ func runRoles(ctx context.Context, cfg config.Config, build BuildInfo, backend d
 	}
 	if cfg.ControllerEndpointID != "" {
 		services.enrollment = enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
+		if publicKeySigner != nil {
+			services.enrollment.EnableUserPasswordPublicKeys(publicKeySigner)
+		}
 		services.transport, services.fences = controlTransport, fenceExecutor
 	}
 	server, err := newHTTPServer(life, cfg, build, backend, auditManager, logger, services)

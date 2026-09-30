@@ -4,11 +4,19 @@ import {
   type Operation,
   type UserPolicy,
   type UserPolicyRequest,
+  type UserPasswordSealingKey,
 } from "@ocservia/api-client";
 import { configuration, newIdempotencyKey, requestInit } from "./transport";
 
 const operations = new OperationsApi(configuration);
 const nodes = new NodesApi(configuration);
+
+export async function getUserPasswordSealingKey(
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<UserPasswordSealingKey> {
+  return nodes.getNodeUserPasswordSealingKey({ nodeId }, requestInit(signal));
+}
 
 function desiredRequest(version: number, reason: string) {
   return {

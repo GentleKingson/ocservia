@@ -2,6 +2,7 @@ package api
 
 // Frozen from e41b9a78e74c5920fe4741061800c1b8e8f56dc1 for S-02 differential tests.
 // Repair PR-11 extends only /api/v1/approval-requests to GET_OR_POST.
+// Repair PR-12 adds only the node public sealing key GET shape.
 // Never used by production routing.
 
 import (
@@ -85,7 +86,7 @@ func s02BaselineRouteMethod(path string) (string, bool) {
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" {
 		return http.MethodGet, true
 	}
-	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry" || parts[4] == "ip-bans" || parts[4] == "user-group-state") {
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry" || parts[4] == "ip-bans" || parts[4] == "user-group-state" || parts[4] == "user-password-sealing-key") {
 		return http.MethodGet, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" {

@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => {
     revokeCertificate: vi.fn(),
     downloadCertificateArtifact: vi.fn(),
     getOperation: vi.fn(),
+    getUserPasswordSealingKey: vi.fn(),
     getUserPolicy: vi.fn(),
     setUserPolicy: vi.fn(),
   };
@@ -57,6 +58,7 @@ vi.mock("../src/api/operations", async (original) => ({
 }));
 vi.mock("../src/api/users", async (original) => ({
   ...(await original<typeof import("../src/api/users")>()),
+  getUserPasswordSealingKey: mocks.getUserPasswordSealingKey,
   getUserPolicy: mocks.getUserPolicy,
   setUserPolicy: mocks.setUserPolicy,
 }));
@@ -86,6 +88,14 @@ const renderer = createRenderer<object, object>({
 });
 
 interface View {
+  desiredDialog: { kind: string } | undefined;
+  desiredPassword: string;
+  desiredName: string;
+  desiredReason: string;
+  desiredLoading: boolean;
+  desiredError: string;
+  openDesired(kind: "create" | "rotate"): void;
+  submitDesired(): Promise<void>;
   detailState: string;
   detailLoading: boolean;
   selectRouteNode(): Promise<void>;
@@ -857,3 +867,56 @@ it.each([
     expect(view.detailState).toBe(expected);
   },
 );
+
+describe("transient password workflow", () => {
+  it("clears the input before a failed key read and requires re-entry", async () => {
+    const view = await mount();
+    const pending = deferred<never>();
+    mocks.getUserPasswordSealingKey.mockReturnValue(pending.promise);
+    view.openDesired("create");
+    view.desiredPassword = "temporary password fixture";
+    view.desiredName = "alice";
+    view.desiredReason = "create fixture";
+    const submit = view.submitDesired();
+    expect(view.desiredPassword).toBe("");
+    expect(view.desiredLoading).toBe(true);
+    pending.reject(new Error("unavailable"));
+    await submit;
+    expect(view.desiredError).toBe("passwordKeyUnavailable");
+    expect(view.desiredLoading).toBe(false);
+    expect(view.desiredDialog?.kind).toBe("create");
+    expect(view.desiredPassword).toBe("");
+  });
+  it.each(["node", "workspace", "close", "unmount"])(
+    "discards a late key after %s and clears inputs",
+    async (change) => {
+      const view = await mount();
+      const pending = deferred<never>();
+      mocks.getUserPasswordSealingKey.mockReturnValue(pending.promise);
+      const create = vi.fn();
+      mocks.fleet.createUser = create;
+      view.openDesired("create");
+      view.desiredPassword = "temporary password fixture";
+      view.desiredReason = "create fixture";
+      const submit = view.submitDesired();
+      const signal = mocks.getUserPasswordSealingKey.mock
+        .calls[0]?.[1] as AbortSignal;
+      if (change === "node") {
+        mocks.route.params.nodeId = "node-b";
+        await nextTick();
+      } else if (change === "workspace") {
+        mocks.workspaceContext.mockReturnValue({
+          id: "workspace-b",
+          generation: 2,
+        });
+        window.dispatchEvent(new Event(workspaceChangedEvent));
+      } else if (change === "close") view.desiredDialog = undefined;
+      else unmount?.();
+      expect(signal.aborted).toBe(true);
+      pending.resolve({} as never);
+      await submit;
+      expect(view.desiredPassword).toBe("");
+      expect(create).not.toHaveBeenCalled();
+    },
+  );
+});

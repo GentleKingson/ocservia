@@ -81,6 +81,7 @@ func (s *Server) registerNodeRoutes(mux httpx.Registrar) {
 }
 
 func (s *Server) registerUserRoutes(mux httpx.Registrar, compat *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/nodes/{node_id}/user-password-sealing-key", s.requireOperationAuth(s.getUserPasswordSealingKey))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/user-group-state", s.requireOperationAuth(s.listUserGroupState))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users", s.requireOperationAuth(s.createUser))
 	compat.HandleFunc("POST /api/v1/nodes/{node_id}/users/{user_action}", s.requireOperationAuth(s.userAction))

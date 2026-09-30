@@ -20,10 +20,12 @@ import {
   UserX,
   Users,
 } from "@lucide/vue";
-import type { NodeObservedState } from "@ocservia/api-client";
+import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
+import { getUserPasswordSealingKey } from "../api/users";
+import { sealUserPassword } from "../features/user-password";
 import AccessibleDialog from "../shared/AccessibleDialog.vue";
 import { formatTimestamp } from "../shared/timestamp";
 import { agentVersionLabel } from "../shared/agent-version";
@@ -78,8 +80,9 @@ const desiredDialog = ref<{
   version: number;
 }>();
 const desiredName = ref("");
-const sealedPassword = ref("");
-const secretKeyId = ref("");
+const desiredPassword = ref("");
+const desiredLoading = ref(false);
+const desiredError = ref("");
 const groupMembers = ref("");
 const desiredReason = ref("");
 const policyDialog = ref<{ username: string }>();
@@ -297,8 +300,10 @@ function openDesired(
 ): void {
   desiredDialog.value = { kind, name, version };
   desiredName.value = name;
-  sealedPassword.value = "";
-  secretKeyId.value = "";
+  desiredWorkflow.cancel();
+  desiredPassword.value = "";
+  desiredError.value = "";
+  desiredLoading.value = false;
   groupMembers.value =
     kind === "group"
       ? (
@@ -309,42 +314,101 @@ function openDesired(
   desiredReason.value = "";
 }
 
+const desiredWorkflow = createNodeWorkflow(
+  () => currentNode.value?.id,
+  () => Boolean(desiredDialog.value),
+  workspaceContext,
+);
+watch(
+  desiredDialog,
+  (dialog) => {
+    if (dialog) return;
+    desiredWorkflow.cancel();
+    desiredPassword.value = "";
+    desiredError.value = "";
+    desiredLoading.value = false;
+  },
+  { flush: "sync" },
+);
+
 async function submitDesired(): Promise<void> {
   const dialog = desiredDialog.value;
   const explanation = desiredReason.value.trim();
-  if (!dialog || !explanation) return;
-  desiredDialog.value = undefined;
-  if (dialog.kind === "create")
-    await fleet.createUser(
-      desiredName.value.trim(),
-      dialog.version,
-      sealedPassword.value.trim(),
-      secretKeyId.value.trim(),
-      explanation,
+  const nodeId = currentNode.value?.id;
+  if (!dialog || !explanation || !nodeId || desiredLoading.value) return;
+  const name = desiredName.value.trim();
+  const context = desiredWorkflow.begin(nodeId);
+  desiredLoading.value = true;
+  desiredError.value = "";
+  // UTF-8 bytes are transient and never passed to the API or fleet store.
+  const plaintext = new TextEncoder().encode(desiredPassword.value);
+  desiredPassword.value = "";
+  try {
+    if (dialog.kind === "create" || dialog.kind === "rotate") {
+      const key = await getUserPasswordSealingKey(nodeId, context.signal);
+      if (!desiredWorkflow.isCurrent(context)) return;
+      const sealed = await sealUserPassword(
+        plaintext,
+        key,
+        context.workspace.id,
+        nodeId,
+      );
+      if (!desiredWorkflow.isCurrent(context)) return;
+      desiredDialog.value = undefined;
+      if (dialog.kind === "create")
+        await fleet.createUser(
+          name,
+          dialog.version,
+          sealed.ciphertext,
+          sealed.keyId,
+          explanation,
+        );
+      else
+        await fleet.rotateUserPassword(
+          dialog.name,
+          dialog.version,
+          sealed.ciphertext,
+          sealed.keyId,
+          explanation,
+        );
+    } else {
+      desiredDialog.value = undefined;
+      if (dialog.kind === "disable")
+        await fleet.disableUser(dialog.name, dialog.version, explanation);
+      else if (dialog.kind === "enable")
+        await fleet.enableUser(dialog.name, dialog.version, explanation);
+      else
+        await fleet.applyGroup(
+          name,
+          dialog.version,
+          groupMembers.value
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean)
+            .sort(),
+          explanation,
+        );
+    }
+  } catch (error) {
+    if (!desiredWorkflow.isCurrent(context)) return;
+    const keys = [
+      "passwordCryptoUnavailable",
+      "passwordKeyChanged",
+      "passwordTooLong",
+    ];
+    desiredError.value = t(
+      error instanceof Error && keys.includes(error.message)
+        ? error.message
+        : error instanceof ResponseError && error.response.status === 403
+          ? "passwordKeyForbidden"
+          : error instanceof ResponseError && error.response.status === 409
+            ? "passwordKeyChanged"
+            : "passwordKeyUnavailable",
     );
-  else if (dialog.kind === "disable")
-    await fleet.disableUser(dialog.name, dialog.version, explanation);
-  else if (dialog.kind === "enable")
-    await fleet.enableUser(dialog.name, dialog.version, explanation);
-  else if (dialog.kind === "rotate")
-    await fleet.rotateUserPassword(
-      dialog.name,
-      dialog.version,
-      sealedPassword.value.trim(),
-      secretKeyId.value.trim(),
-      explanation,
-    );
-  else
-    await fleet.applyGroup(
-      desiredName.value.trim(),
-      dialog.version,
-      groupMembers.value
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean)
-        .sort(),
-      explanation,
-    );
+  } finally {
+    plaintext.fill(0);
+    if (desiredWorkflow.isCurrent(context)) desiredLoading.value = false;
+  }
 }
 
 async function openPolicy(username: string): Promise<void> {
@@ -1252,21 +1316,16 @@ async function submitPolicy(): Promise<void> {
           v-if="
             desiredDialog.kind === 'create' || desiredDialog.kind === 'rotate'
           "
-          ><label for="secret-key-id">{{ $t("secretKeyId") }}</label
-          ><input
-            id="secret-key-id"
-            v-model="secretKeyId"
-            maxlength="128"
-            autocomplete="off"
+          ><label for="desired-password">{{ $t("password") }}</label>
+          <input
+            id="desired-password"
+            v-model="desiredPassword"
+            type="password"
+            autocomplete="new-password"
+            :disabled="desiredLoading"
             required
-          /><label for="sealed-password">{{ $t("sealedPassword") }}</label
-          ><textarea
-            id="sealed-password"
-            v-model="sealedPassword"
-            maxlength="5464"
-            autocomplete="off"
-            required
-          ></textarea>
+          />
+          <p class="form-help">{{ $t("passwordSealingHelp") }}</p>
         </template>
         <template v-if="desiredDialog.kind === 'group'"
           ><label for="group-members">{{ $t("members") }}</label
@@ -1276,6 +1335,7 @@ async function submitPolicy(): Promise<void> {
             maxlength="65535"
           ></textarea>
         </template>
+        <p v-if="desiredError" role="alert">{{ desiredError }}</p>
         <label for="desired-reason">{{ $t("reason") }}</label
         ><textarea
           id="desired-reason"
@@ -1289,7 +1349,13 @@ async function submitPolicy(): Promise<void> {
           ><button
             type="submit"
             class="primary"
-            :disabled="!desiredReason.trim()"
+            :disabled="
+              desiredLoading ||
+              !desiredReason.trim() ||
+              ((desiredDialog.kind === 'create' ||
+                desiredDialog.kind === 'rotate') &&
+                !desiredPassword)
+            "
           >
             {{ $t("confirm") }}
           </button>
