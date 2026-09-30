@@ -2888,6 +2888,10 @@ components:
           type: string
           minLength: 1
           maxLength: 128
+        expected_endpoint_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: Optional possession-bound Agent EndpointID; set this for Controller rebind.
         ttl_seconds:
           type: integer
           format: int64

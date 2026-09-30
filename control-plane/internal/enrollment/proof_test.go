@@ -45,6 +45,19 @@ func TestCreateBootstrapTokenValidatesAuthorityMetadata(t *testing.T) {
 	}
 }
 
+func TestBootstrapTokenRejectsMalformedEndpointRestriction(t *testing.T) {
+	service := &Service{}
+	for _, length := range []int{1, 31, 33} {
+		_, err := service.CreateBootstrapToken(context.Background(), BootstrapTokenSpec{
+			WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "production", ActorID: "operator",
+			RequestID: uuid.NewString(), Reason: "rebind", ExpectedEndpointID: make([]byte, length),
+		})
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("length %d: %v", length, err)
+		}
+	}
+}
+
 func TestEnrollmentProofV1GoldenAndBindings(t *testing.T) {
 	seed := make([]byte, ed25519.SeedSize)
 	for index := range seed {

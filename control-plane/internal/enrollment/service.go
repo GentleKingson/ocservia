@@ -60,13 +60,14 @@ type TokenSpec struct {
 }
 
 type BootstrapTokenSpec struct {
-	WorkspaceID      uuid.UUID
-	Environment      string
-	ExpectedNodeName string
-	TTL              time.Duration
-	ActorID          string
-	Reason           string
-	RequestID        string
+	ExpectedEndpointID []byte
+	WorkspaceID        uuid.UUID
+	Environment        string
+	ExpectedNodeName   string
+	TTL                time.Duration
+	ActorID            string
+	Reason             string
+	RequestID          string
 }
 
 type Token struct {
@@ -179,7 +180,7 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 }
 
 func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenSpec) (Token, error) {
-	if spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
+	if (len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
 		return Token{}, ErrInvalidRequest
 	}
 	ttl := spec.TTL
@@ -221,7 +222,7 @@ func (s *Service) CreateBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	if !workspaceExists {
 		return Token{}, ErrNotFound
 	}
-	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at}, true)
+	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at}, true)
 	if err != nil {
 		return Token{}, fmt.Errorf("insert node bootstrap token: %w", err)
 	}
@@ -271,7 +272,7 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 	if err != nil {
 		return fmt.Errorf("validate enrollment token: %w", err)
 	}
-	if token.Environment != request.GetEnvironment() {
+	if token.Environment != request.GetEnvironment() || (len(token.ExpectedEndpoint) != 0 && !slices.Equal(token.ExpectedEndpoint, request.GetEndpointId())) {
 		return ErrInvalidToken
 	}
 	if bootstrap && token.ConsumedAt.Valid {
@@ -477,7 +478,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 		return nil, fmt.Errorf("lock node bootstrap token: %w", err)
 	}
 	workspaceID, expectedName := token.WorkspaceID, token.ExpectedName
-	if token.Environment != request.GetEnvironment() {
+	if token.Environment != request.GetEnvironment() || (len(token.ExpectedEndpoint) != 0 && !slices.Equal(token.ExpectedEndpoint, request.GetEndpointId())) {
 		return nil, ErrInvalidToken
 	}
 	if token.ConsumedAt.Valid {

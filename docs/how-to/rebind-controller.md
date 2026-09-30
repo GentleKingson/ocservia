@@ -21,7 +21,9 @@ rebound nodes; use the native package lifecycle for subsequent upgrades.
    permanently unavailable, record that fact with `--source-disposition
    unreachable`; contacting it is not a prerequisite.
 2. Create a short-lived bootstrap token on the new Controller through
-   `POST /api/v1/node-bootstrap-tokens`. Keep the same Agent EndpointID. Rebind
+   `POST /api/v1/node-bootstrap-tokens`, setting `expected_endpoint_id` to the
+   existing Agent EndpointID. The Controller checks this binding before consuming
+   the token. Rebind
    uses the existing possession proof and recoverable `obt1_` token protocol;
    it does not reuse the old Controller's NodeID.
 3. Prepare and enroll, supplying a reason and the source disposition:
