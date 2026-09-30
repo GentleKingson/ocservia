@@ -1348,3 +1348,40 @@ h1 {
     min-width: 560px;
   }
 }
+
+.accessible-dialog {
+  margin: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+}
+.accessible-dialog::backdrop {
+  background: rgb(20 28 25 / 48%);
+}
+.detail-skeleton .detail-nav span {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 650;
+  color: #66746f;
+}
+.skeleton-section {
+  padding: 18px;
+  min-height: 160px;
+}
+.skeleton-section h2 {
+  margin: 0 0 18px;
+  font-size: 15px;
+}
+.skeleton-line {
+  height: 12px;
+  margin: 16px 0;
+  width: 75%;
+  border-radius: 4px;
+  background: #e6ebe8;
+}
+.skeleton-line:last-child {
+  width: 50%;
+}
