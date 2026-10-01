@@ -1,12 +1,12 @@
 # Release business coverage ownership
 
-The target manual [Release Check](release-checks.md) always runs Full CI,
+The manual [Release Check](release-checks.md) always runs Full CI,
 Security, and the existing extended Business Integration with
 `run-resilience=true`. Business Integration owns the core smoke chain and the
 extended checks in one environment. Resilience must execute its real recovery
 scenarios and return PASS; a missing, failed, cancelled, or skipped required
-result fails Release Check. The migration must preserve these assertions while
-removing release signing and candidate/provenance transport requirements.
+result fails Release Check. Each run builds and tests local products on
+disposable native runners.
 
 | Behavior | Owner |
 | --- | --- |
@@ -23,6 +23,5 @@ removing release signing and candidate/provenance transport requirements.
 
 Runtime command and production PKI signing remain business behavior, independent
 of package/release signing. CI does not hold the retired release signing key.
-There is no separate accepted product, nomination, artifact binding, or registry
-evidence prerequisite for Release. Until implementation catches up, the
-migration status in the policy applies to the existing executable workflows.
+Release uses the CI result as its qualification and performs only
+build/install/image smoke and ordinary publication.

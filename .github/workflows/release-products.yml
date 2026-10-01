@@ -8,76 +8,15 @@ on:
       arch:
         type: string
         required: true
-    outputs:
-      accepted-id:
-        value: ${{ jobs.reuse-accepted.outputs.accepted-id }}
-      accepted-sha256:
-        value: ${{ jobs.reuse-accepted.outputs.accepted-sha256 }}
-      agent-id:
-        value: ${{ jobs.reuse-accepted.outputs.agent-id || jobs.build-agent-packages.outputs.artifact-id }}
-      agent-sha256:
-        value: ${{ jobs.reuse-accepted.outputs.agent-sha256 || jobs.build-agent-packages.outputs.sha256 }}
-      controller-id:
-        value: ${{ jobs.reuse-accepted.outputs.controller-id || jobs.build-controller-images.outputs.artifact-id }}
-      controller-sha256:
-        value: ${{ jobs.reuse-accepted.outputs.controller-sha256 || jobs.build-controller-images.outputs.sha256 }}
 permissions:
   contents: read
-  actions: read
 env:
   CARGO_INCREMENTAL: "0"
 jobs:
-  reuse-accepted:
-    name: Reuse accepted products (${{ inputs.arch }})
-    if: github.event_name == 'push'
-    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    timeout-minutes: 30
-    outputs:
-      accepted-id: ${{ steps.accepted.outputs.artifact-id }}
-      accepted-sha256: ${{ steps.reuse.outputs.accepted-sha256 }}
-      agent-id: ${{ steps.agent.outputs.artifact-id }}
-      agent-sha256: ${{ steps.reuse.outputs.agent-sha256 }}
-      controller-id: ${{ steps.controller.outputs.artifact-id }}
-      controller-sha256: ${{ steps.reuse.outputs.controller-sha256 }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Reuse successful main Integrated acceptance, never rebuild
-        id: reuse
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-        run: node scripts/reuse-accepted-products.mjs "${RUNNER_TEMP}/accepted-products" "${{ inputs.arch }}" "$VERSION"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        id: agent
-        with:
-          name: agent-packages-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/accepted-products/agent
-          retention-days: 7
-          if-no-files-found: error
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        id: controller
-        with:
-          name: controller-images-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/accepted-products/controller
-          retention-days: 7
-          if-no-files-found: error
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        id: accepted
-        with:
-          name: accepted-integrated-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/accepted-products/accepted
-          retention-days: 7
-          if-no-files-found: error
   build-agent-packages:
     name: Build & Smoke Agent Packages (${{ inputs.arch }})
-    if: github.event_name != 'push'
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
-    outputs:
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      sha256: ${{ steps.manifest.outputs.sha256 }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -128,20 +67,10 @@ jobs:
             echo "version=${version}"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
-      - name: Create ephemeral dry-run signing key
-        run: |
-          key_file="${RUNNER_TEMP}/release-signing.key"
-          # Every build is a dry run from the signing perspective: the
-          # production release key is loaded only by the release-only
-          # publish job, which re-signs the packages for release events.
-          echo "signing with an ephemeral dry-run key; release publishing re-signs with the release key" >&2
-          openssl genpkey -algorithm ED25519 -out "${key_file}" >/dev/null 2>&1
-          chmod 0600 "${key_file}"
-          echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
       - name: Build native Agent / privd / upgrader and packages
         run: |
           VERSION="${version}" PACKAGE_ARCH="${{ inputs.arch }}" \
-            OUTPUT_DIR="${RUNNER_TEMP}/packages" AGENT_SIGNING_KEY="${release_signing_key}" \
+            OUTPUT_DIR="${RUNNER_TEMP}/packages" \
             SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
       - name: Save native-package tool cache
         if: ${{ success() && steps.native-package-tools-cache.outputs.cache-hit != 'true' }}
@@ -155,12 +84,9 @@ jobs:
         env:
           RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
-          CANDIDATE_DIR: ${{ runner.temp }}/packages
+          PRODUCTS_DIR: ${{ runner.temp }}/packages
           VERSION: ${{ env.version }}
         run: scripts/release-native-package-smoke.sh
-      - name: Seal candidate products
-        id: manifest
-        run: node scripts/release-artifacts.mjs seal "${RUNNER_TEMP}/packages" agent "${{ inputs.arch }}" "${version}"
       - name: Save Rocky Agent compilation cache
         if: ${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -183,19 +109,10 @@ jobs:
           path: ${{ runner.temp }}/artifacts/native-smoke
           retention-days: 7
           if-no-files-found: warn
-      - name: Remove release signing key
-        if: always()
-        run: rm -f -- "${release_signing_key}" "${RUNNER_TEMP}/release-signing.pub.pem"
-
   build-controller-images:
     name: Build Controller Images (${{ inputs.arch }})
-    # Dispatch builds once; a later tag push reuses the accepted products.
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
-    outputs:
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      sha256: ${{ steps.manifest.outputs.sha256 }}
     permissions:
       contents: read
     env:
@@ -225,10 +142,6 @@ jobs:
             fi
           fi
           source_commit="$(git rev-parse HEAD)"
-          if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" != "${GITHUB_SHA}" ]]; then
-            echo "checked out source does not match the release commit ${GITHUB_SHA}" >&2
-            exit 1
-          fi
           {
             echo "version=${version}"
             echo "source_commit=${source_commit}"
@@ -253,9 +166,6 @@ jobs:
           CONTROLLER_ARCH: ${{ inputs.arch }}
           VERSION: ${{ env.version }}
         run: scripts/release-controller-image-smoke.sh
-      - name: Seal candidate products
-        id: manifest
-        run: node scripts/release-artifacts.mjs seal "${RUNNER_TEMP}/controller-images" controller "${{ inputs.arch }}" "${version}"
       - name: Upload Controller image archives
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -263,7 +173,6 @@ jobs:
           name: controller-images-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/controller-images/*.tar
-            ${{ runner.temp }}/controller-images/candidate-controller-*.json
           retention-days: 7
           if-no-files-found: error
       - name: Remove Controller BuildKit builder

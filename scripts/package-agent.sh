@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
-AGENT_SIGNING_KEY="${AGENT_SIGNING_KEY:?AGENT_SIGNING_KEY is required}"
 VERSION="${VERSION:?VERSION is required}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH is required}"
 PACKAGE_ARCH="${PACKAGE_ARCH:?PACKAGE_ARCH is required}"
@@ -19,10 +18,6 @@ case "${PACKAGE_ARCH}" in
     exit 2
     ;;
 esac
-if [[ ! -f "${AGENT_SIGNING_KEY}" || -L "${AGENT_SIGNING_KEY}" ]]; then
-  echo "signing key must be a regular file" >&2
-  exit 1
-fi
 for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
   test -x "${ROOT}/rust/target/release/${binary}"
 done
@@ -64,6 +59,4 @@ tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-ow
   -C "${staging}" -czf "${archive}" "ocservia-agent-${VERSION}"
 checksum="${archive}.sha256"
 (printf '%s  %s\n' "$(sha256sum -- "${archive}" | awk '{print $1}')" "$(basename -- "${archive}")" >"${checksum}")
-openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${checksum}" -out "${checksum}.sig"
-openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${checksum}.pub.pem" >/dev/null 2>&1
 printf '%s\n' "${archive}"

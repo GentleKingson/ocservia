@@ -13,8 +13,8 @@ uses two independent Controller deployments to transfer authority; it is not HA.
 
 ## Recovery coverage and ownership
 
-The checks below reuse the existing Business and database owners. Release
-selection forwards `run-resilience` to the selected Smoke or Integration job;
+The checks below reuse the existing Business and database owners. Manual Release Check
+requires `run-resilience=true` for Integrated Business;
 there is no separate G6 workflow or evidence framework.
 
 | Check | Owner and entrypoint | Required observation |
@@ -24,8 +24,8 @@ there is no separate G6 workflow or evidence framework.
 | R3 Database interruption | Existing database smoke jobs and `test-enrollment-restart.sh`; reference Business environment for API outage behavior | Original storage and pool recover; confirmed state survives; unavailable dependencies cannot produce false success. Full CI keeps PG17/PG18, MySQL and MariaDB smoke coverage. |
 | R4 Sole Relay interruption | Shared strict Business single-Relay scenario, once per run | Prove Relay dependence and that an offline queued command was never sent; recover the same Relay and command with exactly one additional real effect. |
 
-Reuse `result.json`, current artifact SHA/version/architecture/digest checks and
-seven-day Actions artifacts. Selected checks must actually finish successfully;
+Use the Business job status and actual recovery checkpoints in `result.json`.
+Sanitized failure diagnostics use seven-day Actions artifacts. Selected checks must actually finish successfully;
 missing fields, failure, cancellation and unexpected skips block acceptance.
 Unselected resilience is explicitly `SKIPPED`; install-only diagnostics cannot
 pass recovery acceptance. No separate fault matrix or evidence framework is
@@ -34,8 +34,7 @@ required.
 ## Retired scope and retained tools
 
 G6 workflows, Go harness, dual-domain HA/PITR orchestration, schemas, verdicts,
-checkpoints, rendezvous and dedicated tests are retired. Candidate helper
-artifacts contain only the Relay. The independent token-authenticated TCP/QUIC
+checkpoints, rendezvous and dedicated tests are retired. Business builds its own native Relay image. The independent token-authenticated TCP/QUIC
 network probe remains a small executable; existing startup/role/Rebind tests
 retain only their scheduler completion fixture. Build/cache tooling, full-history
 secret scans, test runtime and Relay fixture have neutral paths. Necessary

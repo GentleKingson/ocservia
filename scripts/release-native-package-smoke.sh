@@ -17,13 +17,13 @@ ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 # scriptlet matrix without a release build, while the release workflow always
 # runs the default real-binary mode.
 STUB_BINARIES="${STUB_BINARIES:-false}"
-CANDIDATE_DIR="${CANDIDATE_DIR:-}"
+PRODUCTS_DIR="${PRODUCTS_DIR:-}"
 old_version=1.0.0
 new_version=1.0.1
 rpm_upgrade_args=(-Uvh)
-if [[ -n "${CANDIDATE_DIR}" ]]; then
+if [[ -n "${PRODUCTS_DIR}" ]]; then
   [[ "${STUB_BINARIES}" == false && "${VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-    echo "candidate lifecycle requires real packages and their exact VERSION" >&2
+    echo "package lifecycle requires real packages and their VERSION" >&2
     exit 2
   }
   old_version="${VERSION}"
@@ -107,16 +107,11 @@ write_stub_binaries() {
   done
 }
 
-openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
-chmod 0600 "${work}/signing.key"
-openssl pkey -in "${work}/signing.key" -pubout -out "${work}/trusted.pub.pem" >/dev/null 2>&1
-openssl pkey -pubin -in "${work}/trusted.pub.pem" -outform DER -out "${work}/trusted.der"
-trusted_fingerprint="$(sha256sum "${work}/trusted.der" | awk '{print $1}')"
-controller_endpoint="$(openssl pkey -in "${work}/signing.key" -pubout -outform DER \
-  | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
 openssl pkey -in "${work}/controller-command.key" -pubout \
   -out "${work}/controller-command.pub.pem" >/dev/null 2>&1
+controller_endpoint="$(openssl pkey -in "${work}/controller-command.key" -pubout -outform DER \
+  | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
   -out "${work}/user-password-seal-private.pem" >/dev/null 2>&1
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
@@ -136,11 +131,11 @@ build_packages() {
   fi
   sha256sum "${ROOT}/rust/target/release/ocservia-agent" | awk '{print $1}' \
     >"${work}/binary-sha-${version}"
-  OUTPUT_DIR="${pkg_dir}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION="${version}" \
+  OUTPUT_DIR="${pkg_dir}" VERSION="${version}" \
     PACKAGE_ARCH="${PACKAGE_ARCH}" SOURCE_DATE_EPOCH=1786147200 \
     "${ROOT}/scripts/package-agent.sh" >/dev/null
   OUTPUT_DIR="${pkg_dir}" VERSION="${version}" PACKAGE_ARCH="${PACKAGE_ARCH}" \
-    SOURCE_DATE_EPOCH=1786147200 AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
+    SOURCE_DATE_EPOCH=1786147200 \
     "${ROOT}/scripts/package-native-agent.sh" >/dev/null
 }
 check_native_binaries() {
@@ -155,20 +150,19 @@ check_native_binaries() {
     [[ "$(sudo "${directory}/${binary}" --version)" == "${binary} ${version}" ]]
   done
 }
-if [[ -n "${CANDIDATE_DIR}" ]]; then
-  # Reinstall the real candidate to cover scriptlets, fresh production intent,
-  # removal and corruption. Cross-version upgrades use the published baseline
-  # in the next workflow step; no synthetic release versions are built here.
-  archive="${CANDIDATE_DIR}/ocservia-agent-${VERSION}-linux-${PACKAGE_ARCH}.tar.gz"
+if [[ -n "${PRODUCTS_DIR}" ]]; then
+  # Reinstall the real built packages to cover scriptlets, production intent,
+  # removal, corruption and native binary versions.
+  archive="${PRODUCTS_DIR}/ocservia-agent-${VERSION}-linux-${PACKAGE_ARCH}.tar.gz"
   expected_digest="$(awk '{print $1}' "${archive}.sha256")"
   sudo install -d -m 0700 "${work}/verified" "${work}/verified/var/lib"
-  candidate_root="$(sudo env DESTDIR="${work}/verified" \
+  package_root="$(sudo env DESTDIR="${work}/verified" \
     "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${expected_digest}")"
-  check_native_binaries "${candidate_root}/rust/target/release" "${VERSION}"
-  sudo sha256sum "${candidate_root}/rust/target/release/ocservia-agent" | awk '{print $1}' \
+  check_native_binaries "${package_root}/rust/target/release" "${VERSION}"
+  sudo sha256sum "${package_root}/rust/target/release/ocservia-agent" | awk '{print $1}' \
     >"${work}/binary-sha-${VERSION}"
-  cp "${CANDIDATE_DIR}/ocservia-agent_${VERSION}-1_${PACKAGE_ARCH}.deb" \
-    "${CANDIDATE_DIR}/ocservia-agent-${VERSION}-1.${rpm_arch}.rpm" "${pkg_dir}/"
+  cp "${PRODUCTS_DIR}/ocservia-agent_${VERSION}-1_${PACKAGE_ARCH}.deb" \
+    "${PRODUCTS_DIR}/ocservia-agent-${VERSION}-1.${rpm_arch}.rpm" "${pkg_dir}/"
 else
   build_packages "${old_version}"
   build_packages "${new_version}"
@@ -575,5 +569,5 @@ echo "rpm removal state preservation passed"
 docker rm -f -- "${container}" >/dev/null
 printf 'arch=%s\nelf_check=pass\ndeb_metadata=pass\ndeb_install=pass\ndeb_upgrade=pass\ndeb_remove_preserves_state=pass\ndeb_production_install=pass\ndeb_production_upgrade=pass\ndeb_production_remove_preserves_state=pass\ndeb_production_reinstall_identity_reuse=pass\ndeb_corrupt_payload_fail_closed=pass\ndeb_stale_request_retirement=pass\ndeb_plain_install_after_retirement=pass\nrpm_metadata=pass\nrpm_production_install=pass\nrpm_upgrade_preserves_production=pass\nrpm_erase_retires_stale_request=pass\nrpm_erase_preserves_state=pass\n' \
   "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-package-summary.txt"
-printf 'old_version=%s\nnew_version=%s\ncandidate_reuse=%s\n' \
-  "${old_version}" "${new_version}" "${CANDIDATE_DIR:+true}" >>"${ARTIFACT_DIR}/native-package-summary.txt"
+printf 'old_version=%s\nnew_version=%s\nbuilt_packages=%s\n' \
+  "${old_version}" "${new_version}" "${PRODUCTS_DIR:+true}" >>"${ARTIFACT_DIR}/native-package-summary.txt"

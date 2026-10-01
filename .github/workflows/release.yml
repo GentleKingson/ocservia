@@ -1,781 +1,132 @@
 name: Release
-run-name: Release · ${{ github.event_name == 'push' && github.ref_name || inputs.version || github.sha }}
-
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version to build (SemVer, no leading v); dispatch always stays a dry run"
-        required: true
+        description: Build-only test version without v; this dispatch never publishes
         type: string
-      arch:
-        description: "Architecture to build; dispatch always stays a dry run"
         required: true
-        type: choice
-        default: all
-        options:
-          - amd64
-          - arm64
-          - all
-
+        default: '0.0.0'
 permissions:
   contents: read
-  actions: read
-
 concurrency:
-  group: release-packages-${{ github.event_name == 'push' && github.ref_name || github.run_id }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  CARGO_INCREMENTAL: "0"
-
 jobs:
   prepare:
-    name: Select Release Checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
     outputs:
-      version: ${{ steps.prepare.outputs.version }}
-      complete: ${{ steps.prepare.outputs.complete }}
-      selection: ${{ steps.selection.outputs.selection }}
-      integration: ${{ steps.selection.outputs.integration }}
-      resilience: ${{ steps.selection.outputs.resilience }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - id: selection
+      - id: version
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/release-selection.mjs
-      - id: prepare
-        env:
-          VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
-          CANDIDATE_SHA: ${{ github.sha }}
-          COMPLETE: ${{ github.event_name == 'push' || inputs.arch == 'all' }}
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+          TEST_VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${VERSION#v}"
-          export VERSION
-          node --input-type=module <<'JS'
-          import { execFileSync } from 'node:child_process';
-          import { validateCandidate } from './scripts/release-artifacts.mjs';
-          validateCandidate(process.env.VERSION, process.env.CANDIDATE_SHA, process.env.GITHUB_SHA,
-            execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim());
-          JS
-          echo "version=${VERSION}" >>"${GITHUB_OUTPUT}"
-          echo "complete=${COMPLETE}" >>"${GITHUB_OUTPUT}"
-
-  full-ci:
-    needs: prepare
-    if: needs.prepare.outputs.complete == 'true'
-    uses: ./.github/workflows/ci.yml
-    with:
-      profile: full
-
-  security:
-    uses: ./.github/workflows/security.yml
-
+          if [[ "$EVENT" == push ]]; then
+            [[ "$TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
+            version="${TAG#v}"
+          else
+            version="$TEST_VERSION"
+          fi
+          [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          echo "version=$version" >>"$GITHUB_OUTPUT"
   build-amd64:
-    name: Build & Smoke (amd64)
     needs: prepare
-    if: github.event_name == 'push' || inputs.arch == 'all' || inputs.arch == 'amd64'
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: amd64
-
-  helpers-amd64:
-    needs: prepare
-    if: needs.prepare.outputs.complete == 'true'
-    uses: ./.github/workflows/release-test-images.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      arch: amd64
-      component: test-helpers
-
   build-arm64:
-    name: Build & Smoke (arm64)
     needs: prepare
-    if: github.event_name == 'push' || inputs.arch == 'all' || inputs.arch == 'arm64'
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: arm64
-
-  business-smoke:
-    name: Business Smoke
-    needs: [prepare, build-amd64, helpers-amd64]
-    if: needs.prepare.outputs.complete == 'true' && needs.prepare.outputs.integration != 'true'
-    uses: ./.github/workflows/release-business.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      profile: smoke
-      run-resilience: ${{ needs.prepare.outputs.resilience == 'true' }}
-      helpers-id: ${{ needs.helpers-amd64.outputs.artifact-id }}
-      helpers-sha256: ${{ needs.helpers-amd64.outputs.sha256 }}
-      agent-id: ${{ needs.build-amd64.outputs.agent-id }}
-      agent-sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
-      controller-id: ${{ needs.build-amd64.outputs.controller-id }}
-      controller-sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
-
-  integration:
-    name: Integration
-    needs: [prepare, build-amd64, helpers-amd64]
-    if: needs.prepare.outputs.complete == 'true' && needs.prepare.outputs.integration == 'true'
-    uses: ./.github/workflows/release-business.yml
-    with:
-      version: ${{ needs.prepare.outputs.version }}
-      profile: extended
-      run-resilience: ${{ needs.prepare.outputs.resilience == 'true' }}
-      helpers-id: ${{ needs.helpers-amd64.outputs.artifact-id }}
-      helpers-sha256: ${{ needs.helpers-amd64.outputs.sha256 }}
-      agent-id: ${{ needs.build-amd64.outputs.agent-id }}
-      agent-sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
-      controller-id: ${{ needs.build-amd64.outputs.controller-id }}
-      controller-sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
-
-  controller-image-security:
-    outputs:
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      sha256: ${{ steps.security-digest.outputs.sha256 }}
-    name: Scan Controller Images & Emit SBOMs
-    # Gates the release on the built candidate images before any registry
-    # write: the reviewer-gated publish job below needs this job, so by the
-    # time a reviewer approves, the scan verdict already exists. The full
-    # multi-arch dispatch dry run exercises the same real scanner on the same
-    # candidate images.
+  assets:
     needs: [prepare, build-amd64, build-arm64]
-    if: github.event_name == 'push' || inputs.arch == 'all'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout release source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Resolve release identity
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${RELEASE_TAG}" ]]; then
-            if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "refusing to scan Controller images for non-SemVer tag ${RELEASE_TAG}" >&2
-              exit 1
-            fi
-            version="${RELEASE_TAG#v}"
-            release_tag="${RELEASE_TAG}"
-          else
-            version="${INPUT_VERSION}"
-            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "dispatch version must be plain SemVer without a leading v, got ${version}" >&2
-              exit 1
-            fi
-            release_tag="v${version}-dispatch-dry-run"
-          fi
-          source_commit="$(git rev-parse HEAD)"
-          if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" != "${GITHUB_SHA}" ]]; then
-            echo "checked out source does not match the release commit ${GITHUB_SHA}" >&2
-            exit 1
-          fi
-          {
-            echo "version=${version}"
-            echo "release_tag=${release_tag}"
-            echo "source_commit=${source_commit}"
-          } >>"${GITHUB_ENV}"
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-amd64.outputs.controller-id }}
-          sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
-          component: controller
-          arch: amd64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/controller-images
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-arm64.outputs.controller-id }}
-          sha256: ${{ needs.build-arm64.outputs.controller-sha256 }}
-          component: controller
-          arch: arm64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/controller-images
-      - name: Bootstrap pinned image scanner tools
-        run: scripts/bootstrap.sh image-security
-      - name: Scan Controller image candidates & emit SBOMs
-        # OS-level vulnerability gate over the exact built image archives: any
-        # High/Critical OS finding with an available fix fails this job and
-        # blocks the publish. Evidence is bound to the image config digests and
-        # ships as release assets; the publish job proves it loaded and pushed
-        # exactly these images before anything becomes public.
-        env:
-          IMAGE_ARCHIVES_TSV: ${{ runner.temp }}/controller-images/image-archives.tsv
-        run: |
-          set -euo pipefail
-          images_dir="${RUNNER_TEMP}/controller-images"
-          for archive in "${images_dir}"/*-linux-*.tar; do
-            base="$(basename "${archive}" .tar)"
-            printf '%s\t%s\t%s\n' "${base%-linux-*}" "${base##*-linux-}" "${archive}"
-          done | LC_ALL=C sort >"${IMAGE_ARCHIVES_TSV}"
-          source scripts/env.sh
-          RELEASE_TAG="${release_tag}" SOURCE_COMMIT="${source_commit}" \
-            scripts/scan-release-images.sh "${RUNNER_TEMP}/controller-image-security"
-      - name: Bundle Controller image security evidence
-        run: |
-          set -euo pipefail
-          security_dir="${RUNNER_TEMP}/controller-image-security"
-          cd "${security_dir}"
-          sha256sum controller-image-security.json >controller-image-security.json.sha256
-          cd "${RUNNER_TEMP}"
-          tar -czf controller-image-security.tar.gz -C "${security_dir}" .
-          sha256sum controller-image-security.tar.gz >controller-image-security.tar.gz.sha256
-      - id: security-digest
-        run: echo "sha256=$(sha256sum "${RUNNER_TEMP}/controller-image-security/controller-image-security.json" | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
-      - name: Upload Controller image security evidence
-        id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: controller-image-security-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/controller-image-security/*
-            ${{ runner.temp }}/controller-image-security.tar.gz
-            ${{ runner.temp }}/controller-image-security.tar.gz.sha256
-          retention-days: 7
-          if-no-files-found: error
-
-  validate-release-packages:
-    name: Validate Multi-Arch Package Set
-    needs: [prepare, build-amd64, build-arm64]
-    if: github.event_name == 'push' || inputs.arch == 'all'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    steps:
-      - name: Checkout release source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Install rpm inspection tools
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends rpm cpio
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-amd64.outputs.agent-id }}
-          sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
-          component: agent
-          arch: amd64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/assets
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-arm64.outputs.agent-id }}
-          sha256: ${{ needs.build-arm64.outputs.agent-sha256 }}
-          component: agent
-          arch: arm64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/assets
-      - name: Resolve package version
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          version=""
-          if [[ -n "${RELEASE_TAG}" ]]; then
-            version="${RELEASE_TAG#v}"
-          else
-            version="${INPUT_VERSION}"
-          fi
-          echo "version=${version}" >>"${GITHUB_ENV}"
-      - name: Prepare versioned bootstrap assets
-        run: scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"
-      - name: Validate both architecture package sets
-        run: |
-          # No production pin here: a dispatch build validates the internal
-          # consistency of the ephemeral-signed set only. The release pin is
-          # enforced by the release-only publish job.
-          ls -l "${RUNNER_TEMP}/assets"
-          WRITE_SHA256SUMS=1 ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
-            scripts/validate-release-packages.sh
-
-  release-check:
-    name: Release Check
-    if: always() && needs.prepare.outputs.complete == 'true'
-    needs: [prepare, full-ci, security, build-amd64, build-arm64, business-smoke, integration, validate-release-packages, controller-image-security]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Require every selected job
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+        with:
+          pattern: agent-packages-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - name: Prepare ordinary deployment configuration and bootstrap assets
         env:
-          SELECTION: ${{ needs.prepare.outputs.selection }}
-          RESULTS: ${{ toJSON(needs) }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ASSET_DIR: ${{ runner.temp }}/assets
         run: |
-          node --input-type=module <<'JS'
-          import { checkResults } from './scripts/release-selection.mjs';
-          const selection = JSON.parse(process.env.SELECTION);
-          if (selection.candidate !== process.env.GITHUB_SHA) throw new Error('wrong candidate selection');
-          checkResults(selection, JSON.parse(process.env.RESULTS), [
-            'prepare', 'full-ci', 'security', 'build-amd64', 'build-arm64',
-            'validate-release-packages', 'controller-image-security',
-          ]);
-          const smoke = JSON.parse(process.env.RESULTS)['business-smoke']?.result;
-          const expectedSmoke = selection.integration.selected ? 'skipped' : 'success';
-          if (smoke !== expectedSmoke) throw new Error(`business smoke: expected ${expectedSmoke}, got ${smoke}`);
-          console.log('Selected release checks passed; unselected specialties are not evaluated.');
-          JS
-
-  publish-release-packages:
-    name: Sign & Publish Release Assets
-    needs: [release-check, prepare, build-amd64, build-arm64, controller-image-security]
-    # Optional upstream jobs may skip; only the aggregate gate grants publication.
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.release-check.result == 'success' }}
+          scripts/bootstrap.sh npm-security
+          source scripts/env.sh
+          scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR"
+          source_commit="$(git rev-parse HEAD)"
+          for arch in amd64 arm64; do
+            args=()
+            for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+              args+=(--image "$name=ghcr.io/gentlekingson/ocservia/$name:v$VERSION")
+            done
+            node scripts/generate-controller-release-manifest.mjs \
+              --output "$ASSET_DIR/controller-release-$arch.json" --manifest-version 2 \
+              --release-version "$VERSION" --release-tag "v$VERSION" --source-commit "$source_commit" \
+              --platform "linux/$arch" "${args[@]}" \
+              --image postgres=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f \
+              --image otel=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23
+          done
+          cp "$ASSET_DIR/controller-release-amd64.json" "$ASSET_DIR/controller-release.json"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends rpm cpio
+          scripts/validate-release-packages.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assets
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: [prepare, build-amd64, build-arm64, assets]
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release-publishing
     permissions:
       contents: write
       packages: write
-    env:
-      CONTROLLER_IMAGE_PREFIX: ghcr.io/gentlekingson/ocservia
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout release source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
-          persist-credentials: false
-      - name: Record runner environment
-        continue-on-error: true
-        run: scripts/ci-preflight.sh
-      - name: Install rpm inspection tools
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends rpm cpio
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-amd64.outputs.agent-id }}
-          sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
-          component: agent
-          arch: amd64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/assets
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-arm64.outputs.agent-id }}
-          sha256: ${{ needs.build-arm64.outputs.agent-sha256 }}
-          component: agent
-          arch: arm64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/assets
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-amd64.outputs.controller-id }}
-          sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
-          component: controller
-          arch: amd64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/controller-images
-      - uses: ./.github/actions/release-artifacts
-        with:
-          artifact-id: ${{ needs.build-arm64.outputs.controller-id }}
-          sha256: ${{ needs.build-arm64.outputs.controller-sha256 }}
-          component: controller
-          arch: arm64
-          version: ${{ needs.prepare.outputs.version }}
-          path: ${{ runner.temp }}/controller-images
-      - name: Collect Controller image security evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
-        with:
-          artifact-ids: ${{ needs.controller-image-security.outputs.artifact-id }}
-          path: ${{ runner.temp }}/image-security
+          pattern: controller-images-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/images
           merge-multiple: true
-      - name: Verify scanner summary at the publishing boundary
-        env:
-          EXPECTED: ${{ needs.controller-image-security.outputs.sha256 }}
-        run: |
-          [[ "${EXPECTED}" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$(sha256sum "${RUNNER_TEMP}/image-security/controller-image-security/controller-image-security.json" | cut -d' ' -f1)" == "${EXPECTED}" ]]
-      - name: Resolve package version & source epoch
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
-        run: |
-          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "refusing to publish release packages for non-SemVer tag ${RELEASE_TAG}" >&2
-            exit 1
-          fi
-          {
-            echo "version=${RELEASE_TAG#v}"
-            echo "release_tag=${RELEASE_TAG}"
-            echo "source_commit=$(git rev-parse HEAD)"
-            echo "source_date_epoch=$(git log -1 --format=%ct)"
-          } >>"${GITHUB_ENV}"
-      - name: Verify release tag binding
-        run: |
-          set -euo pipefail
-          tag_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}")"
-          tag_type="$(jq -er '.object.type' <<<"${tag_ref}")"
-          tag_sha="$(jq -er '.object.sha' <<<"${tag_ref}")"
-          if [[ "${tag_type}" != "commit" || "${tag_sha}" != "${source_commit}" ]]; then
-            echo "tag ${release_tag} must point directly at the release commit ${source_commit}" >&2
-            exit 1
-          fi
-      - name: Bootstrap pinned nfpm tool
-        run: scripts/bootstrap.sh package-tools
-      - name: Prepare versioned bootstrap assets
-        run: scripts/prepare-bootstrap-release-assets.sh "${RUNNER_TEMP}/assets"
-      - name: Download the accepted candidate bindings
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
-          artifact-ids: ${{ needs.build-amd64.outputs.accepted-id }}
-          path: ${{ runner.temp }}/accepted-integrated
-      - name: Verify accepted bindings before any stable Registry write
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assets
+      - name: Publish version images and Release assets
         env:
-          EXPECTED: ${{ needs.build-amd64.outputs.accepted-sha256 }}
-          ARM64_EXPECTED: ${{ needs.build-arm64.outputs.accepted-sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ && "$EXPECTED" == "$ARM64_EXPECTED" ]]
-          cd "${RUNNER_TEMP}/accepted-integrated"
-          [[ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" == "$EXPECTED" ]]
-          sha256sum --strict -c SHA256SUMS
-          jq -e --arg sha "$GITHUB_SHA" --arg version "$version" \
-            '.source_commit == $sha and .version == $version' producer.json
-      - name: Login to GitHub Container Registry
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-      # First production registry write of the release: everything before this
-      # job ran source-only, so the reviewer approves the exact images and
-      # packages that are about to become public.
-      - name: Push Controller images & assemble multi-platform indexes
-        id: controller-index
-        env:
-          SECURITY_SUMMARY: ${{ runner.temp }}/image-security/controller-image-security/controller-image-security.json
-        run: |
-          set -euo pipefail
-          images_dir="${RUNNER_TEMP}/controller-images"
-          output_dir="${RUNNER_TEMP}/controller-release"
-          mkdir -p "${output_dir}"
-          : >"${output_dir}/security-bindings.tsv"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          prefix=ghcr.io/gentlekingson/ocservia
           for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
-            refs=()
-            binding_rows=()
             for arch in amd64 arm64; do
-              archive="${images_dir}/${name}-linux-${arch}.tar"
-              [[ -s "${archive}" ]] || {
-                echo "Controller image archive is missing or empty: ${archive}" >&2
-                exit 1
-              }
-              # The build legs baked this tag into the archive; loading
-              # restores it, and the per-arch companion tag stays in GHCR as
-              # the visible composition input of the final index.
-              arch_tag="${CONTROLLER_IMAGE_PREFIX}/${name}:${version}-linux-${arch}"
-              docker load --input "${archive}" >/dev/null
-              docker image inspect "${arch_tag}" >/dev/null 2>&1 || {
-                echo "loaded Controller image archive did not restore ${arch_tag}" >&2
-                exit 1
-              }
-              # The scan gate ran against these archives before any registry
-              # write; prove the image being pushed is the scanned one by its
-              # config digest before it becomes public.
-              scanned_digest="$(jq -er --arg name "${name}" --arg platform "linux-${arch}" \
-                '.images[$name].platforms[$platform].config_digest' "${SECURITY_SUMMARY}")"
-              loaded_digest="$(docker image inspect --format '{{.Id}}' "${arch_tag}")"
-              if [[ "${scanned_digest}" != "${loaded_digest}" ]]; then
-                echo "loaded ${arch_tag} config ${loaded_digest} does not match the scanned evidence ${scanned_digest}" >&2
-                exit 1
-              fi
-              push_output="$(docker push "${arch_tag}")"
-              digest="$(grep -oE 'digest: sha256:[0-9a-f]{64}' <<<"${push_output}" | head -1 | cut -d' ' -f2)"
-              if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                echo "could not read the pushed digest for ${arch_tag}" >&2
-                exit 1
-              fi
-              accepted_ref="$(jq -er --arg name "$name" '.images[$name]' "${RUNNER_TEMP}/accepted-integrated/controller-release-${arch}.json")"
-              [[ "$accepted_ref" == "${CONTROLLER_IMAGE_PREFIX}/${name}@${digest}" ]] || {
-                echo "stable push changed accepted ${name}/${arch} content; refusing promotion" >&2
-                exit 1
-              }
-              binding_rows+=("$(printf '%s\tlinux-%s\t%s\t%s' "${name}" "${arch}" "${digest}" "${scanned_digest}")")
-              refs+=("${CONTROLLER_IMAGE_PREFIX}/${name}@${digest}")
+              docker load --input "$RUNNER_TEMP/images/$name-linux-$arch.tar"
+              docker tag "$prefix/$name:$VERSION-linux-$arch" "$prefix/$name:v$VERSION-$arch"
+              docker push "$prefix/$name:v$VERSION-$arch"
             done
-            docker buildx imagetools create \
-              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${release_tag}" \
-              --tag "${CONTROLLER_IMAGE_PREFIX}/${name}:${version}" \
-              "${refs[0]}" \
-              "${refs[1]}"
-            image_ref="${CONTROLLER_IMAGE_PREFIX}/${name}:${release_tag}"
-            index_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${image_ref}")"
-            if [[ ! "${index_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "could not read a valid index digest for ${name}: ${index_digest:-<empty>}" >&2
-              exit 1
-            fi
-            platforms="$(docker buildx imagetools inspect --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}' "${image_ref}" | sort -u)"
-            grep -Fxq 'linux/amd64' <<<"${platforms}" || {
-              echo "Controller image index for ${name} is missing linux/amd64" >&2
-              exit 1
-            }
-            grep -Fxq 'linux/arm64' <<<"${platforms}" || {
-              echo "Controller image index for ${name} is missing linux/arm64" >&2
-              exit 1
-            }
-            printf '%s\t%s\n' "${name}" "${CONTROLLER_IMAGE_PREFIX}/${name}@${index_digest}" >>"${output_dir}/image-refs.tsv"
-            printf '%s_digest=%s\n' "${name}" "${index_digest}" >>"${GITHUB_OUTPUT}"
-            for row in "${binding_rows[@]}"; do
-              printf '%s\t%s\n' "${row}" "${index_digest}" >>"${output_dir}/security-bindings.tsv"
-            done
+            docker buildx imagetools create --tag "$prefix/$name:v$VERSION" \
+              "$prefix/$name:v$VERSION-amd64" "$prefix/$name:v$VERSION-arm64"
           done
-          # Bind the pre-push scan evidence to the public artifacts: per image,
-          # the pushed per-arch manifest digests plus the scanned config
-          # digests they were proven equal to, and the final index digest.
-          # -R reads the bindings table as raw lines; without it jq would try
-          # to parse each TSV row as JSON and abort the publish.
-          jq -rRn --arg release_tag "${release_tag}" --arg source_commit "${source_commit}" '
-            [inputs | split("\t")]
-            | {release_tag: $release_tag, source_commit: $source_commit,
-               images: ([group_by(.[0])[]
-                 | {(.[0][0]): {index_digest: .[0][4],
-                    platforms: (map({(.[1]): {manifest_digest: .[2], config_digest: .[3]}}) | add)}}] | add)}
-          ' "${output_dir}/security-bindings.tsv" >"${output_dir}/controller-image-security-bindings.json"
-          jq -e '.images | length >= 1' "${output_dir}/controller-image-security-bindings.json" >/dev/null
-      - name: Generate Controller release manifests
-        run: |
-          set -euo pipefail
-          output_dir="${RUNNER_TEMP}/controller-release"
-          image_ref() {
-            jq -er --arg name "$1" '.images[$name]' "${RUNNER_TEMP}/accepted-integrated/controller-release-${platform}.json"
-          }
-          for platform in amd64 arm64; do
-            scripts/generate-controller-release-manifest.mjs \
-              --manifest-version 2 \
-              --output "${output_dir}/controller-release-${platform}.json" \
-              --platform "linux/${platform}" \
-              --release-version "${version}" \
-              --release-tag "${release_tag}" \
-              --source-commit "${source_commit}" \
-              --migration-dir control-plane/migrations \
-              --image "gateway=$(image_ref gateway)" \
-              --image "control=$(image_ref control)" \
-              --image "transport=$(image_ref transport)" \
-              --image "backup=$(image_ref backup)" \
-              --image "edge=$(image_ref edge)" \
-              --image "relay=$(image_ref relay)" \
-              --image "signer=$(image_ref signer)" \
-              --image "mysql_backup=$(image_ref mysql_backup)" \
-              --image "mariadb_backup=$(image_ref mariadb_backup)" \
-              --image "postgres=$(image_ref postgres)" \
-              --image "otel=$(image_ref otel)"
-          done
-          # Operator manifests keep the accepted per-platform digest; stable
-          # convenience indexes contain those same immutable image manifests.
-          for platform in amd64 arm64; do
-            for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
-              bound_digest="$(jq -er --arg name "${name}" --arg arch "linux-${platform}" '.images[$name].platforms[$arch].manifest_digest' \
-                "${output_dir}/controller-image-security-bindings.json")"
-              manifest_ref="$(jq -er --arg name "${name}" '.images[$name]' \
-                "${output_dir}/controller-release-${platform}.json")"
-              [[ "${manifest_ref}" == *@"${bound_digest}" ]] || {
-                echo "security bindings platform digest for ${name} does not match controller-release-${platform}.json: ${bound_digest} vs ${manifest_ref}" >&2
-                exit 1
-              }
-            done
-          done
-          # Compatibility alias: existing amd64 operators keep consuming
-          # controller-release.json unchanged.
-          cp -- "${output_dir}/controller-release-amd64.json" "${output_dir}/controller-release.json"
-          cd "${output_dir}"
-          sha256sum controller-release.json >controller-release.json.sha256
-          sha256sum controller-release-amd64.json >controller-release-amd64.json.sha256
-          sha256sum controller-release-arm64.json >controller-release-arm64.json.sha256
-          cp -- controller-release.json controller-release.json.sha256 \
-            controller-release-amd64.json controller-release-amd64.json.sha256 \
-            controller-release-arm64.json controller-release-arm64.json.sha256 \
-            "${RUNNER_TEMP}/assets/"
-      - name: Assemble Controller image security evidence
-        # The scan gate already passed in controller-image-security, before
-        # this job pushed anything. Bind that evidence to the pushed digests
-        # and ship it as release assets.
-        run: |
-          set -euo pipefail
-          security_dir="${RUNNER_TEMP}/controller-release/image-security"
-          mkdir -p "${security_dir}"
-          find "${RUNNER_TEMP}/image-security/controller-image-security" -maxdepth 1 -type f \
-            ! -name '*.tar.gz' ! -name '*.tar.gz.sha256' \
-            -exec cp -t "${security_dir}" {} +
-          cp -- "${RUNNER_TEMP}/controller-release/controller-image-security-bindings.json" "${security_dir}/"
-          cd "${security_dir}"
-          sha256sum controller-image-security-bindings.json >controller-image-security-bindings.json.sha256
-          bundle="${RUNNER_TEMP}/controller-release/controller-image-security.tar.gz"
-          tar -czf "${bundle}" -C "${security_dir}" .
-          cd "${RUNNER_TEMP}/controller-release"
-          sha256sum controller-image-security.tar.gz >controller-image-security.tar.gz.sha256
-          cp -- "${security_dir}/controller-image-security.json" \
-            "${security_dir}/controller-image-security.json.sha256" \
-            "${security_dir}/controller-image-security-bindings.json" \
-            "${security_dir}/controller-image-security-bindings.json.sha256" .
-          cp -- controller-image-security.tar.gz controller-image-security.tar.gz.sha256 \
-            controller-image-security.json controller-image-security.json.sha256 \
-            controller-image-security-bindings.json controller-image-security-bindings.json.sha256 \
-            "${RUNNER_TEMP}/assets/"
-      - name: Verify anonymous Controller image reads
-        env:
-          GATEWAY_DIGEST: ${{ steps.controller-index.outputs.gateway_digest }}
-          CONTROL_DIGEST: ${{ steps.controller-index.outputs.control_digest }}
-          TRANSPORT_DIGEST: ${{ steps.controller-index.outputs.transport_digest }}
-          BACKUP_DIGEST: ${{ steps.controller-index.outputs.backup_digest }}
-          EDGE_DIGEST: ${{ steps.controller-index.outputs.edge_digest }}
-          RELAY_DIGEST: ${{ steps.controller-index.outputs.relay_digest }}
-          SIGNER_DIGEST: ${{ steps.controller-index.outputs.signer_digest }}
-          MYSQL_BACKUP_DIGEST: ${{ steps.controller-index.outputs.mysql_backup_digest }}
-          MARIADB_BACKUP_DIGEST: ${{ steps.controller-index.outputs.mariadb_backup_digest }}
-        run: |
-          set -euo pipefail
-          for image in \
-            "gateway=${GATEWAY_DIGEST}" \
-            "control=${CONTROL_DIGEST}" \
-            "transport=${TRANSPORT_DIGEST}" \
-            "backup=${BACKUP_DIGEST}" \
-            "edge=${EDGE_DIGEST}" \
-            "relay=${RELAY_DIGEST}" \
-            "signer=${SIGNER_DIGEST}" \
-            "mysql_backup=${MYSQL_BACKUP_DIGEST}" \
-            "mariadb_backup=${MARIADB_BACKUP_DIGEST}"; do
-            name="${image%%=*}"
-            digest="${image#*=}"
-            token="$(curl --fail --silent --show-error --get \
-              --data-urlencode 'service=ghcr.io' \
-              --data-urlencode "scope=repository:gentlekingson/ocservia/${name}:pull" \
-              'https://ghcr.io/token' \
-              | jq -er '(.token // .access_token) | strings | select(length > 0)')"
-            curl --fail --silent --show-error --head \
-              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
-              --header "Authorization: Bearer ${token}" \
-              "https://ghcr.io/v2/gentlekingson/ocservia/${name}/manifests/${digest}" \
-              >/dev/null
-          done
-      - name: Load release signing key
-        env:
-          AGENT_SIGNING_KEY_SECRET: ${{ secrets.AGENT_SIGNING_KEY }}
-        run: |
-          if [[ -z "${AGENT_SIGNING_KEY_SECRET}" ]]; then
-            echo "AGENT_SIGNING_KEY secret is required to publish release packages" >&2
-            exit 1
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes
           fi
-          key_file="${RUNNER_TEMP}/release-signing.key"
-          printf '%s\n' "${AGENT_SIGNING_KEY_SECRET}" >"${key_file}"
-          chmod 0600 "${key_file}"
-          echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
-      - name: Re-sign archives & rebuild installers
-        run: |
-          # The build jobs only ever sign with an ephemeral key. The release
-          # set that reaches hosts must chain to the release key, so re-sign
-          # both checksum triples with it and rebuild the native packages
-          # around them with the release trust anchor embedded.
-          # shellcheck source=scripts/env.sh
-          # shellcheck disable=SC1091
-          source scripts/env.sh
-          fingerprint="$(openssl pkey -in "${release_signing_key}" -pubout -outform DER \
-            | sha256sum | awk '{print $1}')"
-          sha256sum "${RUNNER_TEMP}/assets/"*.tar.gz >"${RUNNER_TEMP}/tested-archives.sha256"
-          for package_arch in amd64 arm64; do
-            archive="${RUNNER_TEMP}/assets/ocservia-agent-${version}-linux-${package_arch}.tar.gz"
-            openssl pkeyutl -sign -rawin -inkey "${release_signing_key}" \
-              -in "${archive}.sha256" -out "${archive}.sha256.sig"
-            openssl pkey -in "${release_signing_key}" -pubout \
-              -out "${archive}.sha256.pub.pem" >/dev/null 2>&1
-            OUTPUT_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" PACKAGE_ARCH="${package_arch}" \
-              SOURCE_DATE_EPOCH="${source_date_epoch}" \
-              AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
-              scripts/package-native-agent.sh >/dev/null
-          done
-          # Re-signing may change installers, never the tested payload archives.
-          sha256sum -c "${RUNNER_TEMP}/tested-archives.sha256"
-      - name: Validate package set against the pinned release key
-        env:
-          AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
-        run: |
-          CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 WRITE_SHA256SUMS=1 \
-            PAYLOAD_RECEIPT="${RUNNER_TEMP}/release-payload-validated.sha256" \
-            ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
-            scripts/validate-release-packages.sh
-      - name: Sign unified checksum manifest
-        run: |
-          openssl pkeyutl -sign -rawin -inkey "${release_signing_key}" \
-            -in "${RUNNER_TEMP}/assets/SHA256SUMS" \
-            -out "${RUNNER_TEMP}/assets/SHA256SUMS.sig"
-          openssl pkey -in "${release_signing_key}" -pubout \
-            -out "${RUNNER_TEMP}/assets/release-signing.pub.pem" >/dev/null 2>&1
-      - name: Verify signed release manifest
-        env:
-          AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
-        run: |
-          : "${AGENT_TRUSTED_KEY_SHA256:?final release requires the pinned signing key fingerprint}"
-          signature="${RUNNER_TEMP}/assets/SHA256SUMS.sig"
-          [[ -f "${signature}" && ! -L "${signature}" && -s "${signature}" ]] || {
-            echo "final release requires a nonempty regular SHA256SUMS.sig" >&2
-            exit 1
-          }
-          CONTROLLER_RELEASE_MANIFEST_REQUIRED=1 ASSET_DIR="${RUNNER_TEMP}/assets" \
-            PAYLOAD_RECEIPT="${RUNNER_TEMP}/release-payload-validated.sha256" \
-            VERSION="${version}" \
-            scripts/validate-release-packages.sh manifest
-      - name: Prepare draft release
-        # Upload the complete asset set before publication. Only leftover
-        # drafts may be recreated; published releases are never modified.
-        run: |
-          set -euo pipefail
-          if gh release view "${release_tag}" --json isDraft >/dev/null 2>&1; then
-            if [[ "$(gh release view "${release_tag}" --json isDraft --jq .isDraft)" != "true" ]]; then
-              echo "release ${release_tag} already exists and is published; refusing to modify a published release" >&2
-              exit 1
-            fi
-            echo "deleting the leftover draft release ${release_tag} from an earlier attempt" >&2
-            gh release delete "${release_tag}" --yes
-          fi
-          gh release create "${release_tag}" \
-            --draft \
-            --verify-tag \
-            --title "${release_tag}" \
-            --notes "Published from tag ${release_tag} by the Agent Release Packages workflow; release notes are attached after publication."
-      - name: Upload assets to the draft release
-        # No --clobber: uploading must fail on any asset-name collision
-        # instead of silently replacing published bytes.
-        run: |
-          set -euo pipefail
-          assets="${RUNNER_TEMP}/assets"
-          gh release upload "${release_tag}" \
-            "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz" \
-            "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz.sha256" \
-            "${assets}/ocservia-agent-${version}-linux-amd64.tar.gz.sha256.sig" \
-            "${assets}/ocservia-agent-${version}-linux-arm64.tar.gz" \
-            "${assets}/ocservia-agent-${version}-linux-arm64.tar.gz.sha256" \
-            "${assets}/ocservia-agent-${version}-linux-arm64.tar.gz.sha256.sig" \
-            "${assets}/ocservia-agent_${version}-1_amd64.deb" \
-            "${assets}/ocservia-agent_${version}-1_arm64.deb" \
-            "${assets}/ocservia-agent-${version}-1.x86_64.rpm" \
-            "${assets}/ocservia-agent-${version}-1.aarch64.rpm" \
-            "${assets}/controller-release.json" \
-            "${assets}/controller-release.json.sha256" \
-            "${assets}/controller-release-amd64.json" \
-            "${assets}/controller-release-amd64.json.sha256" \
-            "${assets}/controller-release-arm64.json" \
-            "${assets}/controller-release-arm64.json.sha256" \
-            "${assets}/controller-bootstrap.sh" \
-            "${assets}/managed-node-bootstrap.sh" \
-            "${assets}/controller-image-security.tar.gz" \
-            "${assets}/controller-image-security.tar.gz.sha256" \
-            "${assets}/controller-image-security.json" \
-            "${assets}/controller-image-security.json.sha256" \
-            "${assets}/controller-image-security-bindings.json" \
-            "${assets}/controller-image-security-bindings.json.sha256" \
-            "${assets}/SHA256SUMS" \
-            "${assets}/SHA256SUMS.sig" \
-            "${assets}/release-signing.pub.pem"
-          gh release view "${release_tag}" --json assets --jq '.assets[].name'
-      - name: Publish the release
-        run: gh release edit "${release_tag}" --draft=false
-      - name: Remove release signing key
-        if: always()
-        run: rm -f -- "${release_signing_key}"
+          gh release upload "v$VERSION" "$RUNNER_TEMP/assets/"* --clobber

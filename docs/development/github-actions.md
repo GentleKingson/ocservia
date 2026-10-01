@@ -63,13 +63,14 @@ or deep historical repair suite is moved from Quick into Full.
 | --- | --- |
 | `ci.yml` | PR/main Quick; manual Quick/Full key checks |
 | `security.yml` | Weekly/manual checks and reusable release prerequisite |
-| `release.yml` | Tag/manual release packaging |
-| `release-upgrade.yml` | Independent manual native release upgrades; optional published-node application matrix |
+| `release-check.yml` | Manual main Full CI, Security, Integrated Business + Resilience |
+| `release.yml` | Tag build/smoke/publish; manual build-only dry-run |
+| `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics |
 
 ## Independent security checks
 
 `security.yml` runs weekly on Monday at 03:23 UTC, on manual dispatch, and
-from the release workflow against its candidate commit. It reuses pinned
+from manual Release Check on main. It reuses pinned
 bootstrap profiles to run the full-history `scripts/security-check.sh`
 (including its Gitleaks rule regression check), `govulncheck` for both Go
 modules, `cargo audit` and `cargo deny check advisories` for the Rust workspace,
@@ -202,35 +203,21 @@ acceptance.
 
 ## Release workflow
 
-The [Release Check](release-checks.md) gates the release graph, including
-the existing Full CI invocation, exact accepted products, current package checks,
-supported application combinations, Business Smoke, selected Integration and
-Resilience, and existing security checks. It is not added to PR required checks.
-The initial migration selects every supported check; normal selection uses the
-entire diff from the last published Release.
+[Release Check](release-checks.md) runs manually on merged `main`: Full CI,
+Security and Business Integration with `run-resilience=true` must all succeed.
+`Basic CI Result` continues to protect PRs. The operator confirms a version
+only after Release Check PASS, then creates the Release/tag.
 
-Dispatch `release.yml` with `version` and `arch=all` for a full dry-run.
-It never publishes, writes to production registries or reads the production
-signing key. `arch=amd64` or `arm64` is diagnostic only and skips Release Check.
-Before a tag run, `release-upgrade.yml` must complete Integrated acceptance on
-`main` for the exact SHA/version with `purpose=integration` and
-`production_signer=true`. This explicitly authorized mode writes candidate
-images to GHCR. Tag runs import its verified products without rebuilding, then
-run their own selected checks before protected Publish. A separate Release
-dry-run cannot replace that acceptance. Only the formal Publish job obtains
-the production release signing key and writes stable release assets/images.
+The `vX.Y.Z` tag triggers native Agent and Controller builds for both supported
+architectures, install/image smoke, and publication to GitHub Release and GHCR.
+The formal workflow does not rerun acceptance or inherit earlier results.
+Dispatch `release.yml` with `version=0.0.0` to exercise both build/smoke legs and
+asset preparation without publishing. Only the tag-only `publish` job has
+`contents: write`, `packages: write` and the `release-publishing` environment.
+Reruns use ordinary `gh release upload --clobber` behavior.
 
-The [diagnostic workflow](release-upgrade-validation.md) accepts current
-`smoke` or `integration`, plus an opt-in `production_signer` boolean for
-Integrated candidate publication and real Signer acceptance.
-Historical application and native upgrade cells and baseline inputs are removed.
-
-Product consumers use actual producer artifact IDs plus explicit candidate
-manifest and payload verification. Independent failed jobs may rerun without
-requiring all architectures to share a run attempt. A selected recovery check must rerun its complete Business owner job. See [Resilience](resilience.md).
-
-Source dependency/secret scans and Controller image scanning/SBOM policies are
-unchanged. Image scans precede any production registry write, and Publish still
-checks loaded image config digests against the scanned summary before pushing.
-Final package re-signing may not change the tested payload archive; installer
-signatures, embedded trust and payload equality are validated before release.
+[Manual diagnostics](release-upgrade-validation.md) reuse the same Business
+implementation. Integrated mode uses the real Signer, freshly built local
+images and a loopback test registry, with no GHCR publishing authority.
+Source dependency/secret scans remain in Security; OS image vulnerability
+scans run in Business CI against local archives and report PASS/FAIL.

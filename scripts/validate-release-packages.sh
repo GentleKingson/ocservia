@@ -1,249 +1,57 @@
 #!/usr/bin/env bash
+# Check the built package set and the native payloads it embeds.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSET_DIR="${ASSET_DIR:?ASSET_DIR is required}"
 VERSION="${VERSION:?VERSION is required}"
-AGENT_TRUSTED_KEY_SHA256="${AGENT_TRUSTED_KEY_SHA256:-}"
-WRITE_SHA256SUMS="${WRITE_SHA256SUMS:-}"
-CONTROLLER_RELEASE_MANIFEST_REQUIRED="${CONTROLLER_RELEASE_MANIFEST_REQUIRED:-}"
-MODE="${1:-full}"
-PAYLOAD_RECEIPT="${PAYLOAD_RECEIPT:-}"
-if (($# > 1)) || [[ "${MODE}" != full && "${MODE}" != manifest ]]; then
-  echo "usage: $0 [full|manifest]" >&2
-  exit 2
-fi
-if [[ "${MODE}" == manifest ]]; then
-  : "${PAYLOAD_RECEIPT:?manifest validation needs the same-job full payload receipt}"
-  : "${AGENT_TRUSTED_KEY_SHA256:?final manifest validation needs the pinned key}"
-  [[ "${WRITE_SHA256SUMS}" != 1 ]] || exit 2
-fi
-
-# shellcheck source=scripts/release-checksum-manifest.sh
-source "${ROOT}/scripts/release-checksum-manifest.sh"
-
-if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
-  echo "VERSION must be SemVer" >&2
-  exit 2
-fi
-if [[ -n "${AGENT_TRUSTED_KEY_SHA256}" && ! "${AGENT_TRUSTED_KEY_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "AGENT_TRUSTED_KEY_SHA256 must be 64 lowercase hexadecimal characters" >&2
-  exit 2
-fi
-tools=(openssl)
-if [[ "${MODE}" == full ]]; then tools+=(dpkg-deb file rpm rpm2cpio cpio); fi
-for tool in "${tools[@]}"; do
-  command -v "${tool}" >/dev/null 2>&1 || {
-    echo "required tool is missing: ${tool}" >&2
+[[ $# == 0 && "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]] || exit 2
+ASSET_DIR="$(cd -- "$ASSET_DIR" && pwd)"
+work="$(mktemp -d)"
+trap 'sudo rm -rf -- "$work"' EXIT INT TERM
+require_asset() {
+  [[ -f "$ASSET_DIR/$1" && ! -L "$ASSET_DIR/$1" && -s "$ASSET_DIR/$1" ]] || {
+    echo "missing or unsafe release asset: $1" >&2
     exit 1
   }
-done
-ASSET_DIR="$(cd -- "${ASSET_DIR}" && pwd)"
-
-tar_amd64="ocservia-agent-${VERSION}-linux-amd64.tar.gz"
-tar_arm64="ocservia-agent-${VERSION}-linux-arm64.tar.gz"
-deb_amd64="ocservia-agent_${VERSION}-1_amd64.deb"
-deb_arm64="ocservia-agent_${VERSION}-1_arm64.deb"
-rpm_amd64="ocservia-agent-${VERSION}-1.x86_64.rpm"
-rpm_arm64="ocservia-agent-${VERSION}-1.aarch64.rpm"
-package_files=(
-  "${tar_amd64}" "${tar_arm64}" "${deb_amd64}" "${deb_arm64}" "${rpm_amd64}" "${rpm_arm64}"
-  "${tar_amd64}.sha256" "${tar_amd64}.sha256.sig" "${tar_amd64}.sha256.pub.pem"
-  "${tar_arm64}.sha256" "${tar_arm64}.sha256.sig" "${tar_arm64}.sha256.pub.pem"
-)
-bootstrap_files=(
-  "controller-bootstrap.sh"
-  "managed-node-bootstrap.sh"
-)
-# Optional release hardening evidence: a bundle that carries any of it must
-# carry all of it, checksummed, and the signed SHA256SUMS must cover it.
-image_security_files=(
-  "controller-image-security.json"
-  "controller-image-security.tar.gz"
-  "controller-image-security-bindings.json"
-)
-
-for file in "${package_files[@]}" "${bootstrap_files[@]}"; do
-  if [[ ! -f "${ASSET_DIR}/${file}" || -L "${ASSET_DIR}/${file}" || ! -s "${ASSET_DIR}/${file}" ]]; then
-    echo "release asset is missing or empty: ${file}" >&2
-    exit 1
-  fi
-done
-
-image_security_present=false
-for file in "${image_security_files[@]}"; do
-  if [[ -e "${ASSET_DIR}/${file}" || -e "${ASSET_DIR}/${file}.sha256" ]]; then
-    image_security_present=true
-  fi
-done
-security_manifest_files=()
-if [[ "${image_security_present}" == true ]]; then
-  for file in "${image_security_files[@]}"; do
-    if [[ ! -f "${ASSET_DIR}/${file}" || -L "${ASSET_DIR}/${file}" || ! -s "${ASSET_DIR}/${file}" ]] ||
-      [[ ! -f "${ASSET_DIR}/${file}.sha256" || -L "${ASSET_DIR}/${file}.sha256" || ! -s "${ASSET_DIR}/${file}.sha256" ]]; then
-      echo "controller image security asset or checksum is missing, empty, or a symlink: ${file}" >&2
-      exit 1
-    fi
-    expected_checksum="$(cd -- "${ASSET_DIR}" && sha256sum -- "${file}")"
-    actual_checksum="$(cat -- "${ASSET_DIR}/${file}.sha256")"
-    if [[ "${actual_checksum}" != "${expected_checksum}" ]]; then
-      echo "controller image security checksum mismatch: ${file}" >&2
-      exit 1
-    fi
-  done
-  security_manifest_files=("${image_security_files[@]}")
-fi
-
-cmp -s -- "${ASSET_DIR}/controller-bootstrap.sh" \
-  "${ROOT}/deploy/production/controller-bootstrap.sh" \
-  || { echo "controller-bootstrap.sh does not match the release source" >&2; exit 1; }
-cmp -s -- "${ASSET_DIR}/managed-node-bootstrap.sh" \
-  "${ROOT}/deploy/managed-node/install.sh" \
-  || { echo "managed-node-bootstrap.sh does not match the release source" >&2; exit 1; }
-
-if [[ "${MODE}" == full ]]; then
-  work="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-asset-validation.XXXXXX")"
-  cleanup() { sudo rm -rf -- "${work}"; }
-  trap cleanup EXIT INT TERM
-fi
-
-der_fingerprint_of() {
-  openssl pkey -pubin -in "$1" -outform DER 2>/dev/null | sha256sum | awk '{print $1}'
 }
-
-verify_embedded_payload() {
-  local package_arch="$1" archive="$2" pub="$3" fingerprint="$4"
-  local deb rpm extract archive_member embedded_tar deb_arch rpm_arch_actual cpio_stream
-
-  case "${package_arch}" in
-    amd64) deb="${deb_amd64}" rpm="${rpm_amd64}" ;;
-    arm64) deb="${deb_arm64}" rpm="${rpm_arm64}" ;;
-  esac
-  extract="${work}/extract-${package_arch}"
-  archive_member="usr/share/ocservia-agent/${archive}"
-
-  deb_arch="$(dpkg-deb -f "${ASSET_DIR}/${deb}" Architecture)"
-  [[ "${deb_arch}" == "${package_arch}" ]] \
-    || { echo "${deb} declares Architecture ${deb_arch}, expected ${package_arch}" >&2; exit 1; }
-  install -d -- "${extract}/deb"
-  dpkg-deb -x "${ASSET_DIR}/${deb}" "${extract}/deb"
-  embedded_tar="${extract}/deb/${archive_member}"
-  [[ "$(sha256sum -- "${embedded_tar}" | awk '{print $1}')" == "$(sha256sum -- "${ASSET_DIR}/${archive}" | awk '{print $1}')" ]] \
-    || { echo "${deb} does not embed the published ${archive} bytes" >&2; exit 1; }
-  cmp -s -- "${extract}/deb/usr/share/ocservia-agent/release-signing.pub.pem" "${pub}" \
-    || { echo "${deb} embeds a different signing public key" >&2; exit 1; }
-  [[ "$(cat -- "${extract}/deb/usr/share/ocservia-agent/trusted-release-key.sha256")" == "${fingerprint}" ]] \
-    || { echo "${deb} embeds a different trusted key fingerprint" >&2; exit 1; }
-  cmp -s -- "${extract}/deb/usr/share/ocservia-agent/verify-agent-package.sh" \
-    "${ROOT}/scripts/verify-agent-package.sh" \
-    || { echo "${deb} embeds a different verifier script" >&2; exit 1; }
-
-  rpm_arch_actual="$(rpm -qp --qf '%{ARCH}' --nosignature "${ASSET_DIR}/${rpm}" 2>/dev/null)"
-  case "${package_arch}:${rpm_arch_actual}" in
-    amd64:x86_64 | arm64:aarch64) ;;
-    *)
-      echo "${rpm} declares architecture ${rpm_arch_actual}, expected the ${package_arch} mapping" >&2
-      exit 1
-      ;;
-  esac
-  mkdir -p -- "${extract}/rpm"
-  # rpm2cpio writes the complete payload but exits nonzero on some rpm builds
-  # (observed with rpm 4.18); validate the extracted tree instead of trusting
-  # its exit status.
-  cpio_stream="${extract}/payload.cpio"
-  rpm2cpio "${ASSET_DIR}/${rpm}" >"${cpio_stream}" || true
-  [[ -s "${cpio_stream}" ]] \
-    || { echo "${rpm} produced an empty payload stream" >&2; exit 1; }
-  # Copy-in with --no-absolute-filenames: rpm members carry absolute paths,
-  # and GNU cpio would otherwise write them to the real filesystem root.
-  (cd "${extract}/rpm" && cpio -idm --quiet --no-absolute-filenames <"${cpio_stream}")
-  rm -f -- "${cpio_stream}"
-  embedded_tar="${extract}/rpm/${archive_member}"
-  [[ -f "${embedded_tar}" ]] \
-    || { echo "${rpm} does not embed ${archive}" >&2; exit 1; }
-  [[ "$(sha256sum -- "${embedded_tar}" | awk '{print $1}')" == "$(sha256sum -- "${ASSET_DIR}/${archive}" | awk '{print $1}')" ]] \
-    || { echo "${rpm} does not embed the published ${archive} bytes" >&2; exit 1; }
-  cmp -s -- "${extract}/rpm/usr/share/ocservia-agent/release-signing.pub.pem" "${pub}" \
-    || { echo "${rpm} embeds a different signing public key" >&2; exit 1; }
-  [[ "$(cat -- "${extract}/rpm/usr/share/ocservia-agent/trusted-release-key.sha256")" == "${fingerprint}" ]] \
-    || { echo "${rpm} embeds a different trusted key fingerprint" >&2; exit 1; }
-  cmp -s -- "${extract}/rpm/usr/share/ocservia-agent/verify-agent-package.sh" \
-    "${ROOT}/scripts/verify-agent-package.sh" \
-    || { echo "${rpm} embeds a different verifier script" >&2; exit 1; }
-}
-
-verify_arch_triple() {
-  local package_arch="$1" archive="$2" elf_word="$3"
-  local pub="${ASSET_DIR}/${archive}.sha256.pub.pem"
-  local fingerprint rootfs package_root file_output
-
-  fingerprint="$(der_fingerprint_of "${pub}")"
-  if [[ -n "${AGENT_TRUSTED_KEY_SHA256}" && "${fingerprint}" != "${AGENT_TRUSTED_KEY_SHA256}" ]]; then
-    echo "${archive} was signed by a key other than the pinned release key" >&2
-    exit 1
-  fi
-  rootfs="${work}/rootfs-${package_arch}"
-  sudo install -d -o root -g root -m 0700 -- "${rootfs}"
-  sudo install -d -o root -g root -m 0700 -- "${rootfs}/var/lib"
-  package_root="$(sudo env DESTDIR="${rootfs}" \
-    "${ROOT}/scripts/verify-agent-package.sh" \
-    "${ASSET_DIR}/${archive}" "$(awk '{print $1}' "${ASSET_DIR}/${archive}.sha256")")"
-  sudo grep -Fxq "arch=${package_arch}" "${package_root}/MANIFEST" \
-    || { echo "${archive} MANIFEST does not declare arch=${package_arch}" >&2; exit 1; }
-  file_output="$(sudo file -b "${package_root}/rust/target/release/ocservia-agent")"
-  [[ "${file_output}" == *"${elf_word}"* ]] \
-    || { echo "${archive} carries a ${package_arch} package but ${file_output}" >&2; exit 1; }
-  verify_embedded_payload "${package_arch}" "${archive}" "${pub}" "${fingerprint}"
-}
-
-payload_manifest="$(release_checksum_manifest "${ASSET_DIR}" "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" \
-  "${package_files[@]}" "${bootstrap_files[@]}")"
-if [[ "${MODE}" == full ]]; then
-  verify_arch_triple amd64 "${tar_amd64}" "x86-64"
-  verify_arch_triple arm64 "${tar_arm64}" "aarch64"
-  echo "signed archive triples, package architectures, and embedded payloads validated"
-else
-  if [[ ! -f "${PAYLOAD_RECEIPT}" || -L "${PAYLOAD_RECEIPT}" || ! -s "${PAYLOAD_RECEIPT}" ]] ||
-    [[ "$(cat -- "${PAYLOAD_RECEIPT}")" != "${payload_manifest}" ]]; then
-    echo "payload changed or full validation receipt is missing; full validation is required" >&2
-    exit 1
-  fi
-  for file in SHA256SUMS SHA256SUMS.sig release-signing.pub.pem; do
-    [[ -f "${ASSET_DIR}/${file}" && ! -L "${ASSET_DIR}/${file}" && -s "${ASSET_DIR}/${file}" ]] || exit 1
+for asset in controller-bootstrap.sh managed-node-bootstrap.sh controller-release-amd64.json controller-release-arm64.json controller-release.json; do
+  require_asset "$asset"
+done
+cmp "$ASSET_DIR/controller-bootstrap.sh" "$ROOT/deploy/production/controller-bootstrap.sh"
+cmp "$ASSET_DIR/managed-node-bootstrap.sh" "$ROOT/deploy/managed-node/install.sh"
+for arch in amd64 arm64; do
+  case "$arch" in amd64) rpm_arch=x86_64; elf_word=x86-64 ;; arm64) rpm_arch=aarch64; elf_word=aarch64 ;; esac
+  archive="ocservia-agent-$VERSION-linux-$arch.tar.gz"
+  deb="ocservia-agent_${VERSION}-1_${arch}.deb"
+  rpm="ocservia-agent-$VERSION-1.$rpm_arch.rpm"
+  for asset in "$archive" "$archive.sha256" "$deb" "$rpm"; do require_asset "$asset"; done
+  (cd "$ASSET_DIR" && sha256sum --check "$archive.sha256")
+  rootfs="$work/rootfs-$arch"
+  sudo install -d -o root -g root -m 0700 "$rootfs" "$rootfs/var/lib"
+  expected="$(awk '{print $1}' "$ASSET_DIR/$archive.sha256")"
+  package_root="$(sudo env DESTDIR="$rootfs" "$ROOT/scripts/verify-agent-package.sh" "$ASSET_DIR/$archive" "$expected")"
+  sudo grep -Fxq "arch=$arch" "$package_root/MANIFEST"
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    description="$(sudo file -b "$package_root/rust/target/release/$binary")"
+    [[ "$description" == *"$elf_word"* ]] || { echo "$binary is not native $arch" >&2; exit 1; }
   done
-  [[ "$(der_fingerprint_of "${ASSET_DIR}/release-signing.pub.pem")" == "${AGENT_TRUSTED_KEY_SHA256}" ]] || {
-    echo "final manifest public key does not match the pinned release key" >&2; exit 1;
-  }
-  for archive in "${tar_amd64}" "${tar_arm64}"; do
-    cmp -s "${ASSET_DIR}/release-signing.pub.pem" "${ASSET_DIR}/${archive}.sha256.pub.pem" || exit 1
+  [[ "$(dpkg-deb -f "$ASSET_DIR/$deb" Architecture)" == "$arch" ]]
+  [[ "$(rpm -qp --qf '%{ARCH}' --nosignature "$ASSET_DIR/$rpm" 2>/dev/null)" == "$rpm_arch" ]]
+  mkdir -p "$work/deb-$arch" "$work/rpm-$arch"
+  dpkg-deb -x "$ASSET_DIR/$deb" "$work/deb-$arch"
+  # Some rpm2cpio versions return nonzero after writing a complete payload.
+  rpm2cpio "$ASSET_DIR/$rpm" >"$work/payload.cpio" || true
+  test -s "$work/payload.cpio"
+  (cd "$work/rpm-$arch" && cpio -idm --quiet --no-absolute-filenames <"$work/payload.cpio")
+  for family in deb rpm; do
+    payload="$work/$family-$arch/usr/share/ocservia-agent"
+    cmp "$payload/$archive" "$ASSET_DIR/$archive"
+    cmp "$payload/$archive.sha256" "$ASSET_DIR/$archive.sha256"
+    cmp "$payload/verify-agent-package.sh" "$ROOT/scripts/verify-agent-package.sh"
   done
-fi
-
-canonical_manifest="$(release_checksum_manifest "${ASSET_DIR}" "${CONTROLLER_RELEASE_MANIFEST_REQUIRED}" \
-  "${package_files[@]:0:6}" "${bootstrap_files[@]}" "${security_manifest_files[@]}")"
-if [[ ! -f "${ASSET_DIR}/SHA256SUMS" ]]; then
-  if [[ "${WRITE_SHA256SUMS}" == "1" ]]; then
-    printf '%s\n' "${canonical_manifest}" >"${ASSET_DIR}/SHA256SUMS"
-  else
-    echo "SHA256SUMS is missing (set WRITE_SHA256SUMS=1 to generate it)" >&2
-    exit 1
-  fi
-fi
-[[ "$(cat -- "${ASSET_DIR}/SHA256SUMS")" == "${canonical_manifest}" ]] \
-  || { echo "SHA256SUMS does not canonically cover the expected release assets" >&2; exit 1; }
-if [[ -f "${ASSET_DIR}/SHA256SUMS.sig" ]]; then
-  verified=false
-  for pub in "${ASSET_DIR}/${tar_amd64}.sha256.pub.pem" "${ASSET_DIR}/${tar_arm64}.sha256.pub.pem"; do
-    if openssl pkeyutl -verify -rawin -pubin -inkey "${pub}" \
-      -sigfile "${ASSET_DIR}/SHA256SUMS.sig" -in "${ASSET_DIR}/SHA256SUMS" >/dev/null 2>&1; then
-      verified=true
-    fi
-  done
-  [[ "${verified}" == true ]] \
-    || { echo "SHA256SUMS.sig does not verify against any published signing key" >&2; exit 1; }
-  echo "SHA256SUMS signature verified"
-fi
-if [[ "${MODE}" == full && -n "${PAYLOAD_RECEIPT}" ]]; then
-  printf '%s\n' "${payload_manifest}" >"${PAYLOAD_RECEIPT}"
-fi
-echo "release package set validation passed for version ${VERSION}"
+  jq -e --arg version "$VERSION" --arg platform "linux/$arch" \
+    '.release_version == $version and .release_tag == ("v"+$version) and .platform == $platform and (.images | type == "object")' \
+    "$ASSET_DIR/controller-release-$arch.json" >/dev/null
+ done
+cmp "$ASSET_DIR/controller-release.json" "$ASSET_DIR/controller-release-amd64.json"
+echo "Release package set PASS"

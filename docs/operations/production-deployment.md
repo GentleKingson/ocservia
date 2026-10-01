@@ -70,8 +70,9 @@ For MySQL/MariaDB, use `external`, provide separate owner and runtime DSNs in
 plus `database-backup.cnf` in the protected secret directory. Only `migrate`
 receives the owner DSN. The runtime receives the application DSN and CA, never
 the owner credential. Both DSNs must use `tls=true`; the production descriptor
-mounts `database-ca.pem` as the trust root. The backend-specific backup image must be digest-pinned
-through `OCSERV_DATABASE_BACKUP_IMAGE`. Snapshot restore, PITR, failover, and
+mounts `database-ca.pem` as the trust root. The backend-specific backup image must use an explicit version tag or SHA-256
+reference through `OCSERV_DATABASE_BACKUP_IMAGE` for standalone v1, or the
+selected backend image in the v2 deployment configuration. Snapshot restore, PITR, failover, and
 cross-engine movement are separate procedures; no PostgreSQL G6, HA, or PITR
 claim applies to either MySQL-compatible backend.
 
@@ -165,27 +166,23 @@ reader additionally requires `signer_state_version: 1` and five exact image
 roles: `edge`, `relay`, `signer`, `mysql_backup`, `mariadb_backup`. It retains
 the same per-architecture filenames and protected local file rules. Integrated requires
 v2; see [Integrated configuration](../../deploy/production/integrated/README.md#lifecycle-configuration).
-V2 selects backend backup digests from the manifest rather than
-`OCSERV_DATABASE_BACKUP_IMAGE`. Candidate publication/acceptance is separate
-from the legacy stable-release inventory described below.
+V2 selects backend backup image references from this configuration rather than
+`OCSERV_DATABASE_BACKUP_IMAGE`. First-party images use explicit version tags.
 
 Formal GitHub Releases publish the Controller release manifests
-`controller-release-amd64.json` and `controller-release-arm64.json` with their
-`.sha256` checksums alongside the Agent assets, plus the byte-identical
+`controller-release-amd64.json` and `controller-release-arm64.json`
+alongside the Agent assets, plus the byte-identical
 `controller-release.json` alias of the amd64 manifest for existing operators.
 They also publish `controller-bootstrap.sh` and `managed-node-bootstrap.sh` as
 versioned Stage-1 entrypoints downloaded over HTTPS.
-Each manifest is the canonical release mapping for its platform: copy all six
-image references from its `images` object without replacing any digest with a
-tag. The gateway, control, transport, and backup references are first-party
-multi-platform images in `ghcr.io/gentlekingson/ocservia` whose digest points at
-one image index covering `linux/amd64` and `linux/arm64`; PostgreSQL and
-OpenTelemetry remain pinned third-party multi-platform images. The four
-first-party GHCR packages must already exist and be public before the first
-formal release; the release workflow performs an anonymous registry read check
-and fails closed if any image index cannot be pulled without credentials or is
-missing either architecture. The Controller bundle supports `linux/amd64` and
-`linux/arm64`, and each manifest records its platform explicitly. Before any
+Each configuration maps the images used by its platform and deployment mode.
+V2 includes eleven roles: nine first-party GHCR images use `vX.Y.Z` tags,
+while PostgreSQL and OpenTelemetry retain pinned third-party references.
+First-party packages must be public for installation without registry
+credentials; publishing credentials and package visibility remain repository
+administration concerns. Native builds and assembled version images cover
+`linux/amd64` and `linux/arm64`, and each configuration records its platform.
+Before any
 Compose activation the lifecycle entrypoint asks the Docker daemon for its
 server architecture and fails closed when the manifest platform does not match
 the Docker host platform, so install the manifest variant that matches the
@@ -308,7 +305,7 @@ The entrypoint requires Docker Compose v2 with
 `/var/lib/ocservia-controller`, rejects an existing
 `current-release.json`, validates that the checkout HEAD and clean working tree
 match the manifest `source_commit`, runs the guarded Compose preflight, pulls
-the six digest-pinned images, and starts the dependency graph with
+the selected version-tagged or SHA-256 image references, and starts the dependency graph with
 `up -d --wait`. It then runs
 `deploy/production/controller-release-smoke.sh`, which reuses Compose health,
 probes the public HTTPS `/api/v1/readyz` and `/api/v1/version` routes, verifies
@@ -367,11 +364,11 @@ deploy/production/controller.sh rollback
 Rollback uses only the protected `previous-release.json`; it never accepts an
 operator-selected manifest. It does not require a lower version, equal migration
 numbers or unchanged deployment descriptors, and performs no historical database
-compatibility preflight. The exact target source and digest-pinned images must
+compatibility preflight. The exact target source and selected images must
 still be available and satisfy the actual deployment's requirements. This is
 not a guarantee that an arbitrary previous release can use the existing data.
 
-Rollback renders and pulls the previous digest-pinned images, then requires the
+Rollback renders and pulls the previous image references, then requires the
 functional release smoke to confirm the previous version and source commit
 before exchanging confirmed state. It starts the normal target Compose graph
 with `up -d --wait`, including required forward initialization, never a database

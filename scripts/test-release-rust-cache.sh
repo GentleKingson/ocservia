@@ -21,10 +21,10 @@ key = restore.dig('with', 'key')
 end
 abort 'fallback must not cross build identities' unless restore.dig('with', 'restore-keys') == key.delete_suffix('${{ github.sha }}')
 abort 'save must use the new source identity, not the restored key' unless save.dig('with', 'key') == '${{ steps.agent-target-cache.outputs.cache-primary-key }}'
-abort 'save must follow successful validation' unless save['if'] == "${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}" && steps.index(save) > steps.index(steps.find { |s| s['id'] == 'manifest' })
+abort 'save must follow successful validation' unless save['if'] == "${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}" && steps.index(save) > steps.index(steps.find { |s| s['name'].start_with?('Validate native package lifecycle') })
 compile = steps.find { |s| s.fetch('run', '').include?('scripts/build-release-agent.sh') }
-abort 'a cache hit must never skip candidate compilation' if compile.key?('if')
-abort 'native ABI and candidate version checks must remain' unless
+abort 'a cache hit must never skip binary compilation' if compile.key?('if')
+abort 'native ABI and package version checks must remain' unless
   build.include?('cargo build --locked --release') && build.include?('glibc 2.34') &&
   build.include?('[[ "$("${path}" --version)" == "${binary} ${VERSION}" ]]')
 dockerfile = File.read('rust/transportd.Dockerfile')

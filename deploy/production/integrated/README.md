@@ -2,11 +2,11 @@
 
 The P1 network prototype was developed against source baseline
 `e861b72130d4d409883f68d01805566f26cbafbc`. P3 connects it and the production
-Signer to the existing lifecycle. P4 adds native signed candidates; P5 checks
+Signer to the existing lifecycle. P4 added native build checks; P5 checks
 the real deployment rather than inferring acceptance from configuration tests.
 Historical prototype results below retain their original scope. Read the
 [P0 contract](../../../docs/development/integrated-deployment-adr.md).
-Do not bypass the signed-manifest checks in `controller.sh` for deployment.
+Do not bypass the deployment-configuration checks in `controller.sh` for deployment.
 
 ## Lifecycle configuration
 
@@ -50,7 +50,7 @@ include SAN `signer`. `api-token` must exactly match Controller's
 See the [Signer custody contract](../../../docs/development/production-signer.md)
 for chain, token, approved key-transfer and recovery requirements.
 
-Installation verifies the existing signed bundle and exact source checkout,
+Installation validates the deployment configuration and its source checkout,
 checks the final Compose model and pulls all selected images before stopping
 anything. Only first installation attempts `signer init`; its durable intent
 is recorded before execution. Retry, start, upgrade and rollback inspect an
@@ -73,38 +73,15 @@ a separate reconciled operator action. There is no automatic cross-mode
 migration, automatic CRL distribution, HA or forced disconnection of existing
 VPN sessions.
 
-## Candidate pipeline
+## CI and publication
 
-Dispatch the existing `release-upgrade.yml` with `purpose=integration`,
-`production_signer=true` and the next plain `X.Y.Z` version. This is an explicit
-candidate publication, not a stable tag or Release. Native AMD64/ARM64 producers
-build Agent packages and the nine first-party Controller/Integrated images once.
-The existing scanner gates both platforms before GHCR publication. Ordinary
-diagnostics and clean consumers have read-only permissions; only the candidate
-publication job has `packages:write`.
-
-The `integrated-candidate-<run>-<attempt>` artifact contains signed v2 platform
-manifests, the ephemeral candidate public key, scanned config/Registry digest
-bindings and original producer artifact identities. Retain it, both native
-product artifacts and acceptance evidence before repository retention expires.
-The consumer checks producer-provided checksum/key hashes before pulling; an
-operator must obtain the candidate public key fingerprint through a trusted
-channel, install that key **outside** the bundle, and check out the manifest's
-exact `source_commit`. With the documented Secrets/configuration provisioned,
-use the existing root `controller.sh install --release-file "$MANIFEST"` entry
-point, with `MANIFEST` set to the absolute platform-manifest path. Do not point stable bootstrap at a
-fabricated tag or weaken its published-release source checks. Candidate packages
-may require a read-only GHCR login; never distribute the CI publisher token.
-
-Stable tag builds reuse the original products of a successful main-branch
-Integrated run at the **same SHA and version**, rather than rebuilding binaries
-or images. Missing/expired acceptance artifacts fail closed. Existing stable
-tag binding and release-publishing approval remain required. Stable manifests
-retain accepted per-platform digests, and all nine first-party images must pass
-anonymous Registry reads before a stable Release can be published. A source
-change, including a squash merge, requires a new candidate; never rewrite the
-old manifest's SHA. A successful candidate workflow is not evidence that the
-additional P5 public-network scenarios or a stable Release have run.
+Manual [Release Check](../../../docs/development/release-checks.md) runs Full CI,
+Security and Integrated Business with Resilience on merged main. Business uses
+fresh local builds and a loopback registry on disposable amd64/arm64 runners;
+it does not publish GHCR images. The operator confirms the version after PASS.
+Its tag then triggers fresh native build/install/image smoke and ordinary
+Release/GHCR publication using version tags. Manual Release dispatch builds
+both architectures without publishing.
 
 ## Network contract
 
@@ -167,8 +144,8 @@ streams; this is not proof of original-IP abuse controls behind Edge.
 ## Reproduce the bounded check
 
 Run locally only on BuildServer, in an isolated checkout. Development builds
-are allowed here; final production-path acceptance must pull approved Registry
-digests instead. NGINX 1.30.5 and Caddy 2.11.4 are digest-pinned; Relay uses the
+are allowed here; current publication qualification uses manual Release Check
+and freshly built local images on disposable native runners. NGINX 1.30.5 and Caddy 2.11.4 are digest-pinned; Relay uses the
 existing locked iroh-relay 1.2.0 build. No upstream Relay changes are made.
 
 ```bash
@@ -339,42 +316,12 @@ this is **not** a 35-minute completely idle Edge timeout test.
 Failures above remain failures. Fixes created new source-bound candidates;
 none was repaired by replacing a binary or rewriting its manifest SHA.
 
-## Main candidate identity
+## Historical main acceptance
 
-The post-squash candidate is version `1.0.3`, source
-`368906c65d23bc7abff088dc4bbbdbf160012b32`,
-[run 36220524783, attempt 1](https://github.com/GentleKingson/ocservia/actions/runs/36220524783).
-It is a new native build, not a relabeling of the P5 branch products. The signed
-`integrated-candidate-36220524783-1` artifact is ID `10898458447`;
-its ZIP SHA-256 is
-`ac4370958b5dae691b3624b18f5dea8fcad9f8d5f2bcc1b7675a132dc4b22958`.
-
-| Signed file | SHA-256 |
-| --- | --- |
-| `controller-release-amd64.json` | `72e1829e4f70460889981f3f06f35b899c8a1ef6434b7980f7e1d71a4f2886ec` |
-| `controller-release-arm64.json` | `804d62f5c256ae079b2fc63df723c9bc3e61e1faa5dfb02e109fbf4bb2ab697d` |
-| `SHA256SUMS` | `ef64102569598b0b21d7803145788b3d91aa884b5884bdad6395ad1f1911a0ba` |
-| Candidate public-key PEM | `6cf72c95ffaf3f5b2febfd9a61db15954e47f75fa8b1167ae705ad1257a5c6fa` |
-
-Each platform manifest binds all eleven image roles. The added Integrated
-roles below are under `ghcr.io/gentlekingson/ocservia/<role>@sha256:<digest>`:
-
-| Platform | Role | Registry digest |
-| --- | --- | --- |
-| AMD64 | Edge | `646a68d7d1df73cbc726b4480ed640aaf846848154e7bddce7c7259e4d2ef255` |
-| AMD64 | Relay | `962ec189caf984dc32892b8feed94d25f20aed89d81ea470628c3b4b611fb04e` |
-| AMD64 | Signer | `8e339005fb946bfef24932781762b3759d2c322b1453b15e507bc3ab031215b8` |
-| ARM64 | Edge | `c686d575914f5e5f804831298f61cd94b52d3898ee49ac042ffe9f46d9fde494` |
-| ARM64 | Relay | `f72a25b2fcbc4dfcbff42ec4e8f7526e545daf3097a2c66a36fab2801b5bb165` |
-| ARM64 | Signer | `c4c30df2750e8d5d274c81f385d9084605a5fcd47a19475d334ef5e16c55d1c3` |
-
-Use lowercase role names in pull references. Do not reconstruct a smaller
-manifest from this table; consume and verify the complete signed bundle.
-Candidate signing keys are ephemeral, not the stable Release trust root.
-Retain the original producer artifacts and protected key fingerprint before
-the repository's one-day artifact retention expires. Stable promotion still
-requires those accepted products, exact source/version and existing release
-approvals; missing artifacts fail closed rather than triggering a rebuild.
+[Run 36220524783, attempt 1](https://github.com/GentleKingson/ocservia/actions/runs/36220524783)
+validated source `368906c65d23bc7abff088dc4bbbdbf160012b32` on main.
+The runtime observations below retain their original scope; historical build
+attachments and their expired identities are not current publication criteria.
 
 ### Measured support and maintenance
 
@@ -432,21 +379,20 @@ Choose `standalone` for separately operated Relay/Signer endpoints, or
 `integrated` for this single-host topology. Integrated is not HA. Use the
 [pinned release installation](../../../docs/getting-started/production.md)
 with `--version vX.Y.Z --root-lifecycle` only after that exact stable Release
-exists. A candidate is not a published Release: use its exact source checkout,
-independently trusted public key and platform manifest with the existing
-`controller.sh` entry instead.
+exists. For authorized nonproduction diagnostics, use the matching source
+checkout and ordinary platform configuration with `controller.sh` instead.
 
 `install.env` is data parsed by the installer's strict allowlist, not a shell
 script. Do not `source` it. Direct lifecycle commands require the same explicit
 operator environment used for installation, including database/auth settings,
-Secret directories, public names, identity and release public key. Keep it in
+Secret directories, public names, identity and runtime trust. Keep it in
 the protected operator session; do not print it into acceptance logs.
 
 ```bash
-# Root operator session, clean checkout at the signed manifest's source_commit.
+# Root operator session, clean checkout at the configuration's source_commit.
 deploy/production/controller.sh install --release-file "$MANIFEST"
 deploy/production/controller.sh start
-# From the next exact source checkout, using its verified platform bundle:
+# From the next exact source checkout, using its validated platform configuration:
 deploy/production/controller.sh upgrade --release-file "$NEXT_MANIFEST"
 # From the current release checkout, with the previous commit available locally:
 deploy/production/controller.sh rollback

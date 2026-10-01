@@ -1,6 +1,6 @@
 # Release policy
 
-CI PASS is the only release qualification. The intended flow is:
+CI PASS is the only release qualification. The flow is:
 
 ```text
 PR -> Basic CI -> merge main
@@ -38,22 +38,13 @@ command/fence/receipt signatures, and durable immutable operation intent remain
 required. The operator-provisioned release catalog still supplies authorized
 upgrade package digests.
 
-## Migration status
-
-This policy defines the refactor target. Until the following implementation PRs
-land, the existing workflows and installers still enforce their current release
-contracts; this document alone does not authorize skipping them. The migration
-removes consumer signing dependencies, simplifies products, replaces the tag
-workflow, and finally removes unused release-chain code and documentation. Every
-intermediate merged PR must remain self-consistent.
-
 ## Validation
 
 Before completing the refactor, run Basic CI, Full CI, Security, Business
 Integration with `run-resilience=true`, both native Agent build/install smokes,
 Controller build/image smoke, and a dispatch of Release that performs no
 production writes. Verify AgentUpgrade digest success/refusal and Stage-0
-download success/failure and checksum mismatch. Audit the retired release-chain
+download success/failure and checksum mismatch if a plain Stage-0 checksum is retained. Audit the retired release-chain
 references across the repository. Do not publish a version or deploy production
 as part of this validation.
 

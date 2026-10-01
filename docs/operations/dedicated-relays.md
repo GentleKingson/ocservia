@@ -8,7 +8,7 @@ protected files.
 Set `OCSERV_RELAY_SECRET_DIR` to a launcher-owned mode-`0700` directory, install
 TLS files as launcher-owned mode `0444`, and install `relay-access-token` as
 UID/GID 65532 mode `0400`. Use a matching DNS name/certificate, the checked-in
-`deploy/production/relay/relay.toml`, and a digest-pinned `OCSERV_RELAY_IMAGE`.
+`deploy/production/relay/relay.toml`, and an explicit version-tagged or SHA-256 `OCSERV_RELAY_IMAGE`.
 Validate and start it with `deploy/production/relay/compose.sh config --quiet`
 and `deploy/production/relay/compose.sh up -d`. Production Controller and Agent
 launchers use `--relay-mode custom`, exactly one HTTPS URL and a protected token

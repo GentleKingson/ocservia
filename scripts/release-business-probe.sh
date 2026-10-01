@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Disposable hosted runner only. Smoke and extended profiles retain separate scope.
 # shellcheck disable=SC2024 # sudo reads protected state; redirects are runner-owned.
-# shellcheck disable=SC2030,SC2031 # Baseline subshell must not replace the target candidate identity.
 set -Eeuo pipefail
 # Imported acceptance helpers must not dirty the exact-source lifecycle checkout.
 export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${ARTIFACT_DIR:?}" "${VERSION:?}" "${CANDIDATE_SHA:?}"
+: "${ARTIFACT_DIR:?}" "${VERSION:?}"
+SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+export SOURCE_COMMIT
+# shellcheck source=scripts/env.sh
+# shellcheck disable=SC1091
+source "$ROOT/scripts/env.sh"
 : "${BUSINESS_PROFILE:=smoke}"
 : "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
 : "${INTEGRATED_INSTALL_ONLY:=false}"
@@ -21,8 +25,7 @@ relay_ipv6_rule=false
 [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == false || "$BUSINESS_PROFILE" == extended ]]
 [[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
 bash "$ROOT/scripts/release-business-environment.sh"
-[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-[[ "${GITHUB_SHA:?}" == "${CANDIDATE_SHA}" && "$(git -C "${ROOT}" rev-parse HEAD)" == "${CANDIDATE_SHA}" ]]
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" && "$(ps -p 1 -o comm=)" == systemd ]]
 [[ ! -e /etc/ocservia-agent && ! -e /usr/libexec/ocservia && ! -e /etc/ocservia ]]
 if getent passwd ocserv-agent >/dev/null; then
@@ -39,8 +42,9 @@ work="${T07_WORK}"
 stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
-export SOURCE_COMMIT="${CANDIDATE_SHA}" PACKAGE_ARCH="${CONTROLLER_ARCH:-amd64}" CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
-export SOURCE_DATE_EPOCH OUTPUT_DIR="${CANDIDATE_PRODUCTS:-${work}/products}" AGENT_SIGNING_KEY="${work}/signing.key"
+export PACKAGE_ARCH="${CONTROLLER_ARCH:-amd64}" CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
+export SOURCE_DATE_EPOCH OUTPUT_DIR="${work}/products"
+export DEPLOYMENT_CONFIG_DIR="${work}/bundle"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
 export BUILDX_BUILDER="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
 registry="${BUILDX_BUILDER}-registry"
@@ -55,7 +59,7 @@ export OCSERV_CONTROLLER_PUBLIC_URL=https://localhost OCSERV_PUBLIC_ORIGIN=https
 export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_AUDIT_EVENT_KEY_ID=t07 OCSERV_BACKUP_INTERVAL_SECONDS=86400
 export OCSERV_CERTIFICATE_SIGNER_URL=https://signer.unavailable.invalid
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  [[ "$EUID" == 0 && -n "${CANDIDATE_BUNDLE:-}" && -n "${CANDIDATE_PRODUCTS:-}" ]]
+  [[ "$EUID" == 0 ]]
   gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
   if [[ -n "${INTEGRATED_PUBLIC_ADDRESS:-}" ]]; then
     [[ "${INTEGRATED_DISPOSABLE_CONTAINER:-}" == true ]]
@@ -120,7 +124,7 @@ cleanup() {
       sudo install -o "$(id -u)" -g "$(id -g)" -m 600 "${work}/sanitized.log" "${ARTIFACT_DIR}/probe.log"
   fi
   [[ -f "${ARTIFACT_DIR}/checkpoints.txt" ]] || : >"${ARTIFACT_DIR}/checkpoints.txt"
-  jq -n --arg sha "${CANDIDATE_SHA}" --arg version "${VERSION}" --arg start "${started}" \
+  jq -n --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg profile "${BUSINESS_PROFILE}" \
     --arg resilience "$resilience_result" --argjson resilience_requested "$BUSINESS_RUN_RESILIENCE" \
@@ -130,9 +134,8 @@ cleanup() {
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
-    '{candidate_sha:$sha,candidate_version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,
+    '{version:$version,run_id:$run,run_attempt:$attempt,profile:$profile,
       execution_environment:(if $disposable_container then "BuildServer isolated Docker/systemd" else "GitHub-hosted runner" end),
-      run_identity:"candidate producer workflow run and attempt",
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
@@ -143,7 +146,6 @@ cleanup() {
       planned_topology:{hosts:1,architecture:$arch,native_systemd_node:($install_only | not),relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
-      deferred:["Publish: immutable published Release download/bootstrap"],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
   if [[ "$relay_ipv4_rule" == true ]]; then
@@ -175,53 +177,26 @@ mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup
 bash "${ROOT}/scripts/release-upgrade-native.sh" "$CONTROLLER_ARCH" >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
 next_stage dependency_setup
-openssl genpkey -algorithm ED25519 -out "${AGENT_SIGNING_KEY}"
-openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${work}/trusted-release.pub.pem"
-export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${work}/trusted-release.pub.pem"
-if [[ -n "${CANDIDATE_PRODUCTS:-}" ]]; then
-  next_stage candidate_verification
-  node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" agent "$CONTROLLER_ARCH" "${VERSION}" "${AGENT_MANIFEST_SHA256:?}"
-  if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
-  node scripts/release-artifacts.mjs verify "${OUTPUT_DIR}" controller amd64 "${VERSION}" "${CONTROLLER_MANIFEST_SHA256:?}"
-  if [[ -z "${RELEASE_RELAY_IMAGE:-}" ]]; then
-    docker buildx create --driver docker-container --name "${BUILDX_BUILDER}" \
-    --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 --bootstrap --use
-  fi
-  fi
-else
-  bash "${ROOT}/scripts/bootstrap.sh" native-packages
-  next_stage agent_package_build
-  env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
-  next_stage controller_image_build
-  bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
-fi
-next_stage relay_image_build
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  cp -R "${CANDIDATE_BUNDLE}/." "${work}/bundle/"
-  export CANDIDATE_BUNDLE="${work}/bundle"
-  bash "$ROOT/scripts/consume-controller-candidate.sh"
-  manifest="${CANDIDATE_BUNDLE}/controller-release-${CONTROLLER_ARCH}.json"
-  for name in gateway control transport backup edge relay signer postgres otel; do
-    export "OCSERV_${name^^}_IMAGE=$(jq -er --arg name "$name" '.images[$name]' "$manifest")"
-  done
-  export T07_RELAY_IMAGE="$OCSERV_RELAY_IMAGE" T07_SIGNER_IMAGE="$OCSERV_SIGNER_IMAGE"
-  install -m 600 "${CANDIDATE_BUNDLE}/candidate-signing.pub.pem" "${work}/candidate-release.pub.pem"
-  export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${work}/candidate-release.pub.pem"
-else
-if [[ -n "${RELEASE_RELAY_IMAGE:-}" ]]; then
-  docker tag "${RELEASE_RELAY_IMAGE}" "${BUILDX_BUILDER}-relay"
-else
-bash "${ROOT}/scripts/buildx-cache.sh" relay-business-amd64 true business-relay \
-  --builder "${BUILDX_BUILDER}" --platform linux/amd64 --provenance=false --load \
-  --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
-  -t "${BUILDX_BUILDER}-relay" -f "${ROOT}/deploy/production/relay.Dockerfile" "${ROOT}" \
-  >"${ARTIFACT_DIR}/relay-build.log" 2>&1
-fi
+bash "${ROOT}/scripts/bootstrap.sh" native-packages
+bash "${ROOT}/scripts/bootstrap.sh" npm-security
+next_stage agent_package_build
+env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+next_stage controller_image_build
+bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+next_stage image_security
+bash "${ROOT}/scripts/bootstrap.sh" image-security
+scan_table="${work}/images.tsv"
+for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+  printf '%s\t%s\t%s\n' "$name" "$CONTROLLER_ARCH" "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar" >>"$scan_table"
+done
+IMAGE_ARCHIVES_TSV="$scan_table" bash "$ROOT/scripts/scan-release-images.sh" >"${ARTIFACT_DIR}/image-scan.log" 2>&1
+for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+  docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
+done
+export T07_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
+docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH" "${BUILDX_BUILDER}-relay"
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
-docker image inspect --format '{{.Id}} {{.Architecture}}' "${BUILDX_BUILDER}-relay" >"${ARTIFACT_DIR}/relay-image.txt"
-fi
-find "${OUTPUT_DIR}" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum >"${ARTIFACT_DIR}/product-digests.txt"
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then record candidate_consumed; else record candidate_built; fi
+record products_built
 next_stage dependency_install
 if [[ "$INTEGRATED_INSTALL_ONLY" != true ]]; then
 sudo apt-get update -qq
@@ -273,7 +248,7 @@ sudo install -o root -g 65532 -m 440 "${work}/command.pub.pem" "${OCSERV_SECRET_
 sudo install -o root -g root -m 444 "${work}/ca.crt" "${OCSERV_SECRET_DIR}/relay-ca.pem"
 sudo chown 999:999 "${work}/backup"
 registry_prefix=localhost:5000
-registry_tag="$VERSION"
+registry_tag="v$VERSION"
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   mkdir -m 700 "$OCSERV_RELAY_SECRET_DIR"
   openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$OCSERV_RELAY_PUBLIC_HOST" \
@@ -284,77 +259,62 @@ if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   install -m 444 "$work/private/relay-tls.key" "$OCSERV_RELAY_SECRET_DIR/tls.key"
   chmod 444 "$OCSERV_RELAY_SECRET_DIR/tls.crt"
   python3 "$ROOT/scripts/release-production-signer.py" prepare
-else
-  docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 fi
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" != true ]]; then
-publish_pull() {
-  local name="$1" source="$2" target="${registry_prefix}/$1:${registry_tag}" ref image_id
-  image_id="$(docker image inspect --format '{{.Id}}' "$source")"
-  docker tag "$source" "$target"
+docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
+publish_image() {
+  local name="$1" target="${registry_prefix}/$1:${registry_tag}"
+  docker tag "ghcr.io/gentlekingson/ocservia/$name:$VERSION-linux-$CONTROLLER_ARCH" "$target"
   docker push "$target"
-  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$target" | grep "^${registry_prefix}/${name}@sha256:")"
-  [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]]
-  if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-    docker image rm "$source" "$target" >/dev/null
-    docker pull "$ref"
-    [[ "$(docker image inspect --format '{{.Id}}' "$ref")" == "$image_id" ]]
-    jq -nc --arg candidate_sha "$CANDIDATE_SHA" --arg reference "$ref" --arg image_id "$image_id" \
-      '{candidate_sha:$candidate_sha,reference:$reference,image_id:$image_id,pulled:true}' >>"${ARTIFACT_DIR}/registry-pulls.jsonl"
-  fi
-  PULLED_REFERENCE="$ref"
+  PUBLISHED_REFERENCE="$target"
 }
 args=()
-for name in gateway control transport backup; do
-  docker load -i "${OUTPUT_DIR}/${name}-linux-amd64.tar"
-  publish_pull "$name" "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-amd64"
-  ref="$PULLED_REFERENCE"
-  args+=(--image "${name}=${ref}")
-  export "OCSERV_${name^^}_IMAGE=${ref}"
+roles=(gateway control transport backup)
+manifest_options=()
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  roles+=(edge relay signer mysql_backup mariadb_backup)
+  manifest_options+=(--manifest-version 2)
+fi
+for name in "${roles[@]}"; do
+  publish_image "$name"
+  args+=(--image "$name=$PUBLISHED_REFERENCE")
+  export "OCSERV_${name^^}_IMAGE=$PUBLISHED_REFERENCE"
 done
-# The frozen existing production database/image rows, not a new support matrix.
+export T07_RELAY_IMAGE="${OCSERV_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}"
+export T07_SIGNER_IMAGE="${OCSERV_SIGNER_IMAGE:-$T07_SIGNER_IMAGE}"
+# Existing third-party runtime dependency versions.
 export OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
 OCSERV_POSTGRES_IMAGE=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
 OCSERV_OTEL_IMAGE=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23
-manifest="${work}/bundle/controller-release-amd64.json"
+manifest="${DEPLOYMENT_CONFIG_DIR}/controller-release-${CONTROLLER_ARCH}.json"
 node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${manifest}" \
-  --release-version "${VERSION}" --release-tag "v${VERSION}" --source-commit "${CANDIDATE_SHA}" \
-  --migration-dir "${ROOT}/control-plane/migrations" --platform linux/amd64 \
-  "${args[@]}" --image "postgres=${OCSERV_POSTGRES_IMAGE}" --image "otel=${OCSERV_OTEL_IMAGE}"
-(cd "${work}/bundle" && sha256sum controller-release-amd64.json >SHA256SUMS)
-cp "${work}/bundle/SHA256SUMS" "${manifest}.sha256"
-openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${work}/bundle/SHA256SUMS" -out "${work}/bundle/SHA256SUMS.sig"
-cp "${manifest}" "${ARTIFACT_DIR}/candidate-manifest.json"
-fi
+  --release-version "${VERSION}" --release-tag "v${VERSION}" --source-commit "${SOURCE_COMMIT}" \
+  --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${CONTROLLER_ARCH}" \
+  "${manifest_options[@]}" "${args[@]}" --image "postgres=${OCSERV_POSTGRES_IMAGE}" --image "otel=${OCSERV_OTEL_IMAGE}"
 next_stage controller_install
-if [[ -n "${INTEGRATED_BASELINE_SOURCE:-}" ]]; then
-  [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "${INTEGRATED_DISPOSABLE_CONTAINER:-}" == true ]]
-  mkdir -m 700 "$work/baseline-bundle" "$ARTIFACT_DIR/baseline"
-  cp -R "${INTEGRATED_BASELINE_BUNDLE:?}/." "$work/baseline-bundle/"
-  install -m 600 "$work/baseline-bundle/candidate-signing.pub.pem" "$work/baseline-release.pub.pem"
-  (
-    export CANDIDATE_BUNDLE="$work/baseline-bundle" ARTIFACT_DIR="$ARTIFACT_DIR/baseline"
-    export CANDIDATE_BUNDLE_SHA256="${INTEGRATED_BASELINE_BUNDLE_SHA256:?}"
-    export CANDIDATE_KEY_SHA256="${INTEGRATED_BASELINE_KEY_SHA256:?}"
-    export CANDIDATE_SHA="${INTEGRATED_BASELINE_SHA:?}" VERSION="${INTEGRATED_BASELINE_VERSION:?}"
-    export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="$work/baseline-release.pub.pem"
-    bash "$ROOT/scripts/consume-controller-candidate.sh"
-    "$INTEGRATED_BASELINE_SOURCE/deploy/production/controller.sh" install \
-      --release-file "$CANDIDATE_BUNDLE/controller-release-${CONTROLLER_ARCH}.json"
-  )
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+  # Exercise a real configuration upgrade between two reference forms for
+  # these same built images. This is not historical binary compatibility.
+  initial_config="${work}/initial-deployment.json"
+  cp "$manifest" "$initial_config"
+  for name in "${roles[@]}"; do
+    ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${registry_prefix}/$name:$registry_tag" | grep "^${registry_prefix}/$name@sha256:")"
+    jq --arg name "$name" --arg ref "$ref" '.images[$name] = $ref' "$initial_config" >"${work}/initial-next.json"
+    mv "${work}/initial-next.json" "$initial_config"
+  done
+  "${ROOT}/deploy/production/controller.sh" install --release-file "$initial_config"
   python3 "$ROOT/scripts/release-integrated-acceptance.py" rejected_upgrade
-  "${ROOT}/deploy/production/controller.sh" upgrade --release-file "${manifest}"
-  record integrated_first_install_and_upgrade
+  "${ROOT}/deploy/production/controller.sh" upgrade --release-file "$manifest"
+  record integrated_first_install_and_configuration_upgrade
 else
-  "${ROOT}/deploy/production/controller.sh" install --release-file "${manifest}"
+  "${ROOT}/deploy/production/controller.sh" install --release-file "$manifest"
 fi
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   T07_SIGNER_CONTAINER="$(compose ps -q signer)"
   T07_RELAY_CONTAINER="$(compose ps -q relay)"
 fi
 curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" | \
-  jq -e --arg sha "${CANDIDATE_SHA}" --arg v "${VERSION}" '.commit == $sha and .version == $v' >/dev/null
-record signed_controller_lifecycle
+  jq -e --arg sha "${SOURCE_COMMIT}" --arg v "${VERSION}" '.commit == $sha and .version == $v' >/dev/null
+record controller_lifecycle
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   python3 "$ROOT/scripts/release-integrated-acceptance.py" entry
   record integrated_entry_and_internal_tls
@@ -364,7 +324,7 @@ if [[ "$INTEGRATED_INSTALL_ONLY" == true ]]; then
   "$ROOT/deploy/production/controller.sh" uninstall
   "$ROOT/deploy/production/controller.sh" start
   curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" |
-    jq -e --arg sha "$CANDIDATE_SHA" '.commit == $sha' >/dev/null
+    jq -e --arg sha "$SOURCE_COMMIT" '.commit == $sha' >/dev/null
   record integrated_native_install_restart
   next_stage complete
   exit 0
@@ -435,36 +395,16 @@ else
   python3 "${ROOT}/scripts/release-business-api.py" transport_ready
 fi
 next_stage native_node
-# The candidate is not a published Release. Verify the real signed package
-# locally, then exercise the official managed-node convergence/preparation.
+# Install the locally built native package and exercise official node
+# convergence/preparation without publishing any Release or tag.
 deb="${OUTPUT_DIR}/ocservia-agent_${VERSION}-1_${CONTROLLER_ARCH}.deb"
-sha256sum "${deb}" >"${work}/package.sha256"
-openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" -in "${work}/package.sha256" -out "${work}/package.sig"
-openssl pkeyutl -verify -rawin -pubin -inkey "${work}/trusted-release.pub.pem" \
-  -in "${work}/package.sha256" -sigfile "${work}/package.sig"
-cp "${work}/package.sha256" "${work}/tampered.sha256"
-printf '\ntampered\n' >>"${work}/tampered.sha256"
-if openssl pkeyutl -verify -rawin -pubin -inkey "${work}/trusted-release.pub.pem" \
-  -in "${work}/tampered.sha256" -sigfile "${work}/package.sig"; then
-  echo 'tampered package manifest unexpectedly verified' >&2
-  exit 1
-fi
-sha256sum -c "${work}/package.sha256"
-record real_signature_and_tamper_rejection
 sudo install -d -m 755 /etc/ocservia
-node_key="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-${CONTROLLER_ARCH}.tar.gz.sha256.pub.pem"
-sudo install -m 644 "${node_key}" /etc/ocservia/release-signing.pub.pem
-export EXPECTED_RELEASE_KEY_SHA256
-EXPECTED_RELEASE_KEY_SHA256="$(openssl pkey -pubin -in "${node_key}" -outform DER | sha256sum | cut -d' ' -f1)"
-printf '%s\n' "${EXPECTED_RELEASE_KEY_SHA256}" | sudo tee /etc/ocservia/trusted-release-key.sha256 >/dev/null
-sudo chmod 644 /etc/ocservia/trusted-release-key.sha256
 sudo touch /etc/ocservia/agent-install-production-relays
 sudo dpkg -i "${deb}"
 sudo install -o root -g root -m 444 "${work}/ca.crt" /etc/ocservia-agent/relay-ca.pem
 export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${OCSERV_RELAY_URL_A}" RELAY_URL_B=
 export RELAY_ACCESS_TOKEN_SOURCE="${OCSERV_SECRET_DIR}/relay-access-token"
 export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE="${work}/command.pub.pem"
-export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
 export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=production
 managed_options=(--version "v${VERSION}")
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi

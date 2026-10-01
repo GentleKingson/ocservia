@@ -1,0 +1,44 @@
+name: Release Check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-check-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  main:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "$GITHUB_REF" = refs/heads/main
+  full-ci:
+    needs: main
+    uses: ./.github/workflows/ci.yml
+    with:
+      profile: full
+  security:
+    needs: main
+    uses: ./.github/workflows/security.yml
+  business:
+    needs: main
+    uses: ./.github/workflows/release-business-diagnostic.yml
+    with:
+      version: '0.0.0'
+      profile: extended
+      production_signer: true
+      run-resilience: true
+  result:
+    name: Release Check Result
+    needs: [main, full-ci, security, business]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          if jq -e 'keys == ["business","full-ci","main","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
+            echo PASS >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo FAIL >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
