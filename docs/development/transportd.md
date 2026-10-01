@@ -107,7 +107,8 @@ the exact authoritative transition advances the retained state.
 
 Iroh is pinned to `1.2.0` in `Cargo.toml`; the workspace carries a provenance-bound
 patch of that exact crates.io release, and `Cargo.lock` pins the complete resolved
-graph. Transportd and Agent opt into persistent connections to every member only for a
+graph. Supported Agent and transportd launchers admit one dedicated Relay.
+The retained generic transport library and its tests opt into persistent connections to every member only for a
 custom dedicated relay set containing at least two relays. One preferred relay
 remains the sole published home address, while already-authenticated standby
 connections allow an incoming Agent to reach the same live Controller endpoint

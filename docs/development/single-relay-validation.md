@@ -15,12 +15,12 @@ cargo test --locked -p ocservia-agent fenced_agent_supervisor_redials_over_hot_s
 cargo fmt --all -- --check
 ```
 
-The Relay filter covers 0/1/2/8/9 URLs, normalized duplicates, forbidden URLs,
-token files and the unchanged default/disabled behavior on both endpoints.
-It also runs the existing multi-member connection and surviving-Relay tests.
-The separate fenced supervisor test verifies dual-Relay recovery with the same
-Endpoint and an advanced owner epoch. Public-Relay tests remain ignored; they
-are not evidence for an authenticated dedicated deployment.
+The Relay filter covers URL parsing, normalized duplicates, forbidden URLs,
+token files and the unchanged default/disabled behavior in the transport library.
+Its multi-member tests and the fenced supervisor test exercise retained generic
+library behavior; supported installation and launch entrypoints admit one Relay.
+These tests do not certify a multiple-Relay deployment or failover. Public-Relay
+tests remain ignored; they are not evidence for an authenticated dedicated deployment.
 
 Use a disposable Linux container with Bash, Node, sudo, jq and Python for the
 installer contracts. Run installers as a non-root account with passwordless
