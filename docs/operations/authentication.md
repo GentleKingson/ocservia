@@ -79,8 +79,8 @@ The installer and versioned Controller bootstrap accept and forward the mode,
 origin, TTL and OIDC redirect settings, including across `--root-lifecycle`.
 Explicit exported values override `install.env`, even if empty. Later lifecycle
 and `compose.sh` commands require the same effective exported configuration;
-they do not load `install.env` themselves. Keep all six digest-pinned image
-settings from the verified release manifest for direct `compose.sh` commands.
+they do not load `install.env` themselves. Keep the selected image
+settings from the validated deployment configuration for direct `compose.sh` commands.
 
 `compose.sh` automatically adds `compose.oidc.yaml` when any OIDC setting is
 nonempty, checks the OIDC secret permissions only in that case, and passes the

@@ -118,9 +118,10 @@ privd, root effect store, and key state. Never roll back only one peer.
 
 ```bash
 cd rust
-cargo build --locked --release --package ocservia-agent --package ocservia-privd
+OCSERV_AGENT_RELEASE_VERSION=1.0.0 cargo build --locked --release \
+  --package ocservia-agent --package ocservia-privd --package ocservia-upgrader
 cd ..
-OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
+OUTPUT_DIR=dist \
   VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 ./scripts/package-agent.sh
 EXPECTED_SHA256="$(awk '{print $1}' dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256)"
 VERIFIED_PACKAGE="$(sudo ./scripts/verify-agent-package.sh \
@@ -139,23 +140,21 @@ is the only supported extraction path. It stages and verifies the
 exact archive below root-only `/var/lib/ocservia-upgrade/package-staging`; the
 installer refuses a source tree or an independently extracted download.
 
-`scripts/package-native-agent.sh` wraps the same signed archive into native
+`scripts/package-native-agent.sh` wraps the same archive into native
 installers without adding an install layout of its own:
 
 ```bash
 OUTPUT_DIR=dist VERSION=1.0.0 PACKAGE_ARCH=amd64 \
   SOURCE_DATE_EPOCH=1786147200 \
-  AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
   ./scripts/package-native-agent.sh
 ```
 
-It requires the `tar.gz` triple produced by `package-agent.sh` plus the
-DER SHA-256 fingerprint of the signing key, and emits
-`ocservia-agent_<version>-1_amd64.deb` and
-`ocservia-agent-<version>-1.x86_64.rpm` (arm64 builds map to `arm64` and
-`aarch64`). Both formats embed the signed archive triple, the release public
-key, the pinned fingerprint, and `verify-agent-package.sh` under
-`/usr/share/ocservia-agent`. Installing embeds no layout decisions: the
+It requires the archive and plain checksum produced by `package-agent.sh`,
+and emits `ocservia-agent_<version>-1_amd64.deb` and
+`ocservia-agent-<version>-1.x86_64.rpm` (arm64 builds use `arm64` and
+`aarch64`). Both formats embed the archive, plain checksum, and
+`verify-agent-package.sh` under `/usr/share/ocservia-agent`.
+Installing embeds no layout decisions: the
 post-install scriptlet checks the host architecture, verifies the archive into
 trusted staging against its embedded plain checksum, and then runs the verified
 `install-agent.sh` or `upgrade-agent.sh`. No service is enabled or started

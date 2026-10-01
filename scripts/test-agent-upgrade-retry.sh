@@ -11,10 +11,10 @@ cp -a "${ROOT}/deploy" "${work}/source/"
 cp "${ROOT}/scripts/"{package-agent,install-agent,upgrade-agent,rollback-agent,uninstall-agent,verify-agent-package}.sh "${work}/source/scripts/"
 cp "${ROOT}/scripts/"{rebind-agent,retain-agent}.py "${work}/source/scripts/"
 export DESTDIR="${work}/rootfs" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true
-export OUTPUT_DIR="${work}/products" AGENT_SIGNING_KEY="${work}/signing.key" SOURCE_DATE_EPOCH=1786147200
+export OUTPUT_DIR="${work}/products" SOURCE_DATE_EPOCH=1786147200
 case "$(uname -m)" in aarch64) export PACKAGE_ARCH=arm64 ;; x86_64) export PACKAGE_ARCH=amd64 ;; *) exit 2 ;; esac
-openssl genpkey -algorithm ED25519 -out "${AGENT_SIGNING_KEY}" >/dev/null 2>&1
-openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${work}/public.pem" >/dev/null 2>&1
+openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
+openssl pkey -in "${work}/controller-command.key" -pubout -out "${work}/public.pem" >/dev/null 2>&1
 package() {
   local version="$1" binary archive
   for binary in ocservia-agent ocservia-privd ocservia-upgrader; do

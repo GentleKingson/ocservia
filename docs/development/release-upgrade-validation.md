@@ -1,61 +1,47 @@
 # Current package validation
 
-Use [Release Check](release-checks.md) for current-candidate validation.
-Historical native upgrade, mixed-version and migration compatibility workflows,
-scripts and baseline registry are removed. The
-[published 1.0 procedure](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/docs/development/release-upgrade-validation.md)
-is retained in Git history, not as a runnable current acceptance entry.
+Use [Release Check](release-checks.md) on merged `main` for publication
+qualification. It always runs Full CI, Security, and Integrated Business with
+Resilience. Historical native upgrade and mixed-version compatibility checks
+remain removed; current checks do not guarantee cross-version safety.
 
-The `Release Diagnostics` workflow accepts only `smoke` or `integration`,
-without `baseline_release` or a version-order requirement:
+`Release Diagnostics` uses the same Business driver for manual investigation:
 
 ```bash
-gh workflow run release-upgrade.yml --ref <candidate-branch> \
-  -f version=1.1.0 -f purpose=smoke -f run-resilience=true
+gh workflow run release-upgrade.yml --ref <branch> \
+  -f version=0.0.0 -f purpose=integration \
+  -f production_signer=true -f run-resilience=true
 ```
 
-Choose an exact candidate branch. Dispatch derives its source SHA and checks
-checkout identity; version remains plain `X.Y.Z`. The default
-`production_signer=false` mode has read-only Registry permissions and does not
-publish packages or images. It is not a complete Release Check.
+Integrated is the default and uses the actual Signer on disposable native
+amd64/arm64 runners. It freshly builds the packages and images, scans OS
+vulnerabilities, and installs from a local loopback registry. It does not write
+GHCR, create tags, publish GitHub Releases, or read production Secrets.
+`production_signer=false` with `purpose=smoke` selects the smaller standalone
+smoke scope; it cannot replace the complete manual Release Check.
 
-With explicit candidate Registry-write authorization, select
-`purpose=integration` and `production_signer=true` to build and publish
-run-bound candidate GHCR images and execute current native Integrated/real
-Signer acceptance. This uses the production Signer implementation in isolated
-tests, not a production deployment. It neither creates a release tag nor
-publishes a formal GitHub Release or uses the production release signing key.
+Both native architecture builds retain real ELF architecture/version checks,
+protected archive staging, SHA checks, installation/retry/removal smoke and
+unsafe-package rejection. The host, daemon, image platform and executed ELF
+architecture must agree; cross compilation is not native acceptance. Do not
+install test packages on a shared host or clear its binfmt handlers.
 
-Formal tag publication requires this Integrated mode to succeed on `main` for
-the exact tag SHA/version, with the accepted artifacts still available. A
-default smoke/integration diagnostic pass or a `release.yml` dry-run alone
-does not satisfy that requirement. Follow the [publication sequence](release-checks.md).
+Rerun a failed owner job with all its actual checks; selected Resilience must
+rerun its complete Business job. Failures, cancellations and required skips
+cannot report PASS. CI caches are optional build accelerators.
 
-## Current native products
+For a complete build-only release rehearsal:
 
-Both `amd64` and `arm64` packages retain signature, digest, source and
-architecture validation and current installation smoke. The host, Docker
-daemon, image platform and executed ELF architecture must agree; cross
-compilation is not native acceptance. Never clear host binfmt handlers or
-install test packages on shared BuildServer.
+```bash
+gh workflow run release.yml --ref main -f version=0.0.0
+```
 
-Preserve package retries, state retention, unsafe-package rejection, matched
-snapshots and actual service readiness. Removing historical acceptance is not
-a guarantee that arbitrary cross-version operations will work safely.
+This runs both Agent build/install smoke legs, both Controller image smokes,
+and prepares the ordinary package/configuration assets. Dispatch never enters
+Publish. Tag publication separately builds from its tag and uses ordinary
+asset replacement on reruns.
 
-## Trust and reruns
-
-Diagnostic builds use ephemeral signing keys, not production credentials.
-Consumers use producer-supplied artifact IDs and verify the trusted candidate
-manifest and exact product digests. Source SHA alone is not binary identity.
-Publication must validate its own actual signed products and image digests.
-
-Independent failed units can rerun using their producer-bound inputs, without
-substituting another candidate or latest-success artifacts. Rebuilding a product
-requires its dependent checks again. A selected single-node recovery run must rerun its complete Business owner job. Preserve failed attempts; do not
-turn skipped historical checks into a compatibility PASS.
-
-Local syntax and contract checks run in an isolated BuildServer checkout:
-`bash scripts/test-release-upgrade.sh`, relevant ShellCheck/actionlint and
-documentation checks. Actual native installation belongs on the existing
-authorized disposable runners. Remove only task-owned temporary resources.
+Focused contracts run through `scripts/test-release-upgrade.sh`, package and
+installer tests, relevant ShellCheck/actionlint, and documentation checks.
+Actual host installation belongs on authorized disposable runners. Cleanup
+must remain limited to task-owned resources.

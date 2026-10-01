@@ -7,6 +7,13 @@ NODE="${ROOT}/deploy/bootstrap/install-node"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
+# Published Stage-1 copies must be the actual executable sources.
+mkdir "$fixture/prepared"
+"$ROOT/scripts/prepare-bootstrap-release-assets.sh" "$fixture/prepared"
+cmp "$fixture/prepared/controller-bootstrap.sh" "$ROOT/deploy/production/controller-bootstrap.sh"
+cmp "$fixture/prepared/managed-node-bootstrap.sh" "$ROOT/deploy/managed-node/install.sh"
+[[ -x "$fixture/prepared/controller-bootstrap.sh" && -x "$fixture/prepared/managed-node-bootstrap.sh" ]]
+
 fail() {
   echo "stage-0 installer test: $1" >&2
   exit 1

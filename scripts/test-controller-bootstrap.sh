@@ -230,7 +230,6 @@ OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25
 OCSERV_GATEWAY_APPLICATION_IP=198.18.80.2
 EOF
 }
-: >"${fixture}/controller-release-signing.pub.pem"
 
 run_bootstrap() {
   BOOTSTRAP_TEST_INSTALL_LOG="${install_log}" \

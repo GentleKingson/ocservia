@@ -1,6 +1,6 @@
 # Upgrade the Agent
 
-Apply an explicitly selected signed Agent package on a managed node. Native package
+Apply an explicitly selected Agent package on a managed node. Native package
 installation invokes the same verified repository lifecycle as the archive
 path.
 
@@ -13,15 +13,16 @@ See the [support policy](../reference/support-policy.md).
 
 - The verified target package matches the host architecture.
 - Follow the [native package trust contract](../operations/agent-lifecycle.md#native-installer-packages):
-  verify the out-of-band release-key fingerprint, `SHA256SUMS.sig`, and the
-  selected package checksum before invoking the package manager as root.
+  download the architecture-specific native package over HTTPS from the
+  selected GitHub Release. Native scriptlets verify their embedded archive's
+  plain checksum in protected staging. Controller-driven AgentUpgrade instead
+  verifies `package_sha256` in its already-authorized command.
 - `/etc/ocservia-agent/agent.env` and its trust/sealing keys are valid.
 - You have a current recovery window and can verify the node after restart.
 
 ## Command
 
-Use the same `RELEASE_DIR` and `AGENT_PACKAGE` values whose external release
-signature and checksum were verified above. The package-manager command must
+Use the same `RELEASE_DIR` and `AGENT_PACKAGE` values selected and downloaded above. The package-manager command must
 install that exact verified path, not a different relative-path copy.
 
 On Debian or Ubuntu:

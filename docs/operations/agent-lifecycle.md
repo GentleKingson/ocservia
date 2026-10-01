@@ -33,10 +33,10 @@ Until that hosting has operational ownership and byte-verification evidence,
 the public Quick Start obtains the installer from a clean exact-release
 checkout; the installed native package has no runtime dependency on Git.
 
-Build the Agent and privd release binaries, then create a deterministic signed package:
+Build the Agent and privd release binaries, then create a deterministic package:
 
 ```bash
-OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
+OUTPUT_DIR=dist \
   VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
 # A plain checksum detects transfer corruption; it is not an authorization key.
 EXPECTED_SHA256="$(awk '{print $1}' dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256)"
@@ -71,22 +71,15 @@ rejects a foreign-architecture package — `x86_64` ↔ `amd64`, `aarch64` ↔
 
 ## Native installer packages
 
-Each release publishes the verified archive plus native installers for both
-architectures: `ocservia-agent-<version>-linux-{amd64,arm64}.tar.gz` with its
-`.sha256`/`.sha256.sig` sidecars, `ocservia-agent_<version>-1_{amd64,arm64}.deb`,
-`ocservia-agent-<version>-1.{x86_64,aarch64}.rpm`, one `SHA256SUMS` covering
-the six packages, and, on formal Controller releases, the Controller manifests
-`controller-release.json`, `controller-release-amd64.json`, and
-`controller-release-arm64.json` with their checksums,
-the versioned `controller-bootstrap.sh` and `managed-node-bootstrap.sh`, the
-Ed25519 `SHA256SUMS.sig`, and `release-signing.pub.pem`.
-The producer still emits signing attachments during the workflow migration.
-The archive verifier, native scriptlets and AgentUpgrade no longer consume
-those attachments. Native scriptlets use the embedded plain checksum;
-AgentUpgrade uses the already-authorized command digest.
+Each release publishes the archive and its plain `.sha256`, plus native DEB
+and RPM installers for both `amd64` and `arm64`. Controller assets include
+`controller-release-{amd64,arm64}.json`, the amd64 `controller-release.json`
+alias, and the versioned `controller-bootstrap.sh` and
+`managed-node-bootstrap.sh` entrypoints. The JSON files are deployment
+configuration; their version image tags select the published GHCR images.
 
-The `.deb` and `.rpm` embed the signed archive triple, the release public key,
-the pinned fingerprint, and the verifier under `/usr/share/ocservia-agent`.
+The `.deb` and `.rpm` embed only the archive, its plain checksum, and the
+verifier under `/usr/share/ocservia-agent`.
 Their scriptlets contain no layout logic: `postinst` refuses a host-architecture
 mismatch, verifies the archive into trusted staging, and runs the verified
 `install-agent.sh` (fresh host) or `upgrade-agent.sh` (existing installation).
@@ -115,7 +108,7 @@ matched snapshot contract. Roll back only with
 release.
 
 Stage-0 is not a long-term lifecycle manager. A managed-node upgrade continues
-through a verified signed package or the durable Controller-driven upgrader.
+through a verified package or the durable Controller-driven upgrader.
 Native package removal continues through `dpkg` or `rpm`, invoking the verified
 uninstall scriptlet and preserving identity, state, and configuration unless
 the operator separately chooses the irreversible purge flow.
@@ -301,8 +294,8 @@ with `OCSERV_AGENT_RELEASE_MANIFEST` (default
 The manifest is the only digest source for this workflow. It must contain
 between 1 and 512 unique `(version, architecture)` releases; a missing,
 unreadable, malformed, or ambiguous file fails Controller startup. There is no
-GitHub or registry synchronization: publishing a release means placing the
-signed package triple in each node's local spool and adding the exact digest
+GitHub or registry synchronization: preparing an upgrade means placing the
+archive in each node's local spool and adding its exact digest
 to this file. Under the v1.1.0 policy reset, an explicit trusted target is
 not rejected because it is lower, equal, higher or the source version is unknown.
 The displayed version classification is informational, not execution authority.

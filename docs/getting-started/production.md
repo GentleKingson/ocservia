@@ -2,7 +2,7 @@
 
 This guide is the short production path for installing the ocservia Controller. It focuses on what an operator needs to prepare and run. Exact file modes, lifecycle state, rollback behavior, and recovery details remain in the [Production deployment reference](../operations/production-deployment.md).
 
-Use an exact published release, not an unaccepted candidate. This is a fresh
+Use an exact published release, after Release Check has passed. This is a fresh
 installation path, not an automatic historical-deployment conversion. The
 v1.1.0 policy removes software-version admission but does not guarantee safe
 cross-version operation. See the [support policy](../reference/support-policy.md).

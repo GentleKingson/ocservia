@@ -1,79 +1,36 @@
 name: Release Diagnostics
-run-name: Release diagnostics · ${{ inputs.purpose }} · ${{ github.sha }}
 on:
   workflow_dispatch:
     inputs:
       run-resilience:
-        description: Run finite single-instance recovery in the selected business environment
+        description: Run finite single-instance recovery
         type: boolean
         default: false
       version:
-        description: Candidate X.Y.Z version without v
+        description: Build-only test version without v
         type: string
         required: true
+        default: '0.0.0'
       purpose:
-        description: Diagnostic scope; this workflow never reports a complete Release Check
+        description: Diagnostic scope
         type: choice
         options: [smoke, integration]
-        default: smoke
+        default: integration
         required: true
       production_signer:
-        description: Integration with production Signer, candidate GHCR images and real CRL enforcement
+        description: Integrated deployment with real Signer and CRL enforcement in a disposable runner
         type: boolean
-        default: false
-
+        default: true
 permissions:
   contents: read
-
 concurrency:
   group: release-diagnostics-${{ github.run_id }}
   cancel-in-progress: false
-
-env:
-  CARGO_INCREMENTAL: "0"
-
 jobs:
-  business-probe:
-    name: Read-only business diagnostics
-    if: ${{ !inputs.production_signer && (inputs.purpose == 'smoke' || inputs.purpose == 'integration') }}
-    permissions:
-      contents: read
-      packages: read
+  business:
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
       version: ${{ inputs.version }}
       run-resilience: ${{ inputs.run-resilience }}
-      profile: ${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}
-      production_signer: false
-
-  production-signer-products:
-    name: Opt-in Integrated candidate publication
-    if: ${{ inputs.production_signer && inputs.purpose == 'integration' }}
-    permissions:
-      contents: read
-      actions: read
-      packages: write
-    uses: ./.github/workflows/release-integrated-candidate.yml
-    with:
-      version: ${{ inputs.version }}
-
-  production-signer-probe:
-    name: Opt-in production Signer acceptance
-    needs: production-signer-products
-    if: ${{ inputs.production_signer && inputs.purpose == 'integration' }}
-    permissions:
-      contents: read
-      packages: read
-    uses: ./.github/workflows/release-business-diagnostic.yml
-    with:
-      version: ${{ inputs.version }}
-      run-resilience: ${{ inputs.run-resilience }}
-      profile: extended
-      production_signer: true
-      bundle-id: ${{ needs.production-signer-products.outputs.bundle-id }}
-      bundle-sha256: ${{ needs.production-signer-products.outputs.bundle-sha256 }}
-      key-sha256: ${{ needs.production-signer-products.outputs.key-sha256 }}
-      agent-amd64-id: ${{ needs.production-signer-products.outputs.agent-amd64-id }}
-      agent-amd64-sha256: ${{ needs.production-signer-products.outputs.agent-amd64-sha256 }}
-      agent-arm64-id: ${{ needs.production-signer-products.outputs.agent-arm64-id }}
-      agent-arm64-sha256: ${{ needs.production-signer-products.outputs.agent-arm64-sha256 }}
+      profile: ${{ (inputs.production_signer || inputs.purpose == 'integration') && 'extended' || 'smoke' }}
+      production_signer: ${{ inputs.production_signer }}

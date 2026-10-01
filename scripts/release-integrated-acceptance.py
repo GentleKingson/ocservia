@@ -37,7 +37,7 @@ def inspect(name):
 
 def record(name, **data):
     with (EVIDENCE / 'integrated-checkpoints.jsonl').open('a') as output:
-        output.write(json.dumps(dict(name=name, status='PASS', candidate_sha=os.environ['CANDIDATE_SHA'], **data)) + '\n')
+        output.write(json.dumps(dict(name=name, status='PASS', **data)) + '\n')
 
 
 def module(name):
@@ -62,14 +62,14 @@ def entry():
     ports = sorted((name, str(port['published']), port['protocol'])
                    for name, service in config['services'].items() for port in service.get('ports', []))
     assert ports == [('edge', '443', 'tcp'), ('relay', '7842', 'udp')], ports
-    manifest = json.loads((Path(os.environ['CANDIDATE_BUNDLE']) /
+    manifest = json.loads((Path(os.environ['DEPLOYMENT_CONFIG_DIR']) /
                            f"controller-release-{os.environ['CONTROLLER_ARCH']}.json").read_text())
     allowed = set(manifest['images'].values())
     for service in config['services'].values():
         assert 'build' not in service and service['image'] in allowed
     control_name, relay_name = os.environ['OCSERV_PUBLIC_HOST'], os.environ['OCSERV_RELAY_PUBLIC_HOST']
     status, body, control_cert = request(control_name, '/api/v1/version')
-    assert status == 200 and json.loads(body)['commit'] == os.environ['CANDIDATE_SHA']
+    assert status == 200 and json.loads(body)['commit'] == os.environ['SOURCE_COMMIT']
     status, _, relay_cert = request(relay_name, '/healthz')
     assert status == 200 and control_cert != relay_cert
     assert request(control_name, '/api/v1/version', 'wrong.invalid')[0] == 421
@@ -139,7 +139,7 @@ def rejected_upgrade():
     before = state.read_bytes()
     containers = run(COMPOSE, 'ps', '-q').stdout
     bundle = WORK / 'invalid-bundle'
-    shutil.copytree(os.environ['CANDIDATE_BUNDLE'], bundle)
+    shutil.copytree(os.environ['DEPLOYMENT_CONFIG_DIR'], bundle)
     config = bundle / f"controller-release-{os.environ['CONTROLLER_ARCH']}.json"
     config.write_text('{invalid deployment configuration')
     result = run(ROOT / 'deploy/production/controller.sh', 'upgrade', '--release-file',
@@ -155,12 +155,12 @@ def rejected_upgrade():
         occupied.bind(('0.0.0.0', 443))
         occupied.listen()
         result = run(ROOT / 'deploy/production/controller.sh', 'upgrade', '--release-file',
-                     Path(os.environ['CANDIDATE_BUNDLE']) /
+                     Path(os.environ['DEPLOYMENT_CONFIG_DIR']) /
                      f"controller-release-{os.environ['CONTROLLER_ARCH']}.json", check=False)
     assert result.returncode != 0 and 'activation started but was not confirmed successful' in result.stderr
     assert state.read_bytes() == before
     pending = json.loads((state.parent / 'pending-release.json').read_text())
-    assert pending['phase'] == 'failed' and pending['manifest']['source_commit'] == os.environ['CANDIDATE_SHA']
+    assert pending['phase'] == 'failed' and pending['manifest']['source_commit'] == os.environ['SOURCE_COMMIT']
     assert (Path(os.environ['OCSERV_SIGNER_STATE_DIR']) / 'ledger.db').is_file()
     for name in ('postgres', 'backup'):
         service = run(COMPOSE, 'ps', '-a', '-q', name).stdout.strip()
@@ -202,7 +202,7 @@ def public_sources():
         except json.JSONDecodeError:
             continue
     for row in rows:
-        assert row['status'] == 'PASS' and row['candidate_sha'] == os.environ['CANDIDATE_SHA']
+        assert row['status'] == 'PASS'
         assert row['server_ip'] == os.environ['INTEGRATED_PUBLIC_ADDRESS']
         assert ipaddress.ip_address(row['public_client_ip']).is_global
         matched = [event for event in events if event.get('event') == 'auth.result'
@@ -241,21 +241,19 @@ def revocation_check():
 
 
 def rollback_and_upgrade(api, identities, identity_files):
-    if not os.environ.get('INTEGRATED_BASELINE_SOURCE'):
-        return
     before = revocation_check()
     checkpoint = Path(os.environ['OCSERV_CONTROLLER_STATE_ROOT']) / 'signer-checkpoint.json'
     previous_checkpoint = json.loads(checkpoint.read_text())
     run(ROOT / 'deploy/production/controller.sh', 'rollback')
     status, body, _ = request(os.environ['OCSERV_PUBLIC_HOST'], '/api/v1/version')
-    assert status == 200 and json.loads(body)['commit'] == os.environ['INTEGRATED_BASELINE_SHA']
+    assert status == 200 and json.loads(body)['commit'] == os.environ['SOURCE_COMMIT']
     state = Path(os.environ['OCSERV_CONTROLLER_STATE_ROOT']) / 'current-release.json'
     baseline = json.loads(state.read_text())
     os.environ['T07_SIGNER_IMAGE'] = baseline['images']['signer']
     reverted = revocation_check()
     assert reverted > before and run('sha256sum', *identity_files).stdout == identities
     run(ROOT / 'deploy/production/controller.sh', 'upgrade', '--release-file',
-        Path(os.environ['CANDIDATE_BUNDLE']) / f"controller-release-{os.environ['CONTROLLER_ARCH']}.json")
+        Path(os.environ['DEPLOYMENT_CONFIG_DIR']) / f"controller-release-{os.environ['CONTROLLER_ARCH']}.json")
     os.environ['T07_SIGNER_IMAGE'] = os.environ['OCSERV_SIGNER_IMAGE']
     assert revocation_check() > reverted
     api.transport_ready()
@@ -311,7 +309,7 @@ def recovery():
     if os.environ.get('INTEGRATED_PUBLIC_ADDRESS'):
         (EVIDENCE / 'public-entry.json').write_text(json.dumps(dict(
             address=os.environ['INTEGRATED_PUBLIC_ADDRESS'], ca_pem=(WORK / 'ca.crt').read_text(),
-            candidate_sha=os.environ['CANDIDATE_SHA'])))
+            version=os.environ['VERSION'])))
     sse(api, 2160 if os.environ.get('INTEGRATED_PUBLIC_ADDRESS') else 12)
     public_sources()
 

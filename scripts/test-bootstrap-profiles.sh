@@ -119,9 +119,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
   files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
   files += %w[.github/workflows/release.yml .github/workflows/release-upgrade.yml
               .github/workflows/release-products.yml
-              .github/workflows/release-test-images.yml
-              .github/workflows/release-business.yml .github/workflows/release-business-diagnostic.yml
-              .github/workflows/release-integrated-candidate.yml
+              .github/workflows/release-business-diagnostic.yml .github/workflows/release-check.yml
               rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
   files.each do |source|
     target = File.join(work, source.delete_prefix(root + "/"))
@@ -129,7 +127,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     FileUtils.cp(source, target)
   end
   Dir.glob(File.join(work, "scripts", "test-*.{sh,mjs}")).each do |path|
-    next if %w[test-release-upgrade.sh test-release-upgrade.mjs].include?(File.basename(path))
+    next if %w[test-release-upgrade.sh test-release-upgrade.mjs test-release-workflows.rb].include?(File.basename(path))
     stub = if path.end_with?(".sh")
       "#!/usr/bin/env bash\nprintf '%s\\n' \"${0##*/}\" >> \"${CI_TRACE}\"\n"
     else
@@ -194,7 +192,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     if name == "Release-only"
 
       reject("Release-only must not run unrelated guards") if calls.include?("test-bootstrap-profiles.sh")
-      path = File.join(work, ".github/workflows/release.yml")
+      path = File.join(work, ".github/workflows/release-check.yml")
       original = File.read(path)
       File.write(path, original.sub("uses: ./.github/workflows/security.yml", "uses: ./.github/workflows/ci.yml"))
       _, status = Open3.capture2e(env, "bash", "-eo", "pipefail", "-c", guard.fetch("run"), chdir: work)
@@ -241,7 +239,7 @@ reject("workspace and Relay advisory scans must remain fresh and fail closed") u
     "cargo deny --locked check advisories",
   ]
 # test-release-upgrade.sh executes Release Check with failed security results
-# and verifies that Publish depends on that gate.
+# and checks that dispatch dry runs cannot publish.
 products = YAML.safe_load(File.read(File.join(root, ".github/workflows/release-products.yml")), aliases: true)
 build_steps = products.fetch("jobs").fetch("build-agent-packages").fetch("steps")
 restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
@@ -257,10 +255,10 @@ reject("release tool cache save must require a successful miss") unless
     save.fetch("if").include?("steps.native-package-tools-cache.outputs.cache-hit != 'true'")
 reject("release tool cache must not save before native build success") unless
   release_build && build_steps.index(release_build) < build_steps.index(save)
-publish = release_jobs.fetch("publish-release-packages")
+publish = release_jobs.fetch("publish")
 reject("release publishing environment changed") unless publish.fetch("environment") == "release-publishing"
 # The exact publishing permission set is pinned by
-# test-controller-release-manifest.sh; here it must only stay job-local with
+# test-release-workflows.rb; here it must only stay job-local with
 # release-asset write access.
 reject("release publishing must retain contents write as a job-local permission") unless
   publish.fetch("permissions").fetch("contents", nil) == "write"
