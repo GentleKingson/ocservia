@@ -69,6 +69,87 @@ def main():
                 raise AssertionError('active privd must not hide unavailable Agent')
             record.assert_not_called()
 
+        # One restart must cover both processes, and success requires a fresh
+        # session and unchanged identity, not only active systemd units.
+        with patch.dict(os.environ, env), patch.object(business, 'run', return_value='active') as command, \
+                patch.object(business, 'owner', return_value={'owner_epoch': 1}), \
+                patch.object(business, 'fresh_owner', return_value={'owner_epoch': 2}), \
+                patch.object(business, 'identity_digest', return_value='same'), \
+                patch.object(business, 'record') as record:
+            business.agent_stack_recovery()
+            restarts = [c.args for c in command.call_args_list if 'restart' in c.args]
+            assert restarts == [('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')]
+            record.assert_called_once_with('resilience_agent')
+
+        with patch.dict(os.environ, env), patch.object(business, 'run', return_value='active'), \
+                patch.object(business, 'owner', return_value={'owner_epoch': 1}), \
+                patch.object(business, 'fresh_owner', return_value=None), \
+                patch.object(business, 'identity_digest', return_value='same'), \
+                patch.object(business.time, 'monotonic', side_effect=[0, 0, 0, 0, 0, 0, 121]), \
+                patch.object(business.time, 'sleep'), patch.object(business, 'record') as record:
+            try:
+                business.agent_stack_recovery()
+            except RuntimeError as error:
+                assert 'fresh Agent stack session' in str(error)
+            else:
+                raise AssertionError('stale session accepted after stack restart')
+            record.assert_not_called()
+
+        with patch.dict(os.environ, env), patch.object(business, 'approval', return_value='approval'), \
+                patch.object(business, 'api', side_effect=[{'version': 1}, {'id': 'operation'}]) as api_call, \
+                patch.object(business, 'completed', return_value=True), patch.object(business, 'run') as native, \
+                patch.object(business, 'verify_completed_operations') as verify:
+            assert business.authorized_reload('reconnected')['id'] == 'operation'
+            assert api_call.call_count == 2  # node revision and one mutation; no replay
+            native.assert_not_called()
+            verify.assert_not_called()
+
+        events = []
+        def recovery_command(*args):
+            events.append(args)
+            return ''
+        def recovery_api(path, **kwargs):
+            if path == 'readyz':
+                assert kwargs['status'] == 503
+                return {'type': 'https://ocservia.dev/problems/database-unavailable'}
+            return {'connection_state': 'online'}
+        with patch.dict(os.environ, env), patch.object(business, 'run', side_effect=recovery_command), \
+                patch.object(business, 'api', side_effect=recovery_api), \
+                patch.object(business, 'owner'), patch.object(business, 'fresh_owner', return_value=True), \
+                patch.object(business, 'ready', return_value=True), patch.object(business, 'transport_ready'), \
+                patch.object(business, 'agent_stack_recovery'), patch.object(business, 'record') as record, \
+                patch.object(business, 'authorized_reload', side_effect=lambda name: events.append(('operation', name))), \
+                patch.object(business, 'vpn_smoke') as vpn, patch.object(business, 'cross_check') as cross:
+            business.resilience()
+            assert events[0][-3:] == ('restart', 'control-plane', 'transportd')
+            stop = next(i for i, event in enumerate(events) if event[-2:] == ('stop', 'postgres'))
+            start = next(i for i, event in enumerate(events) if event[-2:] == ('start', 'postgres'))
+            assert start == stop + 1  # no outage mutation
+            assert events[-1] == ('operation', 'database reconnect business')
+            assert [c.args[0] for c in record.call_args_list] == ['resilience_controller', 'resilience_database']
+            vpn.assert_called_once_with('relay_recovery', relay_recovery=True)
+            cross.assert_not_called()
+
+        for offline in (True, False):
+            events.clear()
+            def relay_wait(description, fn, seconds=120):
+                if 'offline' in description and not offline:
+                    raise RuntimeError('transport stayed online')
+                return fn()
+            with patch.dict(os.environ, {**env, 'T07_RELAY_CONTAINER': 'relay'}), \
+                    patch.object(business, 'single_relay_argv'), patch.object(business, 'owner'), \
+                    patch.object(business, 'run', side_effect=recovery_command), \
+                    patch.object(business, 'api', return_value={'connection_state': 'offline'}), \
+                    patch.object(business, 'fresh_owner', return_value=True), \
+                    patch.object(business, 'wait_for', side_effect=relay_wait), \
+                    patch.object(business, 'authorized_reload') as reload, patch.object(business, 'record') as record:
+                try:
+                    business.smoke_relay_recovery(lambda: True)
+                except RuntimeError:
+                    assert not offline
+                assert events == [('docker', 'stop', 'relay'), ('docker', 'start', 'relay')]
+                assert reload.call_count == record.call_count == int(offline)
+
         directives = business.smoke_directives(4)
         assert {item['name'] for item in directives} == {
             'auth', 'cookie-timeout', 'device', 'dns', 'ipv4-network', 'max-clients',

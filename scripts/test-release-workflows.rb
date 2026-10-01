@@ -67,7 +67,7 @@ Dir.mktmpdir('release-check-') do |dir|
   gate = consumer['steps'].find {|s| s['name'] == 'Require completed business and actual recovery scenarios'}.fetch('run')
   recovery = gate[/node --input-type=module <<'JS'\n(.*?)\nJS\n?/m,1]
   require_check(recovery, 'actual recovery result gate missing')
-  names = %w[controller agent_privd transport database_api relay complete]
+  names = %w[controller agent database relay]
   sample = {'resilience_requested'=>true,'resilience_result'=>'PASS','resilience_scenarios'=>names.map {|n| {'name'=>"resilience_#{n}",'status'=>'PASS'}},'planned_topology'=>{'native_systemd_node'=>true}}
   run_recovery = ->(data, flags={}) {
     File.write("#{dir}/result.json",data.to_json)
