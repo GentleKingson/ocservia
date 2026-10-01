@@ -49,8 +49,8 @@ sudo INSTALL_PRODUCTION_RELAYS=true \
 Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with required HTTPS `RELAY_URL_A`. Omit `RELAY_URL_B` or leave it empty; nonempty B is rejected before installation or execution. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
 
 The production drop-in executes the packaged fixed launcher
-`/usr/libexec/ocservia/ocservia-agent-relays`, which constructs one or two URL
-arguments and then replaces itself with the Agent. Base development units and
+`/usr/libexec/ocservia/ocservia-agent-relays`, which constructs exactly one Relay URL
+argument and then replaces itself with the Agent. Base development units and
 direct binary invocations are unchanged. Archive and native installations,
 upgrades, rollback snapshots, and uninstall include this launcher; upgrades
 preserve operator configuration and identity. Uninstall removes the launcher
