@@ -1,28 +1,28 @@
 # Release business coverage ownership
 
-Business Smoke is a fixed release check. Integration is selected from the
-complete published-release-to-candidate diff by
-[`release-selection.mjs`](../../scripts/release-selection.mjs), not by the
-last PR. The [Release Check](release-checks.md) owns execution and aggregation.
-An unselected Integration job is not evaluated, never an inherited PASS.
-When Integration is selected, its existing extended path executes the core
-deployment/apply/VPN/rollback chain in the same environment. The standalone
-Business Smoke job is then skipped, not run a second time; Release Check
-requires Integration success instead. When Integration is not selected,
-standalone Business Smoke must succeed.
+The target manual [Release Check](release-checks.md) always runs Full CI,
+Security, and the existing extended Business Integration with
+`run-resilience=true`. Business Integration owns the core smoke chain and the
+extended checks in one environment. Resilience must execute its real recovery
+scenarios and return PASS; a missing, failed, cancelled, or skipped required
+result fails Release Check. The migration must preserve these assertions while
+removing release signing and candidate/provenance transport requirements.
 
-| Behavior | Owner | Decision |
-| --- | --- | --- |
-| Signed deployment, online native node, independently authenticated requester/approver, ConfigPlan apply, real VPN, automatic rollback and VPN after rollback | Business Smoke | Fixed release path |
-| OIDC positive login and issuer/signature/nonce/code/state rejection | Integration | Retain until a concrete smaller-test equivalence is demonstrated |
-| CSR, issue, P12 one-use export, revoke, restart persistence | Integration | Retain real production lifecycle |
-| Browser login, approvals, ConfigPlan and certificate actions | Integration | Retain real browser assertions |
-| Single-Relay outage and provably unsent queue recovery, API/DB/journal/root-receipt cross-checks | Integration; shared with selected Smoke resilience | Execute once; same command succeeds with one real effect |
-| DEB/RPM installation, supported upgrade and state preservation on both architectures | Package & Upgrade | Reuse candidate products |
-| Controller, Agent/privd/transport, same database and sole Relay recovery | Selected Business owner plus existing database smoke | Optional `run-resilience`; fail closed on missing/failed/cancelled/skipped selected results |
-| Production release permission and signing key | Publish | Existing protected environment |
+| Behavior | Owner |
+| --- | --- |
+| Online native node, independently authenticated requester/approver, ConfigPlan apply, real VPN, automatic rollback and VPN after rollback | Business Integration |
+| OIDC positive login and issuer/signature/nonce/code/state rejection | Business Integration |
+| CSR, issue, P12 one-use export, revoke, restart persistence | Business Integration |
+| Browser login, approvals, ConfigPlan and certificate actions | Business Integration |
+| Single-Relay outage and unsent queue recovery, API/DB/journal/root-receipt cross-checks; one command succeeds with one real effect | Business Integration |
+| Controller, Agent/privd, transport, database/API, and sole Relay recovery | Business Integration with Resilience |
+| DEB/RPM install and state preservation on amd64/arm64 | Native package build/install smoke |
+| Controller image execution on both architectures | Controller build/image smoke |
+| Source and dependency vulnerability checks, necessary image vulnerability PASS/FAIL | Security / CI |
+| Build tagged source and publish GitHub assets and GHCR version images | Release |
 
-No high-level negative assertion has been deleted merely because Go or Web
-tests pass. Integration currently retains the existing extended probe; its
-environment is created only when selected. Further removal requires the exact
-failure mode and its effective replacement test to be recorded here.
+Runtime command and production PKI signing remain business behavior, independent
+of package/release signing. CI does not hold the retired release signing key.
+There is no separate accepted product, nomination, artifact binding, or registry
+evidence prerequisite for Release. Until implementation catches up, the
+migration status in the policy applies to the existing executable workflows.

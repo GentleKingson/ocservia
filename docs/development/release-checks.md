@@ -1,117 +1,63 @@
-# Release Check
+# Release policy
 
-Tag publication promotes products from a successful current Integrated
-acceptance on `main` for the exact source SHA and version. It does not rebuild
-them. The tag run validates the imported products before protected Publish;
-a separate `release.yml` dry-run is a debugging option, not a substitute for
-Integrated acceptance. `Basic CI Result` keeps its existing name and PR routing.
-Release Check is not a required check for every PR.
+CI PASS is the only release qualification. The intended flow is:
 
-| Responsibility | Release execution |
-| --- | --- |
-| Full CI | Existing key Go/Rust/Web/database checks once |
-| Products | Integrated acceptance builds Agent/privd/upgrader packages and Controller images on both native architectures; tag runs import those accepted products without rebuilding |
-| Packages | Current-candidate native package smoke and complete dual-architecture package identity checks |
-| Business Smoke | Signed deployment, separate authenticated principals, apply, real VPN, automatic rollback and VPN again |
-| Integration | Change-selected OIDC, PKI, browser and distinct recovery assertions |
-| Resilience | Change-selected single-instance recovery in the selected Business owner |
-| Security | Existing source/dependency checks and exact-image scanning/SBOM |
-| Release Check | All selected required jobs must succeed |
-| Publish | Existing protected environment, signing and permissions; tested products only |
+```text
+PR -> Basic CI -> merge main
+   -> manual Release Check (Full CI + Security + Business Integration + Resilience)
+   -> PASS -> human version confirmation -> GitHub Release / vX.Y.Z tag
+   -> Release (build + smoke + publish Agent assets and Controller GHCR images)
+```
 
-Per-architecture producers finish after build, basic smoke, sealing and upload.
-Business, Resilience and artifact checks consume the verified current products.
-Historical native upgrades and mixed-version application compatibility are no
-longer release gates or diagnostic modes. No historical package is needed to
-prepare the candidate; version format and exact checkout/workflow SHA remain
-mandatory, as do producer manifest and payload digests.
+`Basic CI Result` remains the required PR check. Release Check is a manual
+`workflow_dispatch` on merged `main`; every required job must succeed. Failure,
+cancellation, or an unexpected skip cannot report PASS. Each invocation runs the
+checks anew. There is no inherited acceptance or candidate nomination.
 
-Native test-image preparation runs alongside product builds. The shared Relay
-image is sealed for current Business and optional recovery checks.
-Consumers use producer artifact IDs, verify
-manifest and payload digests, and check image architecture and source labels.
-Tag runs import verified accepted products into their own run artifacts; no
-cache hit or mutable registry tag substitutes for those producer-bound bytes.
-Selected single-node recovery checks reuse the verified Business environment and payload.
-Release Check requires all selected consumers to succeed, transitively gating
-their fixture producers. Focused fixture and gate tests run through
-`bash scripts/test-release-upgrade.sh` on BuildServer.
+After Release Check passes, the operator confirms the version and creates the
+Release/tag. CI qualification belongs to that operator process. The tag workflow
+builds from the tag and performs build/install smoke checks before publication;
+it does not rerun Full CI, Security, or Business acceptance, or look up previous
+workflow results or artifacts to establish release eligibility.
 
-Release Rust compilation caches are accelerators, not candidate artifacts.
-Agent restores only its architecture/builder-specific Rocky target directory;
-the cache key also binds the toolchain, lockfile, manifests, Cargo configuration
-and build scripts. A source-SHA suffix permits a new cache after changed source,
-with fallback only inside that same build identity. Every hit still runs the
-locked release build and native ABI/version checks before packaging and smoke.
-The Ubuntu test target and Controller compilation objects are never restored
-into this directory.
+Release products are Agent archives, plain archive checksums, DEB/RPM packages,
+Controller images, and the bootstrap assets their installers consume. A plain
+checksum detects download corruption; it is not a signature or trust root.
+`controller-release.json`, while needed by Integrated lifecycle consumers, is
+ordinary deployment configuration. Release publication uses normal GitHub asset
+replacement on reruns and version image tags. It maintains no separate signing,
+provenance, registry binding, or immutable-release contract.
 
-The transport Dockerfile uses pinned cargo-chef to derive a dependency recipe
-from the complete workspace. Dependency cooking and the final locked build use
-the same toolchain, package, release profile and Cargo configuration; the patched
-vendor sources and real workspace sources are copied before the final build.
-Existing per-architecture BuildKit exports include the dependency layer, without
-requiring an unexported cache mount or a second compiler-cache backend.
+AgentUpgrade retains the Controller-authorized `target_version`,
+`package_sha256`, and `architecture`. The upgrade verifies the archive SHA-256
+against that command, refuses a mismatch, and then uses existing protected
+staging, architecture checks, safe extraction, and lifecycle execution. Runtime
+command authorization, approvals, owner/epoch/fence/lease, idempotency, the Agent
+SQLite journal, privd receipts, Unknown reconciliation, semantic payload hashes,
+command/fence/receipt signatures, and durable immutable operation intent remain
+required. The operator-provisioned release catalog still supplies authorized
+upgrade package digests.
 
-GitHub cache visibility still applies: caches created on one release tag are
-not automatically available to another tag. A successful dry-run on trusted
-`main` can populate default-branch caches accessible to subsequent releases;
-this change does not add scheduled or automatic prewarming. Include cache
-restore/save and BuildKit export time when assessing net build savings, and do
-not assume a same-branch warm run represents the next tag's cold start.
+## Migration status
 
-The single executable selection table is
-[`scripts/release-selection.mjs`](../../scripts/release-selection.mjs).
-It resolves the last published stable Release and compares its complete tree
-with the exact candidate, rather than inspecting only the final PR.
-Web/client/gateway/authentication paths select Integration; shared protocol
-and Controller paths select both specialties; recovery/Agent/Relay paths select
-Resilience. Ordinary Markdown documentation does not select heavy specialties.
-Support/acceptance policies, build/toolchain/deployment changes and unknown
-paths select both. Modified checking tools select their owning scope.
-An unavailable baseline/diff selects full supported scope. The first release
-whose predecessor predates the selector also selects full scope.
-This comparison selects current checks; it does not impose an upgrade baseline.
+This policy defines the refactor target. Until the following implementation PRs
+land, the existing workflows and installers still enforce their current release
+contracts; this document alone does not authorize skipping them. The migration
+removes consumer signing dependencies, simplifies products, replaces the tag
+workflow, and finally removes unused release-chain code and documentation. Every
+intermediate merged PR must remain self-consistent.
 
-Selected jobs that fail, are cancelled, unexpectedly skip, or have no result
-block publication. Unselected specialties must be skipped and carry the
-selection reason, not PASS. Single-architecture diagnostics skip Release Check;
-they cannot report complete release acceptance.
-Selected Integration includes the core deployment/apply/VPN/rollback chain,
-so it replaces standalone Business Smoke rather than initializing a second
-environment. Release Check requires exactly the corresponding job outcome.
+## Validation
 
-Build producers export actual artifact IDs and small candidate manifests
-(SHA, version, architecture, filenames, SHA-256). Every product consumer checks
-the trusted producer manifest digest and payload hashes explicitly, independently
-of the download action's archive validation. Never look up the
-latest successful artifact or guess a producer attempt from the consumer.
-Re-signing/repackaging may change installers but cannot rebuild or alter the
-tested payload archive. Final signature, trust root and payload validation
-remain required. Read-only checks never obtain the production signing key.
+Before completing the refactor, run Basic CI, Full CI, Security, Business
+Integration with `run-resilience=true`, both native Agent build/install smokes,
+Controller build/image smoke, and a dispatch of Release that performs no
+production writes. Verify AgentUpgrade digest success/refusal and Stage-0
+download success/failure and checksum mismatch. Audit the retired release-chain
+references across the repository. Do not publish a version or deploy production
+as part of this validation.
 
-Before creating a release tag:
-
-1. Freeze the merged candidate SHA on `main` and select its plain `X.Y.Z` version.
-2. With candidate Registry-write authorization, run `release-upgrade.yml` on
-   `main` with that version, `purpose=integration` and `production_signer=true`.
-   Wait for the whole workflow to succeed and verify its `head_sha` matches the
-   candidate. This publishes run-bound candidate images, not a formal Release.
-3. Keep its candidate bundle and product artifacts for both architectures
-   available. The tag path
-   verifies the exact SHA/version, producer IDs and digests; absent, expired or
-   mismatched accepted products fail publication, with no rebuild fallback.
-4. After required acceptance and publication authorization, create the new
-   `vX.Y.Z` tag directly on that SHA. Tag Release checks, protected-environment
-   approval, final signing and publication still apply. Never move a public tag.
-
-For a separate full dry-run, dispatch `release.yml` with the selected `version`
-and `arch=all` on the candidate branch. This does not publish, create tags or
-change production Secrets, and its products cannot replace the required
-Integrated acceptance. Follow [current package validation](release-upgrade-validation.md)
-and [Resilience](resilience.md) for environment and rerun boundaries.
-
-Preserve actual job/step timings, cache state and sanitized failure details.
-Report measured wall time and runner-minutes separately from source-derived
-build counts; do not label expected savings or queued/unrun work as measured.
-There is no long-term evidence inheritance service or additional sign-off gate.
+Use [business coverage ownership](release-business-coverage.md) for the checks
+that must survive the migration and [validation guidance](testing.md) for focused
+PR checks. Build caches remain optional compilation accelerators; they are never
+release qualification or accepted products.
