@@ -19,7 +19,7 @@ there is no separate G6 workflow or evidence framework.
 
 | Check | Owner and entrypoint | Required observation |
 | --- | --- | --- |
-| R1 Controller restart | Existing Business Smoke / Integration environment, optional `run-resilience` | Original state and completed operation remain verifiable; new authorized business succeeds. Require a fresh session only when the connection actually broke. |
+| R1 Controller restart | Existing Business Smoke / Integration environment, optional `run-resilience` | Original state and completed operation remain verifiable; expiration of the former owner lease triggers a fresh fenced Agent session, then new authorized business succeeds. |
 | R2 Agent / privd / transport restart | Same Business environment; reuse extended Agent / privd checks once | Identity, journal and receipt survive; replacement connections advance the owner fence; confirmed effects are not repeated. |
 | R3 Database interruption | Existing database smoke jobs and `test-enrollment-restart.sh`; reference Business environment for API outage behavior | Original storage and pool recover; confirmed state survives; unavailable dependencies cannot produce false success. Full CI keeps PG17/PG18, MySQL and MariaDB smoke coverage. |
 | R4 Sole Relay interruption | Shared strict Business single-Relay scenario, once per run | Prove Relay dependence and that an offline queued command was never sent; recover the same Relay and command with exactly one additional real effect. |
