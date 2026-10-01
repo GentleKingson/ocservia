@@ -23,13 +23,14 @@ cat >"$work/bin/grype" <<'EOF'
 set -euo pipefail
 if [[ "$1" == db ]]; then
   case "$2" in
-    update) echo update >>"$TRACE" ;;
-    status) printf '{"built":"%s"}' "${DB_BUILT-2026-09-22T00:00:00Z}" ;;
+    update) echo update >>"$TRACE"; [[ "${DB_UPDATE_FAIL:-false}" != true ]] ;;
+    status) printf '{"built":"%s"}' "${DB_BUILT-2026-09-22T00:00:00Z}"; [[ "${DB_STATUS_FAIL:-false}" != true ]] ;;
     *) exit 1 ;;
   esac
   exit 0
 fi
 echo "scan|$GRYPE_DB_AUTO_UPDATE" >>"$TRACE"
+[[ "${GRYPE_FAIL:-false}" != true ]] || exit 1
 while (($#)); do
   case "$1" in --file) destination="$2"; shift 2 ;; *) shift ;; esac
 done
@@ -81,9 +82,34 @@ jq 'del(.exemptions[0].installed_version)' "$exemptions" >"$work/invalid.json"
 cp "$work/invalid.json" "$exemptions"
 expect_failure
 # Source-controlled exception policy and single-native-architecture scans work.
-IMAGE_SCAN_EXEMPTIONS= REPORT='' run_scan
+IMAGE_SCAN_EXEMPTIONS='' REPORT='' run_scan
+printf '{"exemptions":[]}' >"$exemptions"
+REPORT=''
 SYFT_FAIL=true expect_failure
+GRYPE_FAIL=true expect_failure
+DB_UPDATE_FAIL=true expect_failure
+DB_STATUS_FAIL=true expect_failure
 DB_BUILT='' expect_failure
+DB_BUILT='invalid"json' expect_failure
+# Every published role is scanned on both native architectures; one DB update.
+: >"$archives"
+: >"$trace"
+for arch in amd64 arm64; do
+  for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+    printf '%s\t%s\t%s\n' "$name" "$arch" "$work/image.tar" >>"$archives"
+  done
+done
+IMAGE_SCAN_EXEMPTIONS='' REPORT='' run_scan
+[[ "$(grep -c '^update$' "$trace")" == 1 ]]
+[[ "$(grep -c '^scan|false$' "$trace")" == 18 ]]
+[[ "$(grep -c 'linux/amd64:' "$work/scan.log")" == 9 ]]
+[[ "$(grep -c 'linux/arm64:' "$work/scan.log")" == 9 ]]
+printf 'gateway\tamd64\t%s\n' "$work/image.tar" >>"$archives"
+REPORT='' expect_failure
+printf 'gateway\tamd64\t%s\n' "$work/missing.tar" >"$archives"
+expect_failure
+printf 'gateway\tunknown\t%s\n' "$work/image.tar" >"$archives"
+expect_failure
 printf 'bad name\tamd64\t%s\n' "$work/image.tar" >"$archives"
 expect_failure
 echo 'CI image vulnerability gate tests passed'

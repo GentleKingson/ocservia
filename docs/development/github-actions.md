@@ -64,7 +64,7 @@ or deep historical repair suite is moved from Quick into Full.
 | `ci.yml` | PR/main Quick; manual Quick/Full key checks |
 | `security.yml` | Weekly/manual checks and reusable release prerequisite |
 | `release-check.yml` | Manual main Full CI, Security, Integrated Business Smoke + single-instance recovery |
-| `release.yml` | Tag build/smoke/publish; manual build-only dry-run |
+| `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
 | `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics |
 
 ## Independent security checks
@@ -204,14 +204,16 @@ acceptance.
 ## Release workflow
 
 [Release Check](release-checks.md) runs manually on merged `main`: Full CI,
-Security and Business Integration with `run-resilience=true` must all succeed.
+Security and amd64 Integrated Business Smoke with four finite single-instance
+recoveries (`run-resilience=true`) must all succeed.
 `Basic CI Result` continues to protect PRs. The operator confirms a version
-only after Release Check PASS, then creates the Release/tag.
+only after Release Check PASS, then creates the version tag.
 
 The `vX.Y.Z` tag triggers native Agent and Controller builds for both supported
-architectures, install/image smoke, and publication to GitHub Release and GHCR.
+architectures, exact Controller image security scans, install/image smoke, and
+publication to GitHub Release and GHCR only after both architectures pass.
 The formal workflow does not rerun acceptance or inherit earlier results.
-Dispatch `release.yml` with `version=0.0.0` to exercise both build/smoke legs and
+Dispatch `release.yml` with `version=0.0.0` to exercise both build/scan/smoke legs and
 asset preparation without publishing. Only the tag-only `publish` job has
 `contents: write`, `packages: write` and the `release-publishing` environment.
 Reruns use ordinary `gh release upload --clobber` behavior.
@@ -220,7 +222,13 @@ Reruns use ordinary `gh release upload --clobber` behavior.
 implementation. Integrated mode uses the real Signer, freshly built local
 images and a loopback test registry, with no GHCR publishing authority.
 Source dependency/secret scans remain in Security; OS image vulnerability
-scans run in Business CI against local archives and report PASS/FAIL.
+scans run in Release `build-controller-images` against each architecture's exact
+archives, after build and before smoke/upload. Business has no image-security
+stage. Manual `purpose=integration` retains the deep runtime diagnostics.
+
+Release Controller jobs cache pinned image-security downloads and tools by OS,
+architecture and tool/bootstrap identity. The vulnerability DB is not cached;
+the scanner updates it once per invocation and fails on unavailable/invalid data.
 
 ## Optional build caches
 

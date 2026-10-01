@@ -235,11 +235,12 @@ these files are deliverable, and P5 must exercise the deployed configuration.
 
 ### CI and release order
 
-Manual Release Check on merged main runs Full CI, Security and native
-Integrated Business Smoke with single-instance recovery. Business builds local images and uses a
+Manual Release Check on merged main runs Full CI, Security and amd64
+Integrated Business Smoke with four finite single-instance recoveries. Business builds local images and uses a
 loopback registry in disposable runners. After PASS, the operator confirms the
-version and creates its tag; formal Release freshly builds and smoke-tests
-both native architectures before ordinary GitHub Release/GHCR publication.
+version and creates its tag; formal Release freshly builds, scans the exact
+Controller image archives and smoke-tests both native architectures before
+ordinary GitHub Release/GHCR publication.
 Manual Release dispatch is build-only. See [release policy](release-checks.md).
 
 ## Compatibility and rollback

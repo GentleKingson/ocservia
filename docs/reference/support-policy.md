@@ -132,8 +132,9 @@ Three pairs are deliberately not conflated:
   through the scheduled Security Checks workflow and must be green on the
   release candidate. See [SECURITY.md](../../SECURITY.md) for reporting and
   supported-version policy.
-- **Image scanning:** Business CI scans every built Controller image on both
-  native architectures with pinned Syft and Grype tools and an updated
+- **Image scanning:** Release `build-controller-images` scans every exact
+  Controller release archive on both native architectures (amd64 and arm64),
+  before image smoke and artifact upload, with pinned Syft and Grype tools and an updated
   vulnerability database. Temporary OS scan data is removed after the gate;
   it is not published as Release assets. A High or Critical OS finding with
   an available fix fails CI unless a reviewed entry in
@@ -142,7 +143,9 @@ Three pairs are deliberately not conflated:
   reason and unexpired review date. A new CVE, changed package/base or expired
   review fails again. Findings without a fix remain visible in CI logs.
   Compiled first-party dependencies remain covered by the source advisory
-  scans above. Formal Release builds and publishes after the manual CI gate.
+  scans above. Formal Release builds, scans and smoke-tests after the manual CI
+  gate; either architecture failing blocks publication. Business Smoke owns
+  runtime acceptance and does not scan images.
 - **Deferred, with re-review conditions:** the same-line database patch
   candidates identified during contract review (PostgreSQL 17.11, MySQL
   8.4.12 container / 8.4.11 native, MariaDB 12.3.3) are **not** part of the
