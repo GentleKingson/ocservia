@@ -11,7 +11,7 @@ import (
 type SchedulerLeaseStore struct{ tx database.Tx }
 
 func (s *SchedulerLeaseStore) RecordMaintenanceCompletion(ctx context.Context, owner schedulerlease.Owner, epoch int64) error {
-	_, err := s.tx.Exec(ctx, `SELECT public.g6_record_scheduler_maintenance($1,$2,$3)`, owner.InstanceID, owner.Incarnation, epoch)
+	_, err := s.tx.Exec(ctx, `SELECT public.test_record_scheduler_maintenance($1,$2,$3)`, owner.InstanceID, owner.Incarnation, epoch)
 	return err
 }
 

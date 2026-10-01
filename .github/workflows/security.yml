@@ -25,7 +25,6 @@ jobs:
             profile: go-security
             command: |
               (cd control-plane && govulncheck ./...)
-              (cd tools/g6-harness && govulncheck ./...)
           - name: Rust advisories
             profile: rust-security
             command: |
@@ -37,7 +36,6 @@ jobs:
             profile: npm-security
             command: |
               (cd web && npm audit --package-lock-only --ignore-scripts)
-              (cd scripts/g6-runtime && npm audit --package-lock-only --ignore-scripts)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

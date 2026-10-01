@@ -133,7 +133,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	}
 	f.wait("scheduler maintenance commit", func() bool {
 		var completed int
-		return owner.Store.QueryRow(f.ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed) == nil && completed > 0
+		return owner.Store.QueryRow(f.ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed) == nil && completed > 0
 	})
 	f.wait("Controller trust socket", func() bool { _, err := os.Stat(f.root + "/controller/trust.sock"); return err == nil })
 	// Match deployed enrollment policy: new nodes have no owner session yet.

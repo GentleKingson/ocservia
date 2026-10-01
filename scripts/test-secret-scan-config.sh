@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Freeze the G6 evidence secret-scan configuration: the default rule set stays
+# Freeze the repository secret-scan configuration, including historical fixtures: the default rule set stays
 # fully active, only the public run-scoped relay-pre-fault idempotency key is
 # exempted, and the behavioral proof that real credentials still fail closed
 # runs wherever the pinned gitleaks binary exists (scripts/security-check.sh).
@@ -12,7 +12,7 @@ CONFIG="${ROOT}/scripts/secret-scan.toml"
 SECURITY_CHECK="${ROOT}/scripts/security-check.sh"
 
 grep -qF 'useDefault = true' "${CONFIG}" || {
-  echo "the G6 evidence scan config must extend the default rule set" >&2
+  echo "the repository scan config must extend the default rule set" >&2
   exit 1
 }
 grep -qF 'g6-relay-pre-fault-[0-9]+-[0-9]+-fd-b' "${CONFIG}" || {
@@ -48,7 +48,7 @@ grep -qF 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAOCAQ8AMIIBCgKCAQEA' "${CO
   exit 1
 }
 if grep -qE '^[[:space:]]*paths[[:space:]]*=' "${CONFIG}"; then
-  echo "path-based exemptions are forbidden in the G6 evidence scan config" >&2
+  echo "path-based exemptions are forbidden in the repository scan config" >&2
   exit 1
 fi
 # Only the reviewed curl command-boundary correction may override a rule.
@@ -69,7 +69,7 @@ PY
 # the security scan itself. A missing invocation would leave the allowlist
 # unverified, so the wiring is asserted here where no binary is required.
 grep -qF 'test-secret-scan-config-runtime.sh' "${SECURITY_CHECK}" || {
-  echo "the repository security scan must run the G6 scan-config runtime proof" >&2
+  echo "the repository security scan must run the historical scan-config runtime proof" >&2
   exit 1
 }
 grep -qF -- '--config "${ROOT}/scripts/secret-scan.toml"' "${SECURITY_CHECK}" || {
@@ -77,4 +77,4 @@ grep -qF -- '--config "${ROOT}/scripts/secret-scan.toml"' "${SECURITY_CHECK}" ||
   exit 1
 }
 
-echo "g6 secret scan configuration tests passed"
+echo "repository secret scan configuration tests passed"

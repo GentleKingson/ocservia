@@ -10,9 +10,9 @@ const selected = paths => Object.values(selectChecks(paths)).map(value => value.
 assert.deepEqual(selected(["docs/how-to/enroll-node.md", "README.md"]), [false, false]);
 assert.deepEqual(selected(["web/src/App.vue"]), [true, false]);
 for (const path of ["proto/command.proto", "toolchains.lock", "unknown/path", "docs/reference/support-policy.md",
-  "docs/acceptance/g6-slo.yaml", ".github/workflows/release.yml", "scripts/release-selection.mjs"])
+  "docs/development/resilience.md", ".github/workflows/release.yml", "scripts/release-selection.mjs"])
   assert.deepEqual(selected([path]), [true, true], path);
-assert.deepEqual(selected(["scripts/test-g6-relay-proof.mjs"]), [false, true]);
+assert.deepEqual(selected(["rust/crates/agent/src/main.rs"]), [false, true]);
 assert.deepEqual(selected(["web/src/App.vue", "rust/crates/agent/src/main.rs"]), [true, true]);
 assert.deepEqual(Object.values(selectChecks([], "diff failed")).map(value => value.selected), [true, true]);
 const required = ["build", "security"];

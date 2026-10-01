@@ -27,10 +27,10 @@ if [[ "${MODE}" != standard ]]; then
   require_go_race
 fi
 
-GO_MODULES=(control-plane tools/g6-harness)
+GO_MODULES=(control-plane)
 
 if [[ "${MODE}" != "race" ]]; then
-  test -z "$(gofmt -l "${ROOT}/control-plane" "${ROOT}/tools/g6-harness")"
+  test -z "$(gofmt -l "${ROOT}/control-plane")"
   for module in "${GO_MODULES[@]}"; do
     (cd "${ROOT}/${module}" && go vet ./...)
     (cd "${ROOT}/${module}" && go test -count=1 ./...)

@@ -32,7 +32,7 @@ Consumers use producer artifact IDs, verify
 manifest and payload digests, and check image architecture and source labels.
 Tag runs import verified accepted products into their own run artifacts; no
 cache hit or mutable registry tag substitutes for those producer-bound bytes.
-G6 wraps the verified Agent payload; its fault domains retain isolated state.
+Selected single-node recovery checks reuse the verified Business environment and payload.
 Release Check requires all selected consumers to succeed, transitively gating
 their fixture producers. Focused fixture and gate tests run through
 `bash scripts/test-release-upgrade.sh` on BuildServer.
@@ -109,7 +109,7 @@ For a separate full dry-run, dispatch `release.yml` with the selected `version`
 and `arch=all` on the candidate branch. This does not publish, create tags or
 change production Secrets, and its products cannot replace the required
 Integrated acceptance. Follow [current package validation](release-upgrade-validation.md)
-and [Resilience](g6-readiness.md) for environment and rerun boundaries.
+and [Resilience](resilience.md) for environment and rerun boundaries.
 
 Preserve actual job/step timings, cache state and sanitized failure details.
 Report measured wall time and runner-minutes separately from source-derived

@@ -21,7 +21,6 @@ identity="$(
       scripts/ci-go-cache-key.sh scripts/go-check.sh scripts/required-go-tests.sh \
       scripts/database-integration.sh scripts/database-foundation-integration.sh \
       go.work go.work.sum control-plane/go.mod control-plane/go.sum \
-      tools/g6-harness/go.*
   } | sha256sum
 )"
 printf 'identity=%s\n' "${identity%% *}"

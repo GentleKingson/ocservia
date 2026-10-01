@@ -53,10 +53,6 @@ classify_path() {
       tools_suite release ;;
     deploy/test-fixtures/*|rust/test-runtime.Dockerfile)
       run_go=true; run_database=true; tools_suite release ;;
-    docs/acceptance/g6-*.json|docs/acceptance/g6-slo.yaml|\
-    .github/workflows/g6-*|.github/actions/g6-*/*|deploy/g6-*/*|\
-    tools/g6-harness/*|scripts/*g6*)
-      tools_suite release ;;
     proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
     web/*|scripts/web-check.sh) run_web=true ;;
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile)

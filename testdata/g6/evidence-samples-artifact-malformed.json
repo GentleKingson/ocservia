@@ -1,8 +1,0 @@
-{
-  "base": "evidence-pass.json",
-  "artifact_files": {
-    "resource-samples.csv": "timestamp,component,instance,rss_bytes,fd_count,tasks,queue_depth,db_connections,environment_id,candidate_sha\n2026-08-14 00:00:00,controller,api-1,104857600,48,120,0,,g6-12345678,1111111111111111111111111111111111111111\n2026-08-14T00:00:05Z,controller,api-1,104861696,48,120,0,,g6-12345678,1111111111111111111111111111111111111111\n"
-  },
-  "rebind_overridden_artifacts": true,
-  "expected_error": "resource samples artifact resource-samples.csv row 2 timestamp must be a strict RFC 3339 timestamp"
-}
