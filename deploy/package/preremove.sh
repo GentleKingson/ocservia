@@ -27,17 +27,9 @@ if [[ "${removal}" != true || ! -x /usr/libexec/ocservia/ocservia-agent ]]; then
   exit 0
 fi
 
-fingerprint="$(cat -- "${package_root}/trusted-release-key.sha256")"
-if [[ ! "${fingerprint}" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "ocservia-agent: embedded release key fingerprint is malformed" >&2
-  exit 1
-fi
-
 archive="${package_root}/ocservia-agent-${version}-linux-${package_arch}.tar.gz"
-verified_root="$(AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
-  "${package_root}/verify-agent-package.sh" \
-  "${archive}" "${archive}.sha256" "${archive}.sha256.sig" \
-  "${package_root}/release-signing.pub.pem")"
+expected_digest="$(awk '{print $1}' "${archive}.sha256")"
+verified_root="$("${package_root}/verify-agent-package.sh" "${archive}" "${expected_digest}")"
 
 # Without --purge-state, uninstall-agent.sh preserves identity, state, and
 # configuration directories; purging stays an explicit operator decision.

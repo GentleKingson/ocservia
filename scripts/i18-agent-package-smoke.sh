@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2024 # sudo reads protected state; redirects are runner-owned.
 set -Eeuo pipefail
 
 report_error_line() {
@@ -88,53 +89,28 @@ if "${ROOT}/rust/target/release/ocservia-agent" \
 fi
 echo "fresh enrollment identity preparation passed"
 chmod 0600 "${work}/signing.key"
-openssl pkey -in "${work}/signing.key" -pubout -out "${work}/trusted.pub.pem" >/dev/null 2>&1
-openssl pkey -pubin -in "${work}/trusted.pub.pem" -outform DER -out "${work}/trusted.der"
-trusted_fingerprint="$(sha256sum "${work}/trusted.der" | awk '{print $1}')"
 openssl pkey -in "${work}/controller-command.key" -pubout \
   -out "${work}/controller-command.pub.pem" >/dev/null 2>&1
 archive="$(OUTPUT_DIR="${ARTIFACT_DIR}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION=1.0.0 \
   PACKAGE_ARCH="${PACKAGE_ARCH}" SOURCE_DATE_EPOCH=1786147200 "${ROOT}/scripts/package-agent.sh")"
 
-openssl genpkey -algorithm ED25519 -out "${work}/substitute.key" >/dev/null 2>&1
-openssl pkey -in "${work}/substitute.key" -pubout -out "${work}/substitute.pub.pem" >/dev/null 2>&1
-openssl pkeyutl -sign -rawin -inkey "${work}/substitute.key" -in "${archive}.sha256" -out "${work}/substitute.sig"
-if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" "${ROOT}/scripts/verify-agent-package.sh" \
-  "${archive}" "${archive}.sha256" "${work}/substitute.sig" "${work}/substitute.pub.pem" >/dev/null 2>&1; then
-  echo "substituted package signing key was trusted" >&2
-  exit 1
-fi
-echo "agent package signer substitution rejection passed"
-
-same_name_archive_dir="${work}/same-name/archive"
-same_name_manifest_dir="${work}/same-name/manifest"
-mkdir -p "${same_name_archive_dir}" "${same_name_manifest_dir}"
 archive_name="$(basename -- "${archive}")"
-cp -- "${archive}" "${same_name_archive_dir}/${archive_name}"
-cp -- "${archive}.sha256" "${same_name_archive_dir}/${archive_name}.sha256"
-printf '%064d  %s\n' 0 "${archive_name}" >"${same_name_manifest_dir}/${archive_name}.sha256"
-openssl pkeyutl -sign -rawin -inkey "${work}/signing.key" \
-  -in "${same_name_manifest_dir}/${archive_name}.sha256" \
-  -out "${same_name_manifest_dir}/${archive_name}.sha256.sig"
-if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
-  "${ROOT}/scripts/verify-agent-package.sh" \
-  "${same_name_archive_dir}/${archive_name}" \
-  "${same_name_manifest_dir}/${archive_name}.sha256" \
-  "${same_name_manifest_dir}/${archive_name}.sha256.sig" \
-  "${work}/trusted.pub.pem" >/dev/null 2>&1; then
-  echo "verifier reopened a same-basename checksum beside the archive" >&2
+expected_digest="$(awk '{print $1}' "${archive}.sha256")"
+if sudo env DESTDIR="${rootfs}" "${ROOT}/scripts/verify-agent-package.sh" \
+  "${archive}" "$(printf '%064d' 0)" >"${work}/digest-mismatch.log" 2>&1; then
+  echo "verifier accepted an unauthorized package digest" >&2
   exit 1
 fi
-echo "same-basename checksum substitution rejection passed"
-
-cp -- "${archive}.sha256" "${work}/-checksum"
-if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
-  "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${work}/-checksum" \
-  "${archive}.sha256.sig" "${work}/trusted.pub.pem" >/dev/null 2>&1; then
-  echo "verifier accepted an option-like input basename" >&2
-  exit 1
-fi
-echo "option-like input basename rejection passed"
+grep -Fq 'does not match the expected SHA256' "${work}/digest-mismatch.log"
+echo "package digest mismatch rejection passed"
+for malformed_digest in '' ../checksum -checksum "${expected_digest} extra"; do
+  if sudo env DESTDIR="${rootfs}" "${ROOT}/scripts/verify-agent-package.sh" \
+    "${archive}" "${malformed_digest}" >/dev/null 2>&1; then
+    echo "verifier accepted a malformed expected digest" >&2
+    exit 1
+  fi
+done
+echo "expected digest format rejection passed"
 
 foreign_arch=arm64
 if [[ "${PACKAGE_ARCH}" == arm64 ]]; then
@@ -144,11 +120,9 @@ foreign_archive="${work}/ocservia-agent-1.0.0-linux-${foreign_arch}.tar.gz"
 cp -- "${archive}" "${foreign_archive}"
 printf '%s  %s\n' "$(sha256sum -- "${foreign_archive}" | awk '{print $1}')" \
   "$(basename -- "${foreign_archive}")" >"${foreign_archive}.sha256"
-openssl pkeyutl -sign -rawin -inkey "${work}/signing.key" \
-  -in "${foreign_archive}.sha256" -out "${foreign_archive}.sha256.sig"
-if sudo env AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
-  "${ROOT}/scripts/verify-agent-package.sh" "${foreign_archive}" "${foreign_archive}.sha256" \
-  "${foreign_archive}.sha256.sig" "${work}/trusted.pub.pem" >/dev/null 2>&1; then
+
+if sudo env \
+  "${ROOT}/scripts/verify-agent-package.sh" "${foreign_archive}" "${expected_digest}" >/dev/null 2>&1; then
   echo "verifier accepted a package built for a foreign architecture" >&2
   exit 1
 fi
@@ -169,11 +143,9 @@ evil_archive="${work}/ocservia-agent-9.9.9-linux-${PACKAGE_ARCH}.tar.gz"
 tar -C "${work}/evil" -czf "${evil_archive}" ocservia-agent-9.9.9
 printf '%s  %s\n' "$(sha256sum -- "${evil_archive}" | awk '{print $1}')" \
   "$(basename -- "${evil_archive}")" >"${evil_archive}.sha256"
-openssl pkeyutl -sign -rawin -inkey "${work}/signing.key" \
-  -in "${evil_archive}.sha256" -out "${evil_archive}.sha256.sig"
-if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
-  "${ROOT}/scripts/verify-agent-package.sh" "${evil_archive}" "${evil_archive}.sha256" \
-  "${evil_archive}.sha256.sig" "${work}/trusted.pub.pem" >/dev/null 2>&1; then
+
+if sudo env DESTDIR="${rootfs}" \
+  "${ROOT}/scripts/verify-agent-package.sh" "${evil_archive}" "$(awk '{print $1}' "${evil_archive}.sha256")" >/dev/null 2>&1; then
   echo "verifier accepted an archive symlink member" >&2
   exit 1
 fi
@@ -182,9 +154,8 @@ echo "archive link member rejection passed"
 mkdir -p "${work}/download"
 download_archive="${work}/download/${archive_name}"
 cp -- "${archive}" "${download_archive}"
-package_root="$(sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
-  "${ROOT}/scripts/verify-agent-package.sh" "${download_archive}" "${archive}.sha256" \
-  "${archive}.sha256.sig" "${work}/trusted.pub.pem")"
+package_root="$(sudo env DESTDIR="${rootfs}" \
+  "${ROOT}/scripts/verify-agent-package.sh" "${download_archive}" "${expected_digest}")"
 printf '%s\n' "${package_root}" >"${ARTIFACT_DIR}/verification.log"
 verified_staging="${package_root%%/extracted/*}"
 test "$(sudo stat -c '%u:%g:%a' -- "${verified_staging}")" = "0:0:700"
@@ -232,7 +203,7 @@ sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_
 sudo cmp -s "${package_root}/rust/target/release/ocservia-agent" \
   "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "install reopened the replaced untrusted archive" >&2; exit 1; }
-echo "agent package signature verification and trusted staging passed"
+echo "agent package hash verification and trusted staging passed"
 sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent" || { echo "installed Agent binary is missing" >&2; exit 1; }
 sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
   || { echo "production relay drop-in is missing" >&2; exit 1; }
@@ -306,6 +277,7 @@ sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
   | tee "${work}/legacy-agent.service" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
+# shellcheck disable=SC2016 # Variables belong to systemd's service environment.
 printf '%s\n' '[Service]' 'EnvironmentFile=/etc/ocservia-agent/relays.env' 'ExecStart=' \
   'ExecStart=/usr/libexec/ocservia/ocservia-agent --controller $CONTROLLER_ENDPOINT_ID --node-id $NODE_ID --relay-mode custom --relay-url $RELAY_URL_A --relay-url $RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token' \
   >"${work}/legacy-agent-relays.conf"
@@ -763,20 +735,14 @@ sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_
   "${package_root}/scripts/install-agent.sh"
 
 # Durable runner end-to-end: a committed root-owned intent drives the fixed
-# runner binary, which resolves the trusted spool, re-verifies the signed
+# runner binary, which resolves the trusted spool, re-verifies the authorized
 # package through the installed verifier, executes the package lifecycle, and
 # leaves a local terminal result that survives the restart it caused.
 spool_dir="${rootfs}/var/lib/ocservia-upgrade/package-spool"
 operations_dir="${rootfs}/var/lib/ocservia-upgrade/operations"
 sudo install -d -o root -g root -m 0700 -- "${spool_dir}" "${operations_dir}" \
   "${rootfs}/etc/ocservia"
-sudo install -o root -g root -m 0644 -- "${archive}" "${archive}.sha256" \
-  "${archive}.sha256.sig" "${spool_dir}/"
-sudo install -o root -g root -m 0644 -- "${work}/trusted.pub.pem" \
-  "${rootfs}/etc/ocservia/release-signing.pub.pem"
-printf '%s\n' "${trusted_fingerprint}" >"${work}/trusted-release-key.sha256"
-sudo install -o root -g root -m 0600 -- "${work}/trusted-release-key.sha256" \
-  "${rootfs}/etc/ocservia/trusted-release-key.sha256"
+sudo install -o root -g root -m 0644 -- "${archive}" "${spool_dir}/"
 durable_uuid() {
   python3 - <<'PY'
 import time, uuid

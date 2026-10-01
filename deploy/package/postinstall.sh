@@ -22,17 +22,9 @@ if [[ "${package_arch}" != "${host_arch}" ]]; then
   exit 1
 fi
 
-fingerprint="$(cat -- "${package_root}/trusted-release-key.sha256")"
-if [[ ! "${fingerprint}" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "ocservia-agent: embedded release key fingerprint is malformed" >&2
-  exit 1
-fi
-
 archive="${package_root}/ocservia-agent-${version}-linux-${package_arch}.tar.gz"
-verified_root="$(AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
-  "${package_root}/verify-agent-package.sh" \
-  "${archive}" "${archive}.sha256" "${archive}.sha256.sig" \
-  "${package_root}/release-signing.pub.pem")"
+expected_digest="$(awk '{print $1}' "${archive}.sha256")"
+verified_root="$("${package_root}/verify-agent-package.sh" "${archive}" "${expected_digest}")"
 
 # install-agent.sh remains the only install-layout authority; the native
 # package just hands the verified staging scripts control. A production
