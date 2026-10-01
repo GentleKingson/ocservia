@@ -125,9 +125,12 @@ tag is the compiler version, not an endpoint or Relay protocol version. Do not
 replace this with `cargo install --version`: upstream Relay 1.2.0's archive lock
 still has rustls 0.23.41, while the reviewed build lock uses 0.23.45.
 
-For a rolling upgrade, replace Relays one at a time, retaining a healthy member,
-then upgrade transportd and Agents without changing keys, ALPNs, grants, or
-authorization revisions. A protocol-compatible old binary is not necessarily a
+The supported deployment has one Relay. Plan a communication interruption for
+its maintenance, preserve its address and trust material, then restore it and
+verify fresh Agent connections and reconciled command results. Upgrade
+transportd and Agents without changing keys, ALPNs, grants or authorization
+revisions. The retained low-level multi-member mechanism above does not expand
+product support to Relay redundancy. A protocol-compatible old binary is not necessarily a
 security-safe rollback: Iroh 1.0.0 reintroduces the oversized Relay batch and
 predictable mapped-address issues, and Relay's old registry lock reintroduces
 the rustls advisory. Prefer a previous build containing the same security fixes;

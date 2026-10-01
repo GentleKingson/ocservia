@@ -126,8 +126,10 @@ conflicting writes to the affected resource. This is an operational requirement,
 not a claim that the API implements a new resource-wide lock. Do not clear the
 journal or root effect store, edit durable state, reset endpoint identities,
 resend the original mutation, or use the same or a new idempotency key to guess
-the result. Read-only recovery queries are not mutation retries. A package
-upgrade is not reconciliation. Follow the existing
+the result. Read-only recovery queries are not mutation retries. The existing
+explicit `RetryIfEffectAbsent` path remains available only after its required
+effect-absence proof succeeds; an offline or healthy service alone does not
+supply that proof. A package upgrade is not reconciliation. Follow the existing
 [incident recovery procedure](../operations/incident-recovery.md#transport-and-credentials).
 
 Keep strict automatic-recovery probes unchanged. A green attempt does not
