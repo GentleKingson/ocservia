@@ -70,8 +70,9 @@ For MySQL/MariaDB, use `external`, provide separate owner and runtime DSNs in
 plus `database-backup.cnf` in the protected secret directory. Only `migrate`
 receives the owner DSN. The runtime receives the application DSN and CA, never
 the owner credential. Both DSNs must use `tls=true`; the production descriptor
-mounts `database-ca.pem` as the trust root. The backend-specific backup image must be digest-pinned
-through `OCSERV_DATABASE_BACKUP_IMAGE`. Snapshot restore, PITR, failover, and
+mounts `database-ca.pem` as the trust root. The backend-specific backup image must use an explicit version tag or SHA-256
+reference through `OCSERV_DATABASE_BACKUP_IMAGE` for standalone v1, or the
+selected backend image in the v2 deployment configuration. Snapshot restore, PITR, failover, and
 cross-engine movement are separate procedures; no PostgreSQL G6, HA, or PITR
 claim applies to either MySQL-compatible backend.
 
