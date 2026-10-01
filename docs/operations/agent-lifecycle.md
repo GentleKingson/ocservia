@@ -16,18 +16,19 @@ After its external endpoint is deployed and verified, the operator-hosted thin
 first-install chain is deliberately split:
 
 ```text
-Stage-0 -> exact vX.Y.Z Stage-1 -> signed checksum -> native package
+Stage-0 -> exact vX.Y.Z Stage-1 -> HTTPS native package
         -> identity/sealing -> Bootstrap Enrollment -> ENROLLED_LOCAL
         -> independent approval -> service activation
 ```
 
-Stage-0 is only a convenience entrypoint whose first bytes rely on the static
-HTTPS endpoint. The versioned Stage-1 asset and native package are immutable
-Release assets authenticated by `SHA256SUMS.sig`, the independently
-provisioned Ed25519 public key and its pinned fingerprint, and the selected
-asset digest. A Bootstrap Token can create or recover only the same pending
-node; it cannot approve the node. The package and enrollment lifecycles retain
-their existing authority boundaries.
+Stage-0 and initial Stage-1/native package downloads rely on HTTPS. The
+installer freezes the downloaded native package in root-owned staging and
+checks that its bytes remain unchanged before invoking the package manager.
+This transport check does not authorize an AgentUpgrade: upgrades use the
+SHA256 in the already-authorized Controller command. A Bootstrap Token can
+create or recover only the same pending node; it cannot approve the node.
+Package installation, enrollment, approval and service activation retain their
+existing authority boundaries.
 Until that hosting has operational ownership and byte-verification evidence,
 the public Quick Start obtains the installer from a clean exact-release
 checkout; the installed native package has no runtime dependency on Git.

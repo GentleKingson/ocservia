@@ -18,11 +18,10 @@ reset an existing node's identity to make installation succeed. See the
 - Supported managed-node platforms are:
   - Ubuntu 22.04/24.04/26.04 or Debian 12/13 on `x86_64` or `aarch64` using native `.deb` packages.
   - Rocky Linux 9 on `x86_64` or `aarch64` using native `.rpm` packages.
-- The release-signing public key and expected SHA-256 fingerprint are provisioned through a protected channel.
 - Relay access token and Controller command verification key files are available on the node through protected paths.
 - A bootstrap token is available if you want the installer to enroll the node in the same run.
 
-Ubuntu 20.04 and Debian 11 are not supported for managed nodes because the native package verification path requires OpenSSL 3.
+Ubuntu 20.04 and Debian 11 are not supported for managed nodes because they are outside the verified native runtime baseline.
 
 ## 1. Prepare the node configuration
 
@@ -46,8 +45,6 @@ Configure at least:
 | `RELAY_URL_A`, `RELAY_URL_B` | Required HTTPS A; omit B or leave it empty. Nonempty B is rejected. |
 | `RELAY_ACCESS_TOKEN_SOURCE` | Protected source file for the relay token. |
 | `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE` | Protected source file for the Controller command verification key. |
-| `TRUSTED_RELEASE_KEY` | Trusted release-signing public key. |
-| `EXPECTED_RELEASE_KEY_SHA256` | Expected fingerprint of the trusted release key. |
 | `BOOTSTRAP_TOKEN_SOURCE` | Optional protected source file for one-run enrollment. |
 
 The installer reads `./install.env` from the current directory. Shell variables override values from the file.
@@ -76,7 +73,7 @@ For a deliberate whole-lifecycle-as-root run, add `--root-lifecycle`:
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh --root-lifecycle
 ```
 
-The installer detects the platform, downloads the matching `.deb` or `.rpm`, verifies the release trust, installs the package, prepares node state, writes relay configuration, and prepares the persistent node identity. Enrollment and the installed service use the same sole Relay URL. Any nonempty B is rejected before installation or execution.
+The installer detects the platform, downloads the matching `.deb` or `.rpm` over HTTPS, freezes it in root-owned staging, installs the package, prepares node state, writes relay configuration, and prepares the persistent node identity. Enrollment and the installed service use the same sole Relay URL. Any nonempty B is rejected before installation or execution.
 
 It does not approve the node and does not enable or start services.
 
@@ -114,7 +111,7 @@ A healthy already-active node should report `SERVICES_ACTIVE` without reinstalli
 
 ## Lifecycle after installation
 
-- Upgrade with the next signed native package or the Controller-driven Agent upgrade workflow.
+- Upgrade with the next native package or the Controller-driven Agent upgrade workflow.
 - Roll back with the matched package snapshot through `ocservia-agent-rollback`.
 - Uninstall through `dpkg` or `rpm`; package scripts preserve identity, state, and configuration by default.
 - Do not rerun a `latest` convenience installer as an implicit upgrade.
