@@ -32,5 +32,5 @@ jobs:
     with:
       version: ${{ inputs.version }}
       run-resilience: ${{ inputs.run-resilience }}
-      profile: ${{ (inputs.production_signer || inputs.purpose == 'integration') && 'extended' || 'smoke' }}
+      profile: ${{ (inputs.purpose == 'integration') && 'extended' || 'smoke' }}
       production_signer: ${{ inputs.production_signer }}

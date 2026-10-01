@@ -168,7 +168,7 @@ do not reset journals to make an upgrade pass.
 ## CI and rollout decisions
 
 Run manual Release Check on merged main and require Full CI, Security and
-Integrated Business with Resilience PASS. The operator then confirms the
+Integrated Business Smoke with single-instance recovery PASS. The operator then confirms the
 version and creates its tag; formal Release builds and smoke-tests both native
 architectures before publication. Historical compatibility gates are retired,
 not skipped successes.
