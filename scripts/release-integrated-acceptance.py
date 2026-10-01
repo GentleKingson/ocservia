@@ -140,13 +140,13 @@ def rejected_upgrade():
     containers = run(COMPOSE, 'ps', '-q').stdout
     bundle = WORK / 'invalid-bundle'
     shutil.copytree(os.environ['CANDIDATE_BUNDLE'], bundle)
-    signature = bundle / 'SHA256SUMS.sig'
-    signature.write_bytes(bytes(len(signature.read_bytes())))
+    config = bundle / f"controller-release-{os.environ['CONTROLLER_ARCH']}.json"
+    config.write_text('{invalid deployment configuration')
     result = run(ROOT / 'deploy/production/controller.sh', 'upgrade', '--release-file',
                  bundle / f"controller-release-{os.environ['CONTROLLER_ARCH']}.json", check=False)
-    assert result.returncode != 0 and 'release bundle authenticity verification failed' in result.stderr
+    assert result.returncode != 0 and 'release manifest is invalid' in result.stderr
     assert state.read_bytes() == before and run(COMPOSE, 'ps', '-q').stdout == containers
-    record('invalid_signature_rejected_before_service_stop')
+    record('invalid_configuration_rejected_before_service_stop')
     # Hold only this disposable environment's published port to force a real
     # activation failure after verification/pull, then retry the same manifest.
     run('docker', 'stop', container('edge'))
