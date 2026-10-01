@@ -302,7 +302,7 @@ def certificate():
         # A cached online flag can still describe the process we just stopped.
         def fresh_session():
             current = owner()
-            return current if (current['owner_epoch'] > before['owner_epoch'] and
+            return current if (current and current['owner_epoch'] > before['owner_epoch'] and
                                current['connection_id'] != before['connection_id'] and
                                api(node_path)['connection_state'] == 'online') else None
         after = wait_for('new fenced session after node restart', fresh_session)
@@ -566,7 +566,7 @@ def owner():
 
 def fresh_owner(before):
     current = owner()
-    return current if (current['owner_epoch'] > before['owner_epoch'] and
+    return current if (current and current['owner_epoch'] > before['owner_epoch'] and
                        current['connection_id'] != before['connection_id'] and
                        api('nodes/' + os.environ['T07_NODE'])['connection_state'] == 'online') else None
 
@@ -617,18 +617,22 @@ def agent_privd_recovery(operations, config_hash):
         wait_for(service + ' active', lambda: run('systemctl', 'show', service, '-p', 'ActiveState', '--value').strip() == 'active')
         check_confirmed(operations, config_hash)
         assert identity_digest() == identity
-    record('resilience_agent_privd')
+    record('resilience_agent')
 
 
 def authorized_reload(name):
     node = 'nodes/' + os.environ['T07_NODE']
     approval_id = approval('service.reload', 'node', os.environ['T07_NODE'])
-    before = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
+    deep = os.environ.get('BUSINESS_PROFILE') == 'extended'
+    if deep:
+        before = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
     key = secrets.token_hex(16)
     body = {'reason': name, 'ttl_seconds': 300}
     headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"', 'X-Approval-ID': approval_id}
     operation = api(node + '/service:reload', body, headers=headers, status=202)
     wait_for(name, lambda: completed(operation))
+    if not deep:
+        return operation
     verify_completed_operations([operation])
     replay = api(node + '/service:reload', body, headers=headers, status=202)
     assert replay['id'] == operation['id'] and replay['command_id'] == operation['command_id']
@@ -636,7 +640,62 @@ def authorized_reload(name):
     return operation
 
 
+def agent_stack_recovery():
+    identity = identity_digest()
+    before = owner()
+    # One systemd transaction orders privd before its Requires= dependent Agent.
+    run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
+    for service in ('ocservia-privd', 'ocservia-agent'):
+        wait_for(service + ' active', lambda: run(
+            'systemctl', 'show', service, '-p', 'ActiveState', '--value').strip() == 'active')
+    wait_for('fresh Agent stack session', lambda: fresh_owner(before))
+    assert identity_digest() == identity
+    record('resilience_agent')
+
+
+def smoke_relay_recovery(ping):
+    single_relay_argv()
+    before = owner()
+    node = 'nodes/' + os.environ['T07_NODE']
+    relay = os.environ['T07_RELAY_CONTAINER']
+    try:
+        run('docker', 'stop', relay)
+        wait_for('Agent transport offline without Relay', lambda: api(node)['connection_state'] == 'offline')
+    finally:
+        run('docker', 'start', relay)
+    wait_for('fresh Agent session after Relay recovery', lambda: fresh_owner(before))
+    authorized_reload('Relay reconnect business')
+    wait_for('VPN after Relay recovery', ping, 40)
+    record('resilience_relay')
+
+
 def resilience():
+    if os.environ.get('BUSINESS_PROFILE') == 'extended':
+        deep_resilience()
+        return
+    before = owner()
+    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane', 'transportd')
+    wait_for('Controller stack readiness', ready)
+    transport_ready()
+    wait_for('fresh Controller stack session', lambda: fresh_owner(before))
+    authorized_reload('Controller stack recovery')
+    record('resilience_controller')
+    agent_stack_recovery()
+    try:
+        run(str(ROOT / 'deploy/production/compose.sh'), 'stop', 'postgres')
+        outage = api('readyz', role='anonymous', status=503)
+        assert outage['type'] == 'https://ocservia.dev/problems/database-unavailable'
+    finally:
+        run(str(ROOT / 'deploy/production/compose.sh'), 'start', 'postgres')
+    wait_for('database readiness recovered', ready)
+    wait_for('Agent online after database recovery', lambda: api(
+        'nodes/' + os.environ['T07_NODE'])['connection_state'] == 'online')
+    authorized_reload('database reconnect business')
+    record('resilience_database', backend='postgres')
+    vpn_smoke('relay_recovery', relay_recovery=True)
+
+
+def deep_resilience():
     operation, config_hash = confirmed_config()
     operations = [operation]
     identity = identity_digest()
@@ -644,26 +703,21 @@ def resilience():
     before = owner()
     run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
     wait_for('Controller readiness', ready)
-    if os.environ.get('BUSINESS_PROFILE') == 'extended':
-        trust_controller()
+    trust_controller()
     wait_for('fresh Controller owner session', lambda: fresh_owner(before))
     check_confirmed(operations, config_hash)
     operations.append(authorized_reload('Controller restart recovery'))
     record('resilience_controller', operation_id=operation['id'])
 
-    extended = os.environ.get('BUSINESS_PROFILE') == 'extended'
-    if extended:
-        checkpoints = [json.loads(line)['name'] for line in (EVIDENCE / 'api-checkpoints.jsonl').read_text().splitlines()]
-        assert 'resilience_agent_privd' in checkpoints and 'resilience_relay' in checkpoints
-    else:
-        agent_privd_recovery(operations, config_hash)
+    checkpoints = [json.loads(line)['name'] for line in (EVIDENCE / 'api-checkpoints.jsonl').read_text().splitlines()]
+    assert 'resilience_agent' in checkpoints and 'resilience_relay' in checkpoints
     before = owner()
     run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'transportd')
     transport_ready()
     wait_for('fresh transport session', lambda: fresh_owner(before))
     check_confirmed(operations, config_hash)
     operations.append(authorized_reload('transport restart recovery'))
-    record('resilience_transport')
+    record('deep_transport_recovery')
 
     # The original Controller and its pool stay running throughout the outage.
     approval_id = approval('service.reload', 'node', os.environ['T07_NODE'])
@@ -686,12 +740,9 @@ def resilience():
     assert sql(f"SELECT count(*) FROM operations WHERE workspace_id='{WORKSPACE}' AND idempotency_key='{key}';") == '0'
     check_confirmed(operations, config_hash)
     operations.append(authorized_reload('database pool recovery'))
-    record('resilience_database_api', backend='postgres', uncommitted_intent_not_accepted=True)
-    if not extended:
-        vpn_smoke('relay_recovery', relay_recovery=True)
+    record('resilience_database', backend='postgres', uncommitted_intent_not_accepted=True)
     assert identity_digest() == identity
     check_confirmed(operations, config_hash)
-    record('resilience_complete')
 
 
 def browser_verify():
@@ -996,10 +1047,7 @@ def vpn_smoke(phase, relay_recovery=False):
             assert api(f"nodes/{os.environ['T07_NODE']}")['config_revision'] == 1
             record('real_vpn_' + phase)
             if relay_recovery:
-                def native_session():
-                    rows = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
-                    return next(row['ID'] for row in rows if row['Username'] == username)
-                single_relay_recovery(connected, native_session, [])
+                smoke_relay_recovery(connected)
         finally:
             subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
                            capture_output=True, check=False)
