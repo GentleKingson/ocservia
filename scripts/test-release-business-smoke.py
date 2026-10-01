@@ -130,25 +130,44 @@ def main():
             vpn.assert_called_once_with('relay_recovery', relay_recovery=True)
             cross.assert_not_called()
 
-        for offline in (True, False):
+        for expired in (True, False):
             events.clear()
             def relay_wait(description, fn, seconds=120):
-                if 'offline' in description and not offline:
-                    raise RuntimeError('transport stayed online')
-                return fn()
+                events.append(('wait', description))
+                result = fn()
+                if not result:
+                    raise RuntimeError(description)
+                return result
             with patch.dict(os.environ, {**env, 'T07_RELAY_CONTAINER': 'relay'}), \
-                    patch.object(business, 'single_relay_argv'), patch.object(business, 'owner'), \
+                    patch.object(business, 'single_relay_argv'), patch.object(business, 'owner', return_value='old'), \
                     patch.object(business, 'run', side_effect=recovery_command), \
-                    patch.object(business, 'api', return_value={'connection_state': 'offline'}), \
-                    patch.object(business, 'fresh_owner', return_value=True), \
+                    patch.object(business, 'api', side_effect=AssertionError('must not poll stale telemetry')), \
+                    patch.object(business, 'sql', return_value='t' if expired else 'f') as sql, \
+                    patch.object(business, 'fresh_owner', side_effect=lambda old: events.append(('fresh', old)) or True), \
                     patch.object(business, 'wait_for', side_effect=relay_wait), \
-                    patch.object(business, 'authorized_reload') as reload, patch.object(business, 'record') as record:
+                    patch.object(business, 'authorized_reload', side_effect=lambda name: events.append(('reload', name))), \
+                    patch.object(business, 'record') as record:
                 try:
-                    business.smoke_relay_recovery(lambda: True)
-                except RuntimeError:
-                    assert not offline
-                assert events == [('docker', 'stop', 'relay'), ('docker', 'start', 'relay')]
-                assert reload.call_count == record.call_count == int(offline)
+                    business.smoke_relay_recovery(lambda: events.append(('vpn',)) or True)
+                except RuntimeError as error:
+                    assert not expired and 'owner lease invalidation' in str(error)
+                else:
+                    assert expired, 'live lease must prevent recovery success'
+                sql.assert_called_once()
+                assert "node_id=decode('node','hex')" in sql.call_args.args[0]
+                assert 'lease_until>clock_timestamp()' in sql.call_args.args[0]
+                expected = [('docker', 'stop', 'relay'),
+                            ('wait', 'single Relay owner lease invalidation'),
+                            ('docker', 'start', 'relay')]
+                if expired:
+                    expected += [('wait', 'fresh Agent session after Relay recovery'), ('fresh', 'old'),
+                                 ('reload', 'Relay reconnect business'),
+                                 ('wait', 'VPN after Relay recovery'), ('vpn',)]
+                    assert [c.args[0] for c in record.call_args_list] == [
+                        'single_relay_owner_lease_invalidated', 'resilience_relay']
+                else:
+                    record.assert_not_called()
+                assert events == expected
 
         directives = business.smoke_directives(4)
         assert {item['name'] for item in directives} == {
