@@ -112,7 +112,7 @@ else
 fi
 
 docker run --rm --name "${NAME}-workflow" --network "container:${NAME}" \
-  --cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID --cap-add=DAC_OVERRIDE --cap-add=KILL --cap-add=NET_ADMIN \
+  --cap-drop=ALL --cap-add=CHOWN --cap-add=FOWNER --cap-add=SETUID --cap-add=SETGID --cap-add=DAC_OVERRIDE --cap-add=KILL --cap-add=NET_ADMIN \
   -v "${ROOT}:/workspace:ro" -v "${ROOT}/.cache/go-build:/go-cache" -v "${ROOT}/.cache/go-mod:/go-mod:ro" \
   -v "${ARTIFACT_DIR}:/artifacts" -e GOCACHE=/go-cache -e GOMODCACHE=/go-mod -e GOPROXY=off -e GOTOOLCHAIN=local \
   "${MOUNTS[@]}" "${ENVIRONMENT[@]}" "${WORKFLOW_IMAGE}" "${COMMAND[@]}" \

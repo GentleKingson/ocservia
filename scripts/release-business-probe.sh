@@ -551,7 +551,10 @@ T07_P12_HASH="$(sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-priv
 python3 "${ROOT}/scripts/release-business-api.py" token
 sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
 bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
-grep -q '^PENDING_APPROVAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
+# Bootstrap reports only local enrollment; approve() below independently
+# checks the Controller's pending state before the authorized transition.
+grep -q '^ENROLLED_LOCAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
+grep -q '^SERVICES: NOT_OBSERVED$' "${ARTIFACT_DIR}/managed-enrollment.log"
 export T07_NODE
 T07_NODE="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
 [[ "${T07_NODE}" =~ ^[0-9a-f-]{36}$ ]]
