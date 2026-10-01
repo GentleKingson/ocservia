@@ -1128,6 +1128,13 @@ if run_controller_uninstall "${fixture}/uninstall-unknown-flag" --unexpected \
 fi
 grep -Fq 'usage:' "${after_unknown_uninstall}"
 
+version_release="${fixture}/release/version-images.json"
+jq '.images |= with_entries(.value |= sub("@sha256:[0-9a-f]{64}$"; ":v0.2.0"))' "${release_file}" >"${version_release}"
+version_state="${fixture}/version-images"
+mkdir -m 700 "${version_state}"
+run_controller "${version_state}" "${version_release}" env
+cmp -s "${version_release}" "${version_state}/current-release.json"
+
 integrated_release="${fixture}/release/integrated.json"
 jq --arg ref "registry.test/image@${digest}" '.manifest_version = 2 | .signer_state_version = 1 |
   .images += {edge:$ref, relay:$ref, signer:$ref, mysql_backup:$ref, mariadb_backup:$ref}' \
