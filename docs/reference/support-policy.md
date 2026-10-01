@@ -96,7 +96,7 @@ Each supported deployment uses one Controller, one database instance and one
 dedicated Relay. The database choices and supported versions above, integrated
 / standalone deployments, bundled / external database modes and multi-Agent
 management remain unchanged. Components may run on separate hosts. Controller
-HA, multiple Relay failover, database clusters, PostgreSQL automatic failover
+HA, multiple Relay failover, database replication clusters, PostgreSQL automatic failover
 and PITR readiness are outside the supported scope. Rebind uses two independent
 Controller deployments; it is not HA. See the
 [resilience coverage and migration decision](../development/resilience.md).
