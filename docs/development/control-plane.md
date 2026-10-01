@@ -160,7 +160,7 @@ for a current workspace example.
 An additive migration is not a cross-version safety guarantee. Do not rewrite
 published migration SQL or discard data to make a target start. Execution
 receipts are not a backup. Use [backend-specific recovery](../operations/incident-recovery.md#database-recovery):
-PostgreSQL backup/PITR within its scope or MySQL/MariaDB logical restore, not
+PostgreSQL verified backup and isolated restore or MySQL/MariaDB logical restore, not
 equivalent HA/PITR guarantees.
 
 Run the browser-to-simulator E2E with `make e2e`. The script scopes every

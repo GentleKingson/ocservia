@@ -11,7 +11,7 @@ without `baseline_release` or a version-order requirement:
 
 ```bash
 gh workflow run release-upgrade.yml --ref <candidate-branch> \
-  -f version=1.1.0 -f purpose=smoke
+  -f version=1.1.0 -f purpose=smoke -f run-resilience=true
 ```
 
 Choose an exact candidate branch. Dispatch derives its source SHA and checks
@@ -52,8 +52,7 @@ Publication must validate its own actual signed products and image digests.
 
 Independent failed units can rerun using their producer-bound inputs, without
 substituting another candidate or latest-success artifacts. Rebuilding a product
-requires its dependent checks again. Shared cross-host resilience belongs to
-one fault timeline and must rerun together. Preserve failed attempts; do not
+requires its dependent checks again. A selected single-node recovery run must rerun its complete Business owner job. Preserve failed attempts; do not
 turn skipped historical checks into a compatibility PASS.
 
 Local syntax and contract checks run in an isolated BuildServer checkout:
