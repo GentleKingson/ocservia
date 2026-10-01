@@ -1,8 +1,8 @@
 # Current package validation
 
 Use [Release Check](release-checks.md) on merged `main` for publication
-qualification. It always runs Full CI, Security, and Integrated Business with
-Resilience. Historical native upgrade and mixed-version compatibility checks
+qualification. It always runs Full CI, Security, and Integrated Business Smoke with
+single-instance recovery. Historical native upgrade and mixed-version compatibility checks
 remain removed; current checks do not guarantee cross-version safety.
 
 `Release Diagnostics` uses the same Business driver for manual investigation:
@@ -14,11 +14,11 @@ gh workflow run release-upgrade.yml --ref <branch> \
 ```
 
 Integrated is the default and uses the actual Signer on disposable native
-amd64/arm64 runners. It freshly builds the packages and images, scans OS
+amd64 runners. It freshly builds the packages and images, scans OS
 vulnerabilities, and installs from a local loopback registry. It does not write
 GHCR, create tags, publish GitHub Releases, or read production Secrets.
-`production_signer=false` with `purpose=smoke` selects the smaller standalone
-smoke scope; it cannot replace the complete manual Release Check.
+`purpose=smoke` selects smoke independently of `production_signer`;
+`production_signer=false` selects the standalone topology. This diagnostic run it cannot replace the complete manual Release Check.
 
 Both native architecture builds retain real ELF architecture/version checks,
 protected archive staging, SHA checks, installation/retry/removal smoke and

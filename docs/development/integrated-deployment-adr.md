@@ -236,7 +236,7 @@ these files are deliverable, and P5 must exercise the deployed configuration.
 ### CI and release order
 
 Manual Release Check on merged main runs Full CI, Security and native
-Integrated Business with Resilience. Business builds local images and uses a
+Integrated Business Smoke with single-instance recovery. Business builds local images and uses a
 loopback registry in disposable runners. After PASS, the operator confirms the
 version and creates its tag; formal Release freshly builds and smoke-tests
 both native architectures before ordinary GitHub Release/GHCR publication.

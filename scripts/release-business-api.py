@@ -477,11 +477,16 @@ def smoke_user():
     node = os.environ['T07_NODE']
     password = secrets.token_hex(24)
     (WORK / 'private/smoke-vpn-password').write_text(password)
-    encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(WORK / 'user.pub.pem'),
-                                '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
-                               input=password.encode(), capture_output=True, check=True).stdout
-    sealed = {'version': 1, 'purpose': 'user_password', 'key_id': 't07-user',
-              'ciphertext': base64.b64encode(encrypted).decode()}
+    if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
+        sealed = json.loads(run('python3', str(ROOT / 'scripts/release-production-signer.py'), 'seal',
+                                data=password.encode()))
+        record('production_signer_password_sealed')
+    else:
+        encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(WORK / 'user.pub.pem'),
+                                    '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
+                                   input=password.encode(), capture_output=True, check=True).stdout
+        sealed = {'version': 1, 'purpose': 'user_password', 'key_id': 't07-user',
+                  'ciphertext': base64.b64encode(encrypted).decode()}
     operation = api(f'nodes/{node}/users', {'name': 't07-smoke', 'sealed_password': sealed,
                                            'reason': 'T07 Release Business Smoke'},
                     headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=202)
@@ -493,41 +498,6 @@ def smoke_user():
 
     wait_for('smoke VPN user', user_ready)
     record('smoke_vpn_user_ready', operation_id=operation['id'])
-
-
-def smoke_rollback():
-    node = os.environ['T07_NODE']
-    physical_before = json.loads((WORK / 'smoke-applied.json').read_text())['materialized_hash']
-    plan = smoke_plan(smoke_directives(129), 1, 't07-smoke-rollback')
-    assert plan['materialized_hash'] != physical_before
-    approval_id = approval('config.apply', 'config_plan', plan['id'])
-    script = WORK / 'reject-new-config-reload'
-    script.write_text('#!/bin/sh\nif grep -qx "max-clients = 129" /etc/ocserv/ocserv.conf; then exit 9; fi\nexec /bin/kill -HUP "$1"\n')
-    dropin = WORK / 'config-reload-fault.conf'
-    # /run can be a noexec mount in the isolated systemd container.
-    dropin.write_text('[Service]\nExecReload=\nExecReload=/usr/local/sbin/t07-config-reload $MAINPID\n')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '700', str(script), '/usr/local/sbin/t07-config-reload')
-    run('sudo', 'mkdir', '-p', '/etc/systemd/system/ocserv.service.d')
-    run('sudo', 'install', '-o', 'root', '-g', 'root', '-m', '644', str(dropin),
-        '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf')
-    try:
-        run('sudo', 'systemctl', 'daemon-reload')
-        operation = api(f"config-plans/{plan['id']}/apply",
-                        {'approval_id': approval_id, 'reason': 'T07 Release Business Smoke rollback'},
-                        headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-        def rollback_result():
-            value = api('operations/' + operation['id'])
-            if value.get('config_apply_state') == 'failed_critical':
-                raise RuntimeError('native ConfigPlan rollback failed critically')
-            return value if value.get('config_apply_state') == 'rolled_back' else None
-
-        result = wait_for('native ConfigPlan rollback', rollback_result)
-        assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
-        assert api(f'nodes/{node}')['config_revision'] == 1
-        record('smoke_config_plan_rolled_back', operation_id=operation['id'], state=result['config_apply_state'])
-    finally:
-        run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/usr/local/sbin/t07-config-reload')
-        run('sudo', 'systemctl', 'daemon-reload')
 
 
 def configuration():
@@ -1039,8 +1009,8 @@ def vpn_smoke(phase, relay_recovery=False):
 if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
-                     'browser_prepare', 'browser_verify', 'business', 'smoke_config_apply', 'smoke_user', 'smoke_rollback',
-                     'vpn_before_rollback', 'vpn_after_rollback', 'resilience'):
+                     'browser_prepare', 'browser_verify', 'business', 'smoke_config_apply', 'smoke_user',
+                     'vpn_after_config_apply', 'vpn_after_rollback', 'resilience'):
         raise SystemExit('unknown phase')
     if phase.startswith('vpn_'):
         vpn_smoke(phase.removeprefix('vpn_'))

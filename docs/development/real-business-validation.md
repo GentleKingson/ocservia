@@ -3,22 +3,22 @@
 The release Business Smoke job exercises one
 amd64 production path: Controller and native systemd Agent/privd/ocserv
 installation, Local requester/approver login, approved ConfigPlan apply, real
-OpenConnect VPN traffic, automatic ConfigPlan rollback and a fresh VPN check.
+OpenConnect VPN traffic, production Signer password sealing and internal TLS.
 No production binary, service, Relay or VPN is mocked. This is neither native
 package acceptance nor a Controller/database HA guarantee.
 
-Manual [Release Check](release-checks.md) always runs Integration with OIDC,
-PKI/P12/revoke, real browser, single-Relay recovery and Agent/privd restart
-checks. It also requires `run-resilience=true`. See the [coverage inventory](release-business-coverage.md).
+Manual [Release Check](release-checks.md) always runs this Integrated smoke with
+`production_signer=true` and `run-resilience=true` on amd64. Native package and
+Controller image build/smoke jobs in Release own both amd64 and arm64 coverage.
+See the [coverage inventory](release-business-coverage.md).
 
 For investigation, dispatch `release-upgrade.yml` on the branch being tested
 with `version=0.0.0`, `purpose=integration`, `production_signer=true`, and
-`run-resilience=true`. The job freshly builds local products, scans image OS
-vulnerabilities and runs native Integrated lifecycle checks on both supported
-architectures. The amd64 owner runs business and finite recovery; arm64 runs
-native Integrated installation and restart. Use `production_signer=false` with
-`purpose=smoke` for the smaller standalone scope. Neither mode publishes a
-Release/tag or writes GHCR. Host installation runs only on disposable runners.
+`run-resilience=true` for OIDC, PKI/P12/revoke, browser, rollback and deep recovery.
+Use `purpose=smoke` for the release scope. Profile and Signer selection are
+independent; `production_signer=false` uses the standalone fixture topology.
+Neither mode publishes a Release/tag or writes GHCR. Host installation runs
+only on disposable amd64 runners.
 
 ## Evidence and boundaries
 
@@ -30,12 +30,12 @@ historical binary compatibility. Native scriptlets verify the embedded archive
 checksum in root-owned staging. Managed-node preparation and final
 `SERVICES_ACTIVE` convergence use the shipped installer.
 After the approved positive ConfigPlan apply, each profile establishes
-an OpenConnect tunnel and passes real ICMP traffic. It then applies a reviewed
+an OpenConnect tunnel and passes real ICMP traffic. Manual integration then applies a reviewed
 revision whose reload is deliberately rejected, verifies automatic exact-byte
 rollback, and establishes a new OpenConnect tunnel with ICMP traffic. This is
 an **automatic rollback of a failed apply**, not an operator-initiated rollback
 of the successful revision. `timings.json` records per-stage wall-clock seconds;
-failure diagnostics retain the actual environment and execution outcome. No
+sanitized diagnostics retain the actual environment and execution outcome. No
 runtime target is currently a release contract.
 
 `result.json` records scope, diagnostic version, outcome, timings and passed
@@ -95,7 +95,7 @@ gates. Per-phase checkpoints are
 written only after assertions pass. Missing checkpoints are NOT RUN; preserve
 failures, original run/attempt and exact SHA across retries.
 
-The offline Relay queue scenario proves the command was never sent, then
+The manual integration offline Relay queue scenario proves the command was never sent, then
 requires the original operation to succeed with exactly one additional native
 reload after restoring the same Relay. No EXPECTED-UNKNOWN exception can turn
 its failure into acceptance. Other uncertain outcomes retain read-only
@@ -105,11 +105,11 @@ reconciliation and the existing explicit safe retry after proven effect absence.
 scenario checkpoints. A selected recovery run requires exactly one PASS for
 Controller, Agent/privd, transport, reference database API outage, Relay and
 completion. Missing fields/checkpoints, cancellation, failure and unexpected
-skip block acceptance. Unselected recovery is explicitly SKIPPED. Install-only
-architecture diagnostics are SKIPPED and do not supply recovery acceptance.
+skip block acceptance. Unselected recovery is explicitly SKIPPED.
 
-Failure diagnostics retain environment inventory, timings, exit status and
-API/DB/journal/root receipt observations for seven days. Logs are private until redacted. Never upload the workspace
+Sanitized diagnostics retain environment inventory, timings and exit status
+for seven days on success and failure. Manual integration also retains
+API/DB/journal/root receipt observations. Logs are private until redacted. Never upload the workspace
 secret directory, cookies, raw database or password file. Cleanup removes only
 task containers, network namespace, builder and private directory; the native
 installation lives only on the disposable hosted runner. Do not generalize this
@@ -117,9 +117,8 @@ cleanup to a shared host.
 
 To close the smoke scope, cover the prepublication production installation path
 with the current locally built products, separately authenticated principals,
-positive ConfigPlan apply, automatic native rollback and VPN traffic before and
-after rollback. Keep the extended production-path checks until their coverage
-is formally transferred. Public download checks remain separate from the local Business run. Positive configuration apply requires native acceptance
+positive ConfigPlan apply, production Signer sealing and real VPN traffic.
+Automatic native rollback and the second VPN check belong to manual integration. Public download checks remain separate from the local Business run. Positive configuration apply requires native acceptance
 of the [reviewed complete contract](complete-config-contract.md), not just
 contract approval or unit tests; missing acceptance still blocks readiness. Preserve the
 matched-release recovery boundary in
