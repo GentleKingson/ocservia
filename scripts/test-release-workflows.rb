@@ -91,6 +91,14 @@ Dir.mktmpdir('release-check-') do |dir|
     require_check(status == expected, "version input validation failed for #{tag}/#{version}")
   end
   consumer = diagnostic.fetch('jobs').fetch('business')
+  summary = consumer['steps'].find {|s| s['name'] == 'Summarize business timings and sanitized failures'}
+  require_check(summary && summary['if'] == 'always()', 'business timings must remain visible on failure')
+  File.write("#{dir}/result.json", {'probe_status'=>'FAIL','last_stage'=>'single_instance_recovery','exit_code'=>1,'timings'=>[{'stage'=>'controller_image_build','seconds'=>42}],'private_detail'=>'omit-this-field'}.to_json)
+  File.write("#{dir}/api-checkpoints.jsonl", {'name'=>'real_vpn_relay_recovery','time'=>'2026-01-01T00:00:00Z','status'=>'PASS','private_detail'=>'omit-this-field'}.to_json + "\n")
+  File.write("#{dir}/probe.log", "unrelated log line\nRuntimeError: timeout: owner lease invalidation\n")
+  output, _, status = Open3.capture3({'DIAGNOSTICS'=>dir},'bash','-euo','pipefail','-c',summary.fetch('run'))
+  require_check(status.success? && output.include?('controller_image_build') && output.include?('real_vpn_relay_recovery') && output.include?('RuntimeError: timeout'), 'safe diagnostic summary missing')
+  require_check(!output.include?('omit-this-field') && !output.include?('unrelated log line'), 'summary must select safe fields instead of dumping logs')
   require_check(diagnostic['permissions'] == {'contents'=>'read'} && !consumer.key?('environment'), 'Business must run without publishing authority')
   require_check(consumer['runs-on'] == 'ubuntu-24.04' && !consumer.key?('strategy') && consumer.dig('env','CONTROLLER_ARCH') == 'amd64', 'Business must exercise only native amd64')
   gate = consumer['steps'].find {|s| s['name'] == 'Require completed business and actual recovery scenarios'}.fetch('run')
