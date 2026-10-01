@@ -2,6 +2,9 @@ name: Release Business
 on:
   workflow_call:
     inputs:
+      run-resilience:
+        type: boolean
+        default: false
       helpers-id:
         type: string
         required: true
@@ -26,12 +29,17 @@ on:
       controller-sha256:
         type: string
         required: true
+    outputs:
+      resilience-result:
+        value: ${{ jobs.business.outputs.resilience-result }}
 permissions:
   contents: read
 jobs:
   business:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      resilience-result: ${{ steps.resilience.outputs.result }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -64,12 +72,27 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           BUSINESS_PROFILE: ${{ inputs.profile }}
+          BUSINESS_RUN_RESILIENCE: ${{ inputs.run-resilience }}
           CANDIDATE_SHA: ${{ github.sha }}
           CANDIDATE_PRODUCTS: ${{ runner.temp }}/products
           AGENT_MANIFEST_SHA256: ${{ inputs.agent-sha256 }}
           CONTROLLER_MANIFEST_SHA256: ${{ inputs.controller-sha256 }}
           ARTIFACT_DIR: ${{ runner.temp }}/business-evidence
         run: bash scripts/release-business-probe.sh
+      - name: Require actual resilience result
+        id: resilience
+        env:
+          REQUESTED: ${{ inputs.run-resilience }}
+          RESULT_PATH: ${{ runner.temp }}/business-evidence/result.json
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { checkBusinessResilience } from './scripts/release-selection.mjs';
+          const result = JSON.parse(fs.readFileSync(process.env.RESULT_PATH, 'utf8'));
+          if (result.candidate_sha !== process.env.GITHUB_SHA) throw new Error('wrong candidate result');
+          const status = checkBusinessResilience(result, process.env.REQUESTED === 'true');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `result=${status}\n`);
+          JS
       - name: Preserve sanitized diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

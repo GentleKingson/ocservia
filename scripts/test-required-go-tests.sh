@@ -256,7 +256,7 @@ printf '%s\n' "$*" >>"${ROUTE_LOG}"
 SH
 cat >"${tmp}/wrapper/scripts/test-enrollment-restart.sh" <<'SH'
 #!/usr/bin/env bash
-[[ "$1" == ocservia-pr02-mysql-* ]] || exit 1
+[[ "$1" == ocservia-pr02-mysql-* || "$1" == ocservia-pg-smoke-* ]] || exit 1
 printf 'backend-enrollment-restart\n' >>"${ROUTE_LOG}"
 SH
 cat >"${tmp}/wrapper/bin/docker" <<'SH'
@@ -302,11 +302,14 @@ for script in database-foundation-integration.sh database-postgres-smoke.sh; do
   export ROUTE_LOG="${tmp}/${script}.route"
   PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=17 \
     bash "${tmp}/wrapper/scripts/${script}" >/dev/null
-  test "$(wc -l <"${ROUTE_LOG}")" -eq 2
+  test "$(wc -l <"${ROUTE_LOG}")" -eq 3
   grep -q '^--smoke ./internal/platform/app TestDatabaseCoreSmoke$' "${ROUTE_LOG}"
   grep -Eq '^--smoke ./(internal/database/mysql|migrations) TestDatabaseInitializationSmoke$' "${ROUTE_LOG}"
+  grep -q '^backend-enrollment-restart$' "${ROUTE_LOG}"
 done
-echo 'Current smoke includes core and initialization checks'
+  # The existing restart proof is required in each current smoke container.
+  # Its route is checked above alongside the two scoped database entries.
+echo 'Current smoke includes core, initialization and restart checks'
 
 # Basic CI has one explicit entry, not the deep acceptance manifest above.
 mkdir "${tmp}/smoke"

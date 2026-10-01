@@ -20,7 +20,7 @@ source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid python3 openssl
 if [[ "${scope}" == full ]]; then require_test_commands timeout; fi
 require_test_docker
-if [[ "${scope}" == full || "${scope}" == regression ]]; then require_go_race; fi
+require_go_race
 TLS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-pr02-tls-XXXXXX")"
 TLS_DIR="${TLS_ROOT}/certs"
 if [[ "${scope}" == full || "${scope}" == regression ]]; then
@@ -99,6 +99,7 @@ if [[ "${scope}" == smoke ]]; then
   cd "${ROOT}/control-plane"
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseInitializationSmoke
+  bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
   exit 0
 fi
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)

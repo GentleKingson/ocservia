@@ -289,7 +289,7 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		t.Fatal("HTTP port survived Controller exit", err)
 	}
 	listener.Close()
-	t.Log("real CLI, independent local identities, two dedicated TLS relays, enrollment, root attestation, fenced certificate lifecycle and one-use artifact passed")
+	t.Log("real CLI, independent local identities, one dedicated TLS Relay, enrollment, root attestation, fenced certificate lifecycle and one-use artifact passed")
 	t.Log("all Controller roles drained after SIGTERM with real Agent/transport still running; Trust socket and HTTP port released")
 }
 
@@ -643,7 +643,7 @@ func (f *controllerE2E) startRelays() {
 	for name, ids := range map[string][2]int{"agent": {65533, 65533}, "transport": {65532, 65532}} {
 		f.file(name+"/relay-token", []byte("real-process-private-relay-token-v1"), ids[0], ids[1], 0600)
 	}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 1; i++ {
 		address := e2eAddress(f.t)
 		config := fmt.Sprintf("enable_relay = true\nhttp_bind_addr = %q\nenable_quic_addr_discovery = false\nenable_metrics = false\n[access]\nshared_token = [\"real-process-private-relay-token-v1\"]\n[tls]\nhttps_bind_addr = %q\ncert_mode = \"Manual\"\nmanual_cert_path = %q\nmanual_key_path = %q\n", e2eAddress(f.t), address, f.root+"/relay.pem", f.root+"/relay.key")
 		path := f.file(fmt.Sprintf("relay-%d.toml", i), []byte(config), 0, 0, 0600)
@@ -661,7 +661,7 @@ func (f *controllerE2E) startRelays() {
 }
 
 func (f *controllerE2E) relayArgs(principal string) []string {
-	return []string{"--relay-mode", "custom", "--relay-url", f.relays[0], "--relay-url", f.relays[1], "--relay-token-file", f.root + "/" + principal + "/relay-token", "--relay-ca-file", f.root + "/relay-ca.pem"}
+	return []string{"--relay-mode", "custom", "--relay-url", f.relays[0], "--relay-token-file", f.root + "/" + principal + "/relay-token", "--relay-ca-file", f.root + "/relay-ca.pem"}
 }
 
 func (f *controllerE2E) prepareSealKeys() []string {

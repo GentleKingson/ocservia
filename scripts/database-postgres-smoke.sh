@@ -3,8 +3,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands go jq setsid
+require_test_commands go jq setsid python3
 require_test_docker
+require_go_race
 case "${DATABASE_TEST_SCOPE:-smoke}" in
   smoke) ;;
   *) echo 'PostgreSQL smoke requires smoke scope' >&2; exit 2 ;;
@@ -24,7 +25,15 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-docker run -d --name "${name}" -p '127.0.0.1::5432' \
+# A stable host port keeps the original pool/DSN valid across container restart.
+port="$(python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(('127.0.0.1', 0))
+    print(sock.getsockname()[1])
+PY
+)"
+docker run -d --name "${name}" -p "127.0.0.1:${port}:5432" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner \
   -e POSTGRES_PASSWORD=test-owner-only "${image}" >/dev/null
 ready=false
@@ -44,3 +53,4 @@ bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app Test
 docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'CREATE DATABASE initialization_smoke' >/dev/null
 export OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/initialization_smoke?sslmode=disable"
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./migrations TestDatabaseInitializationSmoke
+bash "${ROOT}/scripts/test-enrollment-restart.sh" "${name}"

@@ -34,7 +34,7 @@ fail_closed() {
   local flag
   reason="$1"
   for flag in "${flags[@]}"; do printf -v "${flag}" true; done
-  tools_suite guards; tools_suite release; tools_suite g6
+  tools_suite guards; tools_suite release
 }
 
 # Flags are read indirectly through ${!flag} when writing the outputs.
@@ -44,23 +44,23 @@ classify_path() {
   case "${path}" in
     # Executable/configuration contracts must precede documentation suffixes.
     scripts/ci-tools-check.sh)
-      tools_suite guards; tools_suite release; tools_suite g6 ;;
+      tools_suite guards; tools_suite release ;;
     scripts/build-relay.sh)
       run_rust=true; tools_suite release ;;
     scripts/buildx-cache.sh|scripts/test-buildx-cache-fallback.sh|.github/actions/build-cache-credentials/*)
-      tools_suite release; tools_suite g6 ;;
+      tools_suite release ;;
     scripts/test-build-cache-credentials.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config*.sh)
-      tools_suite g6 ;;
+      tools_suite release ;;
     deploy/test-fixtures/*|rust/test-runtime.Dockerfile)
-      run_go=true; run_database=true; tools_suite release; tools_suite g6 ;;
+      run_go=true; run_database=true; tools_suite release ;;
     docs/acceptance/g6-*.json|docs/acceptance/g6-slo.yaml|\
     .github/workflows/g6-*|.github/actions/g6-*/*|deploy/g6-*/*|\
     tools/g6-harness/*|scripts/*g6*)
-      tools_suite g6 ;;
+      tools_suite release ;;
     proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
     web/*|scripts/web-check.sh) run_web=true ;;
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile)
-      tools_suite release; tools_suite g6 ;;
+      tools_suite release ;;
     rust/*|scripts/rust-check.sh) run_rust=true ;;
     deploy/managed-node/install.sh|deploy/production/install.sh|deploy/production/controller-bootstrap.sh|\
     deploy/lib/install-env.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
@@ -89,7 +89,7 @@ classify_path() {
     scripts/bootstrap.sh|scripts/env.sh|scripts/checksums.txt|toolchains.lock)
       fail_closed shared_toolchain_changed ;;
     deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*|scripts/p1-*|scripts/test-p1-*|scripts/security-acceptance-*)
-      tools_suite g6 ;;
+      tools_suite release ;;
     *) fail_closed "unknown_path:${path}" ;;
   esac
 }

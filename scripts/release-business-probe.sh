@@ -10,6 +10,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${BUSINESS_PROFILE:=smoke}"
 : "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
 : "${INTEGRATED_INSTALL_ONLY:=false}"
+: "${BUSINESS_RUN_RESILIENCE:=false}"
+[[ "$BUSINESS_RUN_RESILIENCE" == true || "$BUSINESS_RUN_RESILIENCE" == false ]]
+resilience_result=SKIPPED
+if [[ "$BUSINESS_RUN_RESILIENCE" == true && "$INTEGRATED_INSTALL_ONLY" != true ]]; then
+  resilience_result=FAIL
+fi
+relay_ipv4_rule=false
+relay_ipv6_rule=false
 [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == false || "$BUSINESS_PROFILE" == extended ]]
 [[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
 bash "$ROOT/scripts/release-business-environment.sh"
@@ -115,6 +123,8 @@ cleanup() {
   jq -n --arg sha "${CANDIDATE_SHA}" --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg profile "${BUSINESS_PROFILE}" \
+    --arg resilience "$resilience_result" --argjson resilience_requested "$BUSINESS_RUN_RESILIENCE" \
+    --argjson resilience_scenarios "$(if [[ -f "${ARTIFACT_DIR}/api-checkpoints.jsonl" ]]; then jq -s '[.[] | select(.name | startswith("resilience_")) | {name,status,time}]' "${ARTIFACT_DIR}/api-checkpoints.jsonl"; else printf '[]'; fi)" \
     --arg arch "$CONTROLLER_ARCH" --argjson install_only "$INTEGRATED_INSTALL_ONLY" \
     --argjson disposable_container "${INTEGRATED_DISPOSABLE_CONTAINER:-false}" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
@@ -127,12 +137,21 @@ cleanup() {
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
       scope:(if $profile == "smoke" then "business-smoke" else "integration" end),
+      resilience_requested:$resilience_requested,
+      resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),
+      resilience_scenarios:$resilience_scenarios,
       planned_topology:{hosts:1,architecture:$arch,native_systemd_node:($install_only | not),relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
       deferred:["Publish: immutable published Release download/bootstrap"],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
+  if [[ "$relay_ipv4_rule" == true ]]; then
+    sudo iptables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
+  fi
+  if [[ "$relay_ipv6_rule" == true ]]; then
+    sudo ip6tables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
+  fi
   if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
     sudo systemctl stop ocservia-p2-crl >/dev/null 2>&1
     docker rm -f "$T07_SIGNER_CONTAINER" >/dev/null 2>&1
@@ -449,6 +468,40 @@ export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
 export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=production
 managed_options=(--version "v${VERSION}")
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi
+# The managed installer preflight reads the real native ocserv resources.
+# Prepare and start this task-owned VPN fixture before enrollment, then bind
+# its TLS material to the enrolled node through the existing ConfigPlan path.
+sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
+sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
+sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
+sudo groupadd --system ocservia-vpn
+sudo useradd --system --no-create-home --gid ocservia-vpn --shell /usr/sbin/nologin ocservia-vpn
+write_node_config() {
+cat >"${work}/ocserv.conf" <<EOF
+auth = "plain[passwd=/etc/ocserv/ocpasswd]"
+tcp-port = 44443
+udp-port = 0
+run-as-user = ocservia-vpn
+run-as-group = ocservia-vpn
+socket-file = /run/ocserv.socket
+server-cert = $1
+server-key = $2
+max-clients = 4
+max-same-clients = 2
+cookie-timeout = 300
+device = vpns
+ipv4-network = 10.208.0.0/24
+dns = 1.1.1.1
+route = default
+use-occtl = true
+EOF
+sudo install -m 600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
+}
+write_node_config /etc/ocserv/t07.crt /etc/ocserv/t07.key
+sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
+sudo systemctl daemon-reload
+sudo systemctl restart ocserv
+sudo /usr/libexec/ocservia/ocservia-privd --host-preflight
 bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-prepare.log"
 grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
 record signed_native_package_and_managed_prepare
@@ -498,7 +551,10 @@ T07_P12_HASH="$(sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-priv
 python3 "${ROOT}/scripts/release-business-api.py" token
 sudo install -o root -g ocserv-agent -m 640 "${work}/private/enrollment-token" /etc/ocservia-agent/enrollment-token
 bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-enrollment.log"
-grep -q '^PENDING_APPROVAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
+# Bootstrap reports only local enrollment; approve() below independently
+# checks the Controller's pending state before the authorized transition.
+grep -q '^ENROLLED_LOCAL$' "${ARTIFACT_DIR}/managed-enrollment.log"
+grep -q '^SERVICES: NOT_OBSERVED$' "${ARTIFACT_DIR}/managed-enrollment.log"
 export T07_NODE
 T07_NODE="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
 [[ "${T07_NODE}" =~ ^[0-9a-f-]{36}$ ]]
@@ -510,34 +566,18 @@ cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/oc
 record official_managed_enrollment_and_unchanged_launchers
 # Prevent direct UDP connectivity from masking the single-Relay outage.
 sudo iptables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
-sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
-sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
-sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
+relay_ipv4_rule=true
+if [[ -n "$(cat /proc/net/if_inet6)" ]]; then
+  sudo ip6tables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
+  relay_ipv6_rule=true
+fi
 next_stage config_tls
 python3 "${ROOT}/scripts/release-business-api.py" config_prepare
 config_ref="$(jq -r .id "${work}/config-reference.json")"
-cat >"${work}/ocserv.conf" <<EOF
-auth = "plain[passwd=/etc/ocserv/ocpasswd]"
-tcp-port = 44443
-udp-port = 0
-run-as-user = ocservia-vpn
-run-as-group = ocservia-vpn
-socket-file = /run/ocserv.socket
-server-cert = /etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.pem
-server-key = /etc/ocservia-agent/config-tls/${config_ref}/v1/server-key.pem
-max-clients = 4
-max-same-clients = 2
-cookie-timeout = 300
-device = vpns
-ipv4-network = 10.208.0.0/24
-dns = 1.1.1.1
-route = default
-use-occtl = true
-EOF
-sudo install -m 600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
+write_node_config "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.pem" "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-key.pem"
 sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
-sudo systemctl daemon-reload
-sudo systemctl start ocserv ocservia-privd
+sudo systemctl restart ocserv
+sudo systemctl start ocservia-privd
 next_stage node_approval
 python3 "${ROOT}/scripts/release-business-api.py" approve
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
@@ -606,6 +646,12 @@ if [[ "${BUSINESS_PROFILE}" == extended ]]; then
   next_stage supplemental_business
   python3 "${ROOT}/scripts/release-business-api.py" business
   record real_vpn_business_and_recovery
+fi
+if [[ "$BUSINESS_RUN_RESILIENCE" == true ]]; then
+  next_stage single_instance_recovery
+  python3 "${ROOT}/scripts/release-business-api.py" resilience
+  resilience_result=PASS
+  record single_instance_recovery
 fi
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   next_stage integrated_recovery

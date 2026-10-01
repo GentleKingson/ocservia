@@ -49,7 +49,17 @@ for b in unset empty dual; do
   esac
   rm -f /var/lib/ocservia-agent/argv.json
   systemctl reset-failed ocservia-agent.service || true
-  systemctl start ocservia-agent.service
+  systemctl start ocservia-agent.service || [[ "$b" == dual ]]
+  if [[ "$b" == dual ]]; then
+    for _ in {1..30}; do
+      systemctl is-failed --quiet ocservia-agent.service && break
+      sleep 0.1
+    done
+    [[ "$(systemctl show ocservia-agent.service -p ExecMainStatus --value)" == 2 ]]
+    [[ ! -e /var/lib/ocservia-agent/argv.json ]]
+    echo "PASS systemd nonempty B: rejected before Agent execution"
+    continue
+  fi
   for _ in {1..30}; do
     [[ ! -s /var/lib/ocservia-agent/argv.json ]] || break
     sleep 0.1
@@ -60,7 +70,7 @@ with open("/var/lib/ocservia-agent/argv.json") as source:
     result = json.load(source)
 argv = result["argv"]
 assert result["uid"] == int(sys.argv[2]) and result["gid"] == int(sys.argv[3])
-assert argv.count("--relay-url") == (2 if sys.argv[1] == "dual" else 1)
+assert argv.count("--relay-url") == 1
 assert argv[argv.index("--controller-command-key-file") + 1] == "/protected/a key's $literal.pem"
 assert argv[-2:] == ["--relay-token-file", "/etc/ocservia-agent/relay-access-token"]
 assert "" not in argv

@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 // First match wins. Unclassified paths select both specialized checks.
 export const rules = [
+  [/^scripts\/(?:test-)?release-business-(?:api\.py|probe\.sh|smoke\.py|resilience\.py)$|^docs\/development\/resilience\.md$/, ["integration", "resilience"]],
   [/^(docs\/(acceptance|reference)\/|docs\/development\/(release-|github-actions|g6-)|SECURITY\.md$)/, ["integration", "resilience"]],
   [/^docs\/.*\.md$|^(README|CONTRIBUTING|CHANGELOG)\.md$|^LICENSE(?:\..*)?$/, []],
   [/^(web\/|openapi\/|control-plane\/gen\/|control-plane\/internal\/(gateway|session|auth|pki|approval)[^/]*\/)/, ["integration"]],
@@ -30,12 +31,34 @@ export function selectChecks(paths, fallback = "") {
     { selected: selected.has(check), reasons: reasons[check] ?? ["not selected: no relevant changes"] }]));
 }
 
+export function checkBusinessResilience(result, requested, installOnly = false) {
+  if (result.probe_status !== "PASS" || result.exit_code !== 0) throw new Error("business did not complete");
+  if (result.resilience_requested !== requested) throw new Error("resilience request mismatch");
+  const expected = requested && !installOnly ? "PASS" : "SKIPPED";
+  if (result.resilience_result !== expected) throw new Error(`resilience: expected ${expected}, got ${result.resilience_result}`);
+  if (!Array.isArray(result.resilience_scenarios)) throw new Error("missing actual recovery scenarios");
+  if (expected === "PASS") {
+    if (result.planned_topology?.native_systemd_node !== true) throw new Error("install-only cannot pass recovery");
+    for (const name of ["controller", "agent_privd", "transport", "database_api", "relay", "complete"]) {
+      const entries = result.resilience_scenarios.filter(entry => entry.name === `resilience_${name}`);
+      if (entries.length !== 1 || entries[0].status !== "PASS") throw new Error(`missing or repeated recovery: ${name}`);
+    }
+  }
+  return expected;
+}
+
 export function checkResults(selection, results, required) {
   for (const check of ["integration", "resilience"]) {
     if (typeof selection[check]?.selected !== "boolean") throw new Error(`missing selection: ${check}`);
-    const expected = selection[check].selected ? "success" : "skipped";
-    if (results[check]?.result !== expected) throw new Error(`${check}: expected ${expected}, got ${results[check]?.result}`);
   }
+  const integration = selection.integration.selected;
+  for (const [job, selected] of [["integration", integration], ["business-smoke", !integration]]) {
+    const expected = selected ? "success" : "skipped";
+    if (results[job]?.result !== expected) throw new Error(`${job}: expected ${expected}, got ${results[job]?.result}`);
+  }
+  const owner = integration ? "integration" : "business-smoke";
+  const expected = selection.resilience.selected ? "PASS" : "SKIPPED";
+  if (results[owner]?.outputs?.["resilience-result"] !== expected) throw new Error(`${owner}: missing or unsuccessful resilience result`);
   for (const job of required) {
     if (results[job]?.result !== "success") throw new Error(`${job}: not successful (${results[job]?.result})`);
   }

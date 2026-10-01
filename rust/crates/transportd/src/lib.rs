@@ -2118,6 +2118,7 @@ impl ProtocolHandler for SessionHandler {
                 connection.clone(),
                 max_message_size,
             ),
+            monitor_owner_lease(self.shared.clone(), node_id.clone(), connection.clone()),
         );
         let _closed = connection.closed().await;
         finish_session(&self.shared, &node_id, &connection, monitors, permit).await;
@@ -2129,11 +2130,16 @@ async fn finish_session(
     shared: &Shared,
     node_id: &[u8],
     connection: &Connection,
-    monitors: (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>),
+    monitors: (
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    ),
     _permit: OwnedSemaphorePermit,
 ) {
     monitors.0.abort();
     monitors.1.abort();
+    monitors.2.abort();
     let mut registry = shared.inner.connections.lock().await;
     let finishing = registry
         .get(node_id)
@@ -2151,6 +2157,49 @@ async fn finish_session(
             ))
             .await;
     }
+}
+
+// A Controller restart stops renewing its owner leases while the QUIC
+// connection can remain alive. Close that exact session on expiry so the
+// Agent negotiates a new authoritative term without restarting transportd.
+fn monitor_owner_lease(
+    shared: Shared,
+    node_id: Vec<u8>,
+    connection: Connection,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut poll = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        loop {
+            poll.tick().await;
+            let registry = shared.inner.connections.lock().await;
+            let Some(entry) = registry.get(&node_id) else {
+                break;
+            };
+            if entry.connection.stable_id() != connection.stable_id() {
+                break;
+            }
+            let Some(session_fence) = &entry.fence else {
+                continue;
+            };
+            // Renewal replaces the registered fence, not the handshake's
+            // snapshot. Read it under the same lock used by registration.
+            let fences = shared.inner.fences.lock().await;
+            let live = fences.get(&node_id).is_some_and(|registered| {
+                same_fence_term(&session_fence.verified, &registered.verified)
+                    && !lease_expired_at(
+                        registered.verified.lease_until_seconds,
+                        registered.verified.lease_until_nanos,
+                    )
+            });
+            if !live {
+                connection.close(VarInt::from_u32(0x109), b"owner lease expired");
+                break;
+            }
+        }
+    })
 }
 
 fn monitor_telemetry(
@@ -6451,6 +6500,81 @@ mod tests {
             .expect_err("epoch collision rejected");
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owner_lease_expiry_closes_the_existing_agent_session() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (term, _, _router, _client, connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 7).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(signed_controller_fence(&signing_key, &term, 2)),
+            }))
+            .await
+            .expect("register short owner lease");
+        tokio::time::timeout(Duration::from_secs(5), connection.closed())
+            .await
+            .expect("expired owner session closes without a new command");
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owner_lease_refresh_keeps_the_existing_agent_session() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (term, _, _router, _client, connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 7).await;
+        let short = signed_controller_fence(&signing_key, &term, 2);
+        {
+            let mut connections = service.shared.inner.connections.lock().await;
+            connections
+                .get_mut(node_id.as_slice())
+                .expect("live session")
+                .fence = Some(RegisteredFence {
+                verified: service
+                    .shared
+                    .keyring()
+                    .expect("keyring")
+                    .verify_connection_fence_v2(
+                        &short,
+                        &term.node_id,
+                        &term.endpoint_id,
+                        unix_now(),
+                    )
+                    .expect("short session fence"),
+                fence: short.clone(),
+                endpoint_id: term.endpoint_id,
+            });
+        }
+        for fence in [short, signed_controller_fence(&signing_key, &term, 120)] {
+            service
+                .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                    fence: Some(fence),
+                }))
+                .await
+                .expect("register or refresh the same owner term");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), connection.closed())
+                .await
+                .is_err(),
+            "the registered renewal outlives the handshake snapshot"
+        );
         service.begin_shutdown().await;
     }
 
