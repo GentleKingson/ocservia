@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavioral proof for the G6 evidence secret-scan configuration. Runs from
+# Behavioral proof for the repository secret-scan configuration, including historical fixtures. Runs from
 # scripts/security-check.sh, where the pinned gitleaks binary is guaranteed:
 # the exempted public idempotency key must pass with the configuration while
 # the unconfigured detector still flags it, and real credentials planted in
@@ -14,7 +14,7 @@ source "${ROOT}/scripts/env.sh"
 CONFIG="${ROOT}/scripts/secret-scan.toml"
 
 command -v gitleaks >/dev/null || {
-  echo "gitleaks is required to verify the G6 evidence scan configuration" >&2
+  echo "gitleaks is required to verify the repository scan configuration" >&2
   exit 1
 }
 command -v openssl >/dev/null || {
@@ -252,4 +252,4 @@ if gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}
   exit 1
 fi
 
-echo "g6 secret scan configuration runtime tests passed"
+echo "repository secret scan configuration runtime tests passed"

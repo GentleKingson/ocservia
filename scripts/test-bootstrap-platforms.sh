@@ -125,7 +125,7 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
 
     FileUtils.rm_rf("#{work}/.tools")
     FileUtils.rm_rf("#{work}/.cache")
-    %w[all ci-quality contracts g6-runtime secret-scan go-quality go-rust-integration native rust-validation web security].each do |profile|
+    %w[all ci-quality contracts secret-scan go-quality go-rust-integration native rust-validation web security].each do |profile|
       run(env, bash, bootstrap, profile, error: "#{platform}/#{profile}; artifact mappings")
       raise 'unsupported profile partially installed' if File.exist?("#{work}/.tools") || File.exist?("#{work}/.cache")
     end

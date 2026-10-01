@@ -137,7 +137,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     end
     File.write(path, stub)
   end
-  %w[bin control-plane tools/g6-harness].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
+  %w[bin control-plane].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
   %w[go gofmt].each do |name|
     path = File.join(work, "bin", name)
     File.write(path, "#!/usr/bin/env bash\nprintf '%s|%s|%s\\n' \"${0##*/}\" \"${PWD}\" \"$*\" >> \"${CI_TRACE}\"\n")
@@ -188,11 +188,6 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       routing.fetch("run_go") == "true" && File.readlines(trace).any? { |line| line.match?(/^go(fmt)?\|/) }
     run.call(env, "bash", "-eo", "pipefail", "-c", standard.fetch("run"), chdir: work) if routing.fetch("run_go") == "true"
     calls = File.readlines(trace, chomp: true)
-    expected = routing.fetch("run_go") == "true" ? 1 : 0
-    reject("#{name} must format harness #{expected} times") unless calls.count { |line| line.start_with?("gofmt|") && line.include?("tools/g6-harness") } == expected
-    ["vet ./...", "test -count=1 ./..."].each do |command|
-      reject("#{name} must run harness #{command} #{expected} times") unless calls.count("go|#{work}/tools/g6-harness|#{command}") == expected
-    end
     reject("#{name} retained retired G6 contract checks") unless calls.grep(/^test-g6-/).empty?
     reject("#{name} lost shared tooling checks") unless
       %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
@@ -206,7 +201,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       reject("Release-only accepted a substituted security entrypoint") if status.success?
       File.write(path, original)
     end
-    puts "#{name}: selected entrypoints and harness command counts passed"
+    puts "#{name}: selected entrypoints and shared tooling counts passed"
   end
 end
 

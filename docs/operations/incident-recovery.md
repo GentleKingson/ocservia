@@ -18,7 +18,7 @@ signing-key refresh and callback behavior before closing an OIDC incident.
 
 ## Transport and credentials
 
-For a single-relay outage, restore that relay at the same address with the same certificate and credentials, then verify fresh Agent heartbeats and reconciled command results. This restores the original path, not standby failover. For a dual-relay outage, leave the healthy relay configured, repair the failed relay, and verify each URL independently. Do not switch production to public relays, reset identities, or re-enroll nodes. Direct connectivity can mask an outage in a relay test.
+For a single-relay outage, restore that relay at the same address with the same certificate and credentials, then verify fresh Agent heartbeats and reconciled command results. This restores the original path, not standby failover. Do not switch production to public relays, reset identities, or re-enroll nodes. Direct connectivity can mask an outage in a relay test.
 
 For Controller endpoint-key recovery, restore the encrypted offline backup to the configured secret path as UID 65532 with mode `0400`, then derive and compare the Controller EndpointID before starting transportd. Never silently generate a replacement key. If the backup or its identity check fails, keep transport offline, revoke trust in the old EndpointID, generate a new protected key, and re-enroll every node through the normal approval path. Record both EndpointIDs and the trust transition in the incident record.
 
@@ -42,10 +42,10 @@ First identify `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` from
 the effective configuration and check the
 [production support matrix](production-deployment.md#database-support).
 
-- PostgreSQL: use [backup and restore](postgres-backup.md),
-  [PITR](postgres-pitr-restore.md), or [failover](postgres-failover.md) only
-  within their documented topology and WAL/standby prerequisites. External
-  PostgreSQL's supplied backup coverage does not itself certify HA or PITR.
+- PostgreSQL: restart the same instance for a transient outage, or use
+  [verified backup and isolated restore](postgres-backup.md) for data loss.
+  Database clusters, automatic failover and PITR readiness are outside the
+  supported single-instance deployment.
 - MySQL/MariaDB: use the matching backend's
   [logical backup and isolated restore](mysql-backup.md). It does not supply
   PITR, failover, storage snapshots or cross-engine migration. Do not run

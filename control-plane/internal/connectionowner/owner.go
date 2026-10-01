@@ -1,5 +1,5 @@
 // Package connectionowner implements the per-node connection-owner lease
-// defined by the G6 HA fencing contract: at most one unexpired owner per
+// defined by the persistent ownership fencing contract: at most one unexpired owner per
 // node, a monotonically increasing fencing epoch that is never reused, and
 // transaction-time asserts so a stale owner can never commit after a
 // takeover.

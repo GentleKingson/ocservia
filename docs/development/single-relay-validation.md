@@ -90,64 +90,19 @@ Do not change live production networks to reproduce this failure.
 
 ## Real Agent Chain
 
-`scripts/single-relay-integration.sh` reuses the existing G6 engineering setup,
-database, browser-session fixtures, enrollment and independent approval APIs.
-Its test sessions have the existing SecurityAdmin and Operator roles. It uses
-real Agent, privd, Controller and transportd binaries, a real dedicated Relay,
-and ocserv 1.3.0. No command signature, approval, identity binding, fencing,
-root receipt verification or Relay authentication is disabled.
+The signed Business Smoke / Integration environment owns real single-node
+recovery. Use the existing Release Diagnostics workflow with
+`run-resilience=true`; see [Resilience](resilience.md) and
+[Business validation](real-business-validation.md). The old G6 engineering
+entrypoint and its disposable node image are retired.
 
-Build the disposable node image with
-`docker build -f scripts/single-relay-node.Dockerfile -t "$SINGLE_NODE_IMAGE" .`.
-Set the following inputs before running the script:
-
-```sh
-export RUN_ID=single-final RUNNER_TEMP=/root/task-owned-directory
-export ARTIFACT_DIR="$RUNNER_TEMP/evidence/chain"
-export G6RD_CONTROL_PLANE_IMAGE=your-current-local-control-image
-export G6RD_TRANSPORTD_IMAGE=your-current-local-transport-image
-export G6RD_RELAY_IMAGE=your-local-authenticated-relay-image
-export G6RD_PROBE_IMAGE=your-local-image-containing-ocservia-g6-probe
-export SINGLE_NODE_IMAGE=your-local-single-relay-node-image
-export SINGLE_AGENT_ARCHIVE=/root/task-owned-directory/package.tar.gz
-export SINGLE_AGENT_PUBLIC_KEY="$SINGLE_AGENT_ARCHIVE.sha256.pub.pem"
-export SINGLE_AGENT_KEY_SHA256=your-test-release-public-key-der-sha256
-bash scripts/single-relay-integration.sh
-```
-
-Use the adjacent checksum and detached signature from `package-agent.sh`; this
-is a test signing identity, never a published release. The archive is verified
-and installed through its shipped lifecycle scripts. The existing one-shot
-privd credential API provisions the real root-owned attestation key.
-
-The fixture uses a private CA through the existing explicit CA options. Because
-the packaged launcher intentionally has no general extra-command facility, a
-test-only copy and systemd drop-in add that CA option. The original packaged
-launcher is separately tested unchanged. Backend engineering fixtures are not
-an external OIDC or complete production Compose certification. Initial trust
-snapshot synchronization restarts transportd after approval and receipt-key
-provisioning, before the first Agent start, as in the existing local G6 setup.
-This setup action must not be mistaken for automatic fault recovery.
-
-Both actual process argv contain exactly one custom Relay URL. Separate bridges
-prevent direct UDP connectivity; connection probes must report the Relay path.
-The chain checks enrollment, approval, online/fresh heartbeat, read-only ocserv
-telemetry, an independently approved real reload, and its verified result.
-It then queues another approved reload while the only Relay is stopped. The
-native business probe first waits for the old owner lease to become invalid,
-then records that the queued command has no published outbox entry, sent attempt,
-Agent journal entry or root effect before restoring the Relay. Stopping the
-container alone does not prove the buffered QUIC connection is gone. This
-offline-queue case does not promise automatic recovery of an uncertain in-flight
-reload without a root receipt; that case must remain fail closed. After
-restoration, the same operation must succeed, have one Agent journal entry with
-a root receipt, and produce exactly one additional ocserv reload. Replaying the
-API idempotency key must return the same operation and command without another
-reload. Cold-starting both communication processes with the Relay unavailable
-must recover after restoring that Relay. The fixed recovery limit is 120 seconds
-(Agent backoff capped at 30 seconds, handshake timeout 10 seconds). Process start
-timestamps and identity hashes must remain unchanged after each restoration;
-no re-enrollment, reapproval, public fallback or claimed standby switch is allowed.
+The sole-Relay scenario proves dependency on that Relay, waits until the old
+owner lease is invalid, and verifies that the approved offline command has no
+published outbox entry, sent attempt, Agent journal entry or root effect.
+Restoring the same Relay must complete the same operation with one journal
+entry, a verified root receipt and exactly one additional real reload.
+Replaying its API idempotency key returns the same operation and command with
+no additional effect. A failed queued command cannot become expected Unknown.
 
 ## Package Lifecycle And Cleanup
 

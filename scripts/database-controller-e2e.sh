@@ -44,7 +44,7 @@ if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
   [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ && "${ENGINE}" == postgres ]]
   WORKFLOW_IMAGE="${RELEASE_WORKFLOW_IMAGE}"
 else
-docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target g6-agent-runtime -t ocservia-pr02-agent:e2e "${ROOT}" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
+docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target agent-runtime -t ocservia-pr02-agent:e2e "${ROOT}" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target transportd-runtime -t ocservia-pr02-transport:e2e "${ROOT}" >"${ARTIFACT_DIR}/transport-build.log" 2>&1
 docker build -f "${ROOT}/deploy/production/relay.Dockerfile" -t ocservia-pr02-relay:e2e "${ROOT}" >"${ARTIFACT_DIR}/relay-build.log" 2>&1
 docker build -f "${ROOT}/deploy/database-e2e/Dockerfile" -t ocservia-pr02-workflow:e2e "${ROOT}" >"${ARTIFACT_DIR}/workflow-build.log" 2>&1

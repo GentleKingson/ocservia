@@ -46,11 +46,8 @@ timestamps, phase counts, and sampler status.
 
 This is initial single-host evidence, not a production capacity claim. Simulated
 Relay metadata does not prove multi-host or multi-failure-domain Relay behavior.
-The blocking G6 stability gate is a continuous 300-second run over the real
-production command path and complete G6 SLO. A 24-hour soak is a nonblocking
-long-term operational observation: it does not replace G6 and elapsed soak time
-alone does not block a release. Production-scale and dedicated, independent
-Relay A/B failure-domain validation remain G6 requirements. The script labels
+Real single-node recovery belongs to [Business resilience](resilience.md).
+This simulated capacity harness does not replace that acceptance. The script labels
 every Docker resource with its Compose project and removes only that project's
 containers, network, volumes, and locally built images on success, failure, or
 interruption.

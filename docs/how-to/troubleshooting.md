@@ -82,9 +82,9 @@ replace the Controller or Agent identity key.
 Confirm `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` from the
 effective deployment configuration before choosing a procedure:
 
-- PostgreSQL: [backup and restore](../operations/postgres-backup.md),
-  [failover](../operations/postgres-failover.md), or
-  [PITR](../operations/postgres-pitr-restore.md), within each guide's scope.
+- PostgreSQL: restart the same instance for transient outages, or use
+  [verified backup and isolated restore](../operations/postgres-backup.md).
+  Cluster failover and PITR readiness are outside the supported deployment.
 - MySQL/MariaDB: [isolated logical restore](../operations/mysql-backup.md),
   not PostgreSQL commands. This does not provide PITR, failover, storage
   snapshots or cross-engine migration.

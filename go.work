@@ -3,5 +3,4 @@ go 1.26.6
 use (
 	./control-plane
 	./signer
-	./tools/g6-harness
 )

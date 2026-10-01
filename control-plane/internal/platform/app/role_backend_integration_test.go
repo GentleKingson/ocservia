@@ -110,7 +110,7 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 					cleanup = seedPolicyCleanup(t, ctx, owner, runtime, runtimeOptions.Backend, account)
 					cleanup.revoke(t, ctx, runtimeOptions.Backend)
 				}
-				if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completedBefore); err != nil {
+				if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completedBefore); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -172,7 +172,7 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 					}
 					cleanupFailed = true
 					var completed int
-					if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil || completed != completedBefore {
+					if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed); err != nil || completed != completedBefore {
 						t.Fatal("failed maintenance wrote completion evidence", completed, err)
 					}
 					if err := owner.GrantRuntimePrivileges(ctx, account); err != nil {
@@ -192,7 +192,7 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 				maintenanceDone := !cfg.RunsScheduler()
 				if maintenance {
 					var completed int
-					if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil {
+					if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed); err != nil {
 						t.Fatal(err)
 					}
 					maintenanceDone = completed > completedBefore

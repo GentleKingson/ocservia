@@ -38,8 +38,7 @@ operating the system.
 - [Current package validation](../development/release-upgrade-validation.md)
 - [Cross-VM real E2E validation](../development/real-e2e.md)
 - [P1 resilience and initial capacity validation](../development/p1-resilience-capacity.md)
-- [G6 readiness harness](../development/g6-readiness.md)
-- [G6 HA/PITR cross-VM harness](../development/g6-ha-pitr-topology.md)
+- [Single-node resilience](../development/resilience.md)
 
 ## API and provenance
 

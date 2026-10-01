@@ -51,8 +51,6 @@ while read -r path selected; do
           expect "${out}" ci_suites guards ;;
         .github/workflows/release*.yml)
           expect "${out}" ci_suites release ;;
-        .github/workflows/g6-harness-core.yml|scripts/g6-pipeline.mjs|scripts/test-g6-resource-sampler.sh|docs/acceptance/g6-*)
-          expect "${out}" ci_suites release ;;
       esac
     else
       expect "${out}" ci_suites ''
@@ -102,20 +100,13 @@ scripts/uninstall-agent.sh run_ci_tools run_installers
 .github/workflows/release.yml run_ci_tools run_installers
 .github/workflows/release-upgrade.yml run_ci_tools run_installers
 .github/workflows/security.yml run_ci_tools
-.github/workflows/g6-harness-core.yml run_ci_tools
 scripts/ci-relevance.sh run_ci_tools
 scripts/ci-tools-check.sh run_ci_tools
 scripts/bootstrap.sh run_docs run_go run_rust run_web run_database run_ci_tools run_installers
-docs/acceptance/g6-slo.yaml run_ci_tools
-docs/acceptance/g6-runtime-result-schema.json run_ci_tools
-scripts/g6-runtime/package-lock.json run_ci_tools
-scripts/g6-pipeline.mjs run_ci_tools
-scripts/test-g6-resource-sampler.sh run_ci_tools
 scripts/buildx-cache.sh run_ci_tools
 .github/actions/build-cache-credentials/index.js run_ci_tools
-tools/g6-harness/internal/runtime/runtime.go run_ci_tools
 deploy/test-fixtures/relay.toml run_go run_database run_ci_tools
-deploy/test-fixtures/agent-supervisor.sh run_go run_database run_ci_tools
+deploy/test-fixtures/scheduler-maintenance.sql run_go run_database run_ci_tools
 rust/test-runtime.Dockerfile run_go run_database run_ci_tools
 scripts/secret-scan.toml run_ci_tools
 deploy/package/nfpm.yaml run_ci_tools run_installers

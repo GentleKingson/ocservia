@@ -14,7 +14,6 @@ shellcheck -x "${ROOT}"/scripts/*.sh
   --config ../openapi/.redocly.yaml ../openapi/openapi.yaml)
 if [[ "${scope}" == all ]]; then
   (cd "${ROOT}/control-plane" && go vet ./...)
-  (cd "${ROOT}/tools/g6-harness" && go vet ./...)
   (cd "${ROOT}/rust" && cargo clippy --workspace --all-targets --all-features -- -D warnings)
   (cd "${ROOT}/web" && npm run format:check && npm run lint && npm run typecheck)
 fi

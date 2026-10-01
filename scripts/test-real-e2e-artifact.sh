@@ -31,8 +31,8 @@ run_wait() {
   shift
   PATH="${directory}/bin:${PATH}" RUNNER_TEMP="${directory}" \
     "${HELPER}" wait-download \
-    "g6-rd-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-    "${directory}/destination" 30 "G6 Readiness Failure Domain B" "$@"
+    "real-e2e-agent-endpoint-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+    "${directory}/destination" 30 "Real E2E Node" "$@"
 }
 
 # shellcheck disable=SC2016  # the generated shim expands these at execution
@@ -40,7 +40,7 @@ peer_failed="$(install_curl_shim '
 url="${!#}"
 case "${url}" in
   *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[]}'\'' ;;
-  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[{"name":"Enroll the failure domain B fleet","status":"completed","conclusion":"failure"},{"name":"Collect diagnostics","status":"in_progress","conclusion":null}]}]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"Real E2E Node","status":"in_progress","conclusion":null,"steps":[{"name":"Enroll the isolated node","status":"completed","conclusion":"failure"},{"name":"Collect diagnostics","status":"in_progress","conclusion":null}]}]}'\'' ;;
   *) exit 64 ;;
 esac' peer-failed)"
 started="${SECONDS}"
@@ -48,7 +48,7 @@ if run_wait "${peer_failed}" >"${peer_failed}/stdout" 2>"${peer_failed}/stderr";
   echo "artifact wait accepted a failed peer job" >&2
   exit 1
 fi
-grep -q 'peer job G6 Readiness Failure Domain B failed at step Enroll the failure domain B fleet (failure)' \
+grep -q 'peer job Real E2E Node failed at step Enroll the isolated node (failure)' \
   "${peer_failed}/stderr" || {
   echo "artifact wait did not report the peer failure" >&2
   exit 1
@@ -63,7 +63,7 @@ peer_succeeded="$(install_curl_shim '
 url="${!#}"
 case "${url}" in
   *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[]}'\'' ;;
-  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"completed","conclusion":"success","steps":[]}]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"Real E2E Node","status":"completed","conclusion":"success","steps":[]}]}'\'' ;;
   *) exit 64 ;;
 esac' peer-succeeded)"
 if run_wait "${peer_succeeded}" >"${peer_succeeded}/stdout" 2>"${peer_succeeded}/stderr"; then
@@ -108,8 +108,8 @@ grep -q 'artifact API returned an invalid JSON document' "${invalid_json}/stderr
 download_success="$(install_curl_shim '
 url="${!#}"
 case "${url}" in
-  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"g6-rd-agents-enrolled-fd-b-424242-3","expired":false}]}'\'' ;;
-  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
+  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"real-e2e-agent-endpoint-424242-3","expired":false}]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"Real E2E Node","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
   *"/actions/artifacts/99/zip") cat "${RUNNER_TEMP}/artifact.zip" ;;
   *) exit 64 ;;
 esac' download-success)"
@@ -128,8 +128,8 @@ run_wait "${download_success}"
 download_transient="$(install_curl_shim '
 url="${!#}"
 case "${url}" in
-  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"g6-rd-agents-enrolled-fd-b-424242-3","expired":false}]}'\'' ;;
-  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
+  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"real-e2e-agent-endpoint-424242-3","expired":false}]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"Real E2E Node","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
   *"/actions/artifacts/99/zip")
     calls=0
     [[ ! -s "${RUNNER_TEMP}/download-calls" ]] || calls="$(cat "${RUNNER_TEMP}/download-calls")"
@@ -160,8 +160,8 @@ run_wait "${download_transient}"
 download_failure="$(install_curl_shim '
 url="${!#}"
 case "${url}" in
-  *"/artifacts?"*) printf "%s\n" '\''{"artifacts":[{"id":99,"name":"g6-rd-agents-enrolled-fd-b-424242-3","expired":false}]}'\'' ;;
-  *"/jobs?"*) printf "%s\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
+  *"/artifacts?"*) printf "%s\n" '\''{"artifacts":[{"id":99,"name":"real-e2e-agent-endpoint-424242-3","expired":false}]}'\'' ;;
+  *"/jobs?"*) printf "%s\n" '\''{"jobs":[{"name":"Real E2E Node","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
   *"/actions/artifacts/99/zip") printf "call\n" >>"${RUNNER_TEMP}/download-calls"; exit 22 ;;
   *) exit 64 ;;
 esac' download-failure)"
@@ -187,8 +187,8 @@ grep -q 'artifact download failed after .* within its 2-second retry window' \
 symlink_archive="$(install_curl_shim '
 url="${!#}"
 case "${url}" in
-  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"g6-rd-agents-enrolled-fd-b-424242-3","expired":false}]}'\'' ;;
-  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
+  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"real-e2e-agent-endpoint-424242-3","expired":false}]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"Real E2E Node","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
   *"/actions/artifacts/99/zip") cat "${RUNNER_TEMP}/artifact.zip" ;;
   *) exit 64 ;;
 esac' symlink-archive)"
@@ -212,7 +212,7 @@ grep -q 'artifact contains a symbolic link' "${symlink_archive}/stderr" || {
 artifact_without_peer_state="$(install_curl_shim '
 url="${!#}"
 case "${url}" in
-  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"g6-rd-agents-enrolled-fd-b-424242-3","expired":false}]}'\'' ;;
+  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"real-e2e-agent-endpoint-424242-3","expired":false}]}'\'' ;;
   *"/jobs?"*) exit 7 ;;
   *"/actions/artifacts/99/zip") touch "${RUNNER_TEMP}/downloaded"; exit 64 ;;
   *) exit 64 ;;

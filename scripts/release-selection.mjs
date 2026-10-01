@@ -5,11 +5,11 @@ import { pathToFileURL } from "node:url";
 // First match wins. Unclassified paths select both specialized checks.
 export const rules = [
   [/^scripts\/(?:test-)?release-business-(?:api\.py|probe\.sh|smoke\.py|resilience\.py)$|^docs\/development\/resilience\.md$/, ["integration", "resilience"]],
-  [/^(docs\/(acceptance|reference)\/|docs\/development\/(release-|github-actions|g6-)|SECURITY\.md$)/, ["integration", "resilience"]],
+  [/^(docs\/(acceptance|reference)\/|docs\/development\/(release-|github-actions)|SECURITY\.md$)/, ["integration", "resilience"]],
   [/^docs\/.*\.md$|^(README|CONTRIBUTING|CHANGELOG)\.md$|^LICENSE(?:\..*)?$/, []],
   [/^(web\/|openapi\/|control-plane\/gen\/|control-plane\/internal\/(gateway|session|auth|pki|approval)[^/]*\/)/, ["integration"]],
   [/^(proto\/|control-plane\/|rust\/crates\/(contracts|command-authorization|privd-attestation)\/)/, ["integration", "resilience"]],
-  [/^(rust\/crates\/|rust\/vendor\/|deploy\/g6-|tools\/g6-harness\/|scripts\/(?:test-)?g6-|scripts\/(?:build|verify)-g6-)/, ["resilience"]],
+  [/^(rust\/crates\/|rust\/vendor\/)/, ["resilience"]],
   [/^scripts\/(?:test-)?release-business-/, ["integration"]],
 ];
 

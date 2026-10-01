@@ -50,7 +50,7 @@ try {
   fs.symlinkSync("gateway-linux-amd64.tar", path.join(root, "control-linux-amd64.tar"));
   assert.throws(() => artifactManifest(root, identity));
   for (const [component, names] of Object.entries({
-    "test-helpers": ["probe.tar", "relay.tar", "ocservia-g6-tunnel"],
+    "test-helpers": ["relay.tar"],
   })) {
     const fixtureIdentity = { ...identity, component };
     for (const name of names) fs.writeFileSync(path.join(root, name), name);

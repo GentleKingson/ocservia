@@ -63,7 +63,6 @@ or deep historical repair suite is moved from Quick into Full.
 | --- | --- |
 | `ci.yml` | PR/main Quick; manual Quick/Full key checks |
 | `security.yml` | Weekly/manual checks and reusable release prerequisite |
-| `g6-readiness.yml`, `g6-harness-core.yml` | Independent manual formal readiness |
 | `release.yml` | Tag/manual release packaging |
 | `release-upgrade.yml` | Independent manual native release upgrades; optional published-node application matrix |
 
@@ -128,7 +127,7 @@ recovery remain in the full suite. `regression` remains manual-only. Normal CI
 explicitly passes `smoke` for both Quick and Full.
 Browser checks require Playwright Chromium installed separately. Disaster
 recovery, complex races and fault injection remain in their existing manual
-G6/deep scripts; no scheduled workflow was added.
+deep scripts; no scheduled workflow was added.
 
 ## Required check migration
 
@@ -152,19 +151,10 @@ branch protection.
 
 ## Separate acceptance
 
-G6 runs only through manual `workflow_dispatch` in `g6-readiness.yml`,
-which calls `g6-harness-core.yml` with `profile=formal`, the selected
-`authority`, and the exact `candidate_sha`. Run it before releases or major
-architecture changes. The smoke caller and all seven smoke jobs are removed;
-ordinary PRs do not run G6 smoke or formal G6. No replacement G6 check is added.
-Formal G6 and release packaging remain separate workflows, not ordinary CI or
-Basic CI prerequisites. Runtime/security/capacity acceptance and cross-VM
-enrollment are script-level manual acceptance, not GitHub Actions workflows.
-There is no separate G6 Rust cache warmup workflow. Formal G6 retains its
-BuildKit cache support and can build cold when no cache is available; cache
-warmup is not a prerequisite for Basic CI or formal G6. Without advance
-warmup, a cold formal build may take longer, but its acceptance checks remain
-unchanged.
+Selected single-node recovery runs in Business Smoke or Integration with
+`run-resilience=true`. The old G6 workflows and evidence framework are retired.
+Runtime/security/capacity acceptance and cross-VM enrollment retain their
+existing manual entry points.
 
 Basic CI does not claim production readiness, capacity, native package,
 cross-VM, browser E2E, security, or license acceptance. Those scripts
@@ -237,8 +227,7 @@ Historical application and native upgrade cells and baseline inputs are removed.
 
 Product consumers use actual producer artifact IDs plus explicit candidate
 manifest and payload verification. Independent failed jobs may rerun without
-requiring all architectures to share a run attempt. Shared cross-host faults
-still require a coherent group rerun. See [Resilience](g6-readiness.md).
+requiring all architectures to share a run attempt. A selected recovery check must rerun its complete Business owner job. See [Resilience](resilience.md).
 
 Source dependency/secret scans and Controller image scanning/SBOM policies are
 unchanged. Image scans precede any production registry write, and Publish still
