@@ -511,9 +511,9 @@ entrypoint copies the read-only Compose secret into a private mode-0600 passfile
 before invoking libpq tools.
 
 External PostgreSQL receives only verified base backup coverage from this
-deployment. Its operator must configure, retain, and test continuous WAL
-archiving independently before claiming PITR. The bundled WAL cleanup and PITR
-contract does not apply to an external server.
+deployment. Continuous WAL archiving on an external server is independently managed by
+the database operator. This deployment does not certify PITR readiness for
+bundled or external PostgreSQL. Existing backup and WAL retention stay intact.
 
 External MySQL 8.4.10 and MariaDB 12.3.2 use the backend-specific logical
 backup and restore procedure in [MySQL and MariaDB backup and restore
@@ -531,20 +531,18 @@ deploy/production/rotate-postgres-credentials.sh
 
 The workflow holds an exclusive mode-`0600` lock in the private secret directory for the complete rotation lifecycle, then verifies the current credentials, executes real `ALTER ROLE` statements through the local administrative connection, verifies both new credentials and rejects both old credentials for new connections, atomically updates the four Compose secret sources, recreates the Control Plane and backup clients, and verifies their new connections. A waiting rotation reads its baseline only after the preceding rotation releases that lock. Recovery restores the previous verifiers and files only when the database and files still match either the baseline or values written by that invocation; unexpected later state is never overwritten. Keep any reported recovery snapshot protected and services stopped until recovery completes. The script never accepts passwords as command-line arguments and does not print them.
 
-Production accepts one dedicated HTTPS relay as a non-redundant deployment:
+Each deployment uses one dedicated HTTPS Relay:
 
 ```bash
 export OCSERV_RELAY_URL_A=https://relay.example.com
 export OCSERV_RELAY_URL_B=
 ```
 
-A is required; B may be absent or explicitly empty. For recommended
-redundancy, configure a distinct HTTPS B on a separate failure domain. These
-values can be set in `install.env` without editing release files. Both
-Controller and Agent must support the optional-relay launcher before clearing
-B. Nonempty invalid or normalized duplicate URLs are rejected. See
-[dedicated relays](../how-to/dedicated-relays.md) for Agent configuration,
-migration, maintenance and old-version rollback restrictions.
+A is required; B must be absent or empty. Nonempty B is rejected before install
+or process execution. These values can be set in `install.env` without editing
+release files. For an existing A/B deployment, deliberately clear B on both
+Controller and Agents while preserving identity and trust material, then
+restart and verify A-only traffic. See [dedicated Relay configuration](../how-to/dedicated-relays.md).
 
 Only transportd joins the additional non-internal `relay-egress` network for
 DNS and outbound HTTPS to independently deployed relays. The application,

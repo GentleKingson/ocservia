@@ -14,7 +14,7 @@ Release Check is not a required check for every PR.
 | Packages | Current-candidate native package smoke and complete dual-architecture package identity checks |
 | Business Smoke | Signed deployment, separate authenticated principals, apply, real VPN, automatic rollback and VPN again |
 | Integration | Change-selected OIDC, PKI, browser and distinct recovery assertions |
-| Resilience | Change-selected two-domain fault/recovery/correctness |
+| Resilience | Change-selected single-instance recovery in the selected Business owner |
 | Security | Existing source/dependency checks and exact-image scanning/SBOM |
 | Release Check | All selected required jobs must succeed |
 | Publish | Existing protected environment, signing and permissions; tested products only |
@@ -26,8 +26,8 @@ longer release gates or diagnostic modes. No historical package is needed to
 prepare the candidate; version format and exact checkout/workflow SHA remain
 mandatory, as do producer manifest and payload digests.
 
-Native test-image preparation runs alongside product builds. Shared probe/Relay
-images and the tunnel are sealed for current Business and Resilience checks.
+Native test-image preparation runs alongside product builds. The shared Relay
+image is sealed for current Business and optional recovery checks.
 Consumers use producer artifact IDs, verify
 manifest and payload digests, and check image architecture and source labels.
 Tag runs import verified accepted products into their own run artifacts; no

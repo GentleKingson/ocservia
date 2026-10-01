@@ -43,7 +43,7 @@ Configure at least:
 | Setting | Purpose |
 | --- | --- |
 | `CONTROLLER_ENDPOINT_ID` | Binds this node to the expected Controller identity. |
-| `RELAY_URL_A`, `RELAY_URL_B` | Required HTTPS A; omit B or leave it empty for one relay, or set a distinct HTTPS B for redundancy. |
+| `RELAY_URL_A`, `RELAY_URL_B` | Required HTTPS A; omit B or leave it empty. Nonempty B is rejected. |
 | `RELAY_ACCESS_TOKEN_SOURCE` | Protected source file for the relay token. |
 | `CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE` | Protected source file for the Controller command verification key. |
 | `TRUSTED_RELEASE_KEY` | Trusted release-signing public key. |
@@ -76,7 +76,7 @@ For a deliberate whole-lifecycle-as-root run, add `--root-lifecycle`:
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh --root-lifecycle
 ```
 
-The installer detects the platform, downloads the matching `.deb` or `.rpm`, verifies the release trust, installs the package, prepares node state, writes relay configuration, and prepares the persistent node identity. Enrollment and the installed service use the same one- or two-relay list. A nonempty invalid B is an error, not a request to fall back to A alone.
+The installer detects the platform, downloads the matching `.deb` or `.rpm`, verifies the release trust, installs the package, prepares node state, writes relay configuration, and prepares the persistent node identity. Enrollment and the installed service use the same sole Relay URL. Any nonempty B is rejected before installation or execution.
 
 It does not approve the node and does not enable or start services.
 

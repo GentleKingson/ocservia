@@ -13,10 +13,9 @@ uses two independent Controller deployments to transfer authority; it is not HA.
 
 ## Recovery coverage and ownership
 
-The following table defines the replacement coverage. Implementation is being
-migrated from the G6 workflows; this decision does not claim that these checks
-already run. The CI owner switch and rejection of a second Relay address must
-land together, after the Business checks are executable.
+The checks below reuse the existing Business and database owners. Release
+selection forwards `run-resilience` to the selected Smoke or Integration job;
+there is no separate G6 workflow or evidence framework.
 
 | Check | Owner and entrypoint | Required observation |
 | --- | --- | --- |
@@ -32,18 +31,19 @@ Unselected resilience is explicitly `SKIPPED`; install-only diagnostics cannot
 pass recovery acceptance. No separate fault matrix or evidence framework is
 required.
 
-## Migration boundaries
+## Retired scope and retained tools
 
-First move the shared build cache, cache-credentials action, full-history secret
-scan configuration, database E2E runtime and Relay fixture to neutral locations.
-Update all consumers, including temporarily active G6 workflows, before removing
-old paths. Preserve justified historical secret-scan fixture allowlists.
+G6 workflows, Go harness, dual-domain HA/PITR orchestration, schemas, verdicts,
+checkpoints, rendezvous and dedicated tests are retired. Candidate helper
+artifacts contain only the Relay. The independent token-authenticated TCP/QUIC
+network probe remains a small executable; existing startup/role/Rebind tests
+retain only their scheduler completion fixture. Build/cache tooling, full-history
+secret scans, test runtime and Relay fixture have neutral paths. Necessary
+historical secret-scan allowlists remain.
 
-Then implement the recovery checks, atomically switch their CI owner and enforce
-one Relay in production installation and launch entrypoints. Keep
-`OCSERV_RELAY_URL_A`; reject nonempty B before side effects. Finally remove the
-unused G6 workflows, harness, dual-domain HA/PITR orchestration and dedicated
-tests. Probe/tunnel removal requires confirming there are no retained consumers.
+Production installation and launch entrypoints require Relay A and reject
+nonempty B before side effects. Existing A/B deployments require an explicit
+operator change to one Relay; installer reruns preserve identity and trust state.
 
 Owner/epoch/fence/lease, transactional outbox, authorization, approval, signing,
 idempotent command identities, Agent SQLite journal and privd receipts remain

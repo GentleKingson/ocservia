@@ -46,7 +46,7 @@ sudo INSTALL_PRODUCTION_RELAYS=true \
   "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
 
-Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with required HTTPS `RELAY_URL_A` and optional distinct HTTPS `RELAY_URL_B`. Empty or absent B selects non-redundant single-relay operation. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
+Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with required HTTPS `RELAY_URL_A`. Omit `RELAY_URL_B` or leave it empty; nonempty B is rejected before installation or execution. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
 
 The production drop-in executes the packaged fixed launcher
 `/usr/libexec/ocservia/ocservia-agent-relays`, which constructs one or two URL

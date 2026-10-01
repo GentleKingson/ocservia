@@ -21,8 +21,7 @@ Controller side.
 - A DNS name and HTTPS certificate for the Controller.
 - A selected login mode: Local only, OIDC only, or Local + OIDC. An OIDC provider and client are required only for SSO.
 - A certificate signing endpoint.
-- One dedicated HTTPS relay for non-redundant production node traffic, or
-  two distinct relays in separate failure domains for recommended redundancy.
+- One dedicated HTTPS Relay for production node traffic.
 - Protected directories for secrets and backups.
 - The release-signing public key provisioned through a protected channel separate from the downloaded release bundle.
 

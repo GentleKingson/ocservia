@@ -1,16 +1,12 @@
 # Single Dedicated Relay Validation
 
-This is functional, single-host validation, not the formal multi-host G6 gate.
-Run project code and all checks on `BuildServer`, in a task-owned checkout,
-temporary directory and Docker projects. Never inject faults into an existing
-deployment. The implementation baseline is
-`594415068c00d1ef1bcf07427558cb9af7dc1c3f`; the Draft PR records the final tested
-commit, commands, timings, evidence directory and any incomplete acceptance.
+Run checks only in a task-owned checkout and disposable Linux environment.
+Native installation, systemd and network faults belong to the existing
+Business runner or a dedicated disposable test container.
 
 ## Lightweight Checks
 
-Run the existing Rust builder on BuildServer, with the task checkout mounted at
-the same absolute path, then source `scripts/env.sh`:
+With the existing Rust toolchain in an isolated environment, run:
 
 ```sh
 cd rust
@@ -60,12 +56,12 @@ boundary, not reachability. It does not certify the untouched database overlay's
 `nofile` limits: the existing full I18 assertion expects limits that the baseline
 Postgres and backup services do not declare. The full and `--contract-only` I18
 checks retain that assertion and are not reported as passing by this task.
-No G6 threshold or database runtime matrix is relaxed or expanded.
+The database support matrix remains unchanged.
 
 ## Network Probe
 
 Build the current transportd runtime image including its new launcher, and use
-the real authenticated iroh-relay image built by `deploy/production/relay.Dockerfile`. On BuildServer:
+the real authenticated iroh-relay image built by `deploy/production/relay.Dockerfile`. On the disposable test host:
 
 ```sh
 python3 scripts/single-relay-network-smoke.py \
@@ -110,9 +106,9 @@ Reuse `i18-agent-package-smoke.sh` and `release-native-package-smoke.sh` for
 current packages in disposable systemd/packaging containers. Historical
 baseline upgrades are retired; follow [current package validation](release-upgrade-validation.md).
 For native tests that launch sibling Docker containers,
-`RUNNER_TEMP` must be mounted at the same absolute path on BuildServer and in
-the parent container. Test ARM64 deb and Rocky Linux 9 rpm on this ARM64 host;
-do not report an unexecuted architecture matrix as passing.
+`RUNNER_TEMP` must be mounted at the same absolute path on the disposable test host and in
+the parent container. Match the actual architecture for native DEB/RPM checks;
+do not report an unexecuted architecture as passing.
 
 Retain logs, rendered topology, timings, checksums and non-secret JSON results.
 Do not publish generated enrollment tokens, session cookies, credentials,
