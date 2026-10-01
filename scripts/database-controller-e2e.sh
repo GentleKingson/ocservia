@@ -40,7 +40,7 @@ trap 'exit 143' TERM
 # final test image adds real Ocserv/OpenSSL, not a transport or Agent stub.
 WORKFLOW_IMAGE=ocservia-pr02-workflow:e2e
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
-  : "${SINGLE_AGENT_ARCHIVE:?}" "${SINGLE_AGENT_PUBLIC_KEY:?}" "${SINGLE_AGENT_KEY_SHA256:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
+  : "${SINGLE_AGENT_ARCHIVE:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
   [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ && "${ENGINE}" == postgres ]]
   WORKFLOW_IMAGE="${RELEASE_WORKFLOW_IMAGE}"
 else
@@ -61,12 +61,12 @@ COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platf
 POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
   POSTGRES_IMAGE=postgres:17.10-bookworm
-  MOUNTS=(-v "$(dirname "${SINGLE_AGENT_ARCHIVE}"):/published:ro" -v "${SINGLE_AGENT_PUBLIC_KEY}:/release-key.pem:ro")
+  MOUNTS=(-v "$(dirname "${SINGLE_AGENT_ARCHIVE}"):/published:ro")
   ENVIRONMENT+=(-e GOWORK=off -e "PUBLISHED_AGENT_ARCHIVE=/published/$(basename "${SINGLE_AGENT_ARCHIVE}")" \
-    -e "AGENT_TRUSTED_KEY_SHA256=${SINGLE_AGENT_KEY_SHA256}" -e "PUBLISHED_AGENT_VERSION=${SINGLE_EXPECTED_AGENT_VERSION}")
+    -e "PUBLISHED_AGENT_VERSION=${SINGLE_EXPECTED_AGENT_VERSION}")
   # shellcheck disable=SC2016 # Expanded only inside the disposable container.
   COMMAND=(bash -euo pipefail -c '
-    package="$(bash /workspace/scripts/verify-agent-package.sh "$PUBLISHED_AGENT_ARCHIVE" "$PUBLISHED_AGENT_ARCHIVE.sha256" "$PUBLISHED_AGENT_ARCHIVE.sha256.sig" /release-key.pem)"
+    package="$(bash /workspace/scripts/verify-agent-package.sh "$PUBLISHED_AGENT_ARCHIVE" "$(cut -d " " -f 1 "$PUBLISHED_AGENT_ARCHIVE.sha256")")"
     for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
       install -o root -g root -m 0755 "$package/rust/target/release/$binary" "/usr/local/bin/$binary"
       sha256sum "/usr/local/bin/$binary"

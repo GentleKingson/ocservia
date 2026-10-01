@@ -122,11 +122,9 @@ cargo build --locked --release --package ocservia-agent --package ocservia-privd
 cd ..
 OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
   VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 ./scripts/package-agent.sh
-VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
-  ./scripts/verify-agent-package.sh dist/ocservia-agent-1.0.0-linux-amd64.tar.gz \
-  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256 \
-  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256.sig \
-  /etc/ocservia/release-signing.pub.pem)"
+EXPECTED_SHA256="$(awk '{print $1}' dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256)"
+VERIFIED_PACKAGE="$(sudo ./scripts/verify-agent-package.sh \
+  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz "${EXPECTED_SHA256}")"
 sudo "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
 
@@ -135,7 +133,9 @@ build the binaries natively on the matching host. Without `DESTDIR`, the
 verifier also refuses a package whose architecture does not match the local
 host (`x86_64` ↔ `amd64`, `aarch64` ↔ `arm64`) before anything is staged.
 
-The verifier is the only supported extraction path. It stages and verifies the
+The plain checksum is a transfer-corruption check. AgentUpgrade instead uses
+`package_sha256` from the already-authorized Controller command. The verifier
+is the only supported extraction path. It stages and verifies the
 exact archive below root-only `/var/lib/ocservia-upgrade/package-staging`; the
 installer refuses a source tree or an independently extracted download.
 
@@ -157,7 +157,7 @@ DER SHA-256 fingerprint of the signing key, and emits
 key, the pinned fingerprint, and `verify-agent-package.sh` under
 `/usr/share/ocservia-agent`. Installing embeds no layout decisions: the
 post-install scriptlet checks the host architecture, verifies the archive into
-trusted staging with the pinned fingerprint, and then runs the verified
+trusted staging against its embedded plain checksum, and then runs the verified
 `install-agent.sh` or `upgrade-agent.sh`. No service is enabled or started
 automatically; `/etc/ocservia-agent/agent.env` must be provisioned first.
 Removing the package runs the verified `uninstall-agent.sh` and preserves

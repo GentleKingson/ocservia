@@ -34,10 +34,6 @@ pub const RECORD_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_OPERATIONS_DIR: &str = "/var/lib/ocservia-upgrade/operations";
 /// Fixed operator-provisioned trusted package spool.
 pub const DEFAULT_SPOOL_DIR: &str = "/var/lib/ocservia-upgrade/package-spool";
-/// Fixed operator-provisioned release signing public key.
-pub const DEFAULT_RELEASE_PUBLIC_KEY: &str = "/etc/ocservia/release-signing.pub.pem";
-/// Fixed pinned DER SHA-256 fingerprint of the release signing key.
-pub const DEFAULT_TRUSTED_FINGERPRINT: &str = "/etc/ocservia/trusted-release-key.sha256";
 /// Fixed installed copy of the package verifier lifecycle script.
 pub const DEFAULT_VERIFIER: &str = "/usr/libexec/ocservia/ocservia-agent-verify";
 /// Fixed systemd template unit started per durable upgrade operation.
@@ -663,18 +659,6 @@ impl UpgradeRunner {
     }
 
     #[must_use]
-    pub fn release_public_key(&self) -> PathBuf {
-        self.root
-            .join(DEFAULT_RELEASE_PUBLIC_KEY.trim_start_matches('/'))
-    }
-
-    #[must_use]
-    pub fn trusted_fingerprint(&self) -> PathBuf {
-        self.root
-            .join(DEFAULT_TRUSTED_FINGERPRINT.trim_start_matches('/'))
-    }
-
-    #[must_use]
     pub fn verifier(&self) -> PathBuf {
         self.root.join(DEFAULT_VERIFIER.trim_start_matches('/'))
     }
@@ -735,20 +719,8 @@ impl UpgradeRunner {
             "ocservia-agent-{}-linux-{}.tar.gz",
             intent.target_version, intent.architecture
         ));
-        let checksum = {
-            let mut name = archive.as_os_str().to_os_string();
-            name.push(".sha256");
-            PathBuf::from(name)
-        };
-        let signature = {
-            let mut name = checksum.as_os_str().to_os_string();
-            name.push(".sig");
-            PathBuf::from(name)
-        };
-        for input in [&archive, &checksum, &signature] {
-            if let Err(failure) = validate_spool_file(input) {
-                return refuse(operation_dir, intent, failure);
-            }
+        if let Err(failure) = validate_spool_file(&archive) {
+            return refuse(operation_dir, intent, failure);
         }
         let digest = sha256_file(&archive)?;
         if digest != intent.package_sha256 {
@@ -760,15 +732,7 @@ impl UpgradeRunner {
                 ),
             );
         }
-        let fingerprint = match load_fingerprint(&self.trusted_fingerprint()) {
-            Ok(fingerprint) => fingerprint,
-            Err(failure) => return refuse(operation_dir, intent, failure),
-        };
-        if let Err(failure) = validate_public_key(&self.release_public_key()) {
-            return refuse(operation_dir, intent, failure);
-        }
-        let package_root = match self.verify_package(&archive, &checksum, &signature, &fingerprint)
-        {
+        let package_root = match self.verify_package(&archive, &intent.package_sha256) {
             Ok(root) => root,
             Err(failure) => {
                 return refuse(
@@ -900,20 +864,13 @@ impl UpgradeRunner {
     fn verify_package(
         &self,
         archive: &Path,
-        checksum: &Path,
-        signature: &Path,
-        fingerprint: &str,
+        expected_digest: &[u8; 32],
     ) -> Result<PathBuf, UpgradeStoreError> {
         let verifier = self.verifier();
         validate_regular_executable(&verifier)?;
         let staging_root = self.root.join("var/lib/ocservia-upgrade/package-staging");
         let mut command = Command::new(&verifier);
-        command
-            .arg(archive)
-            .arg(checksum)
-            .arg(signature)
-            .arg(self.release_public_key())
-            .env("AGENT_TRUSTED_KEY_SHA256", fingerprint);
+        command.arg(archive).arg(hex::encode(expected_digest));
         if self.is_real_host() {
             command.env_remove("DESTDIR");
         } else {
@@ -1286,69 +1243,6 @@ fn validate_spool_file(path: &Path) -> Result<(), UpgradeStoreError> {
     {
         return Err(UpgradeStoreError::Package(
             "trusted package spool input has unsafe metadata".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn load_fingerprint(path: &Path) -> Result<String, UpgradeStoreError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            UpgradeStoreError::Package(
-                "pinned release key fingerprint is not provisioned".to_owned(),
-            )
-        } else {
-            UpgradeStoreError::Io(error)
-        }
-    })?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != trusted_euid()
-        || metadata.nlink() != 1
-        || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.len() != 65
-    {
-        return Err(UpgradeStoreError::Package(
-            "pinned release key fingerprint must be an operator-owned mode 0600 65-byte file"
-                .to_owned(),
-        ));
-    }
-    let mut value = String::new();
-    File::open(path)
-        .map_err(UpgradeStoreError::Io)?
-        .read_to_string(&mut value)
-        .map_err(UpgradeStoreError::Io)?;
-    let value = value.trim_end_matches('\n').to_owned();
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(UpgradeStoreError::Package(
-            "pinned release key fingerprint must be 64 lowercase hexadecimal characters".to_owned(),
-        ));
-    }
-    Ok(value)
-}
-
-fn validate_public_key(path: &Path) -> Result<(), UpgradeStoreError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            UpgradeStoreError::Package("release signing public key is not provisioned".to_owned())
-        } else {
-            UpgradeStoreError::Io(error)
-        }
-    })?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != trusted_euid()
-        || metadata.nlink() != 1
-        || metadata.len() < 48
-        || metadata.len() > 4096
-        || metadata.permissions().mode() & 0o022 != 0
-    {
-        return Err(UpgradeStoreError::Package(
-            "release signing public key has unsafe metadata".to_owned(),
         ));
     }
     Ok(())
@@ -2119,39 +2013,7 @@ mod tests {
         let archive_name = format!("ocservia-agent-{version}-linux-{architecture}.tar.gz");
         let archive = spool.join(&archive_name);
         fs::write(&archive, &archive_bytes).expect("archive");
-        fs::write(
-            spool.join(format!("{archive_name}.sha256")),
-            format!("{}  {archive_name}\n", hex::encode(archive_digest)),
-        )
-        .expect("checksum");
-        fs::write(
-            spool.join(format!("{archive_name}.sha256.sig")),
-            b"signature",
-        )
-        .expect("signature");
-        for file in [
-            archive.clone(),
-            spool.join(format!("{archive_name}.sha256")),
-            spool.join(format!("{archive_name}.sha256.sig")),
-        ] {
-            fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("spool mode");
-        }
-
-        let keys = root.join("etc/ocservia");
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o755)
-            .create(&keys)
-            .expect("release key directory");
-        fs::write(
-            keys.join("release-signing.pub.pem"),
-            b"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfakefixturekeymaterialpadding\n-----END PUBLIC KEY-----\n",
-        )
-        .expect("release key");
-        let fingerprint = keys.join("trusted-release-key.sha256");
-        fs::write(&fingerprint, format!("{}\n", "ab".repeat(32))).expect("fingerprint");
-        fs::set_permissions(&fingerprint, fs::Permissions::from_mode(0o600))
-            .expect("fingerprint mode");
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o644)).expect("spool mode");
 
         let verifier = root.join("usr/libexec/ocservia/ocservia-agent-verify");
         fs::DirBuilder::new()
@@ -2162,7 +2024,9 @@ mod tests {
         let lifecycle_runs = root.join("lifecycle-runs");
         let verifier_source = "#!/bin/sh
 set -e
-digest=$(cut -d' ' -f1 \"$2\")
+[ \"$#\" -eq 2 ]
+digest=\"$2\"
+[ \"$(sha256sum \"$1\" | cut -d' ' -f1)\" = \"${digest}\" ]
 stage=\"${DESTDIR}/var/lib/ocservia-upgrade/package-staging/pkg.1\"
 pkg=\"${stage}/extracted/ocservia-agent-@VERSION@\"
 mkdir -p \"${pkg}/rust/target/release\" \"${pkg}/scripts\"

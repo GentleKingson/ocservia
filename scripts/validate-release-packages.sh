@@ -185,10 +185,9 @@ verify_arch_triple() {
   rootfs="${work}/rootfs-${package_arch}"
   sudo install -d -o root -g root -m 0700 -- "${rootfs}"
   sudo install -d -o root -g root -m 0700 -- "${rootfs}/var/lib"
-  package_root="$(sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
+  package_root="$(sudo env DESTDIR="${rootfs}" \
     "${ROOT}/scripts/verify-agent-package.sh" \
-    "${ASSET_DIR}/${archive}" "${ASSET_DIR}/${archive}.sha256" \
-    "${ASSET_DIR}/${archive}.sha256.sig" "${pub}")"
+    "${ASSET_DIR}/${archive}" "$(awk '{print $1}' "${ASSET_DIR}/${archive}.sha256")")"
   sudo grep -Fxq "arch=${package_arch}" "${package_root}/MANIFEST" \
     || { echo "${archive} MANIFEST does not declare arch=${package_arch}" >&2; exit 1; }
   file_output="$(sudo file -b "${package_root}/rust/target/release/ocservia-agent")"

@@ -50,6 +50,7 @@ for version in 0.6.0 0.6.1; do
     fi
   done
 done
+# shellcheck disable=SC2016 # Literal systemd service variables in the old fixture.
 printf '[Service]\nExecStart=/usr/libexec/ocservia/ocservia-agent --relay-url $RELAY_URL_A --relay-url $RELAY_URL_B\n' >"${work}/old/dropin"
 install -m 644 "${work}/old/dropin" "${dropin}"
 for unit in ocservia-agent.service ocservia-privd.service; do
@@ -64,12 +65,9 @@ printf 'CONTROLLER_ENDPOINT_ID=fixture-controller\n' >/etc/ocservia-agent/agent.
 for name in identity-sentinel endpoint.key controller.endpoint; do
   printf 'fixture-%s\n' "${name}" >"/var/lib/ocservia-agent/identity/${name}"
 done
-openssl genpkey -algorithm ED25519 -out "${work}/old.key" >/dev/null 2>&1
-openssl pkey -in "${work}/old.key" -pubout -out "${package}/release-signing.pub.pem" >/dev/null 2>&1
-openssl pkey -pubin -in "${package}/release-signing.pub.pem" -outform DER | sha256sum | awk '{print $1}' >"${package}/trusted-release-key.sha256"
 bash "${checker}" before "${work}/evidence" 0.6.0 "${arch}"
 
-# Real signing/verification, but the negative preflight and rollback are stubs.
+# Real hash verification, but the negative preflight and rollback are stubs.
 cat >"${work}/source/scripts/upgrade-agent.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -82,8 +80,6 @@ OUTPUT_DIR="${package}" AGENT_SIGNING_KEY="${work}/candidate.key" VERSION=0.6.1 
   SOURCE_DATE_EPOCH=1786147200 PACKAGE_ARCH="${arch}" bash "${work}/source/scripts/package-agent.sh" >/dev/null
 archive="${package}/ocservia-agent-0.6.1-linux-${arch}.tar.gz"
 install -m 755 "${ROOT}/scripts/verify-agent-package.sh" "${package}/verify-agent-package.sh"
-cp "${archive}.sha256.pub.pem" "${package}/release-signing.pub.pem"
-openssl pkey -pubin -in "${package}/release-signing.pub.pem" -outform DER | sha256sum | awk '{print $1}' >"${package}/trusted-release-key.sha256"
 install -m 755 "${work}/source/rust/target/release/"* "${libexec}/"
 install -m 644 "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" "${dropin}"
 install -m 755 "${ROOT}/deploy/production/systemd/agent-relays.sh" "${launcher}"
@@ -122,7 +118,7 @@ for target in "${dropin}" "${launcher}" /usr/lib/systemd/system/ocservia-agent.s
   cp -p "${work}/saved" "${target}"
   bash "${checker}" after "${work}/evidence" 0.6.1 "${arch}"
 done
-for target in /etc/ocservia-agent/relays.env /etc/ocservia/release-signing.pub.pem \
+for target in /etc/ocservia-agent/relays.env /etc/ocservia-agent/controller-command-verification-key.pem \
   /var/lib/ocservia-agent/identity/endpoint.key; do
   cp -p "${target}" "${work}/saved"
   printf 'tampered\n' >>"${target}"
@@ -131,7 +127,7 @@ for target in /etc/ocservia-agent/relays.env /etc/ocservia/release-signing.pub.p
 done
 cp "${archive}" "${work}/archive"
 printf 'damaged\n' >>"${archive}"
-expect_failure 'corrupted signed candidate payload'
+expect_failure 'corrupted package payload'
 cp "${work}/archive" "${archive}"
 bash "${checker}" after "${work}/evidence" 0.6.1 "${arch}"
 cat >"${libexec}/ocservia-agent-rollback" <<SH
