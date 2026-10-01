@@ -587,7 +587,7 @@ if can_root; then
       export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
       export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
       export OCSERV_RELAY_URL_A=https://relay-a.example.test
-      export OCSERV_RELAY_URL_B=https://relay-b.example.test
+      export OCSERV_RELAY_URL_B=
       export OCSERV_HTTPS_ADDRESS=127.0.0.1
       export OCSERV_APPLICATION_SUBNET=198.18.80.0/24
       export OCSERV_APPLICATION_IP_RANGE=198.18.80.128/25

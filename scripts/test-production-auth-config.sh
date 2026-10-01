@@ -33,7 +33,7 @@ export OCSERV_POSTGRES_IMAGE="${image}" OCSERV_OTEL_IMAGE="${image}"
 export OCSERV_PUBLIC_HOST=controller.example.com OCSERV_AUDIT_EVENT_KEY_ID=test-only
 export OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)"
 export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test
-export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=https://relay-b.example.test
+export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=
 unset OCSERV_OTEL_BACKEND_ENDPOINT
 
 # Exercise the published mode examples through each real installer allowlist.

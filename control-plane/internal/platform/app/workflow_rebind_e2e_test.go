@@ -184,7 +184,7 @@ func (f *controllerE2E) rebindWorkflow(oldNode, endpoint, oldController string, 
 	copyFile(f.root+"/relay-ca.pem", "/etc/ocservia-agent/relay-ca.pem", 0, 0, 0444)
 	env := map[string]string{"PATH": "/usr/bin:/bin", "CONTROLLER_ENDPOINT_ID": oldController, "NODE_ID": oldNode,
 		"AGENT_ENDPOINT_ID": endpoint, "CONTROLLER_COMMAND_VERIFICATION_KEY_FILE": "/etc/ocservia-agent/command.pem",
-		"RELAY_URL_A": f.relays[0], "RELAY_URL_B": f.relays[1], "RUST_LOG": "info"}
+		"RELAY_URL_A": f.relays[0], "RELAY_URL_B": "", "RUST_LOG": "info"}
 	for i := 0; i < len(sealArgs); i += 2 {
 		env[strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(sealArgs[i], "--"), "-", "_"))] = sealArgs[i+1]
 	}
@@ -200,7 +200,7 @@ func (f *controllerE2E) rebindWorkflow(oldNode, endpoint, oldController string, 
 		}
 	}
 	writeProtected("/etc/ocservia-agent/agent.env", []byte(agentEnv.String()))
-	writeProtected("/etc/ocservia-agent/relays.env", []byte(fmt.Sprintf("RELAY_URL_A=%s\nRELAY_URL_B=%s\n", f.relays[0], f.relays[1])))
+	writeProtected("/etc/ocservia-agent/relays.env", []byte(fmt.Sprintf("RELAY_URL_A=%s\nRELAY_URL_B=\n", f.relays[0])))
 	// The container supervisor starts the packaged relay launcher and actual privd.
 	// Its only substitution is PID supervision in a container without systemd PID 1.
 	if err := os.MkdirAll("/run/rebind-services", 0700); err != nil {
@@ -365,12 +365,14 @@ func (f *controllerE2E) rebindWorkflow(oldNode, endpoint, oldController string, 
 		t.Fatal("new mutation or retained user missing", err)
 	}
 	journal := "/var/lib/ocservia-agent/bindings/" + newNode + "/agent.db"
-	sessionBefore := f.run(0, 0, nil, "sqlite3", journal, "SELECT hex(value) FROM agent_metadata WHERE key='verified_session_grant';")
+	// Observe as the journal owner so a restart-time read cannot create
+	// root-owned WAL/SHM files before the Agent opens its database.
+	sessionBefore := f.run(65533, 65533, nil, "sqlite3", "-readonly", journal, "SELECT hex(value) FROM agent_metadata WHERE key='verified_session_grant';")
 	f.run(0, 0, nil, "/usr/bin/systemctl", "stop", "ocservia-agent.service", "ocservia-privd.service")
 	f.run(0, 0, nil, cli, "commit", operation) // verified commit does not restart; exercise services separately
 	f.run(0, 0, nil, "/usr/bin/systemctl", "start", "ocservia-privd.service", "ocservia-agent.service")
 	target.wait("fresh signed grant after process restart", func() bool {
-		sessionAfter := f.run(0, 0, nil, "sqlite3", journal, "SELECT hex(value) FROM agent_metadata WHERE key='verified_session_grant';")
+		sessionAfter := f.run(65533, 65533, nil, "sqlite3", "-readonly", journal, "SELECT hex(value) FROM agent_metadata WHERE key='verified_session_grant';")
 		return len(bytes.TrimSpace(sessionAfter)) > 0 && !bytes.Equal(sessionBefore, sessionAfter)
 	})
 	target.wait("restarted target session", func() bool {

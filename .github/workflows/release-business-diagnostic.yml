@@ -2,6 +2,9 @@ name: Native Business Diagnostics
 on:
   workflow_call:
     inputs:
+      run-resilience:
+        type: boolean
+        default: false
       version:
         type: string
         required: true
@@ -54,6 +57,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       CANDIDATE_SHA: ${{ github.sha }}
       BUSINESS_PROFILE: ${{ inputs.profile }}
+      BUSINESS_RUN_RESILIENCE: ${{ inputs.run-resilience }}
       PRODUCTION_SIGNER_ACCEPTANCE: ${{ inputs.production_signer }}
       CONTROLLER_ARCH: ${{ matrix.arch }}
       INTEGRATED_INSTALL_ONLY: ${{ matrix.arch == 'arm64' }}
@@ -104,7 +108,7 @@ jobs:
             trap 'sudo rm -rf -- "${RUNNER_TEMP}/candidate-docker"' EXIT
             printf '%s' "$GH_TOKEN" | sudo docker --config "${RUNNER_TEMP}/candidate-docker" login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
             export DOCKER_CONFIG="${RUNNER_TEMP}/candidate-docker"
-            sudo --preserve-env=ARTIFACT_DIR,VERSION,CANDIDATE_SHA,BUSINESS_PROFILE,PRODUCTION_SIGNER_ACCEPTANCE,CANDIDATE_BUNDLE,CANDIDATE_PRODUCTS,CANDIDATE_BUNDLE_SHA256,CANDIDATE_KEY_SHA256,AGENT_MANIFEST_SHA256,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,RUNNER_ENVIRONMENT,CONTROLLER_ARCH,INTEGRATED_INSTALL_ONLY \
+            sudo --preserve-env=ARTIFACT_DIR,VERSION,CANDIDATE_SHA,BUSINESS_PROFILE,BUSINESS_RUN_RESILIENCE,PRODUCTION_SIGNER_ACCEPTANCE,CANDIDATE_BUNDLE,CANDIDATE_PRODUCTS,CANDIDATE_BUNDLE_SHA256,CANDIDATE_KEY_SHA256,AGENT_MANIFEST_SHA256,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_REPOSITORY,RUNNER_ENVIRONMENT,CONTROLLER_ARCH,INTEGRATED_INSTALL_ONLY \
               --preserve-env=DOCKER_CONFIG,RUNNER_ARCH bash scripts/release-business-probe.sh
           else
             bash scripts/release-business-probe.sh
@@ -151,6 +155,17 @@ jobs:
               (.reference | test("@sha256:[0-9a-f]{64}$")) and .pulled == true)' \
               "${EVIDENCE}/registry-pulls.jsonl"
           fi
+      - name: Require actual scoped resilience result
+        env:
+          RESULT_PATH: ${{ runner.temp }}/business-evidence/result.json
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { checkBusinessResilience } from './scripts/release-selection.mjs';
+          const result = JSON.parse(fs.readFileSync(process.env.RESULT_PATH, 'utf8'));
+          if (result.candidate_sha !== process.env.GITHUB_SHA) throw new Error('wrong candidate result');
+          checkBusinessResilience(result, process.env.BUSINESS_RUN_RESILIENCE === 'true', process.env.INTEGRATED_INSTALL_ONLY === 'true');
+          JS
       - name: Mark evidence upload start
         if: always()
         run: date +%s >"${RUNNER_TEMP}/business-upload-start"

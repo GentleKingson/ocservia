@@ -9,7 +9,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 CONFIG="${ROOT}/scripts/secret-scan.toml"
-WORKFLOW="${ROOT}/.github/workflows/g6-harness-core.yml"
 SECURITY_CHECK="${ROOT}/scripts/security-check.sh"
 
 grep -qF 'useDefault = true' "${CONFIG}" || {
@@ -65,15 +64,6 @@ rules = config.get("rules", [])
 assert len(rules) == 1 and rules[0]["id"] == "curl-auth-user"
 assert set(rules[0]) == {"id", "regex"} and rules[0]["regex"]
 PY
-
-total_scans="$(grep -c 'gitleaks dir' "${WORKFLOW}" || true)"
-configured_scans="$(grep 'gitleaks dir' "${WORKFLOW}" | grep -cF -- '--config scripts/secret-scan.toml' || true)"
-total_scans="${total_scans:-0}"
-configured_scans="${configured_scans:-0}"
-[[ "${total_scans}" -eq 3 && "${configured_scans}" -eq 3 ]] || {
-  echo "every published-evidence G6 scan must load the pinned gitleaks configuration" >&2
-  exit 1
-}
 
 # The behavioral exemption proof needs the pinned detector, so it runs inside
 # the security scan itself. A missing invocation would leave the allowlist

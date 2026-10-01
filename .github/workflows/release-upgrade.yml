@@ -3,6 +3,10 @@ run-name: Release diagnostics · ${{ inputs.purpose }} · ${{ github.sha }}
 on:
   workflow_dispatch:
     inputs:
+      run-resilience:
+        description: Run finite single-instance recovery in the selected business environment
+        type: boolean
+        default: false
       version:
         description: Candidate X.Y.Z version without v
         type: string
@@ -38,6 +42,7 @@ jobs:
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
       version: ${{ inputs.version }}
+      run-resilience: ${{ inputs.run-resilience }}
       profile: ${{ inputs.purpose == 'integration' && 'extended' || 'smoke' }}
       production_signer: false
 
@@ -62,6 +67,7 @@ jobs:
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
       version: ${{ inputs.version }}
+      run-resilience: ${{ inputs.run-resilience }}
       profile: extended
       production_signer: true
       bundle-id: ${{ needs.production-signer-products.outputs.bundle-id }}

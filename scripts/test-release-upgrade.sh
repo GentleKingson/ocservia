@@ -76,6 +76,11 @@ abort 'business callers must use the same checks' unless ordinary['uses'] == dia
 diagnostic = YAML.safe_load(File.read(diagnostic_path))
 consumer = diagnostic.fetch('jobs').fetch('business')
 producer = jobs.fetch('production-signer-products')
+abort 'manual resilience input or forwarding missing' unless inputs.dig('run-resilience', 'default') == false &&
+  [ordinary, privileged].all? { |job| job.dig('with', 'run-resilience') == '${{ inputs.run-resilience }}' }
+abort 'diagnostic resilience env must survive sudo' unless
+  consumer.dig('env', 'BUSINESS_RUN_RESILIENCE') == '${{ inputs.run-resilience }}' &&
+  consumer.fetch('steps').any? { |step| step.fetch('run', '').include?('CANDIDATE_SHA,BUSINESS_PROFILE,BUSINESS_RUN_RESILIENCE,') }
 abort 'clean consumer must be read-only' unless consumer['permissions'] == {'contents' => 'read', 'packages' => 'read'}
 abort 'Registry publication must remain opt-in' unless producer['if'] == "${{ inputs.production_signer && inputs.purpose == 'integration' }}" &&
   producer['permissions'] == {'contents' => 'read', 'actions' => 'read', 'packages' => 'write'} &&
@@ -110,13 +115,12 @@ producer = release_jobs.fetch('helpers-amd64')
 expected = {'component' => 'test-helpers', 'arch' => 'amd64', 'version' => '${{ needs.prepare.outputs.version }}'}
 abort 'fixture recipe identity drifted' unless expected.all? { |key, value| producer.dig('with', key) == value }
 abort 'fixture selection drifted' unless producer['if'] == "needs.prepare.outputs.complete == 'true'"
-%w[business-smoke integration resilience].each do |name|
+%w[business-smoke integration].each do |name|
   {'id' => 'artifact-id', 'sha256' => 'sha256'}.each do |input, output|
     abort "#{name} lost helper identity" unless release_jobs.fetch(name).dig('with', "helpers-#{input}") == "${{ needs.helpers-amd64.outputs.#{output} }}"
   end
 end
-{'release-business.yml' => %w[test-helpers],
- 'g6-harness-core.yml' => %w[test-helpers]}.each do |file, components|
+{'release-business.yml' => %w[test-helpers]}.each do |file, components|
   workflow = YAML.safe_load(File.read(".github/workflows/#{file}"))
   consumers = workflow.fetch('jobs').values.flat_map { |job| job.fetch('steps') }.select { |step| step['uses'] == './.github/actions/release-test-images' }
   abort "fixture reuse missing from #{file}" unless consumers.map { |step| step.dig('with', 'component') } == components
@@ -153,6 +157,15 @@ release.fetch('jobs').each do |name, job|
   abort "write permission in validation: #{name}" if job.fetch('permissions', {}).values.include?('write')
   abort "production secret in validation: #{name}" if job.to_json.include?('secrets.') || job.key?('secrets')
 end
+abort 'G6 resilience job remains' if release_jobs.key?('resilience') || File.exist?('.github/workflows/g6-readiness.yml')
+business = YAML.safe_load(File.read('.github/workflows/release-business.yml'))
+abort 'resilience workflow/job/step result output chain missing' unless
+  business.fetch('on', business[true]).dig('workflow_call', 'outputs', 'resilience-result', 'value') == '${{ jobs.business.outputs.resilience-result }}' &&
+  business.dig('jobs', 'business', 'outputs', 'resilience-result') == '${{ steps.resilience.outputs.result }}' &&
+  business.dig('jobs', 'business', 'steps').any? { |step| step['id'] == 'resilience' && step.fetch('run').include?('checkBusinessResilience') }
+%w[business-smoke integration].each do |name|
+  abort "#{name} resilience selection not forwarded" unless release_jobs.dig(name, 'with', 'run-resilience') == "${{ needs.prepare.outputs.resilience == 'true' }}"
+end
 abort 'source security missing' unless release['jobs'].values.any? { |job| job['uses'] == './.github/workflows/security.yml' }
 release_gate = release.fetch('jobs').fetch('release-check')
 gate_command = release_gate.fetch('steps').find { |step| step.dig('env', 'RESULTS') }.fetch('run')
@@ -160,7 +173,8 @@ gate_command = release_gate.fetch('steps').find { |step| step.dig('env', 'RESULT
   selection = {'candidate' => 'a' * 40, 'integration' => {'selected' => integration}, 'resilience' => {'selected' => resilience}}
   results = release_gate.fetch('needs').to_h { |job| [job, {'result' => 'success'}] }
   results['integration']['result'] = integration ? 'success' : 'skipped'
-  results['resilience']['result'] = resilience ? 'success' : 'skipped'
+  owner = integration ? 'integration' : 'business-smoke'
+  results[owner]['outputs'] = {'resilience-result' => resilience ? 'PASS' : 'SKIPPED'}
   results['business-smoke']['result'] = integration ? 'skipped' : 'success'
   env = {'SELECTION' => selection.to_json, 'GITHUB_SHA' => selection['candidate']}
   abort 'valid selected release scope rejected' unless system(env.merge('RESULTS' => results.to_json), 'bash', '-euc', gate_command, out: File::NULL)

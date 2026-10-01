@@ -88,7 +88,7 @@ export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
 export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
 export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test/v1
 unset OCSERV_OTEL_BACKEND_ENDPOINT
-export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=https://relay-b.example.test
+export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=
 export OCSERV_RELAY_SECRET_DIR="${work}/relay-secrets"
 
 validate_digest_image() {
@@ -118,9 +118,13 @@ env -u OCSERV_RELAY_URL_B "${ROOT}/deploy/production/compose.sh" config --format
 OCSERV_RELAY_URL_B= "${ROOT}/deploy/production/compose.sh" config --format json \
   >"${ARTIFACT_DIR}/platform-compose-single-empty.json"
 if env -u OCSERV_RELAY_URL_A "${ROOT}/deploy/production/compose.sh" config --quiet >/dev/null 2>&1; then
-  echo "production launcher accepted missing A with B configured" >&2
+  echo "production launcher accepted missing A" >&2
   exit 1
 fi
+if OCSERV_RELAY_URL_B=https://second-relay.example.test "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/second-relay.log" 2>&1; then
+  echo "production launcher accepted a second Relay" >&2; exit 1
+fi
+grep -q "only one dedicated Relay" "${work}/second-relay.log"
 mkdir -p "${work}/env-fixture/deploy"
 cp -R "${ROOT}/deploy/production" "${work}/env-fixture/deploy/production"
 printf 'OCSERV_OTEL_BACKEND_ENDPOINT=injected.example.test:4317\nCOMPOSE_PROFILES=observability\n' \
@@ -259,7 +263,7 @@ command = services["transportd"]["command"]
 assert "--relay-url" not in command and "--relay-mode" not in command
 assert services["transportd"]["entrypoint"] == ["/usr/local/libexec/ocservia-transportd-relays"]
 urls = [services["transportd"]["environment"][f"OCSERV_RELAY_URL_{name}"] for name in ("A", "B")]
-assert len(set(urls)) == 2 and all(url.startswith("https://") for url in urls)
+assert urls == ["https://relay-a.example.test", ""]
 assert all("n0" not in url and "iroh.link" not in url for url in urls)
 single_unset = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-single-unset.json").read_text())
 single_empty = json.loads(pathlib.Path(sys.argv[1]).with_name("platform-compose-single-empty.json").read_text())
@@ -303,7 +307,7 @@ print("I18 production topology validation passed")
 PY
 
 if [[ "${MODE}" == "--compose-only" ]]; then
-  echo "Production Compose single/dual Relay contracts passed (no runtime reachability claim)"
+  echo "Production Compose single Relay contracts passed (no runtime reachability claim)"
   exit 0
 fi
 

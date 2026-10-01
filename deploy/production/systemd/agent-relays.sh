@@ -2,6 +2,10 @@
 set -eu
 
 : "${RELAY_URL_A:?set the dedicated HTTPS relay URL}"
+if [ -n "${RELAY_URL_B:-}" ]; then
+  echo 'only one dedicated Relay is supported; leave RELAY_URL_B empty' >&2
+  exit 2
+fi
 set -- --controller "${CONTROLLER_ENDPOINT_ID:?}" --node-id "${NODE_ID:?}" \
   --controller-command-key-file "${CONTROLLER_COMMAND_VERIFICATION_KEY_FILE:?}" \
   --user-password-seal-key-id "${USER_PASSWORD_SEAL_KEY_ID:?}" \
@@ -9,9 +13,6 @@ set -- --controller "${CONTROLLER_ENDPOINT_ID:?}" --node-id "${NODE_ID:?}" \
   --p12-password-seal-key-id "${P12_PASSWORD_SEAL_KEY_ID:?}" \
   --p12-password-seal-public-key-sha256 "${P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256:?}" \
   --relay-mode custom --relay-url "$RELAY_URL_A"
-if [ -n "${RELAY_URL_B:-}" ]; then
-  set -- "$@" --relay-url "$RELAY_URL_B"
-fi
 ca=/etc/ocservia-agent/relay-ca.pem
 if [ -e "$ca" ] || [ -L "$ca" ]; then
   if [ ! -f "$ca" ] || [ -L "$ca" ] || [ ! -s "$ca" ] \

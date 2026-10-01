@@ -46,7 +46,12 @@ try:
             args = [str(ROOT / wrapper)]
             if prefix:
                 args += ["--relay-token-file", "/protected/token file", "--socket", "/tmp/a socket"]
-            result = subprocess.run(args, env=current, check=True, capture_output=True, text=True)
+            result = subprocess.run(args, env=current, capture_output=True, text=True)
+            if b:
+                assert result.returncode != 0 and not result.stdout
+                assert "one dedicated Relay" in result.stderr
+                continue
+            assert result.returncode == 0
             argv = json.loads(result.stdout)
             urls = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--relay-url"]
             assert urls == ["https://relay-a.example.test"] + ([b] if b else []), argv
@@ -105,13 +110,17 @@ try:
             current.pop("OCSERV_RELAY_URL_B", None)
             if override is not None:
                 current["OCSERV_RELAY_URL_B"] = override
-            result = subprocess.check_output([
+            result = subprocess.run([
                 "bash", "-c",
                 'source "$1/deploy/lib/install-env.sh"; install_env_load "$2" OCSERV_RELAY_URL_A OCSERV_RELAY_URL_B >&2; exec "$1/deploy/production/transportd-relays.sh"',
                 "relay-test", str(ROOT), str(config)
-            ], env=current, text=True)
-            argv = json.loads(result)
-            assert argv.count("--relay-url") == (2 if file_b and override is None else 1)
+            ], env=current, text=True, capture_output=True)
+            if file_b and override is None:
+                assert result.returncode != 0 and not result.stdout
+                assert "one dedicated Relay" in result.stderr
+            else:
+                assert result.returncode == 0
+                assert json.loads(result.stdout).count("--relay-url") == 1
     print("PASS literal argv and install.env unset/empty/override contracts")
 finally:
     for ca in ca_paths:
