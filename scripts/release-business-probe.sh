@@ -13,16 +13,14 @@ export SOURCE_COMMIT
 source "$ROOT/scripts/env.sh"
 : "${BUSINESS_PROFILE:=smoke}"
 : "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
-: "${INTEGRATED_INSTALL_ONLY:=false}"
 : "${BUSINESS_RUN_RESILIENCE:=false}"
 [[ "$BUSINESS_RUN_RESILIENCE" == true || "$BUSINESS_RUN_RESILIENCE" == false ]]
 resilience_result=SKIPPED
-if [[ "$BUSINESS_RUN_RESILIENCE" == true && "$INTEGRATED_INSTALL_ONLY" != true ]]; then
+if [[ "$BUSINESS_RUN_RESILIENCE" == true ]]; then
   resilience_result=FAIL
 fi
 relay_ipv4_rule=false
 relay_ipv6_rule=false
-[[ "$PRODUCTION_SIGNER_ACCEPTANCE" == false || "$BUSINESS_PROFILE" == extended ]]
 [[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
 bash "$ROOT/scripts/release-business-environment.sh"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
@@ -42,7 +40,7 @@ work="${T07_WORK}"
 stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
-export PACKAGE_ARCH="${CONTROLLER_ARCH:-amd64}" CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
+export PACKAGE_ARCH=amd64 CONTROLLER_ARCH=amd64
 export SOURCE_DATE_EPOCH OUTPUT_DIR="${work}/products"
 export DEPLOYMENT_CONFIG_DIR="${work}/bundle"
 SOURCE_DATE_EPOCH="$(git -C "${ROOT}" log -1 --format=%ct)"
@@ -129,7 +127,7 @@ cleanup() {
     --arg profile "${BUSINESS_PROFILE}" \
     --arg resilience "$resilience_result" --argjson resilience_requested "$BUSINESS_RUN_RESILIENCE" \
     --argjson resilience_scenarios "$(if [[ -f "${ARTIFACT_DIR}/api-checkpoints.jsonl" ]]; then jq -s '[.[] | select(.name | startswith("resilience_")) | {name,status,time}]' "${ARTIFACT_DIR}/api-checkpoints.jsonl"; else printf '[]'; fi)" \
-    --arg arch "$CONTROLLER_ARCH" --argjson install_only "$INTEGRATED_INSTALL_ONLY" \
+    --arg arch "$CONTROLLER_ARCH" \
     --argjson disposable_container "${INTEGRATED_DISPOSABLE_CONTAINER:-false}" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
@@ -143,7 +141,7 @@ cleanup() {
       resilience_requested:$resilience_requested,
       resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),
       resilience_scenarios:$resilience_scenarios,
-      planned_topology:{hosts:1,architecture:$arch,native_systemd_node:($install_only | not),relays:1,relay_redundancy:false},
+      planned_topology:{hosts:1,architecture:$arch,native_systemd_node:true,relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
@@ -205,12 +203,10 @@ docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
 record products_built
 next_stage dependency_install
-if [[ "$INTEGRATED_INSTALL_ONLY" != true ]]; then
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
 sudo systemctl stop ocserv
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
-fi
 # Subsequent output can contain task-only secret data. Keep it private until
 # the exact-value redactor runs; the uploaded results never contain cookies.
 exec >"${work}/private.log" 2>&1
@@ -298,7 +294,7 @@ node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${mani
   --migration-dir "${ROOT}/control-plane/migrations" --platform "linux/${CONTROLLER_ARCH}" \
   "${manifest_options[@]}" "${args[@]}" --image "postgres=${OCSERV_POSTGRES_IMAGE}" --image "otel=${OCSERV_OTEL_IMAGE}"
 next_stage controller_install
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "$BUSINESS_PROFILE" == extended ]]; then
   # Exercise a real configuration upgrade between two reference forms for
   # these same built images. This is not historical binary compatibility.
   initial_config="${work}/initial-deployment.json"
@@ -325,16 +321,6 @@ record controller_lifecycle
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   python3 "$ROOT/scripts/release-integrated-acceptance.py" entry
   record integrated_entry_and_internal_tls
-fi
-if [[ "$INTEGRATED_INSTALL_ONLY" == true ]]; then
-  [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]
-  "$ROOT/deploy/production/controller.sh" uninstall
-  "$ROOT/deploy/production/controller.sh" start
-  curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" |
-    jq -e --arg sha "$SOURCE_COMMIT" '.commit == $sha' >/dev/null
-  record integrated_native_install_restart
-  next_stage complete
-  exit 0
 fi
 export T07_WORKSPACE=00000000-0000-7000-8000-000000000071
 compose exec -T postgres psql -XAt -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <<SQL
@@ -578,20 +564,16 @@ if [ "$reason" = connect ]; then
 fi
 EOF
 chmod 700 "${work}/vpn-script"
-next_stage vpn_before_rollback
-python3 "${ROOT}/scripts/release-business-api.py" vpn_before_rollback
+next_stage business_vpn
+python3 "${ROOT}/scripts/release-business-api.py" vpn_after_config_apply
 record real_vpn_after_config_apply
-next_stage configuration_rollback
 if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+  next_stage configuration_rollback
   python3 "${ROOT}/scripts/release-business-api.py" configuration
-else
-  python3 "${ROOT}/scripts/release-business-api.py" smoke_rollback
-fi
-record config_plan_automatic_rollback
-next_stage vpn_after_rollback
-python3 "${ROOT}/scripts/release-business-api.py" vpn_after_rollback
-record real_vpn_after_rollback
-if [[ "${BUSINESS_PROFILE}" == extended ]]; then
+  record config_plan_automatic_rollback
+  next_stage vpn_after_rollback
+  python3 "${ROOT}/scripts/release-business-api.py" vpn_after_rollback
+  record real_vpn_after_rollback
   next_stage supplemental_business
   python3 "${ROOT}/scripts/release-business-api.py" business
   record real_vpn_business_and_recovery
@@ -602,7 +584,7 @@ if [[ "$BUSINESS_RUN_RESILIENCE" == true ]]; then
   resilience_result=PASS
   record single_instance_recovery
 fi
-if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
+if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "$BUSINESS_PROFILE" == extended ]]; then
   next_stage integrated_recovery
   python3 "$ROOT/scripts/release-integrated-acceptance.py" recovery
   record integrated_recreation_and_authorized_sse

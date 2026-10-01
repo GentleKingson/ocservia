@@ -63,7 +63,7 @@ or deep historical repair suite is moved from Quick into Full.
 | --- | --- |
 | `ci.yml` | PR/main Quick; manual Quick/Full key checks |
 | `security.yml` | Weekly/manual checks and reusable release prerequisite |
-| `release-check.yml` | Manual main Full CI, Security, Integrated Business + Resilience |
+| `release-check.yml` | Manual main Full CI, Security, Integrated Business Smoke + single-instance recovery |
 | `release.yml` | Tag build/smoke/publish; manual build-only dry-run |
 | `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics |
 

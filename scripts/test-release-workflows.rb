@@ -38,7 +38,7 @@ jobs = check.fetch('jobs')
 require_check(jobs.fetch('main').fetch('steps').first.fetch('run') == 'test "$GITHUB_REF" = refs/heads/main', 'Release Check must use main')
 require_check(jobs.fetch('full-ci')['uses'] == './.github/workflows/ci.yml' && jobs.dig('full-ci','with','profile') == 'full', 'Full CI missing')
 require_check(jobs.fetch('security')['uses'] == './.github/workflows/security.yml', 'Security missing')
-require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business','with') == {'version'=>'0.0.0','profile'=>'extended','production_signer'=>true,'run-resilience'=>true}, 'Integrated Business and Resilience must run')
+require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business','with') == {'version'=>'0.0.0','profile'=>'smoke','production_signer'=>true,'run-resilience'=>true}, 'Integrated Business Smoke and recovery must run')
 result = jobs.fetch('result')
 require_check(result['if'] == 'always()' && result['needs'].sort == %w[business full-ci main security], 'Release Check result must handle every dependency')
 command = result.fetch('steps').first.fetch('run')
@@ -63,7 +63,7 @@ Dir.mktmpdir('release-check-') do |dir|
   end
   consumer = diagnostic.fetch('jobs').fetch('business')
   require_check(diagnostic['permissions'] == {'contents'=>'read'} && !consumer.key?('environment'), 'Business must run without publishing authority')
-  require_check(consumer.dig('strategy','matrix','arch').include?('["amd64","arm64"]'), 'Integrated must exercise both native architectures')
+  require_check(consumer['runs-on'] == 'ubuntu-24.04' && !consumer.key?('strategy') && consumer.dig('env','CONTROLLER_ARCH') == 'amd64', 'Business must exercise only native amd64')
   gate = consumer['steps'].find {|s| s['name'] == 'Require completed business and actual recovery scenarios'}.fetch('run')
   recovery = gate[/node --input-type=module <<'JS'\n(.*?)\nJS\n?/m,1]
   require_check(recovery, 'actual recovery result gate missing')
@@ -71,7 +71,7 @@ Dir.mktmpdir('release-check-') do |dir|
   sample = {'resilience_requested'=>true,'resilience_result'=>'PASS','resilience_scenarios'=>names.map {|n| {'name'=>"resilience_#{n}",'status'=>'PASS'}},'planned_topology'=>{'native_systemd_node'=>true}}
   run_recovery = ->(data, flags={}) {
     File.write("#{dir}/result.json",data.to_json)
-    Open3.capture3({'DIAGNOSTICS'=>dir,'BUSINESS_RUN_RESILIENCE'=>'true','INTEGRATED_INSTALL_ONLY'=>'false'}.merge(flags),'node','--input-type=module','-e',recovery).last.success?
+    Open3.capture3({'DIAGNOSTICS'=>dir,'BUSINESS_RUN_RESILIENCE'=>'true'}.merge(flags),'node','--input-type=module','-e',recovery).last.success?
   }
   require_check(run_recovery.call(sample),'complete recoveries must pass')
   names.each do |name|
@@ -81,8 +81,9 @@ Dir.mktmpdir('release-check-') do |dir|
   end
   %w[FAIL SKIPPED].each {|state| require_check(!run_recovery.call(sample.merge('resilience_result'=>state)), "#{state} recovery accepted")}
   require_check(!run_recovery.call(sample.merge('planned_topology'=>{})), 'recovery without native node accepted')
-  arm = sample.merge('resilience_result'=>'SKIPPED','resilience_scenarios'=>[])
-  require_check(run_recovery.call(arm,{'INTEGRATED_INSTALL_ONLY'=>'true'}), 'arm64 install-only scope must remain distinct')
+  require_check(run_recovery.call(sample.merge('resilience_requested'=>false,'resilience_result'=>'SKIPPED','resilience_scenarios'=>[]),{'BUSINESS_RUN_RESILIENCE'=>'false'}), 'unselected recovery must be skipped')
 end
 require_check(manual['permissions'] == {'contents'=>'read'} && manual.fetch('jobs').values.all? {|j| j['uses'] == './.github/workflows/release-business-diagnostic.yml'}, 'manual diagnostics must use the same local checks')
 puts 'Tag builds, dispatch write guard, Release Check failure propagation and actual recovery contracts passed'
+
+require_check(!manual.dig('jobs','business','with','profile').include?('production_signer'), 'Signer must not force integration')

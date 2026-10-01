@@ -4,7 +4,7 @@ CI PASS is the only release qualification. The flow is:
 
 ```text
 PR -> Basic CI -> merge main
-   -> manual Release Check (Full CI + Security + Business Integration + Resilience)
+   -> manual Release Check (Full CI + Security + Business Smoke + single-instance recovery)
    -> PASS -> human version confirmation -> GitHub Release / vX.Y.Z tag
    -> Release (build + smoke + publish Agent assets and Controller GHCR images)
 ```

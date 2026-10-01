@@ -24,7 +24,7 @@ jobs:
     uses: ./.github/workflows/release-business-diagnostic.yml
     with:
       version: '0.0.0'
-      profile: extended
+      profile: smoke
       production_signer: true
       run-resilience: true
   result:

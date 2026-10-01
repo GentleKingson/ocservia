@@ -42,6 +42,27 @@ set +e
 auth_status=$?
 set -e
 [[ "${auth_status}" == 19 && "$(wc -l <"${fixture}/auth-failed-order")" == 1 ]]
+# Exercise the actual profile routing without installing anything on this host.
+for BUSINESS_PROFILE in smoke extended; do
+  (
+    PRODUCTION_SIGNER_ACCEPTANCE=true BUSINESS_RUN_RESILIENCE=true
+    # shellcheck disable=SC2317
+    next_stage() { :; }
+    # shellcheck disable=SC2317
+    record() { :; }
+    # shellcheck disable=SC2317
+    python3() { printf '%s\n' "$*"; }
+    # shellcheck disable=SC1090
+    source <(sed -n '/^next_stage business_vpn/,$p' scripts/release-business-probe.sh)
+  ) >"${fixture}/${BUSINESS_PROFILE}-phases"
+done
+grep -q 'release-business-api.py vpn_after_config_apply' "${fixture}/smoke-phases"
+grep -q 'release-business-api.py resilience' "${fixture}/smoke-phases"
+[[ "$(wc -l <"${fixture}/smoke-phases")" == 2 ]]
+for phase in configuration vpn_after_rollback business; do
+  grep -q "release-business-api.py ${phase}$" "${fixture}/extended-phases"
+done
+grep -q 'release-integrated-acceptance.py recovery' "${fixture}/extended-phases"
 python3 scripts/test-release-business-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-rust-cache.sh

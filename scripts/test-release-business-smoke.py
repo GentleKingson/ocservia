@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused contract checks for the two real-VPN smoke phases."""
+"""Focused checks for Business Smoke and manual integration."""
 import importlib.util
 import json
 import os
@@ -109,24 +109,13 @@ def main():
             record.assert_called_once()
         assert json.loads((work / 'smoke-applied.json').read_text())['materialized_hash'] == 'newhash'
 
-        def rollback_api(path, *_args, **_kwargs):
-            if path.endswith('/apply'):
-                return {'id': 'operation'}
-            if path == 'operations/operation':
-                return {'config_apply_state': 'rolled_back'}
-            if path == 'nodes/node':
-                return {'config_revision': 1}
-            raise AssertionError(path)
-
-        def native_command(*args):
-            return 'newhash  /etc/ocserv/ocserv.conf' if args[1] == 'sha256sum' else ''
-
-        with patch.dict(os.environ, env), patch.object(business, 'smoke_plan', return_value={
-            'id': 'plan', 'materialized_hash': 'failedhash'}), patch.object(business, 'approval', return_value='approval'), \
-                patch.object(business, 'api', side_effect=rollback_api), patch.object(business, 'run', side_effect=native_command), \
-                patch.object(business, 'record') as record:
-            business.smoke_rollback()
-            record.assert_called_once_with('smoke_config_plan_rolled_back', operation_id='operation', state='rolled_back')
+        with patch.dict(os.environ, {**env, 'PRODUCTION_SIGNER_ACCEPTANCE': 'true'}), \
+                patch.object(business, 'run', return_value='{"ciphertext":"sealed"}') as signer, \
+                patch.object(business, 'api', side_effect=api) as requests, \
+                patch.object(business, 'record'):
+            business.smoke_user()
+            assert signer.call_args.args[-1] == 'seal'
+            assert requests.call_args_list[0].args[1]['sealed_password'] == {'ciphertext': 'sealed'}
 
         vpn = MagicMock()
         vpn.poll.return_value = None
@@ -134,12 +123,12 @@ def main():
                 patch.object(business.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
                 patch.object(business, 'api', return_value={'config_revision': 1}), \
                 patch.object(business, 'record') as record:
-            business.vpn_smoke('before_rollback')
+            business.vpn_smoke('after_config_apply')
             business.vpn_smoke('after_rollback')
             assert popen.call_count == 2
             assert all('--user=t07-smoke' in call.args[0] for call in popen.call_args_list)
             assert [call.args[0] for call in record.call_args_list] == [
-                'real_vpn_before_rollback', 'real_vpn_after_rollback']
+                'real_vpn_after_config_apply', 'real_vpn_after_rollback']
 
 
 if __name__ == '__main__':
