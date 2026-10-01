@@ -34,6 +34,14 @@ products.fetch('jobs').each do |name,job|
   require_check(job.fetch('steps').any? {|s| s.fetch('run','').include?(name == 'build-agent-packages' ? 'release-native-package-smoke.sh' : 'release-controller-image-smoke.sh')}, "#{name} missing real smoke")
 end
 controller = products.fetch('jobs').fetch('build-controller-images')
+writer = load_workflow('ci').fetch('jobs').fetch('controller-cache')
+require_check(writer['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/main'", 'Controller cache writes must only run on trusted main pushes')
+require_check(writer.dig('strategy','matrix','arch') == %w[amd64 arm64] && writer['runs-on'].include?('ubuntu-24.04-arm'), 'main cache writer must cover both native architectures')
+require_check(!writer.key?('permissions') && !writer.key?('environment') && !writer.key?('continue-on-error'), 'cache writer must retain read-only authority and propagate export failures')
+require_check(writer.dig('concurrency','group') == 'controller-cache-${{ matrix.arch }}' && writer.dig('concurrency','cancel-in-progress') == false, 'cache writers must be serialized per architecture')
+require_check(writer['steps'].any? {|s| s['uses'] == './.github/actions/build-cache-credentials'} && writer['steps'].any? {|s| s['run'] == 'bash scripts/build-release-controller.sh --cache-only'}, 'writer must reuse the shared native builder and credential relay')
+require_check(File.read('scripts/release-business-probe.sh').include?('bash "${ROOT}/scripts/build-release-controller.sh" >'), 'Business must retain the shared default restore-only path')
+require_check(controller['steps'].any? {|s| s.fetch('run','').include?('bash scripts/build-release-controller.sh') && !s['run'].include?('--cache-only')}, 'Release must retain product build mode')
 steps = controller.fetch('steps')
 ordered = ['Build Controller images', 'Bootstrap pinned image-security tools', 'Scan exact Controller image archives', 'Smoke Controller images on the native runner', 'Upload Controller image archives']
 indices = ordered.map {|name| steps.index {|s| s['name'] == name}}
@@ -83,6 +91,14 @@ Dir.mktmpdir('release-check-') do |dir|
     require_check(status == expected, "version input validation failed for #{tag}/#{version}")
   end
   consumer = diagnostic.fetch('jobs').fetch('business')
+  summary = consumer['steps'].find {|s| s['name'] == 'Summarize business timings and sanitized failures'}
+  require_check(summary && summary['if'] == 'always()', 'business timings must remain visible on failure')
+  File.write("#{dir}/result.json", {'probe_status'=>'FAIL','last_stage'=>'single_instance_recovery','exit_code'=>1,'timings'=>[{'stage'=>'controller_image_build','seconds'=>42}],'private_detail'=>'omit-this-field'}.to_json)
+  File.write("#{dir}/api-checkpoints.jsonl", {'name'=>'real_vpn_relay_recovery','time'=>'2026-01-01T00:00:00Z','status'=>'PASS','private_detail'=>'omit-this-field'}.to_json + "\n")
+  File.write("#{dir}/probe.log", "unrelated log line\nRuntimeError: timeout: owner lease invalidation\n")
+  output, _, status = Open3.capture3({'DIAGNOSTICS'=>dir},'bash','-euo','pipefail','-c',summary.fetch('run'))
+  require_check(status.success? && output.include?('controller_image_build') && output.include?('real_vpn_relay_recovery') && output.include?('RuntimeError: timeout'), 'safe diagnostic summary missing')
+  require_check(!output.include?('omit-this-field') && !output.include?('unrelated log line'), 'summary must select safe fields instead of dumping logs')
   require_check(diagnostic['permissions'] == {'contents'=>'read'} && !consumer.key?('environment'), 'Business must run without publishing authority')
   require_check(consumer['runs-on'] == 'ubuntu-24.04' && !consumer.key?('strategy') && consumer.dig('env','CONTROLLER_ARCH') == 'amd64', 'Business must exercise only native amd64')
   gate = consumer['steps'].find {|s| s['name'] == 'Require completed business and actual recovery scenarios'}.fetch('run')

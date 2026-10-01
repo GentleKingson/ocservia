@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${VERSION:?}" "${SOURCE_COMMIT:?}" "${CONTROLLER_ARCH:?}" "${OUTPUT_DIR:?}" "${BUILDX_BUILDER:?}"
+: "${VERSION:?}" "${SOURCE_COMMIT:?}" "${CONTROLLER_ARCH:?}" "${BUILDX_BUILDER:?}"
+export_cache=false
+case "${1:-}" in
+  '') : "${OUTPUT_DIR:?}"; mkdir -p "${OUTPUT_DIR}" ;;
+  --cache-only)
+    # Only the trusted main push provisioner writes shared release caches.
+    [[ "${GITHUB_EVENT_NAME:-}" == push && "${GITHUB_REF:-}" == refs/heads/main ]] || exit 2
+    export_cache=true
+    export BUILD_CACHE_STRICT_EXPORT=true
+    ;;
+  *) exit 2 ;;
+esac
+[[ $# -le 1 ]] || exit 2
 case "${CONTROLLER_ARCH}:$(uname -m)" in amd64:x86_64|arm64:aarch64) ;; *) exit 2 ;; esac
-mkdir -p "${OUTPUT_DIR}"
 driver_opts=()
 if [[ "${BUILD_CACHE_AVAILABLE:-false}" == true ]]; then
   driver_opts+=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
@@ -15,21 +26,30 @@ docker buildx create --driver docker-container \
   --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 \
   "${driver_opts[@]}" --name "${BUILDX_BUILDER}" --bootstrap --use
 build_image() {
-  local name="$1" dockerfile="$2"
+  local name="$1" dockerfile="$2" cache_mode=min
   local -a args=(--builder "${BUILDX_BUILDER}" --platform "linux/${CONTROLLER_ARCH}"
-    --provenance=false --pull --output "type=docker,dest=${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
+    --provenance=false --pull
     --label "org.opencontainers.image.version=${VERSION}"
     --label "org.opencontainers.image.revision=${SOURCE_COMMIT}"
     --tag "ghcr.io/gentlekingson/ocservia/${name}:${VERSION}-linux-${CONTROLLER_ARCH}"
     --file "${ROOT}/${dockerfile}")
+  if [[ "${export_cache}" == true ]]; then
+    args+=(--output type=cacheonly)
+  else
+    args+=(--output "type=docker,dest=${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar")
+  fi
   if [[ "${name}" == control ]]; then
     args+=(--build-arg "VERSION=${VERSION}" --build-arg "COMMIT=${SOURCE_COMMIT}" --no-cache-filter runtime-base)
   fi
-  # Reuse the existing bounded cache wrapper; image and native architecture
-  # have independent scopes. Version labels and built outputs stay fresh.
-  bash "${ROOT}/scripts/buildx-cache.sh" "controller-v1-${name}-linux-${CONTROLLER_ARCH}" true \
+  # Keep compiler/dependency layers only for the expensive native builds.
+  case "${name}" in control|transport|relay|signer) cache_mode=max ;; esac
+  # Release and Business restore only; main CI refreshes both native arches.
+  # ponytail: GHA eviction can still cause cold builds; measure before adding another cache backend.
+  BUILD_CACHE_MODE="${cache_mode}" bash "${ROOT}/scripts/buildx-cache.sh" "controller-v1-${name}-linux-${CONTROLLER_ARCH}" "${export_cache}" \
     "controller-${name}-${CONTROLLER_ARCH}" "${args[@]}" "${ROOT}"
-  test -s "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
+  if [[ "${export_cache}" == false ]]; then
+    test -s "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
+  fi
 }
 build_image gateway deploy/production/gateway.Dockerfile
 build_image control control-plane/Dockerfile
