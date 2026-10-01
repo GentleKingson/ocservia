@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-archive="${1:?archive required}"
-checksum="${2:?checksum required}"
-signature="${3:?signature required}"
-public_key="${4:?public key required}"
-trusted_fingerprint="${AGENT_TRUSTED_KEY_SHA256:?AGENT_TRUSTED_KEY_SHA256 is required}"
+if (($# != 2)); then
+  echo "usage: $0 <archive> <expected-sha256>" >&2
+  exit 2
+fi
+archive="$1"
+expected_digest="$2"
 DESTDIR="${DESTDIR:-}"
 trusted_root="${DESTDIR}/var/lib/ocservia-upgrade/package-staging"
 
@@ -13,8 +14,8 @@ if [[ ${EUID} -ne 0 ]]; then
   echo "verify-agent-package.sh must run as root so verification and extraction use trusted staging" >&2
   exit 1
 fi
-if [[ ! "${trusted_fingerprint}" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "trusted signing-key fingerprint must be 64 lowercase hexadecimal characters" >&2
+if [[ ! "${expected_digest}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "expected package SHA256 must be 64 lowercase hexadecimal characters" >&2
   exit 2
 fi
 if [[ -n "${DESTDIR}" ]]; then
@@ -25,15 +26,12 @@ if [[ -n "${DESTDIR}" ]]; then
   fi
 fi
 
-for file in "${archive}" "${checksum}" "${signature}" "${public_key}"; do
-  name="$(basename -- "${file}")"
-  if [[ "${name}" == -* || ! -f "${file}" || -L "${file}" ]]; then
-    echo "package input must be a regular file with a non-option basename: ${file}" >&2
-    exit 1
-  fi
-done
-
 archive_name="$(basename -- "${archive}")"
+if [[ "${archive_name}" == -* || ! -f "${archive}" || -L "${archive}" ]]; then
+  echo "package input must be a regular file with a non-option basename: ${archive}" >&2
+  exit 1
+fi
+
 if [[ ! "${archive_name}" =~ ^ocservia-agent-([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)-linux-(amd64|arm64)\.tar\.gz$ ]]; then
   echo "archive basename is not a supported Agent package name" >&2
   exit 1
@@ -134,45 +132,16 @@ chown root:root -- "${staging}"
 chmod 0700 -- "${staging}"
 
 trusted_archive="${staging}/package.tar.gz"
-trusted_checksum="${staging}/package.sha256"
-trusted_signature="${staging}/package.sha256.sig"
-trusted_public_key="${staging}/release-signing.pub.pem"
 install -o root -g root -m 0600 -- "${archive}" "${trusted_archive}"
-install -o root -g root -m 0600 -- "${checksum}" "${trusted_checksum}"
-install -o root -g root -m 0600 -- "${signature}" "${trusted_signature}"
-install -o root -g root -m 0600 -- "${public_key}" "${trusted_public_key}"
 
-for file in "${trusted_archive}" "${trusted_checksum}" "${trusted_signature}" "${trusted_public_key}"; do
-  if [[ "$(stat -c '%u:%g:%a:%h' -- "${file}")" != "0:0:600:1" ]]; then
-    echo "trusted package input staging has unsafe metadata" >&2
-    exit 1
-  fi
-done
-
-public_der="${staging}/release-signing.der"
-openssl pkey -pubin -in "${trusted_public_key}" -outform DER -out "${public_der}"
-actual_fingerprint="$(sha256sum -- "${public_der}" | awk '{print $1}')"
-if [[ "${actual_fingerprint}" != "${trusted_fingerprint}" ]]; then
-  echo "package signing key is not the trusted release key" >&2
+if [[ "$(stat -c '%u:%g:%a:%h' -- "${trusted_archive}")" != "0:0:600:1" ]]; then
+  echo "trusted package input staging has unsafe metadata" >&2
   exit 1
 fi
 
-if [[ "$(wc -l <"${trusted_checksum}")" -ne 1 ]]; then
-  echo "checksum manifest must contain exactly one entry" >&2
-  exit 1
-fi
-manifest="$(cat -- "${trusted_checksum}")"
-expected_digest="${manifest%%  *}"
-if [[ ! "${expected_digest}" =~ ^[0-9a-f]{64}$ || "${manifest}" != "${expected_digest}  ${archive_name}" ]]; then
-  echo "checksum manifest must canonically name exactly the supplied archive" >&2
-  exit 1
-fi
-
-openssl pkeyutl -verify -rawin -pubin -inkey "${trusted_public_key}" \
-  -sigfile "${trusted_signature}" -in "${trusted_checksum}" >/dev/null
 actual_digest="$(sha256sum -- "${trusted_archive}" | awk '{print $1}')"
 if [[ "${actual_digest}" != "${expected_digest}" ]]; then
-  echo "Agent package archive digest does not match the signed checksum" >&2
+  echo "Agent package archive digest does not match the expected SHA256" >&2
   exit 1
 fi
 

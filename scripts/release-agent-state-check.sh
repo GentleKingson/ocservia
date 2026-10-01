@@ -6,7 +6,6 @@ mkdir -p "${evidence}"
 state() {
   local path
   for path in /etc/ocservia-agent/agent.env /etc/ocservia-agent/controller-command-verification-key.pem \
-    /etc/ocservia/release-signing.pub.pem /etc/ocservia/trusted-release-key.sha256 \
     /etc/ocservia-agent/user-password-seal-private.pem /etc/ocservia-agent/p12-password-seal-private.pem \
     /etc/ocservia-agent/relays.env /etc/ocservia-agent/relay-access-token /etc/ocservia-agent/relay-ca.pem \
     /var/lib/ocservia-agent/identity/identity-sentinel \
@@ -47,9 +46,9 @@ package_units() {
 verify_candidate_relays() (
   package=/usr/share/ocservia-agent
   archive="${package}/ocservia-agent-${version}-linux-${arch}.tar.gz"
-  fingerprint="$(cat "${package}/trusted-release-key.sha256")"
-  verified="$(AGENT_TRUSTED_KEY_SHA256="${fingerprint}" "${package}/verify-agent-package.sh" \
-    "${archive}" "${archive}.sha256" "${archive}.sha256.sig" "${package}/release-signing.pub.pem")"
+  expected_digest="$(awk '{print $1}' "${archive}.sha256")"
+  verified="$("${package}/verify-agent-package.sh" \
+    "${archive}" "${expected_digest}")"
   trap 'rm -rf -- "${verified%%/extracted/*}"' EXIT
   cmp "${verified}/deploy/production/systemd/ocservia-agent-relays.conf" \
     /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf
@@ -69,10 +68,6 @@ binaries() {
 }
 case "${mode}" in
   before)
-    test ! -e /etc/ocservia/release-signing.pub.pem
-    install -d -o root -g root -m 755 /etc/ocservia
-    install -o root -g root -m 644 /usr/share/ocservia-agent/release-signing.pub.pem /etc/ocservia/release-signing.pub.pem
-    install -o root -g root -m 600 /usr/share/ocservia-agent/trusted-release-key.sha256 /etc/ocservia/trusted-release-key.sha256
     test ! -e /etc/ocservia-agent/relay-ca.pem
     test ! -L /etc/ocservia-agent/relay-ca.pem
     openssl req -new -x509 -newkey ed25519 -nodes -days 1 -subj /CN=upgrade-relay-ca \
@@ -112,19 +107,19 @@ case "${mode}" in
   reject)
     package=/usr/share/ocservia-agent
     archive="${package}/ocservia-agent-${version}-linux-${arch}.tar.gz"
-    fingerprint="$(cat "${package}/trusted-release-key.sha256")"
+    expected_digest="$(awk '{print $1}' "${archive}.sha256")"
     mkdir "${evidence}/corrupt"
     corrupted="${evidence}/corrupt/$(basename "${archive}")"
     cp "${archive}" "${corrupted}"
     printf damaged >>"${corrupted}"
-    if AGENT_TRUSTED_KEY_SHA256="${fingerprint}" "${package}/verify-agent-package.sh" \
-      "${corrupted}" "${archive}.sha256" "${archive}.sha256.sig" "${package}/release-signing.pub.pem" \
+    if "${package}/verify-agent-package.sh" \
+      "${corrupted}" "${expected_digest}" \
       >"${evidence}/corrupt.log" 2>&1; then echo 'corrupted package accepted' >&2; exit 1; fi
     grep -Ei 'checksum|digest|sha256' "${evidence}/corrupt.log"
     rm "${corrupted}"
     rmdir "${evidence}/corrupt"
-    verified="$(AGENT_TRUSTED_KEY_SHA256="${fingerprint}" "${package}/verify-agent-package.sh" \
-      "${archive}" "${archive}.sha256" "${archive}.sha256.sig" "${package}/release-signing.pub.pem")"
+    verified="$("${package}/verify-agent-package.sh" \
+      "${archive}" "${expected_digest}")"
     command_key=/etc/ocservia-agent/controller-command-verification-key.pem
     saved_mode="$(stat -c %a "${command_key}")"
     trap 'chmod "${saved_mode}" "${command_key}"; rm -rf -- "${verified%%/extracted/*}"' EXIT

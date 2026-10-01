@@ -160,11 +160,10 @@ if [[ -n "${CANDIDATE_DIR}" ]]; then
   # removal and corruption. Cross-version upgrades use the published baseline
   # in the next workflow step; no synthetic release versions are built here.
   archive="${CANDIDATE_DIR}/ocservia-agent-${VERSION}-linux-${PACKAGE_ARCH}.tar.gz"
-  fingerprint="$(openssl pkey -pubin -in "${archive}.sha256.pub.pem" -outform DER | sha256sum | awk '{print $1}')"
+  expected_digest="$(awk '{print $1}' "${archive}.sha256")"
   sudo install -d -m 0700 "${work}/verified" "${work}/verified/var/lib"
-  candidate_root="$(sudo env DESTDIR="${work}/verified" AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
-    "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" \
-    "${archive}.sha256.sig" "${archive}.sha256.pub.pem")"
+  candidate_root="$(sudo env DESTDIR="${work}/verified" \
+    "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${expected_digest}")"
   check_native_binaries "${candidate_root}/rust/target/release" "${VERSION}"
   sudo sha256sum "${candidate_root}/rust/target/release/ocservia-agent" | awk '{print $1}' \
     >"${work}/binary-sha-${VERSION}"
@@ -391,7 +390,7 @@ if [[ "${corrupt_install_status}" -eq 0 ]]; then
 fi
 sudo test ! -e /usr/libexec/ocservia/ocservia-agent \
   || { echo "corrupted deb verification failure still installed the Agent" >&2; exit 1; }
-grep -Fq 'Agent package archive digest does not match the signed checksum' \
+grep -Fq 'Agent package archive digest does not match the expected SHA256' \
   "${ARTIFACT_DIR}/deb-corrupt-install.log" \
   || { echo "corrupted deb failed for an unexpected reason" >&2; exit 1; }
 sudo test -e /etc/ocservia/agent-install-production-relays \

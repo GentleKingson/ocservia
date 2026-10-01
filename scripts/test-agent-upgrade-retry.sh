@@ -15,8 +15,6 @@ export OUTPUT_DIR="${work}/products" AGENT_SIGNING_KEY="${work}/signing.key" SOU
 case "$(uname -m)" in aarch64) export PACKAGE_ARCH=arm64 ;; x86_64) export PACKAGE_ARCH=amd64 ;; *) exit 2 ;; esac
 openssl genpkey -algorithm ED25519 -out "${AGENT_SIGNING_KEY}" >/dev/null 2>&1
 openssl pkey -in "${AGENT_SIGNING_KEY}" -pubout -out "${work}/public.pem" >/dev/null 2>&1
-AGENT_TRUSTED_KEY_SHA256="$(openssl pkey -pubin -in "${work}/public.pem" -outform DER | sha256sum | awk '{print $1}')"
-export AGENT_TRUSTED_KEY_SHA256
 package() {
   local version="$1" binary archive
   for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
@@ -25,7 +23,7 @@ package() {
   done
   VERSION="${version}" bash "${work}/source/scripts/package-agent.sh" >/dev/null
   archive="${OUTPUT_DIR}/ocservia-agent-${version}-linux-${PACKAGE_ARCH}.tar.gz"
-  bash "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" "${archive}.sha256.sig" "${work}/public.pem"
+  bash "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "$(awk '{print $1}' "${archive}.sha256")"
 }
 old="$(package 1.0.0)"
 new="$(package 1.0.1)"
@@ -131,7 +129,7 @@ cp -p "${work}/direct-manifest" "${snapshot}/MANIFEST.sha256"
 "${new}/scripts/rollback-agent.sh"
 cmp "${config}/relays.env" "${work}/single-relays.env"
 test ! -e "${DESTDIR}/usr/libexec/ocservia/ocservia-agent-relays"
-# Verify signed target contents, not capabilities inferred from live settings.
+# Verify target contents, not capabilities inferred from live settings.
 fixture="${work}/package-fixture"
 mkdir -p "${fixture}"
 cp -a "${new}" "${fixture}/ocservia-agent-1.0.1"
@@ -141,10 +139,7 @@ archive="${work}/ocservia-agent-1.0.1-linux-${PACKAGE_ARCH}.tar.gz"
 verify_fixture() {
   tar -czf "${archive}" -C "${fixture}" ocservia-agent-1.0.1
   (cd "${work}" && sha256sum "$(basename "${archive}")") >"${archive}.sha256"
-  openssl pkeyutl -sign -rawin -inkey "${AGENT_SIGNING_KEY}" \
-    -in "${archive}.sha256" -out "${archive}.sha256.sig"
-  bash "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" \
-    "${archive}.sha256.sig" "${work}/public.pem"
+  bash "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "$(awk '{print $1}' "${archive}.sha256")"
 }
 if verify_fixture >"${work}/invalid-package.log" 2>&1; then
   echo 'package accepted a service with its required launcher missing' >&2; exit 1

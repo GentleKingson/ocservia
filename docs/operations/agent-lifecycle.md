@@ -37,16 +37,15 @@ Build the Agent and privd release binaries, then create a deterministic signed p
 ```bash
 OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
   VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
-VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
-  scripts/verify-agent-package.sh dist/ocservia-agent-1.0.0-linux-amd64.tar.gz \
-  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256 \
-  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256.sig \
-  /etc/ocservia/release-signing.pub.pem)"
+# A plain checksum detects transfer corruption; it is not an authorization key.
+EXPECTED_SHA256="$(awk '{print $1}' dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256)"
+VERIFIED_PACKAGE="$(sudo scripts/verify-agent-package.sh \
+  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz "${EXPECTED_SHA256}")"
 sudo INSTALL_PRODUCTION_RELAYS=true \
   "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
 
-Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with required HTTPS `RELAY_URL_A`. Omit `RELAY_URL_B` or leave it empty; the managed-node installer rejects nonempty B before installation, and the production launcher rejects it before Agent execution. The lower-level package installer preserves operator configuration. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
+The verifier freezes the archive in root-owned staging, compares its SHA256 with the supplied expected digest, and checks archive contents before extraction. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with required HTTPS `RELAY_URL_A`. Omit `RELAY_URL_B` or leave it empty; the managed-node installer rejects nonempty B before installation, and the production launcher rejects it before Agent execution. The lower-level package installer preserves operator configuration. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
 
 The production drop-in executes the packaged fixed launcher
 `/usr/libexec/ocservia/ocservia-agent-relays`, which constructs exactly one Relay URL
@@ -56,10 +55,9 @@ upgrades, rollback snapshots, and uninstall include this launcher; upgrades
 preserve operator configuration and identity. Uninstall removes the launcher
 but retains configuration and state unless the existing purge option is used.
 
-The verifier copies the archive, signed checksum, signature, and pinned public
-key into a unique `root:root` mode `0700` directory below
-`/var/lib/ocservia-upgrade/package-staging`. It verifies the exact copied checksum,
-computes the exact copied archive digest, rejects unsafe archive paths and
+The verifier copies only the archive into a unique `root:root` mode `0700` directory below
+`/var/lib/ocservia-upgrade/package-staging`. It compares the copied archive SHA256
+with the caller-supplied expected digest, rejects unsafe archive paths and
 member types, and extracts that same root-owned archive. Install and upgrade
 scripts accept only the verified directory printed by the verifier. Do not
 extract or run installers from a download directory, and remove the verified
@@ -81,8 +79,10 @@ the six packages, and, on formal Controller releases, the Controller manifests
 `controller-release-arm64.json` with their checksums,
 the versioned `controller-bootstrap.sh` and `managed-node-bootstrap.sh`, the
 Ed25519 `SHA256SUMS.sig`, and `release-signing.pub.pem`.
-All of them trust the same release key whose DER SHA-256 fingerprint is pinned
-out of band.
+The producer still emits signing attachments during the workflow migration.
+The archive verifier, native scriptlets and AgentUpgrade no longer consume
+those attachments. Native scriptlets use the embedded plain checksum;
+AgentUpgrade uses the already-authorized command digest.
 
 The `.deb` and `.rpm` embed the signed archive triple, the release public key,
 the pinned fingerprint, and the verifier under `/usr/share/ocservia-agent`.
@@ -242,20 +242,18 @@ authority for this command family.
 
 The runner resolves packages only from the fixed local spool
 `/var/lib/ocservia-upgrade/package-spool` — the operator or provisioning
-pipeline places the signed release triple
-(`ocservia-agent-<version>-linux-<arch>.tar.gz` plus `.sha256` and
-`.sha256.sig`) there before issuing the upgrade. There is no URL fetch and no
-caller-selected path. The runner requires the spool archive digest to equal the
-signed intent digest, then re-verifies the package through the installed
-`/usr/libexec/ocservia/ocservia-agent-verify` with the pinned trust anchors
-`/etc/ocservia/release-signing.pub.pem` and
-`/etc/ocservia/trusted-release-key.sha256` (DER SHA-256 fingerprint, provisioned
-out of band exactly like the installation key). Only after the verified marker
+pipeline places `ocservia-agent-<version>-linux-<arch>.tar.gz` there before
+issuing the upgrade. There is no URL fetch and no caller-selected path. The
+runner requires the spool archive digest to equal `package_sha256` in the
+already-authorized command's durable intent. It passes that exact digest to
+`/usr/libexec/ocservia/ocservia-agent-verify`, which freezes the archive in
+root-owned staging, compares its SHA256 again, and safely extracts it. A digest
+mismatch fails closed without running the lifecycle. Only after the verified marker
 matches the intent does it run the package's own `upgrade-agent.sh` lifecycle,
 re-check the installed binaries against the verified package, restart
 `ocservia-privd` and `ocservia-agent`, and write the terminal result. A crash at
-any point converges on restart: a `running` operation whose installed binaries
-already match the package skips the destructive lifecycle instead of repeating
+any point converges on restart: a `running` operation whose installation
+commit record and installed binaries match the package skips the destructive lifecycle instead of repeating
 it, and every refusal persists `failed` evidence before exiting non-zero.
 
 Rollback interacts with the durable state explicitly:
@@ -264,7 +262,7 @@ marks non-terminal operations `rolled_back` so a stale runner cannot re-apply
 the rolled-back release, and restores or removes the upgrader binary, the
 `ocservia-upgrader@.service` unit, and the installed verifier exactly as
 recorded in the matched snapshot (`.previous` restored, `.absent` removed). The
-same three files are installed by `install-agent.sh`, carried in every signed
+same three files are installed by `install-agent.sh`, carried in every
 package, and removed by `uninstall-agent.sh`, so all six native package formats
 ship the durable runner.
 
