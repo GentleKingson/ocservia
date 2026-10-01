@@ -23,7 +23,7 @@ operator reconciliation of uncertain mutations remain explicit limitations.
 | [HTTPSigner](../../control-plane/internal/certificates/http_signer.go) uses HTTPS, Bearer authentication and three fixed path shapes. | No bundled production Signer or dedicated CA trust mount is supplied. The [business fixture](../../scripts/release-business-signer.py) stores issuance in memory and only seals P12 passwords. It is not a production implementation. | P2 |
 | [Enrollment proof](../../control-plane/internal/enrollment/proof.go) signs purpose, key ID and public-key digest; [enrollment service](../../control-plane/internal/enrollment/service.go) persists and checks them. | Descriptors are not public-key material. A node UUID alone cannot authorize a sealing-key import. | P2 |
 | [Lifecycle](../../deploy/production/controller.sh) strictly accepts manifest v1 with six image roles. | Edge, Relay, Signer and backend-specific backup images are not all covered by that schema. | P3/P4 |
-| [Release](../../.github/workflows/release.yml) gates production writes in `release-publishing`; [product builds](../../.github/workflows/release-products.yml) export archives before publishing. Dispatch is a dry run. | Registry candidate acceptance must precede final publication; it cannot depend on an already published release. | P4 |
+| [Release](../../.github/workflows/release.yml) gates production writes in `release-publishing`; [product builds](../../.github/workflows/release-products.yml) export archives before publishing. Dispatch is a dry run. | Manual CI qualification precedes version confirmation and tag publication. | P4 |
 
 These are design prerequisites, not reasons to weaken existing validators.
 The single-host alternative keeps independent deployments unchanged but needs
@@ -217,9 +217,9 @@ New readers dispatch explicitly on version; old readers reject v2. P3 chooses
 a smaller extension than the originally proposed per-configuration variants:
 retain one file per architecture and the six existing image roles, add the
 exact roles `edge`, `relay`, `signer`, `mysql_backup`, `mariadb_backup`, and add
-`signer_state_version: 1`. All eleven values are immutable Registry digests.
+`signer_state_version: 1`. All eleven values are explicit version tags or SHA-256 image references.
 Unknown fields, roles, state versions and missing roles remain errors; scalar,
-SemVer, platform, SHA, canonical JSON and existing signature rules are unchanged.
+SemVer, platform, source revision and canonical JSON validation remain required.
 The schema covers both modes and all existing database/auth overlays without
 a second asset-naming or publication matrix. Only selected services are pulled.
 
@@ -227,37 +227,20 @@ The launcher maps the chosen backend's backup image from the verified manifest,
 not an environment override. Protected lifecycle `deployment-profile.json`
 binds mode/backend/deployment across pending, current and previous activation;
 conflicting environment changes fail before stopping services. Optional
-observability may still be enabled because its digest is always signed.
+observability may still be enabled because its image reference is present.
 Integrated requires v2 and retains a separate Signer identity/revision
 checkpoint. V1 assets and the amd64 alias keep their existing meaning. No
 manifest contains Secret values. P4 must produce the added image roles before
 these files are deliverable, and P5 must exercise the deployed configuration.
 
-### Candidate and release order
+### CI and release order
 
-1. Authorized CI builds exact-source, native-platform candidate products once;
-   scan them and push candidate images to Registry under immutable digest
-   identities. This is an external write requiring its own approval gate, not
-   a redefinition of today's dry-run dispatch.
-2. Assemble and sign candidate manifests/checksums against those Registry
-   identities. Provision the trusted Release public key/fingerprint through
-   an independent protected channel; bundled public keys cannot establish trust.
-   Candidate verification does not require a public Git tag or GitHub Release:
-   P3/P4 must add an explicit candidate admission path using the same verifier,
-   pinned source SHA and protected state in isolated acceptance environments.
-   Production installers retain exact-release/tag admission.
-3. Acceptance pulls only these specified Registry digests and verifies source,
-   platform, signed manifest and per-platform image identity. Never rebuild
-   from source for final production-path acceptance. Keep index and child
-   manifest digests distinct from local Docker image config IDs.
-4. After required acceptance and explicit release authorization, publish the
-   tag/final signed assets using the same accepted images. Any changed image
-   or payload invalidates its acceptance. Sign final checksum files as needed
-   without rebuilding payloads; fail if promotion changes bound digests.
-
-P4 separates candidate-push permission from final publication permission and
-updates the existing release graph. Do not remove protected environments,
-allow unsigned fallback, dispatch CI or change repository rules as part of P0.
+Manual Release Check on merged main runs Full CI, Security and native
+Integrated Business with Resilience. Business builds local images and uses a
+loopback registry in disposable runners. After PASS, the operator confirms the
+version and creates its tag; formal Release freshly builds and smoke-tests
+both native architectures before ordinary GitHub Release/GHCR publication.
+Manual Release dispatch is build-only. See [release policy](release-checks.md).
 
 ## Compatibility and rollback
 
@@ -284,23 +267,22 @@ Signer independently is not proof of a consistent recovery point.
 | --- | --- | --- |
 | P1 network | Port/name/trust assertions, client-IP spoof rejection, address replacement and same-host/external Relay reconnect above | This ADR; locked Edge/Gateway/Relay candidates |
 | P2 Signer | Three-path wire compatibility, certificate policy, durable concurrency/restart/revocation, trusted key import and both sealing purposes | Existing client/enrollment/privd contracts; no P1 dependency for isolated tests |
-| P3 lifecycle | Mode rendering, secret mounts, closed v1/v2 admission, pending-state retry, same-mode rollback/refusal and candidate admission | P1/P2 artifacts and state contracts |
-| P4 delivery | Complete image inventory, native builds/scans, approved candidate push, signed digest binding, pull-only acceptance and final publication gate | P3 manifest contract; existing release workflow/checks |
+| P3 lifecycle | Mode rendering, secret mounts, closed v1/v2 admission, pending-state retry, same-mode rollback/refusal | P1/P2 artifacts and state contracts |
+| P4 delivery | Complete image inventory, native builds/scans, local Integrated checks and tag-only publication | P3 manifest contract; existing release workflow/checks |
 | P5 business | Real external node enrollment and independent requester/approver workflows, certificate issuance/P12, revocation enforcement, audit and uncertain outcomes on the same candidate | P1-P4; reuse [business coverage](release-business-coverage.md) and [Release Check](release-checks.md) |
 | P6 operations | Support matrix, DNS/certificate/Secret preparation, key retirement, maintenance/restore drill and operator handoff | P3-P5; reuse existing backend backup/restore and upgrade coverage |
 
 Do not duplicate all database combinations, resilience/long-duration suites
 or evidence storage. Existing checks retain their owners and original results;
 new checks address the concrete Integrated gaps above. Local experiments run
-only on BuildServer; production-path acceptance uses approved Registry
-candidates. A01 topology maps to Network; A02 interfaces and A03 key provenance
+only on BuildServer; current Integrated acceptance uses local builds on disposable native runners. A01 topology maps to Network; A02 interfaces and A03 key provenance
 to Signer; A04 publication order to Delivery; A05 to Compatibility; A06 to this
 ownership table; A07 to the explicit baseline/proposal separation throughout.
 
 P0 static review resolves the design obligations, not the P1-P6 runtime gates.
-Runtime network, production Signer, manifest v2 and Registry candidate checks
+Runtime network, production Signer, manifest v2 and native Integrated checks
 are NOT_RUN in P0. Reevaluate this ADR if PROXY support, Relay IP dependence,
-key provenance, revocation enforcement or candidate admission cannot meet the
+key provenance, revocation enforcement or configuration validation cannot meet the
 specified gates. Record the smallest revised decision before implementation;
 do not silently lower the contract. No production state is changed by this
 document, and its rollback is a documentation-only revert.

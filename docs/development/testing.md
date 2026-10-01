@@ -61,7 +61,7 @@ command alone, when assessing its benefit.
 - Rust behavior or boundaries: `make rust-check`
 - Web behavior: `make web-check`
 - Real cross-VM behavior: follow [real E2E validation](real-e2e.md); module checks and browser fixtures are not substitutes
-- Signed candidate business checks on authorized native runners: [Business Smoke and Integration](real-business-validation.md)
+- Business checks on authorized disposable native runners: [Business Smoke and Integration](real-business-validation.md)
 - Release acceptance: use [Release Check](release-checks.md); selected single-node recovery checks are described in [Resilience](resilience.md)
 
 ## Command wire contracts

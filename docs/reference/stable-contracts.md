@@ -27,8 +27,8 @@ are not current requirements. Existing published artifacts are unchanged.
 | --- | --- | --- |
 | HTTP | [`openapi.yaml`](../../openapi/openapi.yaml): `/api/v1` resources, request/response schemas, strict JSON, authentication, authorization, idempotency, revisions, Problems, pagination and SSE cursor behavior. Preserve the [HTTP baseline](../development/http-baseline.md), including documented error/method precedence. Health/version aliases retain their current behavior. | Go handler/package layout, Web stores, component APIs and generated-client implementation. `/dev` and simulator routes are development-only. |
 | CLI and configuration | Documented Controller `--role`, `--migrate-only`, `OCSERV_*` and exclusive `_FILE` settings; managed-node `agent.env`, `privd.env`, `relays.env` and one-shot enrollment/attestation commands. [Production deployment](../operations/production-deployment.md) and [Agent lifecycle](../operations/agent-lifecycle.md) own names, defaults, secret permissions and failure behavior. | Undocumented flags, debug/probe modes, test environment variables, log wording and local SQLite table access. |
-| Installation and upgrade | Exact release pins; `deploy/production/install.sh`, `controller-bootstrap.sh`, `controller.sh`; `deploy/managed-node/install.sh`; verified node install/upgrade/rollback scripts. Preserve signed manifests, independently provisioned trust, same-target retry and protected confirmed/pending state. | Direct Compose/image replacement, source-tree node installation, unsigned archives and arbitrary package-manager downgrades. |
-| Package names | `ocservia-agent-X.Y.Z-linux-{amd64,arm64}.tar.gz` plus checksum/signature; new DEBs `ocservia-agent_X.Y.Z-1_{amd64,arm64}.deb`; RPMs `ocservia-agent-X.Y.Z-1.{x86_64,aarch64}.rpm`; `controller-release-{amd64,arm64}.json` and existing amd64 alias `controller-release.json`. | Crate versions such as `0.1.0`, build-directory names and image config IDs as registry manifest digests. |
+| Installation and upgrade | Exact release pins; `deploy/production/install.sh`, `controller-bootstrap.sh`, `controller.sh`; `deploy/managed-node/install.sh`; verified node install/upgrade/rollback scripts. Preserve deployment configuration validation, HTTPS downloads, authorized upgrade digests, runtime trust, same-target retry and protected confirmed/pending state. | Direct Compose/image replacement, source-tree node installation, unsafe archive extraction and arbitrary package-manager downgrades. |
+| Package names | `ocservia-agent-X.Y.Z-linux-{amd64,arm64}.tar.gz` plus plain checksum; new DEBs `ocservia-agent_X.Y.Z-1_{amd64,arm64}.deb`; RPMs `ocservia-agent-X.Y.Z-1.{x86_64,aarch64}.rpm`; `controller-release-{amd64,arm64}.json` and existing amd64 alias `controller-release.json`. | Crate versions such as `0.1.0`, build-directory names and image config IDs as registry manifest digests. |
 | Schema and transport | [`proto/`](../../proto/) owns message numbers, enums and services. ALPNs remain `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`; enrollment proof is 1.1, session protocol is negotiated separately. Go/transportd UDS and Agent/privd local protocol are private matched-release interfaces. | Direct Go access to Iroh; arbitrary third-party privd clients; automatic acceptance of new signed-command fields because Protobuf normally permits them. |
 | Signing and hashes | [Command authorization v1](../development/command-authorization-v1.md), session/artifact grants, connection fence v2, fence binding v2 and [privd receipt v1](../development/agent-privd.md) have frozen canonical transcripts. [Semantic v1](../development/command-semantic-hash-v1.md) remains frozen; [v2](../development/command-semantic-hash-v2.md) is current Controller issuance. Proto serialization is never canonical signing input. | Changing an existing hash/transcript to absorb new semantics; inferring semantic v2 from the historical capability string `command.semantic-hash.v1`. |
 | Versions and durable state | Controller/transportd use one candidate source/release; Agent/privd/upgrader are one verified package. Cross-version execution has no compatibility guarantee. Preserve journals, root effect store plus HMAC/receipt keys, endpoint identity and revision/fence floors. | Independent Agent/privd swaps or numeric version classification as permission to dispatch. |
@@ -165,12 +165,13 @@ patch set. Do not substitute PG18/G6 or silently remove old rows. SQLite
 journal WAL-reset applicability and upgrade recovery remain T06/T08 work;
 do not reset journals to make an upgrade pass.
 
-## Freeze and rollout decisions
+## CI and rollout decisions
 
-Freeze the candidate source and bind every accepted package/image to that
-source, version, architecture and digest. The final publishing run must validate
-its own exact products; earlier source tests or another run's digest are not
-substitutes. Historical compatibility gates are retired, not skipped successes.
+Run manual Release Check on merged main and require Full CI, Security and
+Integrated Business with Resilience PASS. The operator then confirms the
+version and creates its tag; formal Release builds and smoke-tests both native
+architectures before publication. Historical compatibility gates are retired,
+not skipped successes.
 
 Preserve current trust, real capabilities, approvals, Signer identity/revision,
 journals, receipts and replay/fencing state. Reconcile Unknown before conflicting
@@ -180,4 +181,4 @@ Cross-version execution can fail or damage state despite removal of admission.
 
 Unrun, failed, skipped and excluded checks remain distinct. Required failures
 still block publication, and any candidate change requires rechecking its
-affected acceptance and source/artifact bindings.
+affected CI checks.

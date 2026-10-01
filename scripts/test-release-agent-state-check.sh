@@ -75,8 +75,7 @@ set -euo pipefail
 echo 'blocked before modification' >&2
 exit 1
 SH
-openssl genpkey -algorithm ED25519 -out "${work}/candidate.key" >/dev/null 2>&1
-OUTPUT_DIR="${package}" AGENT_SIGNING_KEY="${work}/candidate.key" VERSION=0.6.1 \
+OUTPUT_DIR="${package}" VERSION=0.6.1 \
   SOURCE_DATE_EPOCH=1786147200 PACKAGE_ARCH="${arch}" bash "${work}/source/scripts/package-agent.sh" >/dev/null
 archive="${package}/ocservia-agent-0.6.1-linux-${arch}.tar.gz"
 install -m 755 "${ROOT}/scripts/verify-agent-package.sh" "${package}/verify-agent-package.sh"

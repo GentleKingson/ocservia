@@ -204,19 +204,14 @@ designated Registry images and separately prove real daemon/workflow execution.
 
 ## Disposable Actions acceptance
 
-With operator authorization for candidate publication, dispatch
-`release-upgrade.yml` with `purpose=integration`, `production_signer=true` and
-the candidate version on its exact branch. This opt-in path natively builds
-and scans nine first-party images on AMD64 and ARM64, publishes unique
-SHA/run/attempt GHCR tags, and signs the platform manifests binding their
-Registry digests plus the upstream database/observability images. A clean
-consumer pulls those digests and installs through the existing Integrated
-lifecycle. It does not publish a Release or change stable tags.
-The ordinary diagnostic path and shared reusable business consumer are
-read-only. Only the explicit candidate publication job has `packages: write`;
-the consumer does not inherit that write permission. See the
-[candidate pipeline](../../deploy/production/integrated/README.md#candidate-pipeline)
-for exact-source verification, retained artifacts and stable promotion rules.
+Dispatch `release-upgrade.yml` with `purpose=integration`,
+`production_signer=true` and a plain test version such as `0.0.0` on the branch
+being tested. It natively builds and scans nine first-party images on AMD64 and
+ARM64 and uses a loopback test registry with ordinary platform configuration.
+The existing Integrated lifecycle runs the actual Signer implementation;
+no job has GHCR publishing authority. Manual Release Check on main always runs
+this Integrated scope with Resilience. See the
+[CI and publication flow](../../deploy/production/integrated/README.md#ci-and-publication).
 
 The extended native daemon checks use the production Signer with an online
 intermediate, approved Controller export and actual node public-key export.

@@ -1,62 +1,15 @@
 #!/usr/bin/env bash
-# Scans the Controller release candidate images and emits per-image SBOM and
-# OS-level vulnerability evidence.
-#
-# Runs inside the controller-image-security job, before any release image is
-# written to the registry: evidence is bound to the Docker image archives the
-# build legs produced, and the publish job later proves it loaded and pushed
-# exactly those images. Any OS-level High/Critical finding with an available
-# fix fails the gate and blocks the publish; unfixable findings stay in the
-# report without blocking.
-#
-# usage: scan-release-images.sh <output-dir>
-# env:
-#   IMAGE_ARCHIVES_TSV   required; "<name>\t<arch>\t<archive-path>" per built
-#                        image leg; every image needs one amd64 and one arm64 row
-#   RELEASE_TAG          required; release tag recorded in the summary
-#   SOURCE_COMMIT        required; release source commit recorded in the summary
-#   IMAGE_SCAN_EXEMPTIONS  optional; overrides the exemptions file location
-#                        (the release path always reads the checked-in file)
-# Callers must put the bootstrap'd `syft`/`grype` on PATH (see the
-# image-security bootstrap profile) — the script resolves them like any other
-# command so stub-based contract tests can substitute them.
+# CI-only OS vulnerability gate; temporary scan data is never a Release asset.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-output_dir="${1:?usage: scan-release-images.sh <output-dir>}"
 image_archives_tsv="${IMAGE_ARCHIVES_TSV:?IMAGE_ARCHIVES_TSV is required}"
-release_tag="${RELEASE_TAG:?RELEASE_TAG is required}"
-source_commit="${SOURCE_COMMIT:?SOURCE_COMMIT is required}"
-
-[[ -f "${image_archives_tsv}" && ! -L "${image_archives_tsv}" && -s "${image_archives_tsv}" ]] || {
-  echo "image archives table is missing or empty: ${image_archives_tsv}" >&2
-  exit 1
-}
-mkdir -p "${output_dir}"
-
-syft_version="$(syft --version | awk '{print $2}')"
-grype_version="$(grype --version | awk '{print $2}')"
-
-# The whole release is gated on one vulnerability database snapshot: update it
-# once, record its build and the exact DB artifact it came from, and keep
-# auto-update off so the first and the last scan of the run see the same DB.
-# A fresh runner without a working DB fails closed here instead of scanning
-# against nothing.
+[[ $# == 0 && -f "$image_archives_tsv" && ! -L "$image_archives_tsv" && -s "$image_archives_tsv" ]] || exit 2
+work="$(mktemp -d)"
+trap 'rm -rf -- "$work"' EXIT INT TERM
 export GRYPE_DB_AUTO_UPDATE=false
 grype db update >/dev/null
-grype_db_json="$(grype db status -o json)"
-grype_db_built="$(jq -er '.built | strings | select(length > 0)' <<<"${grype_db_json}")"
-grype_db_schema="$(jq -er '.schemaVersion | strings | select(length > 0)' <<<"${grype_db_json}")"
-grype_db_from="$(jq -er '.from | strings | select(length > 0)' <<<"${grype_db_json}")"
-export GRYPE_DB_AUTO_UPDATE=false
-
-# Explicit, reviewed escape hatch: a finding is only exempted when an entry
-# binds the exact image, package, installed version, and vulnerability id,
-# carries a reason, has not passed its review date, and was recorded against
-# the image's actual digest-pinned base, resolved below from the same
-# Dockerfiles the build consumed — a base refresh invalidates stale entries.
-# Everything else keeps the fail-closed behavior.
+# Missing or invalid vulnerability data cannot report PASS.
+grype db status -o json | jq -e '(.built | type == "string" and length > 0)' >/dev/null
 exemptions_file="${IMAGE_SCAN_EXEMPTIONS:-${ROOT}/deploy/production/image-scan-exemptions.json}"
 [[ -f "${exemptions_file}" && ! -L "${exemptions_file}" && -s "${exemptions_file}" ]] || {
   echo "image scan exemptions file is missing or empty: ${exemptions_file}" >&2
@@ -77,32 +30,7 @@ jq -e '
   exit 1
 }
 exemptions_json="$(jq -c '.exemptions' "${exemptions_file}")"
-exemptions_sha256="sha256:$(sha256sum "${exemptions_file}" | awk '{print $1}')"
 
-summary="${output_dir}/controller-image-security.json"
-
-# The evidence must bind to the exact image bytes being gated on, so the config
-# digest is read back out of each archive instead of being trusted from the
-# build metadata. The publish job compares it against the images it loads.
-archive_config_digest() {
-  local archive="$1" config_name
-  config_name="$(tar -xOf "${archive}" manifest.json 2>/dev/null | jq -er '.[0].Config' 2>/dev/null)" || {
-    echo "cannot read the image config reference from archive ${archive}" >&2
-    return 1
-  }
-  config_name="$(basename "${config_name}")"
-  [[ "${config_name}" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "unexpected image config reference in archive ${archive}: ${config_name}" >&2
-    return 1
-  }
-  printf 'sha256:%s\n' "${config_name}"
-}
-
-# Exemptions bind the base image the finding was recorded against, so the gate
-# must know each image's actual base. It resolves the base the same way the
-# build consumes it: the final stage of each release Dockerfile enters through
-# the last digest-pinned FROM (later FROM lines only reference internal
-# stages). Keep this mapping in sync with scripts/build-release-controller.sh.
 controller_dockerfile_for() {
   case "$1" in
     gateway) printf 'deploy/production/gateway.Dockerfile\n' ;;
@@ -125,83 +53,23 @@ image_base_reference() {
   ' "${ROOT:?}/${dockerfile}"
 }
 
-# Validate every row and require both platform legs per image before writing
-# anything: a malformed or incomplete table must fail closed without leaving a
-# half-written summary behind.
-declare -A archive_for=()
-declare -A image_seen=()
-while IFS=$'\t' read -r name arch archive; do
-  [[ "${name}" =~ ^[a-z][a-z0-9_-]*$ ]] || {
-    echo "invalid image name row: ${name}" >&2
-    exit 1
-  }
-  [[ "${arch}" == "amd64" || "${arch}" == "arm64" ]] || {
-    echo "invalid image arch row: ${name} ${arch}" >&2
-    exit 1
-  }
-  [[ -n "${archive}" && -f "${archive}" && ! -L "${archive}" && -s "${archive}" ]] || {
-    echo "image archive is missing, empty, or a symlink: ${name} linux/${arch}: ${archive}" >&2
-    exit 1
-  }
-  [[ -z "${archive_for[${name}/${arch}]:-}" ]] || {
-    echo "duplicate image archive row: ${name}/${arch}" >&2
-    exit 1
-  }
-  archive_for["${name}/${arch}"]="${archive}"
-  image_seen["${name}"]=1
-done <"${image_archives_tsv}"
-((${#image_seen[@]} > 0)) || {
-  echo "image archives table must declare at least one image" >&2
-  exit 1
-}
-for name in "${!image_seen[@]}"; do
-  [[ -n "${archive_for[${name}/amd64]:-}" && -n "${archive_for[${name}/arm64]:-}" ]] || {
-    echo "image ${name} must declare both amd64 and arm64 archives" >&2
-    exit 1
-  }
-done
-
-printf '{\n  "release_tag": "%s",\n  "source_commit": "%s",\n  "generated_at": "%s",\n  "tools": {"syft": "%s", "grype": "%s", "grype_db": {"built": "%s", "schema": "%s", "from": "%s", "auto_update": false}},\n  "exemptions_sha256": "%s",\n  "gate": "os-level high/critical findings with an available fix fail the publish",\n  "images": {' \
-  "${release_tag}" "${source_commit}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  "${syft_version}" "${grype_version}" \
-  "${grype_db_built}" "${grype_db_schema}" "${grype_db_from}" \
-  "${exemptions_sha256}" >"${summary}"
-
 today="$(date -u +%Y-%m-%d)"
+declare -A seen=()
 failures=()
-first_image=true
-for name in $(printf '%s\n' "${!image_seen[@]}" | LC_ALL=C sort); do
-  ${first_image} || printf ',\n' >>"${summary}"
-  first_image=false
-  dockerfile="$(controller_dockerfile_for "${name}")" || {
-    echo "no release Dockerfile mapping for image ${name}; cannot resolve its base image" >&2
-    exit 1
-  }
-  base_ref="$(image_base_reference "${dockerfile}")" || {
-    echo "cannot resolve a digest-pinned base image for ${name} from ${dockerfile}" >&2
-    exit 1
-  }
-  printf '  "%s": {"base_image": "%s", "platforms": {' "${name}" "${base_ref}" >>"${summary}"
-
-  first_platform=true
-  for arch in amd64 arm64; do
-    archive="${archive_for[${name}/${arch}]}"
-    config_digest="$(archive_config_digest "${archive}")"
-    echo "scanning ${name} linux/${arch} at ${config_digest}" >&2
-    sbom_file="${output_dir}/controller-image-sbom-${name}-linux-${arch}.spdx.json"
-    os_sbom_file="${output_dir}/.scan-${name}-${arch}-os.spdx.json"
-    scan_file="${output_dir}/controller-image-os-scan-${name}-linux-${arch}.json"
-    syft "docker-archive:${archive}" -o spdx-json --file "${sbom_file}" -q
-    # OS-level catalogers only: the release gate scopes to base-image
-    # (OS package) vulnerabilities; the full SBOM above stays published for
-    # independent first-party inventory.
-    syft "docker-archive:${archive}" \
-      --override-default-catalogers 'apk-db-cataloger,dpkg-db-cataloger,rpm-db-cataloger' \
-      -o spdx-json --file "${os_sbom_file}" -q
-    grype "sbom:${os_sbom_file}" -o json --file "${scan_file}" -q
-
-    # Classify every finding first (fixable High/Critical are gate-relevant),
-    # then count only the reportable (non-exempted) ones into the summary.
+rows=0
+while IFS=$'\t' read -r name arch archive; do
+  [[ "$name" =~ ^[a-z][a-z0-9_-]*$ && ( "$arch" == amd64 || "$arch" == arm64 ) ]] || exit 2
+  [[ -f "$archive" && ! -L "$archive" && -s "$archive" && -z "${seen[$name/$arch]:-}" ]] || exit 2
+  seen["$name/$arch"]=1
+  rows=$((rows + 1))
+  dockerfile="$(controller_dockerfile_for "$name")"
+  base_ref="$(image_base_reference "$dockerfile")"
+  os_sbom_file="$work/os.spdx.json"
+  scan_file="$work/scan.json"
+  syft "docker-archive:$archive" \
+    --override-default-catalogers 'apk-db-cataloger,dpkg-db-cataloger,rpm-db-cataloger' \
+    -o spdx-json --file "$os_sbom_file" -q
+  grype "sbom:$os_sbom_file" -o json --file "$scan_file" -q
     findings="$(jq -c --arg image "${name}" --arg base "${base_ref}" --arg today "${today}" --argjson _exemptions "${exemptions_json}" '
       [.matches[]
       | .artifact.name as $package | .artifact.version as $version
@@ -222,34 +90,14 @@ for name in $(printf '%s\n' "${!image_seen[@]}" | LC_ALL=C sort); do
         + (([$reportable[].severity] | group_by(.))
           | map({(.[0] | ascii_downcase): length}) | add // {})
     ' "${scan_file}")"
-    fixable_count="$(jq -r '.fixable_high_critical' <<<"${findings}")"
-    exempted_count="$(jq -r '.exempted' <<<"${findings}")"
-    gate="pass"
-    if ((fixable_count > 0)); then
-      gate="fail"
-      failures+=("${name} linux/${arch}: ${fixable_count} fixable High/Critical OS findings")
-    fi
-
-    ${first_platform} || printf ',\n' >>"${summary}"
-    first_platform=false
-    printf '"linux-%s": {"archive": "%s", "config_digest": "%s", "sbom": "%s", "sbom_sha256": "sha256:%s", "scan": "%s", "scan_sha256": "sha256:%s", "os_findings": %s, "gate": "%s"}' \
-      "${arch}" "$(basename "${archive}")" "${config_digest}" \
-      "$(basename "${sbom_file}")" "$(sha256sum "${sbom_file}" | awk '{print $1}')" \
-      "$(basename "${scan_file}")" "$(sha256sum "${scan_file}" | awk '{print $1}')" \
-      "${findings}" "${gate}" >>"${summary}"
-    rm -f "${os_sbom_file}"
-  done
-  printf '}}' >>"${summary}"
-done
-
-printf '}\n}\n' >>"${summary}"
-
+  fixable_count="$(jq -r '.fixable_high_critical' <<<"$findings")"
+  echo "$name linux/$arch: $findings"
+  if ((fixable_count > 0)); then failures+=("$name linux/$arch: $fixable_count fixable High/Critical OS findings"); fi
+done <"$image_archives_tsv"
+((rows > 0)) || exit 2
 if ((${#failures[@]} > 0)); then
-  printf 'release image scan gate failed:\n' >&2
-  printf '  - %s\n' "${failures[@]}" >&2
-  echo "refresh the affected base images and rebuild before publishing" >&2
+  printf '%s\n' "${failures[@]}" >&2
+  echo 'Controller image scan FAIL' >&2
   exit 1
 fi
-
-jq -e '.images | length >= 1' "${summary}" >/dev/null
-echo "controller image security summary: ${summary}"
+echo 'Controller image scan PASS'

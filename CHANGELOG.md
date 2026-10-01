@@ -42,8 +42,8 @@ compatibility-policy reset in v1.1.0 described below.
 - Exact target source checkout for Controller lifecycle operations, artifact-based
   retry identity, atomic state commits, and real execution failures. A reused
   version string does not make different artifacts identical.
-- Target version syntax/display; signed package and image identity, trusted keys,
-  checksums, source commit and architecture binding; actual referenced launchers
+- Target version syntax/display; runtime trusted keys, authorized upgrade
+  digests, source checkout and architecture validation; actual referenced launchers
   and safe package extraction. No new force/skip compatibility switches exist.
 - Real command capability checks, RBAC and approvals, command binding, idempotency,
   replay protection, generation/lease fencing, and Signer identity and revision.

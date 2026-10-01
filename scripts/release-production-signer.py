@@ -216,7 +216,7 @@ def before():
     for control in (False, True):
         result = authenticate(control)
         assert result.returncode == 0 and b'COOKIE=' in result.stdout, 'pre-revoke certificate login failed'
-    (EVIDENCE / 'crl-acceptance.json').write_text(json.dumps({'candidate_sha': os.environ['CANDIDATE_SHA'],
+    (EVIDENCE / 'crl-acceptance.json').write_text(json.dumps({
                                                            'before_auth': True, 'before_crl_number': number,
                                                            'primary_occtl_identity': primary_socket}))
 

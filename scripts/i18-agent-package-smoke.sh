@@ -61,9 +61,9 @@ trap cleanup EXIT INT TERM
 (cd "${ROOT}/rust" && OCSERV_AGENT_RELEASE_VERSION=1.0.0 cargo build --locked --release \
   --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
 echo "agent package release build passed"
-openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
+openssl genpkey -algorithm ED25519 -out "${work}/endpoint-fixture.key" >/dev/null 2>&1
 openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
-controller_endpoint="$(openssl pkey -in "${work}/signing.key" -pubout -outform DER \
+controller_endpoint="$(openssl pkey -in "${work}/endpoint-fixture.key" -pubout -outform DER \
   | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 substitute_controller_endpoint="$(openssl pkey -in "${work}/controller-command.key" -pubout -outform DER \
   | tail -c 32 | od -An -tx1 | tr -d ' \n')"
@@ -88,10 +88,10 @@ if "${ROOT}/rust/target/release/ocservia-agent" \
   exit 1
 fi
 echo "fresh enrollment identity preparation passed"
-chmod 0600 "${work}/signing.key"
+chmod 0600 "${work}/endpoint-fixture.key"
 openssl pkey -in "${work}/controller-command.key" -pubout \
   -out "${work}/controller-command.pub.pem" >/dev/null 2>&1
-archive="$(OUTPUT_DIR="${ARTIFACT_DIR}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION=1.0.0 \
+archive="$(OUTPUT_DIR="${ARTIFACT_DIR}" VERSION=1.0.0 \
   PACKAGE_ARCH="${PACKAGE_ARCH}" SOURCE_DATE_EPOCH=1786147200 "${ROOT}/scripts/package-agent.sh")"
 
 archive_name="$(basename -- "${archive}")"

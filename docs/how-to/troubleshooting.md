@@ -46,11 +46,12 @@ When enabled, check `otel-client.crt`, `otel-client.key`, and `otel-ca.crt` for
 launcher ownership and mode `0444`, then check Collector logs and backend mTLS
 connectivity. Missing or incorrectly permissioned TLS files block startup.
 
-## Release verification fails
+## Deployment configuration is rejected
 
-Keep the selected manifest, its `.sha256`, `SHA256SUMS`, and `SHA256SUMS.sig`
-from the same release bundle. The trusted public key must be provisioned
-outside that bundle. Use the manifest matching the Docker daemon architecture.
+Use the JSON configuration matching the Docker daemon architecture and a clean
+checkout of its `source_commit`. Check version, topology, image references and
+root-controlled file ancestry. Follow the reported prerequisite; do not bypass
+lifecycle validation or overwrite confirmed/pending state.
 
 ## Agent cannot enroll
 

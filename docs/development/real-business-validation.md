@@ -1,64 +1,58 @@
 # Business Smoke and Integration
 
 The release Business Smoke job exercises one
-signed amd64 production path: Controller and native systemd Agent/privd/ocserv
+amd64 production path: Controller and native systemd Agent/privd/ocserv
 installation, Local requester/approver login, approved ConfigPlan apply, real
 OpenConnect VPN traffic, automatic ConfigPlan rollback and a fresh VPN check.
 No production binary, service, Relay or VPN is mocked. This is neither native
 package acceptance nor a Controller/database HA guarantee.
 
-Integration is a change-selected specialized check. It retains the original OIDC, PKI/P12/revoke, real-browser,
-single-Relay recovery, Agent/privd restart and cross-source evidence checks. See the [coverage inventory](release-business-coverage.md).
-The [Release Check](release-checks.md) determines the required scope from the
-complete published-release-to-candidate diff; unselected Integration is not evaluated. Do not describe
-smoke as a 5-15 minute job until its measured timings justify that target.
+Manual [Release Check](release-checks.md) always runs Integration with OIDC,
+PKI/P12/revoke, real browser, single-Relay recovery and Agent/privd restart
+checks. It also requires `run-resilience=true`. See the [coverage inventory](release-business-coverage.md).
 
-With explicit authorization to use disposable GitHub-hosted runners, dispatch
-`release-upgrade.yml` on the exact candidate branch with `version`,
-and `purpose=smoke` or `purpose=integration`. Add `run-resilience=true` for
-Controller, Agent/privd/transport, database API outage and sole-Relay recovery.
-The extended profile reuses its Agent/privd and Relay scenarios once.
-The candidate SHA comes from the actual dispatch context. There is no baseline
-input or historical upgrade mode.
-This mode does not publish packages/images, create a tag, or modify Secrets.
-Local preparation checks run in an isolated environment with existing tools.
-Native host-installing steps run only on a disposable runner.
+For investigation, dispatch `release-upgrade.yml` on the branch being tested
+with `version=0.0.0`, `purpose=integration`, `production_signer=true`, and
+`run-resilience=true`. The job freshly builds local products, scans image OS
+vulnerabilities and runs native Integrated lifecycle checks on both supported
+architectures. The amd64 owner runs business and finite recovery; arm64 runs
+native Integrated installation and restart. Use `production_signer=false` with
+`purpose=smoke` for the smaller standalone scope. Neither mode publishes a
+Release/tag or writes GHCR. Host installation runs only on disposable runners.
 
 ## Evidence and boundaries
 
-The release jobs consume the exact producer artifacts after explicit digest
-checks. Standalone diagnostics can build their own matched candidate.
-The driver then uses `controller.sh install --release-file`.
-The same independently held task signing key verifies the native package before
-`dpkg`; the embedded payload verifier remains enabled. Managed-node preparation
-and the final `SERVICES_ACTIVE` convergence use the shipped installer.
+The Business driver builds its own native packages and images, uses a loopback
+test registry, and runs `controller.sh install --release-file` with ordinary
+JSON configuration. Integrated configuration upgrade/rollback exercises digest
+and version-tag references to the same locally built images; it does not test
+historical binary compatibility. Native scriptlets verify the embedded archive
+checksum in root-owned staging. Managed-node preparation and final
+`SERVICES_ACTIVE` convergence use the shipped installer.
 After the approved positive ConfigPlan apply, each profile establishes
 an OpenConnect tunnel and passes real ICMP traffic. It then applies a reviewed
 revision whose reload is deliberately rejected, verifies automatic exact-byte
 rollback, and establishes a new OpenConnect tunnel with ICMP traffic. This is
 an **automatic rollback of a failed apply**, not an operator-initiated rollback
 of the successful revision. `timings.json` records per-stage wall-clock seconds;
-the job summary records artifact-upload seconds, URL and SHA-256 digest. No runtime
-target is currently a release contract.
+failure diagnostics retain the actual environment and execution outcome. No
+runtime target is currently a release contract.
 
-`result.json` records scope, candidate identity, outcome, timings and passed
-checkpoints once. GitHub job status is the authoritative workflow result;
-no second evidence manifest or cross-candidate inheritance is used.
+`result.json` records scope, diagnostic version, outcome, timings and passed
+checkpoints. GitHub job status is the authoritative workflow result.
 
 The following limitations are deliberately retained, not scored as PASS:
 
-- An unpublished candidate cannot exercise the fixed GitHub Release download
-  and versioned Controller bootstrap. This publication-dependent evidence is
-  deferred to Publish, not a perpetual prepublication Business Smoke blocker.
-  Signed candidate lifecycle and managed-node preparation/convergence remain
-  Business Smoke requirements. No fabricated tag, download stub, unsigned substitution or
-  published-release identity is used.
+- Local builds do not test the public GitHub Release download endpoint. Stage-0
+  download/failure fixtures and Release build-only smoke have separate owners.
+  Business runs the actual native lifecycle and managed-node convergence;
+  it does not create a fabricated published version.
 - The private Relay CA is provisioned through the documented protected public
   CA files. The shipped Compose overlay and native launcher use the existing
   strict-TLS binary option without descriptor/launcher edits. Enrollment and
   its final node configuration are produced by the managed-node installer;
   preparation, PENDING_APPROVAL and SERVICES_ACTIVE checkpoints remain separate.
-  This does not turn the preinstalled signed candidate into a published Release
+  This does not turn the locally installed package into a published Release
   download test.
 - Local requester and approver authenticate normally as different principals
   with separate credentials and isolated sessions; no database-inserted sessions
@@ -75,7 +69,7 @@ The following limitations are deliberately retained, not scored as PASS:
   operator custody. The Controller container trust store is provisioned with
   the task CA; TLS verification stays enabled.
 - Extended certificate/P12 checks include node restarts and one-use download.
-  The real browser uses the signed gateway and Controller API without route
+  The real browser uses the built gateway and Controller API without route
   mocks, simulator or TLS exceptions. Missing phase checkpoints remain NOT RUN;
   source implementation is not proof of runtime success. The reviewed complete
   node-local TLS profile is exercised through browser plan/approval/apply and
@@ -114,33 +108,29 @@ completion. Missing fields/checkpoints, cancellation, failure and unexpected
 skip block acceptance. Unselected recovery is explicitly SKIPPED. Install-only
 architecture diagnostics are SKIPPED and do not supply recovery acceptance.
 
-Retain the artifact and its GitHub digest before expiry, with product digests,
-manifest, environment inventory, timestamps, exit status and API/DB/journal/root
-receipt evidence. Logs are private until redacted. Never upload the workspace
+Failure diagnostics retain environment inventory, timings, exit status and
+API/DB/journal/root receipt observations for seven days. Logs are private until redacted. Never upload the workspace
 secret directory, cookies, raw database or password file. Cleanup removes only
 task containers, network namespace, builder and private directory; the native
 installation lives only on the disposable hosted runner. Do not generalize this
 cleanup to a shared host.
 
 To close the smoke scope, cover the prepublication production installation path
-with the reviewed signed candidate, separately authenticated principals,
+with the current locally built products, separately authenticated principals,
 positive ConfigPlan apply, automatic native rollback and VPN traffic before and
 after rollback. Keep the extended production-path checks until their coverage
-is formally transferred. Publication-dependent immutable download paths belong
-to Publish. Positive configuration apply requires native acceptance
+is formally transferred. Public download checks remain separate from the local Business run. Positive configuration apply requires native acceptance
 of the [reviewed complete contract](complete-config-contract.md), not just
 contract approval or unit tests; missing acceptance still blocks readiness. Preserve the
 matched-release recovery boundary in
 [stable contracts](../reference/stable-contracts.md). Do not import earlier T03,
 T04, T05 or Package & Upgrade results as runtime acceptance of the new candidate.
 
-Freeze the candidate before the release workflow. A new candidate cannot borrow
-old product/test results. Independent architecture failures may be rerun with
-producer-bound inputs; shared fault timelines must be rerun together.
+Release Check runs all required owners anew on merged main. Rerun a failed
+owner with its complete checks; shared fault timelines must rerun together.
 Historical native upgrade and mixed-version application cells are retired.
-Business success does not replace retained current-product, security or
-resilience gates. Historical results are not acceptance of this candidate or a
-cross-version safety guarantee.
+Business success does not replace package, source Security or Resilience
+checks, and does not guarantee cross-version safety.
 
 Existing [single-Relay](single-relay-validation.md) and
 [cross-VM enrollment](real-e2e.md) profiles retain their original scope.
