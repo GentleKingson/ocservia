@@ -14,21 +14,27 @@ uses two independent Controller deployments to transfer authority; it is not HA.
 ## Recovery coverage and ownership
 
 The checks below reuse the existing Business and database owners. Manual Release Check
-requires `run-resilience=true` for Integrated Business;
+requires `run-resilience=true` for Integrated Business Smoke;
 there is no separate G6 workflow or evidence framework.
 
 | Check | Owner and entrypoint | Required observation |
 | --- | --- | --- |
-| R1 Controller restart | Existing Business Smoke / Integration environment, optional `run-resilience` | Original state and completed operation remain verifiable; expiration of the former owner lease triggers a fresh fenced Agent session, then new authorized business succeeds. |
-| R2 Agent / privd / transport restart | Same Business environment; reuse extended Agent / privd checks once | Identity, journal and receipt survive; replacement connections advance the owner fence; confirmed effects are not repeated. |
-| R3 Database interruption | Existing database smoke jobs and `test-enrollment-restart.sh`; reference Business environment for API outage behavior | Original storage and pool recover; confirmed state survives; unavailable dependencies cannot produce false success. Full CI keeps PG17/PG18, MySQL and MariaDB smoke coverage. |
-| R4 Sole Relay interruption | Shared strict Business single-Relay scenario, once per run | Prove Relay dependence and that an offline queued command was never sent; recover the same Relay and command with exactly one additional real effect. |
+| R1 Controller stack | Business Smoke with `run-resilience` | Restart Controller and transport together; both ready, fresh Agent session and new authorized business succeeds. |
+| R2 Agent stack | Same smoke environment | One systemd restart transaction for privd and its dependent Agent; both active, fresh session and unchanged identity. |
+| R3 Database interruption | Same smoke environment | Stop PostgreSQL, require database-unavailable readiness, start it, recover readiness and Agent connectivity, then complete normal business. No outage mutation. |
+| R4 Sole Relay interruption | Same smoke environment | Stop the only Relay, observe Agent offline with direct UDP blocked, restart Relay, acquire a fresh session and recover authorized business and VPN traffic. |
+
+Manual integration retains the deeper restart/persistence, outage mutation,
+unsent queue, idempotent replay, exact reload and API/DB/journal/root-receipt
+checks. These are not required by Release Smoke. Full CI retains its existing
+PostgreSQL/MySQL/MariaDB database smoke and isolated recovery owners.
 
 Use the Business job status and actual recovery checkpoints in `result.json`.
 Sanitized failure diagnostics use seven-day Actions artifacts. Selected checks must actually finish successfully;
 missing fields, failure, cancellation and unexpected skips block acceptance.
-Unselected resilience is explicitly `SKIPPED`; install-only diagnostics cannot
-pass recovery acceptance. No separate fault matrix or evidence framework is
+Unselected resilience is explicitly `SKIPPED`. Required scenario checkpoints
+are only `controller`, `agent`, `database`, and `relay`; there is no synthetic
+completion checkpoint or separate required transport scenario. No separate fault matrix or evidence framework is
 required.
 
 ## Retired scope and retained tools

@@ -14,7 +14,7 @@ Each run builds and tests local products on disposable native runners.
 | CSR, issue, P12 one-use export, revoke, restart persistence | Manual integration |
 | Browser login, approvals, ConfigPlan and certificate actions | Manual integration |
 | Single-Relay outage and unsent queue recovery, API/DB/journal/root-receipt cross-checks; one command succeeds with one real effect | Manual integration |
-| Controller, Agent/privd, transport, database/API, and sole Relay recovery | Business Smoke with recovery |
+| Controller/transport stack, Agent/privd stack, database, and sole Relay recovery | Business Smoke with recovery |
 | DEB/RPM install and state preservation on amd64/arm64 | Native package build/install smoke |
 | Controller image execution on both architectures | Controller build/image smoke |
 | Source and dependency vulnerability checks, necessary image vulnerability PASS/FAIL | Security / CI |

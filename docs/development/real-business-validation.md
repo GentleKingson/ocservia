@@ -75,7 +75,10 @@ The following limitations are deliberately retained, not scored as PASS:
   node-local TLS profile is exercised through browser plan/approval/apply and
   native exact-byte rollback/restart checks; only their checkpoints prove that
   a particular candidate passed.
-- Selected single-instance recovery provides no HA, Relay redundancy or
+- Smoke recovery checks readiness, fresh Controller/Agent sessions, unchanged node
+  identity and successful business after reconnect. Manual integration retains
+  outage queue semantics and durable receipt checks. Selected single-instance
+  recovery provides no HA, Relay redundancy or
   production RTO/RPO guarantee. The client namespace protects host routes; it is not
   another host. The probe checks test VPN traffic, never real user traffic.
 
@@ -103,8 +106,7 @@ reconciliation and the existing explicit safe retry after proven effect absence.
 
 `result.json` records `resilience_requested`, `resilience_result` and actual
 scenario checkpoints. A selected recovery run requires exactly one PASS for
-Controller, Agent/privd, transport, reference database API outage, Relay and
-completion. Missing fields/checkpoints, cancellation, failure and unexpected
+Controller stack (including transport), Agent/privd stack, PostgreSQL and Relay. Missing fields/checkpoints, cancellation, failure and unexpected
 skip block acceptance. Unselected recovery is explicitly SKIPPED.
 
 Sanitized diagnostics retain environment inventory, timings and exit status

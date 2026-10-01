@@ -95,7 +95,7 @@ jobs:
           if (result.resilience_result !== expected || !Array.isArray(result.resilience_scenarios)) throw new Error('resilience incomplete');
           if (expected === 'PASS') {
             if (result.planned_topology.native_systemd_node !== true) throw new Error('missing native node');
-            for (const name of ['controller', 'agent_privd', 'transport', 'database_api', 'relay', 'complete']) {
+            for (const name of ['controller', 'agent', 'database', 'relay']) {
               const entries = result.resilience_scenarios.filter(entry => entry.name === `resilience_${name}`);
               if (entries.length !== 1 || entries[0].status !== 'PASS') throw new Error(`missing recovery: ${name}`);
             }
