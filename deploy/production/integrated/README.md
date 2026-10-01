@@ -210,12 +210,29 @@ with HTTPS fallback probes disabled. Mount only its test CA/token, map the test
 hostname to the authorized public IP, and run it from the same-host egress
 network. A timeout is not an authentication rejection or a QUIC pass.
 
-The existing real-node chain supports `SINGLE_INTEGRATED_PUBLIC_IP` together with
-`SINGLE_EDGE_IMAGE` and `SINGLE_NETWORK_PROBE_IMAGE`. In that mode it publishes Edge TCP443 and Relay UDP7842,
-uses the public IP for both Agent and transportd, blocks non-loopback Agent UDP
-inside its disposable namespace, and stops after the independently approved
-real ocserv reload result. Its normal signed-package and image inputs remain
-required. This mode does not run its separate outage/recovery scenarios.
+From the repository root, build and run this independent diagnostic on the
+authorized disposable host. Set `RELAY_EGRESS_NETWORK` to the same-host egress
+network, `RELAY_HOST` to the test certificate's hostname, `PUBLIC_IP` to the
+authorized endpoint, `RELAY_URL` to its HTTPS URL, and the two file variables to
+absolute paths of the public test CA and private test token:
+
+```sh
+docker build -f rust/test-runtime.Dockerfile --target relay-network-probe \
+  -t ocservia-relay-network-probe:test .
+docker run --rm --network "$RELAY_EGRESS_NETWORK" \
+  --add-host "$RELAY_HOST:$PUBLIC_IP" \
+  -v "$RELAY_CA_FILE:/test-ca.pem:ro" -v "$RELAY_TOKEN_FILE:/test-token:ro" \
+  ocservia-relay-network-probe:test "$RELAY_URL" /test-ca.pem /test-token
+```
+
+This manual diagnostic is not selected single-node recovery acceptance and
+does not establish a real Agent command result.
+
+The real single-node command and recovery chain now belongs to the signed
+Business Smoke / Integration environment. Use its optional `run-resilience`
+input; see [resilience coverage](../../../docs/development/resilience.md).
+The former G6 engineering real-node entrypoint and its public-endpoint mode
+are retired.
 
 ## Historical P1 results and gates
 
