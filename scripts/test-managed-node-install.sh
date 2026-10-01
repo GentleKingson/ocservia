@@ -263,7 +263,7 @@ install -m 0755 -- "${root}/bin/agent-stub" "${OCSERV_MANAGED_NODE_SYSROOT}/usr/
 install -m 0755 -- "${root}/bin/privd-stub" "${OCSERV_MANAGED_NODE_SYSROOT}/usr/libexec/ocservia/ocservia-privd"
 printf '[Service]\nEnvironmentFile=/etc/ocservia-agent/relays.env\n' \
   >"${OCSERV_MANAGED_NODE_SYSROOT}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
-printf 'RELAY_URL_A=https://relay-a.example.com\nRELAY_URL_B=https://relay-b.example.com\n' >"${conf}/relays.env"
+printf 'RELAY_URL_A=https://relay-a.example.com\nRELAY_URL_B=\n' >"${conf}/relays.env"
 printf 'CONTROLLER_ENDPOINT_ID=replace-with-approved-controller-endpoint-id\nNODE_ID=00000000-0000-7000-8000-000000000000\nCONTROLLER_COMMAND_VERIFICATION_KEY_FILE=/etc/ocservia-agent/controller-command-verification-key.pem\nUSER_PASSWORD_SEAL_KEY_ID=user-key-v1\nUSER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=replace-with-64-lowercase-hex-sha256\nP12_PASSWORD_SEAL_KEY_ID=p12-key-v1\nP12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=replace-with-distinct-64-lowercase-hex-sha256\n' >"${conf}/agent.env"
 # The real package lifecycle runs as root; an unprivileged fixture run cannot
 # chown to root:ocserv-agent and deliberately leaves the unsafe ownership for
@@ -552,7 +552,7 @@ build_env() {
   for entry in \
     "CONTROLLER_ENDPOINT_ID=${controller_id}" \
     "RELAY_URL_A=https://relay-a.example.test" \
-    "RELAY_URL_B=https://relay-b.example.test" \
+    "RELAY_URL_B=" \
     "RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token" \
     "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem" \
     "TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem" \
@@ -837,7 +837,7 @@ ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
 cat >"${standalone}/install.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${controller_id}
 RELAY_URL_A=https://relay-file-a.example.test
-RELAY_URL_B=https://relay-file-b.example.test
+RELAY_URL_B=
 RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
 CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
 TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem
@@ -1049,7 +1049,7 @@ ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
 cat >"${repo}/install.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${controller_id}
 RELAY_URL_A=https://relay-file-a.example.test
-RELAY_URL_B=https://relay-file-b.example.test
+RELAY_URL_B=
 RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
 CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
 TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem
@@ -1069,7 +1069,7 @@ if ((EUID == 0)); then
   as_root grep -qx "RELAY_URL_A=https://relay-file-a.example.test" \
     "${sysroot}/etc/ocservia-agent/relays.env" ||
     die "relays.env must carry the install.env relay URL A"
-  as_root grep -qx "RELAY_URL_B=https://relay-file-b.example.test" \
+  as_root grep -qx "RELAY_URL_B=" \
     "${sysroot}/etc/ocservia-agent/relays.env" ||
     die "relays.env must carry the install.env relay URL B"
 else
@@ -1241,7 +1241,7 @@ conf="${sysroot}/etc/ocservia-agent"
   die "relays.env ownership is wrong: $(as_root stat -c '%U:%G:%a' "${conf}/relays.env")"
 as_root grep -qx "RELAY_URL_A=https://relay-a.example.test" "${conf}/relays.env" ||
   die "relays.env does not carry the requested relay URL A"
-as_root grep -qx "RELAY_URL_B=https://relay-b.example.test" "${conf}/relays.env" ||
+as_root grep -qx "RELAY_URL_B=" "${conf}/relays.env" ||
   die "relays.env does not carry the requested relay URL B"
 [[ "$(as_root stat -c '%U:%G:%a' "${conf}/relay-access-token")" == "root:ocserv-agent:640" ]] ||
   die "relay-access-token ownership is wrong"
@@ -1520,6 +1520,16 @@ for single_b in unset empty; do
   assert_status 1
   as_root grep -qx 'RELAY_URL_B=' "${sysroot}/etc/ocservia-agent/relays.env" || die 'rerun changed topology'
 done
+
+scenario
+EXTRA_ENV=("RELAY_URL_B=https://second-relay.example.test")
+capture_root
+assert_status 1
+assert_output "only one dedicated Relay"
+assert_log_empty "${curl_log}"
+assert_log_empty "${dpkg_log}"
+assert_log_empty "${agent_log}"
+assert_log_empty "${systemctl_log}"
 
 # The official enrollment path consumes only a protected additional Relay CA;
 # reruns validate it without changing trust material or enrolling again.
@@ -1890,7 +1900,7 @@ EOF
   cat >"${repo}/install.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${controller_id}
 RELAY_URL_A=https://relay-root-file-a.example.test
-RELAY_URL_B=https://relay-root-file-b.example.test
+RELAY_URL_B=
 USER_PASSWORD_SEAL_KEY_ID=file-user-v1
 P12_PASSWORD_SEAL_KEY_ID=file-p12-v1
 ENROLLMENT_ENVIRONMENT=staging
@@ -1921,7 +1931,7 @@ EOF
   as_root grep -qx "RELAY_URL_A=https://relay-root-file-a.example.test" \
     "${sysroot}/etc/ocservia-agent/relays.env" ||
     die "relays.env must carry the launcher-resolved relay URL A"
-  as_root grep -qx "RELAY_URL_B=https://relay-root-file-b.example.test" \
+  as_root grep -qx "RELAY_URL_B=" \
     "${sysroot}/etc/ocservia-agent/relays.env" ||
     die "relays.env must carry the launcher-resolved relay URL B"
   if as_root grep -q "poisoned" "${sysroot}/etc/ocservia-agent/relays.env"; then
@@ -1940,7 +1950,7 @@ EOF
   cat >"${standalone}/install.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${controller_id}
 RELAY_URL_A=https://relay-root-file-a.example.test
-RELAY_URL_B=https://relay-root-file-b.example.test
+RELAY_URL_B=
 EOF
   ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B)
   RUN_STATUS=0
@@ -1963,7 +1973,7 @@ EOF
     ROOT_ENV_OMIT=(RELAY_URL_A RELAY_URL_B)
     printf 'RELAY_URL_A=https://relay-root-file-a.example.test\n' >"${repo}/install.env"
     if [[ "${single_b}" == empty ]]; then printf 'RELAY_URL_B=\n' >>"${repo}/install.env"; fi
-    if [[ "${single_b}" == override ]]; then printf 'RELAY_URL_B=https://relay-b.example.test\n' >>"${repo}/install.env"; fi
+    if [[ "${single_b}" == override ]]; then printf 'RELAY_URL_B=\n' >>"${repo}/install.env"; fi
     RUN_STATUS=0
     RUN_OUTPUT="$(
       export PATH="${root_lifecycle_bin}"

@@ -10,6 +10,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${BUSINESS_PROFILE:=smoke}"
 : "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
 : "${INTEGRATED_INSTALL_ONLY:=false}"
+: "${BUSINESS_RUN_RESILIENCE:=false}"
+[[ "$BUSINESS_RUN_RESILIENCE" == true || "$BUSINESS_RUN_RESILIENCE" == false ]]
+resilience_result=SKIPPED
+if [[ "$BUSINESS_RUN_RESILIENCE" == true && "$INTEGRATED_INSTALL_ONLY" != true ]]; then
+  resilience_result=FAIL
+fi
+relay_ipv4_rule=false
+relay_ipv6_rule=false
 [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == false || "$BUSINESS_PROFILE" == extended ]]
 [[ "${BUSINESS_PROFILE}" == smoke || "${BUSINESS_PROFILE}" == extended ]]
 bash "$ROOT/scripts/release-business-environment.sh"
@@ -115,6 +123,8 @@ cleanup() {
   jq -n --arg sha "${CANDIDATE_SHA}" --arg version "${VERSION}" --arg start "${started}" \
     --arg end "$(date -u +%FT%TZ)" --arg stage "${failed_stage}" --argjson code "${code}" \
     --arg profile "${BUSINESS_PROFILE}" \
+    --arg resilience "$resilience_result" --argjson resilience_requested "$BUSINESS_RUN_RESILIENCE" \
+    --argjson resilience_scenarios "$(if [[ -f "${ARTIFACT_DIR}/api-checkpoints.jsonl" ]]; then jq -s '[.[] | select(.name | startswith("resilience_")) | {name,status,time}]' "${ARTIFACT_DIR}/api-checkpoints.jsonl"; else printf '[]'; fi)" \
     --arg arch "$CONTROLLER_ARCH" --argjson install_only "$INTEGRATED_INSTALL_ONLY" \
     --argjson disposable_container "${INTEGRATED_DISPOSABLE_CONTAINER:-false}" \
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
@@ -127,12 +137,21 @@ cleanup() {
       timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
       scope:(if $profile == "smoke" then "business-smoke" else "integration" end),
+      resilience_requested:$resilience_requested,
+      resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),
+      resilience_scenarios:$resilience_scenarios,
       planned_topology:{hosts:1,architecture:$arch,native_systemd_node:($install_only | not),relays:1,relay_redundancy:false},
       operator_mode:"simulated_two_principals",independent_human_custody:"NOT_VERIFIED",
       limitations:["separate authenticated principals and browser sessions are not two independently responsible people"],
       deferred:["Publish: immutable published Release download/bootstrap"],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
+  if [[ "$relay_ipv4_rule" == true ]]; then
+    sudo iptables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
+  fi
+  if [[ "$relay_ipv6_rule" == true ]]; then
+    sudo ip6tables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
+  fi
   if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
     sudo systemctl stop ocservia-p2-crl >/dev/null 2>&1
     docker rm -f "$T07_SIGNER_CONTAINER" >/dev/null 2>&1
@@ -510,6 +529,11 @@ cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/oc
 record official_managed_enrollment_and_unchanged_launchers
 # Prevent direct UDP connectivity from masking the single-Relay outage.
 sudo iptables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
+relay_ipv4_rule=true
+if [[ -s /proc/net/if_inet6 ]]; then
+  sudo ip6tables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
+  relay_ipv6_rule=true
+fi
 sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
 sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
 sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
@@ -606,6 +630,12 @@ if [[ "${BUSINESS_PROFILE}" == extended ]]; then
   next_stage supplemental_business
   python3 "${ROOT}/scripts/release-business-api.py" business
   record real_vpn_business_and_recovery
+fi
+if [[ "$BUSINESS_RUN_RESILIENCE" == true ]]; then
+  next_stage single_instance_recovery
+  python3 "${ROOT}/scripts/release-business-api.py" resilience
+  resilience_result=PASS
+  record single_instance_recovery
 fi
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
   next_stage integrated_recovery

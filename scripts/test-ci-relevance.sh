@@ -42,17 +42,17 @@ while read -r path selected; do
     expect "${out}" profile quick
     expect "${out}" database_scope smoke
     if [[ " ${selected} " == *' run_ci_tools '* ]]; then
-      grep -Eq '^ci_suites=(guards|release|g6)( (guards|release|g6))*$' "${out}"
+      grep -Eq '^ci_suites=(guards|release)( (guards|release))*$' "${out}"
       case "${path}" in
-        scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release g6' ;;
+        scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release' ;;
         scripts/buildx-cache.sh|.github/actions/build-cache-credentials/index.js)
-          expect "${out}" ci_suites 'release g6' ;;
+          expect "${out}" ci_suites 'release' ;;
         .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
           expect "${out}" ci_suites guards ;;
         .github/workflows/release*.yml)
           expect "${out}" ci_suites release ;;
         .github/workflows/g6-harness-core.yml|scripts/g6-pipeline.mjs|scripts/test-g6-resource-sampler.sh|docs/acceptance/g6-*)
-          expect "${out}" ci_suites g6 ;;
+          expect "${out}" ci_suites release ;;
       esac
     else
       expect "${out}" ci_suites ''

@@ -19,27 +19,9 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-controller-release-smoke.sh
       bash scripts/test-release-image-security.sh
       bash scripts/test-stage0-installers.sh
-      ;;
-    g6)
-      bash scripts/test-g6-workflow-contract.sh
-      bash scripts/test-g6-evidence-pipeline.sh
-      bash scripts/test-g6-formal-authority.sh
-      bash scripts/test-g6-release-identity.sh
-      bash scripts/test-g6-install-release.sh
-      bash scripts/test-g6-checkpoint-secret-policy.sh
       bash scripts/test-build-cache-credentials.sh
       bash scripts/test-buildx-cache-fallback.sh
       bash scripts/test-secret-scan-config.sh
-      bash scripts/test-g6-readiness-hang-guards.sh
-      bash scripts/test-g6-resource-sampler.sh
-      node scripts/test-g6-pipeline.mjs
-      node scripts/test-g6-evidence-builder.mjs
-      node scripts/test-g6-evidence-verifier.mjs
-      # The selected standard Go step owns these checks for combined changes.
-      if [[ "${CI_RUN_GO:-false}" != true ]]; then
-        test -z "$(gofmt -l tools/g6-harness)"
-        (cd tools/g6-harness && go vet ./... && go test -count=1 ./...)
-      fi
       ;;
     *) echo "unknown CI tool suite: ${suite}" >&2; exit 2 ;;
   esac

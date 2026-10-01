@@ -53,7 +53,7 @@ fi
 docker image inspect "${WORKFLOW_IMAGE}" >"${ARTIFACT_DIR}/workflow-image.json"
 
 # Nothing is published on the host, and runtime processes cannot use public
-# discovery as an accidental substitute for the two dedicated TLS relays.
+# discovery as an accidental substitute for the one dedicated TLS Relay.
 docker network create --internal "${NAME}" >/dev/null
 ENVIRONMENT=(-e "OCSERV_REBIND_E2E=${OCSERV_REBIND_E2E:-}" -e PR02_CONTROLLER_E2E=1 -e "PR07_CONTROLLER_ROLE_MODE=${ROLE_MODE}" -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
 MOUNTS=()

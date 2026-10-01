@@ -114,6 +114,7 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       profile: smoke
+      run-resilience: ${{ needs.prepare.outputs.resilience == 'true' }}
       helpers-id: ${{ needs.helpers-amd64.outputs.artifact-id }}
       helpers-sha256: ${{ needs.helpers-amd64.outputs.sha256 }}
       agent-id: ${{ needs.build-amd64.outputs.agent-id }}
@@ -129,25 +130,9 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       profile: extended
+      run-resilience: ${{ needs.prepare.outputs.resilience == 'true' }}
       helpers-id: ${{ needs.helpers-amd64.outputs.artifact-id }}
       helpers-sha256: ${{ needs.helpers-amd64.outputs.sha256 }}
-      agent-id: ${{ needs.build-amd64.outputs.agent-id }}
-      agent-sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
-      controller-id: ${{ needs.build-amd64.outputs.controller-id }}
-      controller-sha256: ${{ needs.build-amd64.outputs.controller-sha256 }}
-
-  resilience:
-    name: Resilience
-    needs: [prepare, build-amd64, helpers-amd64]
-    if: needs.prepare.outputs.complete == 'true' && needs.prepare.outputs.resilience == 'true'
-    uses: ./.github/workflows/g6-harness-core.yml
-    with:
-      profile: formal
-      helpers-id: ${{ needs.helpers-amd64.outputs.artifact-id }}
-      helpers-sha256: ${{ needs.helpers-amd64.outputs.sha256 }}
-      authority: engineering
-      candidate_sha: ${{ github.sha }}
-      version: ${{ needs.prepare.outputs.version }}
       agent-id: ${{ needs.build-amd64.outputs.agent-id }}
       agent-sha256: ${{ needs.build-amd64.outputs.agent-sha256 }}
       controller-id: ${{ needs.build-amd64.outputs.controller-id }}
@@ -319,7 +304,7 @@ jobs:
   release-check:
     name: Release Check
     if: always() && needs.prepare.outputs.complete == 'true'
-    needs: [prepare, full-ci, security, build-amd64, build-arm64, business-smoke, integration, resilience, validate-release-packages, controller-image-security]
+    needs: [prepare, full-ci, security, build-amd64, build-arm64, business-smoke, integration, validate-release-packages, controller-image-security]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

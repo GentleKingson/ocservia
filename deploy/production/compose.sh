@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ -n "${OCSERV_RELAY_URL_B:-}" ]]; then
+  echo 'only one dedicated Relay is supported; leave OCSERV_RELAY_URL_B empty' >&2
+  exit 2
+fi
 
 unset COMPOSE_PROFILES COMPOSE_ENV_FILES
 export COMPOSE_DISABLE_ENV_FILE=1

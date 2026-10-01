@@ -562,6 +562,7 @@ require_commands() {
 validate_operator_inputs() {
   local variable
   RELAY_URL_B="${RELAY_URL_B:-}"
+  [[ -z "$RELAY_URL_B" ]] || fail 'only one dedicated Relay is supported; leave RELAY_URL_B empty'
   for variable in CONTROLLER_ENDPOINT_ID RELAY_URL_A \
     RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE; do
     [[ -n "${!variable:-}" ]] ||
@@ -1179,9 +1180,6 @@ cleanup_enrollment_copy() {
 
 converge_enrollment() {
   local -a relay_args=(--relay-mode custom --relay-url "${RELAY_URL_A}")
-  if [[ -n "${RELAY_URL_B}" ]]; then
-    relay_args+=(--relay-url "${RELAY_URL_B}")
-  fi
   # Additional public trust is provisioned by the operator, never downloaded
   # from the Relay or replaced by an installer rerun.
   if path_exists "${RELAY_CA_FILE}"; then

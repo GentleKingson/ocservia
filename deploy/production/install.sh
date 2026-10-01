@@ -181,6 +181,7 @@ if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
 fi
 # Every configuration-derived variable is computed only after the
 # configuration sources above are final.
+[[ -z "${OCSERV_RELAY_URL_B:-}" ]] || fail 'only one dedicated Relay is supported; leave OCSERV_RELAY_URL_B empty'
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated && "${ROOT_LIFECYCLE}" != true ]] && (( EUID != 0 )); then
   fail "Integrated requires --root-lifecycle for private Signer custody"

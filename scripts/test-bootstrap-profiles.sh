@@ -122,7 +122,6 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
               .github/workflows/release-test-images.yml
               .github/workflows/release-business.yml .github/workflows/release-business-diagnostic.yml
               .github/workflows/release-integrated-candidate.yml
-              .github/workflows/g6-harness-core.yml
               rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
   files.each do |source|
     target = File.join(work, source.delete_prefix(root + "/"))
@@ -157,11 +156,11 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
   git.call("config", "user.email", "test@example.invalid")
   git.call("commit", "--allow-empty", "-qm", "base")
   base = git.call("rev-parse", "HEAD")
-  g6_path = "tools/g6-harness/internal/runtime/runtime.go"
+  shared_path = "scripts/buildx-cache.sh"
   {
     "Release-only" => [".github/workflows/release.yml"],
-    "G6-only" => [g6_path],
-    "Controller+G6" => ["control-plane/internal/platform/app/run.go", g6_path],
+    "shared tooling" => [shared_path],
+    "Controller+shared" => ["control-plane/internal/platform/app/run.go", shared_path],
     "shared bootstrap" => ["scripts/bootstrap.sh"]
   }.each do |name, paths|
     git.call("checkout", "-q", "--detach", base)
@@ -177,7 +176,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     run.call({}, "bash", File.join(root, "scripts/ci-relevance.sh"), "pull_request", base, git.call("rev-parse", "HEAD"), out, chdir: route)
     routing = File.readlines(out, chomp: true).to_h { |line| line.split("=", 2) }
     reject("#{name} selected the wrong Go owner") unless
-      routing.fetch("run_go") == (!%w[Release-only G6-only].include?(name)).to_s
+      routing.fetch("run_go") == (!["Release-only", "shared tooling"].include?(name)).to_s
     trace = File.join(tmp, "trace")
     File.write(trace, "")
     env = guard.fetch("env").transform_values do |value|
@@ -189,17 +188,16 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       routing.fetch("run_go") == "true" && File.readlines(trace).any? { |line| line.match?(/^go(fmt)?\|/) }
     run.call(env, "bash", "-eo", "pipefail", "-c", standard.fetch("run"), chdir: work) if routing.fetch("run_go") == "true"
     calls = File.readlines(trace, chomp: true)
-    expected = name == "Release-only" ? 0 : 1
+    expected = routing.fetch("run_go") == "true" ? 1 : 0
     reject("#{name} must format harness #{expected} times") unless calls.count { |line| line.start_with?("gofmt|") && line.include?("tools/g6-harness") } == expected
     ["vet ./...", "test -count=1 ./..."].each do |command|
       reject("#{name} must run harness #{command} #{expected} times") unless calls.count("go|#{work}/tools/g6-harness|#{command}") == expected
     end
-    if expected == 1
-      reject("#{name} lost G6 contract/evidence checks") unless calls.grep(/^test-g6-/).length == 11 &&
-        %w[test-g6-workflow-contract.sh test-g6-evidence-pipeline.sh test-g6-evidence-verifier.mjs test-g6-resource-sampler.sh].all? { |test| calls.count(test) == 1 }
-      reject("#{name} lost shared tooling checks") unless
-        %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
-    else
+    reject("#{name} retained retired G6 contract checks") unless calls.grep(/^test-g6-/).empty?
+    reject("#{name} lost shared tooling checks") unless
+      %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
+    if name == "Release-only"
+
       reject("Release-only must not run unrelated guards") if calls.include?("test-bootstrap-profiles.sh")
       path = File.join(work, ".github/workflows/release.yml")
       original = File.read(path)

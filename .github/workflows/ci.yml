@@ -76,27 +76,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards') || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
+      - if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards')
         run: scripts/bootstrap.sh go-test
       - id: cache-key
-        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
+        if: needs.ci-relevance.outputs.run_go == 'true'
         run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
       - id: go-mod-cache
-        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
+        if: needs.ci-relevance.outputs.run_go == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
           key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}
       - id: go-build-cache
-        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'g6')
+        if: needs.ci-relevance.outputs.run_go == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-build
           key: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
           restore-keys: basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
-      - name: Bootstrap G6 contract dependencies
-        if: contains(needs.ci-relevance.outputs.ci_suites, 'g6')
-        run: scripts/bootstrap.sh g6-runtime
       - name: CI guard and workflow contracts
         if: needs.ci-relevance.outputs.run_ci_tools == 'true'
         env:

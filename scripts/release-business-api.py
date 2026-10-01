@@ -585,26 +585,143 @@ def configuration():
     finally:
         run('sudo', 'rm', '/etc/systemd/system/ocserv.service.d/t07-config-reload.conf', '/usr/local/sbin/t07-config-reload')
         run('sudo', 'systemctl', 'daemon-reload')
-    def owner():
-        return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
-                              "owner_epoch FROM connection_owner_fencing "
-                              f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
-    owner_before = owner()
-    run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
-    def fresh_session():
-        current = owner()
-        return current if (current['owner_epoch'] > owner_before['owner_epoch'] and
-                           current['connection_id'] != owner_before['connection_id'] and
-                           api(prefix)['connection_state'] == 'online') else None
-    owner_after = wait_for('configuration new fenced session', fresh_session)
-    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == physical_before
-    assert api(prefix)['config_revision'] == 1
-    for operation in (applied, operation):
+    agent_privd_recovery([applied, operation], physical_before)
+    record('complete_config_durable_restart', materialized_hash=physical_before, config_revision=1)
+
+
+def owner():
+    node = os.environ['T07_NODE'].replace('-', '')
+    return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
+                          "owner_epoch FROM connection_owner_fencing "
+                          f"WHERE node_id=decode('{node}','hex')) s;"))
+
+
+def fresh_owner(before):
+    current = owner()
+    return current if (current['owner_epoch'] > before['owner_epoch'] and
+                       current['connection_id'] != before['connection_id'] and
+                       api('nodes/' + os.environ['T07_NODE'])['connection_state'] == 'online') else None
+
+
+def ready():
+    try:
+        return api('readyz', role='anonymous').get('status') == 'ok'
+    except (RuntimeError, urllib.error.URLError):
+        return False
+
+
+def confirmed_config():
+    if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke':
+        entry = json.loads((WORK / 'smoke-applied.json').read_text())
+        operation_id = entry['operation_id']
+    else:
+        browser = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
+        entry = next(item for item in browser if item['name'] == 'browser_complete_config_apply')
+        operation_id = entry['operation']['id']
+    operation = api('operations/' + operation_id)
+    assert operation['state'] == 'succeeded' and operation['config_apply_state'] == 'succeeded'
+    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == entry['materialized_hash']
+    return operation, entry['materialized_hash']
+
+
+def check_confirmed(operations, config_hash):
+    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == config_hash
+    for operation in operations:
+        current = api('operations/' + operation['id'])
+        assert current['id'] == operation['id'] and current['command_id'] == operation['command_id']
         snapshot = cross_check(operation)
         assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
         assert snapshot['root_count_state_response'] == '1|applied|1'
-    record('complete_config_durable_restart', materialized_hash=physical_before, config_revision=1,
-           owner_before=owner_before, owner_after=owner_after)
+
+
+def identity_digest():
+    return run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
+               '/var/lib/ocservia-agent/identity/controller.endpoint')
+
+
+def agent_privd_recovery(operations, config_hash):
+    identity = identity_digest()
+    for service in ('ocservia-agent', 'ocservia-privd'):
+        before = owner()
+        run('sudo', 'systemctl', 'restart', service)
+        if service == 'ocservia-agent':
+            wait_for('fresh Agent session', lambda: fresh_owner(before))
+        wait_for(service + ' active', lambda: run('systemctl', 'show', service, '-p', 'ActiveState', '--value').strip() == 'active')
+        check_confirmed(operations, config_hash)
+        assert identity_digest() == identity
+    record('resilience_agent_privd')
+
+
+def authorized_reload(name):
+    node = 'nodes/' + os.environ['T07_NODE']
+    approval_id = approval('service.reload', 'node', os.environ['T07_NODE'])
+    before = run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
+    key = secrets.token_hex(16)
+    body = {'reason': name, 'ttl_seconds': 300}
+    headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"', 'X-Approval-ID': approval_id}
+    operation = api(node + '/service:reload', body, headers=headers, status=202)
+    wait_for(name, lambda: completed(operation))
+    verify_completed_operations([operation])
+    replay = api(node + '/service:reload', body, headers=headers, status=202)
+    assert replay['id'] == operation['id'] and replay['command_id'] == operation['command_id']
+    assert run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service') == before + 1
+    return operation
+
+
+def resilience():
+    operation, config_hash = confirmed_config()
+    operations = [operation]
+    identity = identity_digest()
+    check_confirmed(operations, config_hash)
+    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
+    wait_for('Controller readiness', ready)
+    if os.environ.get('BUSINESS_PROFILE') == 'extended':
+        trust_controller()
+    check_confirmed(operations, config_hash)
+    operations.append(authorized_reload('Controller restart recovery'))
+    record('resilience_controller', operation_id=operation['id'])
+
+    extended = os.environ.get('BUSINESS_PROFILE') == 'extended'
+    if extended:
+        checkpoints = [json.loads(line)['name'] for line in (EVIDENCE / 'api-checkpoints.jsonl').read_text().splitlines()]
+        assert 'resilience_agent_privd' in checkpoints and 'resilience_relay' in checkpoints
+    else:
+        agent_privd_recovery(operations, config_hash)
+    before = owner()
+    run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'transportd')
+    transport_ready()
+    wait_for('fresh transport session', lambda: fresh_owner(before))
+    check_confirmed(operations, config_hash)
+    operations.append(authorized_reload('transport restart recovery'))
+    record('resilience_transport')
+
+    # The original Controller and its pool stay running throughout the outage.
+    approval_id = approval('service.reload', 'node', os.environ['T07_NODE'])
+    key = secrets.token_hex(16)
+    node = 'nodes/' + os.environ['T07_NODE']
+    headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(node)["version"]}"', 'X-Approval-ID': approval_id}
+    try:
+        run(str(ROOT / 'deploy/production/compose.sh'), 'stop', 'postgres')
+        outage = api('readyz', role='anonymous', status=503)
+        assert outage['type'] == 'https://ocservia.dev/problems/database-unavailable'
+        try:
+            # One attempt only. An uncertain response never triggers a new mutation.
+            api(node + '/service:reload', {'reason': 'database outage', 'ttl_seconds': 300},
+                headers=headers, status=(401, 500, 503, 504))
+        except (urllib.error.URLError, TimeoutError):
+            pass
+    finally:
+        run(str(ROOT / 'deploy/production/compose.sh'), 'start', 'postgres')
+    wait_for('original database and pool ready', ready)
+    assert sql(f"SELECT count(*) FROM operations WHERE workspace_id='{WORKSPACE}' AND idempotency_key='{key}';") == '0'
+    check_confirmed(operations, config_hash)
+    operations.append(authorized_reload('database pool recovery'))
+    record('resilience_database_api', backend='postgres', uncommitted_intent_not_accepted=True)
+    if not extended:
+        vpn_smoke('relay_recovery', relay_recovery=True)
+    assert identity_digest() == identity
+    check_confirmed(operations, config_hash)
+    record('resilience_complete')
 
 
 def browser_verify():
@@ -618,6 +735,130 @@ def browser_verify():
         assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
         assert snapshot['root_count_state_response'] == '1|applied|1'
     record('browser_operations_durable_cross_check')
+
+
+def completed(operation):
+    result = api('operations/' + operation['id'])
+    (EVIDENCE / ('operation-' + operation['id'] + '.json')).write_text(json.dumps(result))
+    if result['state'] in ('failed', 'expired', 'cancelled'):
+        raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
+    return result if result['state'] == 'succeeded' else None
+
+def verify_completed_operations(operations):
+    for operation in operations:
+        snapshot = cross_check(operation)
+        assert snapshot['database_state'] == 'succeeded'
+        assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
+        assert snapshot['root_count_state_response'] == '1|applied|1'
+    record('api_database_agent_journal_root_receipt', operation_ids=[op['id'] for op in operations])
+
+
+
+def single_relay_recovery(ping, native_session, operations):
+    node = os.environ['T07_NODE']
+    prefix = 'nodes/' + node
+    live_session = native_session()
+    ocserv_started = run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    identity_before = run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
+                          '/var/lib/ocservia-agent/identity/controller.endpoint')
+    started_before = run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    (EVIDENCE / 'identity-before-fault.json').write_text(json.dumps({
+        'agent_endpoint': os.environ['T07_ENDPOINT'], 'controller_endpoint': os.environ['OCSERV_CONTROLLER_ENDPOINT_ID'],
+        'identity_file_digests': identity_before, 'agent_start_monotonic': started_before.strip(),
+        'ocserv_start_monotonic': ocserv_started.strip(), 'native_session_id': live_session}))
+    control = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
+    try:
+        run('docker', 'pause', control)
+        for _ in range(3):
+            assert ping()
+            assert native_session() == live_session
+        record('controller_pause_preserves_live_vpn', native_session_id=live_session)
+    finally:
+        run('docker', 'unpause', control)
+    relay = os.environ['T07_RELAY_CONTAINER']
+    reload_approval = approval('service.reload', 'node', node)
+
+    # The bootstrap SecurityAdmin can approve but cannot reload a service.
+    # An approval ID must not grant the approver that missing RBAC permission.
+    denied = api(prefix + '/service:reload', {'reason': 'T07 isolated validation', 'ttl_seconds': 300},
+                 role='approver', headers={'Idempotency-Key': secrets.token_hex(16),
+                                          'If-Match': f'"revision-{api(prefix)["version"]}"',
+                                          'X-Approval-ID': reload_approval}, status=403)
+    assert denied['type'] == 'https://ocservia.dev/problems/forbidden'
+    assert api('approval-requests/' + reload_approval)['status'] == 'approved'
+    record('approval_does_not_override_approver_rbac', approval_id=reload_approval)
+
+    def reload_count():
+        return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
+
+    reloads_before = reload_count()
+    record('reload_before_fault', native_reload_count=reloads_before)
+    try:
+        run('docker', 'stop', relay)
+        wait_for_relay_outage(node)
+        for _ in range(3):
+            assert ping()
+            assert native_session() == live_session
+        # Retain the single-relay fixture's non-idempotent reload assertion;
+        # never substitute an invisible duplicate enable or force Unknown green.
+        key = secrets.token_hex(16)
+        body = {'reason': 'T07 isolated validation', 'ttl_seconds': 300}
+        for _ in range(3):
+            revision = api(prefix)['version']
+            headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"',
+                       'X-Approval-ID': reload_approval}
+            pending = api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
+            if 'id' in pending:
+                break
+            assert pending.get('type') == 'https://ocservia.dev/problems/stale-revision'
+        assert 'id' in pending
+        time.sleep(10)
+        assert api('operations/' + pending['id'])['state'] != 'succeeded'
+        queued = cross_check(pending)
+        assert queued['journal'] == [] and queued['root'] == []
+        assert queued['outbox'] and all(row['published_at'] is None for row in queued['outbox'])
+        assert all(row['state'] != 'sent' for row in queued['attempts'])
+        (EVIDENCE / 'recovery-queued.json').write_text(json.dumps(queued))
+        record('single_relay_outage_preserves_live_vpn_and_queues_operation')
+    finally:
+        run('docker', 'start', relay)
+    try:
+        wait_for('same operation after relay recovery', lambda: completed(pending))
+    finally:
+        # Query-only diagnostics also survive Unknown. Never retry a mutation
+        # or invent a receipt to make the strict recovery assertion green.
+        recovery_snapshot = cross_check(pending)
+        recovery_snapshot['node'] = api(prefix)
+        recovery_snapshot['owner'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
+                                                   "owner_epoch,lease_until,updated_at FROM connection_owner_fencing "
+                                                   f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
+        recovery_snapshot['native_reload_count'] = reload_count()
+        (EVIDENCE / 'recovery-final.json').write_text(json.dumps(recovery_snapshot))
+    assert identity_before == run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
+                                  '/var/lib/ocservia-agent/identity/controller.endpoint')
+    assert started_before == run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    assert ping()
+    assert native_session() == live_session
+    assert ocserv_started == run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    assert api(prefix)['connection_state'] == 'online'
+    record('single_relay_restored_same_identity_and_live_vpn', native_session_id=live_session,
+           operation_state=recovery_snapshot['database_state'], native_reload_delta=reload_count() - reloads_before)
+    replay = api(prefix + '/service:reload', body, headers=headers, status=202)
+    assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
+    assert api('approval-requests/' + reload_approval)['status'] == 'consumed'
+    denied = api(prefix + '/service:reload', body,
+                 headers={'Idempotency-Key': secrets.token_hex(16),
+                          'If-Match': f'"revision-{api(prefix)["version"]}"',
+                          'X-Approval-ID': reload_approval}, status=409)
+    assert denied['type'] == 'https://ocservia.dev/problems/approval-required'
+    record('consumed_approval_cannot_authorize_new_operation', approval_id=reload_approval)
+    operations.append(pending)
+    time.sleep(3)
+    assert reload_count() == reloads_before + 1
+    record('single_relay_recovery_identity_and_idempotent_replay', operation_id=pending['id'],
+           native_reload_delta=1, native_session_id=live_session)
+    verify_completed_operations(operations)
+    record('resilience_relay', operation_id=pending['id'], native_reload_delta=1)
 
 
 def business():
@@ -651,21 +892,6 @@ def business():
     record('native_privd_permissions', privd={key: process[key].split() for key in ('Uid', 'Gid', 'Groups', 'CapEff')},
            agent={key: agent_process[key].split() for key in ('Uid', 'Gid', 'Groups', 'CapEff')}, socket=socket_stat)
     operations = []
-
-    def completed(operation):
-        result = api('operations/' + operation['id'])
-        (EVIDENCE / ('operation-' + operation['id'] + '.json')).write_text(json.dumps(result))
-        if result['state'] in ('failed', 'expired', 'cancelled'):
-            raise RuntimeError(f"operation {operation['id']} reached {result['state']}")
-        return result if result['state'] == 'succeeded' else None
-
-    def verify_completed_operations():
-        for operation in operations:
-            snapshot = cross_check(operation)
-            assert snapshot['database_state'] == 'succeeded'
-            assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
-            assert snapshot['root_count_state_response'] == '1|applied|1'
-        record('api_database_agent_journal_root_receipt', operation_ids=[op['id'] for op in operations])
 
     def mutation(path, body, revision, method='POST', key=None, extra_headers=None):
         headers = {'Idempotency-Key': key or secrets.token_hex(16), 'If-Match': f'"revision-{revision}"'}
@@ -732,7 +958,7 @@ def business():
     password_stat = run('sudo', 'stat', '-c', '%u:%g:%a:%h', '/etc/ocserv/ocpasswd').strip()
     assert password_stat == '0:0:600:1'
     record('password_file_ownership', stat=password_stat)
-    verify_completed_operations()
+    verify_completed_operations(operations)
     audit = api('audit/events?page_size=200')['items']
     assert audit
     audit_ids = ','.join("'" + item['id'] + "'" for item in audit)
@@ -763,142 +989,15 @@ def business():
     assert any(row.get('username') == 't07-vpn' for row in session)
     api(prefix + '/ip-bans')
     record('live_vpn_session_and_bans_read', session_count=len(session))
-    identity_before = run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
-                          '/var/lib/ocservia-agent/identity/controller.endpoint')
-    started_before = run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    (EVIDENCE / 'identity-before-fault.json').write_text(json.dumps({
-        'agent_endpoint': os.environ['T07_ENDPOINT'], 'controller_endpoint': os.environ['OCSERV_CONTROLLER_ENDPOINT_ID'],
-        'identity_file_digests': identity_before, 'agent_start_monotonic': started_before.strip(),
-        'ocserv_start_monotonic': ocserv_started.strip(), 'native_session_id': live_session}))
-    control = run(str(ROOT / 'deploy/production/compose.sh'), 'ps', '-q', 'control-plane').strip()
     try:
-        run('docker', 'pause', control)
-        for _ in range(3):
-            assert ping()
-            assert native_session() == live_session
-        record('controller_pause_preserves_live_vpn', native_session_id=live_session)
+        single_relay_recovery(ping, native_session, operations)
     finally:
-        run('docker', 'unpause', control)
-    relay = os.environ['T07_RELAY_CONTAINER']
-    reload_approval = approval('service.reload', 'node', node)
-
-    # The bootstrap SecurityAdmin can approve but cannot reload a service.
-    # An approval ID must not grant the approver that missing RBAC permission.
-    denied = api(prefix + '/service:reload', {'reason': 'T07 isolated validation', 'ttl_seconds': 300},
-                 role='approver', headers={'Idempotency-Key': secrets.token_hex(16),
-                                          'If-Match': f'"revision-{api(prefix)["version"]}"',
-                                          'X-Approval-ID': reload_approval}, status=403)
-    assert denied['type'] == 'https://ocservia.dev/problems/forbidden'
-    assert api('approval-requests/' + reload_approval)['status'] == 'approved'
-    record('approval_does_not_override_approver_rbac', approval_id=reload_approval)
-
-    def reload_count():
-        return run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service')
-
-    reloads_before = reload_count()
-    record('reload_before_fault', native_reload_count=reloads_before)
-    try:
-        run('docker', 'stop', relay)
-        wait_for_relay_outage(node)
-        for _ in range(3):
-            assert ping()
-            assert native_session() == live_session
-        # Retain the single-relay fixture's non-idempotent reload assertion;
-        # never substitute an invisible duplicate enable or force Unknown green.
-        key = secrets.token_hex(16)
-        body = {'reason': 'T07 isolated validation', 'ttl_seconds': 300}
-        for _ in range(3):
-            revision = api(prefix)['version']
-            headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{revision}"',
-                       'X-Approval-ID': reload_approval}
-            pending = api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
-            if 'id' in pending:
-                break
-            assert pending.get('type') == 'https://ocservia.dev/problems/stale-revision'
-        assert 'id' in pending
-        time.sleep(10)
-        assert api('operations/' + pending['id'])['state'] != 'succeeded'
-        queued = cross_check(pending)
-        assert queued['journal'] == [] and queued['root'] == []
-        assert queued['outbox'] and all(row['published_at'] is None for row in queued['outbox'])
-        assert all(row['state'] != 'sent' for row in queued['attempts'])
-        (EVIDENCE / 'recovery-queued.json').write_text(json.dumps(queued))
-        record('single_relay_outage_preserves_live_vpn_and_queues_operation')
-    finally:
-        run('docker', 'start', relay)
-    recovery_error = None
-    try:
-        wait_for('same operation after relay recovery', lambda: completed(pending))
-    except RuntimeError as error:
-        recovery_error = error
-    finally:
-        # Query-only diagnostics also survive Unknown. Never retry a mutation
-        # or invent a receipt to make the strict recovery assertion green.
-        recovery_snapshot = cross_check(pending)
-        recovery_snapshot['node'] = api(prefix)
-        recovery_snapshot['owner'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
-                                                   "owner_epoch,lease_until,updated_at FROM connection_owner_fencing "
-                                                   f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
-        recovery_snapshot['native_reload_count'] = reload_count()
-        (EVIDENCE / 'recovery-final.json').write_text(json.dumps(recovery_snapshot))
-    assert identity_before == run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
-                                  '/var/lib/ocservia-agent/identity/controller.endpoint')
-    assert started_before == run('systemctl', 'show', 'ocservia-agent', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    assert ping()
-    assert native_session() == live_session
-    assert ocserv_started == run('systemctl', 'show', 'ocserv', '-p', 'ExecMainStartTimestampMonotonic', '--value')
-    assert api(prefix)['connection_state'] == 'online'
-    record('single_relay_restored_same_identity_and_live_vpn', native_session_id=live_session,
-           operation_state=recovery_snapshot['database_state'], native_reload_delta=reload_count() - reloads_before)
-    if recovery_error is not None:
-        # Keep the strict assertion and its failing exit status. A separate
-        # assessment covers only the stable, evidence-preserving Unknown case.
-        assert recovery_snapshot['database_state'] == 'unknown'
-        time.sleep(3)
-        after = cross_check(pending)
-        after['node'] = api(prefix)
-        after['owner'] = json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
-                                       "owner_epoch,lease_until,updated_at FROM connection_owner_fencing "
-                                       f"WHERE node_id=decode('{node.replace('-', '')}','hex')) s;"))
-        after['native_reload_count'] = reload_count()
-        later = sql(f"SELECT id FROM commands WHERE node_id='{node}' AND created_at >= "
-                    f"(SELECT created_at FROM commands WHERE id='{pending['command_id']}') ORDER BY created_at;").splitlines()
-        logs = run('docker', 'logs', os.environ['T07_TRANSPORT_CONTAINER'])
-        frames = []
-        for line in logs.splitlines():
-            try:
-                fields = json.loads(line).get('fields', {})
-            except json.JSONDecodeError:
-                continue
-            if fields.get('event_type') == 'command_frame_written' and fields.get('command_id') == pending['command_id'].replace('-', ''):
-                frames.append(fields)
-        spec = importlib.util.spec_from_file_location('recovery', ROOT / 'scripts/release-business-recovery.py')
-        recovery = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(recovery)
-        assessment = recovery.assess_unknown(recovery_snapshot, after, frames, later, reloads_before)
-        (EVIDENCE / 'recovery-boundary.json').write_text(json.dumps({'assessment': assessment, 'before': recovery_snapshot, 'after': after, 'frames': frames, 'later_commands': later}))
-        raise recovery_error
-    replay = api(prefix + '/service:reload', body, headers=headers, status=202)
-    assert replay['id'] == pending['id'] and replay['command_id'] == pending['command_id']
-    assert api('approval-requests/' + reload_approval)['status'] == 'consumed'
-    denied = api(prefix + '/service:reload', body,
-                 headers={'Idempotency-Key': secrets.token_hex(16),
-                          'If-Match': f'"revision-{api(prefix)["version"]}"',
-                          'X-Approval-ID': reload_approval}, status=409)
-    assert denied['type'] == 'https://ocservia.dev/problems/approval-required'
-    record('consumed_approval_cannot_authorize_new_operation', approval_id=reload_approval)
-    operations.append(pending)
-    time.sleep(3)
-    assert reload_count() == reloads_before + 1
-    record('single_relay_recovery_identity_and_idempotent_replay', operation_id=pending['id'],
-           native_reload_delta=1, native_session_id=live_session)
-    verify_completed_operations()
-    run('sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect')
-    vpn.wait(timeout=15)
-    client_log.close()
+        run('sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect')
+        vpn.wait(timeout=15)
+        client_log.close()
 
 
-def vpn_smoke(phase):
+def vpn_smoke(phase, relay_recovery=False):
     smoke = os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke'
     password = (WORK / 'private' / ('smoke-vpn-password' if smoke else 'browser-vpn-password')).read_text().strip()
     username = 't07-smoke' if smoke else 't07-browser'
@@ -919,6 +1018,11 @@ def vpn_smoke(phase):
             wait_for('real VPN ICMP ' + phase, connected, 40)
             assert api(f"nodes/{os.environ['T07_NODE']}")['config_revision'] == 1
             record('real_vpn_' + phase)
+            if relay_recovery:
+                def native_session():
+                    rows = json.loads(run('sudo', 'occtl', '--json', 'show', 'users'))
+                    return next(row['ID'] for row in rows if row['Username'] == username)
+                single_relay_recovery(connected, native_session, [])
         finally:
             subprocess.run(['sudo', 'ip', 'netns', 'exec', 't07-client', 'pkill', '-INT', '-x', 'openconnect'],
                            capture_output=True, check=False)
@@ -929,7 +1033,7 @@ if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
                      'browser_prepare', 'browser_verify', 'business', 'smoke_config_apply', 'smoke_user', 'smoke_rollback',
-                     'vpn_before_rollback', 'vpn_after_rollback'):
+                     'vpn_before_rollback', 'vpn_after_rollback', 'resilience'):
         raise SystemExit('unknown phase')
     if phase.startswith('vpn_'):
         vpn_smoke(phase.removeprefix('vpn_'))
