@@ -216,6 +216,9 @@ network, `RELAY_HOST` to the test certificate's hostname, `PUBLIC_IP` to the
 authorized endpoint, `RELAY_URL` to its HTTPS URL, and the two file variables to
 absolute paths of the public test CA and private test token:
 
+The diagnostic runs as UID/GID 65532. Use a task-owned test-token copy owned by
+65532:65532 with mode 0400, and a public CA file readable by that UID.
+
 ```sh
 docker build -f rust/test-runtime.Dockerfile --target relay-network-probe \
   -t ocservia-relay-network-probe:test .
