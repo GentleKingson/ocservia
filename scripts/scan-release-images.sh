@@ -84,6 +84,7 @@ while IFS=$'\t' read -r name arch archive; do
       | {
           total: ($reportable | length),
           fixable_high_critical: ([$reportable[] | select(.fixable and (.severity == "High" or .severity == "Critical"))] | length),
+          fixable_details: [$reportable[] | select(.fixable and (.severity == "High" or .severity == "Critical")) | {package, version, id, severity}],
           exempted: ($exempted | length),
           exempted_details: [$exempted[] | {package, version, id, severity}]
         }

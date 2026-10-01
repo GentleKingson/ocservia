@@ -23,8 +23,9 @@ Install, upgrade and rollback remain explicit operations on verified targets;
 version format and version display remain, but version ordering is not authority
 to accept or reject an operation.
 
-Keep artifact signatures, trusted keys, hashes, source commit and architecture
-binding; real command capabilities; authorization and approvals; idempotency,
+Keep runtime command signatures and trusted keys, Controller-authorized
+upgrade package digests and architecture; real command capabilities;
+authorization and approvals; idempotency,
 replay protection and ownership fences; Signer identity and monotonic revision;
 transactions, atomic state commits and real failure propagation. Database
 initialization, applied records, known migration content integrity and actual
@@ -55,12 +56,13 @@ production recommendation.
 Release identities remain plain `X.Y.Z` SemVer syntax. Version ordering is not
 execution authority. The explicitly chosen v1.1.0 release removes public
 surfaces and compatibility guarantees despite its minor-version label; it must
-not be described as fully backward compatible. A candidate is frozen source
-plus its exact products, not a `-rc.N` publishing scheme.
+not be described as fully backward compatible. Release builds use the
+explicitly selected version tag.
 
 [Release Check](../development/release-checks.md) validates current products.
-Dispatch remains a non-publishing dry-run; tag-triggered publication retains
-its checks, protected environment and signing boundaries. Explicit lifecycle
+Dispatch remains a non-publishing dry-run; tag-triggered publication builds
+and smoke-tests products before publishing through the protected environment.
+Explicit lifecycle
 operations use verified targets, not a minimum source version or a bridge
 release. Package-manager behavior is not overridden. Unknown outcomes require
 [incident recovery](../operations/incident-recovery.md), not blind replay.
