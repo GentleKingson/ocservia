@@ -34,6 +34,14 @@ products.fetch('jobs').each do |name,job|
   require_check(job.fetch('steps').any? {|s| s.fetch('run','').include?(name == 'build-agent-packages' ? 'release-native-package-smoke.sh' : 'release-controller-image-smoke.sh')}, "#{name} missing real smoke")
 end
 controller = products.fetch('jobs').fetch('build-controller-images')
+writer = load_workflow('ci').fetch('jobs').fetch('controller-cache')
+require_check(writer['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/main'", 'Controller cache writes must only run on trusted main pushes')
+require_check(writer.dig('strategy','matrix','arch') == %w[amd64 arm64] && writer['runs-on'].include?('ubuntu-24.04-arm'), 'main cache writer must cover both native architectures')
+require_check(!writer.key?('permissions') && !writer.key?('environment') && !writer.key?('continue-on-error'), 'cache writer must retain read-only authority and propagate export failures')
+require_check(writer.dig('concurrency','group') == 'controller-cache-${{ matrix.arch }}' && writer.dig('concurrency','cancel-in-progress') == false, 'cache writers must be serialized per architecture')
+require_check(writer['steps'].any? {|s| s['uses'] == './.github/actions/build-cache-credentials'} && writer['steps'].any? {|s| s['run'] == 'bash scripts/build-release-controller.sh --cache-only'}, 'writer must reuse the shared native builder and credential relay')
+require_check(File.read('scripts/release-business-probe.sh').include?('bash "${ROOT}/scripts/build-release-controller.sh" >'), 'Business must retain the shared default restore-only path')
+require_check(controller['steps'].any? {|s| s.fetch('run','').include?('bash scripts/build-release-controller.sh') && !s['run'].include?('--cache-only')}, 'Release must retain product build mode')
 steps = controller.fetch('steps')
 ordered = ['Build Controller images', 'Bootstrap pinned image-security tools', 'Scan exact Controller image archives', 'Smoke Controller images on the native runner', 'Upload Controller image archives']
 indices = ordered.map {|name| steps.index {|s| s['name'] == name}}

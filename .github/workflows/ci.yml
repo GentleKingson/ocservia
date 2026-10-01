@@ -268,6 +268,35 @@ jobs:
             ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-${ENGINE}" \
             bash scripts/i18-mysql-backup-restore-smoke.sh
 
+  controller-cache:
+    name: Refresh Controller cache (${{ matrix.arch }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    concurrency:
+      group: controller-cache-${{ matrix.arch }}
+      cancel-in-progress: false
+    env:
+      VERSION: '0.0.0'
+      SOURCE_COMMIT: ${{ github.sha }}
+      CONTROLLER_ARCH: ${{ matrix.arch }}
+      BUILDX_BUILDER: controller-cache-${{ github.run_id }}-${{ matrix.arch }}
+      BUILD_CACHE_TIMEOUT: 300s
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-cache-credentials
+      - name: Refresh native Controller cache
+        run: bash scripts/build-release-controller.sh --cache-only
+      - name: Remove Controller BuildKit builder
+        if: always()
+        run: docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1 || true
+
   basic-ci-result:
     name: Basic CI Result
     if: always()
