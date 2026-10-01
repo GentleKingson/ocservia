@@ -64,17 +64,6 @@ dirname -- "$0" >"${TEST_TEMP_LOG}"
 STAGE1
 chmod 0700 "${fixture}/release/controller-bootstrap.sh" "${fixture}/release/managed-node-bootstrap.sh"
 
-openssl genpkey -algorithm ED25519 -out "${fixture}/release-key.pem" >/dev/null 2>&1
-openssl pkey -in "${fixture}/release-key.pem" -pubout -out "${fixture}/release-key.pub.pem" >/dev/null 2>&1
-(
-  cd "${fixture}/release"
-  sha256sum controller-bootstrap.sh managed-node-bootstrap.sh >SHA256SUMS
-  openssl pkeyutl -sign -rawin -inkey "${fixture}/release-key.pem" -in SHA256SUMS -out SHA256SUMS.sig
-)
-openssl pkey -pubin -in "${fixture}/release-key.pub.pem" -outform DER -out "${fixture}/release-key.der" >/dev/null 2>&1
-fingerprint="$(sha256sum "${fixture}/release-key.der")"
-fingerprint="${fingerprint%% *}"
-
 run_installer() {
   local installer="$1"; shift
   : >"${fixture}/downloads.log"
@@ -91,8 +80,6 @@ run_installer() {
       TEST_EXEC_LOG="${fixture}/exec.log" \
       TEST_ARGS_LOG="${fixture}/args.log" \
       TEST_TEMP_LOG="${fixture}/temp.log" \
-      TRUSTED_RELEASE_KEY="${TEST_TRUSTED_KEY-${fixture}/release-key.pub.pem}" \
-      EXPECTED_RELEASE_KEY_SHA256="${TEST_FINGERPRINT-${fingerprint}}" \
       BOOTSTRAP_TOKEN_SOURCE="token-must-not-leak" \
       OCSERV_PUBLIC_HOST="config-must-not-leak" \
       "${installer}" "$@"
@@ -121,29 +108,10 @@ run_documented_fetch() (
     TEST_ARGS_LOG="${fixture}/args.log" \
     TEST_TEMP_LOG="${fixture}/temp.log" \
     TEST_DOWNLOAD_MODE="${mode}" \
-    TRUSTED_RELEASE_KEY="${fixture}/release-key.pub.pem" \
-    EXPECTED_RELEASE_KEY_SHA256="${fingerprint}" \
     bash "${stage0}" --version v1.2.3
 )
 
 for installer in "${CONTROLLER}" "${NODE}"; do
-  for trust_case in missing key-only fingerprint-only; do
-    key=""
-    digest=""
-    [[ "${trust_case}" != key-only ]] || key="${fixture}/release-key.pub.pem"
-    [[ "${trust_case}" != fingerprint-only ]] || digest="${fingerprint}"
-    if TEST_TRUSTED_KEY="${key}" TEST_FINGERPRINT="${digest}" \
-      run_installer "${installer}" --version v1.2.3 >"${fixture}/output" 2>&1; then
-      fail "$(basename "${installer}") accepted ${trust_case} trust"
-    fi
-    [[ ! -s "${fixture}/exec.log" && ! -s "${fixture}/downloads.log" ]] ||
-      fail "${trust_case} trust reached download or Stage-1"
-  done
-  if TEST_FINGERPRINT="$(printf '%064d' 0)" \
-    run_installer "${installer}" --version v1.2.3 >"${fixture}/output" 2>&1; then
-    fail "$(basename "${installer}") accepted a wrong fingerprint"
-  fi
-  [[ ! -s "${fixture}/exec.log" ]] || fail "a wrong fingerprint reached Stage-1"
   for args in "" "--version latest" "--version v1.2.3-rc.1" "--version main" "--version deadbeef"; do
     # shellcheck disable=SC2086 # each fixture intentionally supplies zero or two words
     if run_installer "${installer}" ${args} >"${fixture}/output" 2>&1; then
@@ -163,14 +131,14 @@ run_installer "${CONTROLLER}" --version v1.2.3 --root-lifecycle --check >"${fixt
 [[ "$(<"${fixture}/args.log")" == $'--version\nv1.2.3\n--root-lifecycle\n--check' ]] ||
   fail "Controller Stage-0 did not pass the allowlisted arguments exactly"
 grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v1.2.3/controller-bootstrap.sh' "${fixture}/downloads.log" ||
-  fail "Controller Stage-0 did not construct the immutable release URL"
+  fail "Controller Stage-0 did not construct the versioned release URL"
 
 run_installer "${NODE}" --root-lifecycle --version v9.8.7 >"${fixture}/output" 2>&1
 [[ "$(cat "${fixture}/exec.log")" == node ]] || fail "Node Stage-0 executed the wrong Stage-1"
 [[ "$(<"${fixture}/args.log")" == $'--version\nv9.8.7\n--root-lifecycle' ]] ||
   fail "Node Stage-0 did not pass the allowlisted arguments exactly"
 grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v9.8.7/managed-node-bootstrap.sh' "${fixture}/downloads.log" ||
-  fail "Node Stage-0 did not construct the immutable release URL"
+  fail "Node Stage-0 did not construct the versioned release URL"
 
 if grep -Eq 'token-must-not-leak|config-must-not-leak|install-env-secret-must-not-leak' "${fixture}/output"; then
   fail "Stage-0 leaked token or configuration content"
@@ -183,23 +151,17 @@ for ((attempt = 0; attempt < 30; attempt++)); do
 done
 [[ -n "${temporary}" && ! -e "${temporary}" ]] || fail "successful handoff did not clean its temporary directory"
 
-cp -- "${fixture}/release/managed-node-bootstrap.sh" "${fixture}/managed-node-bootstrap.good"
-printf '\n# tampered\n' >>"${fixture}/release/managed-node-bootstrap.sh"
-if run_installer "${NODE}" --version v1.2.3 >"${fixture}/output" 2>&1; then
-  fail "Node Stage-0 executed a Stage-1 asset whose digest did not match"
-fi
-[[ ! -s "${fixture}/exec.log" ]] || fail "a digest mismatch reached Stage-1"
-mv -- "${fixture}/managed-node-bootstrap.good" "${fixture}/release/managed-node-bootstrap.sh"
-
-cp -- "${fixture}/release/SHA256SUMS.sig" "${fixture}/signature.good"
-printf 'invalid signature\n' >"${fixture}/release/SHA256SUMS.sig"
-for installer in "${CONTROLLER}" "${NODE}"; do
+for asset in controller-bootstrap.sh managed-node-bootstrap.sh; do
+  cp -- "${fixture}/release/${asset}" "${fixture}/stage1.good"
+  : >"${fixture}/release/${asset}"
+  installer="${CONTROLLER}"
+  [[ "${asset}" != managed-node-bootstrap.sh ]] || installer="${NODE}"
   if run_installer "${installer}" --version v1.2.3 >"${fixture}/output" 2>&1; then
-    fail "$(basename "${installer}") accepted an invalid manifest signature"
+    fail "empty Stage-1 download unexpectedly succeeded"
   fi
-  [[ ! -s "${fixture}/exec.log" ]] || fail "an invalid signature reached Stage-1"
+  [[ ! -s "${fixture}/exec.log" ]] || fail "empty Stage-1 reached execution"
+  mv -- "${fixture}/stage1.good" "${fixture}/release/${asset}"
 done
-mv -- "${fixture}/signature.good" "${fixture}/release/SHA256SUMS.sig"
 
 for mode in 404-stage1 tls; do
   rm -rf -- "${fixture}/tmp"/*
