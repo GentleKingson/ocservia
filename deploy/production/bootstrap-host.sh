@@ -463,7 +463,6 @@ ensure_backup_dir() {
 print_operator_prerequisites() {
   local secret_dir="${OCSERV_SECRET_DIR:-}" secret_stat secret_uid secret_mode
   local backup_env="${OCSERV_BACKUP_DIR:-}" backup_stat
-  local public_key="${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-}"
 
   echo
   echo "Operator prerequisites outside this bootstrap's scope:"
@@ -498,18 +497,10 @@ print_operator_prerequisites() {
     fi
   fi
 
-  if [[ -z "${public_key}" ]]; then
-    record_pending "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY is not set; provision the release-signing public key through an independent protected channel"
-  elif [[ ! -f "${public_key}" || -L "${public_key}" ]]; then
-    record_pending "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY (${public_key}) is not an existing regular file"
-  else
-    echo "- OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY (${public_key}) is present"
-  fi
-
   if ! command -v git >/dev/null 2>&1; then
     record_pending "git is required by controller.sh (a clean checkout matching the release manifest); install it before 'controller.sh install'"
   fi
-  record_pending "download the controller-release-${ARCH_WORD}.json release bundle (manifest, SHA256SUMS, SHA256SUMS.sig, and the manifest .sha256) for this host architecture through a protected channel"
+  record_pending "download controller-release-${ARCH_WORD}.json over HTTPS for this host architecture"
 
   if command -v ufw >/dev/null 2>&1; then
     if (( EUID == 0 )) && ufw status 2>/dev/null | grep -q '^Status: active'; then

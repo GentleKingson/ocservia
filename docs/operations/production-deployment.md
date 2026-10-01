@@ -10,16 +10,14 @@ first-install chain preserves the existing lifecycle authorities:
 
 ```text
 Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
-        -> production/install.sh -> signed manifest -> controller.sh
+        -> production/install.sh -> deployment configuration -> controller.sh
         -> smoke/readiness
 ```
 
 Stage-0 is a convenience boundary. Its first bytes rely on the static HTTPS
-endpoint, and it only parses the version and downloads Stage-1. The immutable
-versioned Stage-1 asset prepares a durable checkout but does not verify or
-activate a Controller release. The clean checkout, the signed manifest's
-`source_commit`, the independently provisioned release-signing key, the
-digest-pinned images, and `controller.sh` remain the production trust chain.
+endpoint. Stage-0 downloads the versioned Stage-1 asset over HTTPS. Stage-1
+prepares a durable checkout, and controller.sh validates ordinary deployment
+configuration and protected local state before activation.
 `install.env` stays in the operator's configuration directory, separate from
 the durable release checkout.
 Until that hosting has operational ownership and byte-verification evidence,
@@ -104,7 +102,7 @@ The lifecycle resolves the verified target source rather than requiring its
 descriptor to equal the current one. This does not convert historical layouts
 or guarantee that an arbitrary target can run against existing state.
 
-## Secrets and release trust
+## Production secrets
 
 Use digest-pinned images for every `OCSERV_*_IMAGE` variable. Put referenced secret files in an absolute, canonical, launcher-owned, mode-`0700` `OCSERV_SECRET_DIR` outside the checkout; every ancestor must be root- or launcher-owned and not group/world writable. General secrets must be launcher-owned mode `0444`: the private parent directory prevents host traversal while the read-only file allows each explicitly mounted non-root service to read it. The Ed25519 Controller command private key, `controller-command-signing-key.pem`, and the 32-byte lowercase-hex audit event key, `audit-event-key`, must be owned by UID/GID `65534:65532` with mode `0400`, matching the non-root Controller process. Set a non-secret stable identifier such as `OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1`; the identifier is stored with each event. The audit event key is independent from `audit-checkpoint-key` and must never be reused for checkpoints or another purpose. File-backed Compose secrets are bind mounts on supported deployments, so the source ownership is required even though the Compose target also declares it. The Iroh Controller key and relay token must be owned by UID/GID 65532 with mode `0400`. The launcher rejects missing files, symbolic links, unsafe host ancestry, and ownership or mode mismatches; the Controller loader additionally rejects a hard-linked audit event key and unsafe in-container ancestry. Do not place credentials in Compose environment variables.
 
@@ -165,7 +163,7 @@ operator action, not an automatic part of this update.
 The v1 schema remains strictly supported for standalone installations. The v2
 reader additionally requires `signer_state_version: 1` and five exact image
 roles: `edge`, `relay`, `signer`, `mysql_backup`, `mariadb_backup`. It retains
-the same per-architecture filenames and signature rules. Integrated requires
+the same per-architecture filenames and protected local file rules. Integrated requires
 v2; see [Integrated configuration](../../deploy/production/integrated/README.md#lifecycle-configuration).
 V2 selects backend backup digests from the manifest rather than
 `OCSERV_DATABASE_BACKUP_IMAGE`. Candidate publication/acceptance is separate
@@ -176,7 +174,7 @@ Formal GitHub Releases publish the Controller release manifests
 `.sha256` checksums alongside the Agent assets, plus the byte-identical
 `controller-release.json` alias of the amd64 manifest for existing operators.
 They also publish `controller-bootstrap.sh` and `managed-node-bootstrap.sh` as
-the immutable Stage-1 entrypoints covered by the same signed `SHA256SUMS`.
+versioned Stage-1 entrypoints downloaded over HTTPS.
 Each manifest is the canonical release mapping for its platform: copy all six
 image references from its `images` object without replacing any digest with a
 tag. The gateway, control, transport, and backup references are first-party
@@ -193,39 +191,14 @@ server architecture and fails closed when the manifest platform does not match
 the Docker host platform, so install the manifest variant that matches the
 host.
 
-The signed `SHA256SUMS` also includes all three Controller manifests, and each
-separate `controller-release*.json.sha256` is an additional byte-integrity
-check. Before
-using a release bundle, provision the release-signing public key through an
-independent protected channel and point the lifecycle entrypoint at it:
-
-```bash
-export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=/etc/ocservia/controller-release-signing.pub.pem
-```
-
-The key path must be absolute and canonical, have no symlink ancestry, be a
-regular root- or launcher-owned file, and not be group/world writable. The
-release bundle evidence (the selected
-`controller-release-<amd64|arm64>.json` manifest, `SHA256SUMS`,
-`SHA256SUMS.sig`, and the manifest's `.sha256` checksum) must meet the same
-ownership and permission requirements, and the bundle directory plus every
-ancestor directory up to `/` must be root- or launcher-owned and not
-group/world writable. These boundary checks keep the verified bytes from
-being swapped between signature verification and use. Do not
-select the public key copied from the same release bundle as the trust anchor:
-an attacker who replaces the manifest, checksum, signature, and key together
-would otherwise be able to validate the replacement bundle with its own key.
-The lifecycle entrypoint automatically verifies the trusted Ed25519 signature
-over `SHA256SUMS`, the single manifest entry and its bytes, and the independent
-manifest checksum before any Compose config, image pull, or activation step.
-Missing or invalid bundle evidence fails closed. Rollback and start continue
-to use only the protected local release state and do not require the original
-release bundle to remain on disk.
-
-GitHub image attestations remain an optional higher-level provenance check and
-are not a production lifecycle prerequisite. When `gh` is already available,
-operators may separately run `gh attestation verify oci://...` for each
-first-party image at the exact digest recorded in the manifest.
+The architecture-specific `controller-release.json` is ordinary deployment
+configuration. Download it over HTTPS and keep it in a protected directory.
+The lifecycle validates its JSON structure, architecture, source checkout and
+image mapping before Compose config, pull or activation. It requires no release
+public key, signature, signed checksum manifest or provenance evidence. Local
+configuration files must be regular root- or launcher-owned files, without
+symlink ancestry or group/world write permission. Rollback and start use the
+protected local lifecycle state and do not need the original download.
 
 Supported Controller hosts are Ubuntu 22.04, 24.04, and 26.04 and Debian 11,
 12, and 13 on amd64 or arm64, plus Ubuntu 20.04 as an existing-Docker
@@ -286,17 +259,15 @@ reported, not repaired. The bootstrap never starts a Docker TCP listener,
 never edits the firewall (it only warns when `ufw` is active, because
 published ports bypass it), and never creates or rotates any secret, key,
 token, or password. Both commands end with a read-only summary of the operator
-prerequisites that remain, such as `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`,
-and `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY`.
+prerequisites that remain, such as `OCSERV_SECRET_DIR` and `OCSERV_BACKUP_DIR`.
 
 For a first deployment, `deploy/production/install.sh` orchestrates those
 steps from a clean checkout of an exact `vX.Y.Z` release tag: it verifies the
 release-tag identity and clean checkout, selects the release manifest matching
 the host architecture (`amd64` or `arm64`), runs the host bootstrap through
 `sudo` in launcher mode (the root lifecycle re-execs once through a controlled
-`sudo env`), downloads the four bundle files — the selected
-`controller-release-<arch>.json`, its `.sha256`, `SHA256SUMS`, and
-`SHA256SUMS.sig`, never the published `release-signing.pub.pem` — into
+`sudo env`), downloads the selected `controller-release-<arch>.json` over
+HTTPS into
 `<state-root>/release-bundles/vX.Y.Z` with mode-`0700` directories and
 mode-`0600` launcher-owned files, and delegates activation to
 `controller.sh install --release-file`. It must run as the lifecycle launcher

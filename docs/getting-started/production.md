@@ -23,7 +23,6 @@ Controller side.
 - A certificate signing endpoint.
 - One dedicated HTTPS Relay for production node traffic.
 - Protected directories for secrets and backups.
-- The release-signing public key provisioned through a protected channel separate from the downloaded release bundle.
 
 The repository does not generate production passwords, private keys, certificates, relay tokens, or signing keys. Prepare them before installation.
 
@@ -63,7 +62,6 @@ The exact variable names are in `install.env.example`. At a minimum, configure:
 | External services | `OCSERV_CERTIFICATE_SIGNER_URL` |
 | Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, required `OCSERV_RELAY_URL_A`, optional `OCSERV_RELAY_URL_B` |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
-| Release trust | `OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY` |
 | Database | bundled/external PostgreSQL 17, external MySQL 8.4.10, or external MariaDB 12.3.2 |
 
 Keep `install.env` private and out of Git. Variables exported in the shell override values from the file.
@@ -118,14 +116,11 @@ For a deliberate whole-lifecycle-as-root install, add `--root-lifecycle`:
   --root-lifecycle
 ```
 
-The bootstrap reads `./install.env`, prepares a clean release checkout under the Controller source root, and hands off to the production installer. The installer downloads the release bundle, verifies it, activates the Controller, and runs readiness checks.
+The bootstrap reads `./install.env`, prepares a clean release checkout under the Controller source root, and hands off to the production installer. The installer downloads and validates the deployment configuration, activates the Controller, and runs readiness checks.
 
 Do not replace this flow with a manual `docker compose up -d`; that bypasses the release and lifecycle checks.
 
-This bootstrap requires an existing stable Release. A signed candidate is not
-a stable tag: use its exact source checkout, independently trusted public key
-and platform manifest with the [existing candidate entry](../../deploy/production/integrated/README.md#candidate-pipeline).
-Never substitute a fabricated Release or mutable image tag.
+This bootstrap requires an existing stable Release and an exact version tag.
 
 ## 5. Verify the deployment
 

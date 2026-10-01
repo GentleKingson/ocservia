@@ -86,9 +86,12 @@ printf 'receivers: {}\n' >"${origin_work}/deploy/production/otel-collector.yaml"
 cat >"${origin_work}/deploy/production/install.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-: "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:?env-only installer received no release trust key}"
 [[ "$(umask)" == 0077 ]] || {
   echo "bootstrap must restore the protected installer umask" >&2
+  exit 1
+}
+[[ -n "${OCSERV_PUBLIC_HOST:-}" ]] || {
+  echo "env-only installer received no public host" >&2
   exit 1
 }
 log="${BOOTSTRAP_TEST_INSTALL_LOG:?}"
@@ -96,7 +99,6 @@ printf 'invoked-as:%s\n' "$0" >>"${log}"
 printf 'pwd:%s\n' "$(pwd -P)" >>"${log}"
 printf 'args:%s\n' "$*" >>"${log}"
 printf 'env-resolved-marker:%s\n' "${OCSERV_INSTALL_ENV_RESOLVED:-<unset>}" >>"${log}"
-printf 'trust-key:%s\n' "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY}" >>"${log}"
 printf 'proxy-network:%s,%s,%s\n' "${OCSERV_APPLICATION_SUBNET:-}" "${OCSERV_APPLICATION_IP_RANGE:-}" "${OCSERV_GATEWAY_APPLICATION_IP:-}" >>"${log}"
 printf 'recommended:%s\n' "${OCSERV_RECOMMENDED_AGENT_VERSION-<unset>}" >>"${log}"
 exit "${MOCK_INSTALL_EXIT:-0}"
@@ -221,7 +223,6 @@ reset_state() {
 
 write_install_env() {
   cat >"${config}/install.env" <<EOF
-OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem
 OCSERV_PUBLIC_HOST=controller-bootstrap.example.test
 OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
 OCSERV_APPLICATION_SUBNET=198.18.80.0/24
@@ -332,26 +333,6 @@ assert_log_empty "${git_log}"
   die "an invalid install.env must not create the source root"
 echo "an invalid install.env fails the run path before cloning"
 
-# 5. --check rejects a missing release trust path.
-reset_state
-EXTRA_ENV=("OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=")
-capture_from "${config}" --version v0.1.2 --check
-assert_status 1 "a missing trust path must fail the check"
-assert_output "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY is not set"
-echo "a missing release trust path fails the check"
-
-# 5a. --check rejects an unusable trust path value.
-reset_state
-EXTRA_ENV=("OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=relative.pub.pem")
-capture_from "${config}" --version v0.1.2 --check
-assert_status 1 "a relative trust path must fail the check"
-assert_output "absolute path"
-EXTRA_ENV=("OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/missing.pub.pem")
-capture_from "${config}" --version v0.1.2 --check
-assert_status 1 "a missing trust file must fail the check"
-assert_output "readable regular file"
-echo "an unusable trust path value fails the check"
-
 # 6. --check passes read-only for the launcher lifecycle.
 reset_state
 write_install_env
@@ -374,7 +355,6 @@ echo "check passes for the launcher lifecycle without mutation"
 reset_state
 install_docker_client
 EXTRA_ENV=(
-  "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem"
   "OCSERV_PUBLIC_HOST=controller-bootstrap.example.test"
 )
 capture_from "${config}" --version v0.1.2 --check
@@ -449,7 +429,6 @@ assert_log_contains "${install_log}" "invoked-as:${target}/deploy/production/ins
 assert_log_contains "${install_log}" "pwd:${config}"
 assert_log_contains "${install_log}" "args:--root-lifecycle"
 assert_log_contains "${install_log}" "env-resolved-marker:<unset>"
-assert_log_contains "${install_log}" "trust-key:${fixture}/controller-release-signing.pub.pem"
 assert_log_contains "${install_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
 assert_log_contains "${install_log}" "recommended:0.2.0"
 echo "a fresh clone hands off to the installer with the root lifecycle"
@@ -461,7 +440,7 @@ echo "a fresh clone hands off to the installer with the root lifecycle"
 reset_state
 capture_from "${config}" --version v0.1.2
 assert_status 1 "an environment-only installer must fail without configuration"
-assert_output "env-only installer received no release trust key"
+assert_output "env-only installer received no public host"
 [[ -d "${source_root}/v0.1.2" ]] ||
   die "the clone itself must still succeed without configuration"
 assert_log_empty "${install_log}"
@@ -477,7 +456,7 @@ assert_status 0 "the rerun must succeed"
 assert_output "reusing verified clean v0.1.2 checkout"
 [[ "$(git_calls clone)" == 1 ]] ||
   die "the rerun must not clone again"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 14 ]] ||
+[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 12 ]] ||
   die "the installer must have been handed off to exactly twice"
 echo "an existing clean checkout is reused without recloning"
 
@@ -492,7 +471,7 @@ assert_status 1 "a dirty checkout must fail closed"
 assert_output "dirty"
 [[ "$(git_calls clone)" == 1 ]] ||
   die "a dirty checkout must not trigger a reclone"
-[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 7 ]] ||
+[[ "$(wc -l <"${install_log}" | tr -d ' ')" == 6 ]] ||
   die "a dirty checkout must not hand off to the installer"
 [[ -d "${target}" ]] ||
   die "a dirty pre-existing checkout must never be deleted"
