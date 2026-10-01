@@ -221,3 +221,23 @@ implementation. Integrated mode uses the real Signer, freshly built local
 images and a loopback test registry, with no GHCR publishing authority.
 Source dependency/secret scans remain in Security; OS image vulnerability
 scans run in Business CI against local archives and report PASS/FAIL.
+
+## Optional build caches
+
+Basic CI caches pinned bootstrap downloads and `.tools` per profile, OS,
+architecture and tool/bootstrap identity. Dependency lockfiles invalidate the
+relevant profiles; ordinary source revisions do not invalidate tool caches.
+Security uses the same pattern per scan profile. Web and npm Security cache
+`.cache/npm` (the directory selected by `scripts/env.sh`), never `node_modules`;
+Web still runs `npm ci` on every invocation.
+
+Rust clippy/test reuse `rust/target/debug`. Their cache identity includes the
+Rust toolchain, Cargo lock/manifests, build flags, patched dependencies and check
+script; a source-revision suffix saves new objects while a matching identity
+prefix reuses dependency compilation across source revisions.
+
+Business tools are separate from the Agent compilation cache. Business and
+Release use the same `rust/target/agent-<arch>-<builder-hash>` directory and
+cache identity, always rebuilding and validating the requested version.
+No runtime state or credentials are cached. Existing per-image/per-architecture
+BuildKit GHA caches, `mode=max` and bounded cold fallback remain unchanged.

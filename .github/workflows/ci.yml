@@ -76,6 +76,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Cache pinned go-test tools
+        if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards')
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'control-plane/go.sum', 'signer/go.sum') }}
       - if: needs.ci-relevance.outputs.run_go == 'true' || contains(needs.ci-relevance.outputs.ci_suites, 'guards')
         run: scripts/bootstrap.sh go-test
       - id: cache-key
@@ -125,6 +133,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Cache pinned rust-basic tools
+        if: needs.ci-relevance.outputs.run_rust == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-rust-basic-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}
+      - name: Cache Rust check and test objects
+        if: needs.ci-relevance.outputs.run_rust == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target/debug
+          key: basic-rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/rust-toolchain.toml', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-${{ github.sha }}
+          restore-keys: basic-rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/rust-toolchain.toml', 'rust/Cargo.lock', 'rust/**/Cargo.toml', 'rust/.cargo/**', 'rust/vendor/**', 'scripts/rust-check.sh') }}-
       - if: needs.ci-relevance.outputs.run_rust == 'true'
         run: scripts/bootstrap.sh rust-basic
       - if: needs.ci-relevance.outputs.run_rust == 'true'
@@ -160,6 +183,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Cache pinned web tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
+      - name: Cache npm downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
       - run: scripts/bootstrap.sh web
       - run: scripts/web-check.sh basic
 
@@ -179,6 +214,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Cache pinned go-test tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'control-plane/go.sum', 'signer/go.sum') }}
       - run: scripts/bootstrap.sh go-test
       - id: cache-key
         run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
