@@ -409,8 +409,6 @@ def config_prepare():
     binding = node + '/' + hashlib.sha256(certificate).hexdigest() + '/' + hashlib.sha256(public_der).hexdigest() + '/none'
     reference = api('secret-provider-refs', {'provider': 'node-local-tls-v1', 'key_path': binding,
                                             'version': 'v1', 'reason': 'T07 operator-provisioned TLS'}, status=201)
-    run('sudo', 'groupadd', '--system', 'ocservia-vpn')
-    run('sudo', 'useradd', '--system', '--no-create-home', '--gid', 'ocservia-vpn', '--shell', '/usr/sbin/nologin', 'ocservia-vpn')
     output = json.loads(run('sudo', 'bash', str(ROOT / 'deploy/managed-node/provision-config-tls.sh'),
                             node, reference['id'], 'v1', '/etc/ocserv/t07.crt', '/etc/ocserv/t07.key'))
     assert output['key'] == binding and output['secret_ref_id'] == reference['id']

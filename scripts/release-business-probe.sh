@@ -468,6 +468,40 @@ export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
 export USER_PASSWORD_SEAL_KEY_ID=t07-user P12_PASSWORD_SEAL_KEY_ID=t07-p12 ENROLLMENT_ENVIRONMENT=production
 managed_options=(--version "v${VERSION}")
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then managed_options+=(--root-lifecycle); fi
+# The managed installer preflight reads the real native ocserv resources.
+# Prepare and start this task-owned VPN fixture before enrollment, then bind
+# its TLS material to the enrolled node through the existing ConfigPlan path.
+sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
+sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
+sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
+sudo groupadd --system ocservia-vpn
+sudo useradd --system --no-create-home --gid ocservia-vpn --shell /usr/sbin/nologin ocservia-vpn
+write_node_config() {
+cat >"${work}/ocserv.conf" <<EOF
+auth = "plain[passwd=/etc/ocserv/ocpasswd]"
+tcp-port = 44443
+udp-port = 0
+run-as-user = ocservia-vpn
+run-as-group = ocservia-vpn
+socket-file = /run/ocserv.socket
+server-cert = $1
+server-key = $2
+max-clients = 4
+max-same-clients = 2
+cookie-timeout = 300
+device = vpns
+ipv4-network = 10.208.0.0/24
+dns = 1.1.1.1
+route = default
+use-occtl = true
+EOF
+sudo install -m 600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
+}
+write_node_config /etc/ocserv/t07.crt /etc/ocserv/t07.key
+sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
+sudo systemctl daemon-reload
+sudo systemctl restart ocserv
+sudo /usr/libexec/ocservia/ocservia-privd --host-preflight
 bash "${ROOT}/deploy/managed-node/install.sh" "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-prepare.log"
 grep -q ENROLLMENT_READY "${ARTIFACT_DIR}/managed-prepare.log"
 record signed_native_package_and_managed_prepare
@@ -534,34 +568,13 @@ if [[ -n "$(cat /proc/net/if_inet6)" ]]; then
   sudo ip6tables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
   relay_ipv6_rule=true
 fi
-sudo install -m 600 "${work}/private/tls.key" /etc/ocserv/t07.key
-sudo install -m 644 "${OCSERV_SECRET_DIR}/tls.crt" /etc/ocserv/t07.crt
-sudo install -m 600 /dev/null /etc/ocserv/ocpasswd
 next_stage config_tls
 python3 "${ROOT}/scripts/release-business-api.py" config_prepare
 config_ref="$(jq -r .id "${work}/config-reference.json")"
-cat >"${work}/ocserv.conf" <<EOF
-auth = "plain[passwd=/etc/ocserv/ocpasswd]"
-tcp-port = 44443
-udp-port = 0
-run-as-user = ocservia-vpn
-run-as-group = ocservia-vpn
-socket-file = /run/ocserv.socket
-server-cert = /etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.pem
-server-key = /etc/ocservia-agent/config-tls/${config_ref}/v1/server-key.pem
-max-clients = 4
-max-same-clients = 2
-cookie-timeout = 300
-device = vpns
-ipv4-network = 10.208.0.0/24
-dns = 1.1.1.1
-route = default
-use-occtl = true
-EOF
-sudo install -m 600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
+write_node_config "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.pem" "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-key.pem"
 sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
-sudo systemctl daemon-reload
-sudo systemctl start ocserv ocservia-privd
+sudo systemctl restart ocserv
+sudo systemctl start ocservia-privd
 next_stage node_approval
 python3 "${ROOT}/scripts/release-business-api.py" approve
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
