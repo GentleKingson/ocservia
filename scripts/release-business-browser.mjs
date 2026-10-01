@@ -79,11 +79,9 @@ try {
   expect(denied.status()).toBe(403);
   const password = crypto.randomBytes(24).toString("hex");
   fs.writeFileSync(`${work}/private/browser-vpn-password`, password, { mode: 0o600 });
-  const ciphertext = crypto.publicEncrypt({ key: fs.readFileSync(`${work}/user.pub.pem`), oaepHash: "sha256" }, Buffer.from(password)).toString("base64");
   await page.getByTitle("Create user", { exact: true }).click();
   await page.getByLabel("User", { exact: true }).fill("t07-browser");
-  await page.getByLabel("Secret key ID").fill("t07-user");
-  await page.getByLabel("Sealed password").fill(ciphertext);
+  await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByLabel("Reason", { exact: true }).fill("T07 browser user");
   const created = page.waitForResponse(response => response.url().endsWith(`/nodes/${node}/users`) && response.request().method() === "POST");
   await page.getByRole("button", { name: "Confirm", exact: true }).click();
