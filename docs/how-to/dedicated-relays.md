@@ -10,7 +10,7 @@ connectivity remains available; a recovery test must prove dependence on the Rel
 - One independent Relay host with a DNS name and certificate.
 - The same high-entropy relay access token provisioned to the Relay, the
   Controller transport service, and enrolled Agents.
-- A digest-pinned relay image.
+- A prebuilt relay image with an explicit `vX.Y.Z` tag or SHA256 reference.
 
 ## Steps
 

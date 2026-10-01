@@ -93,6 +93,13 @@ assert_rejected missing-platform "${missing_platform_args[@]}" "${image_args[@]}
 missing_image_args=("${image_args[@]:0:6}" "${image_args[@]:8}")
 assert_rejected missing-image "${common_args[@]}" "${missing_image_args[@]}"
 
+version_image_args=("${image_args[@]}")
+for ((index = 1; index < ${#version_image_args[@]}; index += 2)); do
+  version_image_args[$index]="${version_image_args[$index]/@${digest}/:v0.2.0}"
+done
+node "${GENERATOR}" --output "${fixture}/version-images.json" "${common_args[@]}" "${version_image_args[@]}"
+jq -e 'all(.images[]; endswith(":v0.2.0"))' "${fixture}/version-images.json" >/dev/null
+
 mutable_image_args=("${image_args[@]}")
 mutable_image_args[1]="gateway=ghcr.io/gentlekingson/ocservia/gateway:latest"
 assert_rejected mutable-image "${common_args[@]}" "${mutable_image_args[@]}"
