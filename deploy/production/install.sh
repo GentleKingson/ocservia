@@ -1,27 +1,16 @@
 #!/usr/bin/env bash
 # Thin production orchestrator for a one-command Controller install.
 #
-# Scope: starting from a clean checkout of an exact vX.Y.Z release tag with the
-# operator-provisioned production environment already exported, run the host
-# bootstrap (via sudo), download the release bundle for the host architecture
-# into the protected lifecycle state root, and delegate activation to
-# controller.sh install. This script never reimplements host bootstrap, release
-# verification, or Controller lifecycle logic: bootstrap-host.sh,
-# verify-controller-release-bundle.sh, and controller.sh remain the
-# authorities. It never creates, replaces, or defaults production secrets or
-# trust material; the release-signing public key must still come from
-# OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY through an independent protected
-# channel, never from the release bundle itself.
-#
-# There is deliberately no curl|bash form: the Controller lifecycle binds to a
-# clean exact release Git checkout, the manifest source_commit, and the
-# operator-provisioned trust key.
+# Scope: from a clean version-tag checkout, prepare the host, download the
+# architecture-specific Controller deployment configuration over HTTPS into
+# protected lifecycle state, and delegate activation to controller.sh.
+# Host preparation and Controller lifecycle remain their existing authorities.
+# Production secrets and runtime command/PKI trust material are operator supplied.
 #
 # Usage model:
 #   git clone --branch vX.Y.Z --depth 1 <ocservia repository>
 #   cd ocservia
 #   export OCSERV_BACKUP_DIR=... OCSERV_SECRET_DIR=...
-#   export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=...
 #   # export the remaining production Controller configuration...
 #   # (or keep the allowlisted configuration in ./install.env, parsed by the
 #   # strict non-executing loader in deploy/lib/install-env.sh; explicit
@@ -57,7 +46,7 @@ BUNDLE_DIR=""
 ROOT_LIFECYCLE=false
 
 # Only operator-supplied production configuration crosses the internal sudo
-# boundary. Release image variables are generated from the verified manifest;
+# boundary. Release image variables are generated from the deployment configuration;
 # bootstrap and test seams are intentionally not forwarded.
 ROOT_LIFECYCLE_ENV_NAMES=(
   OCSERV_AUDIT_EVENT_KEY_ID
@@ -82,7 +71,6 @@ ROOT_LIFECYCLE_ENV_NAMES=(
   OCSERV_CERTIFICATE_SIGNER_URL
   OCSERV_CONTROLLER_ENDPOINT_ID
   OCSERV_CONTROLLER_PUBLIC_URL
-  OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY
   OCSERV_CONTROLLER_STATE_DIR
   OCSERV_CONTROLLER_STATE_ROOT
   OCSERV_HTTPS_ADDRESS
@@ -158,7 +146,6 @@ if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
     OCSERV_CERTIFICATE_SIGNER_URL \
     OCSERV_CONTROLLER_ENDPOINT_ID \
     OCSERV_CONTROLLER_PUBLIC_URL \
-    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY \
     OCSERV_CONTROLLER_STATE_DIR \
     OCSERV_CONTROLLER_STATE_ROOT \
     OCSERV_HTTPS_ADDRESS \
@@ -308,12 +295,7 @@ validate_state_root() {
 download_release_bundle() {
   local name names=(
     "controller-release-${ARCH_WORD}.json"
-    "controller-release-${ARCH_WORD}.json.sha256"
-    "SHA256SUMS"
-    "SHA256SUMS.sig"
   )
-  # The release-signing public key is intentionally absent: trust comes only
-  # from OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY.
   BUNDLE_DIR="${STATE_ROOT}/release-bundles/${RELEASE_TAG}"
   if [[ -L "${STATE_ROOT}/release-bundles" || -L "${BUNDLE_DIR}" ]]; then
     fail "release bundle directory ${BUNDLE_DIR} must not be a symlink"
@@ -330,8 +312,6 @@ download_release_bundle() {
 
 resolve_release_identity
 resolve_architecture
-[[ -n "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-}" ]] ||
-  fail "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY is not set; provision the release-signing public key through an independent protected channel (controller.sh verifies it)"
 verify_fresh_host_launcher_path
 
 run_host_bootstrap

@@ -101,7 +101,6 @@ printf 'proxy-network:%s,%s,%s\n' "${OCSERV_APPLICATION_SUBNET:-}" "${OCSERV_APP
 printf 'otel:%s\n' "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" >>"${bootstrap_log}"
 printf 'OCSERV_SECRET_DIR=%s\n' "${OCSERV_SECRET_DIR:-<unset>}" >>"${bootstrap_log}"
 printf 'OCSERV_BACKUP_DIR=%s\n' "${OCSERV_BACKUP_DIR:-<unset>}" >>"${bootstrap_log}"
-printf 'OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=%s\n' "${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-<unset>}" >>"${bootstrap_log}"
 printf 'UNRELATED_ENV=%s\n' "${UNRELATED_ENV:-<unset>}" >>"${bootstrap_log}"
 printf 'OCSERV_UNRELATED_CONFIG=%s\n' "${OCSERV_UNRELATED_CONFIG:-<unset>}" >>"${bootstrap_log}"
 [[ "${MOCK_BOOTSTRAP_EXIT:-0}" == 0 ]] || exit "${MOCK_BOOTSTRAP_EXIT}"
@@ -278,7 +277,6 @@ run_installer() {
     INSTALL_TEST_ARCH="${INSTALL_TEST_ARCH:-}" \
     PATH="${bin}:${PATH}" \
     OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
-    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
     env "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${repo}/deploy/production/install.sh" "$@"
 }
 
@@ -296,7 +294,6 @@ run_installer_from() {
       INSTALL_TEST_ARCH="${INSTALL_TEST_ARCH:-}" \
       PATH="${bin}:${PATH}" \
       OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
-      OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
       env "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${repo}/deploy/production/install.sh" "$@"
   )
 }
@@ -392,17 +389,6 @@ assert_log_empty "${bootstrap_log}"
 assert_log_empty "${curl_log}"
 echo "a dirty checkout is rejected before any host mutation"
 
-# 3c. a missing release trust key is rejected before any host mutation.
-reset_logs
-reset_checkout
-EXTRA_ENV=("OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=")
-capture
-assert_status 1 "a missing release public key must fail closed"
-assert_output "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY"
-assert_log_empty "${bootstrap_log}"
-assert_log_empty "${curl_log}"
-echo "a missing release trust key is rejected"
-
 # 4. the full happy path as the launcher user on a host with Docker.
 reset_logs
 reset_checkout
@@ -420,12 +406,9 @@ else
   assert_log_contains "${sudo_log}" "env OCSERV_CONTROLLER_STATE_ROOT=${state_root} ${repo}/deploy/production/bootstrap-host.sh install --backup-dir ${fixture}/backup"
   assert_log_contains "${bootstrap_log}" "install --backup-dir ${fixture}/backup"
 fi
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 4 ]] ||
-  die "expected exactly four bundle downloads, got: $(cat -- "${curl_log}")"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 1 ]] ||
+  die "expected exactly one configuration download, got: $(cat -- "${curl_log}")"
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.1.2/controller-release-${native_arch}.json"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.1.2/controller-release-${native_arch}.json.sha256"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.1.2/SHA256SUMS"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.1.2/SHA256SUMS.sig"
 if grep -q "release-signing" "${curl_log}"; then
   die "the installer must never download release trust material: $(cat -- "${curl_log}")"
 fi
@@ -433,13 +416,10 @@ bundle_dir="${state_root}/release-bundles/v0.1.2"
 [[ "$(stat -c '%a' "${bundle_dir}")" == 700 ]] ||
   die "bundle directory mode is wrong: $(stat -c '%a' "${bundle_dir}")"
 [[ "$(ls -A -- "${bundle_dir}" | sort | tr '\n' ' ')" == \
-  "SHA256SUMS SHA256SUMS.sig controller-release-${native_arch}.json controller-release-${native_arch}.json.sha256 " ]] ||
+  "controller-release-${native_arch}.json " ]] ||
   die "unexpected bundle contents: $(ls -A -- "${bundle_dir}")"
 for bundle_file in \
-  "controller-release-${native_arch}.json" \
-  "controller-release-${native_arch}.json.sha256" \
-  SHA256SUMS \
-  SHA256SUMS.sig; do
+  "controller-release-${native_arch}.json"; do
   [[ "$(stat -c '%a' "${bundle_dir}/${bundle_file}")" == 600 ]] ||
     die "bundle file ${bundle_file} mode is wrong"
 done
@@ -453,10 +433,10 @@ install_docker_client_stub
 EXTRA_ENV=("INSTALL_TEST_ARCH=aarch64")
 capture
 assert_status 0 "the arm64 install flow must succeed"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.1.2/controller-release-arm64.json.sha256"
 if grep -q "controller-release-amd64" "${curl_log}"; then
   die "an arm64 host must not download the amd64 manifest"
 fi
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.1.2/controller-release-arm64.json"
 assert_log_contains "${controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-arm64.json"
 echo "arm64 hosts select the arm64 release manifest"
 
@@ -495,7 +475,6 @@ if can_root; then
     PATH="${bin}:${PATH}" \
     SUDO_USER=ocservia-operator \
     OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
-    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
     "${repo}/deploy/production/install.sh" 2>&1)" || RUN_STATUS=$?
   assert_status 1 "whole-script sudo must fail closed"
   assert_output "run install.sh as the lifecycle launcher user"
@@ -519,7 +498,6 @@ if can_root; then
     INSTALL_TEST_SUDO_LOG="${sudo_log}" \
     PATH="${fresh_bin}" \
     OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
-    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
     "${repo}/deploy/production/install.sh" 2>&1)" || RUN_STATUS=$?
   assert_status 0 "the root lifecycle install flow must succeed"
   assert_log_empty "${sudo_log}"
@@ -551,7 +529,6 @@ if can_root; then
     SUDO_UID="$(id -u)" \
     SUDO_GID="$(id -g)" \
     OCSERV_CONTROLLER_STATE_ROOT="${state_root}" \
-    OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem" \
     "${repo}/deploy/production/install.sh" --root-lifecycle 2>&1)" || RUN_STATUS=$?
   assert_status 0 "--root-lifecycle must succeed with a retained sudo identity"
   assert_output "release identity: v0.1.2"
@@ -577,7 +554,6 @@ if can_root; then
       export INSTALL_TEST_SUDO_LOG="${sudo_log}"
       export PATH="${root_lifecycle_bin}"
       export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
-      export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem"
       export OCSERV_SECRET_DIR="${fixture}/secrets"
       export OCSERV_BACKUP_DIR="${fixture}/backup"
       export OCSERV_PUBLIC_HOST=controller.example.test
@@ -600,7 +576,6 @@ if can_root; then
     )" || RUN_STATUS=$?
     assert_status 0 "the operator root-lifecycle command must succeed through sudo env_reset"
     assert_output "release identity: v0.1.2"
-    assert_log_contains "${root_sudo_log}" "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem"
     assert_log_contains "${root_sudo_log}" "OCSERV_PUBLIC_HOST=controller.example.test"
     if grep -q "UNRELATED_ENV\|OCSERV_UNRELATED_CONFIG" "${root_sudo_log}"; then
       die "the root-lifecycle sudo command must not forward unrelated environment variables: $(cat -- "${root_sudo_log}")"
@@ -610,11 +585,10 @@ if can_root; then
     assert_log_contains "${root_bootstrap_log}" "proxy-network:198.18.80.0/24,198.18.80.128/25,198.18.80.2"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_SECRET_DIR=${fixture}/secrets"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_BACKUP_DIR=${fixture}/backup"
-    assert_log_contains "${root_bootstrap_log}" "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem"
     assert_log_contains "${root_bootstrap_log}" "UNRELATED_ENV=<unset>"
     assert_log_contains "${root_bootstrap_log}" "OCSERV_UNRELATED_CONFIG=<unset>"
-    [[ "$(wc -l <"${root_curl_log}" | tr -d ' ')" == 4 ]] ||
-      die "expected exactly four root-lifecycle bundle downloads, got: $(cat -- "${root_curl_log}")"
+    [[ "$(wc -l <"${root_curl_log}" | tr -d ' ')" == 1 ]] ||
+      die "expected exactly one root-lifecycle configuration download, got: $(cat -- "${root_curl_log}")"
     assert_log_contains "${root_controller_log}" "install --release-file ${state_root}/release-bundles/v0.1.2/controller-release-${native_arch}.json"
     as_root chown -R "$(id -u):$(id -g)" "${repo}"
     echo "the operator root-lifecycle command forwards only production configuration across sudo env_reset"
@@ -628,7 +602,6 @@ if can_root; then
       RUN_OUTPUT="$(
         export PATH="${root_lifecycle_bin}"
         export OCSERV_CONTROLLER_STATE_ROOT="${state_root}"
-        export OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY="${fixture}/controller-release-signing.pub.pem"
         unset OCSERV_RELAY_URL_A OCSERV_RELAY_URL_B
         if [[ "${single_b}" == override ]]; then export OCSERV_RELAY_URL_B=; fi
         cd -- "${repo}"
@@ -659,7 +632,6 @@ OCSERV_RECOMMENDED_AGENT_VERSION=0.2.0
 OCSERV_SECRET_DIR=${fixture}/root-file-secrets
 OCSERV_BACKUP_DIR=${fixture}/root-file-backup
 OCSERV_CONTROLLER_STATE_ROOT=${state_root}
-OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${fixture}/controller-release-signing.pub.pem
 EOF
     printf 'OCSERV_PUBLIC_HOST=controller-poisoned.example.test\nOCSERV_SECRET_DIR=%s\nOCSERV_BACKUP_DIR=%s\n' \
       "${fixture}/poisoned-secrets" "${fixture}/poisoned-backup" >"${fixture}/poison-install-env"

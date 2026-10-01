@@ -1,6 +1,6 @@
 # Upgrade the Controller
 
-Apply an explicitly selected signed Controller release using the protected
+Apply an explicitly selected Controller release using the protected
 lifecycle. The lifecycle keeps the current release running while it validates
 the target and records pending evidence.
 
@@ -39,7 +39,7 @@ the Store's conditional DELETE, not the database grant, limits which unfinished
 records the policy workflow removes. Other tables and DDL privileges are unchanged.
 
 Replacing only the binary does not repair an existing account. Use the guarded
-`controller.sh upgrade` command above with the signed target release. Its target
+`controller.sh upgrade` command above with the target release. Its target
 Compose descriptor runs the existing one-shot `migrate` service with
 `--migrate-only`, mounted owner credentials, and `OCSERV_RUNTIME_DATABASE_ROLE`
 before the Controller starts. That path reapplies runtime grants even with no
@@ -47,7 +47,7 @@ new schema migration and is repeatable. Keep the selected authentication mode,
 session and audit secrets (including the audit event key ID/file), database TLS
 CA and backend/role settings intact; the production descriptors supply these
 to the migration service. Do not replace the runtime database secret with an
-owner secret or bypass signature, source, architecture or authorization checks.
+owner secret or bypass source, architecture or authorization checks.
 
 Confirm the migration service completed successfully and subsequent maintenance
 completes without `user_operations.cleanup_failed`. That error means cleanup
@@ -71,7 +71,7 @@ identical target. Do not use `install` to retry an existing installation.
 
 The lifecycle does not detect and convert the old application network layout.
 It uses the verified target source and target Compose files; actual configuration
-or startup errors remain failures. Keep the checkout, environment, signed bundle
+or startup errors remain failures. Keep the checkout, environment, deployment configuration
 and pending state intact. Do not delete evidence or substitute direct Compose.
 
 If same-target recovery is impossible, preserve failure

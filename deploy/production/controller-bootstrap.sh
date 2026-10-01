@@ -20,12 +20,7 @@
 # shell environment keeps its priority over the file.
 #
 # Boundaries (the existing authorities are unchanged):
-# - No production secrets or trust material is created, downloaded, or
-#   defaulted here: the release-signing public key still comes only from
-#   OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY through an independent protected
-#   channel, and release assets are downloaded and verified by
-#   install.sh / controller.sh, never by this script.
-# - No manifest verification, no docker compose, no Docker installation,
+# - No deployment activation, no docker compose, no Docker installation,
 #   and no modification of the Docker permission model (the host
 #   bootstrap keeps that authority). This script itself never crosses a
 #   privilege boundary and never calls sudo -E.
@@ -84,7 +79,6 @@ INSTALL_ENV_NAMES=(
   OCSERV_CERTIFICATE_SIGNER_URL
   OCSERV_CONTROLLER_ENDPOINT_ID
   OCSERV_CONTROLLER_PUBLIC_URL
-  OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY
   OCSERV_CONTROLLER_STATE_DIR
   OCSERV_CONTROLLER_STATE_ROOT
   OCSERV_HTTPS_ADDRESS
@@ -416,7 +410,7 @@ check_release_installer_published() {
 }
 
 run_check() {
-  local key tag_ref
+  local tag_ref
   command -v git >/dev/null 2>&1 || fail "git is required to inspect the release tag"
   command -v curl >/dev/null 2>&1 ||
     fail "curl is required to check the release and download the release bundle"
@@ -425,17 +419,9 @@ run_check() {
       fail "sudo is required for a non-root launcher (the production installer invokes it for the host bootstrap and the root lifecycle)"
   fi
   load_config
-  key="${OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY:-}"
-  [[ -n "${key}" ]] ||
-    fail "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY is not set; provision the release-signing public key through an independent protected channel (set it in the environment or ${CONFIG_ROOT}/install.env)"
-  [[ "${key}" == /* ]] ||
-    fail "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY must be an absolute path to the trusted public key file"
-  [[ -f "${key}" && ! -L "${key}" && -r "${key}" ]] ||
-    fail "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY does not point to a readable regular file: ${key}"
   walk_source_root false
   echo "version: ${VERSION} (exact vX.Y.Z release tag)"
   echo "configuration directory: ${CONFIG_ROOT}"
-  echo "release trust: OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY=${key}"
   echo "source root: ${SOURCE_ROOT}"
   select_lifecycle
   tag_ref="$(git ls-remote "${REPOSITORY_URL}" "refs/tags/${VERSION}")"

@@ -614,7 +614,6 @@ capture self check
 assert_status 0 "a provisioned host must pass the read-only check"
 assert_output "Controller host prerequisites satisfied"
 assert_output "OCSERV_SECRET_DIR is not set"
-assert_output "OCSERV_CONTROLLER_RELEASE_PUBLIC_KEY is not set"
 assert_output "controller-release-amd64.json"
 assert_log_empty "${apt_log}"
 assert_log_empty "${systemctl_log}"
