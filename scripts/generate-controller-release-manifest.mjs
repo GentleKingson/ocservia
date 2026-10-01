@@ -6,7 +6,7 @@ import path from "node:path";
 const imageNames = ["gateway", "control", "transport", "backup", "postgres", "otel"];
 const integratedImageNames = ["edge", "relay", "signer", "mysql_backup", "mariadb_backup"];
 const supportedPlatforms = ["linux/amd64", "linux/arm64"];
-const imageDigestPattern = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
+const imageReferencePattern = /^[^\s@]+(?:@sha256:[0-9a-f]{64}|:v[0-9]+\.[0-9]+\.[0-9]+)$/;
 const semverPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 const commitPattern = /^[0-9a-f]{40}$/;
 
@@ -107,7 +107,7 @@ if (!supportedPlatforms.includes(values.platform)) {
 for (const name of requiredImages) {
   if (!values.images.has(name)) fail(`missing production image: ${name}`);
   const ref = values.images.get(name);
-  if (!imageDigestPattern.test(ref)) fail(`${name} must be a full sha256 image digest`);
+  if (!imageReferencePattern.test(ref)) fail(`${name} must be a version-tagged or sha256 image reference`);
 }
 
 const manifest = {
