@@ -7,8 +7,8 @@ DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 VERSION="0.2.1"
 MOCK_NODE_ID="018f1e11-2222-7333-8444-555555555555"
 
-# The installer fixture asserts file modes with GNU stat and signs release
-# fixtures with openssl; skip on hosts without them (mirrors the guard in
+# The installer fixture asserts file modes with GNU stat and creates runtime command
+# key fixtures with openssl; skip on hosts without them (mirrors the guard in
 # test-controller-install.sh).
 stat -c '%u' . >/dev/null 2>&1 || {
   echo "Managed node install tests skipped: GNU stat is unavailable" >&2
@@ -64,7 +64,6 @@ trap cleanup EXIT INT TERM
 repo="${fixture}/repo"
 sysroot="${fixture}/sysroot"
 serve="${fixture}/serve"
-trusted="${fixture}/trusted"
 bin="${fixture}/bin"
 os="${fixture}/os"
 logs="${fixture}/logs"
@@ -87,7 +86,6 @@ enroll_exit_file="${fixture}/enroll-exit"
 installed_version_file="${fixture}/installed-version"
 arch_file="${fixture}/arch"
 tamper_after_verify_file="${fixture}/tamper-after-verify"
-key_swap_path_file="${fixture}/key-swap-path"
 services_state_file="${fixture}/services-state"
 
 die() {
@@ -104,22 +102,13 @@ SCRIPT_UNDER_TEST="${repo}/deploy/managed-node/install.sh"
 EXTRA_ENV=()
 OS_RELEASE="${os}/ubuntu-24.04"
 
-mkdir -m 700 -- "${bin}" "${logs}" "${serve}" "${trusted}" "${sysroot}"
+mkdir -m 700 -- "${bin}" "${logs}" "${serve}" "${sysroot}"
 mkdir -p -- "${repo}/deploy/managed-node" "${repo}/deploy/lib" "${os}"
 
-# The out-of-band trust anchor: an Ed25519 release key kept outside the
-# release download directory, exactly like an operator-provisioned key.
-openssl genpkey -algorithm ed25519 -out "${trusted}/release-signing.key" 2>/dev/null
-openssl pkey -in "${trusted}/release-signing.key" -pubout -out "${trusted}/release-signing.pub.pem"
-fingerprint="$(openssl pkey -pubin -in "${trusted}/release-signing.pub.pem" -outform DER | sha256sum | awk '{print $1}')"
-# A second key the launcher race swaps in for the operator-provisioned one.
-openssl genpkey -algorithm ed25519 -out "${fixture}/attacker-signing.key" 2>/dev/null
-openssl pkey -in "${fixture}/attacker-signing.key" -pubout \
-  -out "${fixture}/attacker-release-signing.pub.pem"
 openssl genpkey -algorithm ed25519 -out "${fixture}/command-verification.key" 2>/dev/null
 openssl pkey -in "${fixture}/command-verification.key" -pubout -out "${fixture}/controller-command-verification-key.pem"
 printf 'mock relay access token bytes\n' >"${fixture}/relay-access-token"
-chmod 0600 -- "${trusted}/release-signing.key" "${fixture}/command-verification.key"
+chmod 0600 -- "${fixture}/command-verification.key"
 controller_id="$(printf 'c%.0s' $(seq 1 64))"
 
 assets=(
@@ -138,11 +127,6 @@ build_serve() {
   for name in "${assets[@]}"; do
     printf 'mock release asset %s\n' "${name}" >"${serve}/${name}"
   done
-  while IFS= read -r name; do
-    (cd "${serve}" && sha256sum -- "${name}")
-  done < <(printf '%s\n' "${assets[@]}" | LC_ALL=C sort) >"${serve}/SHA256SUMS"
-  openssl pkeyutl -sign -rawin -inkey "${trusted}/release-signing.key" \
-    -in "${serve}/SHA256SUMS" -out "${serve}/SHA256SUMS.sig"
 }
 
 for name in ubuntu-24.04 ubuntu-22.04 ubuntu-20.04 debian-12 debian-11 rocky-9 fedora-41 arch; do
@@ -246,9 +230,9 @@ marker="${OCSERV_MANAGED_NODE_SYSROOT}/etc/ocservia/agent-install-production-rel
   echo "native install mock: the production request marker must exist before the package manager runs" >&2
   exit 1
 }
-expected="$(grep -F "  ${package##*/}" "${root}/serve/SHA256SUMS" | awk '{print $1}')"
+expected="$(sha256sum -- "${root}/serve/${package##*/}" | awk '{print $1}')"
 [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] || {
-  echo "native install mock: no signed checksum for ${package##*/}" >&2
+  echo "native install mock: no package digest for ${package##*/}" >&2
   exit 1
 }
 [[ "$(sha256sum -- "${package}" | awk '{print $1}')" == "${expected}" ]] || {
@@ -322,18 +306,6 @@ cat >"${bin}/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
-# Regression seam: downloads run after the release key fingerprint was
-# verified against the frozen copy, so this is the moment a racing
-# launcher-UID process swaps the launcher-controlled TRUSTED_RELEASE_KEY
-# pathname (key-swap-path holds the target, one shot). A correct installer
-# verified the frozen key and never reads the original pathname again.
-if [[ -s "${root}/key-swap-path" ]]; then
-  swap_target="$(cat -- "${root}/key-swap-path")"
-  : >"${root}/key-swap-path"
-  if [[ -n "${swap_target}" && -f "${swap_target}" ]]; then
-    cp -- "${root}/attacker-release-signing.pub.pem" "${swap_target}"
-  fi
-fi
 output="" url=""
 while (($# > 0)); do
   case "$1" in
@@ -479,33 +451,36 @@ cat >"${bin}/openssl" <<'EOF'
 set -euo pipefail
 root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
 printf '%s\n' "$*" >>"${root}/logs/openssl.log"
-if [[ "${1:-}" == "pkeyutl" && -s "${root}/tamper-after-verify" ]]; then
-  status=0
-  /usr/bin/openssl "$@" || status=$?
-  if ((status == 0)); then
-    # Regression seam for the signed-manifest TOCTOU: the moment signature
-    # verification succeeds, a racing launcher-UID process replaces the
-    # launcher-writable manifest before package selection/download. A correct
-    # installer keeps reading the copy frozen before verification, including
-    # when choosing between historical and revisioned DEB names.
-    # The download staging template
-    # is ocservia-managed-node. (the privileged staging is -pkg. and is
-    # already frozen here).
-    for staging in /tmp/ocservia-managed-node.* "${TMPDIR:-/tmp}"/ocservia-managed-node.*; do
-      [[ -f "${staging}/SHA256SUMS" ]] || continue
-      printf 'attacker manifest bytes\n' >"${staging}/SHA256SUMS"
-      printf 'manifest swapped\n' >>"${root}/tamper-after-verify"
-    done
-  fi
-  exit "${status}"
-fi
 exec /usr/bin/openssl "$@"
+EOF
+
+# Change launcher bytes at a selected checksum boundary. Root staging must
+# refuse a pre-copy swap and ignore a later launcher-only replacement.
+cat >"${bin}/sha256sum" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(dirname -- "${OCSERV_MANAGED_NODE_SYSROOT:?}")"
+result="$(/usr/bin/sha256sum "$@")"
+if [[ -s "${root}/tamper-after-verify" ]]; then
+  phase="$(cat "${root}/tamper-after-verify")"
+  if [[ ( "$phase" == before-freeze && "$*" == *ocservia-managed-node.* ) ||
+        ( "$phase" == after-freeze && "$*" == *ocservia-managed-node-pkg.* ) ]]; then
+    for staging in /tmp/ocservia-managed-node.* "${TMPDIR:-/tmp}"/ocservia-managed-node.*; do
+      for package in "$staging"/*.deb "$staging"/*.rpm; do
+        [[ -f "$package" ]] || continue
+        printf 'attacker package bytes\n' >"$package"
+      done
+    done
+    printf 'package swapped\n' >"${root}/tamper-after-verify"
+  fi
+fi
+printf '%s\n' "$result"
 EOF
 
 chmod 0755 -- "${bin}/agent-stub" "${bin}/native-install" "${bin}/sudo" \
   "${bin}/curl" "${bin}/dpkg" "${bin}/dpkg-query" "${bin}/rpm" \
   "${bin}/runuser" "${bin}/systemctl" "${bin}/uname" "${bin}/id" \
-  "${bin}/openssl"
+  "${bin}/openssl" "${bin}/sha256sum"
 
 build_serve
 
@@ -554,9 +529,7 @@ build_env() {
     "RELAY_URL_A=https://relay-a.example.test" \
     "RELAY_URL_B=" \
     "RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token" \
-    "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem" \
-    "TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem" \
-    "EXPECTED_RELEASE_KEY_SHA256=${fingerprint}"; do
+    "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem"; do
     name="${entry%%=*}"
     for omitted in ${ROOT_ENV_OMIT[@]+"${ROOT_ENV_OMIT[@]}"}; do
       [[ "${name}" == "${omitted}" ]] && continue 2
@@ -580,7 +553,7 @@ reset_state() {
   done
   printf '%s\n' "${MOCK_NODE_ID}" >"${node_id_file}"
   rm -f -- "${enroll_exit_file}" "${installed_version_file}" "${arch_file}" \
-    "${tamper_after_verify_file}" "${key_swap_path_file}" "${services_state_file}" \
+    "${tamper_after_verify_file}" "${services_state_file}" \
     "${fixture}/poison-install-env"
   EXTRA_ENV=()
   ROOT_ENV_OMIT=()
@@ -732,7 +705,8 @@ echo "non-SemVer --version values are rejected before any host mutation"
 scenario
 capture --version v9.9.9
 assert_status 1 "a nonexistent release must fail closed"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v9.9.9/SHA256SUMS"
+case "$(uname -m)" in aarch64) missing_arch=arm64 ;; *) missing_arch=amd64 ;; esac
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v9.9.9/ocservia-agent_9.9.9-1_${missing_arch}.deb"
 assert_log_empty "${dpkg_log}"
 echo "a nonexistent release is rejected before the package manager"
 
@@ -744,16 +718,14 @@ scenario
 SCRIPT_UNDER_TEST="${standalone}/install.sh"
 capture_from "${standalone}" --version "v${VERSION}"
 assert_output "release identity: v${VERSION} (pinned by --version)"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS.sig"
 case "$(uname -m)" in
   x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
   aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
   *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
 esac
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 3 ]] ||
-  die "expected exactly three downloads, got: $(cat -- "${curl_log}")"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 1 ]] ||
+  die "expected exactly one package download, got: $(cat -- "${curl_log}")"
 assert_log_contains "${dpkg_log}" "${selected}"
 if ((EUID == 0)); then
   assert_status 0 "the single-file root flow must reach ENROLLMENT_READY"
@@ -765,83 +737,18 @@ else
 fi
 echo "the single-file --version mode installs the pinned release without a checkout"
 
-# Real v0.6.1 asset spelling and a synthetic future release, on both DEB
-# architectures. These are signed naming fixtures, not historical payloads.
-for naming in legacy revisioned; do
-  for arch in amd64 arm64; do
-    (
-      scenario
-      case "${naming}" in
-        legacy) fixture_version=0.6.1; revision="" ;;
-        revisioned) fixture_version=1.0.0; revision=-1 ;;
-      esac
-      assets=("ocservia-agent_${fixture_version}${revision}_amd64.deb"
-        "ocservia-agent_${fixture_version}${revision}_arm64.deb")
-      build_serve
-      case "${arch}" in
-        amd64) printf 'x86_64\n' >"${arch_file}" ;;
-        arm64) printf 'aarch64\n' >"${arch_file}" ;;
-      esac
-      SCRIPT_UNDER_TEST="${standalone}/install.sh"
-      capture_from "${standalone}" --version "v${fixture_version}"
-      selected="ocservia-agent_${fixture_version}${revision}_${arch}.deb"
-      assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${fixture_version}/${selected}"
-      [[ "$(wc -l <"${curl_log}")" == 3 ]] || die "package selection must not probe alternative names"
-      assert_log_contains "${dpkg_log}" "${selected}"
-      [[ "$(cat "${sysroot}/.package-state")" == "installed ${fixture_version}-1" ]] ||
-        die "both DEB spellings must retain the same package revision"
-      if ((EUID == 0)); then
-        assert_status 0
-        assert_output "ENROLLMENT_READY"
-      else
-        assert_status 1
-        assert_output "unsafe metadata"
-      fi
-      echo "standalone --version v${fixture_version}: ${selected} selected from signed checksums"
-    )
-  done
-done
-
-# A signed manifest must select exactly one canonical package, not a choice
-# between spellings, duplicate entries or a filename outside this contract.
-for invalid in missing duplicate ambiguous suffix malformed; do
-  scenario
-  selected="ocservia-agent_${VERSION}-1_amd64.deb"
-  entry="$(grep -F "  ${selected}" "${serve}/SHA256SUMS")"
-  case "${invalid}" in
-    missing) printf '%s\n' "${entry/amd64/arm64}" >"${serve}/SHA256SUMS" ;;
-    duplicate) printf '%s\n%s\n' "${entry}" "${entry}" >"${serve}/SHA256SUMS" ;;
-    ambiguous) printf '%s\n%s\n' "${entry}" "${entry/-1_/_}" >"${serve}/SHA256SUMS" ;;
-    suffix) printf '%s.extra\n' "${entry}" >"${serve}/SHA256SUMS" ;;
-    malformed) printf '%s extra\n' "${entry}" >"${serve}/SHA256SUMS" ;;
-  esac
-  openssl pkeyutl -sign -rawin -inkey "${trusted}/release-signing.key" \
-    -in "${serve}/SHA256SUMS" -out "${serve}/SHA256SUMS.sig"
-  printf 'x86_64\n' >"${arch_file}"
-  SCRIPT_UNDER_TEST="${standalone}/install.sh"
-  capture_from "${standalone}" --version "v${VERSION}"
-  assert_status 1
-  assert_output "signed checksum"
-  [[ "$(wc -l <"${curl_log}")" == 2 ]] || die "${invalid} manifest must fail before package download"
-  assert_log_empty "${dpkg_log}"
-done
-echo "invalid signed package selections fail before any package download"
-
 # 2f. install.env supplies the node configuration to the single-file mode
 # from the invocation directory: the embedded loader replaces the
 # repository sibling deploy/lib/install-env.sh.
 scenario
 ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
-  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
-  TRUSTED_RELEASE_KEY EXPECTED_RELEASE_KEY_SHA256)
+  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE)
 cat >"${standalone}/install.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${controller_id}
 RELAY_URL_A=https://relay-file-a.example.test
 RELAY_URL_B=
 RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
 CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
-TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem
-EXPECTED_RELEASE_KEY_SHA256=${fingerprint}
 EOF
 SCRIPT_UNDER_TEST="${standalone}/install.sh"
 capture_from "${standalone}" --version "v${VERSION}"
@@ -856,18 +763,6 @@ else
   assert_output "unsafe metadata"
 fi
 echo "install.env works in the single-file --version mode"
-
-# 2g. the out-of-band trust fingerprint mismatch fails in --version mode
-# before any download and before the package manager.
-scenario
-EXTRA_ENV=("EXPECTED_RELEASE_KEY_SHA256=$(printf '0%.0s' $(seq 1 64))")
-SCRIPT_UNDER_TEST="${standalone}/install.sh"
-capture_from "${standalone}" --version "v${VERSION}"
-assert_status 1 "a mismatched trusted key fingerprint must fail closed"
-assert_output "does not match the expected"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "a trust fingerprint mismatch fails in --version mode before any download"
 
 # 2h. the single-file mode requires the version pin: without --version the
 # installer falls back to the legacy checkout identity and fails closed in
@@ -897,7 +792,7 @@ echo "an unsupported architecture is rejected before any host mutation"
 
 # 4. an unsupported distribution is rejected before any host mutation.
 # Ubuntu 20.04 and Debian 11 ship OpenSSL 1.1.1, whose pkeyutl cannot verify
-# the Ed25519 SHA256SUMS signature, so they are unsupported despite being
+# the verified native runtime baseline, so they are unsupported despite being
 # declarable dpkg hosts.
 for distro in fedora-41 arch ubuntu-20.04 debian-11; do
   scenario
@@ -911,67 +806,30 @@ for distro in fedora-41 arch ubuntu-20.04 debian-11; do
 done
 echo "unsupported distributions are rejected before any host mutation"
 
-# 5. a missing or mismatched out-of-band trust anchor fails before any
-# download and before the package manager.
-scenario
-EXTRA_ENV=("TRUSTED_RELEASE_KEY=${fixture}/no-such-key.pem")
-capture
-assert_status 1 "a missing trusted release key must fail closed"
-assert_output "trusted release public key"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-scenario
-EXTRA_ENV=("EXPECTED_RELEASE_KEY_SHA256=$(printf '0%.0s' $(seq 1 64))")
-capture
-assert_status 1 "a mismatched trusted key fingerprint must fail closed"
-assert_output "does not match the expected"
-assert_log_empty "${curl_log}"
-assert_log_empty "${dpkg_log}"
-echo "a missing or mismatched trust anchor fails before any download"
-
-# 6. a bad release manifest signature fails before package selection/download.
-scenario
-printf '\ntampered\n' >>"${serve}/SHA256SUMS"
-capture
-assert_status 1 "a tampered checksum manifest must fail closed"
-assert_output "signature verification failed"
-[[ "$(wc -l <"${curl_log}")" == 2 ]] || die "an unverified manifest must not trigger a package download"
-assert_log_empty "${dpkg_log}"
-echo "a bad release signature is rejected before the package manager"
-
-# 7. a selected package digest mismatch fails before the package manager.
-scenario
-zeros="$(printf '0%.0s' $(seq 1 64))"
-sed -i.bak \
-  -e "s/^[0-9a-f]\{64\}  \(ocservia-agent_${VERSION}-1_amd64\.deb\)$/${zeros}  \1/" \
-  -e "s/^[0-9a-f]\{64\}  \(ocservia-agent_${VERSION}-1_arm64\.deb\)$/${zeros}  \1/" \
-  "${serve}/SHA256SUMS"
-rm -f -- "${serve}/SHA256SUMS.bak"
-openssl pkeyutl -sign -rawin -inkey "${trusted}/release-signing.key" \
-  -in "${serve}/SHA256SUMS" -out "${serve}/SHA256SUMS.sig"
-capture
-assert_status 1 "a digest mismatch must fail closed"
-assert_output "does not match the signed checksum"
-assert_log_empty "${dpkg_log}"
-echo "a package digest mismatch is rejected before the package manager"
+# A failed or empty HTTPS download must never reach the package manager.
+for download_error in missing empty; do
+  scenario
+  case "$(uname -m)" in aarch64) test_arch=arm64 ;; *) test_arch=amd64 ;; esac
+  selected="ocservia-agent_${VERSION}-1_${test_arch}.deb"
+  if [[ "$download_error" == missing ]]; then rm "${serve}/${selected}"; else : >"${serve}/${selected}"; fi
+  capture
+  assert_status 1 "a ${download_error} download must fail closed"
+  assert_log_empty "${dpkg_log}"
+done
+echo "download failures stop before the package manager"
 
 # 8. package selection follows the platform and architecture: amd64/arm64
 # DEB naming on the Debian family and x86_64/aarch64 RPM naming on Rocky 9.
 scenario
 capture
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS"
-assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/SHA256SUMS.sig"
 case "$(uname -m)" in
   x86_64) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
   aarch64 | arm64) selected="ocservia-agent_${VERSION}-1_arm64.deb" ;;
   *) selected="ocservia-agent_${VERSION}-1_amd64.deb" ;;
 esac
 assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v${VERSION}/${selected}"
-[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 3 ]] ||
-  die "expected exactly three downloads, got: $(cat -- "${curl_log}")"
-if grep -q "release-signing" "${curl_log}"; then
-  die "the installer must never download release trust material: $(cat -- "${curl_log}")"
-fi
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == 1 ]] ||
+  die "expected exactly one package download, got: $(cat -- "${curl_log}")"
 assert_log_contains "${dpkg_log}" "${selected}"
 if ((EUID == 0)); then
   # A suite that itself runs as root performs the real privileged flow.
@@ -1041,19 +899,16 @@ echo "a relay-free installed package is rejected"
 # directory: the fixture repo carries the repository's real .gitignore, so a
 # present install.env must also stay invisible to the clean-release-checkout
 # contract, and the file-provided configuration must carry the whole flow
-# (operator input validation, out-of-band trust, package selection).
+# (operator input validation and package selection).
 scenario
 ROOT_ENV_OMIT=(CONTROLLER_ENDPOINT_ID RELAY_URL_A RELAY_URL_B \
-  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
-  TRUSTED_RELEASE_KEY EXPECTED_RELEASE_KEY_SHA256)
+  RELAY_ACCESS_TOKEN_SOURCE CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE)
 cat >"${repo}/install.env" <<EOF
 CONTROLLER_ENDPOINT_ID=${controller_id}
 RELAY_URL_A=https://relay-file-a.example.test
 RELAY_URL_B=
 RELAY_ACCESS_TOKEN_SOURCE=${fixture}/relay-access-token
 CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem
-TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem
-EXPECTED_RELEASE_KEY_SHA256=${fingerprint}
 EOF
 capture_from "${repo}"
 case "$(uname -m)" in
@@ -1081,21 +936,16 @@ if grep -q "dirty" <<<"${RUN_OUTPUT}"; then
 fi
 echo "install.env values load without dirtying the checkout"
 
-# 10b. an explicit shell variable wins over install.env: the environment
-# carries the correct trust fingerprint while the file carries a wrong one.
+# An explicit shell variable wins over the file's Relay URL.
 scenario
-printf 'EXPECTED_RELEASE_KEY_SHA256=%s\n' "$(printf '0%.0s' $(seq 1 64))" \
-  >"${repo}/install.env"
+printf 'RELAY_URL_A=https://relay-file.example.test\n' >"${repo}/install.env"
 capture_from "${repo}"
 if ((EUID == 0)); then
-  assert_status 0 "the shell fingerprint must win over the file value"
-  assert_output "ENROLLMENT_READY"
+  assert_status 0
+  as_root grep -qx 'RELAY_URL_A=https://relay-a.example.test' "${sysroot}/etc/ocservia-agent/relays.env" || die 'file overrides explicit Relay URL'
 else
-  assert_status 1 "the unprivileged fixture must fail closed at node preparation"
+  assert_status 1
   assert_output "unsafe metadata"
-fi
-if grep -q "does not match the expected" <<<"${RUN_OUTPUT}"; then
-  die "the file value must not override the explicit shell variable"
 fi
 echo "an explicit shell variable overrides install.env"
 
@@ -1278,48 +1128,29 @@ grep -q -- "--controller ${controller_id}" "${agent_log}" ||
   die "identity preparation must pin the Controller EndpointID"
 echo "the root bootstrap flow reaches ENROLLMENT_READY"
 
-# 11a. a launcher-UID race cannot swap the signed manifest after signature
-# verification succeeds: the manifest parse and the package digest must read
-# the frozen root-owned staging, never the launcher-writable download
-# directory. The openssl mock replaces the launcher manifest the instant
-# verification returns success; the installer must still select the signed
-# package name and install the bytes matching the frozen signed digest
-# (the native-install simulator rejects any package whose digest does not
-# match the signed manifest).
+# Launcher package bytes changed between hashing and freezing are refused.
 scenario
-printf '1\n' >"${tamper_after_verify_file}"
+printf 'before-freeze\n' >"${tamper_after_verify_file}"
 capture_root
-assert_status 0 "a post-verification launcher staging swap must not affect the install"
+assert_status 1
+assert_output "changed while entering root-owned staging"
+assert_log_empty "${dpkg_log}"
+grep -q 'package swapped' "${tamper_after_verify_file}" || die "the pre-freeze race fixture did not run"
+echo "a package swap before freezing is refused"
+
+# A launcher-only replacement after freezing cannot alter installed bytes.
+scenario
+printf 'after-freeze\n' >"${tamper_after_verify_file}"
+capture_root
+assert_status 0
 assert_output "ENROLLMENT_READY"
 assert_log_contains "${dpkg_log}" "ocservia-managed-node-pkg."
-grep -q 'manifest swapped' "${tamper_after_verify_file}" || die "the manifest race fixture did not run"
-echo "a post-verification manifest swap in the launcher staging is ignored"
-
-# 11b. the release key is frozen before its fingerprint is verified: a
-# launcher-controlled TRUSTED_RELEASE_KEY pathname swapped after the check
-# must never become the key that verifies the manifest. TRUSTED_RELEASE_KEY
-# points at a launcher-writable copy of the real key; the curl mock swaps that
-# pathname to an attacker key at the first download (after the fingerprint
-# check), and every later openssl read must use the frozen root-owned copy —
-# otherwise the real manifest's signature would verify under the attacker key.
-scenario
-cp -- "${trusted}/release-signing.pub.pem" "${fixture}/operator-release-key.pub.pem"
-printf '%s\n' "${fixture}/operator-release-key.pub.pem" >"${key_swap_path_file}"
-EXTRA_ENV=("TRUSTED_RELEASE_KEY=${fixture}/operator-release-key.pub.pem")
-capture_root
-assert_status 0 "a post-verification key path swap must not affect the install"
-assert_output "ENROLLMENT_READY"
-assert_log_contains "${openssl_log}" "pkeyutl -verify -rawin -pubin -inkey"
-assert_log_contains "${openssl_log}" "/var/tmp/ocservia-managed-node-pkg."
-if grep -q -- "operator-release-key" "${openssl_log}"; then
-  die "openssl must use the frozen key copy, not the launcher-controlled path: $(cat -- "${openssl_log}")"
-fi
-echo "a post-verification key path swap is ignored"
+grep -q 'package swapped' "${tamper_after_verify_file}" || die "the post-freeze race fixture did not run"
+echo "a package swap after freezing is ignored"
 
 # 11c. the single-file --version mode converges on reruns exactly like the
 # checkout mode: the already-installed package is reused without a second
-# download, a second out-of-band trust verification, or a second package
-# manager mutation.
+# download or a second package manager mutation.
 scenario
 SCRIPT_UNDER_TEST="${standalone}/install.sh"
 capture_root --version "v${VERSION}"
@@ -1328,7 +1159,6 @@ assert_output "ENROLLMENT_READY"
 assert_output "rerun this installer with the same --version v${VERSION} argument"
 dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
 curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
-signature_checks="$(grep -c -- "pkeyutl -verify" "${openssl_log}")"
 capture_root --version "v${VERSION}"
 assert_status 0 "the converged single-file rerun must succeed"
 assert_output "already installed; skipping the release download"
@@ -1336,8 +1166,6 @@ assert_output "already installed; skipping the release download"
   die "a single-file rerun must not reinstall the native package"
 [[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
   die "a single-file rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
-[[ "$(grep -c -- "pkeyutl -verify" "${openssl_log}")" == "${signature_checks}" ]] ||
-  die "a single-file rerun must not re-run the release trust verification"
 echo "the single-file --version rerun converges without reinstalling or re-downloading"
 
 # 12. a rerun converges: the installed package is reused, not reinstalled,
@@ -1347,9 +1175,6 @@ capture_root
 assert_status 0
 dpkg_calls="$(grep -c -- "-i" "${dpkg_log}")"
 curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
-# The release trust verification is the pkeyutl signature check; deriving the
-# sealing-key descriptors with openssl rsa legitimately repeats on every run.
-signature_checks="$(grep -c -- "pkeyutl -verify" "${openssl_log}")"
 capture_root
 assert_status 0 "the converged rerun must succeed"
 assert_output "already installed; skipping the release download"
@@ -1357,8 +1182,6 @@ assert_output "already installed; skipping the release download"
   die "a rerun must not reinstall the native package"
 [[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
   die "a rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
-[[ "$(grep -c -- "pkeyutl -verify" "${openssl_log}")" == "${signature_checks}" ]] ||
-  die "a rerun must not re-run the release trust verification"
 grep -q "preserved existing user-password sealing key" <<<"${RUN_OUTPUT}" ||
   die "a rerun must preserve the generated sealing keys"
 assert_log_empty "${systemctl_log}"
@@ -1879,7 +1702,7 @@ EOF
   assert_status 0 "the operator root-lifecycle command must succeed"
   assert_output "ENROLLMENT_READY"
   assert_log_contains "${root_sudo_log}" "CONTROLLER_ENDPOINT_ID=${controller_id}"
-  assert_log_contains "${root_sudo_log}" "TRUSTED_RELEASE_KEY=${trusted}/release-signing.pub.pem"
+  assert_log_contains "${root_sudo_log}" "CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=${fixture}/controller-command-verification-key.pem"
   if grep -q "UNRELATED_ENV" "${root_sudo_log}"; then
     die "the root-lifecycle sudo command must not forward unrelated environment variables: $(cat -- "${root_sudo_log}")"
   fi

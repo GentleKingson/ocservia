@@ -7,11 +7,9 @@
 # Without --version it must run from a clean checkout of the exact release
 # tag and derives the release identity from the Git tag (the compatibility
 # path). Either way the script runs the platform preflight, downloads the
-# release metadata plus the matching native package, verifies the
-# out-of-band release trust (trusted public key fingerprint ->
-# SHA256SUMS.sig -> selected package digest) BEFORE any package manager
-# runs as root, installs the native package with the production relay
-# request marker, prepares the production node state (sealing keys, relay
+# matching native package over HTTPS and freezes it in root-owned staging
+# BEFORE any package manager runs as root, installs the native package with
+# the production relay request marker, prepares the production node state (sealing keys, relay
 # configuration, relay access token, Controller command verification key,
 # persistent identity), and either uses a protected bootstrap token source
 # immediately or stops at ENROLLMENT_READY.
@@ -22,10 +20,9 @@
 #
 # Reruns converge without repeating completed work: when the native package
 # of this exact release is already installed under the production relay
-# contract, the release download and the out-of-band trust verification are
-# skipped (they protect the package manager invocation, which no longer
-# happens), and an already-enrolled node is never enrolled again. Once
-# agent.env carries the final NODE_ID, the bootstrap enters a validation-only
+# contract, the package download and staging are skipped (the package
+# manager invocation no longer happens), and an already-enrolled node is
+# never enrolled again. Once agent.env carries the final NODE_ID, the bootstrap enters a validation-only
 # mode for everything the running services load: the persistent identity
 # files must exist and pass the Agent's own identity validation (agent
 # ownership, owner-only permissions, the 32-byte endpoint key, and the
@@ -60,8 +57,8 @@
 # credentials on the node, and never enables or starts a service.
 #
 # Native package first: the default install path is the release .deb on the
-# Debian family and the release .rpm on Rocky Linux 9. The signed archive
-# stays the trusted payload inside the package and the durable upgrade and
+# Debian family and the release .rpm on Rocky Linux 9. The archive
+# stays the payload inside the package and the durable upgrade and
 # manual recovery carrier; it is not the one-command install path.
 #
 # Usage model (package-first: the exact release is pinned on the command
@@ -73,9 +70,6 @@
 #   export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
 #   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/key.pem
 #   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
-#   export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem        # default
-#   export EXPECTED_RELEASE_KEY_SHA256=<64-lowercase-hex>  # else read from
-#   #   /etc/ocservia/trusted-release-key.sha256 (the durable upgrader anchor)
 #   # (or keep the allowlisted node configuration in ./install.env, parsed by
 #   # the strict non-executing loader embedded below — the same contract as
 #   # deploy/lib/install-env.sh; explicit shell variables always win over the
@@ -95,10 +89,8 @@
 # Supported hosts, mirroring what this repository's installers and CI actually
 # exercise: x86_64 and aarch64; Ubuntu 22.04/24.04/26.04 and Debian 12/13
 # through dpkg; Rocky Linux 9 through rpm; systemd required. Ubuntu 20.04 and
-# Debian 11 are deliberately excluded: they ship OpenSSL 1.1.1, whose pkeyutl
-# cannot verify the Ed25519 SHA256SUMS signature this bootstrap (and the
-# package's own verifier) depend on. Any other platform fails closed before
-# any host mutation.
+# Debian 11 remain outside the verified native runtime baseline. Any other
+# platform fails closed before any host mutation.
 #
 # Launcher contract (mirrors deploy/production/install.sh): run as the
 # operator launcher user, not as a whole-script sudo invocation. Privileged
@@ -128,7 +120,6 @@ AGENT_BINARY="${SYSROOT}/usr/libexec/ocservia/ocservia-agent"
 PRIVD_BINARY="${SYSROOT}/usr/libexec/ocservia/ocservia-privd"
 RELAY_DROPIN="${SYSROOT}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 REQUEST_MARKER="${SYSROOT}/etc/ocservia/agent-install-production-relays"
-TRUSTED_FINGERPRINT_FILE="/etc/ocservia/trusted-release-key.sha256"
 AGENT_CONF_DIR="${SYSROOT}/etc/ocservia-agent"
 AGENT_ENV_FILE="${AGENT_CONF_DIR}/agent.env"
 RELAYS_ENV_FILE="${AGENT_CONF_DIR}/relays.env"
@@ -157,7 +148,6 @@ PACKAGE_MANAGER=""
 PACKAGE_FILE=""
 STAGING_DIR=""
 PACKAGE_STAGING_DIR=""
-FROZEN_RELEASE_KEY=""
 ROOT_LIFECYCLE=false
 EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
@@ -176,14 +166,12 @@ ROOT_LIFECYCLE_ENV_NAMES=(
   CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE
   CONTROLLER_ENDPOINT_ID
   ENROLLMENT_ENVIRONMENT
-  EXPECTED_RELEASE_KEY_SHA256
   OCSERV_MANAGED_NODE_OS_RELEASE
   OCSERV_MANAGED_NODE_SYSROOT
   P12_PASSWORD_SEAL_KEY_ID
   RELAY_ACCESS_TOKEN_SOURCE
   RELAY_URL_A
   RELAY_URL_B
-  TRUSTED_RELEASE_KEY
   USER_PASSWORD_SEAL_KEY_ID
 )
 
@@ -200,9 +188,8 @@ usage() {
 # The formal mode pins the exact release on the command line: no Git
 # checkout, no repository siblings, and no trust in the invoking directory.
 # The version is public release identity, not secret material, so it may
-# appear on the command line; the authenticity of everything downloaded is
-# still established only by the out-of-band release key fingerprint, the
-# signed SHA256SUMS manifest, and the selected package digest.
+# appear on the command line. Initial downloads use HTTPS and are frozen in
+# root-owned staging before the native package manager runs.
 version_seen=false
 while (($# > 0)); do
   case "$1" in
@@ -376,12 +363,10 @@ if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
     CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE \
     CONTROLLER_ENDPOINT_ID \
     ENROLLMENT_ENVIRONMENT \
-    EXPECTED_RELEASE_KEY_SHA256 \
     P12_PASSWORD_SEAL_KEY_ID \
     RELAY_ACCESS_TOKEN_SOURCE \
     RELAY_URL_A \
     RELAY_URL_B \
-    TRUSTED_RELEASE_KEY \
     USER_PASSWORD_SEAL_KEY_ID
 fi
 
@@ -472,9 +457,8 @@ resolve_release_identity() {
   if [[ -n "${RELEASE_TAG}" ]]; then
     # --version mode: the release identity came from the validated command
     # line. No Git checkout is consulted and nothing about the invoking
-    # directory is trusted; the downloaded artifacts must still prove their
-    # authenticity through the out-of-band release trust verified before
-    # the package manager runs.
+    # directory is trusted. The native package is downloaded over HTTPS
+    # and frozen before the package manager runs.
     echo "release identity: ${RELEASE_TAG} (pinned by --version)"
     return
   fi
@@ -515,6 +499,7 @@ detect_platform() {
   case "${os_id} ${os_version_id}" in
     "ubuntu 22.04" | "ubuntu 24.04" | "ubuntu 26.04" | "debian 12" | "debian 13")
       PACKAGE_FAMILY=deb
+      PACKAGE_FILE="ocservia-agent_${RELEASE_VERSION}-1_${ARCH_WORD}.deb"
       ;;
     "rocky 9" | "rocky 9."*)
       PACKAGE_FAMILY=rpm
@@ -615,53 +600,15 @@ validate_bootstrap_token_source() {
     fail "BOOTSTRAP_TOKEN_SOURCE must not be accessible by group or other users (found mode ${bootstrap_mode})"
 }
 
-resolve_trust_anchor() {
-  local expected_fingerprint
-  TRUSTED_RELEASE_KEY="${TRUSTED_RELEASE_KEY:-/etc/ocservia/release-signing.pub.pem}"
-  if [[ -n "${EXPECTED_RELEASE_KEY_SHA256:-}" ]]; then
-    expected_fingerprint="${EXPECTED_RELEASE_KEY_SHA256}"
-  else
-    expected_fingerprint="$(priv cat -- "${TRUSTED_FINGERPRINT_FILE}")" ||
-      fail "cannot read the trusted release key fingerprint ${TRUSTED_FINGERPRINT_FILE}; provision it or export EXPECTED_RELEASE_KEY_SHA256"
-  fi
-  [[ "${expected_fingerprint}" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "the trusted release key fingerprint must be 64 lowercase hexadecimal characters"
-  EXPECTED_RELEASE_KEY_SHA256="${expected_fingerprint}"
-  [[ -f "${TRUSTED_RELEASE_KEY}" && ! -L "${TRUSTED_RELEASE_KEY}" ]] ||
-    fail "the trusted release public key ${TRUSTED_RELEASE_KEY} is missing; provision it through an independent protected channel (TRUSTED_RELEASE_KEY)"
-}
-
 create_launcher_staging() {
   STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
   trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
 }
 
-freeze_trust_anchor() {
-  # Freeze the operator-provisioned release key before trusting anything from
-  # it, mirroring scripts/verify-agent-package.sh: TRUSTED_RELEASE_KEY may
-  # point anywhere the operator chose, including a launcher-writable path, so
-  # pathname re-reads would let a launcher-UID process swap the key between
-  # the fingerprint check and the signature verification. The fingerprint and
-  # every later use read the same root-owned frozen copy. The staging parent
-  # is a fixed system directory, never the operator's TMPDIR: pathname trust
-  # comes from the parent, and an operator-owned TMPDIR would let the
-  # launcher rename or replace even this root-owned staging entry. /var/tmp
-  # is a root-owned sticky system directory on every supported host.
+create_package_staging() {
+  # A fixed root-owned sticky parent prevents the launcher from replacing
+  # the protected staging directory through an operator-controlled TMPDIR.
   PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
-  FROZEN_RELEASE_KEY="${PACKAGE_STAGING_DIR}/release-signing.pub.pem"
-  priv install -o root -g root -m 0644 -- "${TRUSTED_RELEASE_KEY}" "${FROZEN_RELEASE_KEY}"
-}
-
-verify_trust_anchor() {
-  local actual_fingerprint
-  # The fingerprint is computed from the frozen root-owned copy the signature
-  # verification later uses, so the key that passed the fingerprint check is
-  # byte-identical to the key that verifies the manifest. This still happens
-  # before anything is downloaded.
-  actual_fingerprint="$(priv openssl pkey -pubin -in "${FROZEN_RELEASE_KEY}" -outform DER | sha256sum | awk '{print $1}')" ||
-    fail "the trusted release public key ${TRUSTED_RELEASE_KEY} is not a readable public key PEM"
-  [[ "${actual_fingerprint}" == "${EXPECTED_RELEASE_KEY_SHA256}" ]] ||
-    fail "the trusted release public key fingerprint ${actual_fingerprint} does not match the expected ${EXPECTED_RELEASE_KEY_SHA256}"
 }
 
 download_release_artifacts() {
@@ -673,61 +620,18 @@ download_release_artifacts() {
   done
 }
 
-freeze_release_artifacts() {
-  # Freeze each downloaded artifact beside the release key before checking it.
-  # The launcher's staging directory stays writable by
-  # the launcher, so verifying bytes there and then parsing the manifest or
-  # digesting the package from there would let a second launcher-UID process
-  # swap the signed manifest (and the package) after the signature check
-  # succeeds — the digest that authorizes the install must come from exactly
-  # the manifest that passed verification. Each artifact is frozen once;
-  # subsequent checks only read its root-owned copy.
-  local name
-  for name in "$@"; do
-    priv install -o root -g root -m 0644 -- "${STAGING_DIR}/${name}" \
-      "${PACKAGE_STAGING_DIR}/${name}"
-  done
-}
-
-verify_release_trust() {
-  local manifest_line expected_digest actual_digest matches
-  local legacy_deb revisioned_deb
-  # The release-signing public key is intentionally absent from the download:
-  # trust comes only from the operator-provisioned anchor verified above.
-  # The frozen key, the signature, the manifest parse, and the package digest
-  # all read the root-owned staging, so the launcher cannot influence any of
-  # them after the fact; the staging directory is mode 0700 root, so every
-  # read crosses the privileged boundary.
-  priv openssl pkeyutl -verify -rawin -pubin -inkey "${FROZEN_RELEASE_KEY}" \
-    -in "${PACKAGE_STAGING_DIR}/SHA256SUMS" \
-    -sigfile "${PACKAGE_STAGING_DIR}/SHA256SUMS.sig" >/dev/null ||
-    fail "the release checksum manifest signature verification failed"
-  if [[ "${PACKAGE_FAMILY}" == deb ]]; then
-    # Published releases may use either spelling. Only the verified manifest
-    # decides; never infer from a version cutoff or probe a missing asset.
-    legacy_deb="ocservia-agent_${RELEASE_VERSION}_${ARCH_WORD}.deb"
-    revisioned_deb="ocservia-agent_${RELEASE_VERSION}-1_${ARCH_WORD}.deb"
-    # shellcheck disable=SC2016 # awk fields are not shell expansions.
-    PACKAGE_FILE="$(priv awk -v legacy="${legacy_deb}" -v revisioned="${revisioned_deb}" \
-      '$2 == legacy || $2 == revisioned { print $2 }' "${PACKAGE_STAGING_DIR}/SHA256SUMS")"
-    [[ "${PACKAGE_FILE}" == "${legacy_deb}" || "${PACKAGE_FILE}" == "${revisioned_deb}" ]] ||
-      fail "the signed checksum manifest must name exactly one supported DEB package for ${RELEASE_VERSION} ${ARCH_WORD}"
-  fi
-  manifest_line="$(priv grep -F -- "  ${PACKAGE_FILE}" "${PACKAGE_STAGING_DIR}/SHA256SUMS" || true)"
-  matches="$(priv grep -cF -- "  ${PACKAGE_FILE}" "${PACKAGE_STAGING_DIR}/SHA256SUMS" || true)"
-  [[ "${matches}" == 1 ]] ||
-    fail "the signed checksum manifest must name ${PACKAGE_FILE} exactly once (found ${matches})"
-  expected_digest="${manifest_line%%"  "*}"
-  [[ "${expected_digest}" =~ ^[0-9a-f]{64}$ && "${manifest_line}" == "${expected_digest}  ${PACKAGE_FILE}" ]] ||
-    fail "the signed checksum entry for ${PACKAGE_FILE} is malformed"
+download_native_package() {
+  local input actual_digest
   download_release_artifacts "${PACKAGE_FILE}"
-  freeze_release_artifacts "${PACKAGE_FILE}"
-  actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')" ||
-    fail "cannot digest the downloaded package"
-  [[ "${actual_digest}" == "${expected_digest}" ]] ||
-    fail "the ${PACKAGE_FILE} digest does not match the signed checksum manifest"
-  EXPECTED_PACKAGE_DIGEST="${expected_digest}"
-  echo "release trust verified out of band: ${PACKAGE_FILE} digest ${expected_digest}"
+  input="${STAGING_DIR}/${PACKAGE_FILE}"
+  [[ -f "${input}" && ! -L "${input}" && -s "${input}" ]] ||
+    fail "downloaded package must be a nonempty regular file"
+  EXPECTED_PACKAGE_DIGEST="$(sha256sum -- "${input}" | awk '{print $1}')"
+  priv install -o root -g root -m 0644 -- "${input}" "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}"
+  actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"
+  [[ "${actual_digest}" == "${EXPECTED_PACKAGE_DIGEST}" ]] ||
+    fail "the package changed while entering root-owned staging"
+  echo "HTTPS package staged: ${PACKAGE_FILE}"
 }
 
 installed_package_version() {
@@ -757,10 +661,8 @@ expected_installed_version() {
 
 native_package_satisfied() {
   # A converged rerun must not re-download or reinstall the native package.
-  # The out-of-band release trust protects the package manager invocation,
-  # which an already-installed package makes unnecessary, so a satisfied
-  # package skips the whole download-and-verify phase. The installed version
-  # and production relay contract checks stay fail-closed either way.
+  # A satisfied package skips downloads and package manager mutation.
+  # Installed version and production relay checks still fail closed.
   local installed_version
   installed_version="$(installed_package_version)"
   [[ -n "${installed_version}" ]] || return 1
@@ -775,7 +677,7 @@ install_native_package() {
   local actual_digest
   # Re-check the digest on the frozen root-owned copy immediately before the
   # package manager, so the exact bytes about to be installed are still the
-  # bytes verified against the signed manifest; every read since the freeze
+  # downloaded HTTPS bytes; every read since the freeze
   # step targets the root-owned staging the launcher cannot reach.
   actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"
   [[ "${actual_digest}" == "${EXPECTED_PACKAGE_DIGEST}" ]] ||
@@ -1274,12 +1176,8 @@ create_launcher_staging
 if native_package_satisfied; then
   echo "native package ocservia-agent $(expected_installed_version) already installed; skipping the release download and package installation"
 else
-  resolve_trust_anchor
-  freeze_trust_anchor
-  verify_trust_anchor
-  download_release_artifacts SHA256SUMS SHA256SUMS.sig
-  freeze_release_artifacts SHA256SUMS SHA256SUMS.sig
-  verify_release_trust
+  create_package_staging
+  download_native_package
   install_native_package
 fi
 # The verified native payload owns host validation. Run as root, before any
