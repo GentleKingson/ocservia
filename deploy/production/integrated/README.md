@@ -76,10 +76,12 @@ VPN sessions.
 ## CI and publication
 
 Manual [Release Check](../../../docs/development/release-checks.md) runs Full CI,
-Security and Integrated Business with Resilience on merged main. Business uses
-fresh local builds and a loopback registry on disposable amd64/arm64 runners;
+Security and amd64 Integrated Business Smoke with four finite single-instance
+recoveries on merged main. Business uses fresh local builds and a loopback
+registry on disposable amd64 runners;
 it does not publish GHCR images. The operator confirms the version after PASS.
-Its tag then triggers fresh native build/install/image smoke and ordinary
+Its tag then triggers fresh native builds, exact Controller image security scans,
+install/image smoke on amd64 and arm64, and ordinary
 Release/GHCR publication using version tags. Manual Release dispatch builds
 both architectures without publishing.
 

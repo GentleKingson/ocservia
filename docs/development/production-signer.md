@@ -206,11 +206,14 @@ designated Registry images and separately prove real daemon/workflow execution.
 
 Dispatch `release-upgrade.yml` with `purpose=integration`,
 `production_signer=true` and a plain test version such as `0.0.0` on the branch
-being tested. It natively builds and scans nine first-party images on AMD64 and
-ARM64 and uses a loopback test registry with ordinary platform configuration.
+being tested. It natively builds nine first-party images on amd64 and uses a
+loopback test registry with ordinary platform configuration. Release product
+jobs separately scan their exact images on both amd64 and arm64 before smoke
+and publication.
 The existing Integrated lifecycle runs the actual Signer implementation;
 no job has GHCR publishing authority. Manual Release Check on main always runs
-this Integrated scope with Resilience. See the
+Integrated Business Smoke with four finite single-instance recoveries. The
+extended checks below remain manual `purpose=integration` coverage. See the
 [CI and publication flow](../../deploy/production/integrated/README.md#ci-and-publication).
 
 The extended native daemon checks use the production Signer with an online
