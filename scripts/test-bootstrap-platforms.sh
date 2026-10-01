@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands ruby tar gzip
+require_test_commands ruby tar gzip xz
 
 # These disposable command fixtures test routing and failures, not native Go.
 ruby - "${ROOT}" <<'RUBY'
@@ -135,6 +135,25 @@ Dir.mktmpdir('bootstrap-platforms-') do |tmp|
     script("#{work}/.tools/bin/nfpm", "echo 'GitVersion: #{File.read("#{root}/toolchains.lock")[/^nfpm=(.+)$/, 1]}'")
     run(env, bash, bootstrap, 'rust-basic')
     run(env, bash, bootstrap, 'native-packages')
+    # ARM64 Business needs only pinned Node/npm, not the unsupported quality
+    # profiles. Exercise its real download/checksum/extraction path with stubs.
+    node_version = File.read("#{root}/toolchains.lock")[/^node=(.+)$/, 1]
+    npm_version = File.read("#{root}/toolchains.lock")[/^npm=(.+)$/, 1]
+    node_artifact = "node-v#{node_version}-linux-arm64.tar.xz"
+    raise 'missing locked ARM64 Node checksum' unless checksums.match?(/^[a-f0-9]{64}  #{Regexp.escape(node_artifact)}$/)
+    node_payload = "#{work}/node-payload"
+    script("#{node_payload}/node-fixture/bin/node", "echo v#{node_version}")
+    script("#{node_payload}/node-fixture/bin/npm", "echo #{npm_version}")
+    node_archive = "#{work}/node-fixture.tar.xz"
+    _, status = Open3.capture2e('tar', '-cJf', node_archive, '-C', node_payload, 'node-fixture')
+    raise 'Node fixture archive failed' unless status.success?
+    File.write(manifest, "#{Digest::SHA256.file(node_archive).hexdigest}  #{node_artifact}\n")
+    node_env = env.merge('FIXTURE_ARCHIVE' => node_archive)
+    run(node_env, bash, bootstrap, 'npm-security')
+    raise 'wrong ARM64 Node artifact URL' unless File.read("#{work}/downloads").include?("https://nodejs.org/dist/v#{node_version}/#{node_artifact}")
+    File.write("#{work}/.tools/node/bin/node", 'invalid installed node')
+    File.write(manifest, "#{'0' * 64}  #{node_artifact}\n")
+    run(node_env, bash, bootstrap, 'npm-security', error: 'checksum mismatch')
     script("#{bin}/uname", 'echo unsupported')
     run(env, bash, bootstrap, 'go-test', error: 'unsupported-unsupported/go-test; no artifact mappings')
   end
