@@ -1,5 +1,5 @@
 // Package coordination implements the fenced scheduler leadership lease
-// defined by the G6 HA contract: one leadership term per maintenance session,
+// with one leadership term per maintenance session,
 // renewed while the session runs, cancelled when renewal fails, and enforced
 // transaction-by-transaction so an expired leader can never commit.
 package coordination
