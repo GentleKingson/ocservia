@@ -203,7 +203,7 @@ or Relay tokens. Compare the two resulting observed public client IPs; two
 runner labels alone are not proof of distinct sources. This uses explicit IP
 routing with test-domain SNI, not public DNS or public certificate issuance.
 
-The `relay-network-probe` target in `rust/g6-runtime.Dockerfile` accepts
+The `relay-network-probe` target in `rust/test-runtime.Dockerfile` accepts
 `URL CA_FILE TOKEN_FILE`. It uses the locked Relay client to check a valid TCP
 upgrade and an explicit bad-token rejection, then runs QUIC address discovery
 with HTTPS fallback probes disabled. Mount only its test CA/token, map the test

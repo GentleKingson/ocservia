@@ -234,7 +234,7 @@ jobs:
             echo "source_commit=${source_commit}"
           } >>"${GITHUB_ENV}"
       - name: Relay optional BuildKit cache credentials
-        uses: ./.github/actions/g6-cache-credentials
+        uses: ./.github/actions/build-cache-credentials
       # Each leg builds natively (no QEMU) and exports one Docker image
       # archive per image. Nothing is written to GHCR here: the legs hold
       # only source read, and every production registry write happens inside

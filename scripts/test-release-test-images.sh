@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf -- "${work}"' EXIT
 mkdir -p "${work}/repo/scripts" "${work}/bin"
-cp "${ROOT}/scripts/"{release-test-images.sh,release-artifacts.mjs,g6-buildx-cache.sh} "${work}/repo/scripts/"
+cp "${ROOT}/scripts/"{release-test-images.sh,release-artifacts.mjs,buildx-cache.sh} "${work}/repo/scripts/"
 cat >"${work}/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -32,7 +32,7 @@ cd "${work}/repo"
 git init -q
 git -c user.name=test -c user.email=test@example.invalid commit --allow-empty -qm fixture
 GITHUB_SHA="$(git rev-parse HEAD)"
-export GITHUB_SHA VERSION=1.0.1 G6_CACHE_AVAILABLE=false
+export GITHUB_SHA VERSION=1.0.1 BUILD_CACHE_AVAILABLE=false
 export PATH="${work}/bin:${PATH}" TRACE="${work}/trace" GITHUB_OUTPUT="${work}/output" GITHUB_ENV="${work}/env"
 component=test-helpers
 for ARCH in amd64 arm64; do

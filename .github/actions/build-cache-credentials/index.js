@@ -25,13 +25,13 @@ for (const name of relayed) {
     continue;
   }
   values.set(name, value);
-  payload += `${name}<<G6_CACHE_CREDENTIALS_EOF\n${value}\nG6_CACHE_CREDENTIALS_EOF\n`;
+  payload += `${name}<<BUILD_CACHE_CREDENTIALS_EOF\n${value}\nBUILD_CACHE_CREDENTIALS_EOF\n`;
   console.log(`relayed ${name} to the job environment`);
 }
 const cacheAvailable =
   values.has('ACTIONS_RUNTIME_TOKEN') &&
   (values.has('ACTIONS_CACHE_URL') || values.has('ACTIONS_RESULTS_URL'));
-payload += `G6_CACHE_AVAILABLE<<G6_CACHE_CREDENTIALS_EOF\n${cacheAvailable}\nG6_CACHE_CREDENTIALS_EOF\n`;
+payload += `BUILD_CACHE_AVAILABLE<<BUILD_CACHE_CREDENTIALS_EOF\n${cacheAvailable}\nBUILD_CACHE_CREDENTIALS_EOF\n`;
 
 try {
   fs.appendFileSync(envFile, payload);

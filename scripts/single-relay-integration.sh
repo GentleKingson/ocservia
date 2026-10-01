@@ -135,7 +135,7 @@ networks:
   relay-boundary: {}
 EOF
 if [[ -n "${SINGLE_INTEGRATED_PUBLIC_IP:-}" ]]; then
-  sed 's/0.0.0.0:3443/0.0.0.0:8443/' "$ROOT/deploy/g6-readiness/relay.toml" >"$G6RD_WORK/p1-relay.toml"
+  sed 's/0.0.0.0:3443/0.0.0.0:8443/' "$ROOT/deploy/test-fixtures/relay.toml" >"$G6RD_WORK/p1-relay.toml"
   chmod 0644 "$G6RD_WORK/p1-relay.toml"
   cat >"$G6RD_WORK/p1-edge.yaml" <<EOF
 services:

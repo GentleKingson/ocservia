@@ -12,11 +12,11 @@ COPY bin/ /usr/local/bin/
 COPY deploy/prepare-transport-runtime.sh /usr/local/libexec/ocservia-prepare-transport-runtime
 COPY deploy/production/relay-entrypoint.sh /usr/local/bin/relay-entrypoint
 COPY deploy/production/relay-healthcheck.sh /usr/local/bin/relay-healthcheck
-COPY deploy/g6-readiness/agent-supervisor.sh /usr/local/libexec/ocservia-agent-supervisor
-COPY deploy/g6-readiness/fake-ocserv/shims/systemctl /usr/bin/systemctl
-COPY deploy/g6-readiness/fake-ocserv/shims/ocserv /usr/sbin/ocserv
-COPY deploy/g6-readiness/fake-ocserv/shims/occtl /usr/bin/occtl
-COPY deploy/g6-readiness/fake-ocserv/ocserv.conf /etc/ocserv/ocserv.conf
+COPY deploy/test-fixtures/agent-supervisor.sh /usr/local/libexec/ocservia-agent-supervisor
+COPY deploy/test-fixtures/fake-ocserv/shims/systemctl /usr/bin/systemctl
+COPY deploy/test-fixtures/fake-ocserv/shims/ocserv /usr/sbin/ocserv
+COPY deploy/test-fixtures/fake-ocserv/shims/occtl /usr/bin/occtl
+COPY deploy/test-fixtures/fake-ocserv/ocserv.conf /etc/ocserv/ocserv.conf
 RUN chmod 0555 /usr/local/bin/* /usr/local/libexec/* /usr/bin/occtl /usr/sbin/ocserv /usr/bin/systemctl
 
 FROM base AS control

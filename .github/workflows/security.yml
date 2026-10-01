@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - name: Repository secrets
-            profile: g6-secret-scan
+            profile: secret-scan
             command: scripts/security-check.sh
           - name: Go vulnerabilities
             profile: go-security
@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: ${{ matrix.profile != 'g6-secret-scan' && 1 || 0 }}
+          fetch-depth: ${{ matrix.profile != 'secret-scan' && 1 || 0 }}
           persist-credentials: false
       - name: Bootstrap pinned tools
         env:
