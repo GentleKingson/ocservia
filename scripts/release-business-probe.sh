@@ -530,7 +530,7 @@ record official_managed_enrollment_and_unchanged_launchers
 # Prevent direct UDP connectivity from masking the single-Relay outage.
 sudo iptables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
 relay_ipv4_rule=true
-if [[ -s /proc/net/if_inet6 ]]; then
+if [[ -n "$(cat /proc/net/if_inet6)" ]]; then
   sudo ip6tables -I OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
   relay_ipv6_rule=true
 fi
