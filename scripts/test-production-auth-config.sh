@@ -174,6 +174,11 @@ mkdir -m 700 "${OCSERV_RELAY_SECRET_DIR}" "${OCSERV_SIGNER_SECRET_DIR}" "${OCSER
 for name in tls.crt tls.key; do
   cp "${OCSERV_SECRET_DIR}/${name}" "${OCSERV_RELAY_SECRET_DIR}/${name}"
 done
+"${owner[@]}" install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${OCSERV_RELAY_SECRET_DIR}/relay-access-token"
+OCSERV_RELAY_IMAGE=ghcr.io/gentlekingson/ocservia/relay:v0.2.0 "${ROOT}/deploy/production/relay/compose.sh" config --quiet
+expect_failure env OCSERV_RELAY_IMAGE=relay:latest "${ROOT}/deploy/production/relay/compose.sh" config --quiet
+# The merged Integrated model also consumes ordinary version tags.
+export OCSERV_EDGE_IMAGE=example.invalid/edge:v0.2.0 OCSERV_RELAY_IMAGE=example.invalid/relay:v0.2.0 OCSERV_SIGNER_IMAGE=example.invalid/signer:v0.2.0
 for name in issuer-chain.pem issuer-key.pem tls-cert.pem tls-key.pem api-token tls-ca.pem; do
   cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SIGNER_SECRET_DIR}/${name}"
   "${owner[@]}" chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}/${name}"
