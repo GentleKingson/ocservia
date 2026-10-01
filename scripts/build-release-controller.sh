@@ -6,7 +6,7 @@ case "${CONTROLLER_ARCH}:$(uname -m)" in amd64:x86_64|arm64:aarch64) ;; *) exit 
 [[ "$(git -C "${ROOT}" rev-parse HEAD)" == "${SOURCE_COMMIT}" ]]
 mkdir -p "${OUTPUT_DIR}"
 driver_opts=()
-if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+if [[ "${BUILD_CACHE_AVAILABLE:-false}" == true ]]; then
   driver_opts+=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
   for name in ACTIONS_CACHE_URL ACTIONS_RESULTS_URL; do
     [[ -z "${!name:-}" ]] || driver_opts+=(--driver-opt "env.${name}=${!name}")
@@ -29,7 +29,7 @@ build_image() {
   fi
   # Reuse the existing bounded cache wrapper; image and native architecture
   # have independent scopes. Candidate labels and output digests stay fresh.
-  bash "${ROOT}/scripts/g6-buildx-cache.sh" "controller-v1-${name}-linux-${CONTROLLER_ARCH}" true \
+  bash "${ROOT}/scripts/buildx-cache.sh" "controller-v1-${name}-linux-${CONTROLLER_ARCH}" true \
     "controller-${name}-${CONTROLLER_ARCH}" "${args[@]}" "${ROOT}"
   test -s "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   jq -er '."containerimage.digest" | strings | select(test("^sha256:[0-9a-f]{64}$"))' "${OUTPUT_DIR}/${name}.metadata.json" >/dev/null

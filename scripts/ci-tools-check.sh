@@ -27,8 +27,9 @@ for suite in ${CI_SUITES}; do
       bash scripts/test-g6-release-identity.sh
       bash scripts/test-g6-install-release.sh
       bash scripts/test-g6-checkpoint-secret-policy.sh
-      bash scripts/test-g6-cache-credentials.sh
-      bash scripts/test-g6-buildx-cache-fallback.sh
+      bash scripts/test-build-cache-credentials.sh
+      bash scripts/test-buildx-cache-fallback.sh
+      bash scripts/test-secret-scan-config.sh
       bash scripts/test-g6-readiness-hang-guards.sh
       bash scripts/test-g6-resource-sampler.sh
       node scripts/test-g6-pipeline.mjs

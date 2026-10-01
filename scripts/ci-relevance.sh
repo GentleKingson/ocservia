@@ -47,15 +47,18 @@ classify_path() {
       tools_suite guards; tools_suite release; tools_suite g6 ;;
     scripts/build-relay.sh)
       run_rust=true; tools_suite release ;;
-    scripts/g6-buildx-cache.sh|scripts/test-g6-buildx-cache-fallback.sh|.github/actions/g6-cache-credentials/*)
+    scripts/buildx-cache.sh|scripts/test-buildx-cache-fallback.sh|.github/actions/build-cache-credentials/*)
       tools_suite release; tools_suite g6 ;;
+    scripts/test-build-cache-credentials.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config*.sh)
+      tools_suite g6 ;;
+    deploy/test-fixtures/*|rust/test-runtime.Dockerfile)
+      run_go=true; run_database=true; tools_suite release; tools_suite g6 ;;
     docs/acceptance/g6-*.json|docs/acceptance/g6-slo.yaml|\
     .github/workflows/g6-*|.github/actions/g6-*/*|deploy/g6-*/*|\
     tools/g6-harness/*|scripts/*g6*)
       tools_suite g6 ;;
     proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
     web/*|scripts/web-check.sh) run_web=true ;;
-    rust/g6-runtime.Dockerfile) tools_suite g6 ;;
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile)
       tools_suite release; tools_suite g6 ;;
     rust/*|scripts/rust-check.sh) run_rust=true ;;

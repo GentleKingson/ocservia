@@ -32,12 +32,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/g6-cache-credentials
+      - uses: ./.github/actions/build-cache-credentials
       - name: Prepare native fixture builder
         run: |
           bash scripts/release-upgrade-native.sh "${{ inputs.arch }}"
           args=()
-          if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+          if [[ "${BUILD_CACHE_AVAILABLE:-false}" == true ]]; then
             for name in ACTIONS_RUNTIME_TOKEN ACTIONS_CACHE_URL ACTIONS_RESULTS_URL; do
               [[ -z "${!name:-}" ]] || args+=(--driver-opt "env.${name}=${!name}")
             done
