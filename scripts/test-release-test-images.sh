@@ -10,14 +10,7 @@ cat >"${work}/bin/docker" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >>"${TRACE}"
 case "$1 $2" in
-  'buildx build')
-    while (( $# )); do
-      if [[ "$1" == --output ]]; then
-        output="${2#type=local,dest=}"
-        printf 'tunnel\n' >"${output}/ocservia-g6-tunnel"
-      fi
-      shift
-    done ;;
+  'buildx build') ;;
   'save -o') printf '%s\n' "$4" >"$3" ;;
   'load -i') test -f "$3" ;;
   'image inspect')
@@ -40,7 +33,7 @@ for ARCH in amd64 arm64; do
   directory="${work}/${ARCH}-${component}"
   : >"${TRACE}"; : >"${GITHUB_OUTPUT}"; : >"${GITHUB_ENV}"
   bash scripts/release-test-images.sh build "${component}" "${ARCH}" "${directory}"
-  expected=3
+  expected=1
   [[ "$(grep -c '^buildx build ' "${TRACE}")" == "${expected}" ]]
   [[ "$(grep '^buildx build ' "${TRACE}" | grep -c -- "--platform linux/${ARCH}")" == "${expected}" ]]
   TEST_IMAGES_SHA256="$(sed -n 's/^sha256=//p' "${GITHUB_OUTPUT}")"

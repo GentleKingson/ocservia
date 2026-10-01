@@ -78,7 +78,7 @@ To prevent accidental fat-finger disasters at 3 AM, high-risk operations (such a
 - **Controller** — Modular Go backend managing the Web UI, API, scheduling, state machines, and transactional audit journals.
 - **Relays** — Low-footprint proxies that allow nodes behind NAT/firewalls to maintain secure, outbound-only control channels.
 - **Node Agent & privd** — Ultra-lightweight Rust services maintaining local health heartbeats and executing signed operational tasks with least-privilege isolation.
-- **Database** — Reliable transactional storage supporting PostgreSQL (default), MySQL 8.4, or MariaDB 12.3 with point-in-time recovery (PITR) procedures.
+- **Database** — Reliable transactional storage supporting PostgreSQL (default), MySQL 8.4, or MariaDB 12.3 with verified backups and isolated restore procedures.
 
 *Read the complete [Architecture & Trust Model](docs/architecture.md) for details.*
 
@@ -150,7 +150,7 @@ Once installed, the node enters a `pending` approval state. Review and approve t
 | :--- | :--- |
 | **[Getting Started](docs/README.md)** | Start here: local setup, production deployment, and first enrollment. |
 | **[Architecture & Trust](docs/architecture.md)** | System topology, trust boundaries, and least-privilege security model. |
-| **[Operations & Runbooks](docs/operations/production-deployment.md)** | Dedicated relays, backup/restore (Postgres & MySQL), and failover guides. |
+| **[Operations & Runbooks](docs/operations/production-deployment.md)** | Single Relay recovery and backup/restore (Postgres & MySQL). |
 | **[Troubleshooting Guide](docs/how-to/troubleshooting.md)** | Diagnostic checklists for startup, OIDC, telemetry, and agent enrollment. |
 | **[Support & Versioning Policy](docs/reference/support-policy.md)** | Current support contracts, platform matrix, and cross-version policies. |
 | **[Technical Reference](docs/reference/README.md)** | Detailed API schemas, gRPC protocols, and internal specifications. |

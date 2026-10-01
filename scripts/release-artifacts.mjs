@@ -16,7 +16,7 @@ function candidateArtifacts(component, arch, version) {
     ["gateway", "control", "transport", "backup", "edge", "relay", "signer", "mysql_backup", "mariadb_backup"].map(name => `${name}-linux-${arch}.tar`);
 }
 const fixtureFiles = {
-  "test-helpers": ["probe.tar", "relay.tar", "ocservia-g6-tunnel"],
+  "test-helpers": ["relay.tar"],
 };
 export function artifactManifest(directory, identity) {
   if (!/^[0-9a-f]{40}$/.test(identity.sha) || !/^\d+\.\d+\.\d+$/.test(identity.version) ||

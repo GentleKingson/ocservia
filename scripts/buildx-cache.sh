@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one G6 BuildKit solve with an optional external cache. A cache service
+# Run one BuildKit solve with an optional external cache. A cache service
 # failure gets one bounded cold-build retry; the cold solve is authoritative.
 # BUILD_CACHE_STRICT_EXPORT=true switches to the provisioner semantics: the
 # solve's only purpose is to write the external cache, so it requires

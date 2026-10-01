@@ -1,7 +1,4 @@
-# The G6 bounded-window sampler derives transportd and Agent task counts from
-# the tokio runtime metrics API, which tokio only exposes when the
-# `tokio_unstable` cfg is set at build time. The workspace pins the exact
-# tokio version, so enabling this cfg cannot pull in changed unstable APIs
-# through a patch upgrade. It changes no runtime behavior by itself.
+# Production observability reads Tokio runtime task metrics. Keep the pinned
+# runtime metrics API enabled for Agent and transport health snapshots.
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

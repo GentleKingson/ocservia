@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manual integration probe of the rendered transportd network, not G6 acceptance."""
+"""Manual integration probe of the rendered transportd network, not full recovery acceptance."""
 import argparse
 import copy
 import json

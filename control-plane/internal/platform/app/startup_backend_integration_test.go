@@ -397,7 +397,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	if !production && !smoke {
 		completed := 0
 		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
-			if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM g6_scheduler_maintenance_history`).Scan(&completed); err != nil {
+			if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed); err != nil {
 				t.Fatal(err)
 			}
 			if completed > 0 {
@@ -491,7 +491,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connection.Connection, backend, account string) {
 	t.Helper()
 	if backend == "postgres" {
-		sql, err := os.ReadFile("../../../../scripts/g6-authority-history.sql")
+		sql, err := os.ReadFile("../../../../deploy/test-fixtures/scheduler-maintenance.sql")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -503,8 +503,8 @@ func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connecti
 	// Test-only owner objects are installed after immutable schema validation.
 	// Runtime gets EXECUTE on the exact-term recorder, never journal INSERT.
 	for _, sql := range []string{
-		`CREATE TABLE g6_scheduler_maintenance_history(maintenance_id BIGINT AUTO_INCREMENT PRIMARY KEY,instance_id VARBINARY(16) NOT NULL,incarnation BIGINT NOT NULL,epoch BIGINT NOT NULL,completed_at BIGINT NOT NULL) ENGINE=InnoDB`,
-		`CREATE PROCEDURE g6_record_scheduler_maintenance(IN requested_instance_id VARBINARY(16),IN requested_incarnation BIGINT,IN requested_epoch BIGINT)
+		`CREATE TABLE test_scheduler_maintenance_history(maintenance_id BIGINT AUTO_INCREMENT PRIMARY KEY,instance_id VARBINARY(16) NOT NULL,incarnation BIGINT NOT NULL,epoch BIGINT NOT NULL,completed_at BIGINT NOT NULL) ENGINE=InnoDB`,
+		`CREATE PROCEDURE test_record_scheduler_maintenance(IN requested_instance_id VARBINARY(16),IN requested_incarnation BIGINT,IN requested_epoch BIGINT)
 SQL SECURITY DEFINER
 BEGIN
  DECLARE valid_until BIGINT DEFAULT NULL;
@@ -512,7 +512,7 @@ BEGIN
  IF valid_until IS NULL OR valid_until<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)) THEN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='scheduler maintenance term is not the exact live leader';
  END IF;
- INSERT INTO g6_scheduler_maintenance_history(instance_id,incarnation,epoch,completed_at) VALUES(requested_instance_id,requested_incarnation,requested_epoch,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)));
+ INSERT INTO test_scheduler_maintenance_history(instance_id,incarnation,epoch,completed_at) VALUES(requested_instance_id,requested_incarnation,requested_epoch,TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)));
 END`,
 	} {
 		if _, err := owner.Store.Exec(ctx, sql); err != nil {
@@ -520,7 +520,7 @@ END`,
 		}
 	}
 	user, _, _ := strings.Cut(account, "@")
-	if _, err := owner.Store.Exec(ctx, "GRANT EXECUTE ON PROCEDURE g6_record_scheduler_maintenance TO '"+user+"'@'%'"); err != nil {
+	if _, err := owner.Store.Exec(ctx, "GRANT EXECUTE ON PROCEDURE test_record_scheduler_maintenance TO '"+user+"'@'%'"); err != nil {
 		t.Fatal(err)
 	}
 }

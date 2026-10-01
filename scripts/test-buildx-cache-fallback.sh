@@ -14,18 +14,18 @@ cat >"${fake_bin}/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 
-log_file="${G6_FAKE_DOCKER_LOG:?G6_FAKE_DOCKER_LOG is required}"
+log_file="${BUILD_FAKE_DOCKER_LOG:?BUILD_FAKE_DOCKER_LOG is required}"
 printf '%s\n' "$*" >>"${log_file}"
 [[ "${1:-}" == buildx && "${2:-}" == build ]] || exit 64
-if [[ "${G6_FAKE_IMPORT_OK:-false}" != true ]] && [[ " $* " == *" --cache-from "* ]]; then
+if [[ "${BUILD_FAKE_IMPORT_OK:-false}" != true ]] && [[ " $* " == *" --cache-from "* ]]; then
   echo "simulated cache importer failure" >&2
   exit 23
 fi
 echo "cold solve succeeded"
-if [[ "${G6_FAKE_COLD_FAILURE:-false}" == true ]]; then
+if [[ "${BUILD_FAKE_COLD_FAILURE:-false}" == true ]]; then
   exit 29
 fi
-if [[ "${G6_FAKE_STRICT_EXPORT_FAILURE:-false}" == true ]] \
+if [[ "${BUILD_FAKE_STRICT_EXPORT_FAILURE:-false}" == true ]] \
   && [[ " $* " == *" --cache-to "* ]] \
   && [[ " $* " != *" ignore-error=true "* ]]; then
   echo "simulated cache exporter failure" >&2
@@ -39,9 +39,9 @@ PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_AVAILABLE=true \
   BUILD_CACHE_FAILURE_DIR="${test_dir}/cache-failures" \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${docker_log}" \
+  BUILD_FAKE_DOCKER_LOG="${docker_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-control-plane true control-plane-build \
+  test-control-plane true control-plane-build \
   --pull=false --load --file control-plane/Dockerfile .
 
 [[ "$(wc -l <"${docker_log}" | tr -d '[:space:]')" == 2 ]] || {
@@ -50,11 +50,11 @@ PATH="${fake_bin}:${PATH}" \
 }
 cached_invocation="$(sed -n '1p' "${docker_log}")"
 cold_invocation="$(sed -n '2p' "${docker_log}")"
-[[ "${cached_invocation}" == *"--cache-from type=gha,scope=g6-control-plane,timeout=60s,version=2"* ]] || {
+[[ "${cached_invocation}" == *"--cache-from type=gha,scope=test-control-plane,timeout=60s,version=2"* ]] || {
   echo "the first invocation must use the bounded GHA importer" >&2
   exit 1
 }
-[[ "${cached_invocation}" == *"--cache-to type=gha,scope=g6-control-plane,mode=max,ignore-error=true,timeout=60s,version=2"* ]] || {
+[[ "${cached_invocation}" == *"--cache-to type=gha,scope=test-control-plane,mode=max,ignore-error=true,timeout=60s,version=2"* ]] || {
   echo "the first invocation must use the tolerant GHA exporter" >&2
   exit 1
 }
@@ -68,9 +68,9 @@ PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_AVAILABLE=true \
   BUILD_CACHE_FAILURE_DIR="${test_dir}/cache-failures" \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${docker_log}" \
+  BUILD_FAKE_DOCKER_LOG="${docker_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-control-plane true control-plane-after-failure \
+  test-control-plane true control-plane-after-failure \
   --pull=false --load --file control-plane/Dockerfile .
 [[ "$(wc -l <"${docker_log}" | tr -d '[:space:]')" == 3 ]] || {
   echo "a cache failure must disable repeated external-cache attempts in the job" >&2
@@ -86,9 +86,9 @@ no_cache_log="${test_dir}/no-cache.log"
 PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_AVAILABLE=false \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${no_cache_log}" \
+  BUILD_FAKE_DOCKER_LOG="${no_cache_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-relay true relay-build \
+  test-relay true relay-build \
   --pull=false --load --file deploy/production/relay.Dockerfile .
 if grep -Eq -- '--cache-(from|to)' "${no_cache_log}"; then
   echo "the credential-free path must execute a local solve directly" >&2
@@ -103,9 +103,9 @@ if PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_STRICT_EXPORT=true \
   BUILD_CACHE_AVAILABLE=false \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${strict_refusal_log}" \
+  BUILD_FAKE_DOCKER_LOG="${strict_refusal_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-rust-runtime true strict-no-credentials \
+  test-rust-runtime true strict-no-credentials \
   --pull=false --file rust/test-runtime.Dockerfile . >"${test_dir}/strict-refusal.out" 2>&1; then
   echo "strict export without cache credentials must fail" >&2
   exit 1
@@ -121,9 +121,9 @@ if PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_STRICT_EXPORT=true \
   BUILD_CACHE_AVAILABLE=true \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${strict_no_export_log}" \
+  BUILD_FAKE_DOCKER_LOG="${strict_no_export_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-rust-runtime false strict-without-export \
+  test-rust-runtime false strict-without-export \
   --pull=false --file rust/test-runtime.Dockerfile . >"${test_dir}/strict-no-export.out" 2>&1; then
   echo "strict export with export-cache=false must fail validation" >&2
   exit 1
@@ -142,9 +142,9 @@ if PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_AVAILABLE=true \
   BUILD_CACHE_FAILURE_DIR="${strict_marker_dir}" \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${strict_marker_log}" \
+  BUILD_FAKE_DOCKER_LOG="${strict_marker_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-rust-runtime true strict-with-marker \
+  test-rust-runtime true strict-with-marker \
   --pull=false --file rust/test-runtime.Dockerfile . >"${test_dir}/strict-marker.out" 2>&1; then
   echo "strict export must refuse a job that already disabled the external cache" >&2
   exit 1
@@ -158,13 +158,13 @@ strict_export_log="${test_dir}/strict-export.log"
 if PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_STRICT_EXPORT=true \
   BUILD_CACHE_AVAILABLE=true \
-  G6_FAKE_IMPORT_OK=true \
-  G6_FAKE_STRICT_EXPORT_FAILURE=true \
+  BUILD_FAKE_IMPORT_OK=true \
+  BUILD_FAKE_STRICT_EXPORT_FAILURE=true \
   BUILD_CACHE_TIMEOUT=300s \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${strict_export_log}" \
+  BUILD_FAKE_DOCKER_LOG="${strict_export_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-rust-runtime true strict-export-failure \
+  test-rust-runtime true strict-export-failure \
   --pull=false --file rust/test-runtime.Dockerfile . >"${test_dir}/strict-export.out" 2>&1; then
   echo "a failed strict cache export must fail the solve" >&2
   exit 1
@@ -174,7 +174,7 @@ fi
   exit 1
 }
 strict_export_invocation="$(sed -n '1p' "${strict_export_log}")"
-[[ "${strict_export_invocation}" == *"--cache-to type=gha,scope=g6-rust-runtime,mode=max,timeout=300s,version=2"* ]] || {
+[[ "${strict_export_invocation}" == *"--cache-to type=gha,scope=test-rust-runtime,mode=max,timeout=300s,version=2"* ]] || {
   echo "the strict exporter must carry the configured timeout without ignore-error" >&2
   exit 1
 }
@@ -184,19 +184,19 @@ mkdir -p "${test_dir}/cache-failures-strict-ok"
 PATH="${fake_bin}:${PATH}" \
   BUILD_CACHE_STRICT_EXPORT=true \
   BUILD_CACHE_AVAILABLE=true \
-  G6_FAKE_IMPORT_OK=true \
+  BUILD_FAKE_IMPORT_OK=true \
   BUILD_CACHE_FAILURE_DIR="${test_dir}/cache-failures-strict-ok" \
   RUNNER_TEMP="${test_dir}" \
-  G6_FAKE_DOCKER_LOG="${strict_ok_log}" \
+  BUILD_FAKE_DOCKER_LOG="${strict_ok_log}" \
   "${ROOT}/scripts/buildx-cache.sh" \
-  g6-rust-runtime true strict-ok \
+  test-rust-runtime true strict-ok \
   --pull=false --file rust/test-runtime.Dockerfile .
 [[ "$(wc -l <"${strict_ok_log}" | tr -d '[:space:]')" == 1 ]] || {
   echo "a successful strict export must be a single solve" >&2
   exit 1
 }
 strict_ok_invocation="$(sed -n '1p' "${strict_ok_log}")"
-[[ "${strict_ok_invocation}" == *"--cache-to type=gha,scope=g6-rust-runtime,mode=max,timeout=60s,version=2"* ]] || {
+[[ "${strict_ok_invocation}" == *"--cache-to type=gha,scope=test-rust-runtime,mode=max,timeout=60s,version=2"* ]] || {
   echo "the strict exporter must default to the 60s cache timeout" >&2
   exit 1
 }
@@ -205,4 +205,4 @@ if [[ "${strict_ok_invocation}" == *"ignore-error"* ]]; then
   exit 1
 fi
 
-echo "G6 BuildKit cache fallback checks passed"
+echo "BuildKit cache fallback checks passed"

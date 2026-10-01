@@ -38,4 +38,4 @@ GITHUB_ENV="${token_without_url}" \
   node "${ACTION}" >/dev/null 2>&1
 grep -Fxq 'false' "${token_without_url}"
 
-echo "G6 cache credential optionality checks passed"
+echo "Build cache credential optionality checks passed"

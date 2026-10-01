@@ -9,7 +9,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
 )
 
-// RecordMaintenanceCompletion writes the G6-only durable completion marker
+// RecordMaintenanceCompletion writes the test-only durable completion marker
 // under the same exact live scheduler term as the maintenance transaction.
 func RecordMaintenanceCompletion(ctx context.Context, backend database.Backend, session *Session) error {
 	if session == nil {

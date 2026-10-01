@@ -32,7 +32,6 @@ node_pin="$(pinned node)"
 expect_equal Go "${go_pin}" "$(declared .tool-versions golang)" ".tool-versions"
 expect_equal Go "${go_pin}" "$(declared go.work go)" "go.work"
 expect_equal Go "${go_pin}" "$(declared control-plane/go.mod go)" "control-plane/go.mod"
-expect_equal Go "${go_pin}" "$(declared tools/g6-harness/go.mod go)" "tools/g6-harness/go.mod"
 
 expect_equal Rust "${rust_pin}" "$(declared .tool-versions rust)" ".tool-versions"
 expect_equal Rust "${rust_pin}" \

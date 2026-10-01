@@ -33,9 +33,7 @@ import (
 // the carrying envelope.
 const FencingCapability = "ocserv.fencing.v2"
 
-// DefaultLeaseTTL keeps the takeover window inside the G6
-// connection_owner_takeover_seconds budget while leaving dispatch enough time
-// to complete under a valid lease.
+// DefaultLeaseTTL allows renewal and dispatch under a valid owner lease.
 const DefaultLeaseTTL = 30 * time.Second
 
 // gapReconciliationConcurrency bounds parallel transport inventory reads. At

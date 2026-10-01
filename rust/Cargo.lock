@@ -2464,41 +2464,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ocservia-g6-probe"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "hex",
- "hyper-util",
- "iroh",
- "iroh-relay",
- "ocservia-command-authorization",
- "ocservia-contracts",
- "prost",
- "prost-types",
- "rustls-pki-types",
- "serde_json",
- "tokio",
- "tonic",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "ocservia-g6-tunnel"
-version = "0.1.0"
-dependencies = [
- "hex",
- "iroh",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zeroize",
-]
-
-[[package]]
 name = "ocservia-observability"
 version = "0.1.0"
 dependencies = [
@@ -2563,6 +2528,17 @@ dependencies = [
  "rand 0.9.5",
  "rustix",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "ocservia-relay-network-probe"
+version = "0.1.0"
+dependencies = [
+ "iroh",
+ "iroh-relay",
+ "rustls-pki-types",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -55,8 +55,7 @@ authenticated application and node paths.
 The confirmed release state remains unchanged and pending failure evidence is
 retained for a same-target retry. Do not redeploy old images manually. If the
 target cannot run against the existing state, select recovery by backend:
-PostgreSQL [backup](../operations/postgres-backup.md) or
-[PITR](../operations/postgres-pitr-restore.md) within the documented scope;
+PostgreSQL [verified backup and isolated restore](../operations/postgres-backup.md);
 MySQL/MariaDB [logical restore](../operations/mysql-backup.md), which is not
 PITR, failover, snapshots or cross-engine migration. Fence old writers, verify
 the restored database and real audit keys, and reconcile pending/Unknown work

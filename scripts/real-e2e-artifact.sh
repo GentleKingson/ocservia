@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The allowlist covers every harness that rendezvous through this helper:
-# the real-E2E controller/node pair, the G6 HA/PITR failure-domain pair, and
-# the G6 readiness failure-domain pair. Names stay closed - a new artifact
-# name is a deliberate contract change.
+# Run-bound artifacts for the retained real-E2E Controller/node pair.
 validate_name() {
   local name="${1:-}"
   [[ -n "${GITHUB_RUN_ID:-}" && -n "${GITHUB_RUN_ATTEMPT:-}" ]] || {
     echo "GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT are required" >&2
     return 2
   }
-  [[ "${name}" =~ ^(real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)|g6-ha-(tunnel-fd-a|tunnel-fd-b|primary-up|standby|load|failover-ready|isolation|new-primary|pitr|post-promotion|fd-a-recovered|fd-a-rejoin|evidence)|g6-rd-(tunnel-fd-a|tunnel-fd-b|shared|primary-up|agents|agents-enrolled-fd-b|trust-ready|load-active|isolation|new-primary|relay-rejoin-ready|relay-pre-fault|fd-a-ready|window-barrier-arm-request|window-barrier-armed-fd-a|final-freeze|fd-a-evidence|raw-fd-a|raw-fd-b|evidence-bundle|secret-scan-result|gate-result|fd-a-diagnostics|fd-b-diagnostics|verdict))-[0-9]+-[0-9]+$ ]] || {
+  [[ "${name}" =~ ^real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)-[0-9]+-[0-9]+$ ]] || {
     echo "invalid real E2E artifact name" >&2
     return 2
   }
@@ -109,11 +106,7 @@ default_peer_job_name() {
     printf '%s\n' "${REAL_E2E_ARTIFACT_PEER_JOB_NAME}"
     return 0
   fi
-  case "${GITHUB_JOB:-}" in
-    g6-rd-fd-a) printf '%s\n' 'G6 Formal FD-B: Standby, Promotion & Faults' ;;
-    g6-rd-fd-b) printf '%s\n' 'G6 Formal FD-A: Primary & PITR' ;;
-    *) return 1 ;;
-  esac
+  return 1
 }
 
 peer_job_state() {
