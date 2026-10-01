@@ -41,6 +41,19 @@ jobs:
         with:
           fetch-depth: ${{ matrix.profile != 'secret-scan' && 1 || 0 }}
           persist-credentials: false
+      - name: Cache pinned ${{ matrix.profile }} tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-${{ matrix.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'control-plane/go.sum', 'signer/go.sum', 'rust/Cargo.lock', 'deploy/production/relay.Cargo.lock', 'web/**/package-lock.json') }}
+      - name: Cache npm downloads
+        if: matrix.profile == 'npm-security'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'web/**/package-lock.json') }}
       - name: Bootstrap pinned tools
         env:
           npm_config_audit: "false"
