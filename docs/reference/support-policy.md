@@ -92,13 +92,20 @@ only after compatibility and artifact review, never automatically.
 
 ## Deployment capability distinctions
 
+Each supported deployment uses one Controller, one database instance and one
+dedicated Relay. The database choices and supported versions above, integrated
+/ standalone deployments, bundled / external database modes and multi-Agent
+management remain unchanged. Components may run on separate hosts. Controller
+HA, multiple Relay failover, database replication clusters, PostgreSQL automatic failover
+and PITR readiness are outside the supported scope. Rebind uses two independent
+Controller deployments; it is not HA. See the
+[resilience coverage and migration decision](../development/resilience.md).
+
 Three pairs are deliberately not conflated:
 
-1. **Single-relay availability vs dual-relay redundancy.** One relay host on
-   independent infrastructure is a supported, non-redundant deployment. The
-   redundancy promise — authenticated failover from relay A to an independent
-   relay B, plus direct↔relay path transitions — is proven only with two relays
-   on separate failure domains and is part of the formal readiness acceptance.
+1. **Single-relay recovery vs redundancy.** One dedicated Relay is supported.
+   Its outage may interrupt management connections; recovery uses the original
+   Relay, identity and command. Multiple Relay failover is outside support.
    See [dedicated relays](../operations/dedicated-relays.md).
 2. **Package installed vs really managed online.** A node with packages
    installed and services stopped is not fleet-managed. Online management
@@ -109,13 +116,11 @@ Three pairs are deliberately not conflated:
 3. **Backup created vs backup restorable.** Producing a backup artifact
    (PostgreSQL base backup, MySQL/MariaDB logical dump) is a scheduled
    operation; **restore is a separate, separately validated procedure**.
-   PostgreSQL restore, PITR, and failover are validated within their explicit
-   topology gates; MySQL/MariaDB restore is validated into a new isolated
+   PostgreSQL backups retain their required WAL and verification; isolated
+   restore is separate from HA/PITR readiness. MySQL/MariaDB restore uses a new isolated
    server with the restore verifier, and redirecting a live Controller is a
    guarded manual cutover. See
    [PostgreSQL backup](../operations/postgres-backup.md),
-   [PITR](../operations/postgres-pitr-restore.md),
-   [failover](../operations/postgres-failover.md), and
    [MySQL/MariaDB backup](../operations/mysql-backup.md).
 
 ## Security review posture
