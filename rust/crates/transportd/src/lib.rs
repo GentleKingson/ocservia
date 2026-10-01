@@ -2387,10 +2387,6 @@ async fn read_agent_events(
                 replayed = result.replayed,
                 "Agent command result received"
             );
-            #[cfg(feature = "relay-recovery-test")]
-            if drop_relay_test_result(&command, &result).await {
-                return;
-            }
         }
         let terminal = matches!(
             event_type,
@@ -2419,60 +2415,7 @@ async fn read_agent_events(
     .await;
 }
 
-#[cfg(feature = "relay-recovery-test")]
-async fn drop_relay_test_result(command: &CommandEnvelope, result: &CommandResult) -> bool {
-    use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandDeliveryMode;
-    use tokio::io::AsyncWriteExt;
 
-    let Ok(path) = std::env::var("OCSERVIA_TEST_DROP_RESULT_TARGET") else {
-        return false;
-    };
-    if !std::path::Path::new(&path).is_absolute()
-        || !matches!(
-            command.payload,
-            Some(command_envelope::Payload::SyntheticNoop(_))
-        )
-        || command.delivery_mode != i32::from(CommandDeliveryMode::ExecuteOrReplay)
-        || result.state != i32::from(CommandResultState::Succeeded)
-        || result.replayed
-        || result.command_id != command.command_id
-        || result.idempotency_key != command.idempotency_key
-        || result.payload_sha256 != command.semantic_payload_sha256
-        || result.semantic_payload_hash_version != command.semantic_payload_hash_version
-    {
-        return false;
-    }
-    let Ok(target) = tokio::fs::read_to_string(&path).await else {
-        return false;
-    };
-    if target.trim_end() != hex::encode(&command.command_id) {
-        return false;
-    }
-    let marker = format!("{path}.dropped");
-    let Ok(mut file) = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(marker)
-        .await
-    else {
-        return false;
-    };
-    let evidence = format!(
-        "command_id={}\nmessage_id={}\nstate=succeeded\nreplayed=false\n",
-        hex::encode(&command.command_id),
-        hex::encode(&command.message_id)
-    );
-    if file.write_all(evidence.as_bytes()).await.is_err() || file.sync_all().await.is_err() {
-        return false;
-    }
-    tracing::warn!(
-        event_type = "test_command_result_dropped",
-        command_id = %hex::encode(&command.command_id),
-        message_id = %hex::encode(&command.message_id),
-        "test-only single synthetic result dropped before event publication"
-    );
-    true
-}
 
 async fn publish_command_unknown(
     (shared, node_id, traceparent, connection): (&Shared, &[u8], &str, &Connection),
