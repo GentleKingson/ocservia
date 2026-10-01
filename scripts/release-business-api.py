@@ -656,11 +656,10 @@ def agent_stack_recovery():
 def smoke_relay_recovery(ping):
     single_relay_argv()
     before = owner()
-    node = 'nodes/' + os.environ['T07_NODE']
     relay = os.environ['T07_RELAY_CONTAINER']
     try:
         run('docker', 'stop', relay)
-        wait_for('Agent transport offline without Relay', lambda: api(node)['connection_state'] == 'offline')
+        wait_for_relay_outage(os.environ['T07_NODE'])
     finally:
         run('docker', 'start', relay)
     wait_for('fresh Agent session after Relay recovery', lambda: fresh_owner(before))
