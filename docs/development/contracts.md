@@ -1,6 +1,6 @@
 # Contracts and toolchains
 
-The [current contract inventory and candidate acceptance](../reference/stable-contracts.md)
+The [current contract inventory and validation](../reference/stable-contracts.md)
 separates user-facing stability, internal matched-version interfaces, source
 checks and actual published-artifact acceptance. It does not expand production
 database or cross-version support.

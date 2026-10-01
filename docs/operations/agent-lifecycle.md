@@ -275,7 +275,7 @@ The console exposes one reconciled upgrade per node:
 `POST /api/v1/nodes/{node_id}/agent-upgrade` (RBAC action `agent.upgrade`,
 Operator role) accepts only a target version, an approval ID, and a reason.
 Callers never supply a URL, path, or package digest. The Controller resolves
-the digest from its operator-provisioned trusted release manifest, configured
+the digest from its operator-provisioned release catalog, configured
 with `OCSERV_AGENT_RELEASE_MANIFEST` (default
 `/etc/ocservia/agent-releases.json`):
 
@@ -352,7 +352,7 @@ The referenced `agent.rollout` approval binding additionally includes the
 target version, sorted node set, batch size, and `stop_on_failure`. The current
 server contract requires that policy to be true; rollout creation fixes
 `StopOnFailure = true` and does not expose it as a caller-selectable field. The
-target must exist in the trusted release manifest for every selected node's
+target must exist in the operator-provisioned release catalog for every selected node's
 architecture, and every selected node must advertise an approved
 `ocserv.agent.upgrade.v1` or `ocserv.agent.upgrade.v2` capability.
 
