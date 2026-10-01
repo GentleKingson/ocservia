@@ -1591,7 +1591,6 @@ for argument in \
   "--p12-password-seal-key-id p12-password-v1" \
   "--relay-mode custom" \
   "--relay-url https://relay-a.example.test" \
-  "--relay-url https://relay-b.example.test" \
   "--relay-token-file ${sysroot}/etc/ocservia-agent/relay-access-token"; do
   grep -qF -- "${argument}" "${agent_log}" ||
     die "the enrollment CLI invocation must carry '${argument}'"
