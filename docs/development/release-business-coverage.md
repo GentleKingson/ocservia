@@ -17,9 +17,9 @@ standalone Business Smoke must succeed.
 | OIDC positive login and issuer/signature/nonce/code/state rejection | Integration | Retain until a concrete smaller-test equivalence is demonstrated |
 | CSR, issue, P12 one-use export, revoke, restart persistence | Integration | Retain real production lifecycle |
 | Browser login, approvals, ConfigPlan and certificate actions | Integration | Retain real browser assertions |
-| Single-Relay outage, uncertain command recovery, API/DB/journal/root-receipt cross-checks | Integration | Retain distinct behavior; cross-host Resilience is not equivalent |
+| Single-Relay outage and provably unsent queue recovery, API/DB/journal/root-receipt cross-checks | Integration; shared with selected Smoke resilience | Execute once; same command succeeds with one real effect |
 | DEB/RPM installation, supported upgrade and state preservation on both architectures | Package & Upgrade | Reuse candidate products |
-| Cross-host failover, fencing, reconciliation and PITR | Resilience | Change-selected, never a blanket production SLO certification |
+| Controller, Agent/privd/transport, same database and sole Relay recovery | Selected Business owner plus existing database smoke | Optional `run-resilience`; fail closed on missing/failed/cancelled/skipped selected results |
 | Production release permission and signing key | Publish | Existing protected environment |
 
 No high-level negative assertion has been deleted merely because Go or Web

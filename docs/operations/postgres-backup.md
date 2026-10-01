@@ -12,8 +12,8 @@ The production initializer creates the separate `ocservia_backup` login with rep
 ## Deployment boundaries
 
 Bundled PostgreSQL 17 configures `archive_mode` and an `archive_command` that
-writes continuous WAL into the backup mount. Its retained base backup plus WAL
-contract supports the separate PITR procedure.
+writes continuous WAL into the backup mount. These existing backup and
+retention settings remain available; they do not certify PITR readiness.
 
 External PostgreSQL support is limited to major version 17. Owner, runtime, and
 backup connections require `sslmode=verify-full` with the launcher-validated
@@ -26,7 +26,7 @@ require independent evidence.
 Restore procedure:
 
 1. Stop application writers and record the incident time.
-2. Select a verified backup and, for bundled PITR, the required WAL for the recovery target.
+2. Select a verified base backup, including its streamed WAL needed for consistency.
 3. Restore into a new empty PostgreSQL data directory, never over the only existing copy.
 4. Start PostgreSQL in isolation and verify migrations, audit-chain checkpoints, row counts, and a read-only application smoke test.
 5. Redirect the control plane only after verification; retain the previous database until the rollback window closes.

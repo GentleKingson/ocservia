@@ -76,7 +76,7 @@ and pending state intact. Do not delete evidence or substitute direct Compose.
 
 If same-target recovery is impossible, preserve failure
 evidence and select the [backend-specific recovery procedure](../operations/incident-recovery.md#database-recovery):
-PostgreSQL backup/PITR within its scope, or MySQL/MariaDB isolated logical
+PostgreSQL verified backup and isolated restore, or MySQL/MariaDB isolated logical
 restore, without implying equivalent recovery capabilities. Complete its
 fencing, audit and unfinished-work checks before redirecting traffic or enabling
 commands. Do not force old images onto the partially upgraded deployment.

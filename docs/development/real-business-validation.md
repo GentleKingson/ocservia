@@ -5,23 +5,24 @@ signed amd64 production path: Controller and native systemd Agent/privd/ocserv
 installation, Local requester/approver login, approved ConfigPlan apply, real
 OpenConnect VPN traffic, automatic ConfigPlan rollback and a fresh VPN check.
 No production binary, service, Relay or VPN is mocked. This is neither native
-package acceptance nor G6 production readiness.
+package acceptance nor a Controller/database HA guarantee.
 
 Integration is a change-selected specialized check. It retains the original OIDC, PKI/P12/revoke, real-browser,
-single-Relay fault/recovery and cross-source evidence checks until equivalent
-owners are established. See the [coverage inventory](release-business-coverage.md).
+single-Relay recovery, Agent/privd restart and cross-source evidence checks. See the [coverage inventory](release-business-coverage.md).
 The [Release Check](release-checks.md) determines the required scope from the
 complete published-release-to-candidate diff; unselected Integration is not evaluated. Do not describe
 smoke as a 5-15 minute job until its measured timings justify that target.
 
 With explicit authorization to use disposable GitHub-hosted runners, dispatch
 `release-upgrade.yml` on the exact candidate branch with `version`,
-and `purpose=smoke` or `purpose=integration`.
+and `purpose=smoke` or `purpose=integration`. Add `run-resilience=true` for
+Controller, Agent/privd/transport, database API outage and sole-Relay recovery.
+The extended profile reuses its Agent/privd and Relay scenarios once.
 The candidate SHA comes from the actual dispatch context. There is no baseline
 input or historical upgrade mode.
 This mode does not publish packages/images, create a tag, or modify Secrets.
-Local preparation checks must run in an isolated checkout on `BuildServer`.
-Never run the business driver or its host-installing steps on BuildServer.
+Local preparation checks run in an isolated environment with existing tools.
+Native host-installing steps run only on a disposable runner.
 
 ## Evidence and boundaries
 
@@ -80,8 +81,8 @@ The following limitations are deliberately retained, not scored as PASS:
   node-local TLS profile is exercised through browser plan/approval/apply and
   native exact-byte rollback/restart checks; only their checkpoints prove that
   a particular candidate passed.
-- One host, one architecture and one Relay provide no Relay redundancy or Resilience
-  fault-domain/SLO proof. The client namespace protects host routes; it is not
+- Selected single-instance recovery provides no HA, Relay redundancy or
+  production RTO/RPO guarantee. The client namespace protects host routes; it is not
   another host. The probe checks test VPN traffic, never real user traffic.
 
 `result.json` reports `scope=business-smoke` or `scope=integration`.
@@ -100,16 +101,18 @@ gates. Per-phase checkpoints are
 written only after assertions pass. Missing checkpoints are NOT RUN; preserve
 failures, original run/attempt and exact SHA across retries.
 
-The extended profile's strict reload recovery probe still fails if automatic completion does not
-occur. A separate `recovery-boundary.json` can classify that exact command as
-`EXPECTED-UNKNOWN` under the stable exclusion only after read-only evidence
-checks: unique matching journal, no authenticated terminal receipt/root result,
-unchanged reload count, query-only recovery frames, fresh owner fence and no
-subsequent conflicting writes. It never changes the failed strict result,
-replays the mutation, edits durable state or upgrades missing evidence to PASS.
-It remains in extended acceptance pending an explicit equivalence mapping to G6; the presence
-of G6 fault-domain recovery alone is not sufficient to delete this distinct
-single-Relay assertion.
+The offline Relay queue scenario proves the command was never sent, then
+requires the original operation to succeed with exactly one additional native
+reload after restoring the same Relay. No EXPECTED-UNKNOWN exception can turn
+its failure into acceptance. Other uncertain outcomes retain read-only
+reconciliation and the existing explicit safe retry after proven effect absence.
+
+`result.json` records `resilience_requested`, `resilience_result` and actual
+scenario checkpoints. A selected recovery run requires exactly one PASS for
+Controller, Agent/privd, transport, reference database API outage, Relay and
+completion. Missing fields/checkpoints, cancellation, failure and unexpected
+skip block acceptance. Unselected recovery is explicitly SKIPPED. Install-only
+architecture diagnostics are SKIPPED and do not supply recovery acceptance.
 
 Retain the artifact and its GitHub digest before expiry, with product digests,
 manifest, environment inventory, timestamps, exit status and API/DB/journal/root
