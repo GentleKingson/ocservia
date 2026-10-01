@@ -34,15 +34,26 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/build-cache-credentials
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        id: cache
+      - name: Restore Business tool cache
+        id: business-tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-            rust/target
-          key: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: business-agent-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}-
+          key: tooling-v4-business-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'rust/Cargo.lock') }}
+      - name: Resolve isolated Agent target cache
+        id: agent-target
+        run: |
+          builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
+          echo "path=rust/target/agent-amd64-${builder_hash}" >>"${GITHUB_OUTPUT}"
+      - name: Restore Rocky Agent compilation cache
+        id: agent-target-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.agent-target.outputs.path }}
+          key: release-agent-target-v1-${{ runner.os }}-amd64-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v1-${{ runner.os }}-amd64-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Build local products and exercise real business
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
@@ -109,12 +120,17 @@ jobs:
           path: ${{ runner.temp }}/business-diagnostics
           if-no-files-found: warn
           retention-days: 7
-      - name: Save optional native build cache
-        if: ${{ success() && steps.cache.outputs.cache-hit != 'true' }}
+      - name: Save Business tool cache
+        if: ${{ success() && steps.business-tools.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-            rust/target
-          key: ${{ steps.cache.outputs.cache-primary-key }}
+          key: ${{ steps.business-tools.outputs.cache-primary-key }}
+      - name: Save Rocky Agent compilation cache
+        if: ${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.agent-target.outputs.path }}
+          key: ${{ steps.agent-target-cache.outputs.cache-primary-key }}
