@@ -754,7 +754,22 @@ def verify_completed_operations(operations):
 
 
 
+def single_relay_argv():
+    observed = api('nodes/' + os.environ['T07_NODE'])
+    pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
+    agent_argv = run('sudo', 'cat', f'/proc/{int(pid)}/cmdline').rstrip('\0').split('\0')
+    transport_argv = run('docker', 'exec', os.environ['T07_TRANSPORT_CONTAINER'], 'sh', '-c',
+                         'for exe in /proc/[0-9]*/exe; do '
+                         'if [ "$(readlink "$exe")" = /usr/local/bin/ocservia-transportd ]; then '
+                         'cat "${exe%/exe}/cmdline"; fi; done').rstrip('\0').split('\0')
+    for argv in (agent_argv, transport_argv):
+        assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [os.environ['RELAY_URL_A']]
+        assert argv[argv.index('--relay-mode') + 1] == 'custom'
+    record('node_online_single_relay_argv', agent_version=observed['agent_version'], relay=os.environ['RELAY_URL_A'])
+
+
 def single_relay_recovery(ping, native_session, operations):
+    single_relay_argv()
     node = os.environ['T07_NODE']
     prefix = 'nodes/' + node
     live_session = native_session()
@@ -867,16 +882,8 @@ def business():
     wait_for('online node', lambda: api(prefix).get('connection_state') == 'online')
     observed = api(prefix)
     assert observed['agent_version'] == os.environ['VERSION']
+    single_relay_argv()
     pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
-    agent_argv = run('sudo', 'cat', f'/proc/{int(pid)}/cmdline').rstrip('\0').split('\0')
-    transport_argv = run('docker', 'exec', os.environ['T07_TRANSPORT_CONTAINER'], 'sh', '-c',
-                         'for exe in /proc/[0-9]*/exe; do '
-                         'if [ "$(readlink "$exe")" = /usr/local/bin/ocservia-transportd ]; then '
-                         'cat "${exe%/exe}/cmdline"; fi; done').rstrip('\0').split('\0')
-    for argv in (agent_argv, transport_argv):
-        assert [argv[i + 1] for i, arg in enumerate(argv) if arg == '--relay-url'] == [os.environ['RELAY_URL_A']]
-        assert argv[argv.index('--relay-mode') + 1] == 'custom'
-    record('node_online_single_relay_argv', agent_version=observed['agent_version'], relay=os.environ['RELAY_URL_A'])
     privd_pid = run('systemctl', 'show', 'ocservia-privd', '-p', 'MainPID', '--value').strip()
     process = dict(line.split(':', 1) for line in run('sudo', 'cat', f'/proc/{int(privd_pid)}/status').splitlines())
     agent_group = run('id', '-g', 'ocserv-agent').strip()

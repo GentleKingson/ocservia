@@ -69,7 +69,7 @@
 # file from any directory holding the node configuration):
 #   export CONTROLLER_ENDPOINT_ID=<64-lowercase-hex>
 #   export RELAY_URL_A=https://relay-a.example.com
-#   export RELAY_URL_B=https://relay-b.example.com
+#   export RELAY_URL_B=
 #   export RELAY_ACCESS_TOKEN_SOURCE=/protected/relay-access-token
 #   export CONTROLLER_COMMAND_VERIFICATION_KEY_SOURCE=/protected/key.pem
 #   export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
@@ -142,7 +142,7 @@ IDENTITY_DIR="${SYSROOT}/var/lib/ocservia-agent/identity"
 # The pristine placeholder relay URLs installed by the verified package from
 # deploy/production/systemd/relays.env.example.
 PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
-PLACEHOLDER_RELAY_URL_B="https://relay-b.example.com"
+PLACEHOLDER_RELAY_URL_B=""
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
 VERSION=""
@@ -1263,6 +1263,13 @@ resolve_architecture
 detect_platform
 require_commands
 validate_operator_inputs
+if path_exists "${RELAYS_ENV_FILE}"; then
+  if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
+    fail "the existing relay configuration is not a regular file"
+  fi
+  existing_b="$(priv sed -n 's/^RELAY_URL_B=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
+  [[ -z "$existing_b" ]] || fail 'existing configuration has a second Relay; retain one Relay deliberately before rerunning'
+fi
 create_launcher_staging
 if native_package_satisfied; then
   echo "native package ocservia-agent $(expected_installed_version) already installed; skipping the release download and package installation"
