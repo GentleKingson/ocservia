@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Disposable HTTPS/OpenSSL signer using only CSRs and node public sealing keys."""
 import base64
+import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
@@ -52,6 +53,18 @@ class Signer(BaseHTTPRequestHandler):
                 return self.reply(200, {'sealed': base64.b64encode(encrypted).decode(), 'key_id': 't07-p12',
                                         'version': 1, 'purpose': 'certificate_p12_password'})
             request = json.loads(body)
+            if self.path == '/sign/public-key':
+                node = (work / 'signer-node').read_text().strip()
+                if request != {'node_id': node, 'purpose': 'user_password'}:
+                    return self.reply(400)
+                public = openssl('pkey', '-pubin', '-in', str(work / 'user.pub.pem'), '-outform', 'DER')
+                return self.reply(200, {
+                    'workspace_id': (work / 'signer-workspace').read_text().strip(), 'node_id': node,
+                    'endpoint_id': (work / 'signer-endpoint').read_text().strip(),
+                    'purpose': 'user_password', 'version': 1, 'key_id': 't07-user',
+                    'public_key_sha256': hashlib.sha256(public).hexdigest(),
+                    'public_key_der': base64.b64encode(public).decode(),
+                })
             cert_id = str(uuid.UUID(request['certificate_id']))
             if self.path == '/sign':
                 if self.headers.get('Idempotency-Key') != cert_id:
