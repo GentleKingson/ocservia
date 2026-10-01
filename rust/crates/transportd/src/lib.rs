@@ -2415,8 +2415,6 @@ async fn read_agent_events(
     .await;
 }
 
-
-
 async fn publish_command_unknown(
     (shared, node_id, traceparent, connection): (&Shared, &[u8], &str, &Connection),
     command: &CommandEnvelope,

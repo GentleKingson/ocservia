@@ -54,4 +54,3 @@ $$;
 
 REVOKE ALL ON FUNCTION public.test_record_scheduler_maintenance(uuid, bigint, bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.test_record_scheduler_maintenance(uuid, bigint, bigint) TO ocservia_app;
-
