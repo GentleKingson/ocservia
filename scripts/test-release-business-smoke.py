@@ -43,6 +43,32 @@ def main():
                 raise AssertionError('live owner must prevent offline queueing')
             record.assert_not_called()
 
+        # Active privd and intact receipts must not report R2 success while its
+        # dependent Agent is still down and has not acquired a new session.
+        recovery = {'service': '', 'seconds': 0}
+
+        def restart_command(*args):
+            if args[:3] == ('sudo', 'systemctl', 'restart'):
+                recovery['service'] = args[3]
+            return 'active'
+
+        with patch.object(business, 'run', side_effect=restart_command), \
+                patch.object(business, 'owner', return_value={'owner_epoch': 1}), \
+                patch.object(business, 'fresh_owner', side_effect=lambda _before:
+                             {'owner_epoch': 2} if recovery['service'] == 'ocservia-agent' else None), \
+                patch.object(business, 'identity_digest', return_value='unchanged'), \
+                patch.object(business, 'check_confirmed'), patch.object(business, 'record') as record, \
+                patch.object(business.time, 'monotonic', side_effect=lambda: recovery['seconds']), \
+                patch.object(business.time, 'sleep', side_effect=lambda delay:
+                             recovery.update(seconds=recovery['seconds'] + delay)):
+            try:
+                business.agent_privd_recovery([], 'confirmed-config')
+            except RuntimeError as error:
+                assert 'fresh Agent session after ocservia-privd' in str(error)
+            else:
+                raise AssertionError('active privd must not hide unavailable Agent')
+            record.assert_not_called()
+
         directives = business.smoke_directives(4)
         assert {item['name'] for item in directives} == {
             'auth', 'cookie-timeout', 'device', 'dns', 'ipv4-network', 'max-clients',

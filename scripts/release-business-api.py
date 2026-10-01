@@ -642,8 +642,8 @@ def agent_privd_recovery(operations, config_hash):
     for service in ('ocservia-agent', 'ocservia-privd'):
         before = owner()
         run('sudo', 'systemctl', 'restart', service)
-        if service == 'ocservia-agent':
-            wait_for('fresh Agent session', lambda: fresh_owner(before))
+        # Requires=privd also restarts Agent; active privd alone is not recovery.
+        wait_for('fresh Agent session after ' + service, lambda: fresh_owner(before))
         wait_for(service + ' active', lambda: run('systemctl', 'show', service, '-p', 'ActiveState', '--value').strip() == 'active')
         check_confirmed(operations, config_hash)
         assert identity_digest() == identity
