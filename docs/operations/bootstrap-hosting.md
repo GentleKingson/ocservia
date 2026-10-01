@@ -48,36 +48,18 @@ single GitHub Release URL under that version and hands off only to the matching
 not read `install.env`, install packages, invoke the Controller lifecycle,
 enroll a node, approve a node, start services, or cross a privilege boundary.
 
-Stage-0 requires both `TRUSTED_RELEASE_KEY` and `EXPECTED_RELEASE_KEY_SHA256`
-to be exported and exits before downloading anything if either is missing.
-It downloads `SHA256SUMS` and `SHA256SUMS.sig`, verifies the independently
-provisioned public-key fingerprint and manifest signature, then verifies the
-selected Stage-1 digest before execution. Configure both values through the
-operator's protected provisioning channel. Stage-1 and the existing lifecycle
-remain responsible for configuration, package and release verification,
-installation, enrollment, and activation.
+Stage-0 downloads the selected asset over HTTPS with TLS verification enabled,
+refuses download errors and empty bodies, and executes it from a private
+short-lived directory. It does not require a release key, fingerprint, signed
+checksum manifest, or signature. The HTTPS endpoint and its PKI supply download
+trust; this path has no independent artifact authenticity claim. Stage-0 does
+not add an OpenSSL version requirement.
 
-This Ed25519 verification path requires OpenSSL 3. That matches the managed-node
-support matrix. The Controller itself also supports Ubuntu 20.04 and Debian 11,
-but their distribution OpenSSL 1.1.1 cannot perform this verification. On those
-two Controller platforms, do not use Stage-0; continue to use the clean exact
-release checkout path in [Deploy the Controller](../getting-started/production.md).
-This narrows only the optional Controller Stage-0 entrypoint, not the existing
-Controller support matrix.
-
-The first bytes in a `curl | bash` flow cannot authenticate themselves. Before
-Stage-0 has started, that flow relies only on the HTTPS endpoint and its PKI;
-verifying the downloaded Stage-1 does not provide out-of-band authenticity for
-the already executing Stage-0 bytes. There is no unsigned Stage-1 fallback.
-
-For a hardened first-byte path, download Stage-0 to local protected storage,
-compare its digest with the reviewed repository source through an independent
-channel, inspect it, and only then run that local file with the out-of-band key
-and fingerprint exported. An operator may instead download Stage-1,
-`SHA256SUMS`, and `SHA256SUMS.sig`, verify them locally with that trust anchor,
-and execute the verified Stage-1 directly. Do not source a version from
-`latest`, a branch, or a commit, and do not download the public key from the
-same release as the artifact it is meant to authenticate.
+Download Stage-0 locally, inspect it, and run it with the explicit version.
+Do not source the version from `latest`, a branch, or a commit. Stage-1 owns
+configuration, installation, enrollment and activation. During the release-policy
+migration, Stage-1 still enforces its existing package/lifecycle requirements
+until its consumer refactor lands; Stage-0 does not bypass those requirements.
 
 ## Intended entrypoints
 
@@ -87,8 +69,6 @@ marker, and only then execute it. The surrounding subshell makes a transport,
 empty-body, or truncated-body failure visible to automation:
 
 ```bash
-export TRUSTED_RELEASE_KEY=/etc/ocservia/release-signing.pub.pem
-export EXPECTED_RELEASE_KEY_SHA256=<64-lowercase-hex-fingerprint>
 (
   set -eu
   stage0="$(mktemp)" || exit 1
@@ -121,6 +101,6 @@ Approval, and service activation remains deliberate.
 Stage-0 is not a long-term upgrade, rollback, uninstall, or service manager.
 Controller upgrades and rollback continue through `controller.sh` and its
 protected lifecycle state. Managed-node upgrades and removal continue through
-the signed upgrader or native package-manager contract. Long-lived settings
+the authorized upgrader or native package-manager contract. Long-lived settings
 belong in `install.env` or the installed service configuration, not in arguments
 that must be replayed through the convenience script.
