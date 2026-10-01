@@ -1009,7 +1009,7 @@ def vpn_smoke(phase, relay_recovery=False):
 if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
-                     'browser_prepare', 'browser_verify', 'business', 'smoke_config_apply', 'smoke_user', 'smoke_rollback',
+                     'browser_prepare', 'browser_verify', 'business', 'smoke_config_apply', 'smoke_user',
                      'vpn_after_config_apply', 'vpn_after_rollback', 'resilience'):
         raise SystemExit('unknown phase')
     if phase.startswith('vpn_'):

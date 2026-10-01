@@ -45,7 +45,7 @@ set -e
 # Exercise the actual profile routing without installing anything on this host.
 for BUSINESS_PROFILE in smoke extended; do
   (
-    PRODUCTION_SIGNER_ACCEPTANCE=true BUSINESS_RUN_RESILIENCE=true
+    export PRODUCTION_SIGNER_ACCEPTANCE=true BUSINESS_RUN_RESILIENCE=true
     # shellcheck disable=SC2317
     next_stage() { :; }
     # shellcheck disable=SC2317
