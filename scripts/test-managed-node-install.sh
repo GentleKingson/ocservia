@@ -1414,7 +1414,7 @@ as_root chmod 0640 "${sysroot}/etc/ocservia-agent/relays.env"
 as_root chown root:ocserv-agent "${sysroot}/etc/ocservia-agent/relays.env"
 capture_root
 assert_status 1 "a mismatching relays.env must fail closed"
-assert_output "not the configured dedicated relays"
+assert_output "existing configuration has a second Relay"
 echo "unsafe or mismatched node material fails closed"
 
 # 15. an invalid enrollment token leaves identity and configuration intact.
