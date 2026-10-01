@@ -27,6 +27,12 @@ abort 'a cache hit must never skip binary compilation' if compile.key?('if')
 abort 'native ABI and package version checks must remain' unless
   build.include?('cargo build --locked --release') && build.include?('glibc 2.34') &&
   build.include?('[[ "$("${path}" --version)" == "${binary} ${VERSION}" ]]')
+builder = File.read('rust/agent-build.Dockerfile')
+%w[minrate=512k timeout=15 max_parallel_downloads=10].each do |option|
+  abort "DNF slow-mirror bound missing #{option}" unless builder.include?("--setopt=#{option}")
+end
+abort 'keep official mirror selection, retry defaults and package verification' if
+  builder.match?(/retries=|fastestmirror=|mirrorlist=|baseurl=|gpgcheck=0|sslverify=0|--nogpgcheck/)
 dockerfile = File.read('rust/transportd.Dockerfile')
 abort 'recipe must include the complete workspace, not a hand-maintained crate list' unless
   dockerfile.include?("COPY rust/crates ./crates\nRUN cargo chef prepare --recipe-path recipe.json")
