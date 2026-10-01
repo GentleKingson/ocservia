@@ -671,10 +671,12 @@ def resilience():
     operations = [operation]
     identity = identity_digest()
     check_confirmed(operations, config_hash)
+    before = owner()
     run(str(ROOT / 'deploy/production/compose.sh'), 'restart', 'control-plane')
     wait_for('Controller readiness', ready)
     if os.environ.get('BUSINESS_PROFILE') == 'extended':
         trust_controller()
+    wait_for('fresh Controller owner session', lambda: fresh_owner(before))
     check_confirmed(operations, config_hash)
     operations.append(authorized_reload('Controller restart recovery'))
     record('resilience_controller', operation_id=operation['id'])
