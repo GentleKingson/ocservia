@@ -559,6 +559,7 @@ export T07_NODE
 T07_NODE="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${ARTIFACT_DIR}/managed-enrollment.log")"
 [[ "${T07_NODE}" =~ ^[0-9a-f-]{36}$ ]]
 printf '%s\n' "${T07_NODE}" >"${work}/signer-node"
+printf '%s\n' "${T07_WORKSPACE}" >"${work}/signer-workspace"
 printf '%s\n' "${T07_ENDPOINT}" >"${work}/signer-endpoint"
 sudo openssl pkey -in /etc/ocservia-agent/p12-password-seal-private.pem -pubout >"${work}/p12.pub.pem"
 sudo test ! -e /etc/ocservia-agent/enrollment-token

@@ -4,7 +4,6 @@ import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-import os
 from pathlib import Path
 import secrets
 import ssl
@@ -60,7 +59,7 @@ class Signer(BaseHTTPRequestHandler):
                     return self.reply(400)
                 public = openssl('pkey', '-pubin', '-in', str(work / 'user.pub.pem'), '-outform', 'DER')
                 return self.reply(200, {
-                    'workspace_id': os.environ['T07_WORKSPACE'], 'node_id': node,
+                    'workspace_id': (work / 'signer-workspace').read_text().strip(), 'node_id': node,
                     'endpoint_id': (work / 'signer-endpoint').read_text().strip(),
                     'purpose': 'user_password', 'version': 1, 'key_id': 't07-user',
                     'public_key_sha256': hashlib.sha256(public).hexdigest(),
