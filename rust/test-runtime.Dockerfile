@@ -78,13 +78,13 @@ RUN apt-get update \
     && install -d -o root -g ocservia -m 0750 /run/ocserv-platform \
     && install -d -o root -g root -m 0755 /etc/ocserv /etc/ocservia /var/lib/ocservia-privd \
     && install -d -o ocservia-agent -g ocservia -m 0700 /var/lib/ocservia-agent/identity /var/lib/ocservia-agent/journal
-COPY --chmod=0555 deploy/g6-readiness/agent-supervisor.sh /usr/local/libexec/ocservia-agent-supervisor
+COPY --chmod=0555 deploy/test-fixtures/agent-supervisor.sh /usr/local/libexec/ocservia-agent-supervisor
 # The adapter executes exactly these fixed paths; the shims answer the seven
 # read-only snapshot probes with healthy, parseable output.
-COPY --chmod=0555 deploy/g6-readiness/fake-ocserv/shims/systemctl /usr/bin/systemctl
-COPY --chmod=0555 deploy/g6-readiness/fake-ocserv/shims/ocserv /usr/sbin/ocserv
-COPY --chmod=0555 deploy/g6-readiness/fake-ocserv/shims/occtl /usr/bin/occtl
-COPY --chmod=0444 deploy/g6-readiness/fake-ocserv/ocserv.conf /etc/ocserv/ocserv.conf
+COPY --chmod=0555 deploy/test-fixtures/fake-ocserv/shims/systemctl /usr/bin/systemctl
+COPY --chmod=0555 deploy/test-fixtures/fake-ocserv/shims/ocserv /usr/sbin/ocserv
+COPY --chmod=0555 deploy/test-fixtures/fake-ocserv/shims/occtl /usr/bin/occtl
+COPY --chmod=0444 deploy/test-fixtures/fake-ocserv/ocserv.conf /etc/ocserv/ocserv.conf
 ENV OCSERVIA_NODE_ROOT=/var/lib/ocservia-agent
 ENTRYPOINT ["/usr/local/libexec/ocservia-agent-supervisor"]
 

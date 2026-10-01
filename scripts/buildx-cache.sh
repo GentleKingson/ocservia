@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Run one G6 BuildKit solve with an optional external cache. A cache service
 # failure gets one bounded cold-build retry; the cold solve is authoritative.
-# G6_CACHE_STRICT_EXPORT=true switches to the provisioner semantics: the
+# BUILD_CACHE_STRICT_EXPORT=true switches to the provisioner semantics: the
 # solve's only purpose is to write the external cache, so it requires
 # available cache credentials, drops the tolerant exporter, and never falls
 # back to a cache-less retry — a build failure or an unfinished export fails
-# the solve, so green means the cache export completed. G6_CACHE_TIMEOUT
+# the solve, so green means the cache export completed. BUILD_CACHE_TIMEOUT
 # overrides the bounded per-command cache timeout (default 60s).
 set -euo pipefail
 
@@ -24,7 +24,7 @@ shift 3
 [[ "${log_name}" =~ ^[A-Za-z0-9._-]+$ ]] || usage
 [[ "${export_cache}" == true || "${export_cache}" == false ]] || usage
 
-strict_export="${G6_CACHE_STRICT_EXPORT:-false}"
+strict_export="${BUILD_CACHE_STRICT_EXPORT:-false}"
 [[ "${strict_export}" == true || "${strict_export}" == false ]] || usage
 if [[ "${strict_export}" == true && "${export_cache}" != true ]]; then
   echo "::error::strict cache export requires export-cache=true" >&2
@@ -32,7 +32,7 @@ if [[ "${strict_export}" == true && "${export_cache}" != true ]]; then
 fi
 
 # No external cache flags means an ordinary local BuildKit solve.
-if [[ "${G6_CACHE_AVAILABLE:-false}" != true ]]; then
+if [[ "${BUILD_CACHE_AVAILABLE:-false}" != true ]]; then
   if [[ "${strict_export}" == true ]]; then
     echo "::error::strict cache export requires Actions cache credentials; a cache-less solve cannot provision" >&2
     exit 1
@@ -40,7 +40,7 @@ if [[ "${G6_CACHE_AVAILABLE:-false}" != true ]]; then
   exec docker buildx build "$@"
 fi
 
-cache_timeout="${G6_CACHE_TIMEOUT:-60s}"
+cache_timeout="${BUILD_CACHE_TIMEOUT:-60s}"
 cache_args=(
   --cache-from "type=gha,scope=${scope},timeout=${cache_timeout},version=2"
 )
@@ -59,7 +59,7 @@ if [[ "${export_cache}" == true ]]; then
 fi
 
 log_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-log_dir="${G6_CACHE_FAILURE_DIR:-${log_root}/artifacts/g6-buildkit-cache-fallback}"
+log_dir="${BUILD_CACHE_FAILURE_DIR:-${log_root}/artifacts/buildkit-cache-fallback}"
 mkdir -p "${log_dir}"
 log_file="${log_dir}/${log_name}.log"
 failure_marker="${log_dir}/cache-disabled"

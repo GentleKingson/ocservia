@@ -104,7 +104,7 @@ golden update. Run the existing Buf generation/breaking checks and
 generation is needed when HTTP schemas are unchanged.
 
 The focused Go command excludes database integration tests. The existing
-`scripts/test-g6-secret-scan-config-runtime.sh` checks that fixed public fixture
+`scripts/test-secret-scan-config-runtime.sh` checks that fixed public fixture
 values pass the exact-value allowlist while other values remain detectable.
 
 These are raw-wire vectors, not executable or authenticated requests: deprecated

@@ -375,7 +375,7 @@ services:
     profiles: [probe]
     build:
       context: ../..
-      dockerfile: rust/g6-runtime.Dockerfile
+      dockerfile: rust/test-runtime.Dockerfile
       target: g6-probe-runtime
     volumes:
       - type: volume

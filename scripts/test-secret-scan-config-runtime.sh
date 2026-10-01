@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
-CONFIG="${ROOT}/scripts/g6-secret-scan.toml"
+CONFIG="${ROOT}/scripts/secret-scan.toml"
 
 command -v gitleaks >/dev/null || {
   echo "gitleaks is required to verify the G6 evidence scan configuration" >&2

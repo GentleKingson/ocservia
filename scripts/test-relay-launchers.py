@@ -9,7 +9,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 assert os.geteuid() == 0 and Path("/.dockerenv").exists(), "isolated root Docker container required"
-for relative in ("deploy/production/relay/relay.toml", "deploy/g6-readiness/relay.toml"):
+for relative in ("deploy/production/relay/relay.toml", "deploy/test-fixtures/relay.toml"):
     with (ROOT / relative).open("rb") as source:
         config = tomllib.load(source)
     assert config["access"] == {"shared_token": ["replaced-by-entrypoint"]}, relative

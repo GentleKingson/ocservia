@@ -195,8 +195,10 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       reject("#{name} must run harness #{command} #{expected} times") unless calls.count("go|#{work}/tools/g6-harness|#{command}") == expected
     end
     if expected == 1
-      reject("#{name} lost G6 contract/evidence checks") unless calls.grep(/^test-g6-/).length == 13 &&
+      reject("#{name} lost G6 contract/evidence checks") unless calls.grep(/^test-g6-/).length == 11 &&
         %w[test-g6-workflow-contract.sh test-g6-evidence-pipeline.sh test-g6-evidence-verifier.mjs test-g6-resource-sampler.sh].all? { |test| calls.count(test) == 1 }
+      reject("#{name} lost shared tooling checks") unless
+        %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
     else
       reject("Release-only must not run unrelated guards") if calls.include?("test-bootstrap-profiles.sh")
       path = File.join(work, ".github/workflows/release.yml")
@@ -219,9 +221,9 @@ scan = security.fetch("jobs").fetch("scan")
 reject("security scans must not cancel siblings on failure") unless scan.fetch("strategy").fetch("fail-fast") == false
 checks = scan.fetch("strategy").fetch("matrix").fetch("include")
 reject("security scans must cover secrets and all three dependency ecosystems") unless
-  checks.map { |check| check.fetch("profile") }.sort == %w[g6-secret-scan go-security npm-security rust-security]
+  checks.map { |check| check.fetch("profile") }.sort == %w[go-security npm-security rust-security secret-scan]
 reject("secret scans need complete history") unless
-  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == "${{ matrix.profile != 'g6-secret-scan' && 1 || 0 }}" }
+  scan.fetch("steps").any? { |step| step.fetch("with", {})["fetch-depth"] == "${{ matrix.profile != 'secret-scan' && 1 || 0 }}" }
 bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
 dispatch = 'case "${PROFILE}" in' + bootstrap.split('case "${PROFILE}" in').last
 stubs = bootstrap.scan(/^(install_\w+|verify_\w+)\(\)/).flatten.map do |name|

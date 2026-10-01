@@ -45,7 +45,7 @@ while read -r path selected; do
       grep -Eq '^ci_suites=(guards|release|g6)( (guards|release|g6))*$' "${out}"
       case "${path}" in
         scripts/ci-tools-check.sh) expect "${out}" ci_suites 'guards release g6' ;;
-        scripts/g6-buildx-cache.sh|.github/actions/g6-cache-credentials/index.js)
+        scripts/buildx-cache.sh|.github/actions/build-cache-credentials/index.js)
           expect "${out}" ci_suites 'release g6' ;;
         .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
           expect "${out}" ci_suites guards ;;
@@ -111,10 +111,13 @@ docs/acceptance/g6-runtime-result-schema.json run_ci_tools
 scripts/g6-runtime/package-lock.json run_ci_tools
 scripts/g6-pipeline.mjs run_ci_tools
 scripts/test-g6-resource-sampler.sh run_ci_tools
-scripts/g6-buildx-cache.sh run_ci_tools
-.github/actions/g6-cache-credentials/index.js run_ci_tools
+scripts/buildx-cache.sh run_ci_tools
+.github/actions/build-cache-credentials/index.js run_ci_tools
 tools/g6-harness/internal/runtime/runtime.go run_ci_tools
-deploy/g6-readiness/relay.toml run_ci_tools
+deploy/test-fixtures/relay.toml run_go run_database run_ci_tools
+deploy/test-fixtures/agent-supervisor.sh run_go run_database run_ci_tools
+rust/test-runtime.Dockerfile run_go run_database run_ci_tools
+scripts/secret-scan.toml run_ci_tools
 deploy/package/nfpm.yaml run_ci_tools run_installers
 unclassified.conf run_docs run_go run_rust run_web run_database run_ci_tools run_installers
 CASES

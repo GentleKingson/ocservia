@@ -192,7 +192,7 @@ else
 if [[ -n "${RELEASE_RELAY_IMAGE:-}" ]]; then
   docker tag "${RELEASE_RELAY_IMAGE}" "${BUILDX_BUILDER}-relay"
 else
-bash "${ROOT}/scripts/g6-buildx-cache.sh" relay-business-amd64 true business-relay \
+bash "${ROOT}/scripts/buildx-cache.sh" relay-business-amd64 true business-relay \
   --builder "${BUILDX_BUILDER}" --platform linux/amd64 --provenance=false --load \
   --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
   -t "${BUILDX_BUILDER}-relay" -f "${ROOT}/deploy/production/relay.Dockerfile" "${ROOT}" \
@@ -464,7 +464,7 @@ docker run -d --name "${T07_RELAY_CONTAINER}" --read-only --cap-drop ALL \
   -e IROH_RELAY_ACCESS_TOKEN_FILE=/run/relay-secrets/relay-token \
   -e RUST_LOG=info,iroh_relay::server::clients=debug \
   -v "${work}/relay:/run/relay-secrets:ro" \
-  -v "${ROOT}/deploy/g6-readiness/relay.toml:/etc/iroh-relay/relay.toml:ro" \
+  -v "${ROOT}/deploy/test-fixtures/relay.toml:/etc/iroh-relay/relay.toml:ro" \
   "${T07_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}" --config-path /etc/iroh-relay/relay.toml
 fi
 export T07_TRANSPORT_CONTAINER

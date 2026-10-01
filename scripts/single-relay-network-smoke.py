@@ -59,7 +59,7 @@ try:
     for name, uid in (("runtime", 65532), ("trust", 65534)):
         (work / name).mkdir(mode=0o750)
         os.chown(work / name, uid, 65532)
-    relay_config = Path(__file__).resolve().parents[1] / "deploy/g6-readiness/relay.toml"
+    relay_config = Path(__file__).resolve().parents[1] / "deploy/test-fixtures/relay.toml"
     with socket.socket() as reservation:
         reservation.bind((gateway, 0))
         relay_port = reservation.getsockname()[1]

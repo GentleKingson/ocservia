@@ -19,11 +19,11 @@ for name in "${names[@]}"; do
   if [[ "${mode}" == build ]]; then
     args=()
     case "${name}" in
-      probe) file=rust/g6-runtime.Dockerfile; args+=(--target g6-probe-runtime) ;;
+      probe) file=rust/test-runtime.Dockerfile; args+=(--target g6-probe-runtime) ;;
       relay) file=deploy/production/relay.Dockerfile; args+=(--no-cache-filter relay-runtime) ;;
     esac
     started="$(date +%s)"
-    bash scripts/g6-buildx-cache.sh "release-fixture-${name}-${arch}" true "fixture-${name}" \
+    bash scripts/buildx-cache.sh "release-fixture-${name}-${arch}" true "fixture-${name}" \
       --platform "linux/${arch}" --provenance=false --load \
       --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
       --file "${file}" --tag "${tag}" "${args[@]}" .
@@ -43,8 +43,8 @@ for name in "${names[@]}"; do
 done
 if [[ "${mode}" == build && "${component}" == test-helpers ]]; then
   # The probe target already compiled the tunnel with the same feature graph.
-  bash scripts/g6-buildx-cache.sh "release-fixture-probe-${arch}" false fixture-tunnel \
-    --platform "linux/${arch}" --file rust/g6-runtime.Dockerfile --target g6-tunnel-artifact \
+  bash scripts/buildx-cache.sh "release-fixture-probe-${arch}" false fixture-tunnel \
+    --platform "linux/${arch}" --file rust/test-runtime.Dockerfile --target g6-tunnel-artifact \
     --output "type=local,dest=${directory}" .
 fi
 if [[ "${mode}" == build ]]; then

@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${ROOT}/.github/workflows/g6-harness-core.yml"
 COMPOSE_FILE="${ROOT}/deploy/g6-readiness/compose.yaml"
-SUPERVISOR="${ROOT}/deploy/g6-readiness/agent-supervisor.sh"
+SUPERVISOR="${ROOT}/deploy/test-fixtures/agent-supervisor.sh"
 AGENT_MAIN="${ROOT}/rust/crates/agent/src/main.rs"
 LIB="${ROOT}/scripts/g6-readiness-lib.sh"
 FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
@@ -18,13 +18,13 @@ COORDINATION_MAINTENANCE="${ROOT}/control-plane/internal/coordination/maintenanc
 BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
 CONTRACT="${ROOT}/scripts/g6-contract-lib.mjs"
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
-G6_RUNTIME_DOCKERFILE="${ROOT}/rust/g6-runtime.Dockerfile"
+G6_RUNTIME_DOCKERFILE="${ROOT}/rust/test-runtime.Dockerfile"
 TRANSPORT_DOCKERFILE="${ROOT}/rust/transportd.Dockerfile"
 TRANSPORT_LIB="${ROOT}/rust/crates/transportd/src/lib.rs"
 G6_TUNNEL_LIB="${ROOT}/rust/crates/g6-tunnel/src/lib.rs"
 RELAY_DOCKERFILE="${ROOT}/deploy/production/relay.Dockerfile"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
-OCSERV_FIXTURE="${ROOT}/deploy/g6-readiness/fake-ocserv/shims/ocserv"
+OCSERV_FIXTURE="${ROOT}/deploy/test-fixtures/fake-ocserv/shims/ocserv"
 RENDEZVOUS_CONTRACT="${ROOT}/tools/g6-harness/internal/rendezvous/contract.go"
 RUNTIME_ORCHESTRATOR="${ROOT}/tools/g6-harness/internal/runtime/orchestrator.go"
 CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
@@ -122,7 +122,7 @@ pgappname_count = compose.fetch("services").values.count { |service| service.dig
 reject("each role service must set its PGAPPNAME from G6_FD_ID (found #{pgappname_count})") unless pgappname_count == 3
 probe_build = services.fetch("g6-probe").fetch("build")
 reject("local probe builds must assemble from the shared G6 runtime graph") unless
-  probe_build.fetch("dockerfile") == "rust/g6-runtime.Dockerfile" &&
+  probe_build.fetch("dockerfile") == "rust/test-runtime.Dockerfile" &&
     probe_build.fetch("target") == "g6-probe-runtime"
 RUBY
 
@@ -1608,7 +1608,7 @@ g6rd_stage_agent_node_state "${relay_topology_test}/nodes.tsv"
   exit 1
 }
 g6rd_write_agent_overlay 1
-grep -q 'dockerfile: rust/g6-runtime.Dockerfile' "${G6RD_AGENT_COMPOSE}"
+grep -q 'dockerfile: rust/test-runtime.Dockerfile' "${G6RD_AGENT_COMPOSE}"
 grep -q 'target: g6-agent-runtime' "${G6RD_AGENT_COMPOSE}"
 [[ "${G6_RELAY_URL_A}" == https://relay-a:3443 ]]
 [[ "${G6_RELAY_URL_B}" == https://relay-b:3443 ]]
