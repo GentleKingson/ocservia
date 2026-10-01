@@ -256,7 +256,7 @@ printf '%s\n' "$*" >>"${ROUTE_LOG}"
 SH
 cat >"${tmp}/wrapper/scripts/test-enrollment-restart.sh" <<'SH'
 #!/usr/bin/env bash
-[[ "$1" == ocservia-pr02-mysql-* ]] || exit 1
+[[ "$1" == ocservia-pr02-mysql-* || "$1" == ocservia-pg-smoke-* ]] || exit 1
 printf 'backend-enrollment-restart\n' >>"${ROUTE_LOG}"
 SH
 cat >"${tmp}/wrapper/bin/docker" <<'SH'
