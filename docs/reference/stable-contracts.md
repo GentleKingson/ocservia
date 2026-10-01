@@ -169,8 +169,8 @@ do not reset journals to make an upgrade pass.
 
 Run manual Release Check on merged main and require Full CI, Security and
 Integrated Business Smoke with single-instance recovery PASS. The operator then confirms the
-version and creates its tag; formal Release builds and smoke-tests both native
-architectures before publication. Historical compatibility gates are retired,
+version and creates its tag; formal Release builds, scans the exact Controller
+images and smoke-tests both native architectures before publication. Historical compatibility gates are retired,
 not skipped successes.
 
 Preserve current trust, real capabilities, approvals, Signer identity/revision,

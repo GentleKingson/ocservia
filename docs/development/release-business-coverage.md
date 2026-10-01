@@ -17,10 +17,11 @@ Each run builds and tests local products on disposable native runners.
 | Controller/transport stack, Agent/privd stack, database, and sole Relay recovery | Business Smoke with recovery |
 | DEB/RPM install and state preservation on amd64/arm64 | Native package build/install smoke |
 | Controller image execution on both architectures | Controller build/image smoke |
-| Source and dependency vulnerability checks, necessary image vulnerability PASS/FAIL | Security / CI |
+| Source and dependency vulnerability checks | Security |
+| Exact Controller archive OS vulnerability scans on amd64 and arm64, before smoke/upload | Release Controller products |
 | Build tagged source and publish GitHub assets and GHCR version images | Release |
 
 Runtime command and production PKI signing remain business behavior, independent
 of package/release signing. CI does not hold the retired release signing key.
 Release uses the CI result as its qualification and performs only
-build/install/image smoke and ordinary publication.
+build, exact image security scans, install/image smoke and ordinary publication.

@@ -188,13 +188,6 @@ next_stage agent_package_build
 env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 next_stage controller_image_build
 bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
-next_stage image_security
-bash "${ROOT}/scripts/bootstrap.sh" image-security
-scan_table="${work}/images.tsv"
-for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
-  printf '%s\t%s\t%s\n' "$name" "$CONTROLLER_ARCH" "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar" >>"$scan_table"
-done
-IMAGE_ARCHIVES_TSV="$scan_table" bash "$ROOT/scripts/scan-release-images.sh" >"${ARTIFACT_DIR}/image-scan.log" 2>&1
 for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
   docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
 done

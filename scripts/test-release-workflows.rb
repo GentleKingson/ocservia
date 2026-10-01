@@ -22,7 +22,7 @@ require_check(publish['if'] == "github.event_name == 'push'" && publish['environ
 require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write'}, 'publishing permissions changed')
 require_check(publish['needs'].sort == %w[assets build-amd64 build-arm64 prepare], 'publishing must wait for both native build/smoke legs and assets')
 require_check(publish['steps'].any? {|s| s.fetch('run','').include?('gh release upload') && s['run'].include?('--clobber')}, 'ordinary asset replacement missing')
-require_check(release.fetch('jobs').values.none? {|j| ['./.github/workflows/ci.yml','./.github/workflows/security.yml','./.github/workflows/release-business-diagnostic.yml'].include?(j['uses'])}, 'formal Release must only build, smoke and publish')
+require_check(release.fetch('jobs').values.none? {|j| ['./.github/workflows/ci.yml','./.github/workflows/security.yml','./.github/workflows/release-business-diagnostic.yml'].include?(j['uses'])}, 'formal Release must only build, image-scan, smoke and publish')
 %w[amd64 arm64].each do |arch|
   caller = release.fetch('jobs').fetch("build-#{arch}")
   require_check(caller['uses'] == './.github/workflows/release-products.yml' && caller.dig('with','arch') == arch, "missing native #{arch} build")
@@ -33,6 +33,27 @@ products.fetch('jobs').each do |name,job|
   require_check(job.fetch('runs-on').include?('ubuntu-24.04-arm'), "#{name} missing native arm64")
   require_check(job.fetch('steps').any? {|s| s.fetch('run','').include?(name == 'build-agent-packages' ? 'release-native-package-smoke.sh' : 'release-controller-image-smoke.sh')}, "#{name} missing real smoke")
 end
+controller = products.fetch('jobs').fetch('build-controller-images')
+steps = controller.fetch('steps')
+ordered = ['Build Controller images', 'Bootstrap pinned image-security tools', 'Scan exact Controller image archives', 'Smoke Controller images on the native runner', 'Upload Controller image archives']
+indices = ordered.map {|name| steps.index {|s| s['name'] == name}}
+require_check(indices.none?(&:nil?) && indices == indices.sort, 'exact image scan must follow build and precede smoke/upload')
+require_check(!controller.key?('continue-on-error'), 'Controller scan failure must fail the product job')
+indices.each do |index|
+  require_check(!steps[index].key?('if') && !steps[index].key?('continue-on-error'), 'build/scan/smoke/upload must use normal success-only failure propagation')
+end
+scan = steps[indices[2]]
+require_check(scan.dig('env','CONTROLLER_ARCH') == '${{ inputs.arch }}', 'scan must use the native product architecture')
+roles = %w[gateway control transport backup edge relay signer mysql_backup mariadb_backup]
+require_check(scan.fetch('run').include?("for name in #{roles.join(' ')}; do") && scan['run'].include?('$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar'), 'scan must consume every exact release archive')
+require_check(scan['run'].include?('IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh'), 'existing scan failure semantics must remain mandatory')
+require_check(steps[indices[1]]['run'] == 'scripts/bootstrap.sh image-security', 'pinned scanner bootstrap missing')
+cache = steps.find {|s| s['name'] == 'Cache pinned image-security tools'}.fetch('with')
+require_check(cache['path'].split == %w[.cache/downloads .tools], 'image-security cache must contain tools only, never vulnerability DB or results')
+%w[runner.os runner.arch toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh].each {|part| require_check(cache['key'].include?(part), "image-security cache identity missing #{part}")}
+require_check(!cache['key'].include?('github.sha'), 'stable tool cache must not depend on source SHA')
+probe = File.read('scripts/release-business-probe.sh')
+require_check(!probe.match?(/scan-release-images|image_security|bootstrap.sh.*image-security/), 'Business must not own the image-security gate')
 require_check(check.fetch(true).keys == ['workflow_dispatch'] && check['permissions'] == {'contents'=>'read'}, 'Release Check must be manual and read-only')
 jobs = check.fetch('jobs')
 require_check(jobs.fetch('main').fetch('steps').first.fetch('run') == 'test "$GITHUB_REF" = refs/heads/main', 'Release Check must use main')

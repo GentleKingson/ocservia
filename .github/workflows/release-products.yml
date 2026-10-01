@@ -157,6 +157,26 @@ jobs:
           VERSION="${version}" SOURCE_COMMIT="${source_commit}" \
             CONTROLLER_ARCH="${{ inputs.arch }}" OUTPUT_DIR="${RUNNER_TEMP}/controller-images" \
             bash scripts/build-release-controller.sh
+      - name: Cache pinned image-security tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-image-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap pinned image-security tools
+        run: scripts/bootstrap.sh image-security
+      - name: Scan exact Controller image archives
+        env:
+          CONTROLLER_ARCH: ${{ inputs.arch }}
+        run: |
+          source scripts/env.sh
+          scan_table="${RUNNER_TEMP}/controller-images.tsv"
+          : >"$scan_table"
+          for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+            printf '%s\t%s\t%s\n' "$name" "$CONTROLLER_ARCH" "$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar" >>"$scan_table"
+          done
+          IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh
       - name: Smoke Controller images on the native runner
         # Runs for both tag pushes and dispatch dry runs: a dispatch must
         # prove the real build path produces runnable images, not just

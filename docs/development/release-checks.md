@@ -4,9 +4,15 @@ CI PASS is the only release qualification. The flow is:
 
 ```text
 PR -> Basic CI -> merge main
-   -> manual Release Check (Full CI + Security + Business Smoke + single-instance recovery)
-   -> PASS -> human version confirmation -> GitHub Release / vX.Y.Z tag
-   -> Release (build + smoke + publish Agent assets and Controller GHCR images)
+   -> manual Release Check
+      - Full CI
+      - Security
+      - amd64 Business Smoke + four finite single-instance recoveries
+   -> PASS -> operator version confirmation -> vX.Y.Z tag
+   -> Release
+      - amd64 build + Controller image security + install/image smoke
+      - arm64 build + Controller image security + install/image smoke
+      - publish Agent assets and Controller GHCR images only after both pass
 ```
 
 `Basic CI Result` remains the required PR check. Release Check is a manual
@@ -15,8 +21,9 @@ cancellation, or an unexpected skip cannot report PASS. Each invocation runs the
 checks anew. There is no inherited acceptance or candidate nomination.
 
 After Release Check passes, the operator confirms the version and creates the
-Release/tag. CI qualification belongs to that operator process. The tag workflow
-builds from the tag and performs build/install smoke checks before publication;
+version tag. CI qualification belongs to that operator process. The tag workflow
+builds from the tag, scans the exact Controller image archives on each native
+architecture, and performs install/image smoke checks before publication;
 it does not rerun Full CI, Security, or Business acceptance, or look up previous
 workflow results or artifacts to establish release eligibility.
 
@@ -40,10 +47,11 @@ upgrade package digests.
 
 ## Validation
 
-Before completing the refactor, run Basic CI, Full CI, Security, Business
-Integration with `run-resilience=true`, both native Agent build/install smokes,
-Controller build/image smoke, and a dispatch of Release that performs no
-production writes. Verify AgentUpgrade digest success/refusal and Stage-0
+Validate merged main with Release Check (Full CI, Security and amd64 Business
+Smoke with recovery), separate manual `purpose=integration` diagnostics with
+`production_signer=true` and `run-resilience=true`, and a `version=0.0.0` Release
+dispatch: both native Agent build/install smokes and Controller build/image
+security/smoke legs must pass, assets must pass, and publish must be skipped. Verify AgentUpgrade digest success/refusal and Stage-0
 download success/failure and checksum mismatch if a plain Stage-0 checksum is retained. Audit the retired release-chain
 references across the repository. Do not publish a version or deploy production
 as part of this validation.

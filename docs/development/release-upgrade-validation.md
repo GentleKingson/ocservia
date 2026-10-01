@@ -14,11 +14,12 @@ gh workflow run release-upgrade.yml --ref <branch> \
 ```
 
 Integrated is the default and uses the actual Signer on disposable native
-amd64 runners. It freshly builds the packages and images, scans OS
-vulnerabilities, and installs from a local loopback registry. It does not write
+amd64 runners. It freshly builds the packages and images and installs from a
+local loopback registry. Image vulnerability scanning belongs to Release
+Controller product jobs on both architectures. It does not write
 GHCR, create tags, publish GitHub Releases, or read production Secrets.
 `purpose=smoke` selects smoke independently of `production_signer`;
-`production_signer=false` selects the standalone topology. This diagnostic run it cannot replace the complete manual Release Check.
+`production_signer=false` selects the standalone topology. This diagnostic run cannot replace the complete manual Release Check.
 
 Both native architecture builds retain real ELF architecture/version checks,
 protected archive staging, SHA checks, installation/retry/removal smoke and
@@ -36,7 +37,7 @@ For a complete build-only release rehearsal:
 gh workflow run release.yml --ref main -f version=0.0.0
 ```
 
-This runs both Agent build/install smoke legs, both Controller image smokes,
+This runs both Agent build/install smoke legs, both Controller build/image-security/smoke legs,
 and prepares the ordinary package/configuration assets. Dispatch never enters
 Publish. Tag publication separately builds from its tag and uses ordinary
 asset replacement on reruns.
