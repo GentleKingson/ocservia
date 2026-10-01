@@ -127,15 +127,16 @@ case "${platform}" in
     grype_platform="linux_amd64"
     ;;
   Linux-aarch64)
+    node_platform="linux-arm64"
     go_platform="linux-arm64"
     rust_platform="aarch64-unknown-linux-gnu"
     nfpm_platform="Linux_arm64"
     syft_platform="linux_arm64"
     grype_platform="linux_arm64"
     case "${PROFILE}" in
-      go-test | rust-basic | native-packages | package-tools | image-security) ;;
+      go-test | rust-basic | native-packages | package-tools | image-security | npm-security) ;;
       *)
-        echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, rustup, nfpm, syft and grype (no Node, quality tools or sccache)" >&2
+        echo "unsupported bootstrap platform/profile: ${platform}/${PROFILE}; artifact mappings exist only for Go, Node/npm, rustup, nfpm, syft and grype (no quality tools or sccache)" >&2
         exit 1
         ;;
     esac

@@ -179,6 +179,13 @@ bash "${ROOT}/scripts/release-upgrade-native.sh" "$CONTROLLER_ARCH" >"${ARTIFACT
 next_stage dependency_setup
 bash "${ROOT}/scripts/bootstrap.sh" native-packages
 bash "${ROOT}/scripts/bootstrap.sh" npm-security
+# The native builder drops all capabilities. A root Business driver therefore
+# needs writable, root-owned task caches before entering that container.
+# The workflow returns these same build caches to the runner after the probe.
+if [[ "$EUID" == 0 ]]; then
+  mkdir -p "$ROOT/rust/target"
+  chown -R 0:0 "$ROOT/.cache" "$ROOT/.tools" "$ROOT/rust/target"
+fi
 next_stage agent_package_build
 env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 next_stage controller_image_build

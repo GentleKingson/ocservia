@@ -115,10 +115,11 @@ bytes or runtime dependencies.
 ## Linux ARM64 Go validation
 
 Bootstrap installs repository tools, not system packages. Linux `aarch64`
-supports `go-test` and retains the existing `rust-basic` and `native-packages`
-paths. Other ARM64 profiles (including
-`all`, `native`, Web, quality and security profiles) fail before installation:
-their Node, sccache or quality-tool artifact mappings are not supplied. Linux
+supports `go-test`, `rust-basic`, `native-packages`, `package-tools`,
+`image-security` and `npm-security`. The last installs pinned Node/npm for
+native Business configuration helpers. Other ARM64 profiles (including
+`all`, `native`, Web, quality and combined security) fail before installation:
+their sccache or quality-tool artifact mappings are not supplied. Linux
 AMD64 and Darwin ARM64 keep their existing mappings; this ARM64 procedure does
 not certify every profile on those platforms or run Rust acceptance.
 
