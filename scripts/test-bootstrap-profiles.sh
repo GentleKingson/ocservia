@@ -68,7 +68,8 @@ jobs.each do |id, job|
   Array(job["steps"]).each do |step|
     reject("#{id} must propagate step failures") if step["continue-on-error"]
     next unless step["uses"]
-    reject("#{id} has an unpinned action") unless step["uses"].match?(/@[0-9a-f]{40}\z/)
+    reject("#{id} has an unpinned action") unless step["uses"].match?(/@[0-9a-f]{40}\z/) ||
+      (id == 'controller-cache' && step['uses'] == './.github/actions/build-cache-credentials')
   end
 end
 result = jobs.fetch("basic-ci-result")
@@ -117,7 +118,7 @@ reject("tool checks must receive the same Go selection") unless
 Dir.mktmpdir("ci-entrypoints-") do |tmp|
   work = File.join(tmp, "work")
   files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
-  files += %w[.github/workflows/release.yml .github/workflows/release-upgrade.yml
+  files += %w[.github/workflows/ci.yml .github/workflows/release.yml .github/workflows/release-upgrade.yml
               .github/workflows/release-products.yml
               .github/workflows/release-business-diagnostic.yml .github/workflows/release-check.yml
               rust/agent-build.Dockerfile].map { |path| File.join(root, path) }

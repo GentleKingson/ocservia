@@ -26,6 +26,8 @@ shift 3
 
 strict_export="${BUILD_CACHE_STRICT_EXPORT:-false}"
 [[ "${strict_export}" == true || "${strict_export}" == false ]] || usage
+cache_mode="${BUILD_CACHE_MODE:-max}"
+[[ "${cache_mode}" == min || "${cache_mode}" == max ]] || usage
 if [[ "${strict_export}" == true && "${export_cache}" != true ]]; then
   echo "::error::strict cache export requires export-cache=true" >&2
   exit 2
@@ -49,11 +51,11 @@ if [[ "${export_cache}" == true ]]; then
   # solves; the strict exporter makes an unfinished export fail the solve.
   if [[ "${strict_export}" == true ]]; then
     cache_args+=(
-      --cache-to "type=gha,scope=${scope},mode=max,timeout=${cache_timeout},version=2"
+      --cache-to "type=gha,scope=${scope},mode=${cache_mode},timeout=${cache_timeout},version=2"
     )
   else
     cache_args+=(
-      --cache-to "type=gha,scope=${scope},mode=max,ignore-error=true,timeout=${cache_timeout},version=2"
+      --cache-to "type=gha,scope=${scope},mode=${cache_mode},ignore-error=true,timeout=${cache_timeout},version=2"
     )
   fi
 fi

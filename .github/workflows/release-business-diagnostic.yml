@@ -73,6 +73,20 @@ jobs:
               sudo chown -R -- "$(id -u):$(id -g)" "$path"
             fi
           done
+      - name: Summarize business timings and sanitized failures
+        if: always()
+        env:
+          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
+        run: |
+          if [[ -f "$DIAGNOSTICS/result.json" ]]; then
+            jq '{probe_status,last_stage,exit_code,timings,resilience_scenarios}' "$DIAGNOSTICS/result.json"
+          fi
+          if [[ -f "$DIAGNOSTICS/api-checkpoints.jsonl" ]]; then
+            jq -c 'select(.name == "real_vpn_relay_recovery" or .name == "resilience_relay") | {name,time,status}' "$DIAGNOSTICS/api-checkpoints.jsonl"
+          fi
+          if [[ -f "$DIAGNOSTICS/probe.log" ]]; then
+            grep -E '^(RuntimeError:|AssertionError|probe failed at line)' "$DIAGNOSTICS/probe.log" || true
+          fi
       - name: Require completed business and actual recovery scenarios
         env:
           DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics

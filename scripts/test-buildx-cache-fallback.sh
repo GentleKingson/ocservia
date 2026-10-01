@@ -16,6 +16,7 @@ set -euo pipefail
 
 log_file="${BUILD_FAKE_DOCKER_LOG:?BUILD_FAKE_DOCKER_LOG is required}"
 printf '%s\n' "$*" >>"${log_file}"
+if [[ "${1:-} ${2:-}" == 'buildx create' ]]; then exit 0; fi
 [[ "${1:-}" == buildx && "${2:-}" == build ]] || exit 64
 if [[ "${BUILD_FAKE_IMPORT_OK:-false}" != true ]] && [[ " $* " == *" --cache-from "* ]]; then
   echo "simulated cache importer failure" >&2
@@ -31,6 +32,11 @@ if [[ "${BUILD_FAKE_STRICT_EXPORT_FAILURE:-false}" == true ]] \
   echo "simulated cache exporter failure" >&2
   exit 31
 fi
+for arg in "$@"; do
+  if [[ "$arg" == type=docker,dest=* ]]; then
+    printf 'image archive\n' >"${arg#type=docker,dest=}"
+  fi
+done
 DOCKER
 chmod 0755 "${fake_bin}/docker"
 
@@ -205,4 +211,58 @@ if [[ "${strict_ok_invocation}" == *"ignore-error"* ]]; then
   exit 1
 fi
 
-echo "BuildKit cache fallback checks passed"
+# Exercise both native Controller legs through the shared caller and wrapper.
+cat >"${fake_bin}/uname" <<'UNAME'
+#!/usr/bin/env bash
+echo "${BUILD_FAKE_MACHINE:?}"
+UNAME
+chmod 0755 "${fake_bin}/uname"
+for arch in amd64 arm64; do
+  machine=x86_64
+  [[ "$arch" != arm64 ]] || machine=aarch64
+  for mode in product cache; do
+    log="${test_dir}/controller-${arch}-${mode}.log"
+    args=()
+    [[ "$mode" != cache ]] || args+=(--cache-only)
+    PATH="${fake_bin}:${PATH}" BUILD_FAKE_MACHINE="$machine" \
+      BUILD_FAKE_DOCKER_LOG="$log" BUILD_FAKE_IMPORT_OK=true \
+      BUILD_CACHE_AVAILABLE=true ACTIONS_RUNTIME_TOKEN=test \
+      BUILD_CACHE_FAILURE_DIR="${test_dir}/controller-${arch}-${mode}" \
+      VERSION=0.0.0 SOURCE_COMMIT=test CONTROLLER_ARCH="$arch" \
+      OUTPUT_DIR="${test_dir}/images" BUILDX_BUILDER=test \
+      GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+      bash "${ROOT}/scripts/build-release-controller.sh" "${args[@]}"
+    [[ "$(grep -c '^buildx build ' "$log")" == 9 ]]
+    grep -q -- '--no-cache-filter runtime-base' "$log"
+    for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+      line="$(grep -- "--tag ghcr.io/gentlekingson/ocservia/${name}:" "$log")"
+      [[ "$line" == *"--cache-from type=gha,scope=controller-v1-${name}-linux-${arch},"* ]]
+      [[ "$line" == *"--platform linux/${arch}"* ]]
+      if [[ "$mode" == product ]]; then
+        [[ "$line" != *--cache-to* && "$line" == *"--output type=docker,dest="* ]]
+        test -s "${test_dir}/images/${name}-linux-${arch}.tar"
+      else
+        cache_mode=min
+        case "$name" in control|transport|relay|signer) cache_mode=max ;; esac
+        [[ "$line" == *"--cache-to type=gha,scope=controller-v1-${name}-linux-${arch},mode=${cache_mode},timeout="* ]]
+        [[ "$line" != *ignore-error* && "$line" == *"--output type=cacheonly"* ]]
+      fi
+    done
+  done
+done
+# A PR, tag or dispatch cannot opt into the privileged main writer path.
+for identity in 'pull_request refs/pull/1/merge' 'push refs/tags/v1.0.0' 'workflow_dispatch refs/heads/main'; do
+  read -r event ref <<<"$identity"
+  if GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" VERSION=0.0.0 \
+      SOURCE_COMMIT=test CONTROLLER_ARCH=amd64 BUILDX_BUILDER=test \
+      bash "${ROOT}/scripts/build-release-controller.sh" --cache-only; then
+    echo 'untrusted Controller cache writer accepted' >&2
+    exit 1
+  fi
+done
+if BUILD_CACHE_MODE=invalid bash "${ROOT}/scripts/buildx-cache.sh" test true invalid-mode .; then
+  echo 'invalid cache mode accepted' >&2
+  exit 1
+fi
+
+echo "BuildKit cache fallback and native Controller cache policy checks passed"
