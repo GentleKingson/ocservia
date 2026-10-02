@@ -2,7 +2,6 @@ package configplan
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -202,5 +201,3 @@ func validLabel(value string, max int) bool {
 func validSecretKey(value string) bool {
 	return len(value) <= 256 && regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`).MatchString(value) && !strings.Contains(value, "..")
 }
-
-func HashHex(hash [32]byte) string { return hex.EncodeToString(hash[:]) }

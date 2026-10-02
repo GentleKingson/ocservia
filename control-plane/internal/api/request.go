@@ -26,10 +26,6 @@ func requestID(r *http.Request) string {
 	return value
 }
 
-func requireIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
-	return httpx.RequireIdempotencyKey(w, r)
-}
-
 func randomID() string {
 	var data [16]byte
 	if _, err := rand.Read(data[:]); err != nil {

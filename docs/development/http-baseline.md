@@ -83,6 +83,9 @@ Node session reads use `[]telemetryread.Session`, not ingestion models.
 <a id="configplan-http-module-r2-02"></a>
 ## ConfigPlan requests
 
+Create and Apply use `httpx.RequireIdempotencyKey` to trim the header and
+return the shared missing-key Problem.
+
 Create checks availability before node ID; Apply checks ID, trimmed idempotency
 key, JSON and approval ID before its business call. Disabled services fail at
 their existing validation point, after outer authentication, Origin and resource
