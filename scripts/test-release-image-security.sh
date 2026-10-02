@@ -16,7 +16,7 @@ cat >"$work/bin/syft" <<'EOF'
 while (($#)); do
   case "$1" in --file) destination="$2"; shift 2 ;; *) shift ;; esac
 done
-printf '{"spdxVersion":"SPDX-2.3","packages":[]}' >"$destination"
+printf '{"spdxVersion":"SPDX-2.3","packages":%s}' "$SBOM_PACKAGES" >"$destination"
 EOF
 cat >"$work/bin/grype" <<'EOF'
 #!/usr/bin/env bash
@@ -34,11 +34,13 @@ echo "scan|$GRYPE_DB_AUTO_UPDATE" >>"$TRACE"
 while (($#)); do
   case "$1" in --file) destination="$2"; shift 2 ;; *) shift ;; esac
 done
-printf '{"matches":[%s]}' "$REPORT" >"$destination"
+printf '{"matches":[%s],"descriptor":{"db":{"status":%s}}}' "$REPORT" "$SCAN_DB_STATUS" >"$destination"
 EOF
 chmod 755 "$work/bin/"*
 export PATH="$work/bin:$PATH" TRACE="$trace"
 export IMAGE_ARCHIVES_TSV="$archives" IMAGE_SCAN_EXEMPTIONS="$exemptions"
+export SBOM_PACKAGES='[]'
+export SCAN_DB_STATUS='{"built":"2001-02-03T04:05:06Z","from":"https://example.invalid/first-scan-db"}'
 finding() {
   local fixes='[]'
   [[ "$5" != true ]] || fixes='["fixed-version"]'
@@ -55,6 +57,26 @@ expect_failure
 [[ "$(grep -c '^scan|false$' "$trace")" == 2 ]]
 REPORT="$(finding package 1 CVE-unfixed Critical false),$(finding medium 1 CVE-medium Medium true)"
 run_scan
+# Evidence comes from this scan and its SBOM, not the DB status command or matches.
+evidence() { jq -Rsc '[split("\n")[] | fromjson? | select(has("db_built"))]' "$work/scan.log"; }
+evidence | jq -e '
+  length == 2 and map(.arch) == ["amd64", "arm64"] and all(.[];
+    .image == "gateway" and .db_built == "2001-02-03T04:05:06Z" and
+    .db_source == "https://example.invalid/first-scan-db" and .pcre2 == [])
+' >/dev/null
+printf 'edge\tamd64\t%s\nedge\tarm64\t%s\n' "$work/image.tar" "$work/image.tar" >"$archives"
+SCAN_DB_STATUS='{"built":"2002-03-04T05:06:07Z","from":"https://example.invalid/second-scan-db"}'
+SBOM_PACKAGES='[{"name":"pcre2","versionInfo":"fixture-pcre2-version"},{"name":"unrelated","versionInfo":"other-version"}]'
+REPORT='' run_scan
+evidence | jq -e '
+  length == 2 and map(.arch) == ["amd64", "arm64"] and all(.[];
+    .image == "edge" and .db_built == "2002-03-04T05:06:07Z" and
+    .db_source == "https://example.invalid/second-scan-db" and .pcre2 == ["fixture-pcre2-version"])
+' >/dev/null
+# Missing log metadata is not fabricated and does not change the vulnerability gate.
+SCAN_DB_STATUS='{}' REPORT='' run_scan
+evidence | jq -e 'length == 2 and all(.[]; .db_built == null and .db_source == null)' >/dev/null
+SBOM_PACKAGES='[]'
 # Reviewed exceptions never transfer to another CVE, version, image or base.
 printf 'backup\tamd64\t%s\n' "$work/image.tar" >"$archives"
 base="$(awk '/^FROM / && $2 ~ /@sha256:/ {base=$2} END {print base}' deploy/production/backup.Dockerfile)"
