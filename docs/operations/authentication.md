@@ -3,7 +3,7 @@
 Production supports **Local only**, **OIDC only**, and **Local + OIDC**. OIDC is
 not mandatory when Local authentication is enabled. Use the normal
 [Controller installation](../getting-started/production.md) and
-[production secret permissions](production-deployment.md#secrets-and-release-trust)
+[production secret permissions](production-deployment.md#production-secrets)
 for all three modes; these examples replace only the authentication section of
 `install.env`, not the database, TLS, relay, signer, backup or release settings.
 
@@ -176,9 +176,7 @@ Sampling can suppress individual events; inspect `auth.summary` counts too.
 Public errors deliberately do not disclose whether an account exists. Never send
 passwords, cookie values, request bodies or raw response headers in an incident
 report. Record the stage, status, request ID and relevant non-secret request
-shape. The historical “terminal 401, Web success” report has an unconfirmed root cause until
-those requests can be correlated; this procedure does not establish an
-authentication-algorithm defect.
+shape; a status code alone does not identify the cause.
 
 ## OIDC provider setup
 
@@ -244,8 +242,7 @@ merges nor migrates them. If a separately approved migration is genuinely needed
    manual review if identities/roles have since changed, rather than overwriting
    newer data. Retain rollback evidence with the same change ticket.
 
-These are controlled operator steps, not a login-time fallback. R5 does not run
-them against production or assume that any deployment requires them.
+These steps require a separately approved migration; login never performs them.
 
 The origin (scheme, host and effective port) of `OCSERV_OIDC_REDIRECT_URL` must
 equal `OCSERV_PUBLIC_ORIGIN`. A mismatch fails production startup. In dual-auth,

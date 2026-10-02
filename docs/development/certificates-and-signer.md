@@ -1,16 +1,92 @@
-# Production Signer
+# Certificates, secrets and Signer
 
-P2 implements the [P0 wire and custody contract](integrated-deployment-adr.md#signer-contract).
-It is a separate Go module/process, not a Controller command-signing provider.
-The Python release-business signer remains a disposable test fixture.
+## Certificate and secret lifecycle
 
-## Runtime contract
+Certificate requests generate their private key on the managed node. The
+controller receives a signed CSR and public-key digest, then sends the CSR to a
+configured external PKI signer only after an independent, content-bound
+approval. The controller does not store a CA private key or a node private key.
+CSR self-signature is not privilege evidence. A CSR enters `csr_ready` only
+after Controller verifies a root privd receipt binding certificate ID, CSR and
+public-key digests, requested-subject digest, node, command, operation,
+idempotency key, and root effect record. Immediately before calling the signer,
+Controller locks the certificate row and rechecks exact CSR digest,
+receipt-bound request/version, node, approval hash, and non-revoked key. P12 and
+certificate-key revocation use the same terminal-result attestation rule.
+
+Configure the external HTTPS service with
+`OCSERV_CERTIFICATE_SIGNER_URL`, `OCSERV_CERTIFICATE_SIGNER_TOKEN`, and
+`OCSERV_CERTIFICATE_SIGNER_TIMEOUT`. The service must make signing and
+revocation idempotent by certificate ID and provide node-targeted secret
+sealing. An unavailable signer leaves the certificate request recoverable and
+returns a service-unavailable problem response.
+
+For a private Signer trust chain, set `OCSERV_CERTIFICATE_SIGNER_CA_FILE` to
+the public PEM CA bundle. It affects only this client, never the process-wide
+trust store. Without it, external HTTPS trust is unchanged. The bundled
+implementation, controlled public-key transfer and offline recovery procedures
+are described in [Production Signer](#production-signer).
+
+The `/seal` request includes `X-Ocservia-Node-ID` and the exact
+`X-Ocservia-Seal-Purpose` (`user_password` or
+`certificate_p12_password`). Its response must echo `version: 1`, the exact
+purpose, the enrolled purpose-specific `key_id`, and the base64 ciphertext.
+The Controller rejects a missing, substituted, or unregistered binding.
+
+P12 export uses a fresh random password and a separately random artifact token.
+The password is sealed with the node's dedicated P12-password public key and
+cannot be opened by the independent user-password key. The password and token
+are returned only by the initial request and are never stored in the Controller database.
+Privd decrypts the typed secret locally, creates an encrypted UUID-addressed
+artifact in its fixed root-owned spool, and records its certificate/version,
+operation, digest, size, expiry, and state in the authenticated effect store.
+The root mapping enters `prepared` before any staging file is created and moves
+to `available` only after the final artifact is published, so revocation can
+remove crash-left staging as well as completed artifacts.
+
+Downloads require ordinary node authorization, the separate
+`X-Artifact-Token`, and a short-lived Controller-signed `ArtifactGrantV1` bound
+to the node, artifact, certificate/version, operation, requester, purpose,
+maximum size, and unique grant ID. Agent and privd verify the grant
+independently. Only one grant may lease an artifact at a time; an interrupted
+lease becomes available only after its bounded expiry. The root ledger also
+advances the exact chunk offset, so a second stream cannot reuse the same grant
+from offset zero. Reading does not consume the artifact. After the Control Plane has received the complete stream and
+verified its size and digest, it relays a separate finalize request carrying
+the same signed grant to Agent and privd. Successful finalization is durably
+consumed and the local P12 is deleted. Consumed grants cannot replay a fetch.
+An exact finalize retry may acknowledge the already-consumed root record so a
+lost response cannot strand the Controller lease; it never reopens the bytes
+or repeats the deletion.
+Certificate revocation invalidates outstanding grants and removes
+all mapped P12 and staging files. Time-based cleanup is only crash recovery for
+expired or orphaned files.
+
+Secret provider records contain only provider, opaque key path, version, and
+lifecycle state. Secret values must remain in the external provider. Rotation
+records the new external version and appends an authenticated audit event; it
+does not copy the value into the control plane.
+
+Certificate expiry enters `expiring` thirty days before `not_after` and emits a
+high-severity alert. Revocation is sent idempotently to the external signer and
+then removes only the UUID-derived node-local key. Before database recovery,
+stop certificate and artifact creation and reconcile all nonterminal
+certificate commands. Preserve terminal command history and root effect evidence.
+The current tree provides no database down migrations; use a forward fix or an
+explicitly planned [isolated restore](../operations/incident-recovery.md#database-recovery).
+
+## Production Signer
+
+Signer is a separate Go module/process under the
+[Integrated custody boundary](integrated-deployment-adr.md#signer-contract),
+not a Controller command-signing provider. The Python business signer is a test fixture.
+
+### Runtime contract
 
 Build with `docker build -f deploy/production/signer.Dockerfile .`.
 The image runs `/ocserv-signer serve` as UID:GID `65532:65532`; run with a
 read-only root filesystem, all capabilities dropped, no-new-privileges and
 only the Controller-to-Signer internal network. No host port is required.
-P3 owns Compose integration; P4 owns manifest/Registry publication.
 
 Default files and listener:
 
@@ -58,7 +134,7 @@ the actual RSA-OAEP capacity (190 bytes for RSA-2048). At most 32 requests enter
 business handling; excess returns 503. Header/read/write/idle timeouts are
 5/10/15/30 seconds. Failures return fixed status text, not request content.
 
-## Policy and durable effects
+### Policy and durable effects
 
 Policy `rsa-client-v1-24h` accepts signed RSA-2048/3072/4096 CSRs with exponent
 65537, SHA-256/384/512 RSA or RSA-PSS signatures, one CN, and at most 32 DNS SANs.
@@ -84,11 +160,10 @@ next-update and audit revision as CRL number. Run it through the protected
 operator workflow and publish atomically to the intended verifier separately.
 Reason text remains in the ledger; CRL reason code is unspecified. A 204 revoke
 is not proof of node cleanup, VPN session termination or CRL distribution.
-The exact-SHA [validation record](production-signer-validation.md) distinguishes
-real verifier refresh/enforcement from unit checks. There is no public CRL
-endpoint or OCSP service; refresh is an explicit operator responsibility.
+There is no public CRL endpoint or OCSP service; refresh and verifier enforcement
+are explicit operator responsibilities, not established by unit checks.
 
-## Trusted public-key transfer
+### Trusted public-key transfer
 
 Stop affected mutations while changing mappings. There is no automatic sync or
 in-place rotation. Only a protected operator may import or disable bindings;
@@ -135,11 +210,10 @@ label and standard base64. Passwords are not persisted or logged. Responses
 echo version 1, the exact purpose and its key ID. Missing/disabled mappings
 return 403. The two purposes cannot share a key or descriptor.
 
-## State and recovery
+### State and recovery
 
-State version is **1**, fixed to [bbolt v1.4.3](https://github.com/etcd-io/bbolt/releases/tag/v1.4.3).
-bbolt was chosen over suggested SQLite for a single pure-Go transactional
-ledger with an exclusive process lock and transaction-consistent snapshots.
+State version is 1, fixed to [bbolt v1.4.3](https://github.com/etcd-io/bbolt/releases/tag/v1.4.3),
+with an exclusive process lock and transaction-consistent snapshots.
 Default synchronous commits remain enabled. Local storage must honor fsync;
 network filesystems, multiple replicas and HA are unsupported.
 
@@ -170,7 +244,7 @@ No local tool can prove freshness after both ledger and independent evidence
 are lost. That situation requires manual reconciliation, not a floor of zero,
 clearing state, changing CA, or an automatic image rollback.
 
-## Focused verification
+### Focused verification
 
 Run only on BuildServer in an isolated copy with trusted ancestry and a private
 `TMPDIR`. Fixture CAs and node keys are generated for tests, never production.
@@ -197,12 +271,7 @@ Subprocess crashes cover preparation, signing, pre-commit and post-commit/lost
 reply. Tests also cover duplicate concurrency, corruption, recovery floors,
 TLS trust/SAN/default isolation, authentication, body limits and disabled keys.
 
-P3 receives the paths, UID/modes, health and state/recovery contracts above.
-P4 receives `deploy/production/signer.Dockerfile` and Controller's export CLI.
-P5 receives the focused tests; production-route acceptance must use the
-designated Registry images and separately prove real daemon/workflow execution.
-
-## Disposable Actions acceptance
+### Disposable Actions acceptance
 
 Dispatch `release-upgrade.yml` with `purpose=integration`,
 `production_signer=true` and a plain test version such as `0.0.0` on the branch
@@ -233,7 +302,7 @@ Missing files or failed assertions block acceptance and merge. A PR opened
 while validation is running is not evidence of acceptance.
 
 
-## Browser password sealing
+### Browser password sealing
 
 The authenticated `POST /sign/public-key` accepts only `node_id` and
 `purpose=user_password`. It reads the enabled durable binding established by

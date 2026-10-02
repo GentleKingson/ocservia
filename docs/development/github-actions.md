@@ -1,6 +1,6 @@
 # Basic CI
 
-> **CI reference.** Contributors should start with [Validate a change](testing.md).
+Start with [Validate a change](testing.md).
 
 One `.github/workflows/ci.yml` runs on PRs, main pushes and manual dispatch.
 Automatic runs use **Quick**. Manual dispatch accepts `quick|full`, defaulting
@@ -17,7 +17,7 @@ Full has a separate concurrency group and cannot cancel Quick.
 
 | Job | Retained checks |
 | --- | --- |
-| docs | Line endings, nonempty Markdown and documentation links/policy text |
+| docs | Line endings, nonempty Markdown and bootstrap/policy text; no general link check |
 | go | gofmt, vet and ordinary fast tests in both Go modules; no full-package race |
 | rust | Format, clippy and workspace tests |
 | web | Format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
@@ -130,25 +130,13 @@ Browser checks require Playwright Chromium installed separately. Disaster
 recovery, complex races and fault injection remain in their existing manual
 deep scripts; no scheduled workflow was added.
 
-## Required check migration
+## Required check
 
-`basic-ci-result` publishes the stable **Basic CI Result** check. It succeeds
-only when routing succeeds, every selected job succeeds, and every unselected
-job is skipped. Failed, cancelled, unexpectedly skipped, or missing results
-fail this one summary. No legacy result aggregators remain.
-
-The former required contexts below are historical names, not current jobs.
-The replacement summary check is `Basic CI Result`:
-
-- `Backend Integration`
-- `Web & Smoke`
-- `Quality, Security & Native`
-- `G6 Harness Smoke Core / G6 Harness Smoke Result`
-
-Changing workflow YAML does not migrate GitHub rulesets; administrators must
-check the ruleset separately. Leaving those old
-contexts required will block merging. The workflow does not bypass or modify
-branch protection.
+`basic-ci-result` publishes `Basic CI Result`: routing and every selected job
+must succeed; every unselected job must be skipped. Missing, failed, cancelled
+or unexpectedly skipped results fail. Administrators must configure GitHub
+rulesets to require this context and remove retired contexts; workflow YAML
+does not change branch protection.
 
 ## Separate acceptance
 
@@ -203,32 +191,15 @@ acceptance.
 
 ## Release workflow
 
-[Release Check](release-checks.md) runs manually on merged `main`: Full CI,
-Security and amd64 Integrated Business Smoke with four finite single-instance
-recoveries (`run-resilience=true`) must all succeed.
-`Basic CI Result` continues to protect PRs. The operator confirms a version
-only after Release Check PASS, then creates the version tag.
+[Release policy](release-checks.md) owns qualification, coverage and manual
+diagnostics. Only the tag-triggered `publish` job has `contents: write`,
+`packages: write` and the `release-publishing` environment. Reruns use ordinary
+`gh release upload --clobber`.
 
-The `vX.Y.Z` tag triggers native Agent and Controller builds for both supported
-architectures, exact Controller image security scans, install/image smoke, and
-publication to GitHub Release and GHCR only after both architectures pass.
-The formal workflow does not rerun acceptance or inherit earlier results.
-Dispatch `release.yml` with `version=0.0.0` to exercise both build/scan/smoke legs and
-asset preparation without publishing. Only the tag-only `publish` job has
-`contents: write`, `packages: write` and the `release-publishing` environment.
-Reruns use ordinary `gh release upload --clobber` behavior.
-
-[Manual diagnostics](release-upgrade-validation.md) reuse the same Business
-implementation. Integrated mode uses the real Signer, freshly built local
-images and a loopback test registry, with no GHCR publishing authority.
-Source dependency/secret scans remain in Security; OS image vulnerability
-scans run in Release `build-controller-images` against each architecture's exact
-archives, after build and before smoke/upload. Business has no image-security
-stage. Manual `purpose=integration` retains the deep runtime diagnostics.
-
-Release Controller jobs cache pinned image-security downloads and tools by OS,
-architecture and tool/bootstrap identity. The vulnerability DB is not cached;
-the scanner updates it once per invocation and fails on unavailable/invalid data.
+Release Controller jobs cache image-security tools by OS, architecture and
+tool/bootstrap identity, but never cache the vulnerability database. Each
+invocation updates it and fails on unavailable/invalid data. Scans check the
+exact archives after build and before smoke/upload; Business has no image scan.
 
 ## Optional build caches
 

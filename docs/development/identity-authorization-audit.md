@@ -94,9 +94,6 @@ write cost. Local login rechecks the credential and disabled state under lock
 before the shared session insert; session cookies, AEAD, authentication,
 logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
 
-Rolling back 000031 deletes local password hashes, not identities or sessions.
-Stop local provisioning/login and preserve credentials before applying down.
-
 Local login requires the installed release's complete backend migration history.
 PostgreSQL introduced shared account failure backoff in migration `000033`;
 MySQL/MariaDB provide it through their own manifests and storage revisions.
@@ -136,10 +133,10 @@ manager. The bootstrap reader uses the existing bounded Secret value format
 private mode, regular file, no final symlink and no hard links on the opened
 descriptor. Nonblocking open prevents FIFO substitution from hanging the CLI.
 Both new credentials use the shared password policy. No default, plaintext
-environment password or password CLI option exists. Different identities are
-not proof of different people: separate responsible owners and separate
-credential custody are operational requirements. Remove both temporary mounts
-and bootstrap settings after success.
+environment password or password CLI option exists. Independent credentials
+and sessions are required; two-person custody is a separate
+[security profile](../reference/stable-contracts.md#approval-principal-boundary).
+Remove both temporary mounts and bootstrap settings after success.
 
 The one-shot exits without starting listeners/workers or contacting OIDC. One
 transaction creates two `local` identities, Argon2id credentials, existing
@@ -209,9 +206,8 @@ PlatformAdmin or fewer than two distinct active Local workspace approvers.
 Disabled identities, inconsistent/missing Local credentials, other workspaces
 and narrower bindings do not count. This conservative Local recovery-anchor
 policy does not treat OIDC availability or temporary Break-glass as substitutes.
-Role creation shares the lock; repository inspection found no production
-role/identity deletion or other identity-disable path. No generic IAM revocation
-framework is added. Raw database administration is outside the HTTP boundary.
+Role creation shares the lock. There is no production role/identity deletion
+API; raw database administration is outside the HTTP boundary.
 
 Disable and reset revoke **all** `auth_sessions` for the target identity in the
 same transaction as the change and audit. `Authenticate` also checks

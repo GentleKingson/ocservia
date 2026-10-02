@@ -7,86 +7,73 @@
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-black.svg?logo=rust)](rust/Cargo.toml)
 [![Vue](https://img.shields.io/badge/Frontend-Vue%203%20%2B%20TS-4FC08D.svg?logo=vuedotjs)](web/package.json)
 
-**A calm, security-minded operations plane for your [ocserv](https://ocserv.openconnect-vpn.net/) / OpenConnect VPN fleets.**
+ocservia is a distributed management system for [ocserv](https://ocserv.openconnect-vpn.net/) / OpenConnect VPN server clusters. The administrative interface provides node health monitoring, user credential and quota provisioning, session inspection, and signed configuration distribution. Network traffic terminates directly at ocserv instances; data plane packets bypass the central controller.
 
-Managing a fleet of OpenConnect servers shouldn't mean keeping a dozen SSH terminals open, juggling config drifts by hand, or holding your breath during a config reload. **ocservia** gives operators a unified, beautifully crafted control plane to observe fleet health, manage users and quotas, review active sessions, and execute signed configuration changes — **without touching or proxying a single byte of your VPN traffic.**
+[Try it locally](#-try-it-locally-in-2-minutes) · [Operating model](#-what-makes-ocservia-different) · [Architecture](#-architecture-at-a-glance) · [Production deployment](#-deploying-to-production) · [Documentation](#-documentation)
 
-[Quick Playground](#-try-it-locally-in-2-minutes) · [Engineering Principles](#-what-makes-ocservia-different) · [Architecture](#-architecture-at-a-glance) · [Production Deployment](#-deploying-to-production) · [Documentation](#-documentation)
+## Features
 
----
+- Node monitoring covering connection states, daemon versions, active sessions, IP bans, and telemetry streams.
+- User management, group policies, traffic quotas, and expiration controls centralized in the Controller.
+- Session termination and IP ban revocation executed via signed operations with audit records.
+- Pre-deployment configuration validation with automatic rollback upon failure, deferring to manual operator recovery if restoration fails.
+- Node enrollment secured by single-use tokens and signed endpoint-possession proofs, completed by manual Controller approval.
+- Lifecycle management (installation, upgrades, rollbacks, and removals) targeting verified releases without implicit cross-version guarantees.
 
-## ✨ What ocservia does for you
+<a id="-what-makes-ocservia-different"></a>
+## Operating model
 
-- 🌐 **Unified Fleet Cockpit** — Observe all your ocserv nodes in real time. Track connection states, daemon versions, active sessions, ban lists, and live telemetry in one central dashboard.
-- 👥 **Centralized User & Quota Orchestration** — Define users, assign group policies, adjust bandwidth quotas, and schedule expiration dates centrally from the Controller instead of editing files on every host.
-- ⚡ **Surgical Session & Ban Actions** — Disconnect stuck sessions, terminate abusive connections, or unban client IP addresses with one click. Every action is cryptographically signed and logged with full audit trails.
-- 🛡️ **Config Staging with Rollback Guarantees** — Render and validate configuration diffs before they ever touch production. Risky fleet-wide rollouts support a built-in "two-man rule" approval workflow so four eyes can review before execution.
-- 🤝 **Deliberate Node Enrollment** — Managed nodes introduce themselves with signed tokens and wait in pending state until an operator explicitly approves them before receiving tasks.
-- 🔄 **Predictable Lifecycle Management** — Install, upgrade, roll back, or decommission Controller and node agents with pinned releases, verified cryptographic checksums, and zero unexpected side-effects.
+### VPN traffic stays on ocserv
 
----
+The Controller operates strictly out-of-band and does not route VPN traffic. An interruption or failure of the Controller affects management workflows only; active client VPN tunnels terminate directly on ocserv and persist unaffected, barring underlying node hardware faults or daemon-level restarts.
 
-## 🛡️ What makes ocservia different
+### Privileged operations are bounded
 
-We built ocservia because we operate infrastructure ourselves and know the anxieties of production maintenance. We designed it around three core principles:
+The node agent runs as an unprivileged process. Administrative actions requiring root privileges are handled by a dedicated daemon (`privd`) that communicates with the agent over an authenticated Unix domain socket. The daemon exposes a closed, predefined set of ocserv maintenance tasks, preventing the execution of arbitrary binaries or shell invocations.
 
-### 1. A Sidecar, Not a Tollgate (Zero Traffic Intrusion)
-ocservia runs **alongside** ocserv, never in the middle of your VPN packets. Your users connect directly to ocserv with full native wire speed. If the Controller stops, restarts, or loses its database connection, **your active VPN tunnels do not drop a single connection**.
+### Sensitive changes require independent approval
 
-### 2. Surgical Scalpels, Never a Backdoor (No Arbitrary Remote Shells)
-Many management panels take shortcuts by running arbitrary `sh -c` strings as root over the network. **ocservia strictly rejects this.** Our Rust node agent splits execution into an unprivileged communication process and a sandboxed privileged daemon (`privd`). Privileged actions are restricted to a pre-compiled set of fixed ocserv operations, validated over Unix domain sockets with local attestation.
+High-impact operations require dual authorization cryptographically bound to the target command payload. Dispatch requires separate authentication from distinct principals holding independent credentials and active sessions, prohibiting self-approval. This mechanism establishes logical separation of duty, while assuming the security of the underlying credential issuance.
 
-### 3. The "Two-Man Rule" for Risky Changes
-To prevent accidental fat-finger disasters at 3 AM, high-risk operations (such as major configuration updates or batch commands) can require approval from an independent authorized operator before the Controller signs and dispatches the task.
+<a id="-architecture-at-a-glance"></a>
+## Architecture
 
----
+Clients interact with the Controller via an HTTPS REST API for command dispatch and server-sent events (SSE) for streaming state updates. The Go Controller communicates with `transportd` through a local gRPC Unix domain socket; `transportd` manages the Iroh endpoint and establishes peer connections to remote agents.
 
-## 📐 Architecture at a glance
+Production topologies specify a single dedicated Relay. Network routing via the Relay and EndpointID verification operate in tandem with Controller-signed session credentials and payload signatures. Multi-relay failover is explicitly unsupported.
 
 ```text
-  Operator Browser (Vue 3 / TypeScript)
-                 │  HTTPS / WSS
-                 ▼
-     ┌───────────────────────┐
-     │  Controller (Go)      │ ───► Supported DB (PostgreSQL 17 / MySQL / MariaDB)
-     └───────────────────────┘
-                 │  mTLS / Pinned Relays
-                 ▼
-     ┌───────────────────────┐
-     │   Dedicated Relays    │ ◄─── (Isolates nodes from public ingress)
-     └───────────────────────┘
-                 │
-                 ▼
-┌──────────────────────────────────────────────────────────┐
-│  Managed Node (Each VPN Server)                          │
-│                                                          │
-│   ┌──────────────────┐         Local UDS /               │
-│   │ Rust Agent       │ ── Attested Protocol ──┐          │
-│   └──────────────────┘                        ▼          │
-│                                      ┌─────────────────┐ │
-│                                      │ Rust privd      │ │
-│                                      └─────────────────┘ │
-│                                               │          │
-│                                        Fixed occtl calls │
-│                                               ▼          │
-│                                      ┌─────────────────┐ │
-│                                      │ ocserv Daemon   │ │
-│                                      └─────────────────┘ │
-└──────────────────────────────────────────────────────────┘
+Browser (Vue 3 / TypeScript)
+  |
+  | HTTPS API / SSE
+  v
+Controller (Go) -----------------> PostgreSQL / MySQL / MariaDB
+  |
+  | gRPC over local Unix socket
+  v
+transportd (Rust / Iroh)
+  |
+  | Iroh connection, with one dedicated Relay
+  v
+Agent (Rust, unprivileged)
+  |
+  | Authenticated local Unix socket
+  v
+privd (Rust, privileged)
+  |
+  | Fixed ocserv-related operations
+  v
+ocserv
 ```
 
-- **Controller** — Modular Go backend managing the Web UI, API, scheduling, state machines, and transactional audit journals.
-- **Relays** — Low-footprint proxies that allow nodes behind NAT/firewalls to maintain secure, outbound-only control channels.
-- **Node Agent & privd** — Ultra-lightweight Rust services maintaining local health heartbeats and executing signed operational tasks with least-privilege isolation.
-- **Database** — Reliable transactional storage supporting PostgreSQL (default), MySQL 8.4, or MariaDB 12.3 with verified backups and isolated restore procedures.
+The Controller coordinates API handling, job scheduling, state-machine transitions, and immutable audit logs. Node agents publish periodic health telemetry, and `privd` applies authorized node changes. PostgreSQL serves as the default database backend, with MySQL 8.4 and MariaDB 12.3 supported for external instances. Supported database releases and backup boundaries are documented in the [support policy](docs/reference/support-policy.md).
 
-*Read the complete [Architecture & Trust Model](docs/architecture.md) for details.*
+See the [architecture and trust model](docs/architecture.md) for comprehensive process boundaries and threat assumptions.
 
----
+<a id="-try-it-locally-in-2-minutes"></a>
+## Try it locally
 
-## ☕ Try it locally in 2 minutes
-
-Want to explore the web console and test fleet workflows without touching real servers? The local playground spins up the Controller, the Web UI, and simulated nodes with realistic telemetry:
+The development environment provisions the Controller, administrative web interface, database, and synthetic agent nodes using Docker Compose, without binding to an active ocserv daemon. Local deployment requires Git, Docker Compose, and unbound ports 4173 and 8080.
 
 ```bash
 git clone https://github.com/GentleKingson/ocservia.git
@@ -96,19 +83,16 @@ cd ocservia
 deploy/compose/compose.sh up --build -d
 ```
 
-- **Web Console**: Open [http://127.0.0.1:4173](http://127.0.0.1:4173) in your browser.
-- **Controller Health**: Verify readiness at `http://127.0.0.1:8080/readyz` and `/version`.
+The web console binds to [http://127.0.0.1:4173](http://127.0.0.1:4173). Controller readiness and build metadata can be queried at `http://127.0.0.1:8080/readyz` and `http://127.0.0.1:8080/version`.
 
-*To tear down cleanly and wipe temporary volumes, run `deploy/compose/compose.sh down --volumes`.*  
-*See [Try ocservia locally](docs/getting-started/local-development.md) for details.*
+To terminate the environment and purge persistent storage volumes, execute `deploy/compose/compose.sh down --volumes`. Comprehensive setup instructions are provided in [Try ocservia locally](docs/getting-started/local-development.md).
 
----
-
-## 🚀 Deploying to production
+<a id="-deploying-to-production"></a>
+## Deploying to production
 
 ### 1. Deploy the Controller
 
-Keep your production settings in a dedicated directory outside the source checkout:
+Store production configuration files in a dedicated workspace outside the repository directory. Substitute `vX.Y.Z` with an official release tag:
 
 ```bash
 # Clone the pinned release
@@ -123,11 +107,13 @@ $EDITOR install.env
 ../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh --version vX.Y.Z
 ```
 
-Configure authentication as **Local only**, **OIDC only**, or **Local + OIDC**. First-time Local setups initialize credentials through the one-shot protected token workflow described in [Production authentication](docs/operations/authentication.md). Full instructions are in [Deploy the Controller](docs/getting-started/production.md).
+Authentication supports local credentials, OpenID Connect (OIDC), or hybrid local and OIDC modes. In initial local deployments, administrative credentials must be established via the single-use bootstrap token workflow described in [Production authentication](docs/operations/authentication.md).
 
-### 2. Install a Managed Node
+In standalone configurations, the Relay and Signer services reside on isolated hosts. Alternatively, integrated configurations colocate these services on the Controller host, which requires explicit configuration parameters and elevated lifecycle permissions. Secret material must be provisioned according to [Deploy the Controller](docs/getting-started/production.md) prior to bootstrapping.
 
-On each ocserv server you wish to manage:
+### 2. Install a managed node
+
+Execute on each target ocserv host:
 
 ```bash
 git clone --branch vX.Y.Z --single-branch --depth 1 \
@@ -140,63 +126,53 @@ $EDITOR install.env
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh
 ```
 
-Once installed, the node enters a `pending` approval state. Review and approve the new node in the Controller Web console, then start the node services. See [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a node](docs/how-to/enroll-node.md).
+If invoked without an enrollment token, the installer outputs `ENROLLMENT_READY`. Supplying a valid token advances the state to `ENROLLED_LOCAL`, indicating local registration without granting authorization or network access. To complete onboarding, inspect the node within the Controller interface, confirm approval, start daemon processes manually, and observe incoming telemetry.
 
----
+The installation script intentionally omits automatic approval and daemon startup. Detailed workflows are documented in [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a node](docs/how-to/enroll-node.md).
 
-## 📚 Documentation
+<a id="-documentation"></a>
+## Documentation
 
 | Topic | Description |
 | :--- | :--- |
-| **[Getting Started](docs/README.md)** | Start here: local setup, production deployment, and first enrollment. |
-| **[Architecture & Trust](docs/architecture.md)** | System topology, trust boundaries, and least-privilege security model. |
-| **[Operations & Runbooks](docs/operations/production-deployment.md)** | Single Relay recovery and backup/restore (Postgres & MySQL). |
-| **[Troubleshooting Guide](docs/how-to/troubleshooting.md)** | Diagnostic checklists for startup, OIDC, telemetry, and agent enrollment. |
-| **[Support & Versioning Policy](docs/reference/support-policy.md)** | Current support contracts, platform matrix, and cross-version policies. |
-| **[Technical Reference](docs/reference/README.md)** | Detailed API schemas, gRPC protocols, and internal specifications. |
+| [Getting started](docs/README.md) | Local setup, production deployment, and first enrollment. |
+| [Architecture and trust](docs/architecture.md) | System topology, trust boundaries, and process privileges. |
+| [Operations and runbooks](docs/operations/production-deployment.md) | Deployment lifecycle, database configuration, and recovery references. |
+| [Troubleshooting](docs/how-to/troubleshooting.md) | Startup, OIDC, telemetry, and enrollment diagnostics. |
+| [Support and versioning policy](docs/reference/support-policy.md) | Supported platforms, deployment scope, and cross-version limits. |
+| [Technical reference](docs/README.md#technical-reference) | API schemas, protocols, and implementation contracts. |
 
----
+## Development
 
-## 🛠️ Developing & Contributing
-
-We pin all toolchains to guarantee deterministic builds across environments:
+Toolchain versions are pinned across the repository. To install requisite dependencies and execute test validation:
 
 ```bash
 make bootstrap
 make verify
 ```
 
-GitHub Actions enforces strict merge validation. See [Contributor validation](docs/development/testing.md) for testing guidelines and build workflows.
+Refer to [Contributor validation](docs/development/testing.md) for toolchain prerequisites, component-specific test suites, and continuous integration workflows.
 
----
+## Releases and compatibility
 
-## 📌 Release & Stability Notice
+Effective as of [`v1.1.0`](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0), the project deprecated automated compatibility validation across heterogeneous versions. Although published under a minor version identifier, this represents a backward-incompatible governance shift: validation of an installation, upgrade, or rollback target does not guarantee runtime compatibility with existing database state. Deployments must adhere to the [current support and versioning policy](docs/reference/support-policy.md).
 
-> [!NOTE]
-> [`v1.1.0`](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0) is published. Starting with `v1.1.0`, software-version compatibility admission and the previous cross-version support promise are removed. This is a breaking policy change despite the minor version number; an accepted target is not a guarantee of cross-version safety. Follow the [current support and versioning policy](docs/reference/support-policy.md).
->
-> Always pin an exact [published release](https://github.com/GentleKingson/ocservia/releases). The default branch and unreleased candidates are not published production releases. The P1 test harness provides single-host resilience validation outside basic CI; see [P1 resilience and capacity](docs/development/p1-resilience-capacity.md).
+Production deployments must pin specific, official [published releases](https://github.com/GentleKingson/ocservia/releases). Development branches and release candidates are unsuitable for production environments. The [P1 resilience and capacity harness](docs/development/p1-resilience-capacity.md) provides synthetic load and fault injection for simulated agents; it does not substitute for empirical qualification on production node infrastructure.
 
----
+## Security
 
-## 🔒 Security
+Administrative commands dispatched across the management plane require cryptographic authorization, and local root execution is restricted to an invariant set of daemon operations. High-risk administrative transitions require multi-party approval, replay protection, durable command ledgers, and signed execution receipts. If command execution yields an ambiguous state, subsequent conflicting transitions are blocked until state reconciliation completes.
 
-ocservia is designed from the ground up for zero-trust environments. Privileged operations are strictly constrained to fixed ocserv actions, commands require cryptographic authorization, and high-risk changes require auditable multi-operator sign-off.
+Vulnerability disclosures must be submitted privately following the guidelines in [SECURITY.md](SECURITY.md), rather than via public issue trackers.
 
-If you discover a security vulnerability, please report it responsibly by following our instructions in [SECURITY.md](SECURITY.md). **Do not open public GitHub issues for security reports.**
+## Community and support
 
----
+- Bug reports and technical inquiries should be submitted via [GitHub Issues](https://github.com/GentleKingson/ocservia/issues), accompanied by reproduction steps, environment specifications, and sanitized logs.
+- Release artifacts and distribution archives are published on the [Releases page](https://github.com/GentleKingson/ocservia/releases).
 
-## 💬 Community & Support
+<a id="license"></a>
+## License and acknowledgements
 
-- **Bug Reports & Discussions**: Open a [GitHub Issue](https://github.com/GentleKingson/ocservia/issues) with reproduction steps, environment details, and sanitized logs.
-- **Releases**: Track upcoming candidates and verified assets on our [Releases page](https://github.com/GentleKingson/ocservia/releases).
+ocservia is distributed under the [Apache License 2.0](LICENSE). Third-party software notices and attribution are detailed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
----
-
-## 📄 License & Acknowledgements
-
-ocservia is open-source software licensed under the [Apache License 2.0](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party credits and notices.
-
-*ocservia is an independent project proudly building upon the work of the [ocserv](https://ocserv.openconnect-vpn.net/) and OpenConnect open-source communities.*
-
+ocservia is an independent project that interfaces with the [ocserv](https://ocserv.openconnect-vpn.net/) and OpenConnect ecosystem.

@@ -1,4 +1,40 @@
-# Agent command journal
+# Command delivery and recovery
+
+## Controller delivery
+
+The side-effect-free synthetic command path validates durable delivery without
+real node mutations.
+
+Clients queue a typed `noop` or `echo` command with
+`POST /api/v1/nodes/{node_id}/synthetic-commands`. Every request must include an
+`Idempotency-Key` and either an `If-Match: "revision-N"` header or the matching
+`expected_version` body field. A successful request returns `202 Accepted`, an
+operation resource, and its `Location`. Reusing a key with identical input
+returns the original operation; reusing it with different input returns an RFC
+9457 conflict.
+
+The operation intent, typed Protobuf command, outbox event, and audit intent are
+committed in one database transaction through backend-owned stores. Workers claim available outbox rows
+with `FOR UPDATE SKIP LOCKED`, acquire one bounded lease per node, commit the
+claim, and only then call transportd. A successful transport acknowledgement is
+recorded after the network call. An expired claim is either redelivered or,
+after the bounded attempt limit, retained as `unknown`; it is never guessed to
+have failed or succeeded.
+
+When a commit acknowledgement is uncertain, services perform a bounded readback
+of the original immutable intent, the exact attempt/lease or completed attempt,
+or the exact owner term and deadline, and fail closed on missing, expired or
+superseded evidence. They do not allocate a replacement intent or invoke
+transport to resolve a database error. Repeated successful bookkeeping is
+idempotent without requiring an Agent result to have arrived already.
+
+Operation state is available through REST and the resumable
+`/api/v1/operations/{operation_id}/events` SSE stream. Queue health is exposed
+at `/api/v1/operations/queue-metrics`, including unpublished count, oldest age,
+queue depth, and unknown count. Where used, PostgreSQL notifications are wakeups only;
+polling remains the recovery mechanism.
+
+## Agent journal
 
 The Agent stores command acceptance and terminal results in its owner-controlled
 SQLite database. Each side effect is bound to one idempotency key, one command
@@ -52,20 +88,22 @@ conflicts, cross-language semantic hash vectors, explicit safe retry, expiry,
 clock skew, revision, capability, cancellation, size limits, and SQLite
 read-only, full, and corrupt failures.
 
-Structured Agent command result history is stored by the selected Controller
-backend. In PostgreSQL's historical migration sequence, schema version 9 stores
-that history; migration 8 persists the semantic hash algorithm version, migration
-9 restricts it to the supported legacy (`0`) and canonical v1 (`1`) values,
-and migration 17 adds session-authority v2 (`2`). MySQL/MariaDB implement the
-same hash-version contract through their own manifests, not these PostgreSQL
-migration numbers. Every `command_result` event must decode and satisfy its state,
+The selected Controller backend stores structured command results and their
+hash version: legacy (`0`), canonical v1 (`1`) or session-authority v2 (`2`).
+Backend migration numbers are not protocol versions.
+Every `command_result` event must decode and satisfy its state,
 identity, hash-version, hash, size, and time constraints; invalid results roll
 back the whole ingestion transaction. Development simulation completion uses
 the distinct `simulation_result` event type. Agent timestamps remain history
 data and never replace Controller-observed authority timestamps.
 
-Binary rollback must stop new command dispatch and preserve the Agent SQLite
-journal and Controller result history. The current tree provides no database
-down-migration path or cross-version journal compatibility guarantee. Use a
-forward fix or an explicitly planned isolated restore; never delete the
-journal or reset replay protection to make an older binary start.
+## Recovery
+
+For [Controller rollback](../how-to/controller-lifecycle.md#rollback),
+[Agent rollback](../how-to/agent-lifecycle.md#rollback) or
+[database recovery](../operations/incident-recovery.md#database-recovery), stop
+affected writers and dispatch, reconcile active work, and preserve the Agent
+SQLite journal and Controller operation, command and result history. There are
+no down migrations or cross-version compatibility guarantees. Use a forward fix
+or planned isolated restore; never delete the journal or reset replay protection
+to make an older binary start.
