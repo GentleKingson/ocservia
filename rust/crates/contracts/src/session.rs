@@ -1,4 +1,9 @@
-//! Stable session capability policy shared by transportd and the Agent.
+//! Stable session framing and capability policy shared by transportd and the Agent.
+
+/// Frame kind for an artifact fetch request on an Agent session stream.
+pub const ARTIFACT_FETCH_FRAME: u32 = 1 << 31;
+/// Frame kind for an artifact consumption request on an Agent session stream.
+pub const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 /// Capabilities permitted in grantless protocol 1.0 sessions.
 ///

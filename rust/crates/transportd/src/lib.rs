@@ -36,7 +36,8 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     transport_service_server::TransportService, trust_service_client::TrustServiceClient,
 };
 use ocservia_contracts::session::{
-    READ_ONLY_SESSION_CAPABILITIES, is_read_only_session_capability,
+    ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME, READ_ONLY_SESSION_CAPABILITIES,
+    is_read_only_session_capability,
 };
 use prost::Message;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -48,9 +49,6 @@ use uuid::Uuid;
 pub const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 /// ALPN for approved agent sessions.
 pub const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
-
-const ARTIFACT_FETCH_FRAME: u32 = 1 << 31;
-const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 const PROTOCOL_MAJOR: u32 = 1;
 const PROTOCOL_MINOR: u32 = 1;
@@ -851,7 +849,7 @@ struct EventState {
 }
 
 impl Shared {
-    #[cfg_attr(not(test), expect(dead_code, reason = "kept for unfenced test setup"))]
+    #[cfg(test)]
     fn new(event_capacity: usize) -> Self {
         Self::new_with_fence_policy(event_capacity, None, false)
     }
@@ -5754,8 +5752,8 @@ mod tests {
             .read_exact(&mut framed)
             .await
             .expect("read artifact fetch length");
+        assert_eq!(framed[0] & 0xc0, 0x80);
         let framed = u32::from_be_bytes(framed);
-        assert_ne!(framed & ARTIFACT_FETCH_FRAME, 0);
         let mut body = vec![0_u8; (framed & !ARTIFACT_FETCH_FRAME) as usize];
         fetch_recv
             .read_exact(&mut body)
@@ -5836,8 +5834,8 @@ mod tests {
             .read_exact(&mut framed)
             .await
             .expect("read artifact consume length");
+        assert_eq!(framed[0] & 0xc0, 0xc0);
         let framed = u32::from_be_bytes(framed);
-        assert_eq!(framed & ARTIFACT_CONSUME_FRAME, ARTIFACT_CONSUME_FRAME);
         let mut body = vec![0_u8; (framed & !ARTIFACT_CONSUME_FRAME) as usize];
         consume_recv
             .read_exact(&mut body)
