@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -54,6 +55,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.s.EnableReleaseCatalog(catalog)
+	f.s.operations.EnableReleaseCatalog(catalog)
 	path := "/api/v1/nodes/" + node.String() + "/agent-upgrade"
 	body := func(target string, approval uuid.UUID) string {
 		return fmt.Sprintf(`{"target_version":%q,"approval_id":%q,"reason":"reviewed upgrade","expected_version":1}`, target, approval)
@@ -134,6 +136,59 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 			})
 		}
 		setObservation("amd64", "1.2.0")
+	})
+	t.Run("domain-catalog-ownership", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                                       string
+			domainCatalog, httpCatalog, httpOperations bool
+			catalogFirst                               bool
+		}{
+			{name: "missing-http-catalog", domainCatalog: true, httpOperations: true},
+			{name: "missing-operations", domainCatalog: true, httpCatalog: true},
+			{name: "operations-first", httpCatalog: true, httpOperations: true},
+			{name: "catalog-first", httpCatalog: true, httpOperations: true, catalogFirst: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				domain := operations.NewBackend(b, 50, f.signer)
+				if tc.domainCatalog {
+					domain.EnableReleaseCatalog(catalog)
+				}
+				original := f.s
+				defer func() { f.s = original }()
+				f.s = f.newServer(Modules{})
+				f.s.EnableOperations(nil)
+				var httpCatalog *releasecatalog.Catalog
+				if tc.httpCatalog {
+					httpCatalog = catalog
+				}
+				var httpOperations *operations.Service
+				if tc.httpOperations {
+					httpOperations = domain
+				}
+				if tc.catalogFirst {
+					f.s.EnableReleaseCatalog(httpCatalog)
+					f.s.EnableOperations(httpOperations)
+				} else {
+					f.s.EnableOperations(httpOperations)
+					f.s.EnableReleaseCatalog(httpCatalog)
+				}
+				target, err := domain.PrepareAgentUpgrade(t.Context(), f.workspace, node, "2.0.0")
+				if tc.domainCatalog {
+					if err != nil || !bytes.Equal(target.PackageSHA256[:], bytes.Repeat([]byte{0x43}, 32)) {
+						t.Fatalf("HTTP assembly changed configured domain catalog: %+v %v", target, err)
+					}
+				} else if !errors.Is(err, operations.ErrUpgradeReleaseNotTrusted) {
+					t.Fatalf("HTTP assembly configured domain catalog: %+v %v", target, err)
+				}
+				if !tc.httpCatalog || !tc.httpOperations {
+					problem(post("2.0.0", uuid.Must(uuid.NewV7()), tc.name), 503, "service-unavailable", "operation service is unavailable")
+					problem(requestApproval("2.0.0"), 400, "invalid-request", "agent upgrade approval requires a target version and a trusted release catalog")
+				} else {
+					problem(post("2.0.0", uuid.Must(uuid.NewV7()), tc.name), 409, "release-not-trusted", "")
+					problem(requestApproval("2.0.0"), 409, "release-not-trusted", "")
+				}
+			})
+		}
 	})
 
 	approval := approve(" 2.0.0 ")
