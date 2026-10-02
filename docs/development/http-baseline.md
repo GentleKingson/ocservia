@@ -21,7 +21,7 @@ Mechanical moves, without signature or visibility changes:
   Callers include auth, enrollment, configuration, certificate and user handlers.
 - `local_slice.go`: pagination, cursor and trace correlation helpers to
   `request.go`; callers include node reads, events and operation writes.
-- ConfigPlan create/apply share `requireIdempotencyKey`: trim the header and
+- ConfigPlan create/apply share `httpx.RequireIdempotencyKey`: trim the header and
   write the identical missing-key Problem. UUID checks still precede it, JSON
   decoding follows it, and their different success Locations remain unchanged.
 

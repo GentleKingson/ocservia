@@ -12,7 +12,6 @@ import {
   workspaceContext,
 } from "../api/workspace";
 import { listAgentRollouts } from "../api/agents";
-import type { OperationDetailState } from "../shared/operation-detail";
 import { operationStatusKey } from "../shared/operation-status";
 import { formatTimestamp } from "../shared/timestamp";
 
@@ -21,7 +20,7 @@ const { t } = useI18n();
 const router = useRouter();
 const rollouts = ref<AgentRollout[]>([]);
 const rolloutsUnavailable = ref(false);
-const detailState = ref<OperationDetailState<Operation>>({ error: "" });
+const detailState = ref<{ selected?: Operation; error: string }>({ error: "" });
 const selectedOperation = computed(() => detailState.value.selected);
 const detailError = computed(() => detailState.value.error);
 const loading = ref(false);
@@ -34,10 +33,6 @@ let requestController: AbortController | undefined;
 let detailController: AbortController | undefined;
 let requestSequence = 0;
 let detailSequence = 0;
-
-function dateLabel(value: string): string {
-  return formatTimestamp(value);
-}
 
 function cancelRequests(): void {
   requestController?.abort();
@@ -268,10 +263,10 @@ onBeforeUnmount(() => {
                 ><span v-else>{{ $t("notAvailable") }}</span>
               </td>
               <td>
-                <span>{{ dateLabel(operation.createdAt) }}</span>
+                <span>{{ formatTimestamp(operation.createdAt) }}</span>
               </td>
               <td>
-                <span>{{ dateLabel(operation.updatedAt) }}</span>
+                <span>{{ formatTimestamp(operation.updatedAt) }}</span>
               </td>
             </tr>
           </tbody>
@@ -325,11 +320,11 @@ onBeforeUnmount(() => {
         </div>
         <div>
           <dt>{{ $t("created") }}</dt>
-          <dd>{{ dateLabel(selectedOperation.createdAt) }}</dd>
+          <dd>{{ formatTimestamp(selectedOperation.createdAt) }}</dd>
         </div>
         <div>
           <dt>{{ $t("updated") }}</dt>
-          <dd>{{ dateLabel(selectedOperation.updatedAt) }}</dd>
+          <dd>{{ formatTimestamp(selectedOperation.updatedAt) }}</dd>
         </div>
       </dl>
     </section>
