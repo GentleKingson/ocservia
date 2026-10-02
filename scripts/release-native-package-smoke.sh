@@ -342,6 +342,7 @@ elif [[ "$1" == retention-start ]]; then
   # The real timer must not launch its worker while the lifecycle holds 9.
   flock -n "${state}/.binding-lifecycle.lock" -c true
 elif [[ "$1" == agent-start && -e "${state}/native-fail-start" ]]; then
+  printf 'injected native Agent start failure\n' >"${state}/native-injected-failure.log"
   exit 71
 fi
 printf '%s\n' "$1" >>"${state}/native-order.log"
@@ -352,8 +353,6 @@ for unit in agent privd agent-retention; do
   cat >"${work}/native-service.conf" <<EOF
 [Service]
 Type=simple
-User=root
-Group=root
 ExecStart=
 ExecStart=/bin/sleep infinity
 ReadWritePaths=/var/lib/ocservia-upgrade
@@ -362,7 +361,9 @@ EOF
     printf 'ExecStopPost=%s retention-stop\n' "${systemd_probe}" >>"${work}/native-service.conf"
     printf 'ExecStartPost=%s retention-start\n' "${systemd_probe}" >>"${work}/native-service.conf"
   else
-    printf 'ExecStartPost=%s %s-start\n' "${systemd_probe}" "${unit}" >>"${work}/native-service.conf"
+    # Only the logging hook needs root; keep the service's packaged identity
+    # and systemd-managed directory ownership, including privd's Agent group.
+    printf 'ExecStartPost=+%s %s-start\n' "${systemd_probe}" "${unit}" >>"${work}/native-service.conf"
   fi
   sudo install -m 0644 "${work}/native-service.conf" "/run/systemd/system/ocservia-${unit}.service.d/90-native-lifecycle.conf"
 done
@@ -389,6 +390,7 @@ sudo test ! -e /var/lib/ocservia-upgrade/installing-package
 { sudo sha256sum "${native_lifecycle_files[@]}"; } >"${work}/native-new.sha256"
 sudo install -m 0600 "${work}/native-new.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
 sudo systemctl start ocservia-privd.service ocservia-agent.service ocservia-agent-retention.service
+[[ "$(sudo stat -c '%U:%G:%a' /var/lib/ocservia-privd)" == root:ocserv-agent:700 ]]
 sudo truncate -s 0 /var/lib/ocservia-upgrade/native-order.log
 driver_hash="$(sudo sha256sum /usr/libexec/ocservia/ocservia-agent-rollback)"
 { sudo /usr/libexec/ocservia/ocservia-agent-rollback; } >"${ARTIFACT_DIR}/deb-rollback.log" 2>&1
@@ -411,6 +413,9 @@ sudo touch /var/lib/ocservia-upgrade/native-fail-start
 if { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-commit-failure.log" 2>&1; then
   echo 'injected service restart failure was ignored' >&2; exit 1
 fi
+{ sudo cat /var/lib/ocservia-upgrade/native-injected-failure.log; } >"${ARTIFACT_DIR}/deb-injected-failure-probe.log"
+grep -Fxq 'injected native Agent start failure' "${ARTIFACT_DIR}/deb-injected-failure-probe.log"
+[[ "$(sudo systemctl show -p Result --value ocservia-agent.service)" == exit-code ]]
 sudo test ! -e /var/lib/ocservia-upgrade/installing-package
 [[ "$(sudo systemctl is-active ocservia-agent-retention.timer 2>/dev/null || true)" != active ]]
 { sudo find /var/lib/ocservia-upgrade/upgrade-backup -type f -exec sha256sum {} +; } >"${work}/post-commit-snapshot"
