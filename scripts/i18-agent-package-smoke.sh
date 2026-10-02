@@ -510,12 +510,13 @@ backup_dir="${rootfs}/var/lib/ocservia-upgrade/upgrade-backup"
 test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
-test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 9
+test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 13
 sudo test -f "${backup_dir}/ocservia-agent-relays.absent"
 # The fresh package install already placed the durable runner set, so the
 # matched snapshot must carry it as concrete rollback sources.
 for runner_snapshot in ocservia-upgrader.previous ocservia-agent-verify.previous \
-  ocservia-upgrader@.service.previous; do
+  ocservia-upgrader@.service.previous ocservia-agent-rebind.previous ocservia-agent-retention.previous \
+  ocservia-agent-retention.service.previous ocservia-agent-retention.timer.previous; do
   sudo test -f "${backup_dir}/${runner_snapshot}" \
     || { echo "snapshot is missing ${runner_snapshot}" >&2; exit 1; }
 done
@@ -560,9 +561,13 @@ for snapshot in \
   ocservia-agent-relays.conf.previous \
   ocservia-upgrader.previous \
   ocservia-agent-verify.previous \
+  ocservia-agent-rebind.previous \
+  ocservia-agent-retention.previous \
+  ocservia-agent-retention.service.previous \
+  ocservia-agent-retention.timer.previous \
   ocservia-upgrader@.service.previous; do
   case "${snapshot}" in
-    ocservia-agent.previous|ocservia-privd.previous|ocservia-upgrader.previous|ocservia-agent-verify.previous) expected_mode=755 ;;
+    ocservia-agent.previous|ocservia-privd.previous|ocservia-upgrader.previous|ocservia-agent-verify.previous|ocservia-agent-rebind.previous|ocservia-agent-retention.previous) expected_mode=755 ;;
     *) expected_mode=644 ;;
   esac
   test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${snapshot}")" = "0:0:${expected_mode}:1"

@@ -228,7 +228,14 @@ ensure_root_directory "${DESTDIR}${SYSCONFDIR}/ocservia-agent" "${agent_group}" 
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-agent" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-privd" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-upgrader" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
-install -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
+# Upgrade has already published this standalone recovery driver. Keep every
+# installer entrypoint atomic too, including a same-package reinstall.
+rollback_destination="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
+rollback_staging="$(mktemp "$(dirname -- "${rollback_destination}")/.ocservia-agent-rollback.XXXXXX")"
+install -o root -g root -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${rollback_staging}"
+sync -f "${rollback_staging}"
+mv -fT -- "${rollback_staging}" "${rollback_destination}"
+sync -f "$(dirname -- "${rollback_destination}")"
 install -m 0755 -- "${ROOT}/scripts/retain-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-retention"
 install -m 0755 -- "${ROOT}/scripts/rebind-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rebind"
 install -m 0755 -- "${ROOT}/scripts/verify-agent-package.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
@@ -260,5 +267,10 @@ fi
 
 if [[ -z "${DESTDIR}" ]]; then
   systemctl daemon-reload
-  systemctl enable --now ocservia-agent-retention.timer
+  systemctl enable ocservia-agent-retention.timer
+  # The upgrade caller starts retention after committing and releasing its
+  # lifecycle lock; Persistent catch-up must not race that unfinished install.
+  if [[ ! -e /var/lib/ocservia-upgrade/installing-package && ! -L /var/lib/ocservia-upgrade/installing-package ]]; then
+    systemctl start ocservia-agent-retention.timer
+  fi
 fi
