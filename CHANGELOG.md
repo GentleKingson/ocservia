@@ -1,10 +1,20 @@
 # Changelog
 
-All notable changes to ocservia are documented in this file. Release dates and
-per-release details are on the
-[GitHub Releases](https://github.com/GentleKingson/ocservia/releases) page;
-this file records the change categories per release line. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and ocservia uses
+This file is a concise history of user-visible changes in stable ocservia
+releases. Release dates, detailed notes, pull requests, assets, and validation
+information are published on
+[GitHub Releases](https://github.com/GentleKingson/ocservia/releases).
+
+Future entries keep only durable user-facing changes. Internal refactors,
+CI-only changes, and detailed release evidence belong in pull requests,
+workflows, or GitHub Release notes rather than being duplicated here.
+Use only relevant sections, such as Highlights, Breaking changes, Security,
+Changed, Fixed, or Upgrade notes, and link to the full release notes.
+Omit empty sections; a patch release may contain only Fixed.
+Previously published entries remain unchanged.
+
+The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+ocservia uses
 [Semantic Versioning](https://semver.org/), except for the explicitly breaking
 compatibility-policy reset in v1.1.0 described below.
 

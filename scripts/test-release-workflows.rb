@@ -21,6 +21,24 @@ publish = release.fetch('jobs').fetch('publish')
 require_check(publish['if'] == "github.event_name == 'push'" && publish['environment'] == 'release-publishing', 'publishing must require a tag push and the publishing environment')
 require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write'}, 'publishing permissions changed')
 require_check(publish['needs'].sort == %w[assets build-amd64 build-arm64 prepare], 'publishing must wait for both native build/smoke legs and assets')
+require_check(publish['steps'].any? {|s| s.fetch('run','').match?(/gh release create[^\n]*--generate-notes/)}, 'Release must retain native generated notes')
+changelog = YAML.safe_load(File.read('.github/release.yml')).fetch('changelog')
+require_check(changelog.dig('exclude','labels') == ['release/internal'], 'internal-only PRs must be excluded from release notes')
+categories = changelog.fetch('categories')
+expected_categories = {
+  'Breaking changes'=>'release/breaking',
+  'Security'=>'release/security',
+  'Controller'=>'area/controller',
+  'Agent'=>'area/agent',
+  'Relay & Transport'=>'area/relay',
+  'Database & Backup'=>'area/database',
+  'Authentication & Authorization'=>'area/auth',
+  'Web & API'=>'area/web',
+  'Deployment & Operations'=>'area/deployment',
+  'Dependencies'=>'area/dependencies',
+  'Other changes'=>'*'
+}
+require_check(categories.map {|c| [c['title'], c['labels']]} == expected_categories.map {|title,label| [title,[label]]}, 'release-note categories, labels or catch-all order changed')
 require_check(publish['steps'].any? {|s| s.fetch('run','').include?('gh release upload') && s['run'].include?('--clobber')}, 'ordinary asset replacement missing')
 require_check(release.fetch('jobs').values.none? {|j| ['./.github/workflows/ci.yml','./.github/workflows/security.yml','./.github/workflows/release-business-diagnostic.yml'].include?(j['uses'])}, 'formal Release must only build, image-scan, smoke and publish')
 %w[amd64 arm64].each do |arch|

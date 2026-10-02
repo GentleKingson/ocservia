@@ -1,0 +1,38 @@
+changelog:
+  exclude:
+    labels:
+      - release/internal
+  categories:
+    - title: Breaking changes
+      labels:
+        - release/breaking
+    - title: Security
+      labels:
+        - release/security
+    - title: Controller
+      labels:
+        - area/controller
+    - title: Agent
+      labels:
+        - area/agent
+    - title: Relay & Transport
+      labels:
+        - area/relay
+    - title: Database & Backup
+      labels:
+        - area/database
+    - title: Authentication & Authorization
+      labels:
+        - area/auth
+    - title: Web & API
+      labels:
+        - area/web
+    - title: Deployment & Operations
+      labels:
+        - area/deployment
+    - title: Dependencies
+      labels:
+        - area/dependencies
+    - title: Other changes
+      labels:
+        - "*"
