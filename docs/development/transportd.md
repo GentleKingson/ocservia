@@ -39,19 +39,7 @@ Controller-signed protocol 1.1 session grant; transportd cannot mint one.
 Endpoint IDs are 32-byte lowercase hexadecimal public identifiers and node IDs
 are UUIDv7 values.
 
-Before an I04-to-I05 cutover, inventory every startup `--approved-binding` and
-keep the I04 transport running while migration 000004 is applied. The old
-database did not store EndpointIDs, so the migration deliberately changes
-legacy `approved` nodes to fail-closed `pending` rather than falsely activating
-them. For each legacy node, create a one-time token constrained to its exact
-workspace, node name, environment, and inventoried EndpointID. Enrollment with
-that token attaches the EndpointID to the existing node record; explicitly
-approve it before switching transportd to `--trust-socket`. Verify that every
-formerly approved node has one active row in `node_endpoint_keys`, then remove
-the static binding flags. Do not start trust-socket mode while any legacy node
-is still pending or lacks an endpoint binding.
-
-Run with the public relay set:
+For isolated development with the public relay set (not production):
 
 ```bash
 ocservia-transportd \
@@ -139,14 +127,10 @@ otherwise isolate the affected service rather than disabling authentication or
 resetting journals/revisions. Production upgrades still require deployment-specific
 version inventory, authorization, and a maintenance window.
 
-The side-effect-free `ocservia-transportd-stub` remains the default development
-stack and rollback mode. To roll back an unshipped Iroh deployment, stop the real
-transport process, preserve the controller key, start the stub on the same UDS
-path, and restart the Go worker so its watch reconnects. Active Iroh connections
-will close and agents must reconnect after the real transport is restored.
-Preserve enrollment tokens, endpoint bindings, capability approvals and the
-public endpoint-to-node mapping. The current tree provides no database down
-migrations; use a forward fix or an explicitly planned
+The side-effect-free `ocservia-transportd-stub` is the development default,
+not a production recovery path. Preserve enrollment tokens, endpoint bindings,
+capability approvals and controller identity during recovery. There are no
+database down migrations; use a forward fix or a planned
 [isolated restore](../operations/incident-recovery.md#database-recovery).
 Static startup bindings preserve
 observation only; they cannot execute commands or move configuration,

@@ -1,8 +1,7 @@
 # Controller rebind and retention contract
 
-Status: implementation contract. The [local rebind procedure](../how-to/rebind-controller.md)
-implements the manual lifecycle; independent retention has its own safety gates.
-Baseline: `95581ec89ee73c9b7403291078b8cefe1c43527d`.
+Use the [local rebind procedure](../how-to/rebind-controller.md) for the manual
+lifecycle. Retention runs independently under the safety conditions below.
 
 The identity crate now provides `Identity::stage_rebind`: it verifies the
 expected source EndpointID and Controller pin, copies the existing endpoint
@@ -164,12 +163,9 @@ is eligibility-based: pending, accepted, running, unknown, unresolved effects
 and unresolved reconciliation never expire by age. Retired binding cleanup
 requires all these blockers to be absent and must retain a compact tombstone.
 
-Before command compaction is enabled, readers must distinguish compacted
-terminal records from missing evidence. Retain command and binding identity,
-idempotency key and semantic hash/version, terminal state, required receipts,
-and replay/revision/fence evidence. A repeated request must not execute again
-or invent an empty successful result. Audit cleanup must not invalidate the
-existing authenticated hash chain or convert truncation into trusted history.
+Readers must distinguish compacted terminal records from missing evidence.
+A repeated request must neither execute again nor invent an empty successful
+result. Audit cleanup must preserve authenticated chain verification.
 
 ## Acceptance evidence
 

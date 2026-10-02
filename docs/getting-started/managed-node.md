@@ -120,6 +120,6 @@ An already-active node should report `SERVICES_ACTIVE` without reinstalling the 
 
 - [Enroll a node](../how-to/enroll-node.md)
 - [Dedicated relays](../how-to/dedicated-relays.md)
-- [Upgrade the Agent](../how-to/agent-upgrade.md)
-- [Roll back the Agent](../how-to/agent-rollback.md)
+- [Upgrade the Agent](../how-to/agent-lifecycle.md#upgrade)
+- [Roll back the Agent](../how-to/agent-lifecycle.md#rollback)
 - [Agent package lifecycle reference](../operations/agent-lifecycle.md)

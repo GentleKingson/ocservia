@@ -81,11 +81,11 @@ implementation and compatibility details.
 | Startup and assembly | `cmd` and `platform/app` assemble shared services and manage startup/shutdown. Business modules do not import the assembly entry points. | [`platform/app`](../control-plane/internal/platform/app/) |
 | HTTP compatibility | HTTP modules decode requests, adapt authentication/authorization context and map responses. Stable business preparation and state rules belong to existing domain services, not duplicated handler logic. | [HTTP baseline](development/http-baseline.md) |
 | Controller services | Collaborate through existing services and the consumer capabilities needed today; do not add empty service/usecase/domain layers. | [Consumer service boundaries](development/domain-service-boundaries.md) |
-| Data and transactions | Domain Store contracts isolate SQL and drivers. The business operation owner manages the shared `database.Tx`; multiple Stores may participate in that transaction. Adapters implement Store contracts; business code does not import concrete database adapters. | [`database` boundary](../control-plane/internal/database/database.go), [existing boundary check](../control-plane/internal/database/boundary_test.go), [operations and outbox](development/operations-outbox.md) |
+| Data and transactions | Domain Store contracts isolate SQL and drivers. The business operation owner manages the shared `database.Tx`; multiple Stores may participate in that transaction. Adapters implement Store contracts; business code does not import concrete database adapters. | [`database` boundary](../control-plane/internal/database/database.go), [existing boundary check](../control-plane/internal/database/boundary_test.go), [operations and outbox](development/command-reliability.md#controller-delivery) |
 | Runtime and privileges | `transportd` is Controller-side transport, not a node privilege helper. Agent, privd and upgrader retain their distinct execution authority and lifecycle. | [Transport](development/transportd.md), [Agent/privd](development/agent-privd.md), [Agent lifecycle](operations/agent-lifecycle.md) |
-| Web API and Workspace | Pages compose routing and features; features own interaction workflows; API modules adapt requests to generated clients. Do not duplicate session coordination or Workspace state. | [Web API boundaries](development/web-api-boundaries.md), [node-detail features](development/node-detail-features.md) |
+| Web API and Workspace | Pages compose routing and features; features own interaction workflows; API modules adapt requests to generated clients. Do not duplicate session coordination or Workspace state. | [Web API boundaries](development/web.md#api-boundaries), [node-detail features](development/web.md#node-detail-workflows) |
 | Protocols and generated code | Proto and OpenAPI are schema authorities. Local protocols and canonical signing have their own versioned contracts; serialized Proto bytes are not canonical signing input. Generated code carries no handwritten business logic. | [Contracts](development/contracts.md), [Agent/privd protocol](development/agent-privd.md), [command authorization](development/command-authorization-v1.md), [semantic hash v2](development/command-semantic-hash-v2.md) |
-| Deployment | Reuse versioned assets, separately provisioned trust material and the existing install/upgrade entry points, not a new deployment framework. | [Production deployment](operations/production-deployment.md), [Controller upgrade](how-to/controller-upgrade.md), [Agent lifecycle](operations/agent-lifecycle.md) |
+| Deployment | Reuse versioned assets, separately provisioned trust material and the existing install/upgrade entry points, not a new deployment framework. | [Production deployment](operations/production-deployment.md), [Controller upgrade](how-to/controller-lifecycle.md#upgrade), [Agent lifecycle](operations/agent-lifecycle.md) |
 | Validation | Choose the smallest sufficient check for the changed behavior and its contracts. | [Validate a change](development/testing.md) |
 
 The diagrams above describe runtime communication, not a mandatory import
@@ -136,9 +136,11 @@ requirements and reevaluation conditions. Mark drafts as proposed; retain
 superseded decisions with a link to their replacement. Ordinary fixes do not
 need an ADR, a template directory or retrospective records for every past PR.
 
-The proposed [Integrated deployment contract](development/integrated-deployment-adr.md)
-records the single-host network, Signer and delivery decisions. It is not an
-implemented deployment mode or an expansion of current production support.
+The [Integrated deployment contract](development/integrated-deployment-adr.md)
+records the single-host network, Signer and delivery decisions. Use the
+[deployment procedure](../deploy/production/integrated/README.md) for the
+implemented lifecycle; the contract alone does not establish runtime acceptance
+or expand the [production support policy](reference/support-policy.md).
 
 The reasoning method follows [Awesome Architecture](https://github.com/study8677/awesome-architecture)
 chapters 02 and 08; diagram scope follows the [C4 guidance](https://c4model.com/diagrams),
@@ -154,4 +156,4 @@ the repository boundaries above come from the linked implementation and topics.
 - [Dedicated relays](how-to/dedicated-relays.md)
 - [Production deployment reference](operations/production-deployment.md)
 - [Agent package lifecycle](operations/agent-lifecycle.md)
-- [Technical reference](reference/README.md)
+- [Technical reference](README.md#technical-reference)

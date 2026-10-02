@@ -8,10 +8,6 @@ pull request commit; local results are not CI results.
 
 ## Choose the validation scope
 
-Start with the changed behavior and its direct contracts, not a full-repository
-command. Documentation checks, module iteration, cross-module validation,
-database regression, real E2E and release acceptance serve different needs.
-
 For documentation-only changes, the focused checks are:
 
 ```bash
@@ -45,8 +41,7 @@ validation, not as the default first step for ordinary edits.
 checks, then the existing Go/Rust/Web checks. Equivalent vet, Clippy and Web
 format/lint/type checks run once. Standalone `make lint` still performs all
 lint checks. Rust Clippy covers the same workspace/targets/features without a
-preceding duplicate `cargo check`; measure the whole cold chain, not the removed
-command alone, when assessing its benefit.
+preceding duplicate `cargo check`.
 
 `scripts/web-check.sh` builds the generated client once, then uses
 `npm --ignore-scripts run lint` and `npx --no-install vue-tsc --noEmit` from
@@ -108,9 +103,7 @@ These are raw-wire vectors, not executable or authenticated requests: deprecated
 fields remain populated to exercise accepted wire tags, signatures are dummy
 bytes, and protocol 1.1 execution still rejects legacy password fields. The
 independent canonical signing, fence and receipt goldens remain authoritative
-for their own contracts and are not replaced by these fixtures. PR-05 changes
-test coverage and its fixture allowlist, not protocol version, ALPN, canonical
-bytes or runtime dependencies.
+for their own contracts.
 
 ## Linux ARM64 Go validation
 
@@ -177,10 +170,8 @@ MariaDB, full scope or release readiness.
 
 ### Native preparation and execution
 
-On the 2026-09-18 BuildServer check (Ubuntu 26.04, `aarch64`), jq, setsid,
-Docker, Python 3, OpenSSL and patch were present, but Go, Ruby and a C compiler
-were absent. Recheck instead of assuming this inventory remains current.
-Do not install global packages with sudo as part of a validation task.
+Check host dependencies before running. Do not install global packages with
+sudo as part of a validation task.
 
 Use a short, private path beneath a trusted home directory, **not `/tmp` or a
 symlink**: transport socket tests validate every ancestor's ownership and reject
@@ -263,8 +254,7 @@ their own temporary fixtures and database containers; `--rm` removes the test
 environment. After retaining evidence, remove only this task's image and private
 directory, not shared Docker images/caches or another task's `.tools`. An initial
 failure, skipped non-required integration test, simulated platform test, native
-Go run and container run must be reported separately. Earlier ARM64 workaround
-measurements remain historical records, not instructions to wrap Go now.
+Go run and container run must be reported separately.
 
 ## Bundled PostgreSQL initialization
 

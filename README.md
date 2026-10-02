@@ -140,7 +140,7 @@ The installation script intentionally omits automatic approval and daemon startu
 | [Operations and runbooks](docs/operations/production-deployment.md) | Deployment lifecycle, database configuration, and recovery references. |
 | [Troubleshooting](docs/how-to/troubleshooting.md) | Startup, OIDC, telemetry, and enrollment diagnostics. |
 | [Support and versioning policy](docs/reference/support-policy.md) | Supported platforms, deployment scope, and cross-version limits. |
-| [Technical reference](docs/reference/README.md) | API schemas, protocols, and implementation contracts. |
+| [Technical reference](docs/README.md#technical-reference) | API schemas, protocols, and implementation contracts. |
 
 ## Development
 

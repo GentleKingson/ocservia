@@ -112,7 +112,7 @@
 本项目是模块化 Monorepo，Controller 保持领域包主导的模块化单体。当前职责、例外和演进条件以 [Development architecture](docs/architecture.md#development-architecture) 为准；仅按任务读取相关专题，不要求每次通读。
 
 - Controller 服务或事务：[领域服务边界](docs/development/domain-service-boundaries.md)；HTTP 行为或兼容性：[HTTP 基线](docs/development/http-baseline.md)。
-- Web API、认证协调或 Workspace：[Web API 边界](docs/development/web-api-boundaries.md)；节点配置或证书交互：[节点详情工作流](docs/development/node-detail-features.md)。
+- Web API、认证协调或 Workspace：[Web API 边界](docs/development/web.md#api-boundaries)；节点配置或证书交互：[节点详情工作流](docs/development/web.md#node-detail-workflows)。
 - 协议、进程权限或部署：[职责与任务导航](docs/architecture.md#ownership-and-task-navigation)；验证入口：[验证指引](docs/development/testing.md)。
 - 新增行为先找已有职责所有者；常规边界内实施不增加停顿。重大边界变化按总览说明证据与取舍，仍须满足已有授权要求。
 - 继续遵守第 4 节的最小充分验证与环境限制，不得通过削弱规则、测试或权限适配违规实现。

@@ -1,6 +1,6 @@
 # Controlled session and service operations
 
-The first production command set consists of four typed operations:
+Controlled session and service commands are typed:
 
 - `session.disconnect` targets one numeric session ID on one node boot;
 - `session.terminate` targets the same identity and also invalidates its reconnect cookie;
@@ -38,9 +38,8 @@ a retry.
 
 ## Compatibility and rollback
 
-The protocol change adds new oneof tags and does not reuse existing tags. Older
-Agents do not advertise the new capabilities, so the Controller rejects these
-operations before dispatch. During binary rollback, first stop creation and
+Commands use distinct oneof tags and require advertised capabilities;
+unsupported operations fail before dispatch. During binary rollback, stop creation and
 dispatch of the four command types and drain or reconcile all nonterminal
 Operations. Preserve the Agent SQLite journal and Controller command history
 so duplicate and uncertain outcomes remain reconcilable. The current tree
