@@ -1,9 +1,8 @@
 # Contracts and toolchains
 
-The [current contract inventory and validation](../reference/stable-contracts.md)
-separates user-facing stability, internal matched-version interfaces, source
-checks and actual published-artifact acceptance. It does not expand production
-database or cross-version support.
+Use the [contract inventory](../reference/stable-contracts.md) for public and
+matched-version boundaries, and [validation guidance](testing.md) to select
+checks. Neither source checks nor matching versions establish release acceptance.
 
 Runtime and generator versions are pinned in `toolchains.lock`. A supported
 macOS arm64 or Linux x86-64 host with `curl`, `tar`, `unzip`, `xz`, Java 17,
@@ -30,7 +29,6 @@ and selects the basic docs, Go, Rust, Web, and database checks from a
 fresh checkout. Contract compatibility and generated-clean checks remain
 manual commands, not Basic CI jobs.
 
-Use `make bootstrap` followed by `make verify` for broader manual validation
-before opening or updating a pull request. Local success is useful for
-debugging but does not replace the required Actions checks. See
-[github-actions.md](github-actions.md) for the Basic CI jobs and their commands.
+Use `make verify` only when broader validation is needed; reuse prepared tools
+instead of bootstrapping every change. Local success does not replace
+[required Actions checks](github-actions.md).

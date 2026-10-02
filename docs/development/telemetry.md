@@ -1,7 +1,7 @@
 # Telemetry and read-only fleet views
 
-I07 adds a read-only node observation path from the unprivileged Agent to the
-control-plane API and Web application. The Agent emits a bounded telemetry
+The unprivileged Agent sends read-only observations to the control-plane API
+and Web application. It emits a bounded telemetry
 batch every 30 seconds on a dedicated Iroh unidirectional stream. A node is
 shown offline after its latest heartbeat is more than 90 seconds old.
 
@@ -46,14 +46,10 @@ rebuild authoritative state through REST after connecting or reconnecting.
 
 ## Upgrade and rollback
 
-Run the target's owner-only database initialization and use the explicit
-[Controller rollback](../how-to/controller-rollback.md) for a binary rollback.
-The current tree provides no database down migrations or historical
-cross-version acceptance. MySQL/MariaDB use their own immutable manifests and
-execution receipts, not PostgreSQL migration numbers.
-
-Preserve telemetry history, quarantine, durable cursors and node trust through
-any backend-specific recovery. Stop affected writers and resolve the underlying
-incident before resuming ingestion. Use a forward fix or an explicitly planned
-isolated restore; do not clear evidence or reset cursors to make an older
-binary start.
+Run the target's owner-only initialization; backend migration numbers are not
+interchangeable. [Binary rollback](../how-to/controller-lifecycle.md#rollback) supplies
+neither down migrations nor cross-version acceptance. For
+[recovery](../operations/incident-recovery.md#database-recovery), stop affected
+writers and preserve telemetry history, quarantine, cursors and node trust.
+Resolve the incident before resuming ingestion; never reset evidence to make
+an older binary start.

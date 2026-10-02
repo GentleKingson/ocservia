@@ -1,8 +1,8 @@
 # Agent package lifecycle
 
 > **Technical reference.** For the operator path, start with [Install a managed
-> node](../getting-started/managed-node.md), [Upgrade the Agent](../how-to/agent-upgrade.md),
-> or [Roll back the Agent](../how-to/agent-rollback.md). This document retains
+> node](../getting-started/managed-node.md), [Upgrade the Agent](../how-to/agent-lifecycle.md#upgrade),
+> or [Roll back the Agent](../how-to/agent-lifecycle.md#rollback). This document retains
 > package construction, verified staging, trust provisioning, and durable
 > lifecycle contracts.
 

@@ -163,14 +163,10 @@ receipts are not a backup. Use [backend-specific recovery](../operations/inciden
 PostgreSQL verified backup and isolated restore or MySQL/MariaDB logical restore, not
 equivalent HA/PITR guarantees.
 
-Run the browser-to-simulator E2E with `make e2e`. The script scopes every
-container, network, and volume to `COMPOSE_PROJECT` and removes them on success,
-failure, or interruption.
-
-Browser E2E is manual validation through `make e2e`, not part of Basic CI.
-The E2E harness collects the Playwright HTML report, traces, screenshots,
-videos, test results, Compose logs, and container status as diagnostics.
-Collect these locally; there is no Browser E2E job or workflow artifact upload.
+`make e2e` runs manual browser-to-simulator validation outside Basic CI.
+It retains Playwright reports/traces/screenshots/videos, test results and
+Compose diagnostics locally, with no workflow upload. Containers, networks and
+volumes are scoped to `COMPOSE_PROJECT` and removed on success, failure or interruption.
 
 For a disposable development stack with no data to preserve, recreate the
 database from the current schema with:
@@ -179,7 +175,6 @@ database from the current schema with:
 deploy/compose/compose.sh down --volumes
 ```
 
-For persisted or shipped schema changes, do not rely on historical manual
-down-chains. The current tree no longer ships down SQL or tests historical
-down/up compatibility. Use a forward fix or a controlled database restore; see
-[database recovery](../operations/incident-recovery.md#database-recovery) for the matching restore workflow.
+For persisted data, use a forward fix or
+[database recovery](../operations/incident-recovery.md#database-recovery), never
+the disposable reset above. The tree provides no down SQL.

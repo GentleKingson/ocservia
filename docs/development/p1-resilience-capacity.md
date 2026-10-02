@@ -44,10 +44,9 @@ p50/p95/p99, telemetry count, path mix, goroutines, Tokio simulator tasks, RSS,
 file descriptors, database pool activity, SSE admission and watcher counters,
 timestamps, phase counts, and sampler status.
 
-This is initial single-host evidence, not a production capacity claim. Simulated
-Relay metadata does not prove multi-host or multi-failure-domain Relay behavior.
-Real single-node recovery belongs to [Business resilience](resilience.md).
-This simulated capacity harness does not replace that acceptance. The script labels
+These simulated single-host results establish neither production capacity nor
+multi-host Relay behavior. Real recovery belongs to [Business resilience](resilience.md).
+The script labels
 every Docker resource with its Compose project and removes only that project's
 containers, network, volumes, and locally built images on success, failure, or
 interruption.
@@ -57,6 +56,5 @@ request and completion metrics, the JSON summary, resource samples, slow-SSE
 output, interrupted-operation state, disk snapshots, Compose logs, container
 status, and the final exit status. Set `ARTIFACT_DIR` outside the temporary
 run directory to retain these diagnostics; no workflow uploads them.
-The server's disk, CPU, and memory bound the result.
-The full run must fail rather than silently reduce its load if that server
-cannot complete the configured profile.
+Insufficient disk, CPU or memory must fail the full run, never silently reduce
+its configured load.

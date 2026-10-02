@@ -45,18 +45,53 @@ command/fence/receipt signatures, and durable immutable operation intent remain
 required. The operator-provisioned release catalog still supplies authorized
 upgrade package digests.
 
-## Validation
+## Coverage ownership
 
-Validate merged main with Release Check (Full CI, Security and amd64 Business
-Smoke with recovery), separate manual `purpose=integration` diagnostics with
-`production_signer=true` and `run-resilience=true`, and a `version=0.0.0` Release
-dispatch: both native Agent build/install smokes and Controller build/image
-security/smoke legs must pass, assets must pass, and publish must be skipped. Verify AgentUpgrade digest success/refusal and Stage-0
-download success/failure and checksum mismatch if a plain Stage-0 checksum is retained. Audit the retired release-chain
-references across the repository. Do not publish a version or deploy production
-as part of this validation.
+| Behavior | Owner |
+| --- | --- |
+| Native online node, independently authenticated requester/approver, ConfigPlan apply, production Signer sealing, real VPN and internal TLS | amd64 Integrated Business Smoke |
+| Controller/transport, Agent/privd, database and sole Relay recovery | Business Smoke with `run-resilience=true` |
+| OIDC positive/negative paths; CSR, issue, one-use P12, revoke and persistence; real browser; offline queue and exact root effects | Manual integration |
+| DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke |
+| Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products |
+| Source/dependency vulnerabilities and repository secrets | Security |
+| Tagged-source build and GitHub/GHCR publication | Release |
 
-Use [business coverage ownership](release-business-coverage.md) for the checks
-that must survive the migration and [validation guidance](testing.md) for focused
-PR checks. Build caches remain optional compilation accelerators; they are never
-release qualification or accepted products.
+Business builds local products and installs from a loopback registry on
+disposable amd64 runners. Native package checks require host, daemon, image and
+executed ELF architecture to agree; cross compilation is not native acceptance.
+Checks retain architecture/version, protected staging and SHA validation.
+Never install test packages on shared hosts or clear their binfmt handlers.
+Current checks do not certify historical upgrades or mixed-version safety.
+
+## Diagnostics and build rehearsal
+
+For extended [Business integration](real-business-validation.md):
+
+```bash
+gh workflow run release-upgrade.yml --ref <branch> \
+  -f version=0.0.0 -f purpose=integration \
+  -f production_signer=true -f run-resilience=true
+```
+
+`purpose=smoke` selects the smaller scope independently of Signer selection;
+`production_signer=false` uses standalone topology. Diagnostics do not publish,
+write GHCR or read production Secrets, and cannot replace Release Check.
+
+For a build-only release rehearsal:
+
+```bash
+gh workflow run release.yml --ref main -f version=0.0.0
+```
+
+Both native Agent and Controller build/security/smoke legs and asset preparation
+must pass; Publish must be skipped. Focused checks use
+`scripts/test-release-upgrade.sh`, package/installer tests, relevant
+ShellCheck/actionlint and [documentation checks](testing.md). Cover authorized
+AgentUpgrade digest success/refusal and Stage-0 download/checksum failures when
+changing those paths. Do not publish or deploy production during validation.
+
+Rerun failed owners with all their checks; selected recovery reruns its complete
+Business job. Failure, cancellation, missing results and unexpected required
+skips cannot pass. Caches accelerate builds but are not accepted products or
+qualification. Retain evidence, then clean only task-owned resources.

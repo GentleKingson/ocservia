@@ -1,11 +1,13 @@
-# Web API boundaries
+# Web boundaries and node workflows
+
+## API boundaries
 
 The handwritten Web API layer uses the generated local `@ocservia/api-client`
 package. Domain modules import one `api/transport.ts` configuration; they do not
 instantiate authentication state, select a Workspace, navigate to a view, or
 decide operation terminal states.
 
-## Ownership
+### Ownership
 
 - `api/transport.ts` owns the authenticated fetch, `/api/v1` base path,
   `same-origin` credentials, development-only bearer token, optional request
@@ -27,7 +29,7 @@ decide operation terminal states.
   listeners and timers. Moving imports adds no module-load subscriptions and
   does not unify their intentionally different terminal-state definitions.
 
-## Static import boundaries
+### Static import boundaries
 
 The existing [`eslint.config.ts`](../../web/eslint.config.ts) uses ESLint's core
 `no-restricted-imports` rule for handwritten `src/api/**/*.ts` and the
@@ -56,13 +58,10 @@ tests/fixtures outside these source directories and other features receive no
 new restriction. Vue SFC parsing is unchanged, so this does not claim equivalent
 coverage for every `.vue` file.
 
-## Export And Caller Inventory
+### Export And Caller Inventory
 
-Paths in this table are relative to `web/src`. It records every former
-`api/client.ts` export and its production callers after PR-06/07. Existing wrappers
-are retained because these callers use them; they are domain entry points, not
-compatibility aliases. Remove an entry point if its last consumer disappears,
-rather than retaining an unused forwarding export.
+Paths are relative to `web/src`. Remove an entry point when its last consumer
+disappears; do not retain unused forwarding exports.
 
 | Owner | Exports | Production callers | Preserved semantics |
 | --- | --- | --- | --- |
@@ -99,7 +98,7 @@ owner. `configuration`, `authenticatedFetch`, `devAuthToken`, `requestInit` and
 `redirectToLogin` is the session coordinator entry point used by transport.
 None is a new public HTTP contract.
 
-## Verification
+### Verification
 
 Run in the authorized BuildServer checkout, from `web`:
 
@@ -119,5 +118,101 @@ serialization against a stub fetch, including 401 coordination, Workspace
 authority, headers, signals, mutation fences and artifact downloads. The
 existing browser runner covers 12 focused login/Workspace/SSE regressions
 against the production build, including late responses and rapid switches.
-It is not a full E2E or database validation. Generated sources and HTTP schemas
-are unchanged by this responsibility split.
+It is not full E2E or database validation.
+
+## Node detail workflows
+
+NodeDetail composes configuration and certificate workflows during setup.
+User-policy mapping lives in `adapters/user-policy.ts`; other desired-state
+and controlled-action handlers remain in the page.
+
+### Boundaries
+
+Paths below are relative to `web/src`.
+
+| Owner | Responsibilities |
+| --- | --- |
+| `views/NodeDetailView.vue` | Route ID, Fleet selection, authorized-read readiness, Workspace listener, closing dialogs on navigation, and template composition |
+| `features/configuration/useNodeConfiguration.ts` | Configuration form, captured revision, Plan/Apply requests, Plan polling, receipt recovery, errors/loading and dialog cancellation |
+| `features/certificates/useNodeCertificates.ts` | Certificate form, CSR polling, issue/P12/download/revoke requests, receipt/grant recovery, errors/loading and dialog cancellation |
+| `features/node-workflow.ts` | Existing shared context fence, cancellable wait, pending-mutation tickets, identifier receipts and expiring in-memory grants |
+| `shared/fleet.ts` | Shared operation tracking and telemetry; feature disposal does not stop Fleet tracking |
+| `api/workspace.ts` | Sole Workspace authority; features receive its context getter, not a second Workspace store |
+
+Each feature receives only a readonly node ref, readonly successful-read flag,
+Workspace context getter, operation-tracking callback and translator. Neither
+imports the router, Fleet, a view or the other feature. The page constructs each
+feature once during setup, passes the route-matched authorized node and computes
+readiness from detail loading, Fleet selection and selection error.
+
+### Preserved Behavior
+
+- ConfigPlan captures only a known, nonnegative JavaScript-safe configuration
+  revision. It does not use node version or rebase/retry a stale revision.
+- Closing a dialog synchronously cancels reads and polling and clears its
+  transient state. The feature's scope disposal also performs this cleanup;
+  route and Workspace changes still close dialogs in the page.
+- Mutations are not aborted or automatically resent on teardown. Late accepted
+  IDs remain recoverable through the existing receipt/ticket owner. Reopening
+  waits for acknowledgement and re-reads authorized server state.
+- ConfigPlan terminal states and the certificate `csr_pending` polling rule
+  remain different. Both keep their existing 30 attempts and 500 ms delay.
+- Apply closes its dialog before handing off operation tracking. P12/revoke
+  hand off tracking without closing the certificate dialog. Disposing a
+  feature only detaches its own reads, not accepted server work.
+- Artifact credentials remain memory-only, scoped to Workspace/node/certificate
+  and bounded by expiry. An already requested one-time download still completes
+  after dialog closure. No credential is added to persistent receipts; a full
+  browser refresh, page termination or another tab cannot recover these secrets.
+- A certificate receipt's operation is restored only when its resource ID matches
+  the selected certificate. Falling back to another certificate, or finding no
+  active certificate, does not fetch or display the old receipt's operation.
+
+### Verification
+
+Run validation in the authorized BuildServer checkout. Existing entry points:
+
+```sh
+cd web
+npm ci
+npm run typecheck
+npm test
+npm run lint
+npm run format:check
+npm run build
+```
+
+`configuration-feature.test.ts` and `certificates-feature.test.ts` exercise the
+features in independent Vue effect scopes without a page, router or store.
+The existing `node-config-plan.test.ts` and `node-workflows.test.ts` continue to
+mount the real NodeDetail setup for PR-01/02 integration regressions.
+
+Serve the production build on an available BuildServer port, set
+`PLAYWRIGHT_BASE_URL`, then run the existing focused browser smoke:
+
+```sh
+npx playwright test config-plan.spec.ts certificate-lifecycle.spec.ts --project=desktop --project=mobile
+```
+
+This checks Plan/Apply and certificate/P12 UI interactions, not a live
+Controller, database recovery or installation.
+
+### Advisory action availability
+
+The authorized node detail read includes `effective_actions`. Telemetry derives
+node trust and approved capabilities through the existing Operations Store;
+Node HTTP asks its parent-supplied callback to apply the same resource-scoped
+RBAC checks as writes. The callback carries the original request context and
+adds no authorization store or permission engine to the module. Reads fail
+closed on lookup errors, and the caller-specific detail response is not cached.
+List reads do not perform these additional lookups.
+
+NodeDetail disables the relevant actions and explains missing capability,
+trust or role permissions before a form is filled. Certificate browsing uses
+its separate read permission. This remains advisory: writes still enforce
+capabilities, role checks, sealing keys, versions, approvals, secret references
+and command-specific constraints. Configuration forms identify their template
+source and captured revision; generated results identify the full redacted
+candidate without inventing current field values. Existing desired/observed
+fields distinguish unmanaged resources and missing observations in the display,
+without changing convergence records or taking over existing accounts.

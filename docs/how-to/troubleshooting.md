@@ -64,7 +64,7 @@ mutation-capable session.
 
 Check `/etc/ocservia-agent/agent.env`, the independently provisioned command
 verification key, and the two distinct sealing keys. If the installed pair
-must be restored, use [Agent rollback](agent-rollback.md); do not copy binaries
+must be restored, use [Agent rollback](agent-lifecycle.md#rollback); do not copy binaries
 from an unverified directory.
 
 ## Relay is unavailable
@@ -84,9 +84,9 @@ Confirm `OCSERV_DATABASE_BACKEND` and `OCSERV_DATABASE_DEPLOYMENT` from the
 effective deployment configuration before choosing a procedure:
 
 - PostgreSQL: restart the same instance for transient outages, or use
-  [verified backup and isolated restore](../operations/postgres-backup.md).
+  [verified backup and isolated restore](../operations/database-backup-restore.md#postgresql).
   Cluster failover and PITR readiness are outside the supported deployment.
-- MySQL/MariaDB: [isolated logical restore](../operations/mysql-backup.md),
+- MySQL/MariaDB: [isolated logical restore](../operations/database-backup-restore.md#mysql-and-mariadb),
   not PostgreSQL commands. This does not provide PITR, failover, storage
   snapshots or cross-engine migration.
 

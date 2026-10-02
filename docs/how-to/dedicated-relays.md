@@ -16,8 +16,10 @@ connectivity remains available; a recovery test must prove dependence on the Rel
 
 1. On the Relay host, provision `OCSERV_RELAY_SECRET_DIR` as a launcher-owned
    mode-`0700` directory containing `tls.crt`, `tls.key`, and
-   `relay-access-token` with the ownership required by the launcher. Assign a
-   DNS name to the host and provision its matching certificate and
+   `relay-access-token`. TLS files are launcher-owned mode `0444`; the token
+   is UID/GID 65532 mode `0400`. Set an explicit version-tagged or SHA-256
+   `OCSERV_RELAY_IMAGE`. The standalone Relay publishes TCP 80/443 and UDP 7842.
+   Assign a DNS name to the host and provision its matching certificate and
    key; use the checked-in `deploy/production/relay/relay.toml` configuration.
 2. On the Relay host, validate and start the relay:
 
@@ -69,8 +71,8 @@ Restart the affected services and verify A-only traffic before retiring B.
 An enrolled installer rerun verifies existing configuration and refuses a
 persisted nonempty B; it does not rewrite topology or replace tokens.
 There is no Relay-list hot reload. Check the actual old release requirements
-before rollback; see [Agent rollback](agent-rollback.md) and
-[Controller rollback](controller-rollback.md).
+before rollback; see [Agent rollback](agent-lifecycle.md#rollback) and
+[Controller rollback](controller-lifecycle.md#rollback).
 
 The relay is an independent service, not embedded in the Controller. Sharing
 a host is not validated here: both default deployments claim TCP 443 on all
@@ -84,5 +86,10 @@ interrupt communication; schedule a recovery window rather than applying a
 two-path no-interruption procedure. Preserve identity, enrollment and pending
 command journals, and verify authenticated traffic after restoring service.
 
-See [Dedicated relays reference](../operations/dedicated-relays.md) for trust
-capacity and path invariants.
+## Trust and capacity
+
+The shared Relay token is not an Agent identity or a Controller capacity guard.
+Keep transportd's five trust classes and reserved known-Agent capacity enabled.
+Direct and Relay paths enforce the same snapshot, revocation, authorization,
+registration-recheck and enrollment-token rules. IP/NAT identity must never
+refill an EndpointID budget.

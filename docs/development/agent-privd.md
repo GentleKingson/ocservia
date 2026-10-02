@@ -109,7 +109,7 @@ independently register the privd key, whose root-authenticated credential
 consumption approves `privd_result_attestation_v1`; upgrade privd and Agent;
 verify the Agent advertises and negotiates that capability before dispatching
 privileged work. There is no production legacy-success mode. Historical certificate
-rows are migration legacy only to preserve schema rollback and cannot start new
+rows are retained as historical data and cannot start new
 signing until a fresh attested CSR is produced. Rollback must stop privileged
 dispatch, reconcile Unknown work, and restore the matched Controller, Agent,
 privd, root effect store, and key state. Never roll back only one peer.
