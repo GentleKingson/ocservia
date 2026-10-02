@@ -16,7 +16,7 @@ authorized principal.
 - Two distinct sealing private keys are provisioned on the node, and you have
   their key IDs and public-key SHA-256 descriptors.
 - For production, the dedicated relay drop-in and launcher are installed,
-  `RELAY_URL_A` is exported, optional `RELAY_URL_B` is distinct when nonempty, and
+  `RELAY_URL_A` is exported, `RELAY_URL_B` is omitted or empty, and
   `/etc/ocservia-agent/relay-access-token` is provisioned.
 - You have an authenticated requester API client with permission to create a
   node bootstrap token and request node approval.
@@ -103,8 +103,6 @@ provided.
 4. Run enrollment with the same identity directory:
 
    ```bash
-   relay_args=(--relay-url "${RELAY_URL_A:?set the dedicated HTTPS relay URL}")
-   if [[ -n "${RELAY_URL_B:-}" ]]; then relay_args+=(--relay-url "$RELAY_URL_B"); fi
    sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent \
      --identity-dir /var/lib/ocservia-agent/identity \
      --controller "$CONTROLLER_ENDPOINT_ID" \
@@ -115,7 +113,7 @@ provided.
      --p12-password-seal-key-id "$P12_PASSWORD_SEAL_KEY_ID" \
      --p12-password-seal-public-key-sha256 "$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" \
      --relay-mode custom \
-     "${relay_args[@]}" \
+     --relay-url "${RELAY_URL_A:?set the dedicated HTTPS relay URL}" \
      --relay-token-file /etc/ocservia-agent/relay-access-token
    ```
 

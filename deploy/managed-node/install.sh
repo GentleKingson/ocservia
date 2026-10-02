@@ -555,21 +555,16 @@ validate_operator_inputs() {
   done
   [[ "${CONTROLLER_ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "CONTROLLER_ENDPOINT_ID must be the 64-lowercase-hex Controller EndpointID"
-  for variable in RELAY_URL_A RELAY_URL_B; do
-    [[ "${variable}" == RELAY_URL_B && -z "${RELAY_URL_B}" ]] && continue
-    case "${!variable}" in
-      https://*) ;;
-      *) fail "${variable} must be an https:// dedicated relay URL" ;;
-    esac
-    # These values are written literally to a systemd EnvironmentFile.
-    # Reject characters that cannot round-trip; the binary validates URLs.
-    if [[ "${!variable}" =~ [[:space:]\"\'\`\$\\\?#@] ]]; then
-      fail "${variable} must be literal credential-free HTTPS without query or fragment"
-    fi
-  done
   # shellcheck disable=SC2153 # A was required through the allowlisted loop above.
-  [[ "${RELAY_URL_A}" != "${RELAY_URL_B}" ]] ||
-    fail "RELAY_URL_A and nonempty RELAY_URL_B must be distinct dedicated relay URLs"
+  case "${RELAY_URL_A}" in
+    https://*) ;;
+    *) fail "RELAY_URL_A must be an https:// dedicated relay URL" ;;
+  esac
+  # This value is written literally to a systemd EnvironmentFile.
+  # Reject characters that cannot round-trip; the binary validates URLs.
+  if [[ "${RELAY_URL_A}" =~ [[:space:]\"\'\`\$\\\?#@] ]]; then
+    fail "RELAY_URL_A must be literal credential-free HTTPS without query or fragment"
+  fi
   USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-user-password-v1}"
   P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-p12-password-v1}"
   for variable in USER_PASSWORD_SEAL_KEY_ID P12_PASSWORD_SEAL_KEY_ID; do
