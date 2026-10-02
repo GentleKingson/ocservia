@@ -480,26 +480,23 @@ if [[ -f "${installed_relay_dropin}" ]]; then
 else
   install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
 fi
-if [[ -e "${installed_upgrader}" ]]; then
-  install -o root -g root -m 0755 -- "${installed_upgrader}" "${BACKUP_DIR}/ocservia-upgrader.previous"
-else
-  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-upgrader.absent"
-fi
-if [[ -e "${installed_relay_launcher}" ]]; then
-  install -o root -g root -m 0755 -- "${installed_relay_launcher}" "${BACKUP_DIR}/ocservia-agent-relays.previous"
-else
-  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-agent-relays.absent"
-fi
-if [[ -e "${installed_upgrader_unit}" ]]; then
-  install -o root -g root -m 0644 -- "${installed_upgrader_unit}" "${BACKUP_DIR}/ocservia-upgrader@.service.previous"
-else
-  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-upgrader@.service.absent"
-fi
-if [[ -e "${installed_verifier}" ]]; then
-  install -o root -g root -m 0755 -- "${installed_verifier}" "${BACKUP_DIR}/ocservia-agent-verify.previous"
-else
-  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-agent-verify.absent"
-fi
+# ponytail: This fixed package-owned set can grow only with matching changes
+# to the independent rollback allowlist and restore policy.
+optional_backups=(
+  ocservia-upgrader "${installed_upgrader}" 0755
+  ocservia-agent-relays "${installed_relay_launcher}" 0755
+  ocservia-upgrader@.service "${installed_upgrader_unit}" 0644
+  ocservia-agent-verify "${installed_verifier}" 0755
+)
+for ((entry = 0; entry < ${#optional_backups[@]}; entry += 3)); do
+  name="${optional_backups[entry]}"
+  installed_file="${optional_backups[entry + 1]}"
+  if [[ -e "${installed_file}" ]]; then
+    install -o root -g root -m "${optional_backups[entry + 2]}" -- "${installed_file}" "${BACKUP_DIR}/${name}.previous"
+  else
+    install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/${name}.absent"
+  fi
+done
 write_snapshot_manifest "${BACKUP_DIR}"
 
 "${ROOT}/scripts/install-agent.sh"
