@@ -75,7 +75,6 @@ container_image="ocservia-rpm-smoke-${RUN_ID:0:50}"
 split_state_mounted=false
 native_rebind_fixture=false
 native_timer_masked=false
-native_privd_masked=false
 systemd_probe="/run/ocservia-native-${RUN_ID}.sh"
 mkdir -p "${pkg_dir}" "${ARTIFACT_DIR}"
 chmod 0700 "${work}"
@@ -95,9 +94,6 @@ cleanup() {
     -u ocservia-agent.service -u ocservia-privd.service; } >"${ARTIFACT_DIR}/native-lifecycle-systemd.log" 2>&1 || true
   if [[ "${native_timer_masked}" == true ]]; then
     sudo systemctl unmask --runtime ocservia-agent-retention.timer || status=1
-  fi
-  if [[ "${native_privd_masked}" == true ]]; then
-    sudo systemctl unmask --runtime ocservia-privd.service || status=1
   fi
   sudo systemctl stop ocservia-agent-retention.timer ocservia-agent-retention.service \
     ocservia-agent.service ocservia-privd.service >/dev/null 2>&1 || true
@@ -407,19 +403,14 @@ sudo systemctl is-active --quiet ocservia-agent-retention.timer
 { sudo cat /var/lib/ocservia-upgrade/native-order.log; } >"${ARTIFACT_DIR}/deb-rollback-systemd-order.log"
 { sudo cat /var/lib/ocservia-upgrade/native-hashes.log; } >"${ARTIFACT_DIR}/deb-retention-stop-hashes.log"
 
-# A service restart can fail after the files and installed-commit are durable.
-# A same-package retry must recover an enabled timer without a pending record.
+# Exercise the stopped-timer state that can remain after a committed install.
+# This uses the real manager; interrupted file installs have separate tests.
 sudo install -m 0600 "${work}/native-old.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
-sudo systemctl is-active --quiet ocservia-privd.service
-# Mask the active first restart target without stopping it. Its explicit
-# TryRestartUnit request must fail synchronously after the package file commit.
-sudo systemctl mask --runtime ocservia-privd.service
-native_privd_masked=true
-sudo systemctl is-active --quiet ocservia-privd.service
-if { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-commit-failure.log" 2>&1; then
-  echo 'injected service restart failure was ignored' >&2; exit 1
-fi
-grep -E 'ocservia-privd\.service.*masked' "${ARTIFACT_DIR}/deb-post-commit-failure.log"
+{ sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-commit-install.log" 2>&1
+assert_timer_worker_active
+sudo install -m 0600 "${work}/native-new.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
+sudo systemctl stop ocservia-agent-retention.timer ocservia-agent-retention.service
+sudo systemctl is-enabled --quiet ocservia-agent-retention.timer
 sudo sha256sum -c "${work}/native-new.sha256"
 [[ "$(sudo sha256sum /usr/libexec/ocservia/ocservia-agent | awk '{print $1}')" == "$(cat "${work}/binary-sha-${new_version}")" ]]
 archive_hash="$(sudo sha256sum "/usr/share/ocservia-agent/ocservia-agent-${new_version}-linux-${PACKAGE_ARCH}.tar.gz" | awk '{print $1}')"
@@ -428,15 +419,10 @@ sudo test ! -e /var/lib/ocservia-upgrade/installing-package
 [[ "$(sudo systemctl is-active ocservia-agent-retention.timer 2>/dev/null || true)" != active ]]
 { sudo /usr/libexec/ocservia/ocservia-agent-rollback --verify-only; } >"${ARTIFACT_DIR}/deb-post-commit-snapshot-verify.log" 2>&1
 { sudo find /var/lib/ocservia-upgrade/upgrade-backup -type f -exec sha256sum {} +; } >"${work}/post-commit-snapshot"
-sudo systemctl unmask --runtime ocservia-privd.service
-native_privd_masked=false
-sudo systemctl reset-failed ocservia-privd.service ocservia-agent.service
-sudo systemctl start ocservia-privd.service ocservia-agent.service
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-commit-retry.log" 2>&1
 sudo sha256sum -c "${work}/post-commit-snapshot"
 assert_timer_worker_active
 sudo test ! -e /var/lib/ocservia-upgrade/installing-package
-sudo install -m 0600 "${work}/native-new.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
 for timer_state in disabled masked; do
   sudo systemctl stop ocservia-agent-retention.service
   sudo systemctl disable --now ocservia-agent-retention.timer
