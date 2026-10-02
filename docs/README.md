@@ -1,6 +1,6 @@
 # ocservia documentation
 
-Use these documents to deploy, operate, and understand ocservia. Start with the installation guides, use the operational runbooks for maintenance, and consult the technical reference for implementation contracts.
+This documentation defines the technical specifications and operational protocols for ocservia. It provides deployment guidelines, maintenance procedures, and architectural references. We recommend consulting the installation guides for initial setup, the operational runbooks for routine maintenance, and the technical reference for system contracts.
 
 ## Start here
 
@@ -61,15 +61,10 @@ Use these documents to deploy, operate, and understand ocservia. Start with the 
 - Generated Web client: [web/src/api/generated/](../web/src/api/generated/)
 - [Upstream provenance records](upstream/v4.9-post1.md)
 
-Generated artifacts are replaced by `make generate`; do not edit them manually.
-Specialized E2E, resilience and capacity checks are indexed in the
-[validation guide](development/testing.md).
+The build system overwrites generated artifacts during `make generate`. Manual modifications to these files will be lost. For testing, the [validation guide](development/testing.md) indexes the specialized end-to-end, resilience, and capacity checks.
 
 ## Documentation scope
 
-Keep current procedures and contracts here, with one owner for each topic.
-Link to that owner instead of repeating its rules. Use Git history for release
-verdicts, implementation timelines and one-off task reports.
+This documentation focuses on active procedures and system contracts. We restrict each topic to a single authoritative source to prevent redundancy. Historical data, including release decisions, implementation timelines, and isolated task reports, belong in the Git version history rather than these active documents.
 
-The files in `upstream/` support attribution and backport validation
-and remain available through the technical reference.
+Files within the `upstream/` directory support attribution and backport validation. They remain accessible via the technical reference section.
