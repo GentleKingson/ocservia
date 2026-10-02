@@ -27,8 +27,8 @@ For PostgreSQL credential exposure, use `deploy/production/rotate-postgres-crede
 ## Deployment rollback
 
 Stop new writes and reconcile every Unknown operation. Use the guarded
-[Controller rollback](../how-to/controller-rollback.md) or
-[Agent rollback](../how-to/agent-rollback.md), respecting the selected artifact's
+[Controller rollback](../how-to/controller-lifecycle.md#rollback) or
+[Agent rollback](../how-to/agent-lifecycle.md#rollback), respecting the selected artifact's
 actual protocol, configuration and persistent-state requirements. Version order,
 schema ranges and descriptor equality are not admission gates in v1.1.0 and do
 not provide a safety guarantee. Controller rollback
@@ -43,11 +43,11 @@ the effective configuration and check the
 [production support matrix](production-deployment.md#database-support).
 
 - PostgreSQL: restart the same instance for a transient outage, or use
-  [verified backup and isolated restore](postgres-backup.md) for data loss.
+  [verified backup and isolated restore](database-backup-restore.md#postgresql) for data loss.
   Database clusters, automatic failover and PITR readiness are outside the
   supported single-instance deployment.
 - MySQL/MariaDB: use the matching backend's
-  [logical backup and isolated restore](mysql-backup.md). It does not supply
+  [logical backup and isolated restore](database-backup-restore.md#mysql-and-mariadb). It does not supply
   PITR, failover, storage snapshots or cross-engine migration. Do not run
   PostgreSQL recovery or credential-rotation scripts against these backends.
 

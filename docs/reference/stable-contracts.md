@@ -97,7 +97,7 @@ not an old-release support promise.
 
 Nodes implementing `ocserv.config.complete.plan` and
 `ocserv.config.complete.apply` use the
-[complete node-local TLS profile](../operations/node-local-config-tls.md).
+[complete node-local TLS profile](../development/configuration.md#node-local-tls-provisioning).
 Apply remains reload-only: startup authentication/listener/worker/socket/TLS
 bindings must match protected active configuration. Initial activation and
 TLS version/path changes need an explicitly authorized maintenance restart.
@@ -156,22 +156,15 @@ the actual server, client and backup image versions/digests per acceptance run.
 | MariaDB 12.3.2 external | Same two entries with `ENGINE=mariadb` | Same logical-restore boundary, independently tested engine, not an alias for a MySQL pass. |
 | PostgreSQL 18 CI; bundled MySQL/MariaDB | PG18 existing CI remains; bundled MySQL/MariaDB launcher rejects | Not production support. Keep tests and production admission distinct. |
 
-T02 identified same-line patch candidates (PostgreSQL 17.11, MySQL container
-8.4.12/native 8.4.11 plus vendor patches, MariaDB 12.3.3). They are **pending
-compatibility and artifact review**, not replacements for the existing support
-rows. T09 owns final image pins/inventory; Business Smoke owns actual deployment evidence.
-Verify migration/permissions and matching backup/restore before accepting a
-patch set. Do not substitute PG18/G6 or silently remove old rows. SQLite
-journal WAL-reset applicability and upgrade recovery remain T06/T08 work;
-do not reset journals to make an upgrade pass.
+New database patch sets require migration/permission, artifact and matching
+backup/restore review before replacing supported pins. Business Smoke owns
+deployment evidence. PostgreSQL 18 CI is not production support; never reset
+SQLite journals to make an upgrade pass.
 
 ## CI and rollout decisions
 
-Run manual Release Check on merged main and require Full CI, Security and
-Integrated Business Smoke with single-instance recovery PASS. The operator then confirms the
-version and creates its tag; formal Release builds, scans the exact Controller
-images and smoke-tests both native architectures before publication. Historical compatibility gates are retired,
-not skipped successes.
+Follow [Release policy](../development/release-checks.md). Retired historical
+compatibility gates are not skipped successes.
 
 Preserve current trust, real capabilities, approvals, Signer identity/revision,
 journals, receipts and replay/fencing state. Reconcile Unknown before conflicting

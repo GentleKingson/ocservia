@@ -1,8 +1,6 @@
 # Node enrollment development
 
-> **Reference.** The operator procedure is [Enroll a node](../how-to/enroll-node.md).
-> This document describes the enrollment protocol, trust binding, and migration
-> invariants.
+Operator steps: [Enroll a node](../how-to/enroll-node.md).
 
 Enrollment is explicit and does not activate a node. The normal bootstrap path
 uses a node bootstrap token created with `POST /api/v1/node-bootstrap-tokens`.
@@ -13,7 +11,6 @@ consumption commit in one transaction. A consumed token can only be replayed
 by that same EndpointID and returns the same pending node ID; another endpoint
 is rejected. Bootstrap tokens never approve or activate a node.
 
-This is a strict permission boundary, not two names for the same operation.
 Bootstrap possession authorizes only creation or recovery of the bound
 `PENDING_APPROVAL` record. `node.approve` requires an authenticated requester,
 a content-bound approval request, a different authorized approver, and a later
@@ -125,12 +122,8 @@ other process's exact UID, socket UID/GID/mode, trusted non-writable ancestry,
 and stable device/inode identity. Shutdown removes only the socket instance the
 server created.
 
-Rollback requires restoring explicit startup endpoint bindings in transportd
-before disabling the trust service. Migration
-`000018_enrollment_revocation_trust` removes durable convergence work when
-reversed; do not roll it back while a trust transition is pending. Migration
-`000004_enrollment_trust` is destructive in reverse and must not be rolled back
-unless enrollment history and bindings have been preserved or the enrolled
-nodes will be enrolled again with new endpoint keys.
-Migration `000030_node_bootstrap_tokens` removes bootstrap token history when
-reversed and must not be rolled back while bootstrap enrollment is in flight.
+Before recovery, stop new enrollment and reconcile pending trust transitions.
+Preserve token consumption, endpoint bindings, approvals and revocation history.
+Static transport bindings permit observation only, not privileged commands.
+The tree provides no down migrations; use a forward fix or a planned
+[isolated restore](../operations/incident-recovery.md#database-recovery).

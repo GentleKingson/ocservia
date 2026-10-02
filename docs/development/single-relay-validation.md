@@ -1,4 +1,4 @@
-# Single Dedicated Relay Validation
+# Single dedicated Relay validation
 
 Run checks only in a task-owned checkout and disposable Linux environment.
 Native installation, systemd and network faults belong to the existing
@@ -86,11 +86,10 @@ Do not change live production networks to reproduce this failure.
 
 ## Real Agent Chain
 
-The signed Business Smoke / Integration environment owns real single-node
+The Business Smoke / Integration environment owns real single-node
 recovery. Use the existing Release Diagnostics workflow with
 `run-resilience=true`; see [Resilience](resilience.md) and
-[Business validation](real-business-validation.md). The old G6 engineering
-entrypoint and its disposable node image are retired.
+[Business validation](real-business-validation.md).
 
 The sole-Relay scenario proves dependency on that Relay, waits until the old
 owner lease is invalid, and verifies that the approved offline command has no
@@ -103,8 +102,8 @@ no additional effect. A failed queued command cannot become expected Unknown.
 ## Package Lifecycle And Cleanup
 
 Reuse `i18-agent-package-smoke.sh` and `release-native-package-smoke.sh` for
-current packages in disposable systemd/packaging containers. Historical
-baseline upgrades are retired; follow [current package validation](release-upgrade-validation.md).
+current packages in disposable systemd/packaging containers; follow
+[package validation](release-checks.md).
 For native tests that launch sibling Docker containers,
 `RUNNER_TEMP` must be mounted at the same absolute path on the disposable test host and in
 the parent container. Match the actual architecture for native DEB/RPM checks;

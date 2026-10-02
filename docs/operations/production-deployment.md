@@ -485,7 +485,7 @@ bundled or external PostgreSQL. Existing backup and WAL retention stay intact.
 
 External MySQL 8.4.10 and MariaDB 12.3.2 use the backend-specific logical
 backup and restore procedure in [MySQL and MariaDB backup and restore
-validation](mysql-backup.md). That procedure does not claim snapshot, PITR,
+validation](database-backup-restore.md#mysql-and-mariadb). That procedure does not claim snapshot, PITR,
 failover, or cross-engine recovery coverage.
 
 Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:

@@ -1,9 +1,7 @@
 # Cross-VM real E2E validation
 
-Cross-VM enrollment is script-level manual acceptance, not a GitHub Actions
-workflow or a prerequisite of Basic CI. The underlying scripts and
-`deploy/real-e2e` fixtures remain available for suitable local or dedicated
-test environments.
+Cross-VM enrollment uses manual scripts and `deploy/real-e2e` fixtures;
+it is outside Basic CI and has no dedicated Actions workflow.
 
 Use two distinct Linux VMs with different boot IDs, the same repository commit,
 and Internet access to Iroh's default relay discovery. The Controller needs
@@ -54,12 +52,12 @@ environment variables. It is not needed for the manual file-transfer flow above.
 ## Scope
 
 This profile checks distinct VMs, persistent Agent identity, Controller-bound
-enrollment, and a real Iroh Internet path. It does not install the signed Agent
+enrollment, and a real Iroh Internet path. It does not install the Agent
 package, start Agent or privd systemd units, install native ocserv/OpenConnect,
 approve a node through two OIDC principals, execute privileged mutations, or
 prove dedicated-relay and production failure-domain behavior.
 
-For a syntax-only check on `LocalServer`, without starting any services:
+For a syntax-only check in the authorized validation environment:
 
 ```bash
 make real-e2e-check

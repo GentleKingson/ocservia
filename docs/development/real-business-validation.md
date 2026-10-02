@@ -1,24 +1,13 @@
 # Business Smoke and Integration
 
-The release Business Smoke job exercises one
-amd64 production path: Controller and native systemd Agent/privd/ocserv
-installation, Local requester/approver login, approved ConfigPlan apply, real
-OpenConnect VPN traffic, production Signer password sealing and internal TLS.
-No production binary, service, Relay or VPN is mocked. This is neither native
-package acceptance nor a Controller/database HA guarantee.
-
-Manual [Release Check](release-checks.md) always runs this Integrated smoke with
-`production_signer=true` and `run-resilience=true` on amd64. Native package and
-Controller image build/smoke jobs in Release own both amd64 and arm64 coverage.
-See the [coverage inventory](release-business-coverage.md).
-
-For investigation, dispatch `release-upgrade.yml` on the branch being tested
-with `version=0.0.0`, `purpose=integration`, `production_signer=true`, and
-`run-resilience=true` for OIDC, PKI/P12/revoke, browser, rollback and deep recovery.
-Use `purpose=smoke` for the release scope. Profile and Signer selection are
-independent; `production_signer=false` uses the standalone fixture topology.
-Neither mode publishes a Release/tag or writes GHCR. Host installation runs
-only on disposable amd64 runners.
+Business Smoke exercises the real Controller, native systemd Agent/privd/ocserv,
+Local requester/approver login, approved ConfigPlan apply, OpenConnect VPN,
+production Signer sealing and internal TLS on disposable amd64 runners.
+Manual integration adds OIDC, PKI/P12/revoke, browser, rollback and deep recovery.
+No production binary, service, Relay or VPN is mocked. Use
+[Release policy](release-checks.md) for dispatch commands, topology selection,
+coverage ownership and publication gates; Business alone establishes neither
+native package acceptance nor HA.
 
 ## Evidence and boundaries
 
@@ -82,21 +71,14 @@ The following limitations are deliberately retained, not scored as PASS:
   production RTO/RPO guarantee. The client namespace protects host routes; it is not
   another host. The probe checks test VPN traffic, never real user traffic.
 
-`result.json` reports `scope=business-smoke` or `scope=integration`.
-It never reports full release acceptance. Both record
-`operator_mode=simulated_two_principals` and human custody `NOT_VERIFIED`, even
-when the probe passes. Baseline 1.0 and Business Smoke require independently controlled
-requester and approver principals, not an organizational two-person rule.
-Automated acceptance may authenticate and exercise both principals separately;
-it must preserve the RBAC, binding, self-approval and replay checks above.
-Actual two-person credential custody is EXCLUDED from baseline Business Smoke, never PASS
-by simulation. It is an additional production-hardening or enterprise security
-profile: a deployment selecting that profile needs independent human custody
-evidence before claiming it. Final evidence must distinguish these two scopes.
-A green smoke job proves only the smoke scope, not the extended or other release
-gates. Per-phase checkpoints are
-written only after assertions pass. Missing checkpoints are NOT RUN; preserve
-failures, original run/attempt and exact SHA across retries.
+`result.json` reports `scope=business-smoke` or `scope=integration`, never full
+release acceptance. Both record `operator_mode=simulated_two_principals` and
+human custody `NOT_VERIFIED`. Independently authenticated principals must pass
+RBAC, binding, self-approval and replay checks. Two-person custody is excluded
+and needs separate evidence under the
+[approval boundary](../reference/stable-contracts.md#approval-principal-boundary).
+Write checkpoints only after assertions pass. Missing checkpoints are NOT RUN;
+retain failures, original run/attempt and exact SHA across retries.
 
 The manual integration offline Relay queue scenario proves the command was never sent, then
 requires the original operation to succeed with exactly one additional native
@@ -117,21 +99,11 @@ task containers, network namespace, builder and private directory; the native
 installation lives only on the disposable hosted runner. Do not generalize this
 cleanup to a shared host.
 
-To close the smoke scope, cover the prepublication production installation path
-with the current locally built products, separately authenticated principals,
-positive ConfigPlan apply, production Signer sealing and real VPN traffic.
-Automatic native rollback and the second VPN check belong to manual integration. Public download checks remain separate from the local Business run. Positive configuration apply requires native acceptance
-of the [reviewed complete contract](complete-config-contract.md), not just
-contract approval or unit tests; missing acceptance still blocks readiness. Preserve the
-matched-release recovery boundary in
-[stable contracts](../reference/stable-contracts.md). Do not import earlier T03,
-T04, T05 or Package & Upgrade results as runtime acceptance of the new candidate.
-
-Release Check runs all required owners anew on merged main. Rerun a failed
-owner with its complete checks; shared fault timelines must rerun together.
-Historical native upgrade and mixed-version application cells are retired.
-Business success does not replace package, source Security or Resilience
-checks, and does not guarantee cross-version safety.
+Positive ConfigPlan apply requires native acceptance of the
+[complete contract](configuration.md#complete-profile-contract), not just contract review or
+unit tests. Preserve the [matched-release recovery boundary](../reference/stable-contracts.md#matched-release-recovery-boundary).
+Rerun failed owners with complete checks and shared fault timelines together;
+earlier candidates cannot supply missing acceptance or cross-version safety.
 
 Existing [single-Relay](single-relay-validation.md) and
 [cross-VM enrollment](real-e2e.md) profiles retain their original scope.

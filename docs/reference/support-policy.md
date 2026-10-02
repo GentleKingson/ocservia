@@ -75,10 +75,10 @@ a second support matrix.
 | Surface | Supported scope | Authority |
 | --- | --- | --- |
 | Controller OS/architecture | Linux `amd64` and `arm64` release artifacts | [Production deployment](../operations/production-deployment.md) |
-| Agent native packages | DEB on Ubuntu 24.04, RPM on Rocky 9, `amd64`/`arm64` | [Agent lifecycle](../operations/agent-lifecycle.md), [current package validation](../development/release-upgrade-validation.md) |
+| Agent native packages | DEB on Ubuntu 24.04, RPM on Rocky 9, `amd64`/`arm64` | [Agent lifecycle](../operations/agent-lifecycle.md), [package validation](../development/release-checks.md) |
 | Databases | PostgreSQL 17 bundled or external; MySQL 8.4.10 external; MariaDB 12.3.2 external | [Database support](../operations/production-deployment.md#database-support) |
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` | See note below |
-| Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated relays](../operations/dedicated-relays.md) |
+| Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated relays](../how-to/dedicated-relays.md) |
 | Authentication | Local only, OIDC only, or Local + OIDC | [Authentication](../operations/authentication.md) |
 
 Managed-ocserv note: the node adapter admits exactly `1.2.x`, `1.3.x`, `1.4.x`,
@@ -108,7 +108,7 @@ Three pairs are deliberately not conflated:
 1. **Single-relay recovery vs redundancy.** One dedicated Relay is supported.
    Its outage may interrupt management connections; recovery uses the original
    Relay, identity and command. Multiple Relay failover is outside support.
-   See [dedicated relays](../operations/dedicated-relays.md).
+   See [dedicated relays](../how-to/dedicated-relays.md).
 2. **Package installed vs really managed online.** A node with packages
    installed and services stopped is not fleet-managed. Online management
    requires enrollment, Controller approval, a started matched node, and an
@@ -122,8 +122,8 @@ Three pairs are deliberately not conflated:
    restore is separate from HA/PITR readiness. MySQL/MariaDB restore uses a new isolated
    server with the restore verifier, and redirecting a live Controller is a
    guarded manual cutover. See
-   [PostgreSQL backup](../operations/postgres-backup.md),
-   [MySQL/MariaDB backup](../operations/mysql-backup.md).
+   [PostgreSQL backup](../operations/database-backup-restore.md#postgresql),
+   [MySQL/MariaDB backup](../operations/database-backup-restore.md#mysql-and-mariadb).
 
 ## Security review posture
 
@@ -146,11 +146,7 @@ Three pairs are deliberately not conflated:
   scans above. Formal Release builds, scans and smoke-tests after the manual CI
   gate; either architecture failing blocks publication. Business Smoke owns
   runtime acceptance and does not scan images.
-- **Deferred, with re-review conditions:** the same-line database patch
-  candidates identified during contract review (PostgreSQL 17.11, MySQL
-  8.4.12 container / 8.4.11 native, MariaDB 12.3.3) are **not** part of the
-  1.0 support rows. Adoption requires the migration, permission, and matching
-  backup/restore review described in
-  [stable contracts](stable-contracts.md#database-and-recovery-matrix), plus
-  new per-version acceptance evidence; the currently pinned and validated
-  versions remain authoritative until then.
+- New database patch sets need migration, permission, artifact and backup/restore
+  review plus candidate-specific evidence under
+  [stable contracts](stable-contracts.md#database-and-recovery-matrix).
+  Existing validated pins remain authoritative until adoption.

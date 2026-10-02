@@ -34,17 +34,12 @@ Sanitized failure diagnostics use seven-day Actions artifacts. Selected checks m
 missing fields, failure, cancellation and unexpected skips block acceptance.
 Unselected resilience is explicitly `SKIPPED`. Required scenario checkpoints
 are only `controller`, `agent`, `database`, and `relay`; there is no synthetic
-completion checkpoint or separate required transport scenario. No separate fault matrix or evidence framework is
-required.
+completion checkpoint or separate required transport scenario.
 
-## Retired scope and retained tools
+## Recovery boundaries
 
-G6 workflows, Go harness, dual-domain HA/PITR orchestration, schemas, verdicts,
-checkpoints, rendezvous and dedicated tests are retired. Business builds its own native Relay image. The independent token-authenticated TCP/QUIC
-network probe remains a small executable; existing startup/role/Rebind tests
-retain only their scheduler completion fixture. Build/cache tooling, full-history
-secret scans, test runtime and Relay fixture have neutral paths. Necessary
-historical secret-scan allowlists remain.
+Business builds its native Relay image. The independent token-authenticated
+TCP/QUIC probe checks networking only, not the real business recovery chain.
 
 Production installation and launch entrypoints require Relay A and reject
 nonempty B before side effects. Existing A/B deployments require an explicit

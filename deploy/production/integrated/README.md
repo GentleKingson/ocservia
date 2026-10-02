@@ -47,7 +47,7 @@ canonical paths with protected ancestry. Signer requires `issuer-chain.pem`,
 so Controller can read its individual public-CA mount. Signer's TLS leaf must
 include SAN `signer`. `api-token` must exactly match Controller's
 `certificate-signer-token`; no private issuer key is mounted into Controller.
-See the [Signer custody contract](../../../docs/development/production-signer.md)
+See the [Signer custody contract](../../../docs/development/certificates-and-signer.md#production-signer)
 for chain, token, approved key-transfer and recovery requirements.
 
 Installation validates the deployment configuration and its source checkout,
@@ -411,7 +411,7 @@ rollback. Retain both source commits and bundles until the recovery window ends.
 
 After first login, enroll and independently approve the real node. Export its
 two distinct public sealing keys locally and the consumed approval binding
-from Controller using the [controlled transfer procedure](../../../docs/development/production-signer.md#trusted-public-key-transfer).
+from Controller using the [controlled transfer procedure](../../../docs/development/certificates-and-signer.md#trusted-public-key-transfer).
 Private node keys stay on the node. Stop affected mutations and Signer before
 import, then restart and verify both sealed-password and P12 business paths.
 Use a separate requester and approver principal, not self-approval.
