@@ -381,8 +381,9 @@ assert_timer_worker_active() {
 }
 reset_native_start_limits() {
   # Separate rapid test scenarios without changing the packaged unit limits.
+  # Inactive retention units may be unloaded; patterns select loaded units only.
   sudo systemctl reset-failed ocservia-agent.service ocservia-privd.service \
-    ocservia-agent-retention.service ocservia-agent-retention.timer
+    'ocservia-agent-retention.*'
 }
 sudo systemctl daemon-reload
 sudo systemctl start ocservia-agent-retention.service ocservia-agent-retention.timer
