@@ -39,7 +39,8 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation, command_envelope,
 };
 use ocservia_contracts::session::{
-    READ_ONLY_SESSION_CAPABILITIES, is_read_only_session_capability,
+    ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME, READ_ONLY_SESSION_CAPABILITIES,
+    is_read_only_session_capability,
 };
 use prost::Message;
 use rustls_pki_types::pem::PemObject as _;
@@ -54,8 +55,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
 const RELAY_FAILOVER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const ARTIFACT_FRAME_MASK: u32 = 3 << 30;
-const ARTIFACT_FETCH_FRAME: u32 = 1 << 31;
-const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
