@@ -91,7 +91,11 @@ unmount_native_state() {
 cleanup() {
   local status=$?
   { sudo journalctl --no-pager -n 100 -u ocservia-agent-retention.service \
-    -u ocservia-agent.service -u ocservia-privd.service; } >"${ARTIFACT_DIR}/native-lifecycle-systemd.log" 2>&1 || true
+    -u ocservia-agent-retention.timer -u ocservia-agent.service -u ocservia-privd.service; } >"${ARTIFACT_DIR}/native-lifecycle-systemd.log" 2>&1 || true
+  { sudo systemctl show ocservia-agent.service ocservia-privd.service \
+    ocservia-agent-retention.service ocservia-agent-retention.timer \
+    -p Id -p ActiveState -p SubState -p Result -p StartLimitIntervalUSec -p StartLimitBurst; } \
+    >"${ARTIFACT_DIR}/native-lifecycle-units.log" 2>&1 || true
   if [[ "${native_timer_masked}" == true ]]; then
     sudo systemctl unmask --runtime ocservia-agent-retention.timer || status=1
   fi
@@ -375,6 +379,11 @@ assert_timer_worker_active() {
   echo 'the real retention timer did not start its worker with the lifecycle lock available' >&2
   return 1
 }
+reset_native_start_limits() {
+  # Separate rapid test scenarios without changing the packaged unit limits.
+  sudo systemctl reset-failed ocservia-agent.service ocservia-privd.service \
+    ocservia-agent-retention.service ocservia-agent-retention.timer
+}
 sudo systemctl daemon-reload
 sudo systemctl start ocservia-agent-retention.service ocservia-agent-retention.timer
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-upgrade.log" 2>&1
@@ -405,6 +414,7 @@ sudo systemctl is-active --quiet ocservia-agent-retention.timer
 
 # Exercise the stopped-timer state that can remain after a committed install.
 # This uses the real manager; interrupted file installs have separate tests.
+reset_native_start_limits
 sudo install -m 0600 "${work}/native-old.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-commit-install.log" 2>&1
 assert_timer_worker_active
@@ -424,6 +434,7 @@ sudo sha256sum -c "${work}/post-commit-snapshot"
 assert_timer_worker_active
 sudo test ! -e /var/lib/ocservia-upgrade/installing-package
 for timer_state in disabled masked; do
+  reset_native_start_limits
   sudo systemctl stop ocservia-agent-retention.service
   sudo systemctl disable --now ocservia-agent-retention.timer
   if [[ "${timer_state}" == masked ]]; then
@@ -441,6 +452,7 @@ for timer_state in disabled masked; do
   fi
 done
 sudo sha256sum -c "${work}/post-commit-snapshot"
+reset_native_start_limits
 sudo systemctl enable ocservia-agent-retention.timer
 { sudo /usr/libexec/ocservia/ocservia-agent-rollback; } >"${ARTIFACT_DIR}/deb-post-commit-rollback.log" 2>&1
 assert_timer_worker_active
@@ -448,6 +460,7 @@ sudo sha256sum -c "${work}/native-old.sha256"
 
 # A snapshot's explicit absent state removes the whole optional chain and its
 # timer activation. This also exercises same-package reinstall after recovery.
+reset_native_start_limits
 sudo install -m 0600 "${work}/native-old.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
 sudo systemctl stop ocservia-agent-retention.timer ocservia-agent-retention.service ocservia-agent.service ocservia-privd.service
 sudo rm -f /run/systemd/system/ocservia-agent-retention.service.d/90-native-lifecycle.conf
