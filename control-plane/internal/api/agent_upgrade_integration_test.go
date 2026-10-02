@@ -108,6 +108,7 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	}
 	server := &Server{backend: postgres.WrapPool(pool), rbac: rbac.NewBackend(postgres.WrapPool(pool)), operations: apiOperationService(pool)}
 	server.EnableReleaseCatalog(catalog)
+	server.operations.EnableReleaseCatalog(catalog)
 
 	post := func(t *testing.T, principal auth.Principal, key, ifMatch, body string) *httptest.ResponseRecorder {
 		t.Helper()

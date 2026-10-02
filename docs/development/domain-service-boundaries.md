@@ -90,8 +90,9 @@ the limited disabled-development-path nil fix and regression entry points.
 resolve the same value target through the existing `RBACStore.UpgradeNode`
 observation query and operator-provisioned release catalog. The HTTP adapters
 retain request decoding, resource/session authorization and their distinct
-error mappings, not package identity construction. Server catalog assembly
-configures the existing Operations instance regardless of enable-call order;
+error mappings, not package identity construction. `platform/app` configures the
+shared Operations catalog before starting Worker, Scheduler or HTTP consumers.
+HTTP retains its catalog availability check without configuring Operations;
 an absent Operations service leaves upgrade approval preparation disabled.
 
 Preparation does not replace `CreateSynthetic`'s transaction. Node locking,
