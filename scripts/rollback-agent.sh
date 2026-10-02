@@ -149,24 +149,10 @@ for backup in "${required_backups[@]}"; do
   validate_digest "${backup}" "${manifest}"
 done
 
-relay_backup="${BACKUP_DIR}/ocservia-agent-relays.conf.previous"
-relay_absent="${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
-if [[ -f "${relay_backup}" && ! -L "${relay_backup}" && ! -e "${relay_absent}" && ! -L "${relay_absent}" ]]; then
-  validate_file "${relay_backup}" 644
-  validate_digest "$(basename -- "${relay_backup}")" "${manifest}"
-  restore_relay=true
-elif [[ -f "${relay_absent}" && ! -L "${relay_absent}" && ! -e "${relay_backup}" && ! -L "${relay_backup}" ]]; then
-  validate_file "${relay_absent}" 600
-  validate_digest "$(basename -- "${relay_absent}")" "${manifest}"
-  restore_relay=false
-else
-  rollback_error "rollback snapshot has ambiguous or unsafe relay drop-in state"
-fi
-
-# Each durable upgrade runner artifact is either restored from .previous or
+# Each optional package artifact is either restored from .previous or
 # removed per .absent, so a rollback cannot leave a mixed-generation runner.
 resolve_optional_backup() {
-  local base="$1" expected_mode="$2"
+  local base="$1" expected_mode="$2" label="${3:-$1}"
   local backup="${BACKUP_DIR}/${base}.previous" absent="${BACKUP_DIR}/${base}.absent"
   if [[ -f "${backup}" && ! -L "${backup}" && ! -e "${absent}" && ! -L "${absent}" ]]; then
     validate_file "${backup}" "${expected_mode}"
@@ -177,10 +163,14 @@ resolve_optional_backup() {
     validate_digest "${base}.absent" "${manifest}"
     resolved_backup=""
   else
-    rollback_error "rollback snapshot has ambiguous or unsafe ${base} state"
+    rollback_error "rollback snapshot has ambiguous or unsafe ${label} state"
   fi
 }
 
+resolve_optional_backup ocservia-agent-relays.conf 644 'relay drop-in'
+relay_backup="${resolved_backup}"
+restore_relay=false
+[[ -z "${relay_backup}" ]] || restore_relay=true
 resolve_optional_backup ocservia-upgrader 755
 upgrader_backup="${resolved_backup}"
 resolve_optional_backup 'ocservia-upgrader@.service' 644
@@ -303,21 +293,20 @@ else
 fi
 restore_file "${BACKUP_DIR}/ocservia-agent.service.previous" "${systemd}/ocservia-agent.service" 644
 restore_file "${BACKUP_DIR}/ocservia-privd.service.previous" "${systemd}/ocservia-privd.service" 644
-if [[ -n "${upgrader_backup}" ]]; then
-  restore_file "${upgrader_backup}" "${libexec}/ocservia-upgrader" 755
-else
-  rm -f -- "${libexec}/ocservia-upgrader"
-fi
-if [[ -n "${upgrader_unit_backup}" ]]; then
-  restore_file "${upgrader_unit_backup}" "${systemd}/ocservia-upgrader@.service" 644
-else
-  rm -f -- "${systemd}/ocservia-upgrader@.service"
-fi
-if [[ -n "${verifier_backup}" ]]; then
-  restore_file "${verifier_backup}" "${libexec}/ocservia-agent-verify" 755
-else
-  rm -f -- "${libexec}/ocservia-agent-verify"
-fi
+optional_restores=(
+  "${upgrader_backup}" "${libexec}/ocservia-upgrader" 755
+  "${upgrader_unit_backup}" "${systemd}/ocservia-upgrader@.service" 644
+  "${verifier_backup}" "${libexec}/ocservia-agent-verify" 755
+)
+for ((entry = 0; entry < ${#optional_restores[@]}; entry += 3)); do
+  backup="${optional_restores[entry]}"
+  destination="${optional_restores[entry + 1]}"
+  if [[ -n "${backup}" ]]; then
+    restore_file "${backup}" "${destination}" "${optional_restores[entry + 2]}"
+  else
+    rm -f -- "${destination}"
+  fi
+done
 if [[ "${restore_relay}" == true ]]; then
   restore_file "${relay_backup}" "${relay_directory}/10-production-relays.conf" 644
 else
