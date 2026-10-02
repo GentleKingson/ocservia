@@ -12,6 +12,10 @@ are refused because their recovery evidence cannot be inferred safely. Independe
 target Controller EndpointID and Ed25519 command verification public key. The
 key and token files must be protected root-owned regular files under trusted
 root-owned ancestry. Existing relay configuration must reach the target.
+Use one dedicated Relay: omit `RELAY_URL_B` or leave it empty in `relays.env`.
+Prepare (including `--dry-run`), resume and uncommitted operations reject a
+nonempty B before enrollment, operation creation or service shutdown. Status
+and recovery after authority publication remain available.
 The initial `agent.env` must retain its independently verified
 `AGENT_ENDPOINT_ID` enrollment binding. Bootstrap installation reruns refuse
 rebound nodes; use the native package lifecycle for subsequent upgrades.

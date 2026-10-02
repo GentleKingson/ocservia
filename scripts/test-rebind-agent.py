@@ -84,6 +84,90 @@ class RebindTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             rebind.environment()
 
+    def test_relay_arguments_preserve_single_and_development_paths(self):
+        self.assertEqual(rebind.relay_arguments(), [])
+        for suffix in ('', 'RELAY_URL_B=\n', 'RELAY_URL_B=""\n'):
+            with self.subTest(suffix=suffix):
+                rebind.atomic_write(rebind.CONF / 'relays.env',
+                                    ('RELAY_URL_A=https://relay.example.test\n' + suffix).encode())
+                self.assertEqual(rebind.relay_arguments(), [
+                    '--relay-mode', 'custom', '--relay-url', 'https://relay.example.test',
+                    '--relay-token-file', str(rebind.CONF / 'relay-access-token')])
+        rebind.atomic_write(rebind.CONF / 'relay-ca.pem', b'fixture')
+        self.assertEqual(rebind.relay_arguments()[-2:],
+                         ['--relay-ca-file', str(rebind.CONF / 'relay-ca.pem')])
+
+    def assert_relay_preflight(self, arguments):
+        rebind.atomic_write(rebind.CONF / 'relays.env',
+                            b'RELAY_URL_A=https://relay.example.test\nRELAY_URL_B=https://second.example.test\n')
+        rebind.atomic_write(rebind.ACTIVE, b'old-authority')
+        rebind.STATE.chmod(0o750)
+        os.chown(rebind.STATE, 0, self.account.pw_gid)
+        before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        operations = set(rebind.STATE.iterdir())
+        env = {key: 'fixture' for key in ['USER_PASSWORD_SEAL_KEY_ID', 'USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256',
+                                         'P12_PASSWORD_SEAL_KEY_ID', 'P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256']}
+        def send(args, *rest):
+            return self.state['node'] if '--enrollment-token-file' in args else self.source['endpoint']
+        with patch.object(rebind.sys, 'argv', ['rebind'] + arguments), \
+             patch.object(rebind.pwd, 'getpwnam', return_value=self.account), \
+             patch.object(rebind, 'environment', return_value=env), \
+             patch.object(rebind, 'managed_units'), \
+             patch.object(rebind, 'current_binding', return_value=self.source), \
+             patch.object(rebind, 'public_key', return_value=self.state['key']), \
+             patch.object(rebind.time, 'monotonic', side_effect=[0, 61]), \
+             patch.object(rebind, 'agent', side_effect=send) as agent, \
+             patch.object(rebind.subprocess, 'run', return_value=types.SimpleNamespace(stdout=b'1')) as process:
+            with self.assertRaisesRegex(RuntimeError, 'only one dedicated Relay'):
+                rebind.main()
+            agent.assert_not_called()
+            process.assert_not_called()
+        self.assertEqual(set(rebind.STATE.iterdir()), operations)
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content, str(path))
+
+    def test_prepare_rejects_second_relay_before_operation_and_identity_work(self):
+        self.state['phase'] = 'verified'
+        rebind.save(self.operation, self.state)
+        token = self.root / 'token'
+        rebind.atomic_write(token, b'obt1_' + b'A' * 43)
+        arguments = ['prepare', '--controller', self.state['controller'], '--command-key-file', 'fixture',
+                     '--token-file', str(token), '--environment', 'production', '--reason', 'fixture',
+                     '--source-disposition', 'revoked']
+        for suffix in (['--dry-run'], []):
+            with self.subTest(suffix=suffix):
+                self.assert_relay_preflight(arguments + suffix)
+
+    def test_resume_rejects_second_relay_before_staging_or_enrollment(self):
+        token = b'obt1_' + b'A' * 43
+        self.state['token_hash'] = rebind.hashlib.sha256(token).hexdigest()
+        rebind.atomic_write(self.operation / 'token', token, 0o640)
+        for path in [rebind.AGENT_STATE / 'rebind-staging', rebind.AGENT_STATE / 'rebind-staging' / self.state['id']]:
+            os.chown(path, self.account.pw_uid, self.account.pw_gid)
+            path.chmod(0o700)
+        for phase in ('prepared', 'enrolling'):
+            with self.subTest(phase=phase):
+                self.state['phase'] = phase
+                rebind.save(self.operation, self.state)
+                self.assert_relay_preflight(['resume', self.state['id']])
+
+    def test_uncommitted_operation_rejects_second_relay_before_stopping_services(self):
+        for phase in ('enrolled', 'committing'):
+            with self.subTest(phase=phase):
+                self.state['phase'] = phase
+                rebind.save(self.operation, self.state)
+                self.assert_relay_preflight(['commit', self.state['id']])
+
+    def test_status_remains_available_with_second_relay(self):
+        rebind.atomic_write(rebind.CONF / 'relays.env', b'RELAY_URL_B=https://second.example.test\n')
+        rebind.STATE.chmod(0o750)
+        os.chown(rebind.STATE, 0, self.account.pw_gid)
+        with patch.object(rebind.sys, 'argv', ['rebind', 'status', self.state['id']]), \
+             patch.object(rebind.pwd, 'getpwnam', return_value=self.account), \
+             patch.object(rebind, 'environment', return_value={}), \
+             patch.object(rebind, 'relay_arguments', side_effect=AssertionError('diagnosis must remain available')):
+            rebind.main()
+
     def test_commit_preserves_source_and_publishes_one_complete_authority(self):
         self.commit()
         active = rebind.decode_binding(rebind.secure_read(rebind.ACTIVE))
@@ -135,8 +219,14 @@ class RebindTests(unittest.TestCase):
         self.assertEqual(self.state['phase'], 'committed')
         self.assertEqual(rebind.decode_binding(rebind.secure_read(rebind.ACTIVE))['node'], self.state['node'])
         self.assertTrue(Path(self.source['journal']).exists())
+        rebind.atomic_write(rebind.CONF / 'relays.env', b'RELAY_URL_B=https://second.example.test\n')
         self.commit()
         self.assertEqual(self.state['phase'], 'verified')
+        # A crash after publication can leave the durable phase at committing.
+        self.state['phase'] = 'committing'
+        self.commit()
+        self.assertEqual(self.state['phase'], 'verified')
+        self.commit()
 
     def test_stale_operation_cannot_start_another_binding(self):
         self.commit()
@@ -149,11 +239,16 @@ class RebindTests(unittest.TestCase):
         token = b'obt1_' + b'A' * 43
         self.state['token_hash'] = rebind.hashlib.sha256(token).hexdigest()
         rebind.atomic_write(self.operation / 'token', token, 0o640)
+        rebind.atomic_write(rebind.CONF / 'relays.env', b'RELAY_URL_A=https://relay.example.test\nRELAY_URL_B=\n')
         env = {key: 'fixture' for key in ['USER_PASSWORD_SEAL_KEY_ID', 'USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256',
                                          'P12_PASSWORD_SEAL_KEY_ID', 'P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256']}
         calls = []
         def send(args, *rest):
             if '--enrollment-token-file' in args:
+                self.assertEqual(args.count('--relay-url'), 1)
+                self.assertEqual(args[args.index('--relay-url') + 1], 'https://relay.example.test')
+                self.assertEqual(Path(args[args.index('--identity-dir') + 1], 'endpoint.key').read_bytes(),
+                                 Path(self.source['identity'], 'endpoint.key').read_bytes())
                 calls.append(Path(args[args.index('--enrollment-token-file') + 1]).read_bytes())
                 if len(calls) == 1:
                     raise rebind.subprocess.TimeoutExpired('enroll', 90)
@@ -164,7 +259,7 @@ class RebindTests(unittest.TestCase):
             os.chown(path, 1000, 1000)
             path.chmod(0o700)
         with patch.object(rebind, 'current_binding', return_value=self.source), \
-             patch.object(rebind, 'agent', side_effect=send), patch.object(rebind, 'relay_arguments', return_value=[]):
+             patch.object(rebind, 'agent', side_effect=send):
             with self.assertRaises(rebind.subprocess.TimeoutExpired):
                 rebind.enroll(self.operation, self.state, env, self.account)
             self.assertEqual(self.state['phase'], 'enrolling')

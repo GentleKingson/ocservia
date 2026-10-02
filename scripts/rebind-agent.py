@@ -272,11 +272,12 @@ def relay_arguments():
         parsed = shlex.split(value)
         require(len(parsed) <= 1, 'invalid relay value')
         values[key] = parsed[0] if parsed else ''
+    # ponytail: managed deployments support one Relay; expand this admission and
+    # the production launchers together if that deployment boundary changes.
+    require(not values.get('RELAY_URL_B'), 'only one dedicated Relay is supported; leave RELAY_URL_B empty')
     require(values.get('RELAY_URL_A', '').startswith('https://'), 'relay A is not provisioned')
     args = ['--relay-mode', 'custom', '--relay-url', values['RELAY_URL_A'],
             '--relay-token-file', str(CONF / 'relay-access-token')]
-    if values.get('RELAY_URL_B'):
-        args += ['--relay-url', values['RELAY_URL_B']]
     if (CONF / 'relay-ca.pem').exists():
         args += ['--relay-ca-file', str(CONF / 'relay-ca.pem')]
     return args
@@ -285,6 +286,7 @@ def relay_arguments():
 def enroll(operation, state, env, account):
     require(state['phase'] in ('prepared', 'enrolling'), 'operation is not awaiting enrollment')
     require(current_binding(env) == state['source'], 'source authority changed; do not resume this operation')
+    relay_args = relay_arguments()
     stage = AGENT_STATE / 'rebind-staging' / state['id']
     managed_directory(AGENT_STATE / 'rebind-staging', account.pw_uid, account.pw_gid)
     managed_directory(stage, account.pw_uid, account.pw_gid)
@@ -306,7 +308,7 @@ def enroll(operation, state, env, account):
                       ('p12-password-seal-key-id', 'P12_PASSWORD_SEAL_KEY_ID'),
                       ('p12-password-seal-public-key-sha256', 'P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256')]:
         args += ['--' + flag, env[key]]
-    target_node = node_id(agent(args + relay_arguments(), account))
+    target_node = node_id(agent(args + relay_args, account))
     require(target_node != state['source']['node'], 'target reused the source NodeID')
     state.update(node=target_node, phase='enrolled', enrolled_at=int(time.time()))
     save(operation, state)
@@ -364,6 +366,8 @@ def commit(operation, state, env, account):
         current = current_binding(env)
         already_committed = state.get('record_hex') and secure_active() == bytes.fromhex(state['record_hex'])
         require(already_committed or current == state['source'], 'source authority changed')
+        if not already_committed:
+            relay_arguments()
         subprocess.run(['/usr/bin/systemctl', 'stop', 'ocservia-agent.service', 'ocservia-privd.service'], check=True, timeout=60)
         units = subprocess.run(['/usr/bin/systemctl', 'list-units', '--all', '--plain', '--no-legend',
                                 'ocservia-upgrader@*.service'], check=True, capture_output=True, timeout=10)
@@ -462,6 +466,7 @@ def main():
             else:
                 commit(operation, state, env, account)
             return
+        relay_arguments()
         for existing in STATE.iterdir():
             if not existing.name.startswith('.') and existing.is_dir():
                 previous = json.loads(secure_read(existing / 'state.json'))
