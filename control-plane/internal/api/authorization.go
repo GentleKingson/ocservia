@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -17,15 +18,6 @@ import (
 
 type principalKey struct{}
 type workspaceKey struct{}
-
-func firstNonempty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
 
 func (s *Server) authenticate(r *http.Request) (auth.Principal, error) {
 	if s.hasOperationPrincipal(r) {
@@ -185,7 +177,7 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 			return nil, resourceErr
 		}
 		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-	} else if certificateText := firstNonempty(r.PathValue("certificate_id"), r.PathValue("certificate_action")); certificateText != "" {
+	} else if certificateText := cmp.Or(r.PathValue("certificate_id"), r.PathValue("certificate_action")); certificateText != "" {
 		certificateID, parseErr := uuid.Parse(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(certificateText, ":revoke"), ":issue"), ":p12"))
 		if parseErr != nil || certificateID.Version() != 7 || s.certificates == nil {
 			return nil, database.ErrNotFound
@@ -205,7 +197,7 @@ func (s *Server) authorizeRouteAction(r *http.Request, principal auth.Principal,
 			return nil, resourceErr
 		}
 		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
-	} else if secretText := firstNonempty(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action")); secretText != "" {
+	} else if secretText := cmp.Or(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action")); secretText != "" {
 		secretID, parseErr := uuid.Parse(strings.TrimSuffix(secretText, ":rotate"))
 		if parseErr != nil || secretID.Version() != 7 || s.certificates == nil {
 			return nil, database.ErrNotFound
