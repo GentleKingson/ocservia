@@ -135,13 +135,18 @@ trust configuration explicitly; missing or invalid configuration still fails.
 Removing historical layout checks does not make arbitrary cross-version
 operations safe or give an installed binary capabilities it does not implement.
 After the preflight, the script retains one matched snapshot of the previous
-Agent and privd binaries, both base systemd units, and the production relay
-drop-in and launcher presence and content under the root-only
+Agent and privd binaries, both base systemd units, the durable upgrader and
+verifier, the production relay drop-in and launcher, and the rebind helper,
+retention executable and retention service/timer under the root-only
 `/var/lib/ocservia-upgrade/upgrade-backup` hierarchy. This directory is outside
 privd's systemd-managed `StateDirectory`, so service startup cannot rewrite
 rollback evidence ownership. A root-owned manifest binds
 the exact snapshot digests, and rollback rejects unsafe ancestry, symlinks,
-hard links, ownership, modes, or replacement. It also preserves endpoint
+hard links, ownership, modes, or replacement. Optional files have explicit
+`.previous` or `.absent` records, which restore or remove the installed file.
+Retention requires its matching rebind helper; the service requires the
+retention executable and the timer requires the service. A rebind helper
+without retention remains a valid layout. Upgrade and rollback preserve endpoint
 identity, the durable Agent database, journal, and configuration. Verify service health and
 Controller connectivity after upgrade. To roll back the complete matched
 snapshot, run:
@@ -150,15 +155,45 @@ snapshot, run:
 sudo /usr/libexec/ocservia/ocservia-agent-rollback
 ```
 
-The command validates the complete snapshot before stopping either unit, then
-restores binaries and units together, reloads systemd, and starts privd before
-Agent. Restoring only the binaries is unsupported because their CLI and local
+The command validates the complete snapshot and destinations before stopping
+services. It stops retention before replacing its executable and imported
+rebind helper, restores binaries and units together, reloads systemd, and
+starts privd before Agent. A restored retention timer is restarted; an explicitly
+absent timer is disabled and removed. The standalone rollback driver itself
+is retained so it can finish executing and read the complete snapshot again.
+Retention starts after the completed lifecycle releases its lock, so a timer's
+persistent catch-up can run against the restored files.
+Restoring only the binaries is unsupported because their CLI and local
 wire contract may require the matching units. A rollback also restores the
 previous release's security properties, so use it only for a controlled
 recovery window and return to a fixed release promptly. `uninstall-agent.sh` preserves
 identity and journal by default;
 `--purge-state` is irreversible and is appropriate only after revoking the node
 identity and preserving required audit material.
+
+Current snapshots contain 13 fixed records. Existing 8- and 9-record snapshots
+remain readable with `ocservia-agent-rollback --verify-only`, but lack prior
+rebind/retention evidence; 8-record snapshots also lack launcher evidence.
+Missing records do not mean the prior files were absent. Mutating rollback
+therefore refuses these incomplete snapshots before stopping services. Recovery
+requires a complete trusted matched snapshot or independently reviewed manual
+restoration of the missing artifacts; there is no force or skip override.
+
+Before installation modifies package-owned files, upgrade durably records the
+verified target digest in `/var/lib/ocservia-upgrade/installing-package` after
+persisting the complete snapshot and atomically publishing the verified standalone
+rollback driver that can read it. An interrupted direct or native-package retry
+refuses to overwrite that snapshot. Run verified rollback to restore it, then
+retry the package operation. A matching completed retry can clear a stale
+record only after checking the installation commit, every package-owned file
+and the rollback snapshot. Rollback clears the record only after restores and
+removals are durable across filesystems. Neither path changes Controller
+binding authority or reverses database migrations.
+
+A completed identical retry also starts an enabled retention timer after
+releasing the lifecycle lock. This recovers service activation interrupted
+after the installation commit, including an enabled timer that was stopped.
+An identical retry does not start explicitly disabled or masked timers.
 
 ## Journal storage monitoring
 

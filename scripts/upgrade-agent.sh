@@ -153,7 +153,11 @@ write_snapshot_manifest() {
     ocservia-agent-relays \
     ocservia-upgrader \
     ocservia-upgrader@.service \
-    ocservia-agent-verify; do
+    ocservia-agent-verify \
+    ocservia-agent-rebind \
+    ocservia-agent-retention \
+    ocservia-agent-retention.service \
+    ocservia-agent-retention.timer; do
     if [[ -f "${directory}/${name}.previous" ]]; then
       entry="${name}.previous"
     else
@@ -368,6 +372,10 @@ installed_agent_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.serv
 installed_privd_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 installed_upgrader_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"
 installed_relay_dropin="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+installed_rebind="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rebind"
+installed_retention="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-retention"
+installed_retention_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent-retention.service"
+installed_retention_timer="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent-retention.timer"
 for installed_file in \
   "${installed_agent}" \
   "${installed_privd}" \
@@ -417,12 +425,42 @@ fi
 if [[ -e "${installed_upgrader_unit}" || -L "${installed_upgrader_unit}" ]]; then
   validate_installed_snapshot_source "${installed_upgrader_unit}" 644
 fi
+for installed_file in "${installed_rebind}" "${installed_retention}" "${installed_retention_unit}" "${installed_retention_timer}"; do
+  if [[ -e "${installed_file}" || -L "${installed_file}" ]]; then
+    case "${installed_file}" in
+      "${installed_rebind}" | "${installed_retention}") mode=755 ;;
+      *) mode=644 ;;
+    esac
+    validate_installed_snapshot_source "${installed_file}" "${mode}"
+  else
+    validate_root_ancestry "$(dirname -- "${installed_file}")"
+  fi
+done
+if [[ -f "${installed_retention}" && ! -f "${installed_rebind}" ]]; then
+  installed_pair_preflight_error "installed retention executable requires rebind helper"
+fi
+if [[ -f "${installed_retention_unit}" && ! -f "${installed_retention}" ]]; then
+  installed_pair_preflight_error "installed retention service requires retention executable"
+fi
+if [[ -f "${installed_retention_timer}" && ! -f "${installed_retention_unit}" ]]; then
+  installed_pair_preflight_error "installed retention timer requires retention service"
+fi
 
 # A completed identical retry must not snapshot the candidate over the old
 # release. Compare bytes too: rollback restores files, not installed-commit.
 same_install=true
 commit_record="${DESTDIR}${UPGRADE_STATE_DIR}/installed-commit"
 expected_archive="$(sed -n 's/^archive_sha256=//p' "${ROOT}/.ocservia-package-verified")"
+pending_record="${DESTDIR}${UPGRADE_STATE_DIR}/installing-package"
+pending_archive=""
+if [[ -e "${pending_record}" || -L "${pending_record}" ]]; then
+  if [[ ! -f "${pending_record}" || -L "${pending_record}" ]] ||
+    [[ "$(stat -c '%u:%g:%a:%h' -- "${pending_record}")" != "0:0:600:1" || "$(wc -l <"${pending_record}")" -ne 1 ]] ||
+    ! [[ "$(cat -- "${pending_record}")" =~ ^archive_sha256=[0-9a-f]{64}$ ]]; then
+    installed_pair_preflight_error "pending installation record is malformed or unsafe"
+  fi
+  pending_archive="$(sed -n 's/^archive_sha256=//p' "${pending_record}")"
+fi
 if [[ ! -f "${commit_record}" || -L "${commit_record}" ]] ||
   [[ "$(stat -c '%u:%g:%a:%h' -- "${commit_record}")" != "0:0:600:1" ]] ||
   [[ "$(cat -- "${commit_record}")" != "archive_sha256=${expected_archive}" ]]; then
@@ -442,12 +480,23 @@ cmp -s "${ROOT}/scripts/rebind-agent.py" "${DESTDIR}${PREFIX}/libexec/ocservia/o
 if [[ "${INSTALL_PRODUCTION_RELAYS:-false}" == true || -e "${installed_relay_dropin}" ]]; then
   cmp -s "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" "${installed_relay_dropin}" || same_install=false
 fi
+if [[ -n "${pending_archive}" && ( "${same_install}" != true || "${pending_archive}" != "${expected_archive}" ) ]]; then
+  installed_pair_preflight_error "unfinished package installation requires verified rollback before retry"
+fi
 if [[ "${same_install}" == true ]]; then
   DESTDIR="${DESTDIR}" PREFIX="${PREFIX}" UPGRADE_STATE_DIR="${UPGRADE_STATE_DIR}" BACKUP_DIR="${BACKUP_DIR}" \
     bash "${ROOT}/scripts/rollback-agent.sh" --verify-only
+  if [[ -n "${pending_archive}" ]]; then
+    rm -- "${pending_record}"
+    sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
+  fi
   echo "Identical verified Agent package already installed; preserving rollback snapshot"
   if [[ -z "${DESTDIR}" ]]; then
     systemctl try-restart ocservia-privd.service ocservia-agent.service
+    flock -u 9
+    if systemctl is-enabled --quiet ocservia-agent-retention.timer; then
+      systemctl start ocservia-agent-retention.timer
+    fi
   fi
   exit 0
 fi
@@ -465,15 +514,7 @@ install -o root -g root -m 0755 -- "${installed_privd}" "${BACKUP_DIR}/ocservia-
 install -o root -g root -m 0644 -- "${installed_agent_unit}" "${BACKUP_DIR}/ocservia-agent.service.previous"
 install -o root -g root -m 0644 -- "${installed_privd_unit}" "${BACKUP_DIR}/ocservia-privd.service.previous"
 rm -f -- "${BACKUP_DIR}/ocservia-agent-relays.conf.previous" \
-  "${BACKUP_DIR}/ocservia-agent-relays.previous" \
-  "${BACKUP_DIR}/ocservia-agent-relays.absent" \
-  "${BACKUP_DIR}/ocservia-agent-relays.conf.absent" \
-  "${BACKUP_DIR}/ocservia-upgrader.previous" \
-  "${BACKUP_DIR}/ocservia-upgrader.absent" \
-  "${BACKUP_DIR}/ocservia-upgrader@.service.previous" \
-  "${BACKUP_DIR}/ocservia-upgrader@.service.absent" \
-  "${BACKUP_DIR}/ocservia-agent-verify.previous" \
-  "${BACKUP_DIR}/ocservia-agent-verify.absent"
+  "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
 if [[ -f "${installed_relay_dropin}" ]]; then
   install -o root -g root -m 0644 -- "${installed_relay_dropin}" \
     "${BACKUP_DIR}/ocservia-agent-relays.conf.previous"
@@ -487,10 +528,15 @@ optional_backups=(
   ocservia-agent-relays "${installed_relay_launcher}" 0755
   ocservia-upgrader@.service "${installed_upgrader_unit}" 0644
   ocservia-agent-verify "${installed_verifier}" 0755
+  ocservia-agent-rebind "${installed_rebind}" 0755
+  ocservia-agent-retention "${installed_retention}" 0755
+  ocservia-agent-retention.service "${installed_retention_unit}" 0644
+  ocservia-agent-retention.timer "${installed_retention_timer}" 0644
 )
 for ((entry = 0; entry < ${#optional_backups[@]}; entry += 3)); do
   name="${optional_backups[entry]}"
   installed_file="${optional_backups[entry + 1]}"
+  rm -f -- "${BACKUP_DIR}/${name}.previous" "${BACKUP_DIR}/${name}.absent"
   if [[ -e "${installed_file}" ]]; then
     install -o root -g root -m "${optional_backups[entry + 2]}" -- "${installed_file}" "${BACKUP_DIR}/${name}.previous"
   else
@@ -498,7 +544,30 @@ for ((entry = 0; entry < ${#optional_backups[@]}; entry += 3)); do
   fi
 done
 write_snapshot_manifest "${BACKUP_DIR}"
+DESTDIR="${DESTDIR}" PREFIX="${PREFIX}" UPGRADE_STATE_DIR="${UPGRADE_STATE_DIR}" BACKUP_DIR="${BACKUP_DIR}" \
+  bash "${ROOT}/scripts/rollback-agent.sh" --verify-only
 
+# Publish the standalone reader before an interrupted install can require
+# this snapshot. The previous driver may not understand its complete file set.
+rollback_staging="$(mktemp "$(dirname -- "${installed_rollback}")/.ocservia-agent-rollback.XXXXXX")"
+install -o root -g root -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${rollback_staging}"
+sync -f "${rollback_staging}"
+mv -fT -- "${rollback_staging}" "${installed_rollback}"
+sync -f "$(dirname -- "${installed_rollback}")"
+
+# A direct/native retry has no Rust runner intent. Preserve this matched
+# snapshot if installation stops midway; verified rollback clears the record.
+pending_staging="$(mktemp "${DESTDIR}${UPGRADE_STATE_DIR}/.installing-package.XXXXXX")"
+chown root:root -- "${pending_staging}"
+chmod 0600 -- "${pending_staging}"
+printf 'archive_sha256=%s\n' "${expected_archive}" >"${pending_staging}"
+sync -f "${pending_staging}"
+mv -fT -- "${pending_staging}" "${pending_record}"
+sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
+if [[ -z "${DESTDIR}" ]]; then
+  [[ ! -f "${installed_retention_timer}" ]] || systemctl stop ocservia-agent-retention.timer
+  [[ ! -f "${installed_retention_unit}" ]] || systemctl stop ocservia-agent-retention.service
+fi
 "${ROOT}/scripts/install-agent.sh"
 # The installed binaries, verifier, and units can live on a different
 # filesystem than this state directory (for example /usr on one device and
@@ -523,6 +592,10 @@ install -o root -g root -m 0600 -- /dev/null "${commit_record}"
 printf 'archive_sha256=%s\n' "${commit_archive_hash}" >"${commit_record}"
 sync -f "${commit_record}"
 sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
+rm -- "${pending_record}"
+sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
 if [[ -z "${DESTDIR}" ]]; then
   systemctl try-restart ocservia-privd.service ocservia-agent.service
+  flock -u 9
+  systemctl start ocservia-agent-retention.timer
 fi

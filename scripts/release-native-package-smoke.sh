@@ -60,6 +60,8 @@ fi
 # This smoke drives real host installation state; refuse to run anywhere that
 # already carries an Agent installation so cleanup can stay scoped.
 if sudo test -e /usr/libexec/ocservia || sudo test -e /etc/ocservia-agent || \
+  sudo test -e /var/lib/ocservia-rebind || \
+  mountpoint -q /var/lib/ocservia-upgrade || \
   getent passwd ocserv-agent >/dev/null 2>&1 || \
   sudo dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -q "install ok installed"; then
   echo "host already carries an ocservia Agent installation; refusing to run" >&2
@@ -70,11 +72,45 @@ work="${RUNNER_TEMP:-/tmp}/ocservia-native-package-${RUN_ID}"
 pkg_dir="${work}/packages"
 container="ocservia-rpm-${RUN_ID:0:60}"
 container_image="ocservia-rpm-smoke-${RUN_ID:0:50}"
+split_state_mounted=false
+native_rebind_fixture=false
+native_timer_masked=false
+systemd_probe="/run/ocservia-native-${RUN_ID}.sh"
 mkdir -p "${pkg_dir}" "${ARTIFACT_DIR}"
 chmod 0700 "${work}"
 
+unmount_native_state() {
+  if [[ "$(findmnt -n -o SOURCE -M /var/lib/ocservia-upgrade)" != "ocservia-native-${RUN_ID}" || \
+        "$(findmnt -n -o FSTYPE -M /var/lib/ocservia-upgrade)" != tmpfs ]]; then
+    echo 'refusing to unmount an unexpected upgrade-state filesystem' >&2; return 1
+  fi
+  sudo umount /var/lib/ocservia-upgrade || return 1
+  split_state_mounted=false
+}
+
 cleanup() {
   local status=$?
+  { sudo journalctl --no-pager -n 100 -u ocservia-agent-retention.service \
+    -u ocservia-agent.service -u ocservia-privd.service; } >"${ARTIFACT_DIR}/native-lifecycle-systemd.log" 2>&1 || true
+  if [[ "${native_timer_masked}" == true ]]; then
+    sudo systemctl unmask --runtime ocservia-agent-retention.timer || status=1
+  fi
+  sudo systemctl stop ocservia-agent-retention.timer ocservia-agent-retention.service \
+    ocservia-agent.service ocservia-privd.service >/dev/null 2>&1 || true
+  for unit in agent privd agent-retention; do
+    sudo rm -f -- "/run/systemd/system/ocservia-${unit}.service.d/90-native-lifecycle.conf"
+    sudo rmdir -- "/run/systemd/system/ocservia-${unit}.service.d" 2>/dev/null || true
+  done
+  sudo rm -f /run/systemd/system/ocservia-agent-retention.timer.d/90-native-lifecycle.conf
+  sudo rmdir /run/systemd/system/ocservia-agent-retention.timer.d 2>/dev/null || true
+  sudo rm -f -- "${systemd_probe}"
+  if [[ "${native_rebind_fixture}" == true ]]; then
+    sudo rm -f /etc/ocservia-agent/active-binding
+    sudo rmdir /var/lib/ocservia-rebind || status=1
+  fi
+  if [[ "${split_state_mounted}" == true ]]; then
+    unmount_native_state || exit 1
+  fi
   {
     sudo apt-get remove -y ocservia-agent ||
       sudo dpkg --remove --force-remove ocservia-agent || true
@@ -197,6 +233,12 @@ assert_installed_state() {
     || { echo "${context}: upgrader binary missing" >&2; exit 1; }
   sudo test -x /usr/libexec/ocservia/ocservia-agent-verify \
     || { echo "${context}: package verifier missing" >&2; exit 1; }
+  for helper in rebind retention; do
+    sudo test -x "/usr/libexec/ocservia/ocservia-agent-${helper}"
+  done
+  for suffix in service timer; do
+    sudo test -f "/usr/lib/systemd/system/ocservia-agent-retention.${suffix}"
+  done
   sudo test -f /usr/lib/systemd/system/ocservia-agent.service \
     || { echo "${context}: agent unit missing" >&2; exit 1; }
   sudo test -f /usr/lib/systemd/system/ocservia-privd.service \
@@ -255,15 +297,191 @@ assert_upgraded_state() {
   assert_installed_state "${context}" "${expected_version}"
   sudo test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
     || { echo "${context}: upgrade rollback snapshot manifest missing" >&2; exit 1; }
-  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 9 \
+  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 13 \
     || { echo "${context}: upgrade rollback snapshot is incomplete" >&2; exit 1; }
   sudo grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" /etc/ocservia-agent/agent.env \
     || { echo "${context}: upgrade lost the configured agent environment" >&2; exit 1; }
 }
 
 provision_upgrade_fixtures
+# Use the real service manager with controlled processes. ExecStopPost checks
+# that retention stopped before any helper/unit replacement; restored unit
+# descriptions prove daemon-reload, and process hooks record restart ordering.
+sudo systemctl stop ocservia-agent-retention.timer ocservia-agent-retention.service
+sudo install -d -m 0700 /var/lib/ocservia-upgrade
+if mountpoint -q /var/lib/ocservia-upgrade; then
+  echo 'refusing to cover an existing upgrade-state mount' >&2; exit 1
+fi
+sudo mount -t tmpfs -o mode=0700 "ocservia-native-${RUN_ID}" /var/lib/ocservia-upgrade
+split_state_mounted=true
+[[ "$(sudo stat -c %d /var/lib/ocservia-upgrade)" != "$(sudo stat -c %d /usr/libexec/ocservia)" ]]
+{ sudo stat -c '%n device=%d' /var/lib/ocservia-upgrade /usr/libexec/ocservia; } \
+  >"${ARTIFACT_DIR}/deb-lifecycle-filesystems.log"
+native_lifecycle_files=(
+  /usr/libexec/ocservia/ocservia-agent-rebind
+  /usr/libexec/ocservia/ocservia-agent-retention
+  /usr/lib/systemd/system/ocservia-agent-retention.service
+  /usr/lib/systemd/system/ocservia-agent-retention.timer
+)
+for path in "${native_lifecycle_files[@]}"; do
+  printf '\n# native rollback source fixture\n' | sudo tee -a "${path}" >/dev/null
+done
+for suffix in service timer; do
+  printf '\n[Unit]\nDescription=Native old retention %s\n' "${suffix}" \
+    | sudo tee -a "/usr/lib/systemd/system/ocservia-agent-retention.${suffix}" >/dev/null
+done
+{ sudo sha256sum "${native_lifecycle_files[@]}"; } >"${work}/native-old.sha256"
+sudo install -m 0600 "${work}/native-old.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
+cat >"${work}/systemd-probe" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+state=/var/lib/ocservia-upgrade
+if [[ "$1" == retention-stop ]]; then
+  sha256sum -c "${state}/native-expected.sha256" >>"${state}/native-hashes.log"
+elif [[ "$1" == retention-start ]]; then
+  # The real timer must not launch its worker while the lifecycle holds 9.
+  flock -n "${state}/.binding-lifecycle.lock" -c true
+elif [[ "$1" == agent-start && -e "${state}/native-fail-start" ]]; then
+  exit 71
+fi
+printf '%s\n' "$1" >>"${state}/native-order.log"
+EOF
+sudo install -m 0755 "${work}/systemd-probe" "${systemd_probe}"
+for unit in agent privd agent-retention; do
+  sudo install -d -m 0755 "/run/systemd/system/ocservia-${unit}.service.d"
+  cat >"${work}/native-service.conf" <<EOF
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=
+ExecStart=/bin/sleep infinity
+ReadWritePaths=/var/lib/ocservia-upgrade
+EOF
+  if [[ "${unit}" == agent-retention ]]; then
+    printf 'ExecStopPost=%s retention-stop\n' "${systemd_probe}" >>"${work}/native-service.conf"
+    printf 'ExecStartPost=%s retention-start\n' "${systemd_probe}" >>"${work}/native-service.conf"
+  else
+    printf 'ExecStartPost=%s %s-start\n' "${systemd_probe}" "${unit}" >>"${work}/native-service.conf"
+  fi
+  sudo install -m 0644 "${work}/native-service.conf" "/run/systemd/system/ocservia-${unit}.service.d/90-native-lifecycle.conf"
+done
+sudo install -d -m 0755 /run/systemd/system/ocservia-agent-retention.timer.d
+printf '[Timer]\nOnCalendar=\nOnActiveSec=1ms\nAccuracySec=1ms\nRandomizedDelaySec=0\nPersistent=false\n' \
+  | sudo tee /run/systemd/system/ocservia-agent-retention.timer.d/90-native-lifecycle.conf >/dev/null
+assert_timer_worker_active() {
+  for _ in {1..50}; do
+    if sudo systemctl is-active --quiet ocservia-agent-retention.service; then return; fi
+    sleep 0.1
+  done
+  echo 'the real retention timer did not start its worker with the lifecycle lock available' >&2
+  return 1
+}
+sudo systemctl daemon-reload
+sudo systemctl start ocservia-agent-retention.service ocservia-agent-retention.timer
 { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-upgrade.log" 2>&1
 assert_upgraded_state "deb upgrade" "${new_version}"
+assert_timer_worker_active
+sudo grep -qx retention-stop /var/lib/ocservia-upgrade/native-order.log
+sudo test "$(sudo systemctl show -p Result --value ocservia-agent-retention.service)" = success
+sudo systemctl is-active --quiet ocservia-agent-retention.timer
+sudo test ! -e /var/lib/ocservia-upgrade/installing-package
+{ sudo sha256sum "${native_lifecycle_files[@]}"; } >"${work}/native-new.sha256"
+sudo install -m 0600 "${work}/native-new.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
+sudo systemctl start ocservia-privd.service ocservia-agent.service ocservia-agent-retention.service
+sudo truncate -s 0 /var/lib/ocservia-upgrade/native-order.log
+driver_hash="$(sudo sha256sum /usr/libexec/ocservia/ocservia-agent-rollback)"
+{ sudo /usr/libexec/ocservia/ocservia-agent-rollback; } >"${ARTIFACT_DIR}/deb-rollback.log" 2>&1
+assert_timer_worker_active
+sudo sha256sum -c "${work}/native-old.sha256"
+[[ "$(sudo sha256sum /usr/libexec/ocservia/ocservia-agent-rollback)" == "${driver_hash}" ]]
+[[ "$(sudo cat /var/lib/ocservia-upgrade/native-order.log)" == $'retention-stop\nprivd-start\nagent-start\nretention-start' ]]
+for suffix in service timer; do
+  [[ "$(sudo systemctl show -p Description --value "ocservia-agent-retention.${suffix}")" == "Native old retention ${suffix}" ]]
+done
+sudo systemctl is-enabled --quiet ocservia-agent-retention.timer
+sudo systemctl is-active --quiet ocservia-agent-retention.timer
+{ sudo cat /var/lib/ocservia-upgrade/native-order.log; } >"${ARTIFACT_DIR}/deb-rollback-systemd-order.log"
+{ sudo cat /var/lib/ocservia-upgrade/native-hashes.log; } >"${ARTIFACT_DIR}/deb-retention-stop-hashes.log"
+
+# A service restart can fail after the files and installed-commit are durable.
+# A same-package retry must recover an enabled timer without a pending record.
+sudo install -m 0600 "${work}/native-old.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
+sudo touch /var/lib/ocservia-upgrade/native-fail-start
+if { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-commit-failure.log" 2>&1; then
+  echo 'injected service restart failure was ignored' >&2; exit 1
+fi
+sudo test ! -e /var/lib/ocservia-upgrade/installing-package
+[[ "$(sudo systemctl is-active ocservia-agent-retention.timer 2>/dev/null || true)" != active ]]
+{ sudo find /var/lib/ocservia-upgrade/upgrade-backup -type f -exec sha256sum {} +; } >"${work}/post-commit-snapshot"
+sudo rm /var/lib/ocservia-upgrade/native-fail-start
+sudo systemctl reset-failed ocservia-agent.service
+sudo systemctl start ocservia-agent.service
+{ sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-post-commit-retry.log" 2>&1
+sudo sha256sum -c "${work}/post-commit-snapshot"
+assert_timer_worker_active
+sudo test ! -e /var/lib/ocservia-upgrade/installing-package
+sudo install -m 0600 "${work}/native-new.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
+for timer_state in disabled masked; do
+  sudo systemctl stop ocservia-agent-retention.service
+  sudo systemctl disable --now ocservia-agent-retention.timer
+  if [[ "${timer_state}" == masked ]]; then
+    sudo systemctl mask --runtime ocservia-agent-retention.timer
+    native_timer_masked=true
+  fi
+  { sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-retry-timer-${timer_state}.log" 2>&1
+  [[ "$(sudo systemctl is-active ocservia-agent-retention.timer 2>/dev/null || true)" != active ]]
+  if [[ "${native_timer_masked}" == true ]]; then
+    [[ "$(sudo systemctl is-enabled ocservia-agent-retention.timer 2>/dev/null || true)" == masked* ]]
+    sudo systemctl unmask --runtime ocservia-agent-retention.timer
+    native_timer_masked=false
+  else
+    [[ "$(sudo systemctl is-enabled ocservia-agent-retention.timer 2>/dev/null || true)" == disabled ]]
+  fi
+done
+sudo sha256sum -c "${work}/post-commit-snapshot"
+sudo systemctl enable ocservia-agent-retention.timer
+{ sudo /usr/libexec/ocservia/ocservia-agent-rollback; } >"${ARTIFACT_DIR}/deb-post-commit-rollback.log" 2>&1
+assert_timer_worker_active
+sudo sha256sum -c "${work}/native-old.sha256"
+
+# A snapshot's explicit absent state removes the whole optional chain and its
+# timer activation. This also exercises same-package reinstall after recovery.
+sudo install -m 0600 "${work}/native-old.sha256" /var/lib/ocservia-upgrade/native-expected.sha256
+sudo systemctl stop ocservia-agent-retention.timer ocservia-agent-retention.service ocservia-agent.service ocservia-privd.service
+sudo rm -f /run/systemd/system/ocservia-agent-retention.service.d/90-native-lifecycle.conf
+sudo rm -f /run/systemd/system/ocservia-agent-retention.timer.d/90-native-lifecycle.conf
+sudo rm -- "${native_lifecycle_files[@]}"
+sudo systemctl daemon-reload
+{ sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-absent-upgrade.log" 2>&1
+{ sudo /usr/libexec/ocservia/ocservia-agent-rollback; } >"${ARTIFACT_DIR}/deb-absent-rollback.log" 2>&1
+for path in "${native_lifecycle_files[@]}"; do sudo test ! -e "${path}"; done
+[[ "$(sudo systemctl show -p LoadState --value ocservia-agent-retention.timer)" == not-found ]]
+[[ "$(sudo systemctl is-active ocservia-agent-retention.timer 2>/dev/null || true)" != active ]]
+sudo systemctl stop ocservia-agent.service ocservia-privd.service
+{ sudo dpkg -i "${deb_new}"; } >"${ARTIFACT_DIR}/deb-reinstall-after-rollback.log" 2>&1
+assert_upgraded_state "deb reinstall after rollback" "${new_version}"
+sudo systemctl stop ocservia-agent-retention.timer ocservia-agent-retention.service
+for unit in agent privd agent-retention; do
+  sudo rm -f -- "/run/systemd/system/ocservia-${unit}.service.d/90-native-lifecycle.conf"
+  sudo rmdir -- "/run/systemd/system/ocservia-${unit}.service.d" 2>/dev/null || true
+done
+sudo rm -f "${systemd_probe}"
+sudo systemctl daemon-reload
+# Run the actual worker after the lifecycle has released its lock. Controlled
+# processes above cover manager ordering; this covers the installed import pair.
+sudo test ! -e /etc/ocservia-agent/active-binding
+sudo install -d -o root -g ocserv-agent -m 0750 /var/lib/ocservia-rebind
+native_rebind_fixture=true
+printf 'ocservia-binding-v1\n00000000-0000-7000-8000-000000000001\n%s\n%s\n%s\nclear\n' \
+  "${controller_endpoint}" "${controller_endpoint}" "${controller_endpoint}" >"${work}/empty-retention-binding"
+sudo install -o root -g ocserv-agent -m 0640 "${work}/empty-retention-binding" /etc/ocservia-agent/active-binding
+sudo systemctl start ocservia-agent-retention.service
+[[ "$(sudo systemctl show -p Result --value ocservia-agent-retention.service)" == success ]]
+sudo rm /etc/ocservia-agent/active-binding
+sudo rmdir /var/lib/ocservia-rebind
+native_rebind_fixture=false
+unmount_native_state
 echo "deb upgrade lifecycle passed"
 
 { sudo apt-get remove -y ocservia-agent; } >"${ARTIFACT_DIR}/deb-remove.log" 2>&1
@@ -457,6 +675,12 @@ container_assert_installed() {
     || { echo "${context}: upgrader binary missing" >&2; exit 1; }
   docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent-verify \
     || { echo "${context}: package verifier missing" >&2; exit 1; }
+  for helper in rebind retention; do
+    docker exec "${container}" test -x "/usr/libexec/ocservia/ocservia-agent-${helper}"
+  done
+  for suffix in service timer; do
+    docker exec "${container}" test -f "/usr/lib/systemd/system/ocservia-agent-retention.${suffix}"
+  done
   docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-agent.service \
     || { echo "${context}: agent unit missing" >&2; exit 1; }
   docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-privd.service \
@@ -534,7 +758,7 @@ docker exec "${container}" grep -Fq 'RELAY_URL_A=https://relay-one.example.net' 
 docker exec "${container}" test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
   || { echo "rpm upgrade rollback snapshot manifest missing" >&2; exit 1; }
 docker exec "${container}" bash -c \
-  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 9' \
+  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 13' \
   || { echo "rpm upgrade rollback snapshot is incomplete" >&2; exit 1; }
 docker exec "${container}" grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" \
   /etc/ocservia-agent/agent.env \
@@ -571,3 +795,5 @@ printf 'arch=%s\nelf_check=pass\ndeb_metadata=pass\ndeb_install=pass\ndeb_upgrad
   "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-package-summary.txt"
 printf 'old_version=%s\nnew_version=%s\nbuilt_packages=%s\n' \
   "${old_version}" "${new_version}" "${PRODUCTS_DIR:+true}" >>"${ARTIFACT_DIR}/native-package-summary.txt"
+printf 'deb_quartet_restore_remove=pass\ndeb_real_systemd_order=pass\ndeb_timer_lock=pass\ndeb_retention_worker=pass\ndeb_post_commit_retry=pass\ndeb_split_filesystem_restore=pass\n' \
+  >>"${ARTIFACT_DIR}/native-package-summary.txt"
