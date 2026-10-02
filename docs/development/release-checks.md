@@ -45,6 +45,55 @@ command/fence/receipt signatures, and durable immutable operation intent remain
 required. The operator-provisioned release catalog still supplies authorized
 upgrade package digests.
 
+## Release notes and changelog
+
+GitHub Releases are the user entry point for each version: detailed changes,
+pull requests, assets, and relevant upgrade notes or known issues. The Release
+workflow retains native `gh release create --generate-notes`, configured by
+[`.github/release.yml`](../../.github/release.yml). It groups merged PRs by labels:
+
+| Category | Label |
+| --- | --- |
+| Breaking changes | `release/breaking` |
+| Security | `release/security` |
+| Controller | `area/controller` |
+| Agent | `area/agent` |
+| Relay & Transport | `area/relay` |
+| Database & Backup | `area/database` |
+| Authentication & Authorization | `area/auth` |
+| Web & API | `area/web` |
+| Deployment & Operations | `area/deployment` |
+| Dependencies | `area/dependencies` |
+| Other changes | Unmatched PRs |
+
+Create these labels in the repository before applying them. Area labels are
+optional. Use `release/internal` only for changes with no user-visible impact,
+such as test refactors or CI-only maintenance; it excludes the PR from automatic
+notes, including when other labels are present. Do not apply it to user-facing
+security fixes or breaking changes.
+
+The [PR template](../../.github/PULL_REQUEST_TEMPLATE.md) offers an optional,
+one-sentence user-facing Release note. GitHub's generator uses PR titles and
+labels, not this field; use descriptive user-facing titles and consult the field
+when curating highlights or upgrade guidance. Empty notes are allowed, with no
+custom parser or required-label CI check.
+
+[`CHANGELOG.md`](../../CHANGELOG.md) keeps durable summaries of stable releases.
+Start the concise format with the next release and preserve historical entries.
+Omit empty sections and link to the full GitHub Release rather than copying its
+PR list or workflow run evidence. Add Highlights, Upgrade notes, Known issues,
+or a short Validation statement only when relevant and supported by actual
+results; detailed evidence stays in Actions.
+
+These presentation rules do not change Release Check qualification or the
+native build, image scan, smoke, and publication gates. RC releases are not yet
+supported by the current stable-only version and package contracts. A separate
+RC implementation must first validate DEB/RPM and installer version handling,
+mark RCs as prereleases with `--latest=false`, and explicitly select the notes
+comparison base: previous stable for the first RC and final stable, with the
+previous RC allowed for later candidate increments (`--notes-start-tag`). RCs
+must retain the same Release Check qualification.
+
 ## Coverage ownership
 
 | Behavior | Owner |
