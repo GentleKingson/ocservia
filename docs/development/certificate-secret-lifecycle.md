@@ -67,7 +67,8 @@ does not copy the value into the control plane.
 
 Certificate expiry enters `expiring` thirty days before `not_after` and emits a
 high-severity alert. Revocation is sent idempotently to the external signer and
-then removes only the UUID-derived node-local key. Before migration rollback,
+then removes only the UUID-derived node-local key. Before database recovery,
 stop certificate and artifact creation and reconcile all nonterminal
-certificate commands. Rollback refuses active work and preserves terminal typed
-command history.
+certificate commands. Preserve terminal command history and root effect evidence.
+The current tree provides no database down migrations; use a forward fix or an
+explicitly planned [isolated restore](../operations/incident-recovery.md#database-recovery).

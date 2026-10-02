@@ -43,6 +43,8 @@ of the durable effect identity. Reconciliation uses that durable identity rather
 than file fingerprint equality; rebuilding or losing the Agent journal cannot
 make an old configuration authorization current again.
 
-Before migration rollback, stop new apply requests and reconcile every
-nonterminal `config_apply` command. Migration rollback refuses active work and
-retains terminal typed command history for audit and compatibility.
+Before database recovery, stop new apply requests and reconcile every
+nonterminal `config_apply` command. Preserve terminal command history and root
+effect evidence. The current tree provides no database down migrations; use a
+forward fix or an explicitly planned
+[isolated restore](../operations/incident-recovery.md#database-recovery).

@@ -301,4 +301,3 @@ This privileged regression is manual; a green workspace CI does not imply it ran
 
 - The current targets are defined in [`Makefile`](../../Makefile).
 - The pull-request job and relevance map are in [GitHub Actions validation](github-actions.md).
-- Machine-readable release-readiness contracts are in [`acceptance/`](../acceptance/README.md).

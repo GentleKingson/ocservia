@@ -53,7 +53,7 @@ more than two intervals. Each scheduler run emits the
 failed run emits `alert_kind=user_operations.scheduler_failed` before the
 scheduler process exits for supervised restart.
 
-Rollback disables the scheduler/API version first, waits for active command
-leases to settle, and reverts the standalone I14 change. Migration `000013`
-may be rolled down only before policy, usage, batch, or enforcement history is
-relied upon; otherwise retain the additive tables and forward-fix.
+Before recovery, stop the scheduler and affected API writes, and reconcile
+active commands. Preserve policy, usage, batch and enforcement history.
+The current tree provides no database down migrations; use a forward fix or an
+explicitly planned [isolated restore](../operations/incident-recovery.md#database-recovery).

@@ -83,14 +83,14 @@ The next step depends on whether `BOOTSTRAP_TOKEN_SOURCE` was configured.
 
 | Installer result | What to do next |
 | --- | --- |
-| `PENDING_APPROVAL` | The node enrolled successfully and is waiting for Controller approval. Continue to approval. |
+| `ENROLLED_LOCAL` | Local enrollment is complete. Check the node's approval and connection state in the Controller; the installer does not observe them. |
 | `ENROLLMENT_READY` | Create an endpoint-bound bootstrap token for the printed EndpointID, place it at `/etc/ocservia-agent/enrollment-token` as `root:ocserv-agent` with mode `0640`, and rerun the same installer. |
 
 Use [Enroll a node](../how-to/enroll-node.md) for the Controller-side token and approval steps.
 
 ## 4. Approve and start services
 
-After the node reaches `PENDING_APPROVAL`, approve it in the Controller. Then start the node services deliberately:
+After the installer reports `ENROLLED_LOCAL`, check the node in the Controller and approve it if pending. Then start the node services deliberately:
 
 ```bash
 sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
@@ -107,7 +107,7 @@ After approval and service activation, rerun the same installer as a read-only c
 ../ocservia-vX.Y.Z/deploy/managed-node/install.sh
 ```
 
-A healthy already-active node should report `SERVICES_ACTIVE` without reinstalling the package, replacing identity files, approving the node, or starting services again.
+An already-active node should report `SERVICES_ACTIVE` without reinstalling the package, replacing identity files, approving the node, or starting services again. This confirms that both local services are enabled and active; verify approval, connectivity, and fresh telemetry separately in the Controller.
 
 ## Lifecycle after installation
 

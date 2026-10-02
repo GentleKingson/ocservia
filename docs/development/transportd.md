@@ -144,11 +144,11 @@ stack and rollback mode. To roll back an unshipped Iroh deployment, stop the rea
 transport process, preserve the controller key, start the stub on the same UDS
 path, and restart the Go worker so its watch reconnects. Active Iroh connections
 will close and agents must reconnect after the real transport is restored.
-Do not roll back migration `000004_enrollment_trust` while enrolled nodes must
-remain manageable. The database rollback removes enrollment tokens, endpoint
-bindings, and capability approvals. Static startup bindings preserve
+Preserve enrollment tokens, endpoint bindings, capability approvals and the
+public endpoint-to-node mapping. The current tree provides no database down
+migrations; use a forward fix or an explicitly planned
+[isolated restore](../operations/incident-recovery.md#database-recovery).
+Static startup bindings preserve
 observation only; they cannot execute commands or move configuration,
-certificate, or artifact state. Restore the startup binding flags before
-stopping the trust service, then roll back the migration only after preserving
-the required public endpoint-to-node mapping. Restore trusted Controller
+certificate, or artifact state. Restore trusted Controller
 authority and a valid signed session before resuming management operations.

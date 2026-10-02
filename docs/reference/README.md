@@ -45,9 +45,7 @@ operating the system.
 - HTTP API: [`openapi/openapi.yaml`](../../openapi/openapi.yaml)
 - Protobuf contracts: [`proto/`](../../proto/)
 - Generated Web client: [`web/src/api/generated/`](../../web/src/api/generated/)
-- [Readiness harness contracts](../acceptance/README.md)
 - [Upstream provenance records](../upstream/v4.9-post1.md)
 
 Generated artifacts are replaced by `make generate` and must not be edited
-manually. Acceptance schemas are consumed by the readiness harness; upstream
-records support attribution and backport validation.
+manually. Upstream records support attribution and backport validation.

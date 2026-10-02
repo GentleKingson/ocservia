@@ -45,7 +45,6 @@ Use these documents to deploy, operate, and understand ocservia. Start with the 
 - [Contracts and toolchains](development/contracts.md)
 - [GitHub Actions validation](development/github-actions.md)
 - [Current package validation](development/release-upgrade-validation.md)
-- [Readiness harness contracts](acceptance/README.md)
 
 ## Documentation scope
 
@@ -54,6 +53,5 @@ runbooks, and instructions needed to maintain or validate the project here.
 Historical release verdicts and one-off task closeout reports do not belong
 in the maintained documentation; use Git history for removed records.
 
-The machine-readable files in `acceptance/` are harness inputs, not disposable
-reports. The files in `upstream/` support attribution and backport validation
+The files in `upstream/` support attribution and backport validation
 and remain available through the technical reference.

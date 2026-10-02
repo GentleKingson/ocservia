@@ -84,7 +84,7 @@ next-update and audit revision as CRL number. Run it through the protected
 operator workflow and publish atomically to the intended verifier separately.
 Reason text remains in the ledger; CRL reason code is unspecified. A 204 revoke
 is not proof of node cleanup, VPN session termination or CRL distribution.
-The exact-SHA [validation record](production-signer-validation.md) distinguishes
+The historical [exact-SHA validation record](https://github.com/GentleKingson/ocservia/blob/22901739b6ece61d3dab0e25251ef4427eb3a1d8/docs/development/production-signer-validation.md) distinguishes
 real verifier refresh/enforcement from unit checks. There is no public CRL
 endpoint or OCSP service; refresh is an explicit operator responsibility.
 
