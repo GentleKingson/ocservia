@@ -70,6 +70,10 @@ while IFS=$'\t' read -r name arch archive; do
     --override-default-catalogers 'apk-db-cataloger,dpkg-db-cataloger,rpm-db-cataloger' \
     -o spdx-json --file "$os_sbom_file" -q
   grype "sbom:$os_sbom_file" -o json --file "$scan_file" -q
+  jq -c --arg image "$name" --arg arch "$arch" --slurpfile sbom "$os_sbom_file" '
+    {image:$image, arch:$arch, db_built:.descriptor.db.status.built, db_source:.descriptor.db.status.from,
+     pcre2:[$sbom[0].packages[] | select(.name == "pcre2") | .versionInfo]}
+  ' "$scan_file"
     findings="$(jq -c --arg image "${name}" --arg base "${base_ref}" --arg today "${today}" --argjson _exemptions "${exemptions_json}" '
       [.matches[]
       | .artifact.name as $package | .artifact.version as $version
