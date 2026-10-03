@@ -3,7 +3,7 @@
  | map(select(length < 4 or .[3] == env.PR02_ENGINE)
    | select(.[0] == $group or
      ($group == "backend-mysql-full" and
-       (.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql")))
+       (.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")))
    | {package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), test: .[2]})) as $required
 | if ($ARGS.named.mode // "check") == "select" then
     # Only top-level sets or children of ONE parent are supported. Do not

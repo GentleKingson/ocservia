@@ -16,8 +16,8 @@ import (
 )
 
 func run() error {
-	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
-	checksum := flag.String("repair-checksum", "", "reviewed manifest checksum for forward repair")
+	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, snapshot-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
+	checksum := flag.String("repair-checksum", "", "reviewed revision or snapshot checksum for forward repair")
 	month := flag.String("month", "", "UTC month YYYY-MM for owner-only telemetry provisioning")
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -31,6 +31,14 @@ func run() error {
 	sum, err := mysql.ManifestChecksum(engine)
 	if err != nil {
 		return err
+	}
+	if *mode == "snapshot-checksum" {
+		sum, err := mysql.SnapshotChecksum(engine)
+		if err != nil {
+			return err
+		}
+		fmt.Println(sum)
+		return nil
 	}
 	if *mode == "manifest-checksum" {
 		fmt.Println(sum)

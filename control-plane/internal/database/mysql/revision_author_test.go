@@ -220,3 +220,10 @@ func authorRevision(t *testing.T, version int, inputs []LongKeyStep) {
 		t.Fatal(writeErr, closeErr)
 	}
 }
+
+func TestAuthorRevisionThirty(t *testing.T) {
+	authorRevision(t, 30, []LongKeyStep{
+		{Name: "backend_schema_snapshot", Object: "backend_schema_snapshot", Kind: "table", SQL: snapshotOriginDDL},
+		{Name: "backend_schema_snapshot_steps", Object: "backend_schema_snapshot_steps", Kind: "table", SQL: snapshotStepsDDL},
+	})
+}

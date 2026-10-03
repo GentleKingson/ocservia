@@ -98,10 +98,12 @@ if [[ "${scope}" == smoke ]]; then
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseInitializationSmoke
   bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
+  bash "${ROOT}/scripts/required-go-tests.sh" mysql-snapshot --select -race -timeout=15m
   exit 0
 fi
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)
 if [[ "${scope}" == regression ]]; then
+  (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" mysql-snapshot --select -race -timeout=15m)
   (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" regression-mysql --select -race -timeout=60m)
   for group in regression-disconnect regression-outbox regression-fencing regression-auth regression-telemetry backend-policy-useroperations; do
     (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" "${group}" --select -race -timeout=10m)

@@ -289,3 +289,11 @@ postgres-snapshot migrations TestPostgreSQLSnapshotAtomicityAndLock
 postgres-snapshot migrations TestPostgreSQLLegacyUpgrade
 postgres-snapshot migrations TestPostgreSQLLegacyHistoryGapRejected
 postgres-snapshot migrations TestPostgreSQLSnapshotCatalogReadPermissions
+
+mysql-snapshot internal/database/mysql TestSnapshotLifecycle
+mysql-snapshot internal/database/mysql TestSnapshotForwardRevision
+mysql-snapshot internal/database/mysql TestSnapshotLegacyLineages
+mysql-snapshot internal/database/mysql TestSnapshotArtifactValidation
+mysql-snapshot internal/database/mysql TestSnapshotRuntimePermissions
+mysql-snapshot internal/database/mysql TestSnapshotCrashAfterDDL
+mysql-snapshot internal/database/mysql TestSnapshotGenerationDeterminism
