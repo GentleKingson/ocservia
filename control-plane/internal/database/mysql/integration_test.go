@@ -100,17 +100,20 @@ func TestRealInitializationAndHistory(t *testing.T) {
 		return receipt
 	}
 	before := opaqueReceipts()
-	if err := b.Migrate(ctx, ""); !errors.Is(err, ErrChecksum) {
-		t.Fatal("unknown receipts accepted at designated checkpoint", err)
+	if err := b.Migrate(ctx, ""); err != nil {
+		t.Fatal("legacy rows became authority after a verified checkpoint", err)
 	}
 	if err := b.PrepareControllerTelemetry(ctx); err != nil {
 		t.Fatal("opaque completed receipts blocked current startup", err)
 	}
-	if err := b.ValidateSchema(ctx); !errors.Is(err, ErrChecksum) {
-		t.Fatal("unknown receipts accepted by checkpoint validation", err)
+	if err := b.ValidateSchema(ctx); err != nil {
+		t.Fatal("legacy rows became authority after a verified checkpoint", err)
 	}
 	if after := opaqueReceipts(); after != before {
 		t.Fatal("initialization rewrote opaque completed receipts", before, after)
+	}
+	if _, err := b.Exec(ctx, "DELETE FROM schema_revisions"); err != nil {
+		t.Fatal(err)
 	}
 	sum, err := ManifestChecksum(b.engine)
 	if err != nil {
@@ -126,8 +129,8 @@ func TestRealInitializationAndHistory(t *testing.T) {
 		if err := b.Migrate(ctx, sum); !errors.Is(err, ErrDirty) {
 			t.Fatal("unknown unfinished work repaired without its content", table, err)
 		}
-		if err := b.ValidateSchema(ctx); !errors.Is(err, ErrDirty) {
-			t.Fatal("unknown unfinished work passed validation", table, err)
+		if err := b.ValidateSchema(ctx); !errors.Is(err, ErrChecksum) {
+			t.Fatal("missing checkpoint passed validation", table, err)
 		}
 		if _, err := b.Exec(ctx, "UPDATE "+table+" SET state='verified' WHERE version=9001"); err != nil {
 			t.Fatal(err)
