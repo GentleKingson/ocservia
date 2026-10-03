@@ -238,6 +238,8 @@ jobs:
           restore-keys: |
             basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
+      - name: Enforce SQL artifact window and immutable bridge sources
+        run: bash scripts/database-artifact-policy.sh "$ENGINE"
       - if: matrix.engine == 'postgres'
         run: scripts/database-integration.sh
       - if: matrix.engine != 'postgres'

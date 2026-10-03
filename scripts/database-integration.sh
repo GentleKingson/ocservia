@@ -97,10 +97,16 @@ case "${PG_MAJOR}" in
     ;;
 esac
 
+assert_current_checkpoint() {
+  local container=$1 database=$2 expected_checksum
+  expected_checksum="$(sha256sum "${ROOT}/control-plane/migrations/schema.sql" | cut -d' ' -f1)"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=1 AND revision=0 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc 'SELECT count(*) FROM schema_migrations')" = 0
+}
+
 assert_local_bootstrap_schema() {
   local container=$1 database=$2
-  local expected_versions='32,34'
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations WHERE version IN (${expected_versions})")" = "${expected_versions}"
+  assert_current_checkpoint "${container}" "${database}"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','local_auth_attempts','SELECT,INSERT,UPDATE,DELETE') AND NOT has_table_privilege('ocservia_app','local_auth_attempts','TRUNCATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='local_auth_bootstrap'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','local_auth_bootstrap','SELECT') AND has_table_privilege('ocservia_app','local_auth_bootstrap','INSERT') AND NOT has_table_privilege('ocservia_app','local_auth_bootstrap','UPDATE,DELETE,TRUNCATE')")" = "t"
@@ -232,12 +238,12 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     done
     # Deliberate corruption is last, after all current-schema business checks.
     docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-      "UPDATE schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=1" >/dev/null
+      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=1 AND revision=0" >/dev/null
     if OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-checksum-rejected.log" 2>&1; then
       echo 'migration accepted a checksum mismatch' >&2; exit 1
     fi
-    grep -Fq 'migration 1 checksum does not match the applied schema' "${TMP_ROOT}/pg${major}-checksum-rejected.log"
+    grep -Fq 'PostgreSQL revision checksum/state mismatch' "${TMP_ROOT}/pg${major}-checksum-rejected.log"
     required_cases="$(jq -s 'map(.required) | add // 0' "${DATABASE_CASE_RESULTS}")"
     echo "PostgreSQL ${major} regression: current migration, repeat migration, permissions and checksum guards passed"
     echo "Database acceptance required cases: backend=postgres${major} shard=regression passed=${required_cases} skipped=0"
@@ -271,9 +277,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
   curl --fail --silent "http://127.0.0.1:${api_port}/livez" >/dev/null
   curl --fail --silent "http://127.0.0.1:${api_port}/version" | grep -q '"role":"all"'
-  # This stage checks its listed versions; other records remain allowed.
-  expected_versions='1,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,29,30,31'
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT string_agg(version::text, ',' ORDER BY version) FROM schema_migrations WHERE version IN (${expected_versions})")" = "${expected_versions}"
+  assert_current_checkpoint "${container}" ocservia
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('workspaces','nodes','operations','audit_events','local_slice_jobs','transport_events','enrollment_tokens','node_endpoint_keys','node_capabilities','telemetry_ingest_batches','node_observed_snapshots','node_sessions','telemetry_security_events','telemetry_samples','telemetry_rollups_5m','telemetry_rollups_1h')")" = "16"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('commands','command_attempts','outbox_events','node_command_leases','operation_events')")" = "5"
   assert_local_bootstrap_schema "${container}" ocservia
@@ -450,8 +454,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   pid=$!
   PIDS+=("${pid}")
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
-  # Snapshot coverage and real forward rows together match the current catalogue.
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "$(find "${ROOT}/control-plane/migrations" -name '*.up.sql' | wc -l | tr -d ' ')"
+  assert_current_checkpoint "${container}" ocservia
   assert_local_bootstrap_schema "${container}" ocservia
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "INSERT INTO schema_migrations (version, name, checksum) VALUES (9000001, '9000001_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
