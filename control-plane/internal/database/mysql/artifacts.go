@@ -812,19 +812,29 @@ func validateArtifactJournalComment(ctx context.Context, conn *sql.Conn, sum str
 }
 
 // ArtifactChecksum identifies exactly the SQL whose running receipt may be resumed.
-func ArtifactChecksum(engine Engine, kind string) (string, error) {
-	if engine != MySQL {
+func ArtifactChecksum(engine Engine, kind string, selected ...int64) (string, error) {
+	if engine != MySQL || len(selected) > 1 {
 		return "", ErrChecksum
 	}
 	a, err := loadMySQLArtifacts()
 	if err != nil {
 		return "", err
 	}
-	if kind == "schema" {
+	if kind == "schema" && len(selected) == 0 {
 		return fmt.Sprintf("%x", a.schema.Checksum), nil
 	}
-	if kind == "upgrade" && len(a.upgrade.Revisions) > 0 {
-		return fmt.Sprintf("%x", a.upgrade.Revisions[len(a.upgrade.Revisions)-1].Checksum), nil
+	if kind != "upgrade" {
+		return "", ErrChecksum
 	}
-	return "", ErrChecksum
+	number := int64(len(a.upgrade.Revisions))
+	if len(selected) == 1 {
+		number = selected[0]
+	}
+	if number == 0 && a.upgrade.Transition != nil {
+		return fmt.Sprintf("%x", a.upgrade.Transition.Checksum), nil
+	}
+	if number < 1 || number > int64(len(a.upgrade.Revisions)) {
+		return "", ErrChecksum
+	}
+	return fmt.Sprintf("%x", a.upgrade.Revisions[number-1].Checksum), nil
 }

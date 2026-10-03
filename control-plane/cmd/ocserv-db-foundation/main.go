@@ -18,10 +18,14 @@ import (
 func run() error {
 	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, snapshot-checksum, schema-artifact-checksum, upgrade-artifact-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
 	checksum := flag.String("repair-checksum", "", "reviewed revision or snapshot checksum for forward repair")
+	revision := flag.Int64("revision", -1, "upgrade-artifact-checksum revision; 0 is the previous-checkpoint transition")
 	month := flag.String("month", "", "UTC month YYYY-MM for owner-only telemetry provisioning")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
+	}
+	if *revision < -1 || (*revision != -1 && *mode != "upgrade-artifact-checksum") {
+		return fmt.Errorf("--revision requires upgrade-artifact-checksum and a nonnegative revision")
 	}
 	environment := os.Getenv("OCSERV_ENVIRONMENT")
 	if environment != "test" && environment != "development" {
@@ -34,7 +38,11 @@ func run() error {
 		if *mode == "upgrade-artifact-checksum" {
 			kind = "upgrade"
 		}
-		sum, err := mysql.ArtifactChecksum(engine, kind)
+		var selected []int64
+		if *revision != -1 {
+			selected = append(selected, *revision)
+		}
+		sum, err := mysql.ArtifactChecksum(engine, kind, selected...)
 		if err != nil {
 			return err
 		}

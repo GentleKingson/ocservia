@@ -393,6 +393,10 @@ func TestMySQLArtifactPreviousCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sum string
+	selected, err := ArtifactChecksum(MySQL, "upgrade", 0)
+	if err != nil || selected != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
+		t.Fatal("transition repair checksum unavailable", selected, err)
+	}
 	if err = old.QueryRow(ctx, "SELECT checksum FROM schema_revisions WHERE epoch=2 AND revision=0").Scan(&sum); err != nil || sum != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
 		t.Fatal("transition SQL receipt lost", sum, err)
 	}

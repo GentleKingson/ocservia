@@ -98,7 +98,9 @@ An interrupted MySQL SQL artifact refuses ordinary migration. In a controlled
 test/development recovery environment, obtain the checksum from the exact
 matching build with `ocserv-db-foundation --mode schema-artifact-checksum` for
 fresh initialization, or `--mode upgrade-artifact-checksum` for the latest
-running upgrade revision. Supply that reviewed checksum with
+running upgrade revision. Use `--revision N` to select its exact logical block
+when the file also contains later revisions; revision zero selects the declared
+previous-checkpoint transition. Supply that reviewed checksum with
 `--mode repair --repair-checksum <checksum>`. If a later snapshot has changed,
 recover with the original schema SQL first, then upgrade. DDL recovery accepts
 only a pinned before/after fingerprint; data and progress commit in one InnoDB
