@@ -152,6 +152,10 @@ jobs:
           done
           if ! gh release view "v$VERSION" >/dev/null 2>&1; then
             flags=(--notes-start-tag "$NOTES_BASE")
+            if [[ "$NOTES_BASE" == v1.1.0 ]]; then
+              flags+=(--notes "$(gh api "repos/$GH_REPO/contents/.github/release-notes/v1.1.0-history-rewrite.md?ref=$GITHUB_SHA" \
+                -H 'Accept: application/vnd.github.raw+json')")
+            fi
             if [[ "$IS_PRERELEASE" == true ]]; then
               flags+=(--prerelease --latest=false)
             fi
