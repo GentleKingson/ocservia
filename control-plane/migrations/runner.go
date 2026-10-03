@@ -78,6 +78,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, preflights ...Preflight) e
 }
 
 func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current snapshot, preflights []Preflight) (result error) {
+	if _, _, err := baselineArtifact(current.SQL); err != nil {
+		return err
+	}
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
@@ -129,8 +132,18 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current
 	if err := validateAppliedMigrations(known, applied); err != nil {
 		return err
 	}
-	// Unknown completed records are preserved, but cannot on their own establish
-	// an existing database's provenance.
+	for _, row := range applied {
+		found := false
+		for _, m := range known {
+			if m.Version == row.Version {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("unsupported PostgreSQL history at checkpoint")
+		}
+	}
 	recognized := false
 	for _, row := range applied {
 		for _, m := range known {
@@ -158,6 +171,9 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current
 			return err
 		}
 	}
+	if err := stampCheckpoint(ctx, conn, current, known); err != nil {
+		return err
+	}
 
 	// Owner-only, repeated by --migrate-only to advance the provisioned horizon.
 	if _, err := conn.Exec(ctx, `SELECT telemetry_ensure_month_partition(month AT TIME ZONE 'UTC') FROM generate_series(date_trunc('month',now() AT TIME ZONE 'UTC')-interval '1 month',date_trunc('month',now() AT TIME ZONE 'UTC')+interval '2 months',interval '1 month') AS month`); err != nil {
@@ -170,7 +186,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 	identifier := pgx.Identifier{role}.Sanitize()
 	statements := []string{
 		"GRANT USAGE ON SCHEMA public TO " + identifier,
-		"GRANT SELECT ON schema_migrations, schema_snapshot_origin TO " + identifier,
+		"GRANT SELECT ON schema_migrations, schema_snapshot_origin, schema_revisions TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces, nodes, operations TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON enrollment_tokens, node_endpoint_keys, node_capabilities TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_bootstrap_tokens TO " + identifier,
