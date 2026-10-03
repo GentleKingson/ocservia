@@ -42,6 +42,8 @@ type manifest struct {
 	Engine         Engine            `json:"engine"`
 	Steps          []step            `json:"steps"`
 	MetadataHashes map[string]string `json:"metadata_hashes"`
+	fingerprint    func(string) string
+	artifactOwned  bool
 }
 
 var ErrDirty = errors.New("experimental database: migration in progress; inspect schema and explicitly repair with the manifest checksum")
@@ -88,7 +90,15 @@ func ManifestChecksum(engine Engine) (string, error) {
 var identifier = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 var autoIncrement = regexp.MustCompile(` AUTO_INCREMENT=[0-9]+`)
 
-func schemaHash(ctx context.Context, conn *sql.Conn, s step) (string, error) {
+type schemaQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func schemaHash(ctx context.Context, conn schemaQueryer, s step) (string, error) {
+	return schemaHashWithFingerprint(ctx, conn, s, tableFingerprint)
+}
+func schemaHashWithFingerprint(ctx context.Context, conn schemaQueryer, s step, fingerprint func(string) string) (string, error) {
 	var definition string
 	switch s.Kind {
 	case "table":
@@ -104,6 +114,9 @@ func schemaHash(ctx context.Context, conn *sql.Conn, s step) (string, error) {
 		definition = autoIncrement.ReplaceAllString(definition, "")
 		if s.Name == "backend_schema_snapshot" {
 			definition = snapshotCommentSuffix.ReplaceAllString(definition, "")
+		}
+		if s.Name == "schema_revisions" {
+			definition = artifactCommentSuffix.ReplaceAllString(definition, "")
 		}
 	case "trigger":
 		err := conn.QueryRowContext(ctx, `SELECT CONCAT(ACTION_TIMING,' ',EVENT_MANIPULATION,' ',EVENT_OBJECT_TABLE,' ',ACTION_STATEMENT) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME=?`, s.Name).Scan(&definition)
@@ -158,7 +171,7 @@ func schemaHash(ctx context.Context, conn *sql.Conn, s step) (string, error) {
 		definition = fmt.Sprint(count)
 	}
 	if s.Kind == "table" {
-		return tableFingerprint(definition), nil
+		return fingerprint(definition), nil
 	}
 	return digest([]byte(definition)), nil
 }
@@ -460,7 +473,11 @@ func validateSnapshot(ctx context.Context, conn *sql.Conn, m manifest) error {
 		if s.Kind == "seed" && s.Name == "seed_upstream" {
 			continue
 		}
-		actual, err := schemaHash(ctx, conn, s)
+		fingerprint := m.fingerprint
+		if fingerprint == nil {
+			fingerprint = tableFingerprint
+		}
+		actual, err := schemaHashWithFingerprint(ctx, conn, s, fingerprint)
 		if err != nil {
 			return err
 		}

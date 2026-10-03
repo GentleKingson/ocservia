@@ -53,10 +53,14 @@ func TestMySQLBridgeCheckpoint(t *testing.T) {
 			if _, err := other.Exec(ctx, tamper); err != nil {
 				t.Fatal(err)
 			}
-			if err := other.Migrate(ctx, ""); !errors.Is(err, ErrChecksum) {
+			expected := ErrChecksum
+			if tamper == "UPDATE schema_revisions SET state='running',verified_at=NULL" {
+				expected = ErrDirty
+			}
+			if err := other.Migrate(ctx, ""); !errors.Is(err, expected) {
 				t.Fatal("checkpoint tamper accepted", err)
 			}
-			if err := other.ValidateSchema(ctx); !errors.Is(err, ErrChecksum) {
+			if err := other.ValidateSchema(ctx); !errors.Is(err, expected) {
 				t.Fatal("validation ignored checkpoint", err)
 			}
 		})

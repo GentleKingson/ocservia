@@ -3,7 +3,6 @@ package mysql
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"sort"
@@ -13,7 +12,7 @@ import (
 // Hex encoding is independent of connection escaping and preserves binary
 // UUIDs, JSON, decimal strings and NULL distinctly. Sort rows by their complete
 // encoded value rather than environment-specific collations.
-func snapshotRows(ctx context.Context, conn *sql.Conn, table string, columns []string) ([]string, [][]*string, error) {
+func snapshotRows(ctx context.Context, conn schemaQueryer, table string, columns []string) ([]string, [][]*string, error) {
 	if len(columns) == 0 {
 		rows, err := conn.QueryContext(ctx, "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND EXTRA NOT LIKE '%GENERATED%' ORDER BY ORDINAL_POSITION", table)
 		if err != nil {

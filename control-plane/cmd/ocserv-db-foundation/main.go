@@ -16,7 +16,7 @@ import (
 )
 
 func run() error {
-	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, snapshot-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
+	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, snapshot-checksum, schema-artifact-checksum, upgrade-artifact-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
 	checksum := flag.String("repair-checksum", "", "reviewed revision or snapshot checksum for forward repair")
 	month := flag.String("month", "", "UTC month YYYY-MM for owner-only telemetry provisioning")
 	flag.Parse()
@@ -28,9 +28,18 @@ func run() error {
 		return fmt.Errorf("database foundation requires test/development; production is not supported")
 	}
 	engine := mysql.Engine(os.Getenv("OCSERV_DATABASE_BACKEND"))
-	sum, err := mysql.ManifestChecksum(engine)
-	if err != nil {
-		return err
+	var err error
+	if *mode == "schema-artifact-checksum" || *mode == "upgrade-artifact-checksum" {
+		kind := "schema"
+		if *mode == "upgrade-artifact-checksum" {
+			kind = "upgrade"
+		}
+		sum, err := mysql.ArtifactChecksum(engine, kind)
+		if err != nil {
+			return err
+		}
+		fmt.Println(sum)
+		return nil
 	}
 	if *mode == "snapshot-checksum" {
 		sum, err := mysql.SnapshotChecksum(engine)
@@ -41,6 +50,10 @@ func run() error {
 		return nil
 	}
 	if *mode == "manifest-checksum" {
+		sum, err := mysql.ManifestChecksum(engine)
+		if err != nil {
+			return err
+		}
 		fmt.Println(sum)
 		return nil
 	}
