@@ -75,7 +75,13 @@ func TestSnapshotLifecycle(t *testing.T) {
 	t.Run("receipt-tampering", func(t *testing.T) {
 		for _, query := range []string{"UPDATE backend_schema_snapshot SET artifact_checksum=REPEAT('0',64)", "UPDATE backend_schema_snapshot_steps SET checksum=REPEAT('0',64) WHERE ordinal=3", "UPDATE backend_schema_snapshot_steps SET name='tampered' WHERE ordinal=3", "INSERT INTO backend_schema_revisions(version,parent_checksum,manifest_checksum,state) VALUES(2,REPEAT('a',64),REPEAT('b',64),'verified')"} {
 			t.Run(query, func(t *testing.T) {
-				b, _, _ := migrateFixture(t)
+				b, _, _ := fixture(t)
+				if err := b.migrateLegacy(ctx, ""); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := b.Exec(ctx, "DELETE FROM schema_revisions"); err != nil {
+					t.Fatal(err)
+				}
 				if _, err := b.Exec(ctx, query); err != nil {
 					t.Fatal(err)
 				}
@@ -90,7 +96,10 @@ func TestSnapshotLifecycle(t *testing.T) {
 			t.Run(phase, func(t *testing.T) {
 				b, _, _ := fixture(t)
 				if phase == "before-publish" {
-					if err := b.Migrate(ctx, ""); err != nil {
+					if err := b.migrateLegacy(ctx, ""); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := b.Exec(ctx, "DELETE FROM schema_revisions"); err != nil {
 						t.Fatal(err)
 					}
 					if _, err := b.Exec(ctx, "UPDATE backend_schema_snapshot SET state='running',verified_at=NULL"); err != nil {
@@ -247,6 +256,9 @@ func TestSnapshotLegacyLineages(t *testing.T) {
 			if err := b.QueryRow(context.Background(), "SELECT COUNT(*) FROM backend_schema_snapshot").Scan(&n); err != nil || n != 0 {
 				t.Fatal("legacy snapshot origin fabricated", n, err)
 			}
+			if _, err := b.Exec(context.Background(), "DELETE FROM schema_revisions"); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := b.Exec(context.Background(), "UPDATE backend_migration_steps SET name='tampered' WHERE ordinal=1"); err != nil {
 				t.Fatal(err)
 			}
@@ -322,7 +334,7 @@ func TestSnapshotRuntimePermissions(t *testing.T) {
 	if err = runtime.ValidateTelemetryRuntime(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, query := range []string{"UPDATE backend_schema_snapshot SET state='verified'", "DELETE FROM backend_schema_snapshot_steps", "CREATE TABLE forbidden(id INT)"} {
+	for _, query := range []string{"UPDATE backend_schema_snapshot SET state='verified'", "DELETE FROM backend_schema_snapshot_steps", "UPDATE schema_revisions SET state='running',verified_at=NULL", "DELETE FROM schema_revisions", "CREATE TABLE forbidden(id INT)"} {
 		if _, err = runtime.Exec(ctx, query); !errors.Is(err, database.ErrPermission) {
 			t.Fatal(query, err)
 		}
@@ -342,7 +354,7 @@ func TestSnapshotCrashAfterDDL(t *testing.T) {
 		t.Fatal(err)
 	}
 	statement := a.Statements[2]
-	proxy := newFinalizeProxy(t, config.Addr, snapshotSQL(a, statement), true)
+	proxy := newFinalizeProxy(t, config.Addr, snapshotSQL(a, statement)+";\n", true)
 	config.Addr = proxy.listener.Addr().String()
 	child := exec.Command(os.Args[0], "-test.run=^TestCrashChild$", "-test.timeout=90s")
 	child.Env = append(os.Environ(), "PR02_CRASH_CHILD=yes", "PR02_CRASH_LEGACY=no", "PR02_DSN="+config.FormatDSN())
@@ -363,13 +375,13 @@ func TestSnapshotCrashAfterDDL(t *testing.T) {
 	child.Wait()
 	proxy.close()
 	var state string
-	if err = b.QueryRow(ctx, "SELECT state FROM backend_schema_snapshot_steps WHERE ordinal=3").Scan(&state); err != nil || state != "running" {
+	if err = b.QueryRow(ctx, "SELECT state FROM schema_revisions WHERE epoch=1 AND revision=0 AND step=2").Scan(&state); err != nil || state != "running" {
 		t.Fatal("DDL completion silently verified", state, err)
 	}
 	if err = b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
 		t.Fatal(err)
 	}
-	if err = b.Migrate(ctx, a.sum); err != nil {
+	if err = b.Migrate(ctx, digest(a.sql)); err != nil {
 		t.Fatal(err)
 	}
 	if err = b.ValidateSchema(ctx); err != nil {

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -83,6 +84,9 @@ func (p *finalizeProxy) serve(client net.Conn, address string) {
 		}
 	}()
 	var blackhole atomic.Bool
+	var preparing atomic.Bool
+	var preparedID atomic.Uint32
+	var preparedValid atomic.Bool
 	responseDone := make(chan struct{})
 	go func() {
 		defer close(responseDone)
@@ -90,6 +94,10 @@ func (p *finalizeProxy) serve(client net.Conn, address string) {
 			packet, err := readPacket(server)
 			if err != nil {
 				return
+			}
+			if preparing.Swap(false) && len(packet) >= 9 && packet[4] == 0 {
+				preparedID.Store(binary.LittleEndian.Uint32(packet[5:9]))
+				preparedValid.Store(true)
 			}
 			if blackhole.Load() {
 				close(p.hit)
@@ -114,7 +122,14 @@ func (p *finalizeProxy) serve(client net.Conn, address string) {
 		if err != nil {
 			return
 		}
-		if len(packet) > 4 && packet[4] == 3 && strings.EqualFold(string(packet[5:]), p.command) && p.blocked.CompareAndSwap(false, true) {
+		if len(packet) > 5 && packet[4] == 22 && strings.EqualFold(string(packet[5:]), p.command) {
+			preparing.Store(true)
+		}
+		matches := len(packet) > 4 && packet[4] == 3 && strings.EqualFold(string(packet[5:]), p.command)
+		if len(packet) >= 9 && packet[4] == 23 && preparedValid.Load() && binary.LittleEndian.Uint32(packet[5:9]) == preparedID.Load() {
+			matches = true
+		}
+		if matches && p.blocked.CompareAndSwap(false, true) {
 			blackhole.Store(true)
 			if !p.forward {
 				close(p.hit)

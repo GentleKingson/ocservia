@@ -88,11 +88,7 @@ func (b *Backend) MigrateTelemetryHistory(ctx context.Context) (result error) {
 	if _, err = conn.ExecContext(ctx, `UPDATE telemetry_legacy_migration SET singleton=singleton WHERE singleton=0`); err != nil {
 		return safeError(err)
 	}
-	chain, err := loadRevisionChain(b.engine)
-	if err != nil {
-		return err
-	}
-	if _, err = b.verifiedSnapshotOn(ctx, conn, chain); err != nil {
+	if _, err = b.artifactSnapshotOn(ctx, conn); err != nil {
 		return err
 	}
 	// Even a completed repeat requires owner metadata-write privileges.
@@ -146,7 +142,7 @@ func (b *Backend) MigrateTelemetryHistory(ctx context.Context) (result error) {
 			}
 			continue
 		}
-		snapshot, err := b.verifiedSnapshotOn(ctx, conn, chain)
+		snapshot, err := b.artifactSnapshotOn(ctx, conn)
 		if err != nil {
 			return err
 		}

@@ -309,3 +309,10 @@ mysql-snapshot internal/database/mysql TestSnapshotRuntimePermissions
 mysql-snapshot internal/database/mysql TestSnapshotCrashAfterDDL
 mysql-snapshot internal/database/mysql TestSnapshotGenerationDeterminism
 mysql-snapshot internal/database/mysql TestSnapshotDumpTableRoundtrip
+mysql-snapshot internal/database/mysql TestMySQLArtifactFreshAndUpgrade
+mysql-snapshot internal/database/mysql TestMySQLArtifactUnsupportedNoMutation
+mysql-snapshot internal/database/mysql TestMySQLArtifactInterruptedUpgrade
+mysql-snapshot internal/database/mysql TestMySQLArtifactDataRollback
+mysql-snapshot internal/database/mysql TestMySQLArtifactHistoryMutation
+mysql-snapshot internal/database/mysql TestMySQLArtifactCrashBoundaries
+mysql-snapshot internal/database/mysql TestMySQLArtifactPreviousCheckpoint
