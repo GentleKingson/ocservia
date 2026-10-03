@@ -201,7 +201,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer owner.Close()
+	t.Cleanup(owner.Close)
 	runtime, err := connection.Open(ctx, runtimeOptions)
 	if err != nil {
 		t.Fatal(err)
@@ -498,6 +498,13 @@ func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connecti
 		if _, err := owner.Store.Exec(ctx, string(sql)); err != nil {
 			t.Fatal("install PostgreSQL evidence fixture", err)
 		}
+		t.Cleanup(func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := owner.Store.Exec(cleanup, `DROP FUNCTION public.test_record_scheduler_maintenance(uuid,bigint,bigint); DROP TABLE public.test_scheduler_maintenance_history`); err != nil {
+				t.Error("remove PostgreSQL evidence fixture", err)
+			}
+		})
 		return
 	}
 	// Test-only owner objects are installed after immutable schema validation.
