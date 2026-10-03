@@ -227,3 +227,7 @@ func TestAuthorRevisionThirty(t *testing.T) {
 		{Name: "backend_schema_snapshot_steps", Object: "backend_schema_snapshot_steps", Kind: "table", SQL: snapshotStepsDDL},
 	})
 }
+
+func TestAuthorRevisionThirtyOne(t *testing.T) {
+	authorRevision(t, 31, []LongKeyStep{{Name: "schema_revisions", Object: "schema_revisions", Kind: "table", SQL: journalDDL}})
+}
