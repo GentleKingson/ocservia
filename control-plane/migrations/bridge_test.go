@@ -52,7 +52,7 @@ func TestPostgreSQLBridgeCheckpoint(t *testing.T) {
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations WHERE snapshot_covered").Scan(&covered); err != nil {
 				t.Fatal(err)
 			}
-			if (legacy && covered != 0) || (!legacy && covered != len(known)) {
+			if covered != 0 {
 				t.Fatal("invented execution receipts", covered)
 			}
 			if err := GrantRuntimePrivileges(ctx, pool, "ocservia_app"); err != nil {
