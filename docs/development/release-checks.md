@@ -45,6 +45,30 @@ command/fence/receipt signatures, and durable immutable operation intent remain
 required. The operator-provisioned release catalog still supplies authorized
 upgrade package digests.
 
+## Database checkpoint release boundary
+
+Phase A keeps one epoch-1 baseline per engine: PostgreSQL legacy revision 41
+and MySQL legacy revision 31 bridge genuine old receipts into `schema_revisions`.
+The active SQL pair is `schema.sql` plus `upgrade.sql`; new fresh databases stamp
+one checkpoint and leave legacy journals empty. Retained SQL/JSON/descriptors
+serve only the bounded bridge and its validation. The immutable bridge sources
+are listed in `docs/database-migrations.sha256`.
+
+Review and merge the six Phase A changes in dependency order: contract,
+PostgreSQL bridge, MySQL bridge, PostgreSQL executor, MySQL executor, then
+policy/CI/operations. An open stack must pass full Basic CI, Security Checks,
+Native Business Diagnostics with production Signer and resilience, and both
+backup/restore recovery jobs at its final head. These are review evidence;
+Release Check itself remains main-only. After separately approved merges,
+qualify the exact main commit and publish a real checkpoint release through the
+existing release process. A build-only dispatch is not a checkpoint release.
+
+Stop before deleting legacy sources or declaring the next epoch until that
+release exists and its two journals and checksums are fixed. The next major's
+sole previous-checkpoint window must reference that actual release and its
+verified receipts. Never invent a tag, treat an RC/build-only run as this release,
+merge the open stack automatically, or enable auto-merge to bypass the boundary.
+
 ## Release notes and changelog
 
 GitHub Releases are the user entry point for each version: detailed changes,

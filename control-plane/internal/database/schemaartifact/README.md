@@ -83,7 +83,9 @@ transition SHA-256 cover bytes after the opening boundary through the byte
 before the closing boundary, including step markers and metadata. A revision's
 optional checkpoint receipt is excluded from that SQL block hash to avoid a
 circular dependency with its covered schema checksum; it remains covered by
-the full artifact checksum. Step SHA-256
+the full artifact checksum. A previous-epoch transition keeps its raw SQL
+block checksum and step count in the new epoch revision-zero row; its retained
+previous receipt distinguishes it from a fresh schema checkpoint. Step SHA-256
 covers the raw SQL byte range after its marker/metadata through the byte before
 `end-step`. No whitespace or line ending normalization occurs. Database
 admission, journal validation, execution, locking, and repair remain the

@@ -373,15 +373,18 @@ func validateRevisionSnapshot(ctx context.Context, conn *sql.Conn, snapshot mani
 }
 
 func (b *Backend) migrateLegacy(ctx context.Context, repairChecksum string) (result error) {
-	chain, err := loadRevisionChain(b.engine)
-	if err != nil {
-		return err
-	}
 	conn, name, err := migrationConnection(ctx, b)
 	if err != nil {
 		return err
 	}
 	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
+	return b.migrateLegacyOn(ctx, conn, repairChecksum)
+}
+func (b *Backend) migrateLegacyOn(ctx context.Context, conn *sql.Conn, repairChecksum string) error {
+	chain, err := loadRevisionChain(b.engine)
+	if err != nil {
+		return err
+	}
 	if err := validateCheckpointWindow(ctx, conn, chain); err != nil {
 		return err
 	}
@@ -546,16 +549,11 @@ func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []re
 	return validateRevisionSnapshot(ctx, conn, snapshot)
 }
 
-func (b *Backend) validateLegacySchema(ctx context.Context) (result error) {
+func (b *Backend) validateLegacySchemaOn(ctx context.Context, conn *sql.Conn) error {
 	chain, err := loadRevisionChain(b.engine)
 	if err != nil {
 		return err
 	}
-	conn, name, err := migrationConnection(ctx, b)
-	if err != nil {
-		return err
-	}
-	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
 	if err := validateCheckpointWindow(ctx, conn, chain); err != nil {
 		return err
 	}

@@ -393,11 +393,80 @@ func TestMySQLArtifactPreviousCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sum string
+	selected, err := ArtifactChecksum(MySQL, "upgrade", 0)
+	if err != nil || selected != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
+		t.Fatal("transition repair checksum unavailable", selected, err)
+	}
 	if err = old.QueryRow(ctx, "SELECT checksum FROM schema_revisions WHERE epoch=2 AND revision=0").Scan(&sum); err != nil || sum != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
 		t.Fatal("transition SQL receipt lost", sum, err)
 	}
 	fresh, _, _ := migrateFixture(t)
 	if err = fresh.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMySQLArtifactCatalog(t *testing.T) {
+	schema, err := manifests.ReadFile("mysql/schema.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgrade, err := manifests.ReadFile("mysql/upgrade.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	useMySQLArtifacts(t, schema, upgrade)
+	a, err := loadMySQLArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unknown definition must never normalize to absence or a pinned object.
+	if got := a.fingerprint("foreign table definition"); got != digest([]byte("foreign table definition")) {
+		t.Fatal("unknown fingerprint adopted", got)
+	}
+	if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 || a.upgrade.Previous != nil {
+		t.Fatal("Phase A bridge window changed without checkpoint qualification")
+	}
+}
+
+func TestMySQLArtifactForeignRepair(t *testing.T) {
+	ctx := context.Background()
+	schema, upgrade := futureMySQLArtifacts(t)
+	original := manifests
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprint(partial), func(t *testing.T) {
+			manifests = original
+			b, _, _ := migrateFixture(t)
+			useMySQLArtifacts(t, schema, upgrade)
+			a, err := loadMySQLArtifacts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rev := a.upgrade.Revisions[0]
+			conn, err := b.pool.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = startMySQLRevision(ctx, conn, 1, 1, fmt.Sprintf("%x", rev.Checksum)); err != nil {
+				t.Fatal(err)
+			}
+			if partial {
+				if _, err = conn.ExecContext(ctx, "CREATE TABLE artifact_probe(id INT PRIMARY KEY,value INT NOT NULL,foreign_column INT) ENGINE=InnoDB"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err = conn.ExecContext(ctx, "CREATE TABLE foreign_probe(id INT) ENGINE=InnoDB"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			conn.Close()
+			before := mysqlArtifactDigest(t, b)
+			if err = b.Migrate(ctx, fmt.Sprintf("%x", rev.Checksum)); !errors.Is(err, ErrSchema) {
+				t.Fatal("foreign state adopted", err)
+			}
+			if mysqlArtifactDigest(t, b) != before {
+				t.Fatal("foreign repair mutated state")
+			}
+		})
 	}
 }
