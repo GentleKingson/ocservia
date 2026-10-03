@@ -122,3 +122,29 @@ func TestRevisionChecksumIncludesMetadataAndWhitespace(t *testing.T) {
 		}
 	}
 }
+
+func TestSchemaCheckpointReceipts(t *testing.T) {
+	receipt := `{"checksum":"` + strings.Repeat("a", 64) + `","steps":1}`
+	header := strings.ReplaceAll(upgradeHeader, "ENGINE", "mysql") + "-- ocservia:baseline=" + receipt + "\n"
+	data := header + strings.Replace(revisionFixture, "-- ocservia:revision=1\n", "-- ocservia:revision=1\n-- ocservia:checkpoint="+receipt+"\n", 1)
+	a, err := Parse([]byte(data), "mysql")
+	if err != nil || a.Base == nil || a.Revisions[0].Checkpoint == nil {
+		t.Fatal(a, err)
+	}
+	schema := strings.ReplaceAll(schemaFixture, "ENGINE", "mysql")
+	schema = strings.Replace(schema, "revision=0", "revision=1", 1)
+	if a, err := Parse([]byte(schema), "mysql"); err != nil || a.Baseline.Number != 1 {
+		t.Fatal(a, err)
+	}
+	for _, bad := range []string{
+		strings.Replace(data, receipt, `{"checksum":"bad","steps":1}`, 1),
+		strings.Replace(data, receipt, strings.Replace(receipt, `"steps":1`, `"steps":0`, 1), 1),
+		strings.Replace(data, receipt, strings.Replace(receipt, `"steps":1`, `"steps":1,"steps":1`, 1), 1),
+		strings.Replace(data, receipt, strings.Replace(receipt, `"steps":1`, `"steps":1,"unknown":true`, 1), 1),
+		strings.Replace(data, "-- ocservia:end-step", "-- ocservia:checkpoint="+receipt+"\n-- ocservia:end-step", 1),
+	} {
+		if _, err := Parse([]byte(bad), "mysql"); err == nil {
+			t.Fatal("invalid checkpoint receipt accepted")
+		}
+	}
+}

@@ -108,7 +108,7 @@ func TestPostgreSQLSnapshotLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var covered int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations WHERE snapshot_covered").Scan(&covered); err != nil || covered != len(known) {
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations WHERE snapshot_covered").Scan(&covered); err != nil || covered != 0 {
 		t.Fatal(covered, err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('11111111-1111-1111-1111-111111111111','snapshot preserved','snapshot-preserved',now(),now())`); err != nil {
@@ -134,7 +134,7 @@ func TestPostgreSQLSnapshotLifecycle(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT name FROM workspaces WHERE slug='snapshot-preserved'").Scan(&name); err != nil || name != "snapshot preserved" {
 		t.Fatal(name, err)
 	}
-	if _, err := pool.Exec(ctx, "UPDATE schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=1"); err != nil {
+	if _, err := pool.Exec(ctx, "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex')"); err != nil {
 		t.Fatal(err)
 	}
 	if err := Migrate(ctx, pool); err == nil {
@@ -186,7 +186,14 @@ func TestPostgreSQLSnapshotOriginTampering(t *testing.T) {
 		t.Run(statement, func(t *testing.T) {
 			pool := snapshotDatabase(t)
 			ctx := context.Background()
-			if err := Migrate(ctx, pool); err != nil {
+			known, _ := loadMigrations()
+			current, _ := loadSnapshot(known)
+			if err := migrate(ctx, pool, known, current, nil); err != nil {
+				t.Fatal(err)
+			}
+			// The fallback must validate legacy provenance before establishing
+			// a checkpoint. New artifacts never fabricate these coverage rows.
+			if _, err := pool.Exec(ctx, "DELETE FROM schema_revisions"); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := pool.Exec(ctx, statement); err != nil {
