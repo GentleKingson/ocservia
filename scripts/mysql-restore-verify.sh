@@ -50,20 +50,28 @@ existing="$("${client}" --defaults-extra-file="${target_config}" --batch --skip-
 query() {
   "${client}" --defaults-extra-file="${target_config}" --database="${database}" --batch --skip-column-names -e "$1"
 }
-schema_predicate="(SELECT COUNT(*) FROM backend_migrations)=1 AND EXISTS(SELECT 1 FROM backend_migrations WHERE singleton=1 AND engine='mysql' AND version>0 AND dirty=0)"
-if [[ "$(query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='backend_schema_snapshot'")" == 1 ]]; then
-  origins="$(query 'SELECT COUNT(*) FROM backend_schema_snapshot')"
-  if [[ "${origins}" != 0 ]]; then
-    schema_predicate="(SELECT COUNT(*) FROM backend_schema_snapshot)=1 AND EXISTS(SELECT 1 FROM backend_schema_snapshot WHERE singleton=1 AND state='verified' AND verified_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM backend_migrations) AND EXISTS(SELECT 1 FROM backend_schema_snapshot_steps) AND NOT EXISTS(SELECT 1 FROM backend_schema_snapshot_steps WHERE state<>'verified' OR verified_at IS NULL)"
-  else
-    schema_predicate+=" AND NOT EXISTS(SELECT 1 FROM backend_schema_snapshot_steps)"
-  fi
+artifact_journal=false
+if [[ "$(query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='schema_revisions'")" == 1 ]]; then
+  [[ "$(query 'SELECT COUNT(*) FROM schema_revisions')" == 0 ]] || artifact_journal=true
 fi
-for journal in backend_migration_steps backend_schema_revisions backend_schema_revision_steps; do
-  if [[ "$(query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='${journal}'")" == 1 ]]; then
-    schema_predicate+=" AND NOT EXISTS(SELECT 1 FROM ${journal} WHERE state<>'verified' OR verified_at IS NULL)"
+if [[ "${artifact_journal}" == true ]]; then
+  schema_predicate="EXISTS(SELECT 1 FROM schema_revisions) AND NOT EXISTS(SELECT 1 FROM schema_revisions WHERE epoch<1 OR revision<0 OR OCTET_LENGTH(checksum)<>64 OR NOT REGEXP_LIKE(CONVERT(checksum USING ascii),'^[0-9a-f]{64}$','c') OR BINARY state<>BINARY 'verified' OR step<1 OR step>999 OR verified_at IS NULL OR verified_at<started_at)"
+else
+  schema_predicate="(SELECT COUNT(*) FROM backend_migrations)=1 AND EXISTS(SELECT 1 FROM backend_migrations WHERE singleton=1 AND engine='mysql' AND version>0 AND dirty=0)"
+  if [[ "$(query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='backend_schema_snapshot'")" == 1 ]]; then
+    origins="$(query 'SELECT COUNT(*) FROM backend_schema_snapshot')"
+    if [[ "${origins}" != 0 ]]; then
+      schema_predicate="(SELECT COUNT(*) FROM backend_schema_snapshot)=1 AND EXISTS(SELECT 1 FROM backend_schema_snapshot WHERE singleton=1 AND state='verified' AND verified_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM backend_migrations) AND EXISTS(SELECT 1 FROM backend_schema_snapshot_steps) AND NOT EXISTS(SELECT 1 FROM backend_schema_snapshot_steps WHERE state<>'verified' OR verified_at IS NULL)"
+    else
+      schema_predicate+=" AND NOT EXISTS(SELECT 1 FROM backend_schema_snapshot_steps)"
+    fi
   fi
-done
+  for journal in backend_migration_steps backend_schema_revisions backend_schema_revision_steps; do
+    if [[ "$(query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='${journal}'")" == 1 ]]; then
+      schema_predicate+=" AND NOT EXISTS(SELECT 1 FROM ${journal} WHERE state<>'verified' OR verified_at IS NULL)"
+    fi
+  done
+fi
 schema_state="$(query "SELECT IF(${schema_predicate},'schema:ok','schema:failed')")"
 summary="${schema_state}"$'\n'"$("${client}" --defaults-extra-file="${target_config}" --database="${database}" --batch --skip-column-names <<'SQL'
 SELECT IF((SELECT COUNT(*) FROM audit_events WHERE event_hash IS NULL OR event_mac IS NULL)=0,'audit-shape:ok','audit-shape:failed');

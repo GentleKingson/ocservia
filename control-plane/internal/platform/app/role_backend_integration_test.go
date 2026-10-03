@@ -87,7 +87,7 @@ func TestControllerRoleLifecycleBackendIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer owner.Close()
+	t.Cleanup(owner.Close)
 	runtime, err := connection.Open(ctx, runtimeOptions)
 	if err != nil {
 		t.Fatal(err)
