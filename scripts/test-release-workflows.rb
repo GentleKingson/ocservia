@@ -18,7 +18,7 @@ require_check(triggers.keys.sort == %w[push workflow_dispatch] && triggers.dig('
 require_check(triggers.dig('workflow_dispatch', 'inputs').keys == ['version'], 'dry-run must only select a test version')
 require_check(release['permissions'] == {'contents'=>'read'}, 'Release must default to read-only')
 publish = release.fetch('jobs').fetch('publish')
-require_check(publish['if'] == "github.event_name == 'push'" && publish['environment'] == 'release-publishing', 'publishing must require a tag push and the publishing environment')
+require_check(publish['if'] == "github.event_name == 'push'" && publish['environment'] == {'name'=>'release-publishing', 'deployment'=>false}, 'publishing must require a tag push and the publishing environment without deployment records')
 require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write'}, 'publishing permissions changed')
 require_check(publish['needs'].sort == %w[assets build-amd64 build-arm64 prepare], 'publishing must wait for both native build/smoke legs and assets')
 require_check(publish['steps'].any? {|s| s.fetch('run','').match?(/gh release create[^\n]*--generate-notes/)}, 'Release must retain native generated notes')
