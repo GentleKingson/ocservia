@@ -37,7 +37,7 @@ for path in "${BACKUP_ROOT}" "${BACKUP_ROOT}/logical"; do
 done
 
 run_backup() {
-  local lock="${BACKUP_ROOT}/.backup.lock" timestamp staging final latest_tmp version client dump
+  local lock="${BACKUP_ROOT}/.backup.lock" timestamp staging final latest_tmp version dump
   local -a dump_options=()
   mkdir "${lock}" 2>/dev/null || { echo "another backup is active or a stale lock needs operator review" >&2; return 1; }
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -53,7 +53,6 @@ run_backup() {
   [[ ! -e "${final}" ]] || { echo "backup destination already exists: ${final}" >&2; return 1; }
   mkdir "${staging}"
 
-  client=mysql
   dump=mysqldump
   dump_options+=(--set-gtid-purged=OFF)
   version="$(mysql_server_version "${MYSQL_CONFIG_FILE}")"

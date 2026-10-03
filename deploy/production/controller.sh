@@ -186,7 +186,9 @@ select_release_source() {
 }
 
 validate_manifest_file() {
-  local label="$1" path="$2" manifest_filter
+  local label="$1" path="$2" historical_inventory="${3:-false}" manifest_filter
+  # Saved manifests are immutable evidence. Retired assets may be read there,
+  # but may never be supplied in a newly selected install/upgrade/rollback target.
   # jq variables in this filter are intentionally not shell variables.
   # shellcheck disable=SC2016
   manifest_filter='
@@ -202,7 +204,8 @@ validate_manifest_file() {
       elif $manifest.manifest_version == 2 then
         ($manifest | keys == ["database_migration", "images", "manifest_version", "platform", "release_tag", "release_version", "signer_state_version", "source_commit"]) and
         ($manifest.signer_state_version == 1) and
-        ($manifest.images | keys == ["backup", "control", "edge", "gateway", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])
+        ($manifest.images | (keys == ["backup", "control", "edge", "gateway", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"]) or
+          ($historical_inventory and keys == ["backup", "control", "edge", "gateway", "mariadb_backup", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"]))
       else false end) and
       ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$")) and
       ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$") and . == ("v" + $manifest.release_version)) and
@@ -213,7 +216,7 @@ validate_manifest_file() {
         all(.[]; matches("^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$")))
     end
   '
-  jq -e -s "${manifest_filter}" "${path}" >/dev/null ||
+  jq -e -s --argjson historical_inventory "${historical_inventory}" "${manifest_filter}" "${path}" >/dev/null ||
     fail "${label} is invalid"
 
   CANONICAL_RELEASE="$(mktemp "${STATE_ROOT}/.canonical-release.json.XXXXXX")" ||
@@ -380,7 +383,7 @@ validate_current_release() {
   fi
   [[ -e "${CURRENT_RELEASE}" ]] || fail "current release state is missing; refusing to upgrade"
   validate_state_file_path "current release state" "${CURRENT_RELEASE}"
-  validate_manifest_file "current release state" "${CURRENT_RELEASE}"
+  validate_manifest_file "current release state" "${CURRENT_RELEASE}" true
 }
 
 validate_previous_release() {
@@ -388,7 +391,7 @@ validate_previous_release() {
     fail "previous release state must not be a symlink"
   elif [[ -e "${PREVIOUS_RELEASE}" ]]; then
     validate_state_file_path "previous release state" "${PREVIOUS_RELEASE}"
-    validate_manifest_file "previous release state" "${PREVIOUS_RELEASE}"
+    validate_manifest_file "previous release state" "${PREVIOUS_RELEASE}" true
   fi
 }
 
@@ -398,7 +401,7 @@ validate_pending_previous_release() {
   chmod 600 "${PENDING_PREVIOUS_TMP}"
   jq -e '.previous_manifest | select(type == "object")' "${PENDING_RELEASE}" >"${PENDING_PREVIOUS_TMP}" ||
     fail "pending release state is invalid"
-  validate_manifest_file "pending previous release manifest" "${PENDING_PREVIOUS_TMP}"
+  validate_manifest_file "pending previous release manifest" "${PENDING_PREVIOUS_TMP}" true
 }
 
 reconcile_completed_pending() {

@@ -1159,7 +1159,7 @@ jq --arg ref "registry.test/image@${digest}" '.manifest_version = 2 | .signer_st
   "${release_file}" >"${integrated_release}"
 integrated_state="${fixture}/integrated"
 expect_failure "${fixture}/integrated-v1" "${release_file}" "requires a v2 release manifest" false env OCSERV_DEPLOYMENT_MODE=integrated
-for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .images.signer' 'del(.images.mysql_backup)'; do
+for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .images.signer' 'del(.images.mysql_backup)' '.images.mariadb_backup = .images.mysql_backup'; do
   rejected="${fixture}/release/integrated-rejected.json"
   jq "${filter}" "${integrated_release}" >"${rejected}"
   rejection_state="$(mktemp -d "${fixture}/v2-rejection.XXXXXX")"
@@ -1169,6 +1169,20 @@ for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .imag
   grep -Fq 'release manifest is invalid' "${rejection_state}/output.log"
   test ! -e "${rejection_state}/compose.log"
 done
+# Old v2 inventories remain valid saved evidence, including pending-upgrade
+# recovery. They are rejected above as new targets and never enable MariaDB.
+legacy_v2="${fixture}/release/legacy-v2.json"
+jq '.images.mariadb_backup = .images.mysql_backup' "${integrated_release}" >"${legacy_v2}"
+legacy_v2_state="${fixture}/legacy-v2-upgrade"
+seed_upgrade_state "${legacy_v2_state}" "${legacy_v2}"
+cp "${legacy_v2}" "${legacy_v2_state}/current-release.json"
+expect_upgrade_failure "${legacy_v2_state}" "${integrated_release}" 'release smoke failed' env MOCK_SMOKE_EXIT=1
+cmp -s "${legacy_v2}" "${legacy_v2_state}/current-release.json"
+assert_pending_previous_release "${legacy_v2}" "${legacy_v2_state}/pending-release.json"
+run_controller_upgrade "${legacy_v2_state}" "${integrated_release}" env
+cmp -s "${integrated_release}" "${legacy_v2_state}/current-release.json"
+cmp -s "${legacy_v2}" "${legacy_v2_state}/previous-release.json"
+
 mkdir -m 700 "${integrated_state}"
 if run_controller "${integrated_state}" "${integrated_release}" env OCSERV_DEPLOYMENT_MODE=integrated \
   OCSERV_SIGNER_STATE_DIR="${integrated_state}" MOCK_SMOKE_EXIT=1 >"${integrated_state}/failure.log" 2>&1; then
