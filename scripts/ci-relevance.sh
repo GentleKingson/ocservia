@@ -126,10 +126,8 @@ else
   fi
 fi
 
-matrix='{"include":[{"engine":"postgres","postgres":"17","version":"17.10"},{"engine":"mysql","version":"8.4.10"}]}'
-if [[ "${profile}" == full ]]; then
-  matrix='{"include":[{"engine":"postgres","postgres":"17","version":"17.10"},{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"},{"engine":"mariadb","version":"12.3.2"}]}'
-fi
+matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"}]}'
+
 {
   printf 'database_matrix=%s\n' "${matrix}"
   printf 'profile=%s\n' "${profile}"

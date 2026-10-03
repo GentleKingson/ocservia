@@ -61,13 +61,13 @@ jq -e --argjson expected_head "${expected_head}" '
 
 arm64_args=("${common_args[@]}")
 integrated_args=()
-for role in edge relay signer mysql_backup mariadb_backup; do
+for role in edge relay signer mysql_backup; do
   integrated_args+=(--image "${role}=registry.test/${role}@${digest}")
 done
 node "${GENERATOR}" --output "${fixture}/manifest-v2.json" --manifest-version 2 \
   "${common_args[@]}" "${image_args[@]}" "${integrated_args[@]}"
 jq -e '.manifest_version == 2 and .signer_state_version == 1 and
-  (.images | keys == ["backup", "control", "edge", "gateway", "mariadb_backup", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])' \
+  (.images | keys == ["backup", "control", "edge", "gateway", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])' \
   "${fixture}/manifest-v2.json" >/dev/null
 assert_rejected v1-extra-images "${common_args[@]}" "${image_args[@]}" "${integrated_args[@]}"
 assert_rejected v2-missing-images --manifest-version 2 "${common_args[@]}" "${image_args[@]}"

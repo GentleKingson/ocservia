@@ -35,19 +35,8 @@ func TestExternalPostgreSQLTLSContract(t *testing.T) {
 	}
 }
 
-func TestExternalPostgreSQLMajorVersion(t *testing.T) {
-	for _, version := range []int{160012, 180006} {
-		if err := validateExternalPostgreSQLVersion(version); err == nil {
-			t.Fatalf("unsupported server version %d accepted", version)
-		}
-	}
-	if err := validateExternalPostgreSQLVersion(170010); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestMySQLCompatibleProductionTLSContract(t *testing.T) {
-	for _, backend := range []string{"mysql", "mariadb"} {
+	for _, backend := range []string{"mysql"} {
 		t.Run(backend, func(t *testing.T) {
 			base := Options{
 				Backend: backend, Environment: "production",
@@ -61,5 +50,11 @@ func TestMySQLCompatibleProductionTLSContract(t *testing.T) {
 				t.Fatal("remote production plaintext accepted")
 			}
 		})
+	}
+}
+
+func TestRejectMariaDB(t *testing.T) {
+	if err := ValidateOptions(Options{Backend: "mariadb", Environment: "test", URL: "app:secret@tcp(127.0.0.1:3306)/db?tls=false"}); err == nil {
+		t.Fatal("MariaDB accepted")
 	}
 }

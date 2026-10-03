@@ -96,7 +96,7 @@ logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
 
 Local login requires the installed release's complete backend migration history.
 PostgreSQL introduced shared account failure backoff in migration `000033`;
-MySQL/MariaDB provide it through their own manifests and storage revisions.
+MySQL provides it through its own manifests and storage revisions.
 `AuthenticateLocal` reserves a database-backed single-flight lease before reading a
 credential or executing KDF, then completes only an observed incorrect password
 as a failure. Admission serializes capacity allocation in a short transaction;

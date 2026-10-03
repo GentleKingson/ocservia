@@ -114,18 +114,6 @@ func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if b.engine == MariaDB {
-		for _, table := range []string{"exact_telemetry_rollups_5m", "exact_telemetry_rollups_1h"} {
-			rows, err := b.Query(ctx, `SELECT owner_id,key_value FROM `+table+` LIMIT 0`)
-			if err != nil {
-				return err
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				return err
-			}
-		}
-	}
 	for _, table := range []string{"telemetry_rollups_5m", "telemetry_rollups_1h"} {
 		// A false predicate checks effective privileges, including inherited
 		// global/schema grants, without deleting a row or relying on grant text.
@@ -486,9 +474,6 @@ func (b *Backend) provisionTelemetryMonth(ctx context.Context, conn *sql.Conn, m
 			return ErrSchema
 		}
 		collation := "utf8mb4_0900_bin"
-		if b.engine == MariaDB {
-			collation = "utf8mb4_nopad_bin"
-		}
 		if _, err = conn.ExecContext(ctx, telemetryShardDDL(name, start, end, collation)); err != nil {
 			return safeError(err)
 		}

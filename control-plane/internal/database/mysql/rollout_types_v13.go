@@ -7,9 +7,6 @@ import (
 
 func RolloutTypeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	validator := strings.Replace(jsonbObjectValidator, "ocserv_jsonb_object_valid", "ocserv_rollout_exclusions_valid", 1)
 	validator = strings.Replace(validator, "RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'OBJECT';", "RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'ARRAY' AND JSON_LENGTH(masked)<=500;", 1)
 	steps := []LongKeyStep{{Name: "rollout_exclusions_validator", Kind: "function", Object: "ocserv_rollout_exclusions_valid", SQL: validator}}

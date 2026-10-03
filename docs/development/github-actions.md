@@ -21,8 +21,8 @@ Full has a separate concurrency group and cannot cancel Quick.
 | go | gofmt, vet and ordinary fast tests in both Go modules; no full-package race |
 | rust | Format, clippy and workspace tests |
 | web | Format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
-| database-smoke | Quick: PostgreSQL 17.10 (project default), MySQL 8.4.10. Full: also PostgreSQL 18.6 and MariaDB 12.3.2 |
-| database-recovery-full | Existing short MySQL/MariaDB logical backup/restore loop, Full only |
+| database-smoke | Quick and Full: PostgreSQL 18.x (project default) and MySQL 8.4 LTS |
+| database-recovery-full | Existing short MySQL logical backup/restore loop, Full only |
 | Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
 
 All database images retain their exact patch/digest pins. Each core job starts
@@ -33,8 +33,8 @@ administrator, and reads the written workspace through the authenticated API.
 Real transactions check commit, rollback and isolation from a second pooled
 connection; a repeated migration must preserve the committed workspace.
 Runtime DDL denial is the small retained failure path: it verifies the
-Controller is not accidentally tested with owner credentials. MySQL/MariaDB
-retain production configuration and verified TLS in this same flow.
+Controller is not accidentally tested with owner credentials. MySQL
+retains production configuration and verified TLS in this same flow.
 
 Both profiles also run current empty-database initialization and identical
 retry in a separate schema on the same service. These checks preserve current
@@ -116,7 +116,6 @@ The original independent entrypoints remain available, but are **not Full CI**:
 # On BuildServer; expensive opt-in checks:
 DATABASE_TEST_SCOPE=full PG_MAJOR=all scripts/database-integration.sh
 DATABASE_TEST_SCOPE=full ENGINE=mysql bash scripts/database-foundation-integration.sh
-DATABASE_TEST_SCOPE=full ENGINE=mariadb bash scripts/database-foundation-integration.sh
 scripts/go-check.sh race
 scripts/web-check.sh full
 ```
@@ -174,13 +173,9 @@ Run on `BuildServer` against the same candidate source:
 ```bash
 scripts/bootstrap.sh go-test
 scripts/go-check.sh standard
-DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh
-DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh
-# Full also runs PG_MAJOR=18 and ENGINE=mariadb with the same current smoke.
 DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh
-DATABASE_TEST_SCOPE=smoke ENGINE=mariadb bash scripts/database-foundation-integration.sh
+DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh
 RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash scripts/i18-mysql-backup-restore-smoke.sh
-RUN_ID=local-mariadb ARTIFACT_DIR="$PWD/.cache/recovery-mariadb" ENGINE=mariadb bash scripts/i18-mysql-backup-restore-smoke.sh
 ```
 
 With push/remote-run authorization, select the candidate branch in Actions or

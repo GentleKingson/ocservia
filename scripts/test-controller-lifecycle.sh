@@ -1155,7 +1155,7 @@ cmp -s "${version_release}" "${version_state}/current-release.json"
 
 integrated_release="${fixture}/release/integrated.json"
 jq --arg ref "registry.test/image@${digest}" '.manifest_version = 2 | .signer_state_version = 1 |
-  .images += {edge:$ref, relay:$ref, signer:$ref, mysql_backup:$ref, mariadb_backup:$ref}' \
+  .images += {edge:$ref, relay:$ref, signer:$ref, mysql_backup:$ref}' \
   "${release_file}" >"${integrated_release}"
 integrated_state="${fixture}/integrated"
 expect_failure "${fixture}/integrated-v1" "${release_file}" "requires a v2 release manifest" false env OCSERV_DEPLOYMENT_MODE=integrated

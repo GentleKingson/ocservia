@@ -34,7 +34,7 @@ Keep authentication, session/audit keys, database TLS and backend/role settings
 intact. Long-running Controllers retain runtime credentials only.
 
 Policy cleanup needs DELETE on `user_policy_enforcements`: PostgreSQL uses its
-configured role; MySQL/MariaDB use explicit `user@host`. Store predicates, not
+configured role; MySQL uses explicit `user@host`. Store predicates, not
 this table-level grant, restrict which unfinished records can be removed.
 Other table/DDL privileges do not change. A binary replacement alone cannot
 repair missing grants.

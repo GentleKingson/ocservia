@@ -1,4 +1,4 @@
-FROM postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+FROM postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade libssl3 openssl \
     && rm -rf /var/lib/apt/lists/*

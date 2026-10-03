@@ -85,7 +85,7 @@ fi
 
 docker run -d --name "${POSTGRES}" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-  -p "127.0.0.1::5432" postgres:17-bookworm >/dev/null
+  -p "127.0.0.1::5432" postgres:18.6-bookworm >/dev/null
 # Probe over TCP: the entrypoint's initdb temporary server listens on the Unix
 # socket only, so a socket probe can report ready before the final server exists.
 postgres_ready=false

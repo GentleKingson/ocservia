@@ -1,7 +1,7 @@
 # Single-instance resilience
 
 Each supported deployment uses one Controller, one database instance and one
-dedicated Relay. PostgreSQL, MySQL and MariaDB retain their current versions and
+dedicated Relay. PostgreSQL and MySQL retain their current versions and
 deployment scope in [production deployment](../operations/production-deployment.md#database-support).
 Integrated / standalone and bundled / external modes remain available, as does
 management of multiple Agents. The components need not share a physical host.
@@ -27,7 +27,7 @@ there is no separate G6 workflow or evidence framework.
 Manual integration retains the deeper restart/persistence, outage mutation,
 unsent queue, idempotent replay, exact reload and API/DB/journal/root-receipt
 checks. These are not required by Release Smoke. Full CI retains its existing
-PostgreSQL/MySQL/MariaDB database smoke and isolated recovery owners.
+PostgreSQL/MySQL database smoke and isolated recovery owners.
 
 Use the Business job status and actual recovery checkpoints in `result.json`.
 Sanitized failure diagnostics use seven-day Actions artifacts. Selected checks must actually finish successfully;

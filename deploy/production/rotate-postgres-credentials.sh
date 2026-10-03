@@ -275,7 +275,7 @@ current_pgpass="$(cat -- "${secret_dir}/postgres.pgpass")"
 [[ "${current_app_url}" == postgres://ocservia_app:*@* ]] || fail "database-app-url does not contain the expected application role"
 database_suffix="${current_app_url#*@}"
 new_app_url="postgres://ocservia_app:$(urlencode "${new_app_password}")@${database_suffix}"
-new_pgpass="postgres:5432:replication:ocservia_backup:$(pgpass_escape "${new_backup_password}")"
+new_pgpass="postgres:5432:*:ocservia_backup:$(pgpass_escape "${new_backup_password}")"
 
 verify_login ocservia_app "${old_app_password}" ocservia
 verify_login ocservia_backup "${old_backup_password}" postgres

@@ -66,13 +66,13 @@ database_deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
 case "${database_backend}:${database_deployment}" in
   postgres:bundled) database_overlay="compose.postgres.yaml" ;;
   postgres:external) database_overlay="compose.external-postgres.yaml" ;;
-  mysql:external|mariadb:external) database_overlay="compose.external-mysql.yaml" ;;
-  mysql:bundled|mariadb:bundled)
+  mysql:external) database_overlay="compose.external-mysql.yaml" ;;
+  mysql:bundled)
     echo "bundled ${database_backend} is not implemented; use an externally managed database" >&2
     exit 2
     ;;
   *)
-    echo "OCSERV_DATABASE_BACKEND must be postgres, mysql or mariadb and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
+    echo "OCSERV_DATABASE_BACKEND must be postgres or mysql and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
     exit 2
     ;;
 esac
@@ -89,7 +89,7 @@ for variable in "${image_variables[@]}"; do
     exit 2
   fi
 done
-if [[ "${database_backend}" == mysql || "${database_backend}" == mariadb ]]; then
+if [[ "${database_backend}" == mysql ]]; then
   if [[ ! "${OCSERV_DATABASE_BACKUP_IMAGE:-}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]]; then
     echo "OCSERV_DATABASE_BACKUP_IMAGE must contain a version-tagged or sha256 image reference" >&2
     exit 2

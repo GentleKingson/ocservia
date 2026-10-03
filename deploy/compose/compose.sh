@@ -11,12 +11,8 @@ case "${backend}" in
     export OCSERV_DATABASE_IMAGE="${OCSERV_DATABASE_IMAGE:-mysql:8.4.10}"
     compose_file="${ROOT}/deploy/compose/compose.mysql-compatible.yaml"
     ;;
-  mariadb)
-    export OCSERV_DATABASE_IMAGE="${OCSERV_DATABASE_IMAGE:-mariadb:12.3.2}"
-    compose_file="${ROOT}/deploy/compose/compose.mysql-compatible.yaml"
-    ;;
   *)
-    echo "OCSERV_DATABASE_BACKEND must be postgres, mysql or mariadb" >&2
+    echo "OCSERV_DATABASE_BACKEND must be postgres or mysql" >&2
     exit 2
     ;;
 esac

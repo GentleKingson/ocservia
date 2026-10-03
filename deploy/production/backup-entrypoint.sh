@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${DATABASE_BACKEND:-postgres}" == mysql || "${DATABASE_BACKEND:-postgres}" == mariadb ]]; then
+if [[ "${DATABASE_BACKEND:-postgres}" == mysql ]]; then
   source_file="${MYSQL_CONFIG_SOURCE:-/run/secrets/database_backup_config}"
   private_file="/tmp/ocservia-database.cnf"
   if [[ ! -f "${source_file}" || -L "${source_file}" ]]; then
@@ -14,7 +14,7 @@ if [[ "${DATABASE_BACKEND:-postgres}" == mysql || "${DATABASE_BACKEND:-postgres}
 fi
 
 if [[ "${DATABASE_BACKEND:-postgres}" != postgres ]]; then
-  echo "DATABASE_BACKEND must be postgres, mysql or mariadb" >&2
+  echo "DATABASE_BACKEND must be postgres or mysql" >&2
   exit 2
 fi
 

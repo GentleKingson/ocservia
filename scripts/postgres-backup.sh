@@ -4,7 +4,7 @@ set -euo pipefail
 BACKUP_ROOT="${BACKUP_ROOT:-/var/lib/ocservia-backup}"
 BACKUP_INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-900}"
 BACKUP_RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-8}"
-POSTGRES_SERVER_MAJOR="${POSTGRES_SERVER_MAJOR:-}"
+POSTGRES_SERVER_MAJOR="${POSTGRES_SERVER_MAJOR:-18}"
 RUN_ID="${RUN_ID:-backup-$$}"
 
 if [[ "${BACKUP_ROOT}" != /* || "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
@@ -19,8 +19,8 @@ if ! [[ "${BACKUP_RETENTION_COUNT}" =~ ^[0-9]+$ ]] || (( BACKUP_RETENTION_COUNT 
   echo "BACKUP_RETENTION_COUNT must be 1..128" >&2
   exit 2
 fi
-if [[ -n "${POSTGRES_SERVER_MAJOR}" && "${POSTGRES_SERVER_MAJOR}" != 17 ]]; then
-  echo "POSTGRES_SERVER_MAJOR must be 17 when set" >&2
+if [[ "${POSTGRES_SERVER_MAJOR}" != 18 ]]; then
+  echo "POSTGRES_SERVER_MAJOR must be 18" >&2
   exit 2
 fi
 
@@ -57,12 +57,10 @@ run_backup() {
   }
   trap cleanup_backup RETURN
 
-  if [[ -n "${POSTGRES_SERVER_MAJOR}" ]]; then
-    server_version="$(psql --no-password --tuples-only --no-align --command 'SHOW server_version_num')"
-    if [[ ! "${server_version}" =~ ^[0-9]+$ ]] || (( server_version / 10000 != POSTGRES_SERVER_MAJOR )); then
-      echo "external PostgreSQL server must be major version ${POSTGRES_SERVER_MAJOR}" >&2
-      return 1
-    fi
+  server_version="$(psql --no-password --tuples-only --no-align --command 'SHOW server_version_num')"
+  if [[ ! "${server_version}" =~ ^[0-9]+$ ]] || (( server_version / 10000 != POSTGRES_SERVER_MAJOR )); then
+    echo "PostgreSQL server must be major version ${POSTGRES_SERVER_MAJOR}" >&2
+    return 1
   fi
 
   if [[ -e "${final}" ]]; then

@@ -32,7 +32,7 @@ are not current requirements. Existing published artifacts are unchanged.
 | Schema and transport | [`proto/`](../../proto/) owns message numbers, enums and services. ALPNs remain `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`; enrollment proof is 1.1, session protocol is negotiated separately. Go/transportd UDS and Agent/privd local protocol are private matched-release interfaces. | Direct Go access to Iroh; arbitrary third-party privd clients; automatic acceptance of new signed-command fields because Protobuf normally permits them. |
 | Signing and hashes | [Command authorization v1](../development/command-authorization-v1.md), session/artifact grants, connection fence v2, fence binding v2 and [privd receipt v1](../development/agent-privd.md) have frozen canonical transcripts. [Semantic v1](../development/command-semantic-hash-v1.md) remains frozen; [v2](../development/command-semantic-hash-v2.md) is current Controller issuance. Proto serialization is never canonical signing input. | Changing an existing hash/transcript to absorb new semantics; inferring semantic v2 from the historical capability string `command.semantic-hash.v1`. |
 | Versions and durable state | Controller/transportd use one candidate source/release; Agent/privd/upgrader are one verified package. Cross-version execution has no compatibility guarantee. Preserve journals, root effect store plus HMAC/receipt keys, endpoint identity and revision/fence floors. | Independent Agent/privd swaps or numeric version classification as permission to dispatch. |
-| Database | [Migration contract](../development/control-plane.md): owner-only serialized migrations, restricted runtime role, execution receipts, known content integrity and actual SQL/dirty-error handling. PostgreSQL schema numbers are not MySQL/MariaDB migration revisions. | Generic down-migration rollback, automatic force-clean, cross-engine migration, or treating additive DDL as automatically backward compatible. |
+| Database | [Migration contract](../development/control-plane.md): owner-only serialized migrations, restricted runtime role, execution receipts, known content integrity and actual SQL/dirty-error handling. PostgreSQL schema numbers are not MySQL migration revisions. | Generic down-migration rollback, automatic force-clean, cross-engine migration, or treating additive DDL as automatically backward compatible. |
 
 Generated code is disposable output of Proto/OpenAPI. Use the existing
 `scripts/check-breaking.sh`, `scripts/generate.sh` and
@@ -150,15 +150,14 @@ the actual server, client and backup image versions/digests per acceptance run.
 
 | Version and deployment | Existing verification entry | Recovery and uncovered scope |
 | --- | --- | --- |
-| PostgreSQL 17 bundled (current fixture 17.10) | `PG_MAJOR=17 DATABASE_TEST_SCOPE=smoke scripts/database-integration.sh`; `scripts/i18-backup-restore-smoke.sh` | Verified base backup and isolated restore; restart coverage for the same instance. No cluster, automatic failover or PITR readiness claim. |
-| PostgreSQL 17 external | Same backend checks plus `scripts/i18-external-postgres-backup-restore-smoke.sh` | Verified TLS owner/runtime/backup connections and base restore. No automatic managed external HA/PITR. |
-| MySQL 8.4.10 external | `ENGINE=mysql DATABASE_TEST_SCOPE=smoke bash scripts/database-foundation-integration.sh`; `ENGINE=mysql scripts/i18-mysql-backup-restore-smoke.sh` | Backend-specific logical backup/isolated restore. No bundled deployment, cross-engine migration or PostgreSQL HA/PITR claim. |
-| MariaDB 12.3.2 external | Same two entries with `ENGINE=mariadb` | Same logical-restore boundary, independently tested engine, not an alias for a MySQL pass. |
-| PostgreSQL 18 CI; bundled MySQL/MariaDB | PG18 existing CI remains; bundled MySQL/MariaDB launcher rejects | Not production support. Keep tests and production admission distinct. |
+| PostgreSQL 18.x bundled | `PG_MAJOR=18 DATABASE_TEST_SCOPE=smoke scripts/database-integration.sh`; `scripts/i18-backup-restore-smoke.sh` | Verified base backup and isolated restore; restart coverage for the same instance. No cluster, automatic failover or PITR readiness claim. |
+| PostgreSQL 18.x external | Same backend checks plus `scripts/i18-external-postgres-backup-restore-smoke.sh` | Verified TLS owner/runtime/backup connections and base restore. No automatic managed external HA/PITR. |
+| MySQL 8.4 LTS external | `ENGINE=mysql DATABASE_TEST_SCOPE=smoke bash scripts/database-foundation-integration.sh`; `ENGINE=mysql scripts/i18-mysql-backup-restore-smoke.sh` | Backend-specific logical backup/isolated restore. No bundled deployment, cross-engine migration or PostgreSQL HA/PITR claim. |
+| MySQL bundled | Launcher rejects | Not production support. |
 
 New database patch sets require migration/permission, artifact and matching
 backup/restore review before replacing supported pins. Business Smoke owns
-deployment evidence. PostgreSQL 18 CI is not production support; never reset
+deployment evidence. Never reset
 SQLite journals to make an upgrade pass.
 
 ## CI and rollout decisions

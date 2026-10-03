@@ -65,7 +65,7 @@ if [[ "$(jq -r '.manifest_version' "${RELEASE_FILE}")" == 2 ]]; then
     export "OCSERV_${image^^}_IMAGE=${value}"
   done
   case "${OCSERV_DATABASE_BACKEND:-postgres}" in
-    mysql|mariadb)
+    mysql)
       OCSERV_DATABASE_BACKUP_IMAGE="$(jq -er --arg role "${OCSERV_DATABASE_BACKEND}_backup" '.images[$role]' "${RELEASE_FILE}")"
       export OCSERV_DATABASE_BACKUP_IMAGE
       ;;

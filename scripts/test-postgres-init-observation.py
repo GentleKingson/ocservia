@@ -70,8 +70,8 @@ try:
                "-e", "POSTGRES_USER=ocservia_owner", "-e", "POSTGRES_DB=ocservia",
                "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres_owner_password",
                "-e", "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --data-checksums",
-               "-e", "PGDATA=/var/lib/postgresql/data",
-               "-v", f"{data}:/var/lib/postgresql/data",
+               "-e", "PGDATA=/var/lib/postgresql/18/docker",
+               "-v", f"{data}:/var/lib/postgresql/18/docker",
                "-v", f"{archive}:/var/lib/ocservia-backup",
                "-v", f"{init}:/docker-entrypoint-initdb.d:ro",
                "-v", f"{root}/deploy/production/postgresql.conf:/etc/postgresql/postgresql.conf:ro"]
@@ -160,10 +160,10 @@ try:
     logs += error.stdout + error.stderr
     if args.expect_argv == "no":
         sql("DROP ROLE ocservia_app; ALTER ROLE ocservia_owner SET default_transaction_read_only = on")
-        hba_before = run("docker", "exec", name, "cat", "/var/lib/postgresql/data/pg_hba.conf").stdout
+        hba_before = run("docker", "exec", name, "cat", "/var/lib/postgresql/18/docker/pg_hba.conf").stdout
         error = run("docker", "exec", name, "bash", "/docker-entrypoint-initdb.d/001-runtime-role.sh", check=False)
         check("sql_failure_propagated", error.returncode != 0)
-        check("no_hba_append_after_sql_error", hba_before == run("docker", "exec", name, "cat", "/var/lib/postgresql/data/pg_hba.conf").stdout)
+        check("no_hba_append_after_sql_error", hba_before == run("docker", "exec", name, "cat", "/var/lib/postgresql/18/docker/pg_hba.conf").stdout)
         logs += error.stdout + error.stderr
     temporary = run("docker", "exec", name, "tar", "-cf", "-", "/tmp", check=False).stdout
     check("no_password_in_temp_files", not any(value.encode() in temporary or base64.b64encode(value.encode()) in temporary for value in values.values()))

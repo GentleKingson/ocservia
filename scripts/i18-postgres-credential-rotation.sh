@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}"
 [[ "${RUN_ID}" != *[^a-zA-Z0-9._-]* ]] || { echo "RUN_ID contains unsafe characters" >&2; exit 2; }
 
 tmp_base="$(realpath -e "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")"
@@ -48,7 +48,7 @@ printf '%s\n' 'owner-fixture-password' >"${secret_dir}/postgres-owner-password"
 printf '%s\n' "${old_app}" >"${secret_dir}/postgres-app-password"
 printf '%s\n' "${old_backup}" >"${secret_dir}/postgres-backup-password"
 printf '%s\n' 'postgres://ocservia_app:old-app-9%21z%3Acredential@postgres:5432/ocservia?sslmode=disable' >"${secret_dir}/database-app-url"
-printf 'postgres:5432:replication:ocservia_backup:old-backup-7@q\\:credential\n' >"${secret_dir}/postgres.pgpass"
+printf 'postgres:5432:*:ocservia_backup:old-backup-7@q\\:credential\n' >"${secret_dir}/postgres.pgpass"
 printf '%s\n' "${new_app}" >"${new_dir}/app"
 printf '%s\n' "${new_backup}" >"${new_dir}/backup"
 printf '%s\n' "${later_app}" >"${new_dir}/later-app"
@@ -72,7 +72,7 @@ services:
       - postgres_backup_password
     volumes:
       - ${ROOT}/deploy/production/postgres-init/001-runtime-role.sh:/docker-entrypoint-initdb.d/001-runtime-role.sh:ro
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     tmpfs:
       - /var/lib/ocservia-backup:uid=999,gid=999,mode=0700
     healthcheck:

@@ -7,9 +7,6 @@ import (
 
 func ConfigurationTypeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	changes := timeColumnSteps("config_plans", []TimeColumn{{Name: "expires_at"}, {Name: "created_at"}}, "HEX(source.id)", []string{"DROP INDEX config_plans_node_created_idx"}, []string{"ADD KEY config_plans_node_created_idx(node_id,created_at DESC,id DESC)"})
 	check := `SELECT IF(NOT EXISTS(SELECT 1 FROM config_plans WHERE NOT (logical_warnings <=> CAST(warnings AS BINARY)) OR NOT ocserv_jsonb_array_valid(logical_warnings)),'valid','invalid')`
 	changes = append(changes,

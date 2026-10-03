@@ -55,7 +55,7 @@ reject("matrix must use the router's Quick/Full selection") unless
   database.fetch("strategy").fetch("matrix") == "${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}" &&
   database.fetch("env").fetch("DATABASE_TEST_SCOPE") == "${{ needs.ci-relevance.outputs.database_scope }}"
 reject("Full retains short recovery on both implementations") unless
-  jobs.fetch("database-recovery-full").fetch("strategy").fetch("matrix") == {"engine" => %w[mysql mariadb]}
+  jobs.fetch("database-recovery-full").fetch("strategy").fetch("matrix") == {"engine" => %w[mysql]}
 reject("heavy history must not be a Basic CI job") if jobs.key?("database-history-full")
 reject("Quick and Full must have separate concurrency groups") unless
   workflow.fetch("concurrency").fetch("group").include?("inputs.profile || 'quick'") &&

@@ -1,4 +1,4 @@
-// Package mysql implements the MySQL and MariaDB Controller backends.
+// Package mysql implements the MySQL Controller backend.
 package mysql
 
 import (
@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,12 +20,7 @@ import (
 
 type Engine string
 
-const (
-	MySQL          Engine = "mysql"
-	MariaDB        Engine = "mariadb"
-	MySQLVersion          = "8.4.10"
-	MariaDBVersion        = "12.3.2"
-)
+const MySQL Engine = "mysql"
 
 // Options deliberately does not accept arbitrary driver/system parameters.
 // DSN is a go-sql-driver DSN, not a URL. TLS is mandatory off loopback.
@@ -52,8 +48,8 @@ func configuration(o Options) (*driver.Config, error) {
 	if o.Environment != "test" && o.Environment != "development" && o.Environment != "production" {
 		return nil, errors.New("database backend: invalid environment")
 	}
-	if o.Engine != MySQL && o.Engine != MariaDB {
-		return nil, errors.New("database backend: select mysql or mariadb explicitly")
+	if o.Engine != MySQL {
+		return nil, errors.New("database backend: select mysql explicitly")
 	}
 	c, err := driver.ParseDSN(o.DSN)
 	if err != nil {
@@ -115,11 +111,7 @@ func configuration(o Options) (*driver.Config, error) {
 		"character_set_results": "'utf8mb4'",
 	}
 	c.Collation = "utf8mb4_0900_bin"
-	if o.Engine == MariaDB {
-		c.Collation = "utf8mb4_nopad_bin"
-	} else {
-		c.Params["sql_mode"] = strings.TrimSuffix(c.Params["sql_mode"], "'") + ",TIME_TRUNCATE_FRACTIONAL'"
-	}
+	c.Params["sql_mode"] = strings.TrimSuffix(c.Params["sql_mode"], "'") + ",TIME_TRUNCATE_FRACTIONAL'"
 	c.Params["collation_connection"] = "'" + c.Collation + "'"
 	if err := c.Apply(driver.TimeTruncate(time.Microsecond)); err != nil {
 		return nil, errors.New("database backend: invalid time precision")
@@ -141,15 +133,14 @@ func Open(ctx context.Context, o Options) (*Backend, error) {
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(time.Hour)
 	db.SetConnMaxIdleTime(5 * time.Minute)
-	var version string
-	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+	var version, comment string
+	if err := db.QueryRowContext(ctx, "SELECT VERSION(), @@version_comment").Scan(&version, &comment); err != nil {
 		db.Close()
 		return nil, safeError(err)
 	}
-	valid := o.Engine == MySQL && version == MySQLVersion || o.Engine == MariaDB && strings.HasPrefix(version, MariaDBVersion+"-MariaDB")
-	if !valid {
+	if !supportedServer(version, comment) {
 		db.Close()
-		return nil, errors.New("database backend: server flavor/version does not match the pinned backend")
+		return nil, errors.New("database backend: requires Oracle MySQL 8.4 LTS")
 	}
 	return &Backend{store: store{db}, pool: db, engine: o.Engine}, nil
 }
@@ -177,4 +168,22 @@ func safeError(err error) error {
 		return classifyNumber(e.Number)
 	}
 	return errors.New("database backend: operation failed (details redacted)")
+}
+
+// Stable Oracle MySQL versions contain only a numeric patch, never fork or
+// prerelease suffixes. The server comment also excludes numeric-version forks.
+func supportedServer(version, comment string) bool {
+	commercial := comment == "MySQL Enterprise Server - Commercial"
+	if comment != "MySQL Community Server - GPL" && !commercial {
+		return false
+	}
+	if commercial {
+		version = strings.TrimSuffix(version, "-commercial")
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 || parts[0] != "8" || parts[1] != "4" {
+		return false
+	}
+	patch, err := strconv.ParseUint(parts[2], 10, 32)
+	return err == nil && strconv.FormatUint(patch, 10) == parts[2]
 }

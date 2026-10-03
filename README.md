@@ -47,7 +47,7 @@ Browser (Vue 3 / TypeScript)
   |
   | HTTPS API / SSE
   v
-Controller (Go) -----------------> PostgreSQL / MySQL / MariaDB
+Controller (Go) -----------------> PostgreSQL / MySQL
   |
   | gRPC over local Unix socket
   v
@@ -66,7 +66,7 @@ privd (Rust, privileged)
 ocserv
 ```
 
-The Controller handles APIs, schedules jobs, manages state transitions, and writes audit logs. Node agents send periodic health telemetry, and `privd` applies node changes. PostgreSQL is the default database, and the Controller also supports MySQL 8.4 and MariaDB 12.3. See the [support policy](docs/reference/support-policy.md) for supported database versions and backup boundaries.
+The Controller handles APIs, schedules jobs, manages state transitions, and writes audit logs. Node agents send periodic health telemetry, and `privd` applies node changes. PostgreSQL 18.x is the default database, and the Controller also supports MySQL 8.4 LTS. See the [support policy](docs/reference/support-policy.md) for supported database versions and backup boundaries.
 
 See the [architecture and trust model](docs/architecture.md) for process boundaries and threat assumptions.
 

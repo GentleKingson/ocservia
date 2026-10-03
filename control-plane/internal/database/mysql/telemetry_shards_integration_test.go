@@ -18,9 +18,6 @@ func TestRealTelemetryShardLifecycle(t *testing.T) {
 	b, _, options := fixture(t)
 	ctx := context.Background()
 	collation := "utf8mb4_0900_bin"
-	if b.engine == MariaDB {
-		collation = "utf8mb4_nopad_bin"
-	}
 	template, err := TelemetryShardTemplateDDL(collation)
 	if err != nil {
 		t.Fatal(err)

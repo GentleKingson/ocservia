@@ -202,7 +202,7 @@ validate_manifest_file() {
       elif $manifest.manifest_version == 2 then
         ($manifest | keys == ["database_migration", "images", "manifest_version", "platform", "release_tag", "release_version", "signer_state_version", "source_commit"]) and
         ($manifest.signer_state_version == 1) and
-        ($manifest.images | keys == ["backup", "control", "edge", "gateway", "mariadb_backup", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])
+        ($manifest.images | keys == ["backup", "control", "edge", "gateway", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])
       else false end) and
       ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$")) and
       ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$") and . == ("v" + $manifest.release_version)) and
@@ -243,7 +243,7 @@ map_manifest_images() {
     validate_state_file_path "deployment profile" "${profile}"
     jq -e 'keys == ["database_backend", "database_deployment", "deployment_mode"] and
       (.deployment_mode | IN("standalone", "integrated")) and
-      ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"], ["mysql", "external"], ["mariadb", "external"]))' \
+      ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"], ["mysql", "external"]))' \
       "${profile}" >/dev/null || fail "invalid deployment profile"
     mode="$(jq -r '.deployment_mode' "${profile}")"
     backend="$(jq -r '.database_backend' "${profile}")"
@@ -272,7 +272,7 @@ map_manifest_images() {
     OCSERV_SIGNER_IMAGE="$(jq -er '.images.signer' "${manifest}")"
     export OCSERV_EDGE_IMAGE OCSERV_RELAY_IMAGE OCSERV_SIGNER_IMAGE
     case "${OCSERV_DATABASE_BACKEND:-postgres}" in
-      mysql|mariadb)
+      mysql)
         OCSERV_DATABASE_BACKUP_IMAGE="$(jq -er --arg role "${OCSERV_DATABASE_BACKEND}_backup" '.images[$role]' "${manifest}")"
         export OCSERV_DATABASE_BACKUP_IMAGE
         ;;

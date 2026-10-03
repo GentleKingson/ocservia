@@ -257,7 +257,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [mysql, mariadb]
+        engine: [mysql]
     env:
       ENGINE: ${{ matrix.engine }}
     steps:

@@ -9,9 +9,6 @@ import (
 // conversions. Published v1-v6 SQL and receipts are never rewritten.
 func CertificateTypeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	validator := strings.Replace(jsonbObjectValidator, "ocserv_jsonb_object_valid", "ocserv_jsonb_array_valid", 1)
 	validator = strings.Replace(validator, "_binary'OBJECT'", "_binary'ARRAY'", 1)
 	steps := []LongKeyStep{{Name: "jsonb_array_validator", Kind: "function", Object: "ocserv_jsonb_array_valid", SQL: validator}}

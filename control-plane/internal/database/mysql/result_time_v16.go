@@ -2,9 +2,6 @@ package mysql
 
 func ResultTimeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	return TimeColumnSteps("agent_command_results", []TimeColumn{{Name: "accepted_at", Nullable: true}, {Name: "completed_at"}, {Name: "created_at"}}, "HEX(source.event_id)",
 		[]string{drop + "agent_command_results_agent_command_results_check", drop + "agent_command_results_agent_command_results_check1", "DROP INDEX agent_command_results_command_created_idx"},
 		[]string{"ADD CONSTRAINT agent_command_results_agent_command_results_check CHECK (accepted_at IS NULL OR accepted_at<=completed_at)",

@@ -4,9 +4,6 @@ package mysql
 // and expiry ordering without imposing MySQL's calendar range on the domain.
 func ArtifactTimeSteps(engine Engine) []LongKeyStep {
 	dropCheck := "DROP CHECK "
-	if engine == MariaDB {
-		dropCheck = "DROP CONSTRAINT "
-	}
 	steps := TimeColumnSteps("artifact_operations", []TimeColumn{
 		{Name: "expires_at"}, {Name: "lease_until", Nullable: true},
 		{Name: "consumed_at", Nullable: true}, {Name: "created_at"},

@@ -71,7 +71,6 @@ regression-mysql internal/database/mysql TestRealConfigurationReadAndIntent/cons
 regression-mysql internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain/apply-rollback
 regression-mysql internal/database/mysql TestRealCertificateIssuanceTransactions
 regression-mysql internal/database/mysql TestRealObservedStateTransactions
-regression-mysql internal/database/mysql TestRealQueryRowPoisonsBeforeScan mariadb
 regression-postgres internal/database/postgres TestTransactionCancellationRollbackIntegration
 regression-postgres internal/database/postgres TestUsageCrossStoreTransactionIntegration
 regression-postgres internal/database/postgres TestLogicalValuesIntegration
@@ -180,7 +179,6 @@ backend-mysql-current internal/database/mysql TestRealOperationReads
 backend-mysql-current internal/database/mysql TestRealOperationReaping
 backend-mysql-current internal/database/mysql TestRealPrivdAttestationWorkflow
 backend-mysql-current internal/database/mysql TestRealPrivileges
-backend-mysql-current internal/database/mysql TestRealQueryRowPoisonsBeforeScan mariadb
 backend-mysql-current internal/database/mysql TestRealRevisionConstraintFailureAndRepair
 backend-mysql-current internal/database/mysql TestRealRevisionCrashAfterDDL
 backend-mysql-current internal/database/mysql TestRealRolloutCreation

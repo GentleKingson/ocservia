@@ -37,7 +37,7 @@ services:
       PGUSER: ${OCSERV_DATABASE_BACKUP_USER:-ocservia_backup}
       PGSSLMODE: verify-full
       PGSSLROOTCERT: /run/secrets/database_ca
-      POSTGRES_SERVER_MAJOR: "17"
+      POSTGRES_SERVER_MAJOR: "18"
       PGPASS_SOURCE: /run/secrets/postgres_pgpass
       BACKUP_ROOT: /var/lib/ocservia-backup
       BACKUP_INTERVAL_SECONDS: ${OCSERV_BACKUP_INTERVAL_SECONDS:-900}

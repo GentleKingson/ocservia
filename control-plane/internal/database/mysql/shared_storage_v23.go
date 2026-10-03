@@ -7,9 +7,6 @@ import (
 
 func SharedStorageSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	steps := TimeColumnSteps("workspaces", []TimeColumn{{Name: "created_at"}, {Name: "updated_at"}, {Name: "archived_at", Nullable: true}}, "HEX(source.id)", nil, nil)
 	steps = append(steps, TimeColumnSteps("node_endpoint_keys", []TimeColumn{{Name: "bound_at"}, {Name: "revoked_at", Nullable: true}}, "HEX(source.node_id)",
 		[]string{drop + "node_endpoint_keys_node_endpoint_keys_check"},

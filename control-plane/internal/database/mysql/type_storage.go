@@ -148,13 +148,7 @@ func TypeMigrationSteps(engine Engine) []LongKeyStep {
 		copyCheck := steps[len(steps)-1].VerifySQL
 		procedure := "ocserv_switch_" + table
 		drop := "DROP CHECK"
-		if engine == MariaDB {
-			drop = "DROP CONSTRAINT"
-		}
 		joinTable := ""
-		if engine == MariaDB {
-			joinTable = " AND c.TABLE_NAME=t.TABLE_NAME AND t.CONSTRAINT_NAME<>'" + col + "'"
-		}
 		ddl := fmt.Sprintf(`CREATE PROCEDURE %s() SQL SECURITY DEFINER
 BEGIN
  DECLARE finished BOOLEAN DEFAULT FALSE;

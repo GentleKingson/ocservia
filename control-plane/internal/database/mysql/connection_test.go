@@ -89,7 +89,7 @@ func TestSafeErrors(t *testing.T) {
 }
 
 func TestPinnedManifests(t *testing.T) {
-	for _, engine := range []Engine{MySQL, MariaDB} {
+	for _, engine := range []Engine{MySQL} {
 		m, _, err := loadManifest(engine)
 		if err != nil {
 			t.Fatal(err)
@@ -137,5 +137,32 @@ func TestValueCodecs(t *testing.T) {
 	}
 	if err = array.Scan([]byte(`[["text"]]`)); err == nil {
 		t.Fatal("multidimensional array silently flattened")
+	}
+}
+
+func TestSupportedServer(t *testing.T) {
+	if !supportedServer("8.4.10-commercial", "MySQL Enterprise Server - Commercial") {
+		t.Fatal("stable Enterprise release rejected")
+	}
+	for _, version := range []string{"8.4.0", "8.4.10", "8.4.11", "8.4.99"} {
+		if !supportedServer(version, "MySQL Community Server - GPL") {
+			t.Fatalf("stable MySQL version rejected: %s", version)
+		}
+	}
+	for _, tc := range []struct{ version, comment string }{
+		{"8.0.40", "MySQL Community Server - GPL"}, {"9.4.0", "MySQL Community Server - GPL"},
+		{"8.40.10", "MySQL Community Server - GPL"}, {"8.4.01", "MySQL Community Server - GPL"},
+		{"8.4.4294967296", "MySQL Community Server - GPL"}, {"8.4.+1", "MySQL Community Server - GPL"},
+		{"8.4.10-commercial", "MySQL Community Server - GPL"}, {"8.4.", "MySQL Community Server - GPL"}, {"8.4.10-rc", "MySQL Community Server - GPL"},
+		{"8.4.10-MariaDB", "MySQL Community Server - GPL"}, {"12.3.2-MariaDB", "MariaDB Server"},
+		{"8.4.10", "Percona Server (GPL)"}, {"8.4.10", "TiDB Server"},
+	} {
+		if supportedServer(tc.version, tc.comment) {
+			t.Fatalf("unsupported server accepted: %+v", tc)
+		}
+	}
+	base := Options{Engine: "mariadb", Environment: "test", DSN: "user:secret@tcp(127.0.0.1:3306)/ocservia?tls=false"}
+	if err := ValidateOptions(base); err == nil {
+		t.Fatal("MariaDB options accepted")
 	}
 }

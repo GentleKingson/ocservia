@@ -232,9 +232,9 @@ for arch in amd64 arm64; do
       OUTPUT_DIR="${test_dir}/images" BUILDX_BUILDER=test \
       GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
       bash "${ROOT}/scripts/build-release-controller.sh" "${args[@]}"
-    [[ "$(grep -c '^buildx build ' "$log")" == 9 ]]
+    [[ "$(grep -c '^buildx build ' "$log")" == 8 ]]
     grep -q -- '--no-cache-filter runtime-base' "$log"
-    for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+    for name in gateway control transport backup edge relay signer mysql_backup; do
       line="$(grep -- "--tag ghcr.io/gentlekingson/ocservia/${name}:" "$log")"
       [[ "$line" == *"--cache-from type=gha,scope=controller-v1-${name}-linux-${arch},"* ]]
       [[ "$line" == *"--platform linux/${arch}"* ]]

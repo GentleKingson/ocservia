@@ -89,10 +89,10 @@ fi
 TEST_CONTROL_PLANE="${ROOT}/control-plane"
 
 case "${PG_MAJOR}" in
-  all) POSTGRES_MAJORS=(17 18) ;;
-  17 | 18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
+  all) POSTGRES_MAJORS=(18) ;;
+  18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
   *)
-    echo "PG_MAJOR must be all, 17, or 18" >&2
+    echo "PG_MAJOR must be all or 18" >&2
     exit 2
     ;;
 esac
@@ -195,7 +195,6 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # Keep the selected loopback port stable across the lifecycle restart test.
   port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
   case "${major}" in
-    17) postgres_image='postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f' ;;
     18) postgres_image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
   esac
   docker run -d --name "${container}" \

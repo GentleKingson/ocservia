@@ -17,9 +17,6 @@ func DesiredStateTypeSteps(engine Engine) []LongKeyStep {
 		LongKeyStep{Name: "desired_groups_logical_backfill", SQL: "UPDATE desired_groups SET logical_members=" + expression + " WHERE logical_members IS NULL", Kind: "data", Object: "desired_groups", Repairable: true, VerifySQL: check},
 	)
 	drop, join := "DROP CHECK", ""
-	if engine == MariaDB {
-		drop, join = "DROP CONSTRAINT", " AND c.TABLE_NAME=t.TABLE_NAME AND t.CONSTRAINT_NAME<>'members'"
-	}
 	// Native JSON contributes engine-specific unnamed checks, which must leave
 	// with the old column. The verified logical array guard replaces them.
 	ddl := fmt.Sprintf(`CREATE PROCEDURE ocserv_switch_desired_groups() SQL SECURITY DEFINER

@@ -65,7 +65,7 @@ The exact variable names are in `install.env.example`. At a minimum, configure:
 | External services | `OCSERV_CERTIFICATE_SIGNER_URL` |
 | Controller identity and relays | `OCSERV_CONTROLLER_ENDPOINT_ID`, required `OCSERV_RELAY_URL_A`, optional `OCSERV_RELAY_URL_B` |
 | Protected storage | `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, optional Controller state root |
-| Database | bundled/external PostgreSQL 17, external MySQL 8.4.10, or external MariaDB 12.3.2 |
+| Database | bundled/external PostgreSQL 18.x or external MySQL 8.4 LTS |
 
 Keep `install.env` private and out of Git. Variables exported in the shell override values from the file.
 
@@ -83,7 +83,7 @@ Put production material in the protected directories referenced by `install.env`
 
 - HTTPS certificate and key.
 - Database owner, runtime, and backup credentials for the selected supported backend.
-- For external MySQL/MariaDB, `database-ca.pem`, separate owner/runtime DSN
+- For external MySQL, `database-ca.pem`, separate owner/runtime DSN
   files, and the backend-specific `database-backup.cnf`.
 - Session key and audit keys; OIDC client secret only when SSO is enabled.
 - Controller command signing key.
@@ -156,5 +156,5 @@ Also verify that login works, a managed node can connect through each configured
 - [Enroll a node](../how-to/enroll-node.md)
 - [Configure dedicated relays](../how-to/dedicated-relays.md)
 - [Back up and restore PostgreSQL](../operations/database-backup-restore.md#postgresql)
-- [Back up and restore MySQL or MariaDB](../operations/database-backup-restore.md#mysql-and-mariadb)
+- [Back up and restore MySQL](../operations/database-backup-restore.md#mysql)
 - [Production deployment reference](../operations/production-deployment.md)

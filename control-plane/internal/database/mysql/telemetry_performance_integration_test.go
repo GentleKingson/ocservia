@@ -159,8 +159,6 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 		arg := any(dbName + "/%")
 		if pg {
 			sql, arg = `SELECT pg_database_size($1)`, dbName
-		} else if owner.(*Backend).engine == MariaDB {
-			sql = `SELECT COALESCE(SUM(ALLOCATED_SIZE),0) FROM information_schema.INNODB_SYS_TABLESPACES WHERE NAME LIKE ?`
 		}
 		if err := monitor.QueryRow(ctx, sql, arg).Scan(&bytes); err != nil {
 			t.Fatal(err)
@@ -243,8 +241,6 @@ func TestTelemetryLowDataPerformance(t *testing.T) {
 	lockSQL := `SELECT DISTINCT CAST(REQUESTING_ENGINE_TRANSACTION_ID AS CHAR) FROM performance_schema.data_lock_waits`
 	if pg {
 		lockSQL = `SELECT pid::text FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'`
-	} else if owner.(*Backend).engine == MariaDB {
-		lockSQL = `SELECT DISTINCT requesting_trx_id FROM information_schema.INNODB_LOCK_WAITS`
 	}
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()

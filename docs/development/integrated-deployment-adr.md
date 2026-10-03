@@ -65,8 +65,8 @@ Conflicting changes fail before stopping services. Retries never replace trust
 material or initialize a missing existing Signer ledger.
 
 Manifest v1 retains its schema, six image roles and standalone meaning. V2
-adds `edge`, `relay`, `signer`, `mysql_backup`, `mariadb_backup` and
-`signer_state_version: 1` in one file per architecture. All eleven image
+adds `edge`, `relay`, `signer`, `mysql_backup` and
+`signer_state_version: 1` in one file per architecture. All ten image
 references are explicit version tags or SHA-256 references. Unknown fields,
 roles/state versions, missing roles, invalid SemVer/platform/source revision
 or noncanonical JSON fail validation. Old readers reject v2; Integrated
@@ -74,8 +74,8 @@ requires v2. No manifest contains secret values. Selected services alone are
 pulled, including the backend's manifest-bound backup image.
 
 Keep the [database support matrix](../operations/production-deployment.md#database-support)
-and Local/OIDC provisioning unchanged. Integrated adds neither bundled
-MySQL/MariaDB nor PostgreSQL 18 support. Images and internal ports come from
+and Local/OIDC provisioning unchanged. Integrated does not add bundled
+MySQL support. Images and internal ports come from
 the selected manifest and versioned templates, not mutable operator overrides.
 [Release policy](release-checks.md) owns qualification and publication order.
 
