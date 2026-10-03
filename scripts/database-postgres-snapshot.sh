@@ -29,6 +29,13 @@ docker exec "$name" pg_dump -U ocservia_owner -d snapshot --data-only --no-owner
 # uses its schema default at initialization time, just as migration 24 does.
 psql -Atc "SELECT format('INSERT INTO public.scheduler_leadership(id,instance_id,incarnation,epoch,lease_until) VALUES(%s,%L,%s,%s,%L);',id,instance_id,incarnation,epoch,lease_until) FROM scheduler_leadership ORDER BY id" > "$tmp/scheduler.sql"
 psql -Atc "SELECT coalesce(json_agg(json_build_object('table',c.relname,'column',a.attname,'name',x.conname) ORDER BY c.relname,a.attnum),'[]') FROM pg_constraint x JOIN pg_class c ON c.oid=x.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=x.conkey[1] WHERE x.contype='n' AND n.nspname='public'" > "$tmp/not-null.json"
+python3 - "$ROOT/control-plane/migrations/bridge.go" "$tmp/catalog.sql" <<'PY_CATALOG'
+import pathlib,re,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+query=re.search(r'const staticFingerprintSQL = `([^`]+)`',source).group(1)
+pathlib.Path(sys.argv[2]).write_text(query+';\n')
+PY_CATALOG
+psql -At -f - < "$tmp/catalog.sql" > "$tmp/catalog.json"
 python3 - "$ROOT/control-plane/migrations" "$tmp" <<'PY'
 import hashlib,json,pathlib,re,sys
 root,tmp=map(pathlib.Path,sys.argv[1:])
@@ -56,6 +63,9 @@ for line in (tmp/'schema.raw').read_text().splitlines():
  if line==');': table=None
  lines.append(line)
 sql=normalize('\n'.join(lines))+'\n'+normalize((tmp/'seeds.raw').read_text())+'\n'+(tmp/'scheduler.sql').read_text()
+catalog=hashlib.sha256((tmp/'catalog.json').read_bytes().removesuffix(b'\n')).hexdigest()
+metadata=json.dumps({'catalog_sha256':catalog},separators=(',',':'))
+sql='-- ocservia:artifact=schema\n-- ocservia:format=1\n-- ocservia:engine=postgresql\n-- ocservia:epoch=1\n-- ocservia:revision=0\n\n-- ocservia:step=001:baseline\n-- ocservia:metadata='+metadata+'\n'+sql+'-- ocservia:end-step\n'
 (tmp/'schema.sql').write_text(sql)
 history=b''
 files=sorted(root.glob('*.up.sql'))

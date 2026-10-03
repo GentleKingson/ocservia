@@ -1,3 +1,11 @@
+-- ocservia:artifact=schema
+-- ocservia:format=1
+-- ocservia:engine=postgresql
+-- ocservia:epoch=1
+-- ocservia:revision=0
+
+-- ocservia:step=001:baseline
+-- ocservia:metadata={"catalog_sha256":"a69f2e270c62191be30309d10fffcacc27b960487784a984c18ed69081c84a3b"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -1218,6 +1226,22 @@ CREATE TABLE public.schema_migrations (
     snapshot_covered boolean DEFAULT false CONSTRAINT "schema_migrations_snapshot_covered_not_null" NOT NULL
 );
 
+CREATE TABLE public.schema_revisions (
+    epoch bigint CONSTRAINT "schema_revisions_epoch_not_null" NOT NULL,
+    revision bigint CONSTRAINT "schema_revisions_revision_not_null" NOT NULL,
+    checksum bytea CONSTRAINT "schema_revisions_checksum_not_null" NOT NULL,
+    state text CONSTRAINT "schema_revisions_state_not_null" NOT NULL,
+    step integer CONSTRAINT "schema_revisions_step_not_null" NOT NULL,
+    started_at timestamp with time zone DEFAULT now() CONSTRAINT "schema_revisions_started_at_not_null" NOT NULL,
+    verified_at timestamp with time zone,
+    CONSTRAINT schema_revisions_check CHECK (((state = 'verified'::text) = (verified_at IS NOT NULL))),
+    CONSTRAINT schema_revisions_checksum_check CHECK ((octet_length(checksum) = 32)),
+    CONSTRAINT schema_revisions_epoch_check CHECK ((epoch > 0)),
+    CONSTRAINT schema_revisions_revision_check CHECK ((revision >= 0)),
+    CONSTRAINT schema_revisions_state_check CHECK ((state = ANY (ARRAY['running'::text, 'verified'::text]))),
+    CONSTRAINT schema_revisions_step_check CHECK ((step >= 0))
+);
+
 CREATE TABLE public.schema_snapshot_origin (
     singleton boolean DEFAULT true CONSTRAINT "schema_snapshot_origin_singleton_not_null" NOT NULL,
     covered_version bigint CONSTRAINT "schema_snapshot_origin_covered_version_not_null" NOT NULL,
@@ -1718,6 +1742,9 @@ ALTER TABLE ONLY public.scheduler_leases
 
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+
+ALTER TABLE ONLY public.schema_revisions
+    ADD CONSTRAINT schema_revisions_pkey PRIMARY KEY (epoch, revision);
 
 ALTER TABLE ONLY public.schema_snapshot_origin
     ADD CONSTRAINT schema_snapshot_origin_pkey PRIMARY KEY (singleton);
@@ -2287,3 +2314,4 @@ INSERT INTO public.roles (name) VALUES ('PlatformAdmin');
 INSERT INTO public.upstream_sync_records (id, repository, old_ref, old_commit, new_ref, new_commit, classification, rollback_ref, synced_at) VALUES ('019fdc5b-b939-72a1-ae67-8efd197e5688', 'mmtaee/ocserv-dashboard', 'v4.9', 'b8f59026c4d879f40c1da43dc00d97e34f9790bc', 'master', '4d25478580d899b77460bdf0cf0a590cfdd26030', '{"A": [], "B": ["web/src/components/auth/SetupForm.vue"], "C": ["quota and expiry semantics mapped to node-scoped desired policy and scheduler"], "D": ["Docker/native occtl execution", "local cron journal", "direct password/config files", "permanent deletion"]}', 'publication: revert PR15 independently; implementation: stop I14 scheduler/API, reconcile commands, revert PR14, then apply migration 000013 down only when policy and batch data need not be retained', '2026-08-07 16:41:52+00');
 
 INSERT INTO public.scheduler_leadership(id,instance_id,incarnation,epoch,lease_until) VALUES(1,'00000000-0000-0000-0000-000000000000',0,0,'-infinity');
+-- ocservia:end-step
