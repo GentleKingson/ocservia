@@ -872,4 +872,17 @@ assert_status 0 "statically quoted install.env values must load"
 assert_log_contains "${bootstrap_log}" "OCSERV_PUBLIC_HOST=controller-quoted.example.test"
 echo "one static quote layer is stripped without expansion"
 
+reset_logs
+reset_checkout
+install_docker_client_stub
+git -C "${repo}" commit -q --allow-empty -m rc
+git -C "${repo}" tag v0.2.0-rc.1
+capture
+assert_status 0 "an exact RC checkout must install"
+assert_log_contains "${curl_log}" "${DOWNLOAD_BASE}/v0.2.0-rc.1/controller-release-${native_arch}.json"
+git -C "${repo}" tag v0.2.0
+reset_logs
+capture
+assert_status 1 "RC and final at the same HEAD must fail closed"
+assert_log_empty "${curl_log}"
 echo "Controller install tests passed"

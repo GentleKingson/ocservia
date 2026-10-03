@@ -209,8 +209,8 @@ while (($# > 0)); do
   esac
 done
 if [[ "${version_seen}" == true ]]; then
-  [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-    fail "unsupported version '${VERSION}': an exact vX.Y.Z release tag is required (latest, branches, commits, and pre-releases are not accepted)"
+  [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
+    fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
   RELEASE_TAG="${VERSION}"
   RELEASE_VERSION="${VERSION#v}"
   VERSION_PINNED=true
@@ -467,7 +467,7 @@ resolve_release_identity() {
   RELEASE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" ||
     fail "${ROOT} is not a Git checkout; install from a clean checkout of an exact vX.Y.Z release tag"
   while IFS= read -r tag; do
-    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && matching+=("${tag}")
+    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] && matching+=("${tag}")
   done < <(git -C "${ROOT}" tag --points-at HEAD)
   ((${#matching[@]} == 1)) ||
     fail "checkout HEAD must correspond to exactly one exact vX.Y.Z release tag (found ${#matching[@]}); check out the release tag to install, e.g. git clone --branch vX.Y.Z --depth 1 <repository>"
@@ -645,12 +645,9 @@ installed_package_version() {
 
 expected_installed_version() {
   case "${PACKAGE_FAMILY}" in
-    # nfpm appends the release component to the deb Version (deploy/package/
-    # nfpm.yaml sets release: 1, and scripts/release-native-package-smoke.sh
-    # asserts the installed deb Version is X.Y.Z-1); rpm keeps the release in
-    # %{RELEASE}, so %{VERSION} stays the bare SemVer.
-    deb) echo "${RELEASE_VERSION}-1" ;;
-    rpm) echo "${RELEASE_VERSION}" ;;
+    # nFPM encodes the supported RC suffix with ~; RPM stores Release separately.
+    deb) echo "${RELEASE_VERSION/-rc./~rc.}-1" ;;
+    rpm) echo "${RELEASE_VERSION/-rc./~rc.}" ;;
   esac
 }
 

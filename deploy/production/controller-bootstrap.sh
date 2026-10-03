@@ -232,8 +232,8 @@ while (($# > 0)); do
   esac
 done
 [[ "${version_seen}" == true ]] || usage
-[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-  fail "unsupported version '${VERSION}': an exact vX.Y.Z release tag is required (latest, branches, commits, and pre-releases are not accepted)"
+[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
+  fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
 
 resolve_source_root() {
   if [[ -n "${OCSERV_CONTROLLER_SOURCE_ROOT:-}" ]]; then
@@ -340,7 +340,7 @@ validate_checkout() {
   head="$(git -C "${TARGET}" rev-parse HEAD 2>/dev/null)" ||
     fail "cannot resolve HEAD in ${label} ${TARGET}"
   while IFS= read -r tag; do
-    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && matching+=("${tag}")
+    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] && matching+=("${tag}")
   done < <(git -C "${TARGET}" tag --points-at "${head}")
   if (( ${#matching[@]} != 1 )) || [[ "${matching[0]:-}" != "${VERSION}" ]]; then
     fail "${label} at ${TARGET} is not exactly at the requested tag ${VERSION} (release tags at HEAD: ${matching[*]:-none}); refusing to reuse or overwrite it"
