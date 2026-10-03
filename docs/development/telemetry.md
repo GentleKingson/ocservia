@@ -14,7 +14,7 @@ shown offline after its latest heartbeat is more than 90 seconds old.
   aggregate, health, and security data and reports drop counts.
 - A wire batch is limited to 512 KiB. Session, username, and client IP fields
   are stored in the node session read model and must not be metric labels.
-- PostgreSQL stores raw samples in monthly partitions; MySQL/MariaDB use
+- PostgreSQL stores raw samples in monthly partitions; MySQL uses
   owner-managed monthly shard tables and a durable shard catalog. Runtime
   writers do not create or drop these objects. Scheduler maintenance builds
   5-minute and 1-hour rollups and applies the 14-day, 90-day, and 13-month

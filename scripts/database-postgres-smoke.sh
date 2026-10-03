@@ -10,10 +10,9 @@ case "${DATABASE_TEST_SCOPE:-smoke}" in
   smoke) ;;
   *) echo 'PostgreSQL smoke requires smoke scope' >&2; exit 2 ;;
 esac
-case "${PG_MAJOR:-17}" in
-  17) image='postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f' ;;
+case "${PG_MAJOR:-18}" in
   18) image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
-  *) echo 'PG_MAJOR must be 17 or 18' >&2; exit 2 ;;
+  *) echo 'PG_MAJOR must be 18' >&2; exit 2 ;;
 esac
 name="ocservia-pg-smoke-$$"
 cleanup() {

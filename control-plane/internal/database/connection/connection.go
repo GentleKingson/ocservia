@@ -5,7 +5,6 @@ package connection
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"path/filepath"
 
@@ -28,10 +27,9 @@ type Store interface {
 }
 
 type Connection struct {
-	Store              Store
-	pg                 *pgxpool.Pool
-	mysql              *mysql.Backend
-	externalPostgreSQL bool
+	Store Store
+	pg    *pgxpool.Pool
+	mysql *mysql.Backend
 }
 
 func postgresURL(options Options) (string, error) {
@@ -60,7 +58,7 @@ func ValidateOptions(options Options) error {
 	case "", "postgres":
 		_, err := postgresURL(options)
 		return err
-	case "mysql", "mariadb":
+	case "mysql":
 		return mysql.ValidateOptions(mysql.Options{Engine: mysql.Engine(options.Backend), Environment: options.Environment, DSN: options.URL, CAFile: options.CAFile})
 	default:
 		return errors.New("unsupported Controller database backend")
@@ -81,8 +79,8 @@ func Open(ctx context.Context, options Options) (*Connection, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Connection{Store: postgres.WrapPool(pool), pg: pool, externalPostgreSQL: options.CAFile != ""}, nil
-	case "mysql", "mariadb":
+		return &Connection{Store: postgres.WrapPool(pool), pg: pool}, nil
+	case "mysql":
 		backend, err := mysql.Open(ctx, mysql.Options{Engine: mysql.Engine(options.Backend), Environment: options.Environment, DSN: options.URL, CAFile: options.CAFile})
 		if err != nil {
 			return nil, err
@@ -93,23 +91,14 @@ func Open(ctx context.Context, options Options) (*Connection, error) {
 	}
 }
 
-func validateExternalPostgreSQLVersion(version int) error {
-	if version/10000 != 17 {
-		return fmt.Errorf("external PostgreSQL requires server major version 17, got %d", version/10000)
+// ValidateDeployment runs connection-level deployment gates before migrations.
+// PostgreSQL connections are checked centrally by migrations.Open, for bundled,
+// external, owner, runtime and tool connections alike.
+func (c *Connection) ValidateDeployment(ctx context.Context) error {
+	if c.pg != nil {
+		return c.pg.Ping(ctx)
 	}
 	return nil
-}
-
-// ValidateDeployment runs connection-level deployment gates before migrations.
-func (c *Connection) ValidateDeployment(ctx context.Context) error {
-	if !c.externalPostgreSQL {
-		return nil
-	}
-	var version int
-	if err := c.pg.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
-		return fmt.Errorf("inspect external PostgreSQL server version: %w", err)
-	}
-	return validateExternalPostgreSQLVersion(version)
 }
 
 func (c *Connection) Close() {

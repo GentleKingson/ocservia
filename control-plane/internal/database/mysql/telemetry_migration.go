@@ -3,14 +3,12 @@ package mysql
 import "fmt"
 
 // TelemetryMigrationSteps is authoring input only. Published revisions pin
-// each resulting object and data postcondition separately for both engines.
+// each resulting object and data postcondition separately for MySQL.
 func TelemetryMigrationSteps(engine Engine) ([]LongKeyStep, error) {
-	collation := "utf8mb4_0900_bin"
-	if engine == MariaDB {
-		collation = "utf8mb4_nopad_bin"
-	} else if engine != MySQL {
+	if engine != MySQL {
 		return nil, ErrSchema
 	}
+	collation := "utf8mb4_0900_bin"
 	steps := []LongKeyStep{{Name: "telemetry_catalog_guard", Kind: "data", Object: "business_locks", SQL: "INSERT INTO business_locks(lock_key) SELECT 'telemetry-shard-catalog' WHERE NOT EXISTS(SELECT 1 FROM business_locks WHERE lock_key='telemetry-shard-catalog')", VerifySQL: "SELECT IF(COUNT(*)=1,'valid','invalid') FROM business_locks WHERE lock_key='telemetry-shard-catalog'", Repairable: true}}
 	for _, field := range []struct{ table, column, primary string }{
 		{"telemetry_samples", "sampled_at", "sampled_at,node_id,batch_id,metric"},

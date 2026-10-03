@@ -367,46 +367,6 @@ func TestRealLongKeyPermissions(t *testing.T) {
 	}
 }
 
-func TestRealQueryRowPoisonsBeforeScan(t *testing.T) {
-	if testOptions(t).Engine != MariaDB {
-		t.Skip("MariaDB snapshot-isolation error 1020")
-	}
-	b, _, _ := fixture(t)
-	ctx := context.Background()
-	if _, err := b.Exec(ctx, `CREATE TABLE queryrow_abort_probe(id INTEGER PRIMARY KEY,value INTEGER NOT NULL) ENGINE=InnoDB`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Exec(ctx, `INSERT INTO queryrow_abort_probe VALUES(1,0)`); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := b.Begin(ctx, database.RepeatableRead)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback(ctx)
-	var first int
-	if err = tx.QueryRow(ctx, `SELECT value FROM queryrow_abort_probe WHERE id=1`).Scan(&first); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = b.Exec(ctx, `UPDATE queryrow_abort_probe SET value=1 WHERE id=1`); err != nil {
-		t.Fatal(err)
-	}
-	delayed := tx.QueryRow(ctx, `UPDATE queryrow_abort_probe SET value=2 WHERE id=1`)
-	if _, err = tx.Exec(ctx, `INSERT INTO queryrow_abort_probe VALUES(2,99)`); !errors.Is(err, database.ErrTxAborted) {
-		t.Fatal("unscanned server error allowed autocommit", err)
-	}
-	if err = delayed.Scan(&first); !errors.Is(err, database.ErrSerialization) {
-		t.Fatal("expected actual MariaDB snapshot rollback", err)
-	}
-	if err = tx.Commit(ctx); !errors.Is(err, database.ErrTxAborted) {
-		t.Fatal("unscanned server rollback allowed commit", err)
-	}
-	var count int
-	if err = b.QueryRow(ctx, `SELECT COUNT(*) FROM queryrow_abort_probe WHERE id=2`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("post-rollback sentinel persisted", count, err)
-	}
-}
-
 func TestRealRowsClosePoisonsDrainError(t *testing.T) {
 	b, _, _ := fixture(t)
 	ctx := context.Background()

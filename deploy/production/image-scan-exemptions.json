@@ -27,33 +27,6 @@
       "base_image": "mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d",
       "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50346.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-20612.html fixes the same 13 CVEs in 3.8.10-4.el9_8; installed non-FIPS 3.8.10-8.el9_8 RPM changelog retains all fixes. Both native reports and vendor records independently reviewed. Other advisories remain gated.",
       "review_by": "2026-10-26"
-    },
-    {
-      "image": "backup",
-      "package": "libpcre2-8-0",
-      "installed_version": "10.42-1",
-      "vulnerability_id": "CVE-2026-86145",
-      "base_image": "postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f",
-      "reason": "The image is pinned to postgres:17.10-bookworm, which upstream has not rebuilt with the Debian libpcre2 10.42-1+deb12u1 security update; moving to a newer PostgreSQL patch line is gated by the database patch review in docs/reference/support-policy.md and must not happen through a scanner-driven base bump. Revisit when the next 17.x patch image adopts the fixed Debian layer.",
-      "review_by": "2027-03-31"
-    },
-    {
-      "image": "backup",
-      "package": "libpcre2-8-0",
-      "installed_version": "10.42-1",
-      "vulnerability_id": "CVE-2026-89157",
-      "base_image": "postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f",
-      "reason": "Same upstream gap as the other recorded backup libpcre2 findings: postgres:17.10-bookworm predates the Debian libpcre2 10.42-1+deb12u1 security update, and a PostgreSQL patch-line bump stays gated by the database patch review in docs/reference/support-policy.md. Revisit when the next 17.x patch image adopts the fixed Debian layer.",
-      "review_by": "2027-03-31"
-    },
-    {
-      "image": "backup",
-      "package": "libpcre2-8-0",
-      "installed_version": "10.42-1",
-      "vulnerability_id": "CVE-2026-89161",
-      "base_image": "postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f",
-      "reason": "Same upstream gap as the other recorded backup libpcre2 findings: postgres:17.10-bookworm predates the Debian libpcre2 10.42-1+deb12u1 security update, and a PostgreSQL patch-line bump stays gated by the database patch review in docs/reference/support-policy.md. Revisit when the next 17.x patch image adopts the fixed Debian layer.",
-      "review_by": "2027-03-31"
     }
   ]
 }

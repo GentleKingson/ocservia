@@ -268,7 +268,7 @@ operator-invoked **one-shot**, not part of normal install or restart.
    workspace. On a completely empty database, an authorized database operator
    must first provision one through the protected administrative connection.
    Follow the matching [database preparation](#database-preparation) below;
-   the PostgreSQL SQL is not portable to MySQL/MariaDB.
+   the PostgreSQL SQL is not portable to MySQL.
    Record that UUID: the Local identity management workspace is fixed at
    bootstrap, not selected later by an API header.
 3. Establish **independently controlled requester and approver principals**:
@@ -363,10 +363,10 @@ INSERT INTO workspaces (id, name, slug, created_at, updated_at)
 VALUES ('<management-workspace-uuidv7>', 'Administration', 'administration', now(), now());
 ```
 
-#### MySQL/MariaDB
+#### MySQL
 
-These backends have their own immutable manifests and appended revision
-histories under `control-plane/internal/database/mysql/{mysql,mariadb}`.
+MySQL has immutable manifests and appended revision
+histories under `control-plane/internal/database/mysql/mysql`.
 Inspect both the baseline and appended history after the migration process
 succeeds:
 
@@ -411,7 +411,7 @@ other historical SecurityAdmin/PlatformAdmin binding in the fixed workspace.
 Disabled bindings also close eligibility. All other existing deployments are
 marked closed without changing identities, credentials or roles. No marker or
 no verifiable original admin means no automatic recovery exception.
-MySQL/MariaDB do not run that PostgreSQL migration; their initialized schema
+MySQL does not run that PostgreSQL migration; its initialized schema
 includes the two-principal contract. Use the stored eligibility marker, not a
 backend revision number, to decide whether completion is allowed.
 
@@ -504,7 +504,7 @@ protected administrative connection. For PostgreSQL:
 UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
 ```
 
-For the current MySQL/MariaDB schema, session times use the same BIGINT
+For the current MySQL schema, session times use the same BIGINT
 microsecond epoch described above:
 
 ```sql
@@ -592,15 +592,15 @@ table remains bounded. Random usernames cannot evict live state: at capacity,
 new keys receive generic 503 while tracked keys retain their protection.
 Cleanup/admission/completion errors also fail closed with generic 503, never
 unlimited verification. PostgreSQL autovacuum handles its dead tuples; this is
-not a MySQL/MariaDB maintenance mechanism.
+not a MySQL maintenance mechanism.
 
 Password reset and disable delete the account state in the existing credential,
 revocation and audit transaction. Rollback preserves it. Credential revalidation
 and lease-token matching prevent an older verified request from clearing failures
 or leases created after that transaction commits.
 
-PostgreSQL migration `000033` created the table and expiry index; MySQL/MariaDB
-provide them through their own baseline and time-storage revisions. The normal migration runner
+PostgreSQL migration `000033` created the table and expiry index; MySQL
+provides them through its own baseline and time-storage revisions. The normal migration runner
 grants only SELECT/INSERT/UPDATE/DELETE on this table to the runtime role; Owner
 or TRUNCATE permissions are not needed. There is no minimum Controller schema
 admission check. Stop affected Local login instances before replacement and

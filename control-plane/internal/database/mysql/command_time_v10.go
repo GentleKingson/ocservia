@@ -2,9 +2,6 @@ package mysql
 
 func CommandTimeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	steps := TimeColumnSteps("commands", []TimeColumn{{Name: "expires_at"}, {Name: "created_at"}, {Name: "updated_at"}}, "HEX(source.id)",
 		[]string{drop + "commands_commands_check", "DROP INDEX commands_node_state_idx", "DROP INDEX commands_pending_resource_idx"},
 		[]string{"ADD CONSTRAINT commands_commands_check CHECK (expires_at>created_at)", "ADD KEY commands_node_state_idx(node_id,state,created_at,id)", "ADD KEY commands_pending_resource_idx(node_id,resource_type,created_at)"})

@@ -86,7 +86,7 @@ effective deployment configuration before choosing a procedure:
 - PostgreSQL: restart the same instance for transient outages, or use
   [verified backup and isolated restore](../operations/database-backup-restore.md#postgresql).
   Cluster failover and PITR readiness are outside the supported deployment.
-- MySQL/MariaDB: [isolated logical restore](../operations/database-backup-restore.md#mysql-and-mariadb),
+- MySQL: [isolated logical restore](../operations/database-backup-restore.md#mysql),
   not PostgreSQL commands. This does not provide PITR, failover, storage
   snapshots or cross-engine migration.
 

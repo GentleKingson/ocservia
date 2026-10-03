@@ -13,7 +13,7 @@ services:
       - database-data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "if command -v mariadb >/dev/null; then mariadb --user=ocservia_owner --password=development-owner-only --database=ocservia --execute='SELECT 1' >/dev/null; else mysql --user=ocservia_owner --password=development-owner-only --database=ocservia --execute='SELECT 1' >/dev/null; fi"]
+      test: ["CMD-SHELL", "mysql --user=ocservia_owner --password=development-owner-only --database=ocservia --execute='SELECT 1' >/dev/null"]
       interval: 3s
       timeout: 3s
       retries: 30
@@ -41,7 +41,7 @@ services:
     command: ["--migrate-only"]
     environment:
       OCSERV_ENVIRONMENT: development
-      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql}
       OCSERV_DATABASE_URL: ocservia_owner:development-owner-only@tcp(database:3306)/ocservia?tls=false
       OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app@%
       OCSERV_AUDIT_EVENT_KEY_ID: development-audit-event-v1
@@ -58,7 +58,7 @@ services:
     environment:
       OCSERV_ENVIRONMENT: development
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
-      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql}
       OCSERV_DATABASE_URL: ocservia_app:development-runtime-only@tcp(database:3306)/ocservia?tls=false
       OCSERV_AUDIT_EVENT_KEY_ID: development-audit-event-v1
       OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "3333333333333333333333333333333333333333333333333333333333333333"

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}"
 
 if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   echo "RUN_ID contains unsafe characters" >&2
@@ -20,7 +20,7 @@ source_alias="postgres-source"
 password="$(openssl rand -hex 24)"
 mkdir -p "${work}/backup" "${work}/production-backup" "${work}/restore" "${ARTIFACT_DIR}"
 chmod 0700 "${work}" "${work}/backup" "${work}/production-backup" "${work}/restore"
-printf '%s:5432:replication:postgres:%s\n' "${source_alias}" "${password}" >"${work}/postgres.pgpass"
+printf '%s:5432:*:postgres:%s\n' "${source_alias}" "${password}" >"${work}/postgres.pgpass"
 chmod 0644 "${work}/postgres.pgpass"
 
 cleanup() {
@@ -144,7 +144,7 @@ rm -f "${work}/restore/standby.signal"
 docker run --rm -v "${work}/restore:/restore" "${POSTGRES_IMAGE}" \
   bash -ceu 'chown -R postgres:postgres /restore && chmod 0700 /restore'
 docker run -d --name "${restore_container}" --network "${network}" \
-  -e POSTGRES_PASSWORD="${password}" -v "${work}/restore:/var/lib/postgresql/data" \
+  -e POSTGRES_PASSWORD="${password}" -v "${work}/restore:/var/lib/postgresql/18/docker" \
   "${POSTGRES_IMAGE}" >/dev/null
 restore_ready=false
 for _ in $(seq 1 60); do

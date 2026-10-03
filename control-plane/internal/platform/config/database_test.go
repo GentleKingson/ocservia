@@ -19,10 +19,10 @@ func TestDatabaseBackendContract(t *testing.T) {
 		{"mysql", "mysql", "postgres://db/test", true, false},
 		{"mariadb", "mariadb", "postgres://db/test", true, false},
 		{"mysql development", "mysql", "app:secret@tcp(127.0.0.1:3306)/db?tls=false", true, true},
-		{"mariadb development", "mariadb", "app:secret@tcp(127.0.0.1:3306)/db?tls=false", true, true},
+		{"mariadb development", "mariadb", "app:secret@tcp(127.0.0.1:3306)/db?tls=false", true, false},
 		{"no DSN guessing", "", "app:secret@tcp(127.0.0.1:3306)/db?tls=false", false, false},
 		{"no TLS fallback", "mysql", "app:secret@tcp(db:3306)/db?tls=preferred", true, false},
-		{"no remote plaintext", "mariadb", "app:secret@tcp(db:3306)/db?tls=false", true, false},
+		{"no remote plaintext", "mysql", "app:secret@tcp(db:3306)/db?tls=false", true, false},
 		{"no driver overrides", "mysql", "app:secret@tcp(127.0.0.1:3306)/db?tls=false&multiStatements=true", true, false},
 		{"unknown", "auto", "postgres://db/test", true, false},
 		{"no guessing", "", "mysql://db/test", false, false},
@@ -51,7 +51,7 @@ func TestMySQLCompatibleControllerProductionConfiguration(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte(strings.Repeat("22", 32)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, backend := range []string{"mysql", "mariadb"} {
+	for _, backend := range []string{"mysql"} {
 		t.Run(backend, func(t *testing.T) {
 			values := map[string]string{
 				"OCSERV_ENVIRONMENT":              "production",

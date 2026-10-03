@@ -42,6 +42,13 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database configuration: %w", err)
 	}
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		var version int
+		if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version); err != nil {
+			return fmt.Errorf("inspect PostgreSQL server version: %w", err)
+		}
+		return validatePostgreSQLRelease(version, conn.PgConn().ParameterStatus("server_version"))
+	}
 	cfg.MaxConns = 20
 	cfg.MinConns = 1
 	cfg.MaxConnLifetime = time.Hour
@@ -50,6 +57,10 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create database pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
 	}
 	return pool, nil
 }
@@ -298,4 +309,21 @@ func loadMigrations() ([]Migration, error) {
 
 func equalChecksum(left, right []byte) bool {
 	return subtle.ConstantTimeCompare(left, right) == 1
+}
+
+func validatePostgreSQLVersion(version int) error {
+	if version/10000 != 18 {
+		return fmt.Errorf("PostgreSQL requires server major version 18, got %d", version/10000)
+	}
+	return nil
+}
+
+func validatePostgreSQLRelease(version int, release string) error {
+	if err := validatePostgreSQLVersion(version); err != nil {
+		return err
+	}
+	if strings.Contains(release, "beta") || strings.Contains(release, "rc") || strings.Contains(release, "devel") {
+		return errors.New("PostgreSQL requires a stable 18.x release")
+	}
+	return nil
 }

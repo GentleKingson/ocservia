@@ -17,9 +17,6 @@ func TelemetryWriteMigrationSteps(engine Engine) []LongKeyStep {
 	steps = append(steps, TimeColumnSteps("observed_users", []TimeColumn{{Name: "observed_at"}}, "HEX(source.node_id)", nil, nil)...)
 	steps = append(steps, TimeColumnSteps("node_agent_upgrade_results", []TimeColumn{{Name: "completed_at"}, {Name: "reported_at"}}, "HEX(source.operation_id)", nil, nil)...)
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	jsonSteps := timeColumnSteps("node_observed_snapshots", []TimeColumn{{Name: "observed_at"}, {Name: "received_at", DefaultSQL: clock}, {Name: "last_heartbeat_at"}}, "HEX(source.node_id)", []string{"DROP INDEX node_observed_freshness_idx"}, []string{"ADD KEY node_observed_freshness_idx(last_heartbeat_at)"})
 	for _, column := range []string{"ocserv", "system", "path"} {
 		table := "node_observed_snapshots"

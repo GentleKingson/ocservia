@@ -428,7 +428,7 @@ docker run --rm -v "${work}/secrets/audit-event-key:/run/secrets/test:ro" \
   --entrypoint /bin/sh "${runtime_control_image}" \
   -c 'test "$(stat -c %u:%g:%a /run/secrets/test)" = "65534:65532:400" && test -r /run/secrets/test && test ! -w /run/secrets/test'
 docker run --rm --user 999:999 -v "${work}/secrets/postgres-app-password:/run/secrets/test:ro" \
-  --entrypoint /bin/sh "${POSTGRES_IMAGE:-postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f}" \
+  --entrypoint /bin/sh "${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}" \
   -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'
 docker run --rm --user 10001:10001 -v "${work}/secrets/otel-client.key:/run/secrets/test:ro" \
   --entrypoint /bin/sh "${runtime_control_image}" -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'

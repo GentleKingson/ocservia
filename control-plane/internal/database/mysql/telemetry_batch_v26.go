@@ -30,8 +30,6 @@ func telemetryBatchSteps(engine Engine) []LongKeyStep {
 func telemetryBatchDDL(engine Engine) string {
 	// SAVEPOINT is inert in autocommit mode, so its immediate RELEASE rejects
 	// that mode without committing or rolling back the caller's transaction.
-	// Lock page parents after staging but before the merge statement snapshot;
-	// concurrent parent updates must not invalidate MariaDB's FK read.
 	body := `CREATE PROCEDURE telemetry_retire_shards(IN requested_cutoff BIGINT)
 SQL SECURITY DEFINER
 main: BEGIN
@@ -168,22 +166,6 @@ main: BEGIN
  SELECT TRUE AS done;
 END`
 	parents := ""
-	if engine == MariaDB {
-		parents = `BEGIN
-    DECLARE finished BOOLEAN DEFAULT FALSE;
-    DECLARE parent_id VARBINARY(16);
-    DECLARE locked_id VARBINARY(16);
-    DECLARE parents CURSOR FOR SELECT DISTINCT node_id FROM telemetry_maintenance_page ORDER BY node_id;
-    DECLARE CONTINUE HANDLER FOR NOT FOUND SET finished=TRUE;
-    OPEN parents;
-    parent_loop: LOOP
-     FETCH parents INTO parent_id;
-     IF finished THEN LEAVE parent_loop; END IF;
-     SELECT id INTO locked_id FROM nodes WHERE id=parent_id LOCK IN SHARE MODE;
-    END LOOP;
-    CLOSE parents;
-   END;`
-	}
 	body = strings.Replace(body, "LOCK_PAGE_PARENTS", parents, 1)
 	for _, r := range []struct {
 		name  string

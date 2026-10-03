@@ -16,8 +16,8 @@ cd ocservia
 deploy/compose/compose.sh up --build -d
 ```
 
-PostgreSQL is the default. To exercise a pinned MySQL-compatible development
-database, set `OCSERV_DATABASE_BACKEND=mysql` or `mariadb` before invoking the
+PostgreSQL is the default. To exercise a pinned MySQL 8.4 LTS development
+database, set `OCSERV_DATABASE_BACKEND=mysql` before invoking the
 same launcher. The launcher selects the matching Compose descriptor explicitly.
 
 Open `http://127.0.0.1:4173` in a browser. The Controller exposes `/livez`, `/readyz`, and `/version` on `http://127.0.0.1:8080`.

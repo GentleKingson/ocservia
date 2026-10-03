@@ -275,7 +275,7 @@ TLS trust/SAN/default isolation, authentication, body limits and disabled keys.
 
 Dispatch `release-upgrade.yml` with `purpose=integration`,
 `production_signer=true` and a plain test version such as `0.0.0` on the branch
-being tested. It natively builds nine first-party images on amd64 and uses a
+being tested. It natively builds eight first-party images on amd64 and uses a
 loopback test registry with ordinary platform configuration. Release product
 jobs separately scan their exact images on both amd64 and arm64 before smoke
 and publication.

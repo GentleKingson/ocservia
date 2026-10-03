@@ -10,7 +10,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 echo 'Required-test guard self-test: synthetic events below are NOT database acceptance'
 check() {
-  PR02_ENGINE="${3:-mariadb}" jq -se --arg group "${2:-database-api}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
+  PR02_ENGINE="${3:-mysql}" jq -se --arg group "${2:-database-api}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
     -f "${ROOT}/scripts/check-required-go-tests.jq" "$1"
 }
 jq -n --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
@@ -43,11 +43,6 @@ for scope in full; do
      | . + {Action: "run"}, . + {Action: "pass"}][]
   ' >"${tmp}/mysql.json"
   check "${tmp}/mysql.json" "${group}"
-  jq -c 'if .Test == "TestRealQueryRowPoisonsBeforeScan" and .Action == "pass" then .Action = "skip" else . end' "${tmp}/mysql.json" >"${tmp}/engine.json"
-  check "${tmp}/engine.json" "${group}" mysql
-  if check "${tmp}/engine.json" "${group}" mariadb >/dev/null 2>&1; then
-    echo "${group} accepted skipped MariaDB-specific regression" >&2; exit 1
-  fi
   for name in TestRealTLS TestRealPrivileges TestRealInitializationAndHistory TestRealUsageTransactions TestRealOutboxCommitDisconnect/claim-request-lost; do
     jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/mysql.json" >"${tmp}/bad.json"
     if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
@@ -64,9 +59,9 @@ jq -c 'select(.Test != "TestRealCrashAndRepair")' "${tmp}/mysql.json" >"${tmp}/b
 if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
   echo 'full database guard accepted missing crash recovery' >&2; exit 1
 fi
-echo 'MySQL/MariaDB current correctness and recovery guards passed'
+echo 'MySQL current correctness and recovery guards passed'
 # Exercise every explicit critical inventory, not just a successful go exit.
-for engine in mysql mariadb; do
+for engine in mysql; do
   while read -r group; do
     PR02_ENGINE="${engine}" jq -n --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
       $manifest | split("\n")[] | split(" ")
@@ -300,7 +295,7 @@ grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route
 echo 'Full current database routing passed'
 for script in database-foundation-integration.sh database-postgres-smoke.sh; do
   export ROUTE_LOG="${tmp}/${script}.route"
-  PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=17 \
+  PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=18 \
     bash "${tmp}/wrapper/scripts/${script}" >/dev/null
   test "$(wc -l <"${ROUTE_LOG}")" -eq 3
   grep -q '^--smoke ./internal/platform/app TestDatabaseCoreSmoke$' "${ROUTE_LOG}"

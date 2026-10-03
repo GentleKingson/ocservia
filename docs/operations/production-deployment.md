@@ -29,13 +29,12 @@ the public Quick Start obtains Stage-1 from a clean exact-release checkout.
 ## Database support
 
 The production launcher combines `deploy/production/compose.yaml` with one
-database descriptor. Bundled PostgreSQL 17 remains the default and runs the HTTPS
+database descriptor. Bundled PostgreSQL 18 remains the default and runs the HTTPS
 gateway, control plane, transport service, PostgreSQL, and backup worker. An
-external PostgreSQL 17 descriptor is also implemented; it uses a dedicated
+external PostgreSQL 18 descriptor is also implemented; it uses a dedicated
 egress network and requires `sslmode=verify-full` plus `database-ca.pem` for
-owner, runtime, and backup connections. External MySQL 8.4.10 and MariaDB
-12.3.2 are supported with verified TLS and backend-specific logical backups.
-Bundled MySQL/MariaDB is rejected.
+owner, runtime, and backup connections. External MySQL 8.4 LTS is supported with verified TLS and backend-specific logical backups.
+Bundled MySQL is rejected.
 The project publishes only TCP 443. Bundled database, application, and
 observability traffic remain on internal networks. External database
 deployments additionally attach database clients to the dedicated non-internal
@@ -43,10 +42,22 @@ deployments additionally attach database clients to the dedicated non-internal
 
 | Backend | Deployment | Production support |
 | --- | --- | --- |
-| PostgreSQL 17 | bundled or external | Yes; bundled remains the default |
-| MySQL 8.4.10 | external only | Yes |
-| MariaDB 12.3.2 | external only | Yes |
-| MySQL/MariaDB | bundled | No |
+| PostgreSQL 18 | bundled or external | Yes; bundled remains the default |
+| MySQL 8.4 LTS | external only | Yes |
+| MySQL | bundled | No |
+
+PostgreSQL 17 and MariaDB are no longer supported. Before starting this
+Controller against a PostgreSQL 17 database, the operator must complete a
+controlled PostgreSQL major upgrade with `pg_upgrade` or dump/reload, preserving
+a verified backup and rollback copy. Application migrations do not upgrade the
+PostgreSQL server or its physical data format. MariaDB cannot be switched in
+place by changing `OCSERV_DATABASE_BACKEND` to `mysql`; cross-engine conversion
+is not provided by this project.
+
+PostgreSQL 18 containers mount the named volume at `/var/lib/postgresql` and use
+`PGDATA=/var/lib/postgresql/18/docker`. An existing PostgreSQL 17 volume must not
+be reused as if it were an empty PostgreSQL 18 volume. Complete the operator-led
+upgrade before activating the new layout; keep the old volume intact for recovery.
 
 Select a non-default descriptor explicitly:
 
@@ -56,7 +67,7 @@ OCSERV_DATABASE_DEPLOYMENT=external
 OCSERV_DATABASE_BACKUP_HOST=postgres.example.com
 ```
 
-External MySQL example (use `mariadb` for the pinned MariaDB 12.3.2 server):
+External MySQL example:
 
 ```dotenv
 OCSERV_DATABASE_BACKEND=mysql
@@ -68,7 +79,7 @@ OCSERV_DATABASE_BACKUP_USER=ocservia_backup
 OCSERV_DATABASE_BACKUP_IMAGE=registry.example.com/ocservia-mysql-backup@sha256:<digest>
 ```
 
-For MySQL/MariaDB, use `external`, provide separate owner and runtime DSNs in
+For MySQL, use `external`, provide separate owner and runtime DSNs in
 `database-owner-url` and `database-app-url`, and provision `database-ca.pem`
 plus `database-backup.cnf` in the protected secret directory. Only `migrate`
 receives the owner DSN. The runtime receives the application DSN and CA, never
@@ -77,7 +88,7 @@ mounts `database-ca.pem` as the trust root. The backend-specific backup image mu
 reference through `OCSERV_DATABASE_BACKUP_IMAGE` for standalone v1, or the
 selected backend image in the v2 deployment configuration. Snapshot restore, PITR, failover, and
 cross-engine movement are separate procedures; no PostgreSQL G6, HA, or PITR
-claim applies to either MySQL-compatible backend.
+claim applies to MySQL.
 
 For Local only, OIDC only, or Local + OIDC configuration, login behavior and
 one-shot first-admin creation, follow [Production authentication](authentication.md).
@@ -165,8 +176,8 @@ operator action, not an automatic part of this update.
 ### Release manifests
 
 The v1 schema remains strictly supported for standalone installations. The v2
-reader additionally requires `signer_state_version: 1` and five exact image
-roles: `edge`, `relay`, `signer`, `mysql_backup`, `mariadb_backup`. It retains
+reader additionally requires `signer_state_version: 1` and four exact image
+roles: `edge`, `relay`, `signer`, `mysql_backup`. It retains
 the same per-architecture filenames and protected local file rules. Integrated requires
 v2; see [Integrated configuration](../../deploy/production/integrated/README.md#lifecycle-configuration).
 V2 selects backend backup image references from this configuration rather than
@@ -179,7 +190,7 @@ alongside the Agent assets, plus the byte-identical
 They also publish `controller-bootstrap.sh` and `managed-node-bootstrap.sh` as
 versioned Stage-1 entrypoints downloaded over HTTPS.
 Each configuration maps the images used by its platform and deployment mode.
-V2 includes eleven roles: nine first-party GHCR images use `vX.Y.Z` tags,
+V2 includes ten roles: eight first-party GHCR images use `vX.Y.Z` tags,
 while PostgreSQL and OpenTelemetry retain pinned third-party references.
 First-party packages must be public for installation without registry
 credentials; publishing credentials and package visibility remain repository
@@ -448,7 +459,7 @@ protected lifecycle state. Neither operation downloads or re-enters Stage-0.
 
 The target's owner-only database initialization preserves execution receipts,
 checks known migration content, serializes execution and propagates actual SQL
-and partial-execution failures. PostgreSQL, MySQL and MariaDB do not compare a
+and partial-execution failures. PostgreSQL and MySQL do not compare a
 Controller schema range or reject an unknown completed receipt as a software
 version policy. Frozen compatibility metadata remains historical data; it is
 not readiness authority. Readiness checks current core reads, permissions and
@@ -474,8 +485,9 @@ range to protected off-host storage, and confirm the off-host copy before
 reducing local retention.
 
 For bundled PostgreSQL, set `postgres.pgpass` to
-`postgres:5432:replication:ocservia_backup:<password>` using the protected
-backup-role password supplied during initialization. For external PostgreSQL,
+`postgres:5432:*:ocservia_backup:<password>` using the protected
+backup-role password supplied during initialization. The passfile covers both
+the regular database connection for the server-major check and replication. For external PostgreSQL,
 use its actual hostname and port and include entries for both `ocservia` (the
 server-major preflight) and `replication` (`pg_basebackup`). The backup
 entrypoint copies the read-only Compose secret into a private mode-0600 passfile
@@ -486,9 +498,9 @@ deployment. Continuous WAL archiving on an external server is independently mana
 the database operator. This deployment does not certify PITR readiness for
 bundled or external PostgreSQL. Existing backup and WAL retention stay intact.
 
-External MySQL 8.4.10 and MariaDB 12.3.2 use the backend-specific logical
-backup and restore procedure in [MySQL and MariaDB backup and restore
-validation](database-backup-restore.md#mysql-and-mariadb). That procedure does not claim snapshot, PITR,
+External MySQL 8.4 LTS uses the backend-specific logical
+backup and restore procedure in [MySQL backup and restore
+validation](database-backup-restore.md#mysql). That procedure does not claim snapshot, PITR,
 failover, or cross-engine recovery coverage.
 
 Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:

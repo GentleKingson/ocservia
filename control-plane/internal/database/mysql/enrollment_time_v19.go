@@ -2,9 +2,6 @@ package mysql
 
 func EnrollmentTokenTimeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	var steps []LongKeyStep
 	for _, table := range []string{"enrollment_tokens", "node_bootstrap_tokens"} {
 		checks := []string{

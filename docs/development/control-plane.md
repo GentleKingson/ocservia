@@ -11,7 +11,7 @@ Start the public development stack:
 deploy/compose/compose.sh up --build
 ```
 
-Set `OCSERV_DATABASE_BACKEND=mysql` or `mariadb` to select the corresponding
+Set `OCSERV_DATABASE_BACKEND=mysql` to select the corresponding
 pinned development database. An unsupported value is rejected rather than
 falling back to PostgreSQL.
 This development selection does not define production admission; use the
@@ -98,12 +98,12 @@ by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives
 only the runtime role credentials. Migration execution serializes schema
 changes, validates known applied content, and grants the runtime
 role ordinary data access while keeping audit events read/append-only.
-PostgreSQL grants `SELECT`/`INSERT`; MySQL/MariaDB additionally grant a narrow
+PostgreSQL grants `SELECT`/`INSERT`; MySQL additionally grants a narrow
 column UPDATE privilege for locking reads, while immutable triggers reject
 actual updates. PostgreSQL uses an advisory lock and transactional SQL migrations.
-MySQL/MariaDB use a dedicated connection's `GET_LOCK` for migration
+MySQL uses a dedicated connection's `GET_LOCK` for migration
 serialization, immutable backend manifests and journaled, verified steps because
-DDL can implicitly commit. Their revision numbers are not PostgreSQL migration
+DDL can implicitly commit. Its revision numbers are not PostgreSQL migration
 numbers. Actual dirty execution, mismatched known content and SQL failures
 remain errors, not automatic force-clean. Unknown completed receipts are not a
 software-version rejection and are preserved. Initialization does not reverse
@@ -115,7 +115,7 @@ the actual telemetry objects and runtime privileges it needs.
 
 Business stores share transaction ownership, atomic audit/business writes,
 bounded cleanup and fencing semantics through `internal/database`. PostgreSQL
-transaction advisory locks and MySQL/MariaDB `business_locks` row locks are
+transaction advisory locks and MySQL `business_locks` row locks are
 backend implementations of those semantics. Migration `GET_LOCK` is not the
 MySQL business-transaction lock. A commit acknowledgement error can mean an
 unknown outcome; do not blindly replay writes.
@@ -138,7 +138,7 @@ locks, so waiting for a lock cannot revive an expired term; transaction-stable
 timestamps remain available for logical timestamps. Takeovers increment the
 retained epoch instead of deleting and recreating authority records, and old
 terms keep failing their exact owner/incarnation/connection/epoch predicates.
-MySQL/MariaDB sessions accept only the driver DSN with the `tls` parameter and
+MySQL sessions accept only the driver DSN with the `tls` parameter and
 set UTC, `READ COMMITTED`, strict SQL modes and `utf8mb4` with the backend's
 binary no-pad collation, truncating Go time values to microseconds. Their
 natural-key uniqueness uses owner-maintained exact-key side tables with guard
@@ -148,7 +148,7 @@ Store's `LockExactKey`/`UpsertIdentity` sequence, never
 conflict.
 
 UUIDs and logical times cross the boundary through typed values. PostgreSQL
-uses native UUID/timestamp types; migrated MySQL/MariaDB domain tables use
+uses native UUID/timestamp types; migrated MySQL domain tables use
 `VARBINARY(16)` UUIDs with exact 16-byte length constraints and unswapped RFC
 UUID byte order, and signed BIGINT microseconds relative to
 `2000-01-01 UTC`, with explicit infinity handling where the contract permits it.
@@ -160,7 +160,7 @@ for a current workspace example.
 An additive migration is not a cross-version safety guarantee. Do not rewrite
 published migration SQL or discard data to make a target start. Execution
 receipts are not a backup. Use [backend-specific recovery](../operations/incident-recovery.md#database-recovery):
-PostgreSQL verified backup and isolated restore or MySQL/MariaDB logical restore, not
+PostgreSQL verified backup and isolated restore or MySQL logical restore, not
 equivalent HA/PITR guarantees.
 
 `make e2e` runs manual browser-to-simulator validation outside Basic CI.

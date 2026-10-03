@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const imageNames = ["gateway", "control", "transport", "backup", "postgres", "otel"];
-const integratedImageNames = ["edge", "relay", "signer", "mysql_backup", "mariadb_backup"];
+const integratedImageNames = ["edge", "relay", "signer", "mysql_backup"];
 const supportedPlatforms = ["linux/amd64", "linux/arm64"];
 const imageReferencePattern = /^[^\s@]+(?:@sha256:[0-9a-f]{64}|:v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?)$/;
 const semverPattern = /^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$/;

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
-POSTGRES_IMAGE='postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f'
+POSTGRES_IMAGE='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af'
 [[ "${RUN_ID}" != *[^a-zA-Z0-9._-]* ]] || { echo "RUN_ID contains unsafe characters" >&2; exit 2; }
 
 work="${RUNNER_TEMP:-/tmp}/ocservia-external-postgres-${RUN_ID}"
@@ -135,7 +135,7 @@ printf '%s:%s:ocservia:ocservia_backup:%s\n%s:%s:replication:ocservia_backup:%s\
 chmod 0444 "${work}/postgres.pgpass"
 docker run --name "${backup_container}" --network "${egress_network}" \
   -e PGHOST="${gateway}" -e PGPORT="${host_port}" -e PGDATABASE=ocservia -e PGUSER=ocservia_backup \
-  -e PGSSLMODE=verify-full -e PGSSLROOTCERT=/run/secrets/database_ca -e POSTGRES_SERVER_MAJOR=17 \
+  -e PGSSLMODE=verify-full -e PGSSLROOTCERT=/run/secrets/database_ca -e POSTGRES_SERVER_MAJOR=18 \
   -e PGPASS_SOURCE=/run/secrets/postgres_pgpass -e BACKUP_ROOT=/backup -e RUN_ID="${RUN_ID}" \
   -v "${work}/postgres.pgpass:/run/secrets/postgres_pgpass:ro" \
   -v "${work}/tls/ca.crt:/run/secrets/database_ca:ro" -v "${work}/backup:/backup" \
@@ -164,7 +164,7 @@ rm -f "${work}/restore/standby.signal"
 docker run --rm -v "${work}/restore:/restore" "${POSTGRES_IMAGE}" \
   bash -ceu 'chown -R postgres:postgres /restore && chmod 0700 /restore'
 docker run -d --name "${restore_container}" --network "${source_network}" \
-  -v "${work}/restore:/var/lib/postgresql/data" "${POSTGRES_IMAGE}" >/dev/null
+  -v "${work}/restore:/var/lib/postgresql/18/docker" "${POSTGRES_IMAGE}" >/dev/null
 for _ in $(seq 1 90); do
   if docker exec "${restore_container}" pg_isready -U postgres -d ocservia >/dev/null 2>&1; then break; fi
   sleep 1

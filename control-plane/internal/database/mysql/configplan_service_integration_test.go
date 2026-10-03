@@ -36,7 +36,7 @@ func (r *configPlanCreator) CreateSynthetic(ctx context.Context, request operati
 	return r.service.CreateSynthetic(ctx, request)
 }
 
-// Keep the existing MySQL/MariaDB restricted-runtime fixture, but exercise the
+// Keep the existing MySQL restricted-runtime fixture, but exercise the
 // consumer, signed result ingress and independent approval, not only its Store.
 func runConfigPlanServiceChain(t *testing.T, owner, backend *Backend) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)

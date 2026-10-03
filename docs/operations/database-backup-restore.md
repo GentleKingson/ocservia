@@ -13,11 +13,11 @@ The production initializer creates the separate `ocservia_backup` login with rep
 
 ### Deployment boundaries
 
-Bundled PostgreSQL 17 configures `archive_mode` and an `archive_command` that
+Bundled PostgreSQL 18 configures `archive_mode` and an `archive_command` that
 writes continuous WAL into the backup mount. These existing backup and
 retention settings remain available; they do not certify PITR readiness.
 
-External PostgreSQL support is limited to major version 17. Owner, runtime, and
+External PostgreSQL support is limited to major version 18. Owner, runtime, and
 backup connections require `sslmode=verify-full` with the launcher-validated
 `database-ca.pem`. The backup worker verifies the server major before writing a
 backup. It guarantees a verified base backup only: the external server is not
@@ -29,7 +29,7 @@ Restore procedure:
 
 1. Stop application writers and record the incident time.
 2. Select a verified base backup, including its streamed WAL needed for consistency.
-3. Restore into a new empty PostgreSQL data directory, never over the only existing copy.
+3. Restore into a new empty PostgreSQL 18 data directory, never over the only existing copy. For the official container layout, mount the volume at `/var/lib/postgresql` and restore into `/var/lib/postgresql/18/docker`; the parent mount itself is not `PGDATA`.
 4. Start PostgreSQL in isolation and verify migrations, audit-chain checkpoints, row counts, and a read-only application smoke test.
 5. Redirect the control plane only after verification; retain the previous database until the rollback window closes.
 
@@ -39,14 +39,12 @@ PostgreSQL contract. It places the TLS server outside the Controller network,
 checks verified routing and hostname rejection, runs migrations before backup,
 rejects corruption, and restores into an isolated server.
 
-## MySQL and MariaDB
+## MySQL
 
-This production operations contract covers external MySQL 8.4.10 and external
-MariaDB 12.3.2 only. It does not cover bundled deployments, other server
+This production operations contract covers external MySQL 8.4 LTS only. It does not cover bundled deployments, other server
 versions, HA, PITR, storage snapshots, or cross-engine migration.
 
-The backend-specific images built from `backup.mysql.Dockerfile` and
-`backup.mariadb.Dockerfile` use the matching native client. The worker creates
+The image built from `backup.mysql.Dockerfile` uses the native MySQL client. The worker creates
 a single-transaction logical dump with triggers, routines, events, binary data,
 and explicit database creation, records server flavor/version metadata, writes
 SHA-256 checksums, atomically advances `LATEST`, and bounds retention. It does
@@ -63,7 +61,7 @@ account needs the minimum privileges required to read tables and views and dump
 triggers, routines, and events; it must not own the schema or migration tables.
 For the pinned clients, grant `SELECT`, `SHOW VIEW`, `TRIGGER`, and `EVENT` on
 `ocservia.*`. MySQL 8.4 additionally needs the global `SHOW_ROUTINE` dynamic
-privilege; MariaDB 12.3 instead needs `SELECT` on `mysql.proc`. The dump uses
+privilege. The dump uses
 `--no-tablespaces`, so the account does not need `PROCESS`.
 
 Restore only into a new isolated server. Run the matching image with

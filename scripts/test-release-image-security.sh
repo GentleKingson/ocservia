@@ -117,15 +117,15 @@ DB_BUILT='invalid"json' expect_failure
 : >"$archives"
 : >"$trace"
 for arch in amd64 arm64; do
-  for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+  for name in gateway control transport backup edge relay signer mysql_backup; do
     printf '%s\t%s\t%s\n' "$name" "$arch" "$work/image.tar" >>"$archives"
   done
 done
 IMAGE_SCAN_EXEMPTIONS='' REPORT='' run_scan
 [[ "$(grep -c '^update$' "$trace")" == 1 ]]
-[[ "$(grep -c '^scan|false$' "$trace")" == 18 ]]
-[[ "$(grep -c 'linux/amd64:' "$work/scan.log")" == 9 ]]
-[[ "$(grep -c 'linux/arm64:' "$work/scan.log")" == 9 ]]
+[[ "$(grep -c '^scan|false$' "$trace")" == 16 ]]
+[[ "$(grep -c 'linux/amd64:' "$work/scan.log")" == 8 ]]
+[[ "$(grep -c 'linux/arm64:' "$work/scan.log")" == 8 ]]
 printf 'gateway\tamd64\t%s\n' "$work/image.tar" >>"$archives"
 REPORT='' expect_failure
 printf 'gateway\tamd64\t%s\n' "$work/missing.tar" >"$archives"

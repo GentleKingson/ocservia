@@ -17,11 +17,7 @@ expect() {
 check_matrix() {
   local out=$1 profile=$2
   sed -n 's/^database_matrix=//p' "${out}" | jq -e --arg profile "${profile}" '
-    .include == (if $profile == "quick" then
-      [{"engine":"postgres","postgres":"17","version":"17.10"},{"engine":"mysql","version":"8.4.10"}]
-    else
-      [{"engine":"postgres","postgres":"17","version":"17.10"},{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"},{"engine":"mariadb","version":"12.3.2"}]
-    end)' >/dev/null
+    .include == [{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"}]' >/dev/null
 }
 while read -r path selected; do
   git -C "${fixture}" checkout -q --detach "${base}"

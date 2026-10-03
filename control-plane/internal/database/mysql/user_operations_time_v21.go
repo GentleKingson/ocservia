@@ -2,9 +2,6 @@ package mysql
 
 func UserOperationsTimeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	var steps []LongKeyStep
 	steps = append(steps, TimeColumnSteps("desired_user_policies", []TimeColumn{{Name: "expires_at", Nullable: true}, {Name: "created_at"}, {Name: "updated_at"}}, "CONCAT(HEX(source.node_id),':',HEX(source.username))", nil, nil)...)
 	steps = append(steps, TimeColumnSteps("user_policy_mutations", []TimeColumn{{Name: "created_at"}}, "HEX(source.id)", nil, nil)...)

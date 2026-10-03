@@ -46,8 +46,8 @@ the effective configuration and check the
   [verified backup and isolated restore](database-backup-restore.md#postgresql) for data loss.
   Database clusters, automatic failover and PITR readiness are outside the
   supported single-instance deployment.
-- MySQL/MariaDB: use the matching backend's
-  [logical backup and isolated restore](database-backup-restore.md#mysql-and-mariadb). It does not supply
+- MySQL: use the matching backend's
+  [logical backup and isolated restore](database-backup-restore.md#mysql). It does not supply
   PITR, failover, storage snapshots or cross-engine migration. Do not run
   PostgreSQL recovery or credential-rotation scripts against these backends.
 

@@ -48,8 +48,8 @@ preceding duplicate `cargo check`.
 `web`. The hook override applies only to that explicit lint command. Independent
 `npm run lint` and `npm run typecheck` still prepare their generated client.
 
-- Quick database feedback: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
-- All supported database units: use `DATABASE_TEST_SCOPE=smoke` for PostgreSQL 17/18, MySQL and MariaDB; Full CI checks current initialization and runtime behavior on each unit, not historical compatibility or comprehensive acceptance.
+- Quick database feedback: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
+- All supported database units: use `DATABASE_TEST_SCOPE=smoke` for PostgreSQL 18.x and MySQL 8.4 LTS; Full CI checks current initialization and runtime behavior on each unit, not historical compatibility or comprehensive acceptance.
 - Deep database migrations or failure scenarios, explicitly opt-in: `make database-integration`
 - Go and transport local integration: `make integration`
 - Browser or runtime behavior: `make e2e`
@@ -165,8 +165,7 @@ owner/runtime credentials; do not supply production credentials. Calling the
 `OCSERV_TEST_DATABASE_URL` and `OCSERV_TEST_OWNER_DATABASE_URL`. MySQL-compatible
 fixtures prepare their existing `PR02_*` variables themselves. Do not print
 DSNs. Required-case summaries are acceptance evidence; synthetic selector JSON
-is not. PostgreSQL 17 and MySQL smoke below do not certify PostgreSQL 18,
-MariaDB, full scope or release readiness.
+is not. PostgreSQL 18 and MySQL smoke below do not certify full scope or release readiness.
 
 ### Native preparation and execution
 
@@ -231,7 +230,7 @@ docker run --rm --init --name "$(basename "$task")-validation" \
     bash scripts/test-required-go-tests.sh
     bash scripts/test-bootstrap-profiles.sh
     scripts/go-check.sh standard
-    DATABASE_TEST_SCOPE=smoke PG_MAJOR=17 scripts/database-integration.sh
+    DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh
     ENGINE=mysql DATABASE_TEST_SCOPE=smoke bash scripts/database-foundation-integration.sh
     scripts/docs-check.sh
     git diff --check
@@ -262,11 +261,11 @@ Run the focused initializer regression only in an authorized, isolated
 environment, using a private checkout directory, host root, Python
 3, `setpriv`, and a local Docker daemon. Do not use a production host, real
 credentials, or existing database volumes. Select the target release's
-digest-pinned PostgreSQL 17 image rather than `latest`:
+digest-pinned PostgreSQL 18 image rather than `latest`:
 
 ```bash
 python3 scripts/test-postgres-init-observation.py \
-  --image "${OCSERV_POSTGRES_IMAGE:?set the target PostgreSQL 17 digest}" \
+  --image "${OCSERV_POSTGRES_IMAGE:?set the target PostgreSQL 18 digest}" \
   --expect-argv no
 ```
 

@@ -188,7 +188,7 @@ next_stage agent_package_build
 env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 next_stage controller_image_build
 bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
-for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+for name in gateway control transport backup edge relay signer mysql_backup; do
   docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
 done
 export T07_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
@@ -267,7 +267,7 @@ args=()
 roles=(gateway control transport backup)
 manifest_options=()
 if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
-  roles+=(edge relay signer mysql_backup mariadb_backup)
+  roles+=(edge relay signer mysql_backup)
   manifest_options+=(--manifest-version 2)
 fi
 for name in "${roles[@]}"; do
@@ -279,7 +279,7 @@ export T07_RELAY_IMAGE="${OCSERV_RELAY_IMAGE:-${BUILDX_BUILDER}-relay}"
 export T07_SIGNER_IMAGE="${OCSERV_SIGNER_IMAGE:-$T07_SIGNER_IMAGE}"
 # Existing third-party runtime dependency versions.
 export OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
-OCSERV_POSTGRES_IMAGE=docker.io/library/postgres@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+OCSERV_POSTGRES_IMAGE=docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
 OCSERV_OTEL_IMAGE=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23
 manifest="${DEPLOYMENT_CONFIG_DIR}/controller-release-${CONTROLLER_ARCH}.json"
 node "${ROOT}/scripts/generate-controller-release-manifest.mjs" --output "${manifest}" \

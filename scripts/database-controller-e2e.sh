@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="${1:-postgres}"
-case "${ENGINE}" in mysql|mariadb|postgres) ;; *) echo 'expected postgres, mysql or mariadb' >&2; exit 2 ;; esac
+case "${ENGINE}" in mysql|postgres) ;; *) echo 'expected postgres or mysql' >&2; exit 2 ;; esac
 ROLE_MODE="${2:-all}"
 case "${ROLE_MODE}" in all|split) ;; *) echo 'expected all or split role mode' >&2; exit 2 ;; esac
 if [[ -n "${OCSERV_REBIND_E2E:-}" ]]; then
@@ -60,7 +60,7 @@ MOUNTS=()
 COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platform/app -run '^TestControllerTransportBackendE2E$')
 POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
-  POSTGRES_IMAGE=postgres:17.10-bookworm
+  POSTGRES_IMAGE=postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
   MOUNTS=(-v "$(dirname "${SINGLE_AGENT_ARCHIVE}"):/published:ro")
   ENVIRONMENT+=(-e GOWORK=off -e "PUBLISHED_AGENT_ARCHIVE=/published/$(basename "${SINGLE_AGENT_ARCHIVE}")" \
     -e "PUBLISHED_AGENT_VERSION=${SINGLE_EXPECTED_AGENT_VERSION}")
@@ -97,10 +97,8 @@ if [[ "${ENGINE}" == postgres ]]; then
 else
   IMAGE=mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
   CLIENT=mysql
-  if [[ "${ENGINE}" == mariadb ]]; then IMAGE=mariadb:12.3.2@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc; CLIENT=mariadb; fi
   docker run -d --name "${NAME}" --network "${NAME}" \
     -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia \
-    -e MARIADB_ROOT_PASSWORD=pr02-isolated-test-root -e MARIADB_DATABASE=ocservia \
     "${IMAGE}" --log-bin-trust-function-creators=1 >/dev/null
   for _ in {1..90}; do
     if docker exec -e MYSQL_PWD=pr02-isolated-test-root "${NAME}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then break; fi

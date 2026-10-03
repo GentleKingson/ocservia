@@ -41,7 +41,7 @@ image_ref() {
   printf '%s/%s:%s-linux-%s' "${CONTROLLER_IMAGE_PREFIX}" "$1" "${VERSION}" "${CONTROLLER_ARCH}"
 }
 
-for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+for name in gateway control transport backup edge relay signer mysql_backup; do
   archive="${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ -s "${archive}" ]] || fail "Controller image archive is missing or empty: ${archive}"
   image="$(image_ref "${name}")"
@@ -60,7 +60,7 @@ if signer_output="$(docker run --rm "$(image_ref signer)" invalid-command 2>&1)"
   fail "signer accepted an unknown command"
 fi
 grep -Fq 'unknown command' <<<"${signer_output}" || fail "signer did not reach command validation"
-for backend in mysql mariadb; do
+for backend in mysql; do
   docker run --rm --entrypoint "${backend}" "$(image_ref "${backend}_backup")" --version
   if backup_output="$(docker run --rm -e "DATABASE_BACKEND=${backend}" "$(image_ref "${backend}_backup")" 2>&1)"; then
     fail "${backend} backup ran without its client configuration"
@@ -125,8 +125,8 @@ grep -Fq -- '--key-file is required' <<<"${transport_output}" ||
 # backup: the PostgreSQL client runtime must execute, and the real
 # entrypoint must reach its own guard when the pgpass source is absent.
 psql_version="$(docker run --rm --entrypoint psql "$(image_ref backup)" --version)"
-grep -Eq 'psql \(PostgreSQL\) 17\.' <<<"${psql_version}" ||
-  fail "backup image psql runtime did not report PostgreSQL 17: ${psql_version}"
+grep -Eq 'psql \(PostgreSQL\) 18\.' <<<"${psql_version}" ||
+  fail "backup image psql runtime did not report PostgreSQL 18: ${psql_version}"
 if backup_output="$(docker run --rm "$(image_ref backup)" 2>&1)"; then
   fail "backup entrypoint ran without its pgpass source"
 fi

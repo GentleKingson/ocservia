@@ -79,7 +79,7 @@ a second support matrix.
 | --- | --- | --- |
 | Controller OS/architecture | Linux `amd64` and `arm64` release artifacts | [Production deployment](../operations/production-deployment.md) |
 | Agent native packages | DEB on Ubuntu 24.04, RPM on Rocky 9, `amd64`/`arm64` | [Agent lifecycle](../operations/agent-lifecycle.md), [package validation](../development/release-checks.md) |
-| Databases | PostgreSQL 17 bundled or external; MySQL 8.4.10 external; MariaDB 12.3.2 external | [Database support](../operations/production-deployment.md#database-support) |
+| Databases | PostgreSQL 18.x bundled or external; MySQL 8.4 LTS external | [Database support](../operations/production-deployment.md#database-support) |
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` | See note below |
 | Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated relays](../how-to/dedicated-relays.md) |
 | Authentication | Local only, OIDC only, or Local + OIDC | [Authentication](../operations/authentication.md) |
@@ -119,14 +119,14 @@ Three pairs are deliberately not conflated:
    See [enroll a node](../how-to/enroll-node.md) and
    [agent lifecycle](../operations/agent-lifecycle.md).
 3. **Backup created vs backup restorable.** Producing a backup artifact
-   (PostgreSQL base backup, MySQL/MariaDB logical dump) is a scheduled
+   (PostgreSQL base backup, MySQL logical dump) is a scheduled
    operation; **restore is a separate, separately validated procedure**.
    PostgreSQL backups retain their required WAL and verification; isolated
-   restore is separate from HA/PITR readiness. MySQL/MariaDB restore uses a new isolated
+   restore is separate from HA/PITR readiness. MySQL restore uses a new isolated
    server with the restore verifier, and redirecting a live Controller is a
    guarded manual cutover. See
    [PostgreSQL backup](../operations/database-backup-restore.md#postgresql),
-   [MySQL/MariaDB backup](../operations/database-backup-restore.md#mysql-and-mariadb).
+   [MySQL backup](../operations/database-backup-restore.md#mysql).
 
 ## Security review posture
 

@@ -183,7 +183,7 @@ jobs:
           source scripts/env.sh
           scan_table="${RUNNER_TEMP}/controller-images.tsv"
           : >"$scan_table"
-          for name in gateway control transport backup edge relay signer mysql_backup mariadb_backup; do
+          for name in gateway control transport backup edge relay signer mysql_backup; do
             printf '%s\t%s\t%s\n' "$name" "$CONTROLLER_ARCH" "$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar" >>"$scan_table"
           done
           IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh

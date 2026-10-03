@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENGINE="${ENGINE:?ENGINE must be mysql or mariadb}"
+ENGINE="${ENGINE:?ENGINE must be mysql}"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 case "${ENGINE}" in
@@ -11,12 +11,7 @@ case "${ENGINE}" in
     DOCKERFILE=deploy/production/backup.mysql.Dockerfile
     CLIENT=mysql
     ;;
-  mariadb)
-    SERVER_IMAGE='mariadb:12.3.2@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc'
-    DOCKERFILE=deploy/production/backup.mariadb.Dockerfile
-    CLIENT=mariadb
-    ;;
-  *) echo "ENGINE must be mysql or mariadb" >&2; exit 2 ;;
+  *) echo "ENGINE must be mysql" >&2; exit 2 ;;
 esac
 [[ "${RUN_ID}" != *[^a-zA-Z0-9._-]* ]] || { echo "RUN_ID contains unsafe characters" >&2; exit 2; }
 
@@ -79,13 +74,8 @@ CREATE TRIGGER identities_marker BEFORE INSERT ON identities FOR EACH ROW SET NE
 CREATE PROCEDURE restore_probe() SELECT COUNT(*) FROM identities;
 CREATE EVENT restore_event ON SCHEDULE EVERY 1 DAY DO INSERT INTO identities VALUES(99,'EVENT');
 SQL
-if [[ "${ENGINE}" == mysql ]]; then
-  docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e \
-    "CREATE USER 'backup'@'%' IDENTIFIED BY '${backup_password}'; GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON ocservia.* TO 'backup'@'%'; GRANT SHOW_ROUTINE ON *.* TO 'backup'@'%';"
-else
-  docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e \
-    "CREATE USER 'backup'@'%' IDENTIFIED BY '${backup_password}'; GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON ocservia.* TO 'backup'@'%'; GRANT SELECT ON mysql.proc TO 'backup'@'%';"
-fi
+docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e \
+  "CREATE USER 'backup'@'%' IDENTIFIED BY '${backup_password}'; GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON ocservia.* TO 'backup'@'%'; GRANT SHOW_ROUTINE ON *.* TO 'backup'@'%';"
 
 cat >"${work}/backup.cnf" <<EOF
 [client]

@@ -3,7 +3,6 @@ go=1.26.6
 rust=1.97.1
 node=24.18.1
 npm=11.19.0
-postgresql_17=17.10
 postgresql_18=18.6
 # Standalone iroh-relay binary; endpoint dependency is pinned in rust/Cargo.toml.
 iroh=1.2.0

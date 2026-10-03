@@ -8,11 +8,10 @@ case "${scope}" in
   smoke|full|regression) ;;
   *) echo 'DATABASE_TEST_SCOPE must be smoke, full or regression' >&2; exit 2 ;;
 esac
-ENGINE="${ENGINE:?ENGINE must be mysql or mariadb}"
+ENGINE="${ENGINE:?ENGINE must be mysql}"
 case "${ENGINE}" in
   mysql) IMAGE='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'; CLIENT=mysql ;;
-  mariadb) IMAGE='mariadb:12.3.2@sha256:a02fe89cb597d4375812b2eac90cf9d0775d4686daa7f7cc750ebbcad7525bbc'; CLIENT=mariadb ;;
-  *) echo 'ENGINE must be mysql or mariadb' >&2; exit 2 ;;
+  *) echo 'ENGINE must be mysql' >&2; exit 2 ;;
 esac
 NAME="ocservia-pr02-${ENGINE}-$$"
 # shellcheck source=scripts/go-test-environment.sh
@@ -75,7 +74,6 @@ PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); p
 docker run -d --name "${NAME}" -p "127.0.0.1:${PORT}:3306" \
   -v "${TLS_DIR}:/tls:ro" \
   -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia \
-  -e MARIADB_ROOT_PASSWORD=pr02-isolated-test-root -e MARIADB_DATABASE=ocservia \
   "${IMAGE}" --log-bin-trust-function-creators=1 \
   --ssl-ca=/tls/server-cert.pem --ssl-cert=/tls/server-cert.pem --ssl-key=/tls/server-key.pem >/dev/null
 ready=false

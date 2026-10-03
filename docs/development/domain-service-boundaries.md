@@ -68,7 +68,7 @@ scheduler identities, batch hashes and canonical approval/upgrade bindings.
 Existing `backend-policy-config`, `backend-policy-useroperations`,
 `backend-policy-api` and `regression-auth` groups cover signed intent,
 approval consumption/rollback, cleanup failures, fencing and HTTP behavior.
-MySQL/MariaDB's `TestRealConfigurationReadAndIntent/consumer-service-chain`
+MySQL's `TestRealConfigurationReadAndIntent/consumer-service-chain`
 checks the actual ConfigPlan-to-Operations path separately from PostgreSQL's
 historical service test. Use restricted runtime connections; owner access is
 only for setup/fault injection. Required cases must run, and ordinary database

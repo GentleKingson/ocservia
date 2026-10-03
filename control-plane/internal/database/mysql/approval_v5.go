@@ -4,9 +4,6 @@ package mysql
 // fields. Published revisions remain byte-for-byte unchanged.
 func ApprovalRemainingSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	steps := timeColumnSteps("approval_requests", []TimeColumn{{Name: "approved_at", Nullable: true}, {Name: "authority_snapshot_at", DefaultSQL: "(TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)))"}}, "HEX(source.id)", nil, nil)
 	check := `SELECT IF(NOT EXISTS(SELECT 1 FROM approval_requests WHERE NOT(logical_request_summary <=> CAST(request_summary AS BINARY)) OR (logical_request_summary IS NOT NULL AND NOT ocserv_jsonb_value_valid(logical_request_summary))),'valid','invalid')`
 	changes := []LongKeyStep{

@@ -35,6 +35,9 @@ export OCSERV_RELAY_URL_A=https://relay-a.example.test OCSERV_RELAY_URL_B=
 "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/postgres.json"
 jq -e '
   (.services | has("postgres")) and
+  .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker" and
+  .services.postgres.entrypoint == ["/bin/bash", "/usr/local/bin/ocservia-postgres-entrypoint"] and
+  ([.services.postgres.volumes[] | select(.source == "postgres-data") | .target] == ["/var/lib/postgresql"]) and
   .services.migrate.depends_on.postgres.condition == "service_healthy" and
   .services.backup.depends_on.postgres.condition == "service_healthy" and
   (.services.postgres.healthcheck.test | length > 0) and
@@ -55,7 +58,7 @@ jq -e '
   .services.backup.depends_on.migrate.condition == "service_completed_successfully" and
   .services.backup.environment.PGHOST == "postgres.example.test" and
   .services.backup.environment.PGSSLMODE == "verify-full" and
-  .services.backup.environment.POSTGRES_SERVER_MAJOR == "17" and
+  .services.backup.environment.POSTGRES_SERVER_MAJOR == "18" and
   .services.migrate.environment.OCSERV_DATABASE_TLS_CA_FILE == "/run/secrets/database_ca" and
   .services["control-plane"].environment.OCSERV_DATABASE_TLS_CA_FILE == "/run/secrets/database_ca" and
   (.services.backup.healthcheck.test | length > 0) and
@@ -77,7 +80,15 @@ if OCSERV_DATABASE_DEPLOYMENT=external OCSERV_DATABASE_BACKUP_HOST=postgres.exam
 fi
 mv "${work}/database-ca.pem" "${work}/secrets/database-ca.pem"
 
-for backend in mysql mariadb; do
+for launcher in "${ROOT}/deploy/production/compose.sh" "${ROOT}/deploy/compose/compose.sh"; do
+  if OCSERV_DATABASE_BACKEND=mariadb OCSERV_DATABASE_DEPLOYMENT=external \
+    "${launcher}" config --quiet >"${work}/unsupported-backend.log" 2>&1; then
+    echo "removed database backend unexpectedly accepted" >&2
+    exit 1
+  fi
+done
+
+for backend in mysql; do
   OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT=external \
     "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/external-${backend}.json"
   jq -e --arg backend "${backend}" '
@@ -106,7 +117,7 @@ if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=bundled \
   exit 1
 fi
 
-for backend in mysql mariadb; do
+for backend in mysql; do
   OCSERV_DATABASE_BACKEND="${backend}" "${ROOT}/deploy/compose/compose.sh" config --format json >"${work}/dev-${backend}.json"
   jq -e --arg backend "${backend}" '
     (.services | has("postgres") | not) and .services.database != null and
@@ -118,7 +129,7 @@ for backend in mysql mariadb; do
   ' "${work}/dev-${backend}.json" >/dev/null
 done
 
-for rendered in postgres external-postgres external-mysql external-mariadb; do
+for rendered in postgres external-postgres external-mysql; do
   jq -e '
     (.services.transportd.networks | keys) == ["application", "observability", "relay-egress"] and
     (.networks["relay-egress"].internal // false) == false and

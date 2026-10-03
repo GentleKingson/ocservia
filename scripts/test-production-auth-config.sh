@@ -205,7 +205,7 @@ for name in database-ca.pem database-backup.cnf oidc-client-secret; do
   cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SECRET_DIR}/${name}"
 done
 export OCSERV_DATABASE_BACKUP_HOST=database.example.com OCSERV_DATABASE_BACKUP_IMAGE="${image}"
-for backend in postgres:bundled postgres:external mysql:external mariadb:external; do
+for backend in postgres:bundled postgres:external mysql:external; do
   export OCSERV_DATABASE_BACKEND="${backend%:*}" OCSERV_DATABASE_DEPLOYMENT="${backend#*:}"
   for auth in local oidc combined; do
     export OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_OIDC_ISSUER='' OCSERV_OIDC_CLIENT_ID='' OCSERV_OIDC_REDIRECT_URL=''

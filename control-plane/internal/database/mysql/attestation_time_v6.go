@@ -12,9 +12,6 @@ import (
 // byte-for-byte unchanged.
 func AttestationTimeSteps(engine Engine) []LongKeyStep {
 	drop := "DROP CHECK "
-	if engine == MariaDB {
-		drop = "DROP CONSTRAINT "
-	}
 	clock := "(TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',CURRENT_TIMESTAMP(6)))"
 	// Unlimited key validity is NULL on the original domain, never an infinity,
 	// so every non-NULL source value converts as a finite instant.
@@ -50,7 +47,7 @@ func AttestationTimeSteps(engine Engine) []LongKeyStep {
 
 // guardNamedTimeSteps is GuardTimeSteps with an explicit trigger-name prefix:
 // the enrollment credential table name is too long for the generated
-// drop_<trigger> identifier limit shared by MySQL/MariaDB and the revision
+// drop_<trigger> identifier limit shared by MySQL and the revision
 // plan validator.
 func guardNamedTimeSteps(name, table string, changes []LongKeyStep) []LongKeyStep {
 	var steps []LongKeyStep

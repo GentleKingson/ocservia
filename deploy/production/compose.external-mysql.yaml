@@ -1,7 +1,7 @@
 services:
   migrate:
     environment:
-      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql}
       OCSERV_DATABASE_TLS_CA_FILE: /run/secrets/database_ca
       OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app@%
     secrets:
@@ -14,7 +14,7 @@ services:
 
   control-plane:
     environment:
-      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      OCSERV_DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql}
       OCSERV_DATABASE_TLS_CA_FILE: /run/secrets/database_ca
     secrets:
       - source: database_ca
@@ -32,7 +32,7 @@ services:
     init: true
     image: ${OCSERV_DATABASE_BACKUP_IMAGE:?set a digest-pinned backend-specific backup image}
     environment:
-      DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql or mariadb}
+      DATABASE_BACKEND: ${OCSERV_DATABASE_BACKEND:?set mysql}
       MYSQL_DATABASE: ${OCSERV_DATABASE_BACKUP_NAME:-ocservia}
       MYSQL_CONFIG_SOURCE: /run/secrets/database_backup_config
       BACKUP_ROOT: /var/lib/ocservia-backup

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=scripts/mysql-server-check.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mysql-server-check.sh"
+
 BACKUP_ROOT="${BACKUP_ROOT:-/var/lib/ocservia-backup}"
 BACKUP_INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-900}"
 BACKUP_RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-8}"
@@ -9,7 +12,7 @@ MYSQL_DATABASE="${MYSQL_DATABASE:?MYSQL_DATABASE is required}"
 MYSQL_CONFIG_FILE="${MYSQL_CONFIG_FILE:?MYSQL_CONFIG_FILE is required}"
 RUN_ID="${RUN_ID:-backup-$$}"
 
-case "${DATABASE_BACKEND}" in mysql|mariadb) ;; *) echo "DATABASE_BACKEND must be mysql or mariadb" >&2; exit 2 ;; esac
+case "${DATABASE_BACKEND}" in mysql) ;; *) echo "DATABASE_BACKEND must be mysql" >&2; exit 2 ;; esac
 if [[ "${BACKUP_ROOT}" != /* || "${RUN_ID}" == *[^a-zA-Z0-9._-]* || ! "${MYSQL_DATABASE}" =~ ^[A-Za-z0-9_]{1,64}$ ]]; then
   echo "backup root, database name or RUN_ID is invalid" >&2
   exit 2
@@ -34,7 +37,7 @@ for path in "${BACKUP_ROOT}" "${BACKUP_ROOT}/logical"; do
 done
 
 run_backup() {
-  local lock="${BACKUP_ROOT}/.backup.lock" timestamp staging final latest_tmp version client dump
+  local lock="${BACKUP_ROOT}/.backup.lock" timestamp staging final latest_tmp version dump
   local -a dump_options=()
   mkdir "${lock}" 2>/dev/null || { echo "another backup is active or a stale lock needs operator review" >&2; return 1; }
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -50,20 +53,9 @@ run_backup() {
   [[ ! -e "${final}" ]] || { echo "backup destination already exists: ${final}" >&2; return 1; }
   mkdir "${staging}"
 
-  if [[ "${DATABASE_BACKEND}" == mysql ]]; then
-    client=mysql
-    dump=mysqldump
-    dump_options+=(--set-gtid-purged=OFF)
-  else
-    client=mariadb
-    dump=mariadb-dump
-  fi
-  version="$("${client}" --defaults-extra-file="${MYSQL_CONFIG_FILE}" --batch --skip-column-names -e 'SELECT VERSION()')"
-  case "${DATABASE_BACKEND}:${version}" in
-    mysql:8.4.10*) ;;
-    mariadb:12.3.2-MariaDB*) ;;
-    *) echo "database server does not match the pinned ${DATABASE_BACKEND} backup contract" >&2; return 1 ;;
-  esac
+  dump=mysqldump
+  dump_options+=(--set-gtid-purged=OFF)
+  version="$(mysql_server_version "${MYSQL_CONFIG_FILE}")"
 
   "${dump}" --defaults-extra-file="${MYSQL_CONFIG_FILE}" \
     --single-transaction --quick --hex-blob --routines --events --triggers \

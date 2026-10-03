@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=scripts/mysql-server-check.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mysql-server-check.sh"
+
 usage() {
-  echo "usage: $0 --backend <mysql|mariadb> --backup-dir <absolute-path> --target-config <mode-0600.cnf> [--old-writers-fenced]" >&2
+  echo "usage: $0 --backend <mysql> --backup-dir <absolute-path> --target-config <mode-0600.cnf> [--old-writers-fenced]" >&2
   exit 2
 }
 
@@ -16,8 +19,8 @@ while (($#)); do
     *) usage ;;
   esac
 done
-case "${backend}" in mysql|mariadb) ;; *) usage ;; esac
-if [[ "${backend}" == mysql ]]; then client=mysql; else client=mariadb; fi
+case "${backend}" in mysql) ;; *) usage ;; esac
+client=mysql
 [[ "${backup_dir}" == /* && -d "${backup_dir}" && ! -L "${backup_dir}" ]] || usage
 [[ -f "${target_config}" && ! -L "${target_config}" && "$(stat -c %a "${target_config}")" == 600 ]] || usage
 for file in database.sql metadata SHA256SUMS; do
@@ -36,6 +39,7 @@ database="$(sed -n 's/^database=//p' "${backup_dir}/metadata")"
 [[ "${metadata_backend}" == "${backend}" && "${database}" =~ ^[A-Za-z0-9_]{1,64}$ ]] || {
   echo "backup metadata does not match the requested backend" >&2; exit 1;
 }
+mysql_server_version "${target_config}" >/dev/null
 existing="$("${client}" --defaults-extra-file="${target_config}" --batch --skip-column-names \
   -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='${database}'")"
 [[ "${existing}" == 0 ]] || { echo "isolated restore target database already exists" >&2; exit 1; }
