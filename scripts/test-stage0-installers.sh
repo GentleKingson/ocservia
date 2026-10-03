@@ -119,13 +119,19 @@ run_documented_fetch() (
 )
 
 for installer in "${CONTROLLER}" "${NODE}"; do
-  for args in "" "--version latest" "--version v1.2.3-rc.1" "--version main" "--version deadbeef"; do
+  for args in "" "--version latest" "--version v1.2.3-rc.0" "--version v1.2.3-rc.01" "--version v1.2.3-rc1" "--version v1.2.3-beta.1" "--version v1.2.3-rc.1+build" "--version main" "--version deadbeef"; do
     # shellcheck disable=SC2086 # each fixture intentionally supplies zero or two words
     if run_installer "${installer}" ${args} >"${fixture}/output" 2>&1; then
       fail "$(basename "${installer}") accepted a missing or non-release version: ${args:-<missing>}"
     fi
     [[ ! -s "${fixture}/exec.log" ]] || fail "invalid input reached Stage-1"
   done
+done
+
+for installer in "${CONTROLLER}" "${NODE}"; do
+  run_installer "${installer}" --version v1.2.3-rc.1 >"${fixture}/output" 2>&1
+  grep -qx 'v1.2.3-rc.1' "${fixture}/args.log" || fail "RC identity was not passed to Stage-1"
+  grep -q '/download/v1.2.3-rc.1/' "${fixture}/downloads.log" || fail "RC download URL missing"
 done
 
 if run_installer "${NODE}" --version v1.2.3 --token token-must-not-leak >"${fixture}/output" 2>&1; then

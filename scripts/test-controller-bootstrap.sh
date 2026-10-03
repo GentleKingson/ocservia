@@ -291,7 +291,7 @@ reset_state
 for bad_version in latest main 0.1.2 v0.1 v0.1.2-rc1 v0.1.2.3; do
   capture --version "${bad_version}"
   assert_status 1 "version '${bad_version}' must fail closed"
-  assert_output "exact vX.Y.Z release tag"
+  assert_output "exact vX.Y.Z or vX.Y.Z-rc.N release tag"
 done
 assert_log_empty "${git_log}"
 [[ ! -e "${source_root}" ]] ||
@@ -577,4 +577,12 @@ assert_output "does not ship the production installer"
 assert_log_empty "${install_log}"
 echo "a release without the installer is refused but keeps the checkout"
 
+reset_state
+write_install_env
+git -C "${origin_work}" commit -qm rc --allow-empty
+git -C "${origin_work}" tag v0.1.4-rc.1
+git -C "${origin_work}" push -q "${origin}" v0.1.4-rc.1
+capture_from "${config}" --version v0.1.4-rc.1 --root-lifecycle
+assert_status 0 "an exact RC checkout must install"
+[[ "$(git -C "${source_root}/v0.1.4-rc.1" describe --tags --exact-match)" == v0.1.4-rc.1 ]] || die "wrong RC checkout"
 echo "Controller bootstrap tests passed"

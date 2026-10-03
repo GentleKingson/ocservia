@@ -224,7 +224,7 @@ resolve_release_identity() {
   RELEASE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" ||
     fail "${ROOT} is not a Git checkout; install from a clean checkout of an exact vX.Y.Z release tag"
   while IFS= read -r tag; do
-    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && matching+=("${tag}")
+    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] && matching+=("${tag}")
   done < <(git -C "${ROOT}" tag --points-at HEAD)
   ((${#matching[@]} == 1)) ||
     fail "checkout HEAD must correspond to exactly one exact vX.Y.Z release tag (found ${#matching[@]}); check out the release tag to install, e.g. git clone --branch vX.Y.Z --depth 1 <repository>"

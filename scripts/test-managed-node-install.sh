@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="${ROOT}/deploy/managed-node/install.sh"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
-VERSION="0.2.1"
+VERSION="${TEST_RELEASE_VERSION:-0.2.1}"
 MOCK_NODE_ID="018f1e11-2222-7333-8444-555555555555"
 
 # The installer fixture asserts file modes with GNU stat and creates runtime command
@@ -268,7 +268,7 @@ case "${version}" in
     ;;
   *.rpm) version="${version#ocservia-agent-}" ; version="${version%-1.*}" ;;
 esac
-printf 'installed %s\n' "${version}" >"${OCSERV_MANAGED_NODE_SYSROOT}/.package-state"
+printf 'installed %s\n' "${version/-rc./~rc.}" >"${OCSERV_MANAGED_NODE_SYSROOT}/.package-state"
 exit 0
 EOF
 
@@ -672,10 +672,10 @@ scenario
 git -C "${repo}" commit -q --allow-empty -m rc
 git -C "${repo}" tag v0.3.0-rc1
 capture
-assert_status 1 "an RC tag must not be a production release identity"
+assert_status 1 "a malformed RC tag must not be a production release identity"
 assert_output "exactly one exact vX.Y.Z release tag"
 assert_log_empty "${dpkg_log}"
-echo "an RC tag is rejected"
+echo "a malformed RC tag is rejected"
 
 # 2b. a dirty checkout is rejected before any host mutation.
 scenario
@@ -694,7 +694,7 @@ for bad_version in 0.2.1 v0.2 v0.2.1-rc1 latest; do
   scenario
   capture --version "${bad_version}"
   assert_status 1 "a non-SemVer --version must fail closed (${bad_version})"
-  assert_output "an exact vX.Y.Z release tag is required"
+  assert_output "an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required"
   assert_log_empty "${curl_log}"
   assert_log_empty "${dpkg_log}"
 done
@@ -883,11 +883,27 @@ assert_log_empty "${curl_log}"
 assert_log_empty "${dpkg_log}"
 echo "an installed version mismatch fails closed"
 
+# Changing RC identity still requires the release lifecycle, for both managers.
+for family in deb rpm; do
+  scenario
+  if [[ "${family}" == deb ]]; then
+    printf '0.2.1~rc.1-1\n' >"${installed_version_file}"
+  else
+    EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
+    printf '0.2.1~rc.1\n' >"${installed_version_file}"
+  fi
+  capture --version v0.2.1-rc.2
+  assert_status 1 "bootstrap must not upgrade an installed RC"
+  assert_output "neither upgrades nor downgrades"
+  assert_log_empty "${curl_log}"
+  assert_log_empty "${dpkg_log}"
+done
+
 # 10. an installed package without the production relay contract fails
 # closed instead of silently reusing a relay-free install.
 scenario
 # The DEB platform's native version carries the nfpm release component.
-printf '%s\n' "${VERSION}-1" >"${installed_version_file}"
+printf '%s\n' "${VERSION/-rc./~rc.}-1" >"${installed_version_file}"
 capture
 assert_status 1 "a relay-free installed package must fail closed"
 assert_output "production relay drop-in"
@@ -1167,6 +1183,19 @@ assert_output "already installed; skipping the release download"
 [[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] ||
   die "a single-file rerun must not re-download the release: $(tail -n 3 "${curl_log}")"
 echo "the single-file --version rerun converges without reinstalling or re-downloading"
+
+scenario
+SCRIPT_UNDER_TEST="${standalone}/install.sh"
+EXTRA_ENV=("OCSERV_MANAGED_NODE_OS_RELEASE=${os}/rocky-9")
+capture_root --version "v${VERSION}"
+assert_status 0 "RPM bootstrap must succeed"
+rpm_calls="$(grep -c -- '-ivh' "${rpm_log}")"
+curl_calls="$(wc -l <"${curl_log}" | tr -d ' ')"
+capture_root --version "v${VERSION}"
+assert_status 0 "RPM rerun must converge"
+assert_output "already installed; skipping the release download"
+[[ "$(grep -c -- '-ivh' "${rpm_log}")" == "${rpm_calls}" ]] || die "RPM rerun reinstalled package"
+[[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] || die "RPM rerun downloaded package"
 
 # 12. a rerun converges: the installed package is reused, not reinstalled,
 # and the release is not downloaded again.

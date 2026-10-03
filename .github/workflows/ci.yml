@@ -156,6 +156,7 @@ jobs:
         if: needs.ci-relevance.outputs.run_installers == 'true'
         run: |
           bash scripts/test-managed-node-install.sh
+          TEST_RELEASE_VERSION=0.2.1-rc.1 bash scripts/test-managed-node-install.sh
           bash scripts/test-controller-install.sh
           bash scripts/test-controller-bootstrap.sh
           bash scripts/test-controller-lifecycle.sh
