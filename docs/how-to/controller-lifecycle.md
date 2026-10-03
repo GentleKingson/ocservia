@@ -33,6 +33,13 @@ startup. It reapplies runtime grants even when no new migration is needed.
 Keep authentication, session/audit keys, database TLS and backend/role settings
 intact. Long-running Controllers retain runtime credentials only.
 
+A new, proven-empty database is initialized from the backend's current
+`schema.sql`. Existing databases are validated and advanced only through
+unapplied forward migrations/revisions. An updated snapshot file is never a
+reason to overwrite an existing schema. Missing or inconsistent provenance and
+interrupted MySQL initialization stop ordinary startup; do not erase metadata
+or change checksums to make it proceed.
+
 Policy cleanup needs DELETE on `user_policy_enforcements`: PostgreSQL uses its
 configured role; MySQL uses explicit `user@host`. Store predicates, not
 this table-level grant, restrict which unfinished records can be removed.

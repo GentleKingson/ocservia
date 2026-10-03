@@ -17,6 +17,7 @@ control_image="${egress_network}-control-image"
 backup_image="${egress_network}-backup-image"
 password="$(openssl rand -hex 24)"
 backup_password="$(openssl rand -hex 24)"
+runtime_password="$(openssl rand -hex 24)"
 owner=(); ((EUID == 0)) || owner=(sudo)
 
 mkdir -p "${work}/tls" "${work}/secrets" "${work}/backup" "${work}/restore" "${ARTIFACT_DIR}"
@@ -75,7 +76,7 @@ host_port="$(docker port "${source_container}" 5432/tcp | sed -n 's/.*://p' | he
 docker exec -u postgres "${source_container}" sh -c \
   "printf '%s\n' 'hostssl replication ocservia_backup all scram-sha-256' >>\"\${PGDATA}/pg_hba.conf\" && pg_ctl reload" >/dev/null
 docker exec -e PGPASSWORD="${password}" "${source_container}" psql -v ON_ERROR_STOP=1 -U postgres -d ocservia \
-  -c "CREATE ROLE ocservia_app LOGIN PASSWORD '$(openssl rand -hex 24)'; CREATE ROLE ocservia_backup LOGIN REPLICATION PASSWORD '${backup_password}';" \
+  -c "CREATE ROLE ocservia_app LOGIN PASSWORD '${runtime_password}'; CREATE ROLE ocservia_backup LOGIN REPLICATION PASSWORD '${backup_password}';" \
   >"${ARTIFACT_DIR}/roles.log"
 
 printf '%064d\n' 1 >"${work}/secrets/session-key"
@@ -129,6 +130,15 @@ schema_version="$(docker exec -e PGPASSWORD="${password}" "${source_container}" 
 [[ "${schema_version}" =~ ^[0-9]+$ ]] || { echo "external PostgreSQL migration did not produce schema metadata" >&2; exit 1; }
 printf 'schema_version=%s\n' "${schema_version}" >"${ARTIFACT_DIR}/source-schema.log"
 
+# Preserve the actual origin and every migration row, including timestamps and
+# explicit coverage markers. A restored snapshot must never be reinitialized.
+provenance_sql="SELECT jsonb_build_object('origin',(SELECT to_jsonb(o) FROM schema_snapshot_origin o WHERE singleton),'migrations',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m))"
+source_coverage="$(docker exec "${source_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \
+  -c 'SELECT (SELECT count(*)=1 FROM schema_snapshot_origin) AND EXISTS(SELECT 1 FROM schema_migrations WHERE snapshot_covered)')"
+[[ "${source_coverage}" == t ]] || { echo "source was not initialized with snapshot coverage" >&2; exit 1; }
+docker exec "${source_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \
+  -c "${provenance_sql}" >"${ARTIFACT_DIR}/source-schema-provenance.json"
+
 printf '%s:%s:ocservia:ocservia_backup:%s\n%s:%s:replication:ocservia_backup:%s\n' \
   "${gateway}" "${host_port}" "${backup_password}" "${gateway}" "${host_port}" "${backup_password}" \
   >"${work}/postgres.pgpass"
@@ -148,10 +158,12 @@ backup_networks="$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Netw
 }
 docker rm "${backup_container}" >/dev/null
 
-backup_id="$(cat "${work}/backup/LATEST")"
+# Backups deliberately remain PostgreSQL-owned and private (0700/0600).
+# Use the existing root/sudo helper for host-side inspection and restore copies.
+backup_id="$("${owner[@]}" cat "${work}/backup/LATEST")"
 backup_dir="${work}/backup/base/${backup_id}"
-cp -a "${backup_dir}/." "${work}/restore/"
-printf 'corrupt\n' >>"${work}/restore/PG_VERSION"
+"${owner[@]}" cp -a "${backup_dir}/." "${work}/restore/"
+printf 'corrupt\n' | "${owner[@]}" tee -a "${work}/restore/PG_VERSION" >/dev/null
 if docker run --rm -v "${work}/restore:/restore:ro" --entrypoint pg_verifybackup \
   "${POSTGRES_IMAGE}" /restore >"${ARTIFACT_DIR}/corrupt-rejection.log" 2>&1; then
   echo "corrupt external PostgreSQL backup unexpectedly verified" >&2
@@ -159,17 +171,40 @@ if docker run --rm -v "${work}/restore:/restore:ro" --entrypoint pg_verifybackup
 fi
 "${owner[@]}" rm -rf -- "${work}/restore"
 mkdir -m 0700 "${work}/restore"
-cp -a "${backup_dir}/." "${work}/restore/"
-rm -f "${work}/restore/standby.signal"
+"${owner[@]}" cp -a "${backup_dir}/." "${work}/restore/"
+"${owner[@]}" rm -f "${work}/restore/standby.signal"
 docker run --rm -v "${work}/restore:/restore" "${POSTGRES_IMAGE}" \
   bash -ceu 'chown -R postgres:postgres /restore && chmod 0700 /restore'
-docker run -d --name "${restore_container}" --network "${source_network}" \
-  -v "${work}/restore:/var/lib/postgresql/18/docker" "${POSTGRES_IMAGE}" >/dev/null
+docker run -d --name "${restore_container}" --network "${source_network}" -p 0:5432 \
+  -v "${work}/restore:/var/lib/postgresql/18/docker" -v "${work}/tls:/tls:ro" "${POSTGRES_IMAGE}" \
+  -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key >/dev/null
+restore_ready=false
 for _ in $(seq 1 90); do
-  if docker exec "${restore_container}" pg_isready -U postgres -d ocservia >/dev/null 2>&1; then break; fi
+  if docker exec -e PGPASSWORD="${password}" "${restore_container}" psql -X -h127.0.0.1 -U postgres -d ocservia -Atc 'SELECT 1' >/dev/null 2>&1; then restore_ready=true; break; fi
   sleep 1
 done
+[[ "${restore_ready}" == true ]] || { echo "restored PostgreSQL did not become ready" >&2; exit 1; }
+restore_port="$(docker port "${restore_container}" 5432/tcp | sed -n 's/.*://p' | head -1)"
+[[ "${restore_port}" =~ ^[0-9]+$ ]] || { echo "cannot determine restored PostgreSQL port" >&2; exit 1; }
+docker exec "${restore_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \
+  -c "${provenance_sql}" >"${ARTIFACT_DIR}/restored-schema-provenance.json"
+cmp "${ARTIFACT_DIR}/source-schema-provenance.json" "${ARTIFACT_DIR}/restored-schema-provenance.json"
+# Use the matching built Controller and its existing owner migration path.
+run_migrate "postgres://postgres:${password}@${gateway}:${restore_port}/ocservia?sslmode=verify-full" \
+  >"${ARTIFACT_DIR}/restored-migration.log"
+docker exec "${restore_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \
+  -c "${provenance_sql}" >"${ARTIFACT_DIR}/remigrated-schema-provenance.json"
+cmp "${ARTIFACT_DIR}/source-schema-provenance.json" "${ARTIFACT_DIR}/remigrated-schema-provenance.json"
+# The restored runtime account reads application data and provenance over the
+# same verified TLS boundary, while owner DDL remains unavailable.
+docker run --rm --network "${egress_network}" \
+  -v "${work}/tls/ca.crt:/run/secrets/database_ca:ro" --entrypoint psql "${backup_image}" \
+  "postgres://ocservia_app:${runtime_password}@${gateway}:${restore_port}/ocservia?sslmode=verify-full&sslrootcert=/run/secrets/database_ca" \
+  -X -At -v ON_ERROR_STOP=1 \
+  -c "SELECT current_user='ocservia_app' AND EXISTS(SELECT 1 FROM identities WHERE subject='restore-probe') AND EXISTS(SELECT 1 FROM schema_snapshot_origin WHERE singleton) AND EXISTS(SELECT 1 FROM schema_migrations WHERE snapshot_covered) AND NOT has_schema_privilege(current_user,'public','CREATE') AND NOT has_table_privilege(current_user,'schema_migrations','INSERT,UPDATE,DELETE') AND NOT has_function_privilege(current_user,'telemetry_ensure_month_partition(timestamptz)','EXECUTE')" \
+  >"${ARTIFACT_DIR}/restored-runtime-read.log"
+[[ "$(cat "${ARTIFACT_DIR}/restored-runtime-read.log")" == t ]] || { echo "restored runtime read or privilege boundary failed" >&2; exit 1; }
 restored="$(docker exec "${restore_container}" psql -At -U postgres -d ocservia -c "SELECT subject FROM identities WHERE subject='restore-probe'")"
 [[ "${restored}" == restore-probe ]] || { echo "isolated external PostgreSQL restore failed" >&2; exit 1; }
-printf 'backup_id=%s\nrestore_marker=%s\nsource_network=%s\nbackup_network=%s\n' \
+printf 'backup_id=%s\nrestore_marker=%s\nsource_network=%s\nbackup_network=%s\nprovenance_preserved=true\nremigration_preserved=true\nruntime_read=true\n' \
   "${backup_id}" "${restored}" "${source_network}" "${egress_network}" >"${ARTIFACT_DIR}/restore-summary.txt"

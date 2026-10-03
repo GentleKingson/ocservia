@@ -54,8 +54,8 @@ database = jobs.fetch("database-smoke")
 reject("matrix must use the router's Quick/Full selection") unless
   database.fetch("strategy").fetch("matrix") == "${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}" &&
   database.fetch("env").fetch("DATABASE_TEST_SCOPE") == "${{ needs.ci-relevance.outputs.database_scope }}"
-reject("Full retains short recovery on both implementations") unless
-  jobs.fetch("database-recovery-full").fetch("strategy").fetch("matrix") == {"engine" => %w[mysql]}
+reject("Full retains recovery on both supported implementations") unless
+  jobs.fetch("database-recovery-full").fetch("strategy").fetch("matrix") == {"engine" => %w[postgres mysql]}
 reject("heavy history must not be a Basic CI job") if jobs.key?("database-history-full")
 reject("Quick and Full must have separate concurrency groups") unless
   workflow.fetch("concurrency").fetch("group").include?("inputs.profile || 'quick'") &&
@@ -63,7 +63,13 @@ reject("Quick and Full must have separate concurrency groups") unless
 guard = jobs.fetch("go").fetch("steps").find { |s| s["name"] == "CI guard and workflow contracts" }
 reject("CI self-tests must be path selected") unless guard.fetch("if") == "needs.ci-relevance.outputs.run_ci_tools == 'true'"
 jobs.each do |id, job|
-  reject("#{id} needs a bounded runner") unless job.fetch("timeout-minutes") > 0
+  timeout = job.fetch("timeout-minutes")
+  if id == "database-smoke"
+    reject("database runner must bound both full and smoke profiles") unless
+      timeout == "${{ needs.ci-relevance.outputs.database_scope == 'full' && 90 || 25 }}"
+  else
+    reject("#{id} needs a bounded runner") unless timeout.is_a?(Integer) && timeout > 0
+  end
   reject("#{id} must propagate failures") if job["continue-on-error"]
   Array(job["steps"]).each do |step|
     reject("#{id} must propagate step failures") if step["continue-on-error"]

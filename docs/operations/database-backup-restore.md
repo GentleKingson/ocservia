@@ -83,3 +83,22 @@ is unambiguous may the operator redirect traffic and allow commands.
 Logical restore is not PITR, database failover, a storage snapshot, or
 cross-engine migration. Those procedures require independent evidence and are
 not supplied by this tooling.
+
+## Schema provenance after restore
+
+Backups must include the original migration history and snapshot provenance.
+After restore, validate them with the matching Controller/backend before
+allowing writes. Owner migration on a valid restored database applies only
+unapplied forward changes; it must not replay the current `schema.sql`.
+Snapshot-origin and historical-origin databases retain their respective
+receipts, including timestamps and checksums.
+
+For interrupted MySQL snapshot initialization, ordinary migration refuses to
+continue. In a controlled test/development recovery environment, the existing
+`ocserv-db-foundation` tool exposes `--mode snapshot-checksum`; supply that exact
+reviewed artifact checksum to `--mode repair --repair-checksum <checksum>`.
+Historical revision repair keeps `--mode manifest-checksum`. Snapshot recovery
+requires the matching build/SQL artifact. If a newer build has changed the
+snapshot, recover with the original artifact first, then perform forward
+upgrades. Never mark an interrupted operation verified by editing its journal.
+The foundation tool's existing production restriction remains in place.

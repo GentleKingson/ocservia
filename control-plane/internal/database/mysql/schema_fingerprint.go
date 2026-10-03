@@ -3,12 +3,18 @@ package mysql
 import (
 	"encoding/json"
 	"io/fs"
+	"regexp"
+	"strings"
 	"sync"
 )
 
 var schemaFingerprintOnce sync.Once
 var historicalSchemaFingerprints map[string]bool
 var roundtripFingerprints map[string]string
+
+// Match only a column declaration's character type, never defaults, generated
+// expressions, comments, CHECK bodies, or a non-default collation.
+var redundantColumnCharset = regexp.MustCompile("(?m)^(  `[^`]+` (?:(?:var)?char\\([0-9]+\\)|(?:tiny|medium|long)?text)) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
 
 // MySQL 8.4 SHOW CREATE roundtrips a range literal from >= -211813488000000000
 // to >= -(211813488000000000). Both denote the same signed integer. Preserve
@@ -69,6 +75,19 @@ func tableFingerprint(definition string) string {
 	}
 	if original, ok := roundtripFingerprints[exact]; ok && historicalSchemaFingerprints[original] {
 		return original
+	}
+	// mysqldump replays SHOW CREATE verbatim. MySQL then marks an inherited
+	// column collation explicit and displays its implied charset too. Elide
+	// only that redundant declaration, retaining the same collation and every
+	// other byte, and require a full immutable fingerprint match.
+	if strings.HasSuffix(definition, "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin") {
+		candidate := digest([]byte(redundantColumnCharset.ReplaceAllString(definition, "${1} COLLATE utf8mb4_0900_bin")))
+		if historicalSchemaFingerprints[candidate] {
+			return candidate
+		}
+		if original, ok := roundtripFingerprints[candidate]; ok && historicalSchemaFingerprints[original] {
+			return original
+		}
 	}
 	return exact
 }

@@ -203,7 +203,7 @@ jobs:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: ${{ needs.ci-relevance.outputs.database_scope == 'full' && 90 || 25 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.ci-relevance.outputs.database_matrix) }}
@@ -242,6 +242,11 @@ jobs:
         run: scripts/database-integration.sh
       - if: matrix.engine != 'postgres'
         run: bash scripts/database-foundation-integration.sh
+      - name: Check current schema source and independent replay equivalence
+        run: bash "scripts/database-${ENGINE}-snapshot.sh" check
+      - name: Verify PostgreSQL 18 volume lifecycle
+        if: matrix.engine == 'postgres'
+        run: bash scripts/test-postgres-volume-layout.sh
       - name: Save database Go objects (one main writer)
         if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.engine == 'mysql' && steps.go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -257,17 +262,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [mysql]
+        engine: [postgres, mysql]
     env:
       ENGINE: ${{ matrix.engine }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - run: scripts/bootstrap.sh go-test
       - run: |
+          script=scripts/i18-mysql-backup-restore-smoke.sh
+          if [[ "$ENGINE" == postgres ]]; then script=scripts/i18-external-postgres-backup-restore-smoke.sh; fi
           RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENGINE}" \
             ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-${ENGINE}" \
-            bash scripts/i18-mysql-backup-restore-smoke.sh
+            bash "$script"
+      - name: Preserve database recovery evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: database-recovery-${{ matrix.engine }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/database-recovery-${{ matrix.engine }}
+          if-no-files-found: warn
+          retention-days: 7
 
   controller-cache:
     name: Refresh Controller cache (${{ matrix.arch }})

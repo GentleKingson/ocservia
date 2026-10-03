@@ -297,3 +297,4 @@ mysql-snapshot internal/database/mysql TestSnapshotArtifactValidation
 mysql-snapshot internal/database/mysql TestSnapshotRuntimePermissions
 mysql-snapshot internal/database/mysql TestSnapshotCrashAfterDDL
 mysql-snapshot internal/database/mysql TestSnapshotGenerationDeterminism
+mysql-snapshot internal/database/mysql TestSnapshotDumpTableRoundtrip
