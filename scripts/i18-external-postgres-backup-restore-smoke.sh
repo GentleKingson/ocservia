@@ -158,10 +158,12 @@ backup_networks="$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Netw
 }
 docker rm "${backup_container}" >/dev/null
 
-backup_id="$(cat "${work}/backup/LATEST")"
+# Backups deliberately remain PostgreSQL-owned and private (0700/0600).
+# Use the existing root/sudo helper for host-side inspection and restore copies.
+backup_id="$("${owner[@]}" cat "${work}/backup/LATEST")"
 backup_dir="${work}/backup/base/${backup_id}"
-cp -a "${backup_dir}/." "${work}/restore/"
-printf 'corrupt\n' >>"${work}/restore/PG_VERSION"
+"${owner[@]}" cp -a "${backup_dir}/." "${work}/restore/"
+printf 'corrupt\n' | "${owner[@]}" tee -a "${work}/restore/PG_VERSION" >/dev/null
 if docker run --rm -v "${work}/restore:/restore:ro" --entrypoint pg_verifybackup \
   "${POSTGRES_IMAGE}" /restore >"${ARTIFACT_DIR}/corrupt-rejection.log" 2>&1; then
   echo "corrupt external PostgreSQL backup unexpectedly verified" >&2
@@ -169,8 +171,8 @@ if docker run --rm -v "${work}/restore:/restore:ro" --entrypoint pg_verifybackup
 fi
 "${owner[@]}" rm -rf -- "${work}/restore"
 mkdir -m 0700 "${work}/restore"
-cp -a "${backup_dir}/." "${work}/restore/"
-rm -f "${work}/restore/standby.signal"
+"${owner[@]}" cp -a "${backup_dir}/." "${work}/restore/"
+"${owner[@]}" rm -f "${work}/restore/standby.signal"
 docker run --rm -v "${work}/restore:/restore" "${POSTGRES_IMAGE}" \
   bash -ceu 'chown -R postgres:postgres /restore && chmod 0700 /restore'
 docker run -d --name "${restore_container}" --network "${source_network}" -p 0:5432 \

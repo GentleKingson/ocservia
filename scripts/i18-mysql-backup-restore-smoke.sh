@@ -53,10 +53,10 @@ docker run -d --name "${source_container}" --network "${network}" --network-alia
   -e MYSQL_ROOT_PASSWORD="${password}" "${SERVER_IMAGE}" >/dev/null
 
 for _ in $(seq 1 90); do
-  if docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e 'SELECT 1' >/dev/null 2>&1; then break; fi
+  if docker exec "${source_container}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -p"${password}" -e 'SELECT 1' >/dev/null 2>&1; then break; fi
   sleep 1
 done
-docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e 'SELECT 1' >/dev/null
+docker exec "${source_container}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -p"${password}" -e 'SELECT 1' >/dev/null
 # Use the current generated metadata definitions for this transport-only fixture.
 # Its deliberately synthetic checksum is not evidence of a valid migration chain;
 # the second database below exercises genuine origin/checksum validation.
@@ -124,7 +124,7 @@ backup_dir="${work}/backup/logical/${backup_id}"
 docker run -d --name "${target_container}" --network "${network}" --network-alias target \
   -e MYSQL_ROOT_PASSWORD="${password}" "${SERVER_IMAGE}" >/dev/null
 for _ in $(seq 1 90); do
-  if docker exec "${target_container}" "${CLIENT}" -uroot -p"${password}" -e 'SELECT 1' >/dev/null 2>&1; then break; fi
+  if docker exec "${target_container}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -p"${password}" -e 'SELECT 1' >/dev/null 2>&1; then break; fi
   sleep 1
 done
 cat >"${work}/target.cnf" <<EOF
@@ -235,6 +235,12 @@ docker run --rm --user 0:0 --network "${network}" --entrypoint /usr/local/bin/oc
 restore_status=$?
 set -e
 [[ "${restore_status}" == 0 ]] || { echo "snapshot restore data checks returned ${restore_status}, expected 0" >&2; exit 1; }
+# Keep exact pre/post-restore definitions as evidence if canonical validation fails.
+for endpoint in source target; do
+  docker exec "${network}-${endpoint}" "${CLIENT}" -uroot -p"${password}" \
+    --database=snapshot_restore --batch --raw -e 'SHOW CREATE TABLE identities' \
+    >"${ARTIFACT_DIR}/snapshot-${endpoint}-identities.sql"
+done
 foundation target check >"${ARTIFACT_DIR}/snapshot-restored-check.log" 2>&1
 controller_migrate target >"${ARTIFACT_DIR}/snapshot-restored-migrate.log" 2>&1
 foundation target check >>"${ARTIFACT_DIR}/snapshot-restored-check.log" 2>&1
