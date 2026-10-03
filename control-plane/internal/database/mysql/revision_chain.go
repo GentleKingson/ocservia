@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 )
 
-const latestRevisionVersion = 29
+const latestRevisionVersion = 30
 
 type revisionArtifact struct {
 	revision
@@ -102,7 +103,11 @@ func loadRevisionChain(engine Engine) ([]revisionArtifact, error) {
 		}
 		snapshots[parent] = revisedSnapshot(root, plan)
 	}
-	for version := 3; version <= latestRevisionVersion; version++ {
+	paths, err := fs.Glob(manifests, string(engine)+"/0*.json")
+	if err != nil {
+		return nil, ErrChecksum
+	}
+	for version := 3; version <= len(paths)+1; version++ {
 		data, err := manifests.ReadFile(fmt.Sprintf("%s/%06d.json", engine, version))
 		var next revision
 		if err != nil || json.Unmarshal(data, &next) != nil {
@@ -135,7 +140,7 @@ func loadRevisionChain(engine Engine) ([]revisionArtifact, error) {
 
 // Verify known content without treating the embedded catalog as a version window.
 // Unknown completed receipts are preserved; unknown unfinished work cannot be repaired here.
-func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionArtifact, parent string) ([]string, [][]string, error) {
+func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionArtifact, parent string, covered int) ([]string, [][]string, error) {
 	known := make(map[int]int, len(chain))
 	for i, artifact := range chain {
 		known[artifact.Version] = i
@@ -144,7 +149,10 @@ func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionAr
 	if err != nil {
 		return nil, nil, safeError(err)
 	}
-	states := []string{}
+	states := make([]string, covered)
+	for i := range states {
+		states[i] = "covered"
+	}
 	for rows.Next() {
 		var version int
 		var previous, sum, state string
@@ -158,12 +166,16 @@ func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionAr
 			}
 			continue
 		}
+		if known[version] < covered {
+			err = ErrChecksum
+			break
+		}
 		i := len(states)
 		expectedParent := parent
 		if i > 0 {
 			expectedParent = chain[i-1].sum
 		}
-		if i >= len(chain) || version != chain[i].Version || previous != expectedParent || sum != chain[i].sum || (state != "running" && state != "verified") || (i > 0 && states[i-1] != "verified") {
+		if i >= len(chain) || version != chain[i].Version || previous != expectedParent || sum != chain[i].sum || (state != "running" && state != "verified") || (i > 0 && states[i-1] != "verified" && states[i-1] != "covered") {
 			err = ErrChecksum
 			break
 		}
@@ -198,7 +210,7 @@ func readRevisionHistory(ctx context.Context, conn *sql.Conn, chain []revisionAr
 			}
 			continue
 		}
-		if i >= len(states) {
+		if i < covered || i >= len(states) {
 			return nil, nil, ErrChecksum
 		}
 		plan, ok := chain[i].Parents[parent]
@@ -353,19 +365,69 @@ func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result er
 	if err != nil {
 		return err
 	}
-	if repairChecksum != "" && repairChecksum != chain[len(chain)-1].sum {
-		return ErrChecksum
-	}
 	conn, name, err := migrationConnection(ctx, b)
 	if err != nil {
 		return err
 	}
 	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
+	a, err := currentSnapshot(chain)
+	if err != nil {
+		return err
+	}
+	origin, state, states, err := snapshotStateOn(ctx, conn, chain)
+	if err != nil {
+		return err
+	}
+	count, err := databaseObjectCount(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if count == 0 || (origin != nil && state != "verified") {
+		if origin != nil && repairChecksum == "" {
+			return fmt.Errorf("%w: snapshot repair requires mode snapshot-checksum from the matching build", ErrDirty)
+		}
+		if origin != nil && origin.sum != a.sum {
+			return fmt.Errorf("%w: interrupted snapshot requires its matching build", ErrChecksum)
+		}
+		if err = initializeSnapshot(ctx, conn, a, origin, state, states, repairChecksum); err != nil {
+			return err
+		}
+		repairChecksum = ""
+	} else if origin == nil {
+		// Classification is read-only. Metadata without a valid baseline receipt
+		// never becomes proof of an originally empty database.
+		var present int
+		if err = conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='backend_migrations'").Scan(&present); err != nil {
+			return safeError(err)
+		}
+		if present != 1 {
+			return ErrSchema
+		}
+		var receipts int
+		if err = conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM backend_migrations WHERE singleton=1").Scan(&receipts); err != nil {
+			return safeError(err)
+		}
+		if receipts != 1 {
+			return ErrSchema
+		}
+	}
+	if repairChecksum != "" && repairChecksum != chain[len(chain)-1].sum {
+		return ErrChecksum
+	}
 	return b.migrateChainOn(ctx, conn, chain, repairChecksum)
 }
 
 func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []revisionArtifact, repairChecksum string) error {
+	origin, err := verifiedOriginOn(ctx, conn, chain)
+	if err != nil {
+		return err
+	}
 	root, parent, err := b.rootOn(ctx, conn)
+	covered := 0
+	if origin != nil {
+		root, parent, err = baselineFor(b.engine, origin.Parent)
+		covered = origin.Covered - 1
+	}
 	if err != nil {
 		return err
 	}
@@ -381,7 +443,7 @@ func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []re
 	var states []string
 	var steps [][]string
 	if tables == 2 {
-		states, steps, err = readRevisionHistory(ctx, conn, chain, parent)
+		states, steps, err = readRevisionHistory(ctx, conn, chain, parent, covered)
 		if err != nil {
 			return err
 		}
@@ -413,13 +475,15 @@ func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []re
 			}
 			return ErrSchema
 		}
-		states, steps, err = readRevisionHistory(ctx, conn, chain, parent)
+		states, steps, err = readRevisionHistory(ctx, conn, chain, parent, covered)
 		if err != nil {
 			return err
 		}
 	}
-	if err = b.validateBaselineReceipts(ctx, conn, root, parent); err != nil {
-		return err
+	if origin == nil {
+		if err = b.validateBaselineReceipts(ctx, conn, root, parent); err != nil {
+			return err
+		}
 	}
 	for _, state := range states {
 		if state == "running" && repairChecksum == "" {
@@ -430,7 +494,7 @@ func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []re
 	for i, r := range chain {
 		plan := r.Parents[parent]
 		target := revisedSnapshot(snapshot, plan)
-		if i < len(states) && states[i] == "verified" {
+		if i < len(states) && (states[i] == "verified" || states[i] == "covered") {
 			snapshot = target
 			continue
 		}
@@ -484,7 +548,16 @@ func (b *Backend) ValidateSchema(ctx context.Context) (result error) {
 // verifiedSnapshotOn checks immutable history and every static object without
 // requiring an interrupted owner-managed dynamic shard to be active already.
 func (b *Backend) verifiedSnapshotOn(ctx context.Context, conn *sql.Conn, chain []revisionArtifact) (manifest, error) {
+	origin, err := verifiedOriginOn(ctx, conn, chain)
+	if err != nil {
+		return manifest{}, err
+	}
 	root, parent, err := b.rootOn(ctx, conn)
+	covered := 0
+	if origin != nil {
+		root, parent, err = baselineFor(b.engine, origin.Parent)
+		covered = origin.Covered - 1
+	}
 	if err != nil {
 		return manifest{}, err
 	}
@@ -494,7 +567,7 @@ func (b *Backend) verifiedSnapshotOn(ctx context.Context, conn *sql.Conn, chain 
 		}
 		return manifest{}, ErrSchema
 	}
-	states, _, err := readRevisionHistory(ctx, conn, chain, parent)
+	states, _, err := readRevisionHistory(ctx, conn, chain, parent, covered)
 	if err != nil {
 		return manifest{}, err
 	}
@@ -506,8 +579,10 @@ func (b *Backend) verifiedSnapshotOn(ctx context.Context, conn *sql.Conn, chain 
 	if len(states) != len(chain) {
 		return manifest{}, ErrSchema
 	}
-	if err = b.validateBaselineReceipts(ctx, conn, root, parent); err != nil {
-		return manifest{}, err
+	if origin == nil {
+		if err = b.validateBaselineReceipts(ctx, conn, root, parent); err != nil {
+			return manifest{}, err
+		}
 	}
 	snapshot := root
 	for _, r := range chain {

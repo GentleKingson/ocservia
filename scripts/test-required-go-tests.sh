@@ -38,7 +38,7 @@ for scope in full; do
   group="backend-mysql-${scope}"
   jq -n --arg scope "${scope}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" '
     [$manifest | split("\n")[] | split(" ")
-     | select(.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql")
+     | select(.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")
      | {Package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), Test: .[2]}
      | . + {Action: "run"}, . + {Action: "pass"}][]
   ' >"${tmp}/mysql.json"
@@ -297,9 +297,7 @@ for script in database-foundation-integration.sh database-postgres-smoke.sh; do
   export ROUTE_LOG="${tmp}/${script}.route"
   PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=18 \
     bash "${tmp}/wrapper/scripts/${script}" >/dev/null
-  expected_routes=3
-  [[ "${script}" != database-postgres-smoke.sh ]] || expected_routes=4
-  test "$(wc -l <"${ROUTE_LOG}")" -eq "${expected_routes}"
+  test "$(wc -l <"${ROUTE_LOG}")" -eq 4
   grep -q '^--smoke ./internal/platform/app TestDatabaseCoreSmoke$' "${ROUTE_LOG}"
   grep -Eq '^--smoke ./(internal/database/mysql|migrations) TestDatabaseInitializationSmoke$' "${ROUTE_LOG}"
   grep -q '^backend-enrollment-restart$' "${ROUTE_LOG}"

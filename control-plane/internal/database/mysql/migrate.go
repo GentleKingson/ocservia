@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"strings"
 	"time"
@@ -19,17 +20,15 @@ import (
 
 // These are new backend histories, not records of PostgreSQL migrations.
 //
-//go:embed mysql/manifest.json history/f6cd0e0/mysql.json mysql/000002.json mysql/000003.json mysql/000004.json mysql/000005.json mysql/000006.json mysql/000007.json mysql/000008.json mysql/000009.json mysql/000010.json mysql/000011.json mysql/000012.json mysql/000013.json mysql/000014.json mysql/000015.json mysql/000016.json mysql/000017.json mysql/000018.json mysql/000019.json mysql/000020.json
-//go:embed mysql/000021.json
-//go:embed mysql/000022.json
-//go:embed mysql/000023.json
-//go:embed mysql/000024.json
-//go:embed mysql/000025.json
-//go:embed mysql/000026.json
-//go:embed mysql/000027.json
-//go:embed mysql/000028.json
-//go:embed mysql/000029.json
-var manifests embed.FS
+//go:embed mysql history/f6cd0e0/mysql.json
+var embeddedManifests embed.FS
+
+// Production catalog is immutable; tests substitute a separately built release.
+type artifactFiles struct{ fs.FS }
+
+func (f artifactFiles) ReadFile(name string) ([]byte, error) { return fs.ReadFile(f.FS, name) }
+
+var manifests = artifactFiles{embeddedManifests}
 
 type step struct {
 	Name       string `json:"name"`
@@ -103,6 +102,9 @@ func schemaHash(ctx context.Context, conn *sql.Conn, s step) (string, error) {
 			return "", safeError(err)
 		}
 		definition = autoIncrement.ReplaceAllString(definition, "")
+		if s.Name == "backend_schema_snapshot" {
+			definition = snapshotCommentSuffix.ReplaceAllString(definition, "")
+		}
 	case "trigger":
 		err := conn.QueryRowContext(ctx, `SELECT CONCAT(ACTION_TIMING,' ',EVENT_MANIPULATION,' ',EVENT_OBJECT_TABLE,' ',ACTION_STATEMENT) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME=?`, s.Name).Scan(&definition)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -154,6 +156,9 @@ func schemaHash(ctx context.Context, conn *sql.Conn, s step) (string, error) {
 			return "", nil
 		}
 		definition = fmt.Sprint(count)
+	}
+	if s.Kind == "table" {
+		return tableFingerprint(definition), nil
 	}
 	return digest([]byte(definition)), nil
 }

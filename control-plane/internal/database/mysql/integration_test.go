@@ -69,7 +69,10 @@ func migrateFixture(t *testing.T) (*Backend, *Backend, Options) {
 }
 
 func TestRealInitializationAndHistory(t *testing.T) {
-	b, _, _ := migrateFixture(t)
+	b, _ := historicalFixture(t, false)
+	if err := b.Migrate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if err := b.Migrate(ctx, ""); err != nil {
 		t.Fatal(err)
@@ -174,7 +177,10 @@ func TestRealConcurrentMigration(t *testing.T) {
 	}
 }
 func TestRealSchemaDriftRepairRefused(t *testing.T) {
-	b, _, _ := migrateFixture(t)
+	b, _ := historicalFixture(t, false)
+	if err := b.Migrate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if _, err := b.Exec(ctx, "ALTER TABLE workspaces ADD COLUMN unexpected INT"); err != nil {
 		t.Fatal(err)
@@ -200,6 +206,22 @@ func TestCrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
+	if os.Getenv("PR02_CRASH_LEGACY") == "yes" {
+		ctx := context.Background()
+		conn, lock, err := migrationConnection(ctx, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer releaseMigrationConnection(conn, lock)
+		m, sum, err := loadManifest(b.engine)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = b.migrateBaseline(ctx, conn, m, sum, ""); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	if err = b.Migrate(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +235,7 @@ func TestRealCrashAndRepair(t *testing.T) {
 		}
 	}
 	child := exec.Command(os.Args[0], "-test.run=^TestCrashChild$", "-test.timeout=90s")
-	child.Env = append(os.Environ(), "PR02_CRASH_CHILD=yes", "PR02_DSN="+o.DSN)
+	child.Env = append(os.Environ(), "PR02_CRASH_CHILD=yes", "PR02_CRASH_LEGACY=yes", "PR02_DSN="+o.DSN)
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +384,10 @@ func TestRealSessionAndLocks(t *testing.T) {
 }
 
 func TestRealPrivileges(t *testing.T) {
-	b, _, o := migrateFixture(t)
+	b, o := historicalFixture(t, false)
+	if err := b.Migrate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if err := b.GrantTestPrivileges(ctx); err != nil {
 		t.Fatal(err)
