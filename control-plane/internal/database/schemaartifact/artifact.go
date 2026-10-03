@@ -4,6 +4,7 @@ package schemaartifact
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,24 +23,66 @@ type Step struct {
 }
 
 type Revision struct {
-	Number   int64
-	Steps    []Step
-	Checksum [32]byte
+	Number     int64
+	Steps      []Step
+	Checksum   [32]byte
+	Checkpoint *Receipt
+}
+
+// Receipt identifies a schema checkpoint, rather than claiming its covered
+// historical revisions were executed. Metadata semantics belong to the engine.
+type Receipt struct {
+	Checksum string          `json:"checksum"`
+	Steps    int             `json:"steps"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 
 type Checkpoint struct {
 	Epoch, Revision int64
 	Ref             string
+	Receipt         *Receipt
 }
 
 type Artifact struct {
-	Kind, Engine string
-	Epoch        int64
-	Baseline     Revision
-	Revisions    []Revision
-	Previous     *Checkpoint
-	Transition   *Revision
-	Checksum     [32]byte
+	Kind, Engine    string
+	Epoch           int64
+	Baseline        Revision
+	Revisions       []Revision
+	Previous        *Checkpoint
+	Transition      *Revision
+	Checksum        [32]byte
+	Base            *Receipt
+	HistoryChecksum string
+}
+
+func HistoryChecksum(upgrade Artifact, through int64) (string, error) {
+	if upgrade.Kind != "upgrade" || upgrade.Base == nil || through < 0 || through > int64(len(upgrade.Revisions)) {
+		return "", errors.New("invalid artifact history boundary")
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\t%d\t%s\n", upgrade.Engine, upgrade.Epoch, upgrade.Base.Checksum)
+	for _, r := range upgrade.Revisions {
+		if r.Number > through {
+			break
+		}
+		fmt.Fprintf(h, "%d\t%x\n", r.Number, r.Checksum)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func parseReceipt(value string) (*Receipt, error) {
+	var r Receipt
+	d := json.NewDecoder(strings.NewReader(value))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&r); err != nil {
+		return nil, errors.New("invalid checkpoint receipt")
+	}
+	decoded, err := hex.DecodeString(r.Checksum)
+	canonical, _ := json.Marshal(r)
+	if err != nil || len(decoded) != 32 || r.Checksum != strings.ToLower(r.Checksum) || r.Steps <= 0 || r.Steps > 999 || !bytes.Equal(canonical, []byte(value)) || (r.Metadata != nil && !bytes.HasPrefix(r.Metadata, []byte("{"))) {
+		return nil, errors.New("checkpoint receipt must use canonical JSON, SHA256 and positive steps")
+	}
+	return &r, nil
 }
 
 var stepName = regexp.MustCompile(`^[0-9]{3}:[a-z][a-z0-9_]{0,63}$`)
@@ -86,16 +129,44 @@ func Parse(data []byte, engine string) (Artifact, error) {
 			return errors.New("invalid artifact epoch")
 		}
 		if a.Kind == "schema" {
-			if headers["revision"] != "0" || len(headers) != 5 {
-				return errors.New("schema requires revision zero")
+			if value, ok := headers["history-sha256"]; ok {
+				decoded, err := hex.DecodeString(value)
+				if err != nil || len(decoded) != 32 || value != strings.ToLower(value) {
+					return errors.New("invalid covered history checksum")
+				}
+				a.HistoryChecksum = value
+				delete(headers, "history-sha256")
 			}
+			n, err := number(headers["revision"])
+			if err != nil || len(headers) != 5 {
+				return errors.New("schema requires its checkpoint revision")
+			}
+			a.Baseline.Number = n
 			rev = &a.Baseline
 			return nil
 		}
 		if _, ok := headers["revision"]; ok {
 			return errors.New("upgrade has no baseline header")
 		}
+		if value, ok := headers["baseline"]; ok {
+			a.Base, err = parseReceipt(value)
+			if err != nil {
+				return err
+			}
+			delete(headers, "baseline")
+		}
+		var previousReceipt *Receipt
+		if value, ok := headers["previous-checkpoint-receipt"]; ok {
+			previousReceipt, err = parseReceipt(value)
+			if err != nil {
+				return err
+			}
+			delete(headers, "previous-checkpoint-receipt")
+		}
 		if len(headers) == 4 {
+			if previousReceipt != nil {
+				return errors.New("receipt has no previous checkpoint")
+			}
 			return nil
 		}
 		if len(headers) != 7 {
@@ -113,7 +184,7 @@ func Parse(data []byte, engine string) (Artifact, error) {
 		if ref == "" || strings.ContainsAny(ref, " \t") {
 			return errors.New("invalid checkpoint ref")
 		}
-		a.Previous = &Checkpoint{Epoch: e, Revision: r, Ref: ref}
+		a.Previous = &Checkpoint{Epoch: e, Revision: r, Ref: ref, Receipt: previousReceipt}
 		return nil
 	}
 	for offset := 0; offset < len(data); {
@@ -134,7 +205,7 @@ func Parse(data []byte, engine string) (Artifact, error) {
 		key, value, hasValue := strings.Cut(marker, "=")
 		if header && key != "step" && key != "transition" && !(key == "revision" && headers["artifact"] == "upgrade") {
 			switch key {
-			case "artifact", "format", "engine", "epoch", "revision", "previous-checkpoint-epoch", "previous-checkpoint-revision", "previous-checkpoint-ref":
+			case "artifact", "format", "engine", "epoch", "revision", "previous-checkpoint-epoch", "previous-checkpoint-revision", "previous-checkpoint-ref", "baseline", "previous-checkpoint-receipt", "history-sha256":
 			default:
 				return a, fmt.Errorf("unknown header %q", key)
 			}
@@ -152,6 +223,19 @@ func Parse(data []byte, engine string) (Artifact, error) {
 			return a, err
 		}
 		switch key {
+		case "checkpoint":
+			if rev == nil || current != nil || len(rev.Steps) != 0 || rev.Checkpoint != nil || !hasValue || a.Kind != "upgrade" || transition {
+				return a, errors.New("checkpoint must precede revision steps")
+			}
+			var err error
+			rev.Checkpoint, err = parseReceipt(value)
+			if err != nil {
+				return a, err
+			}
+			// Checkpoint provenance refers to schema bytes which in turn bind
+			// executed history. Exclude this receipt from the SQL block hash to
+			// avoid a circular checksum; the full artifact still hashes it.
+			revStart = end
 		case "revision", "transition":
 			if a.Kind != "upgrade" || rev != nil || current != nil || !hasValue {
 				return a, errors.New("unexpected revision boundary")

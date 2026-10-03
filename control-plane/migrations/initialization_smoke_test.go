@@ -50,16 +50,19 @@ func TestDatabaseInitializationSmoke(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET version=-version`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(version,name,checksum) VALUES(9000001,'unknown-receipt',decode(repeat('01',32),'hex'))`); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE schema_revisions SET epoch=2`); err != nil {
 		t.Fatal(err)
 	}
 	if err := Migrate(ctx, pool); err == nil {
-		t.Fatal("unknown receipt was accepted at the designated checkpoint")
+		t.Fatal("unsupported epoch was accepted")
 	}
-	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=1`); err != nil {
+	if _, err := pool.Exec(ctx, "UPDATE schema_revisions SET epoch=1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := Migrate(ctx, pool); err == nil || !strings.Contains(err.Error(), "checksum does not match") {
+	if _, err := pool.Exec(ctx, `UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, pool); err == nil || !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("known SQL checksum corruption not rejected: %v", err)
 	}
 }
