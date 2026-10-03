@@ -401,3 +401,26 @@ func TestMySQLArtifactPreviousCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMySQLArtifactCatalog(t *testing.T) {
+	schema, err := manifests.ReadFile("mysql/schema.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgrade, err := manifests.ReadFile("mysql/upgrade.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	useMySQLArtifacts(t, schema, upgrade)
+	a, err := loadMySQLArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unknown definition must never normalize to absence or a pinned object.
+	if got := a.fingerprint("foreign table definition"); got != digest([]byte("foreign table definition")) {
+		t.Fatal("unknown fingerprint adopted", got)
+	}
+	if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 || a.upgrade.Previous != nil {
+		t.Fatal("Phase A bridge window changed without checkpoint qualification")
+	}
+}

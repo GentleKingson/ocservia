@@ -240,3 +240,18 @@ func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
 		t.Fatal("checkpoint transition", rows, err)
 	}
 }
+
+func TestPostgreSQLArtifactCatalog(t *testing.T) {
+	a, err := parsePostgresArtifacts([]byte(snapshotSQL), upgradeSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 || a.upgrade.Previous != nil {
+		t.Fatal("Phase A bridge window changed without checkpoint qualification")
+	}
+	for _, metadata := range []string{`{"catalog_sha256":"` + strings.Repeat("a", 64) + `","unknown":1}`, `{"catalog_sha256":"` + strings.Repeat("a", 64) + `","catalog_sha256":"` + strings.Repeat("a", 64) + `"}`, `{"catalog_sha256":"` + strings.Repeat("A", 64) + `"}`} {
+		if _, err := catalogMetadata([]byte(metadata)); err == nil {
+			t.Fatal("noncanonical fingerprint metadata accepted")
+		}
+	}
+}

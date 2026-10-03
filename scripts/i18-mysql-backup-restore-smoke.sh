@@ -203,21 +203,23 @@ docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e \
   "CREATE DATABASE snapshot_restore; GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON snapshot_restore.* TO 'backup'@'%';"
 controller_migrate source >"${ARTIFACT_DIR}/snapshot-initialize.log" 2>&1
 foundation source check >"${ARTIFACT_DIR}/snapshot-source-check.log" 2>&1
-snapshot_checksum="$(foundation source snapshot-checksum)"
+snapshot_checksum="$(foundation source schema-artifact-checksum)"
 source_checksum="$(docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -Nse \
-  "SELECT artifact_checksum FROM snapshot_restore.backend_schema_snapshot WHERE singleton=1 AND state='verified'")"
+  "SELECT checksum FROM snapshot_restore.schema_revisions WHERE epoch=1 AND revision=0 AND state='verified'")"
 [[ "${source_checksum}" == "${snapshot_checksum}" ]]
 docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e \
   "INSERT INTO snapshot_restore.identities(id,issuer,subject,created_at,updated_at) VALUES(UNHEX(REPEAT('11',16)),'backup-test','snapshot-restore-marker',0,0); UPDATE snapshot_restore.scheduler_leadership SET lease_until=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))-1000000 WHERE id=1;"
-receipt_query="SELECT CONCAT_WS('|',singleton,artifact_checksum,state,repair_count,started_at,verified_at) FROM backend_schema_snapshot ORDER BY singleton;
+receipt_query="SELECT CONCAT_WS('|',epoch,revision,checksum,state,step,started_at,verified_at) FROM schema_revisions ORDER BY epoch,revision;
+SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='schema_revisions';
+SELECT CONCAT_WS('|',singleton,artifact_checksum,state,repair_count,started_at,verified_at) FROM backend_schema_snapshot ORDER BY singleton;
 SELECT CONCAT_WS('|',ordinal,name,checksum,state,started_at,verified_at) FROM backend_schema_snapshot_steps ORDER BY ordinal;
-SELECT CONCAT('legacy:',(SELECT COUNT(*) FROM backend_migrations),':',(SELECT COUNT(*) FROM backend_migration_steps),':',(SELECT COUNT(*) FROM backend_schema_revisions),':',(SELECT COUNT(*) FROM backend_schema_revision_steps));
+SELECT CONCAT('legacy:',(SELECT COUNT(*) FROM backend_migrations),':',(SELECT COUNT(*) FROM backend_migration_steps),':',(SELECT COUNT(*) FROM backend_schema_revisions),':',(SELECT COUNT(*) FROM backend_schema_revision_steps),':',(SELECT COUNT(*) FROM backend_schema_snapshot),':',(SELECT COUNT(*) FROM backend_schema_snapshot_steps));
 SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='backend_schema_snapshot';"
 receipts() {
   docker exec "$1" "${CLIENT}" -uroot -p"${password}" --database=snapshot_restore -Nse "${receipt_query}"
 }
 receipts "${source_container}" >"${ARTIFACT_DIR}/snapshot-source-receipts.txt"
-grep -Fxq 'legacy:0:0:0:0' "${ARTIFACT_DIR}/snapshot-source-receipts.txt"
+grep -Fxq 'legacy:0:0:0:0:0:0' "${ARTIFACT_DIR}/snapshot-source-receipts.txt"
 set_backup_owner 999:999
 docker run --name "${backup_container}" --network "${network}" \
   -e DATABASE_BACKEND=mysql -e MYSQL_DATABASE=snapshot_restore \
@@ -250,7 +252,7 @@ cmp "${ARTIFACT_DIR}/snapshot-source-receipts.txt" "${ARTIFACT_DIR}/snapshot-res
   "SELECT subject FROM snapshot_restore.identities WHERE id=UNHEX(REPEAT('11',16))")" == snapshot-restore-marker ]]
 runtime_read="$(docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}" \
   --protocol=TCP -h127.0.0.1 -usnapshot_runtime --database=snapshot_restore -Nse \
-  "SELECT subject FROM identities WHERE id=UNHEX(REPEAT('11',16)); SELECT COUNT(*) FROM backend_schema_snapshot WHERE state='verified';")"
+  "SELECT subject FROM identities WHERE id=UNHEX(REPEAT('11',16)); SELECT COUNT(*) FROM schema_revisions WHERE epoch=1 AND revision=0 AND state='verified';")"
 [[ "${runtime_read}" == $'snapshot-restore-marker\n1' ]]
 printf '%s\n' "${runtime_read}" >"${ARTIFACT_DIR}/snapshot-runtime-read.log"
 if docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}" \
@@ -260,6 +262,13 @@ if docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}"
   exit 1
 fi
 grep -Fq 'CREATE command denied' "${ARTIFACT_DIR}/snapshot-runtime-ddl.log"
+if docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}" \
+  --protocol=TCP -h127.0.0.1 -usnapshot_runtime --database=snapshot_restore \
+  -e 'UPDATE schema_revisions SET checksum=checksum' >"${ARTIFACT_DIR}/snapshot-runtime-journal-write.log" 2>&1; then
+  echo 'restored runtime can write the migration journal' >&2
+  exit 1
+fi
+grep -Fq 'UPDATE command denied' "${ARTIFACT_DIR}/snapshot-runtime-journal-write.log"
 printf 'snapshot_checksum=%s\nsnapshot_backup_id=%s\nvalidation=passed\nreceipts=unchanged\nlegacy_receipts=empty\nruntime_read=passed\nruntime_ddl=denied\n' \
   "${snapshot_checksum}" "${snapshot_backup_id}" >"${ARTIFACT_DIR}/snapshot-restore-summary.txt"
 

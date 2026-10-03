@@ -79,7 +79,7 @@ func parseMySQLArtifacts(schema, upgrade []byte) (mysqlArtifacts, error) {
 		return a, fmt.Errorf("%w: upgrade markers: %v", ErrChecksum, err)
 	}
 	head := int64(len(a.upgrade.Revisions))
-	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != head || a.upgrade.Base == nil {
+	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != head || a.upgrade.Base == nil || (a.schema.Epoch > 1 && a.upgrade.Previous == nil) {
 		return a, fmt.Errorf("%w: artifact window", ErrChecksum)
 	}
 	cp := a.upgrade.Base
