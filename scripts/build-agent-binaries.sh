@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${VERSION:?}" "${PACKAGE_ARCH:?}"
-[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 2
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] || exit 2
 case "${PACKAGE_ARCH}:$(uname -m)" in
   amd64:x86_64) machine='Advanced Micro Devices X86-64' ;;
   arm64:aarch64) machine=AArch64 ;;
