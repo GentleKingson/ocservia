@@ -248,6 +248,9 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -p 1 ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend|HistoryRetentionBackend|AuditRetentionBackend)Integration$')
 
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_SNAPSHOT_DATABASE_URL="${owner_url}" \
+    bash "${ROOT}/scripts/required-go-tests.sh" postgres-snapshot --select -race -timeout=10m)
+
   # Scheduler leadership tests need an idle lease, so they run before any
   # long-lived control-plane process acquires leadership on this database.
   # -race is required here: these are the only tests that exercise the
@@ -447,15 +450,14 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   pid=$!
   PIDS+=("${pid}")
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
-  # ponytail: The current schema has 39 migrations; advance this count and
-  # the unused future record below together when adding a migration.
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "39"
+  # Snapshot coverage and real forward rows together match the current catalogue.
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "$(find "${ROOT}/control-plane/migrations" -name '*.up.sql' | wc -l | tr -d ' ')"
   assert_local_bootstrap_schema "${container}" ocservia
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (40, '000040_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (9000001, '9000001_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "200"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 40" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 9000001" >/dev/null
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
 
   docker stop "${container}" >/dev/null

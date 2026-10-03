@@ -66,45 +66,99 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, preflights ...Preflight) error {
+	known, err := loadMigrations()
+	if err != nil {
+		return err
+	}
+	current, err := loadSnapshot(known)
+	if err != nil {
+		return err
+	}
+	return migrate(ctx, pool, known, current, preflights)
+}
+
+func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current snapshot, preflights []Preflight) (result error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
+	lockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	_, err = conn.Exec(lockCtx, "SELECT pg_advisory_lock($1)", migrationLockID)
+	cancel()
+	if err != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		_ = conn.Hijack().Close(closeCtx)
 		return fmt.Errorf("lock migrations: %w", err)
 	}
 	defer func() {
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationLockID)
+		var unlocked bool
+		err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationLockID).Scan(&unlocked)
+		if err != nil || !unlocked {
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer closeCancel()
+			_ = conn.Hijack().Close(closeCtx)
+			if result == nil {
+				if err != nil {
+					result = fmt.Errorf("unlock migrations: %w", err)
+				} else {
+					result = errors.New("migration lock ownership was lost")
+				}
+			}
+			return
+		}
+		conn.Release()
 	}()
-	if _, err := conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version bigint PRIMARY KEY, name text NOT NULL, checksum bytea NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
-		return fmt.Errorf("create migration metadata: %w", err)
-	}
-	migrations, err := loadMigrations()
+	hasHistory, empty, err := databaseState(ctx, conn)
 	if err != nil {
-		return err
+		return fmt.Errorf("classify PostgreSQL database: %w", err)
+	}
+	if empty {
+		if err := initializeSnapshot(ctx, conn, current, known); err != nil {
+			return err
+		}
+	} else if !hasHistory {
+		return errors.New("nonempty PostgreSQL database has no recognized migration history; refusing initialization")
 	}
 	applied, err := readAppliedMigrations(ctx, conn)
 	if err != nil {
 		return err
 	}
-	if err := validateAppliedMigrations(migrations, applied); err != nil {
+	if err := validateAppliedMigrations(known, applied); err != nil {
+		return err
+	}
+	// Unknown completed records are preserved, but cannot on their own establish
+	// an existing database's provenance.
+	recognized := false
+	for _, row := range applied {
+		for _, m := range known {
+			if row.Version == m.Version {
+				recognized = true
+				break
+			}
+		}
+	}
+	if !recognized {
+		return errors.New("PostgreSQL database has no known migration history; refusing adoption")
+	}
+	if err := validateOrigin(ctx, conn, known, applied); err != nil {
 		return err
 	}
 	appliedVersions := make(map[int64]struct{}, len(applied))
-	for _, migration := range applied {
-		appliedVersions[migration.Version] = struct{}{}
+	for _, m := range applied {
+		appliedVersions[m.Version] = struct{}{}
 	}
-	for _, migration := range migrations {
-		if _, ok := appliedVersions[migration.Version]; ok {
+	for _, m := range known {
+		if _, ok := appliedVersions[m.Version]; ok {
 			continue
 		}
-		if err := applyMigration(ctx, conn, migration, preflights); err != nil {
+		if err := applyMigration(ctx, conn, m, preflights); err != nil {
 			return err
 		}
 	}
+
 	// Owner-only, repeated by --migrate-only to advance the provisioned horizon.
 	if _, err := conn.Exec(ctx, `SELECT telemetry_ensure_month_partition(month AT TIME ZONE 'UTC') FROM generate_series(date_trunc('month',now() AT TIME ZONE 'UTC')-interval '1 month',date_trunc('month',now() AT TIME ZONE 'UTC')+interval '2 months',interval '1 month') AS month`); err != nil {
 		return fmt.Errorf("provision telemetry partitions: %w", err)
@@ -116,7 +170,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 	identifier := pgx.Identifier{role}.Sanitize()
 	statements := []string{
 		"GRANT USAGE ON SCHEMA public TO " + identifier,
-		"GRANT SELECT ON schema_migrations TO " + identifier,
+		"GRANT SELECT ON schema_migrations, schema_snapshot_origin TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces, nodes, operations TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON enrollment_tokens, node_endpoint_keys, node_capabilities TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_bootstrap_tokens TO " + identifier,
@@ -223,6 +277,21 @@ func validateAppliedMigrations(known []Migration, applied []appliedMigration) er
 	for _, migration := range known {
 		knownByVersion[migration.Version] = migration
 	}
+	present := make(map[int64]bool, len(applied))
+	var highestKnown int64
+	for _, migration := range applied {
+		if _, ok := knownByVersion[migration.Version]; ok {
+			present[migration.Version] = true
+			if migration.Version > highestKnown {
+				highestKnown = migration.Version
+			}
+		}
+	}
+	for _, migration := range known {
+		if migration.Version <= highestKnown && !present[migration.Version] {
+			return fmt.Errorf("migration history has a gap at known version %d", migration.Version)
+		}
+	}
 	for _, migration := range applied {
 		expected, ok := knownByVersion[migration.Version]
 		if !ok {
@@ -326,4 +395,10 @@ func validatePostgreSQLRelease(version int, release string) error {
 		return errors.New("PostgreSQL requires a stable 18.x release")
 	}
 	return nil
+}
+
+func rollbackMigration(tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = tx.Rollback(ctx)
 }
