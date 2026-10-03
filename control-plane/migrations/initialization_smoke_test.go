@@ -53,8 +53,8 @@ func TestDatabaseInitializationSmoke(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(version,name,checksum) VALUES(9000001,'unknown-receipt',decode(repeat('01',32),'hex'))`); err != nil {
 		t.Fatal(err)
 	}
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatalf("unknown receipt became a version gate: %v", err)
+	if err := Migrate(ctx, pool); err == nil {
+		t.Fatal("unknown receipt was accepted at the designated checkpoint")
 	}
 	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET checksum=decode(repeat('00',32),'hex') WHERE version=1`); err != nil {
 		t.Fatal(err)
