@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -19,45 +20,35 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 		}
 	}
 	ready()
-	for _, change := range []struct{ mutate, restore string }{
-		{`UPDATE backend_migrations SET dirty=true`, `UPDATE backend_migrations SET dirty=false`},
-		{`UPDATE backend_schema_revisions SET state='running' WHERE version=(SELECT MAX(version) FROM backend_schema_revision_steps)`, `UPDATE backend_schema_revisions SET state='verified' WHERE state='running'`},
-		{`UPDATE backend_schema_revision_steps SET ordinal=100001 WHERE version=3 AND ordinal=1`, `UPDATE backend_schema_revision_steps SET ordinal=1 WHERE version=3 AND ordinal=100001`},
-	} {
-		if n, err := owner.Exec(ctx, change.mutate); err != nil || n != 1 {
-			t.Fatalf("alter schema fixture: %d %v", n, err)
-		}
-		checkErr := owner.ValidateSchema(ctx)
-		if _, err := owner.Exec(ctx, change.restore); err != nil {
+	var checksum string
+	var progress int
+	var verified time.Time
+	if err := owner.QueryRow(ctx, "SELECT checksum,step,verified_at FROM schema_revisions WHERE epoch=1 AND revision=0").Scan(&checksum, &progress, &verified); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() {
+		t.Helper()
+		if _, err := owner.Exec(ctx, "UPDATE schema_revisions SET checksum=?,state='verified',step=?,verified_at=? WHERE epoch=1 AND revision=0", checksum, progress, verified); err != nil {
 			t.Fatal(err)
 		}
-		if checkErr == nil {
-			t.Fatalf("owner accepted altered schema ledger: %s", change.mutate)
+	}
+	for _, query := range []string{"UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=1 AND revision=0", fmt.Sprintf("UPDATE schema_revisions SET step=%d WHERE epoch=1 AND revision=0", progress+1), "UPDATE schema_revisions SET checksum=REPEAT('0',64) WHERE epoch=1 AND revision=0"} {
+		if n, err := owner.Exec(ctx, query); err != nil || n != 1 {
+			t.Fatal("alter schema fixture", n, err)
+		}
+		err := owner.ValidateSchema(ctx)
+		restore()
+		if err == nil {
+			t.Fatal("owner accepted altered journal", query)
 		}
 		ready()
 	}
-	var checksum string
-	if err := owner.QueryRow(ctx, `SELECT checksum FROM backend_schema_revision_steps WHERE version=3 AND ordinal=1`).Scan(&checksum); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := owner.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=REPEAT('0',64) WHERE version=3 AND ordinal=1`); err != nil {
-		t.Fatal(err)
-	}
-	checkErr := owner.ValidateSchema(ctx)
-	if _, err := owner.Exec(ctx, `UPDATE backend_schema_revision_steps SET checksum=? WHERE version=3 AND ordinal=1`, checksum); err != nil {
-		t.Fatal(err)
-	}
-	if !errors.Is(checkErr, ErrChecksum) {
-		t.Fatalf("altered predecessor checksum: %v", checkErr)
-	}
-	ready()
-
 	conn, name, err := migrationConnection(ctx, owner)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bounded, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	checkErr = owner.ValidateSchema(bounded)
+	checkErr := owner.ValidateSchema(bounded)
 	cancel()
 	if err := releaseMigrationConnection(conn, name); err != nil {
 		t.Fatal(err)

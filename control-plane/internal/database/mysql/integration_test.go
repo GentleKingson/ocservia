@@ -129,8 +129,8 @@ func TestRealInitializationAndHistory(t *testing.T) {
 		if err := b.Migrate(ctx, sum); !errors.Is(err, ErrDirty) {
 			t.Fatal("unknown unfinished work repaired without its content", table, err)
 		}
-		if err := b.ValidateSchema(ctx); !errors.Is(err, ErrChecksum) {
-			t.Fatal("missing checkpoint passed validation", table, err)
+		if err := b.ValidateSchema(ctx); !errors.Is(err, ErrDirty) {
+			t.Fatal("unfinished legacy work passed validation", table, err)
 		}
 		if _, err := b.Exec(ctx, "UPDATE "+table+" SET state='verified' WHERE version=9001"); err != nil {
 			t.Fatal(err)
@@ -185,6 +185,10 @@ func TestRealSchemaDriftRepairRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	// This fixture exercises an interrupted legacy bridge before its checkpoint.
+	if _, err := b.Exec(ctx, "DELETE FROM schema_revisions"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := b.Exec(ctx, "ALTER TABLE workspaces ADD COLUMN unexpected INT"); err != nil {
 		t.Fatal(err)
 	}

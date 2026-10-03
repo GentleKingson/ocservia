@@ -424,3 +424,45 @@ func TestMySQLArtifactCatalog(t *testing.T) {
 		t.Fatal("Phase A bridge window changed without checkpoint qualification")
 	}
 }
+
+func TestMySQLArtifactForeignRepair(t *testing.T) {
+	ctx := context.Background()
+	schema, upgrade := futureMySQLArtifacts(t)
+	original := manifests
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprint(partial), func(t *testing.T) {
+			manifests = original
+			b, _, _ := migrateFixture(t)
+			useMySQLArtifacts(t, schema, upgrade)
+			a, err := loadMySQLArtifacts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rev := a.upgrade.Revisions[0]
+			conn, err := b.pool.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = startMySQLRevision(ctx, conn, 1, 1, fmt.Sprintf("%x", rev.Checksum)); err != nil {
+				t.Fatal(err)
+			}
+			if partial {
+				if _, err = conn.ExecContext(ctx, "CREATE TABLE artifact_probe(id INT PRIMARY KEY,value INT NOT NULL,foreign_column INT) ENGINE=InnoDB"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err = conn.ExecContext(ctx, "CREATE TABLE foreign_probe(id INT) ENGINE=InnoDB"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			conn.Close()
+			before := mysqlArtifactDigest(t, b)
+			if err = b.Migrate(ctx, fmt.Sprintf("%x", rev.Checksum)); !errors.Is(err, ErrSchema) {
+				t.Fatal("foreign state adopted", err)
+			}
+			if mysqlArtifactDigest(t, b) != before {
+				t.Fatal("foreign repair mutated state")
+			}
+		})
+	}
+}
