@@ -1,5 +1,8 @@
 # Deploy the Controller
 
+Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
+(positive N without leading zeros). RCs are not recommended stable releases.
+
 This guide is the short production path for installing the ocservia Controller. It focuses on what an operator needs to prepare and run. Exact file modes, lifecycle state, rollback behavior, and recovery details remain in the [Production deployment reference](../operations/production-deployment.md).
 
 Use an exact published release, after Release Check has passed. This is a fresh
@@ -120,7 +123,7 @@ The bootstrap reads `./install.env`, prepares a clean release checkout under the
 
 Do not replace this flow with a manual `docker compose up -d`; that bypasses the release and lifecycle checks.
 
-This bootstrap requires an existing stable Release and an exact version tag.
+This bootstrap requires an existing stable or RC Release and an exact version tag.
 
 ## 5. Verify the deployment
 

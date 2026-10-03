@@ -142,3 +142,56 @@ require_check(manual['permissions'] == {'contents'=>'read'} && manual.fetch('job
 puts 'Tag builds, dispatch write guard, Release Check failure propagation and actual recovery contracts passed'
 
 require_check(!manual.dig('jobs','business','with','profile').include?('production_signer'), 'Signer must not force integration')
+# Execute publication commands with recording doubles: no external writes.
+Dir.mktmpdir('release-rc-') do |dir|
+  prepare = release.dig('jobs','prepare','steps').first.fetch('run')
+  %w[1.2.3 1.2.3-rc.1 1.2.3-rc.10].each do |version|
+    [['push',"v#{version}",''],['workflow_dispatch','main',version]].each do |event,tag,input|
+      File.write("#{dir}/outputs", '')
+      _, error, status = Open3.capture3({'EVENT'=>event,'TAG'=>tag,'TEST_VERSION'=>input,'GITHUB_OUTPUT'=>"#{dir}/outputs"},'bash','-euo','pipefail','-c',prepare)
+      require_check(status.success?, "valid RC input failed: #{error}")
+      require_check(File.read("#{dir}/outputs").include?("is_prerelease=#{version.include?('-rc.') ? 'true' : 'false'}\n"), 'wrong prerelease output')
+    end
+  end
+  %w[v1.2.3 v1.2.3-rc.1 1.2.3-rc 1.2.3-rc1 1.2.3-rc.0 1.2.3-rc.01 1.2.3-beta.1 1.2.3+build 1.2.3-rc.1+build].each do |version|
+    [['push',"v#{version}",''],['workflow_dispatch','main',version]].each do |event,tag,input|
+      status = Open3.capture3({'EVENT'=>event,'TAG'=>tag,'TEST_VERSION'=>input,'GITHUB_OUTPUT'=>"#{dir}/outputs"},'bash','-euo','pipefail','-c',prepare).last
+      require_check(!status.success?, "invalid RC input accepted: #{version}")
+    end
+  end
+  File.write("#{dir}/gh", <<~'SH')
+    #!/usr/bin/env bash
+    printf '%s\n' "$*" >>"$CALLS"
+    case "$1 $2" in
+      'release list') echo "${STABLE_BASE-v1.1.0}" ;;
+      'release view')
+        if [[ "$*" == *isDraft* ]]; then echo "${PREVIOUS_RC_VALID:-true}"
+        elif [[ "$*" == *isPrerelease* ]]; then echo "$IS_PRERELEASE"
+        else exit 1
+        fi ;;
+      'api repos/test/repo/releases/latest') echo v1.1.0 ;;
+      'release create'|'release upload') ;;
+      *) exit 2 ;;
+    esac
+  SH
+  File.write("#{dir}/docker", "#!/usr/bin/env bash\ncat >/dev/null\n")
+  File.chmod(0755,"#{dir}/gh","#{dir}/docker")
+  env={'PATH'=>"#{dir}:#{ENV.fetch('PATH')}",'GITHUB_OUTPUT'=>"#{dir}/outputs",'CALLS'=>"#{dir}/calls",'GH_REPO'=>'test/repo','GH_TOKEN'=>'test','GITHUB_ACTOR'=>'test','RUNNER_TEMP'=>dir}
+  notes = publish['steps'].find {|s| s['id']=='notes'}.fetch('run')
+  publication = publish['steps'].find {|s| s['name']=='Publish version images and Release assets'}.fetch('run')
+  [['1.2.3-rc.1','v1.1.0'],['1.2.3-rc.2','v1.2.3-rc.1'],['1.2.3-rc.10','v1.2.3-rc.9'],['1.2.3','v1.1.0']].each do |version,base|
+    File.write("#{dir}/outputs",'')
+    File.write("#{dir}/calls",'')
+    current=env.merge('VERSION'=>version,'IS_PRERELEASE'=>version.include?('-rc.') ? 'true' : 'false')
+    _,err,status=Open3.capture3(current,'bash','-euo','pipefail','-c',notes)
+    require_check(status.success? && File.read("#{dir}/outputs").include?("base=#{base}\n"), "notes base failed #{version}: #{err}")
+    _,err,status=Open3.capture3(current.merge('NOTES_BASE'=>base),'bash','-euo','pipefail','-c',publication)
+    require_check(status.success?, "publication failed: #{err}")
+    create=File.readlines("#{dir}/calls").find {|line| line.start_with?('release create ')}
+    require_check(create.include?("--notes-start-tag #{base}") && create.include?('--verify-tag'), 'publication lost explicit notes base or tag verification')
+    require_check(create.include?('--prerelease') == version.include?('-rc.') && create.include?('--latest=false') == version.include?('-rc.'), 'wrong publication flags')
+  end
+  [['1.2.3-rc.2',{'PREVIOUS_RC_VALID'=>'false'}],['1.2.3-rc.1',{'STABLE_BASE'=>''}]].each do |version,extra|
+    require_check(!Open3.capture3(env.merge('VERSION'=>version).merge(extra),'bash','-euo','pipefail','-c',notes).last.success?, 'missing comparison base accepted')
+  end
+end

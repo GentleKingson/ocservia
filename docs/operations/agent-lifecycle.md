@@ -1,5 +1,8 @@
 # Agent package lifecycle
 
+Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
+(positive N without leading zeros). RCs are not recommended stable releases.
+
 > **Technical reference.** For the operator path, start with [Install a managed
 > node](../getting-started/managed-node.md), [Upgrade the Agent](../how-to/agent-lifecycle.md#upgrade),
 > or [Roll back the Agent](../how-to/agent-lifecycle.md#rollback). This document retains

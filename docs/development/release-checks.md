@@ -8,7 +8,7 @@ PR -> Basic CI -> merge main
       - Full CI
       - Security
       - amd64 Business Smoke + four finite single-instance recoveries
-   -> PASS -> operator version confirmation -> vX.Y.Z tag
+   -> PASS -> operator version confirmation -> vX.Y.Z-rc.N or vX.Y.Z tag
    -> Release
       - amd64 build + Controller image security + install/image smoke
       - arm64 build + Controller image security + install/image smoke
@@ -86,13 +86,30 @@ or a short Validation statement only when relevant and supported by actual
 results; detailed evidence stays in Actions.
 
 These presentation rules do not change Release Check qualification or the
-native build, image scan, smoke, and publication gates. RC releases are not yet
-supported by the current stable-only version and package contracts. A separate
-RC implementation must first validate DEB/RPM and installer version handling,
-mark RCs as prereleases with `--latest=false`, and explicitly select the notes
-comparison base: previous stable for the first RC and final stable, with the
-previous RC allowed for later candidate increments (`--notes-start-tag`). RCs
-must retain the same Release Check qualification.
+native build, image scan, smoke, and publication gates. Supported candidates use
+`X.Y.Z-rc.N`, where N is positive with no leading zeros; other prereleases and
+build metadata are rejected. RC publication sets `--prerelease --latest=false`
+and writes only exact RC image tags. Dispatch never publishes.
+
+The notes base is the most recently published non-draft stable Release for
+`rc.1` and final (excluding the current Release on a rerun). For `rc.N`, N > 1,
+the immediately preceding RC must exist as a published prerelease. Missing
+bases fail before image publication; skipping RC numbers is not supported.
+This follows a linear release train, not semantic-version sorting across
+parallel maintenance branches. Final needs its own commit and tag so installers
+still see exactly one release identity at HEAD. Retain RC Release history.
+Every candidate and final needs a fresh Release Check on its exact commit.
+
+Package filenames and binary versions use `X.Y.Z-rc.N`; nFPM encodes native
+metadata as `X.Y.Z~rc.N-1` (DEB) and Version `X.Y.Z~rc.N`, Release `1` (RPM).
+To exercise three real packages on a disposable native systemd runner, use
+`RC_LIFECYCLE=true RUN_ID=<unique-id> ARTIFACT_DIR=<path>
+scripts/release-native-package-smoke.sh` with the native package tools prepared.
+It builds `1.2.0-rc.1`, `1.2.0-rc.2`, and `1.2.0` and checks both upgrade steps.
+Keep `STUB_BINARIES=false` for release acceptance; stub runs are scriptlet tests.
+Run on both native architectures. A build-only RC rehearsal uses
+`gh workflow run release.yml --ref <candidate-branch> -f version=1.2.0-rc.1`;
+all product and asset jobs must pass and Publish must be skipped.
 
 ## Coverage ownership
 
