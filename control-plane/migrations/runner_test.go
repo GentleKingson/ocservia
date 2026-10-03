@@ -39,15 +39,14 @@ func TestValidateAppliedMigrationsAcceptsKnownVersion(t *testing.T) {
 	}
 }
 
-func TestValidateAppliedMigrationsAllowsUnappliedKnownMigration(t *testing.T) {
+func TestValidateAppliedMigrationsRequiresContiguousKnownPrefix(t *testing.T) {
 	first := testMigration(1, "000001_foundation.up.sql", "one")
 	second := testMigration(2, "000002_next.up.sql", "two")
-
-	err := validateAppliedMigrations([]Migration{first, second}, []appliedMigration{{
-		Version: second.Version, Name: second.Name, Checksum: second.Checksum[:],
-	}})
-	if err != nil {
-		t.Fatalf("validateAppliedMigrations() error = %v, want missing migration to remain eligible for execution", err)
+	if err := validateAppliedMigrations([]Migration{first, second}, []appliedMigration{{Version: first.Version, Name: first.Name, Checksum: first.Checksum[:]}}); err != nil {
+		t.Fatalf("unapplied suffix rejected: %v", err)
+	}
+	if err := validateAppliedMigrations([]Migration{first, second}, []appliedMigration{{Version: second.Version, Name: second.Name, Checksum: second.Checksum[:]}}); err == nil {
+		t.Fatal("gap in known applied history accepted")
 	}
 }
 

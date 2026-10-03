@@ -297,7 +297,9 @@ for script in database-foundation-integration.sh database-postgres-smoke.sh; do
   export ROUTE_LOG="${tmp}/${script}.route"
   PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=18 \
     bash "${tmp}/wrapper/scripts/${script}" >/dev/null
-  test "$(wc -l <"${ROUTE_LOG}")" -eq 3
+  expected_routes=3
+  [[ "${script}" != database-postgres-smoke.sh ]] || expected_routes=4
+  test "$(wc -l <"${ROUTE_LOG}")" -eq "${expected_routes}"
   grep -q '^--smoke ./internal/platform/app TestDatabaseCoreSmoke$' "${ROUTE_LOG}"
   grep -Eq '^--smoke ./(internal/database/mysql|migrations) TestDatabaseInitializationSmoke$' "${ROUTE_LOG}"
   grep -q '^backend-enrollment-restart$' "${ROUTE_LOG}"

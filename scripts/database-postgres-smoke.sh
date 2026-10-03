@@ -46,6 +46,7 @@ docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
 port="$(docker port "${name}" 5432/tcp | sed 's/127.0.0.1://')"
 export OCSERV_TEST_OWNER_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 export OCSERV_TEST_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
+export OCSERV_TEST_SNAPSHOT_DATABASE_URL="${OCSERV_TEST_OWNER_DATABASE_URL}"
 unset PR02_DSN PR02_ENGINE
 cd "${ROOT}/control-plane"
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
@@ -53,3 +54,4 @@ docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c '
 export OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/initialization_smoke?sslmode=disable"
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./migrations TestDatabaseInitializationSmoke
 bash "${ROOT}/scripts/test-enrollment-restart.sh" "${name}"
+bash "${ROOT}/scripts/required-go-tests.sh" postgres-snapshot --select -race -timeout=10m

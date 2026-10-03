@@ -280,3 +280,12 @@ backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/claim
 backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/claim-response-lost
 backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/sent-request-lost
 backend-audit-mysql internal/database/mysql TestRealOutboxCommitDisconnect/sent-response-lost
+
+# Current snapshot lifecycle is mandatory, including genuine forward upgrades.
+postgres-snapshot migrations TestPostgreSQLSnapshotLifecycle
+postgres-snapshot migrations TestPostgreSQLSnapshotRejectsUnprovenState
+postgres-snapshot migrations TestPostgreSQLSnapshotOriginTampering
+postgres-snapshot migrations TestPostgreSQLSnapshotAtomicityAndLock
+postgres-snapshot migrations TestPostgreSQLLegacyUpgrade
+postgres-snapshot migrations TestPostgreSQLLegacyHistoryGapRejected
+postgres-snapshot migrations TestPostgreSQLSnapshotCatalogReadPermissions
