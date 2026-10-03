@@ -53,7 +53,7 @@ for image in gateway control transport backup postgres otel; do
     otel) variable=OCSERV_OTEL_IMAGE ;;
   esac
   if ! value="$(jq -er --arg image "${image}" '.images[$image]' "${RELEASE_FILE}")" ||
-    [[ ! "${value}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+)$ ]]; then
+    [[ ! "${value}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]]; then
     fail "release image ${image} is invalid"
   fi
   export "${variable}=${value}"
@@ -61,7 +61,7 @@ done
 if [[ "$(jq -r '.manifest_version' "${RELEASE_FILE}")" == 2 ]]; then
   for image in edge relay signer; do
     value="$(jq -er --arg image "${image}" '.images[$image]' "${RELEASE_FILE}")"
-    [[ "${value}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+)$ ]] || fail "invalid ${image} reference"
+    [[ "${value}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]] || fail "invalid ${image} reference"
     export "OCSERV_${image^^}_IMAGE=${value}"
   done
   case "${OCSERV_DATABASE_BACKEND:-postgres}" in

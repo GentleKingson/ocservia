@@ -84,13 +84,13 @@ if [[ "${deployment_mode}" == integrated ]]; then
 fi
 for variable in "${image_variables[@]}"; do
   value="${!variable:-}"
-  if [[ ! "${value}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+)$ ]]; then
+  if [[ ! "${value}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]]; then
     echo "${variable} must contain a version-tagged or sha256 image reference" >&2
     exit 2
   fi
 done
 if [[ "${database_backend}" == mysql || "${database_backend}" == mariadb ]]; then
-  if [[ ! "${OCSERV_DATABASE_BACKUP_IMAGE:-}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+)$ ]]; then
+  if [[ ! "${OCSERV_DATABASE_BACKUP_IMAGE:-}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]]; then
     echo "OCSERV_DATABASE_BACKUP_IMAGE must contain a version-tagged or sha256 image reference" >&2
     exit 2
   fi
@@ -270,7 +270,7 @@ if [[ "${deployment_mode}" == integrated ]]; then
     ([.services | to_entries[] | .key as $service | .value.ports[]? |
       [$service, .target, (.published | tostring), .protocol]] | sort) ==
       [["edge", 8443, "443", "tcp"], ["relay", 7842, "7842", "udp"]] and
-    all(.services[]; (has("build") | not) and (.image | test("^[^\\s@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+)$"))) and
+    all(.services[]; (has("build") | not) and (.image | test("^[^\\s@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$"))) and
     (.networks.signer.internal == true) and
     (.services.signer.networks | keys == ["signer"]) and
     (.services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_CA_FILE == "/run/secrets/certificate_signer_ca")
