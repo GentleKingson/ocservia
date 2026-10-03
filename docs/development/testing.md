@@ -49,8 +49,8 @@ preceding duplicate `cargo check`.
 `npm run lint` and `npm run typecheck` still prepare their generated client.
 
 - Quick database feedback: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
-- All supported database units: use `DATABASE_TEST_SCOPE=smoke` for PostgreSQL 18.x and MySQL 8.4 LTS; Full CI checks current initialization and runtime behavior on each unit, not historical compatibility or comprehensive acceptance.
-- Deep database migrations or failure scenarios, explicitly opt-in: `make database-integration`
+- Supported database units: PostgreSQL 18.x and MySQL 8.4 LTS. Quick CI selects smoke; Full CI selects `DATABASE_TEST_SCOPE=full`. Both check current schema source, independent replay equivalence and required lifecycle cases.
+- Full database migrations and failure scenarios: `make database-integration`, or use the backend script with `DATABASE_TEST_SCOPE=full`
 - Go and transport local integration: `make integration`
 - Browser or runtime behavior: `make e2e`
 - Rust behavior or boundaries: `make rust-check`

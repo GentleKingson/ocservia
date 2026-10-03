@@ -115,7 +115,7 @@ for profile in quick full; do
   expect "${out}" run_ci_tools false
   expect "${out}" run_installers false
   expect "${out}" profile "${profile}"
-  expect "${out}" database_scope smoke
+  if [[ "${profile}" == full ]]; then expect "${out}" database_scope full; else expect "${out}" database_scope smoke; fi
   check_matrix "${out}" "${profile}"
 done
 out="${fixture}/invalid.output"

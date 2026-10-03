@@ -21,8 +21,8 @@ Full has a separate concurrency group and cannot cancel Quick.
 | go | gofmt, vet and ordinary fast tests in both Go modules; no full-package race |
 | rust | Format, clippy and workspace tests |
 | web | Format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
-| database-smoke | Quick and Full: PostgreSQL 18.x (project default) and MySQL 8.4 LTS |
-| database-recovery-full | Existing short MySQL logical backup/restore loop, Full only |
+| database-smoke | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance; both check current snapshot equivalence |
+| database-recovery-full | PostgreSQL physical and MySQL logical backup/restore, including snapshot provenance, Full only |
 | Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
 
 All database images retain their exact patch/digest pins. Each core job starts
@@ -36,13 +36,14 @@ Runtime DDL denial is the small retained failure path: it verifies the
 Controller is not accidentally tested with owner credentials. MySQL
 retains production configuration and verified TLS in this same flow.
 
-Both profiles also run current empty-database initialization and identical
-retry in a separate schema on the same service. These checks preserve current
-business data and execution receipts. PostgreSQL also rejects known migration
-checksum corruption; these checks do not certify historical upgrades. Full adds the remaining
-supported database products/versions, not an ocservia version matrix. There is
-no second Controller build. Smoke tests use `-count=1`, never cached test
-results, and do not use `-race`.
+Both profiles verify current snapshot initialization, identical retry, provenance
+integrity and forward-only continuation. Independent historical replay checks
+schema/security/seed equivalence and refuses stale artifacts. PostgreSQL also
+checks its actual volume layout and legacy-layout rejection. Full selects the
+existing full database suites, including migration failures and recovery; it
+does not add another backend or a Controller-version admission window. Explicit
+required test inventories reject skipped lifecycle cases. Smoke uses fresh
+`-count=1` results; dedicated lifecycle checks retain race detection.
 
 `required-go-tests.sh --smoke <package> <test>` checks only the explicit
 top-level test's run/final-pass events. A missing or skipped entry fails.

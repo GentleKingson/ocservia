@@ -109,6 +109,51 @@ remain errors, not automatic force-clean. Unknown completed receipts are not a
 software-version rejection and are preserved. Initialization does not reverse
 SQL or reset persistent state. Frozen compatibility metadata in published SQL
 is retained as historical data, not maintained or used for admission.
+
+### Current schema snapshots and forward upgrades
+
+Each backend has one current executable `schema.sql`: PostgreSQL in
+`control-plane/migrations/`, MySQL in
+`control-plane/internal/database/mysql/mysql/`. Its adjacent
+`schema.snapshot.json` pins the SQL hash and complete ordered historical source.
+Under the backend's migration lock, only a genuinely empty database takes this
+path. Existing tables, views, routines or incomplete metadata without valid
+provenance cause refusal before initialization writes.
+
+PostgreSQL installs the snapshot, seeds and coverage receipt in one transaction.
+Covered `schema_migrations` rows are explicitly marked as snapshot coverage.
+MySQL records a snapshot origin and the statements actually executed; it does
+not manufacture old baseline or revision-step receipts. MySQL initialization
+uses a dedicated locked connection, durable running/verified steps and actual
+postconditions because DDL is not an all-or-nothing transaction.
+
+A database with valid history or snapshot provenance receives only unapplied
+forward migrations/revisions. Its original receipt remains unchanged when the
+current snapshot changes. Repeated owner maintenance may reapply grants and
+provision dynamic telemetry objects; it never reexecutes `schema.sql` on that
+database. Unknown completed history remains preserved, while known names,
+checksums and provenance must match. Dirty or unproven state is not adopted.
+
+When adding a migration or revision, preserve historical bytes and regenerate
+the affected backend's snapshot from the real historical replay:
+
+```bash
+bash scripts/database-postgres-snapshot.sh generate
+bash scripts/database-mysql-snapshot.sh generate
+bash scripts/database-postgres-snapshot.sh check
+bash scripts/database-mysql-snapshot.sh check
+```
+
+`check` is read-only with respect to tracked artifacts. It independently
+compares replayed and directly initialized schema/seed semantics. Run the
+backend's lifecycle tests too, including an already-created prior snapshot
+upgrading through the next forward change. Calendar-dependent telemetry objects
+remain owner-provisioned and are not frozen into generated SQL. Execution
+evidence such as MySQL `time_migration_decisions` remains in genuine historical
+databases but is not inserted as a new-database seed. Initialization timestamps
+are generated at initialization; deterministic application seed values are
+compared exactly.
+
 Readiness checks current core reads, permissions and event-stream health, not
 migration history or Controller schema ranges. Current startup also validates
 the actual telemetry objects and runtime privileges it needs.

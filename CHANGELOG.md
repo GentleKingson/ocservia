@@ -18,6 +18,20 @@ ocservia uses
 [Semantic Versioning](https://semver.org/), except for the explicitly breaking
 compatibility-policy reset in v1.1.0 described below.
 
+## Unreleased
+
+### Database support and initialization
+
+- Support PostgreSQL 18.x and MySQL 8.4 LTS only; retire PostgreSQL 17 and
+  MariaDB active deployment, CI and backup paths.
+- Initialize new databases from current backend schema snapshots with explicit
+  provenance. Existing databases retain their history and advance only through
+  forward migrations or revisions.
+- PostgreSQL 17 requires an operator-managed major upgrade before this
+  Controller can connect. PostgreSQL 18 uses the parent volume mount at
+  `/var/lib/postgresql`; legacy layouts are refused before initialization.
+  Changing a MariaDB backend setting does not convert its database to MySQL.
+
 ## [1.1.0]
 
 ### Breaking Policy Change
