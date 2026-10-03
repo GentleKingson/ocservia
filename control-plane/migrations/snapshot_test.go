@@ -3,7 +3,6 @@ package migrations
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -99,7 +98,7 @@ func TestPostgreSQLSnapshotLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := loadSnapshot(known)
+	_, err = loadSnapshot(known)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,30 +124,11 @@ func TestPostgreSQLSnapshotLifecycle(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT has_table_privilege('ocservia_app','workspaces','SELECT') AND NOT has_table_privilege('ocservia_app','schema_migrations','INSERT') AND NOT has_function_privilege('ocservia_app','telemetry_ensure_month_partition(timestamptz)','EXECUTE')`).Scan(&allowed); err != nil || !allowed {
 		t.Fatal("runtime privilege boundary", allowed, err)
 	}
-	next := Migration{Version: 41, Name: "000041_snapshot_continuation.up.sql", SQL: "ALTER TABLE workspaces ADD COLUMN snapshot_next text"}
-	next.Checksum = sha256.Sum256([]byte(next.SQL))
-	future := append(append([]Migration(nil), known...), next)
-	newer := current
-	newer.CoveredVersion = 41
-	newer.SQL = current.SQL + "\n" + next.SQL + ";"
-	sum := sha256.Sum256([]byte(newer.SQL))
-	newer.SchemaHash = hex.EncodeToString(sum[:])
-	newer.HistoryHash = historyDigest(future, 41)
-	calls := 0
-	if err := migrate(ctx, pool, future, newer, []Preflight{func(_ context.Context, _ pgx.Tx, v int64) error {
-		calls++
-		if v != 41 {
-			return fmt.Errorf("replayed %d", v)
-		}
-		return nil
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 1 {
-		t.Fatal("next migration count", calls)
-	}
-	if err := migrate(ctx, pool, future, newer, nil); err != nil {
-		t.Fatal(err)
+	// The bridge is the last legacy migration. New forward revisions belong
+	// to upgrade.sql and must not silently change the checkpoint checksum.
+	var checkpoints int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_revisions WHERE epoch=1 AND revision=0 AND state='verified'").Scan(&checkpoints); err != nil || checkpoints != 1 {
+		t.Fatal("trusted checkpoint missing", checkpoints, err)
 	}
 	var name string
 	if err := pool.QueryRow(ctx, "SELECT name FROM workspaces WHERE slug='snapshot-preserved'").Scan(&name); err != nil || name != "snapshot preserved" {
@@ -282,7 +262,7 @@ func TestPostgreSQLLegacyUpgrade(t *testing.T) {
 	calls := 0
 	if err := Migrate(ctx, pool, func(_ context.Context, _ pgx.Tx, v int64) error {
 		calls++
-		if v != 40 {
+		if v != known[len(known)-1].Version {
 			return fmt.Errorf("replayed history %d", v)
 		}
 		return nil
@@ -317,7 +297,7 @@ func TestPostgreSQLLegacyHistoryGapRejected(t *testing.T) {
 		t.Fatalf("legacy history gap not rejected: %v", err)
 	}
 	var count int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations WHERE version IN (24,40)").Scan(&count); err != nil || count != 0 {
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations WHERE version=24 OR version=$1", known[len(known)-1].Version).Scan(&count); err != nil || count != 0 {
 		t.Fatal("history was rewritten or migration applied after gap", count, err)
 	}
 }

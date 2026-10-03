@@ -51,6 +51,9 @@ func loadSnapshot(known []Migration) (snapshot, error) {
 		return s, errors.New("PostgreSQL snapshot does not match current migration history or schema.sql")
 	}
 	s.SQL = snapshotSQL
+	if _, _, err := baselineArtifact(s.SQL); err != nil {
+		return s, err
+	}
 	return s, nil
 }
 
@@ -105,6 +108,9 @@ func initializeSnapshot(ctx context.Context, conn *pgxpool.Conn, s snapshot, kno
 	schema, _ := hex.DecodeString(s.SchemaHash)
 	receipt := s.receipt()
 	if _, err = tx.Exec(ctx, `INSERT INTO public.schema_snapshot_origin(singleton,covered_version,history_sha256,schema_sha256,receipt_sha256) VALUES(true,$1,$2,$3,$4)`, s.CoveredVersion, history, schema, receipt[:]); err != nil {
+		return err
+	}
+	if err := stampCheckpointOn(ctx, tx, s, known); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
