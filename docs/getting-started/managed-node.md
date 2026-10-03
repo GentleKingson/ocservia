@@ -1,5 +1,8 @@
 # Install a managed node
 
+Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
+(positive N without leading zeros). RCs are not recommended stable releases.
+
 A managed node is an existing ocserv server with the ocservia node services installed beside it. The node still runs ocserv for VPN traffic. ocservia adds controlled management, health reporting, enrollment, and lifecycle operations from the Controller.
 
 This guide covers the normal package-first installation path. Detailed package verification, manual archive installation, rollback, and uninstall behavior remain in the [Agent package lifecycle reference](../operations/agent-lifecycle.md).

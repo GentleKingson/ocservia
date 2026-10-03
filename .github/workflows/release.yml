@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
       - id: version
         env:
@@ -27,12 +28,15 @@ jobs:
           TEST_VERSION: ${{ inputs.version }}
         run: |
           if [[ "$EVENT" == push ]]; then
-            [[ "$TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
+            [[ "$TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]]
             version="${TAG#v}"
           else
             version="$TEST_VERSION"
           fi
-          [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]]
+          is_prerelease=false
+          [[ "$version" =~ -rc[.][1-9][0-9]*$ ]] && is_prerelease=true
+          echo "is_prerelease=$is_prerelease" >>"$GITHUB_OUTPUT"
           echo "version=$version" >>"$GITHUB_OUTPUT"
   build-amd64:
     needs: prepare
@@ -109,8 +113,28 @@ jobs:
         with:
           name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/assets
+      - name: Select Release notes base
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [[ "$VERSION" =~ -rc[.]([1-9][0-9]*)$ && "${BASH_REMATCH[1]}" != 1 ]]; then
+            previous="$(python3 -c 'import sys; print(int(sys.argv[1]) - 1)' "${BASH_REMATCH[1]}")"
+            base="v${VERSION%-rc.*}-rc.$previous"
+            gh release view "$base" --json isDraft,isPrerelease --jq '.isDraft == false and .isPrerelease == true' | grep -qx true
+          else
+            # Exclude this release on reruns; do not use an RC as the final's base.
+            base="$(gh release list --exclude-drafts --exclude-pre-releases --limit 2 \
+              --json tagName --jq "[.[] | select(.tagName != \"v$VERSION\")][0].tagName // empty")"
+            [[ "$base" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          fi
+          echo "base=$base" >>"$GITHUB_OUTPUT"
       - name: Publish version images and Release assets
         env:
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+          NOTES_BASE: ${{ steps.notes.outputs.base }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
           GH_REPO: ${{ github.repository }}
@@ -127,6 +151,14 @@ jobs:
               "$prefix/$name:v$VERSION-amd64" "$prefix/$name:v$VERSION-arm64"
           done
           if ! gh release view "v$VERSION" >/dev/null 2>&1; then
-            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes
+            flags=(--notes-start-tag "$NOTES_BASE")
+            if [[ "$IS_PRERELEASE" == true ]]; then
+              flags+=(--prerelease --latest=false)
+            fi
+            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
           fi
           gh release upload "v$VERSION" "$RUNNER_TEMP/assets/"* --clobber
+          [[ "$(gh release view "v$VERSION" --json isPrerelease --jq '.isPrerelease')" == "$IS_PRERELEASE" ]]
+          if [[ "$IS_PRERELEASE" == true ]]; then
+            [[ "$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')" != "v$VERSION" ]]
+          fi

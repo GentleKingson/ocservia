@@ -1,5 +1,8 @@
 # Integrated deployment
 
+Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
+(positive N without leading zeros). RCs are not recommended stable releases.
+
 The P1 network prototype was developed against source baseline
 `e861b72130d4d409883f68d01805566f26cbafbc`. P3 connects it and the production
 Signer to the existing lifecycle. P4 added native build checks; P5 checks
@@ -380,7 +383,7 @@ Subsequent documentation-only changes do not retest or relabel this source.
 Choose `standalone` for separately operated Relay/Signer endpoints, or
 `integrated` for this single-host topology. Integrated is not HA. Use the
 [pinned release installation](../../../docs/getting-started/production.md)
-with `--version vX.Y.Z --root-lifecycle` only after that exact stable Release
+with `--version vX.Y.Z --root-lifecycle` only after that exact stable or RC Release
 exists. For authorized nonproduction diagnostics, use the matching source
 checkout and ordinary platform configuration with `controller.sh` instead.
 

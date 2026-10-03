@@ -53,7 +53,10 @@ govern the v1.1.0 reset; historical release facts remain unchanged.
 This document does not turn an unreleased candidate or an unrun check into a
 production recommendation.
 
-Release identities remain plain `X.Y.Z` SemVer syntax. Version ordering is not
+Release identities are stable `X.Y.Z` or candidate `X.Y.Z-rc.N` (positive N,
+without leading zeros). RCs are candidates, not recommended stable versions.
+RC and stable share the same Release Check. Final is a separate tag and Release;
+RC tags and Releases remain in the history. Version ordering is not
 execution authority. The explicitly chosen v1.1.0 release removes public
 surfaces and compatibility guarantees despite its minor-version label; it must
 not be described as fully backward compatible. Release builds use the
