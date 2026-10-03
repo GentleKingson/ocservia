@@ -11,7 +11,7 @@ VERSION="${VERSION:?VERSION is required}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH is required}"
 PACKAGE_ARCH="${PACKAGE_ARCH:?PACKAGE_ARCH is required}"
 
-if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || ! [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
+if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] || ! [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
   echo "VERSION must be SemVer and SOURCE_DATE_EPOCH must be numeric" >&2
   exit 2
 fi

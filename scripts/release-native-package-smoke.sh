@@ -20,9 +20,21 @@ STUB_BINARIES="${STUB_BINARIES:-false}"
 PRODUCTS_DIR="${PRODUCTS_DIR:-}"
 old_version=1.0.0
 new_version=1.0.1
+# Opt-in real RC -> RC -> final acceptance, reusing the existing lifecycle.
+RC_LIFECYCLE="${RC_LIFECYCLE:-false}"
+case "${RC_LIFECYCLE}" in
+  true)
+    [[ -z "${PRODUCTS_DIR}" ]] || { echo 'RC lifecycle builds its three versions' >&2; exit 2; }
+    old_version=1.2.0-rc.1
+    middle_version=1.2.0-rc.2
+    new_version=1.2.0
+    ;;
+  false) ;;
+  *) exit 2 ;;
+esac
 rpm_upgrade_args=(-Uvh)
 if [[ -n "${PRODUCTS_DIR}" ]]; then
-  [[ "${STUB_BINARIES}" == false && "${VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  [[ "${STUB_BINARIES}" == false && "${VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] || {
     echo "package lifecycle requires real packages and their VERSION" >&2
     exit 2
   }
@@ -205,6 +217,7 @@ if [[ -n "${PRODUCTS_DIR}" ]]; then
     "${PRODUCTS_DIR}/ocservia-agent-${VERSION}-1.${rpm_arch}.rpm" "${pkg_dir}/"
 else
   build_packages "${old_version}"
+  [[ "${RC_LIFECYCLE}" != true ]] || build_packages "${middle_version}"
   build_packages "${new_version}"
 fi
 deb_old="${pkg_dir}/ocservia-agent_${old_version}-1_${PACKAGE_ARCH}.deb"
@@ -216,7 +229,7 @@ for field in Package Version Architecture; do
   value="$(dpkg-deb -f "${deb_old}" "${field}")"
   # nfpm appends the release component to the deb version (1.0.0-1).
   case "${field}:${value}" in
-    Package:ocservia-agent | Version:"${old_version}-1" | Architecture:"${PACKAGE_ARCH}") ;;
+    Package:ocservia-agent | Version:"${old_version/-rc./~rc.}-1" | Architecture:"${PACKAGE_ARCH}") ;;
     *)
       echo "deb metadata field ${field} has unexpected value ${value}" >&2
       exit 1
@@ -226,7 +239,11 @@ done
 echo "deb metadata validation passed"
 
 assert_installed_state() {
-  local context="$1" expected_version="$2" binary_sha
+  local context="$1" expected_version="$2" binary_sha binary
+  [[ "$(sudo dpkg-query -W -f='${Version}' ocservia-agent)" == "${expected_version/-rc./~rc.}-1" ]]
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    [[ "$(sudo "/usr/libexec/ocservia/${binary}" --version)" == "${binary} ${expected_version}" ]]
+  done
   sudo test -x /usr/libexec/ocservia/ocservia-agent \
     || { echo "${context}: Agent binary missing" >&2; exit 1; }
   sudo test -x /usr/libexec/ocservia/ocservia-privd \
@@ -308,6 +325,13 @@ assert_upgraded_state() {
 }
 
 provision_upgrade_fixtures
+if [[ "${RC_LIFECYCLE}" == true ]]; then
+  sudo dpkg --compare-versions "${old_version/-rc./~rc.}-1" lt "${middle_version/-rc./~rc.}-1"
+  sudo dpkg --compare-versions "${middle_version/-rc./~rc.}-1" lt "${new_version}-1"
+  { sudo dpkg -i "${pkg_dir}/ocservia-agent_${middle_version}-1_${PACKAGE_ARCH}.deb"; } \
+    >"${ARTIFACT_DIR}/deb-rc2-upgrade.log" 2>&1
+  assert_upgraded_state "deb rc.2 upgrade" "${middle_version}"
+fi
 # Use the real service manager with controlled processes. ExecStopPost checks
 # that retention stopped before any helper/unit replacement; restored unit
 # descriptions prove daemon-reload, and process hooks record restart ordering.
@@ -677,7 +701,11 @@ docker exec "${container}" rpm -ivh "/packages/$(basename "${rpm_old}")" \
   >"${ARTIFACT_DIR}/rpm-install.log" 2>&1
 
 container_assert_installed() {
-  local context="$1" expected_version="$2" binary_sha
+  local context="$1" expected_version="$2" binary_sha binary
+  [[ "$(docker exec "${container}" rpm -q --qf '%{VERSION}-%{RELEASE}' ocservia-agent)" == "${expected_version/-rc./~rc.}-1" ]]
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    [[ "$(docker exec "${container}" "/usr/libexec/ocservia/${binary}" --version)" == "${binary} ${expected_version}" ]]
+  done
   docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent-relays \
     || { echo "${context}: Relay launcher missing" >&2; exit 1; }
   docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent \
@@ -764,6 +792,12 @@ EOF
 }
 
 container_provision_upgrade_fixtures
+if [[ "${RC_LIFECYCLE}" == true ]]; then
+  docker exec "${container}" rpm -Uvh "/packages/ocservia-agent-${middle_version}-1.${rpm_arch}.rpm" \
+    >"${ARTIFACT_DIR}/rpm-rc2-upgrade.log" 2>&1
+  container_assert_installed "rpm rc.2 upgrade" "${middle_version}"
+  container_assert_production_relays "rpm rc.2 upgrade"
+fi
 docker exec "${container}" rpm "${rpm_upgrade_args[@]}" "/packages/$(basename "${rpm_new}")" \
   >"${ARTIFACT_DIR}/rpm-upgrade.log" 2>&1
 container_assert_installed "rpm upgrade" "${new_version}"
@@ -808,7 +842,7 @@ echo "rpm removal state preservation passed"
 docker rm -f -- "${container}" >/dev/null
 printf 'arch=%s\nelf_check=pass\ndeb_metadata=pass\ndeb_install=pass\ndeb_upgrade=pass\ndeb_remove_preserves_state=pass\ndeb_production_install=pass\ndeb_production_upgrade=pass\ndeb_production_remove_preserves_state=pass\ndeb_production_reinstall_identity_reuse=pass\ndeb_corrupt_payload_fail_closed=pass\ndeb_stale_request_retirement=pass\ndeb_plain_install_after_retirement=pass\nrpm_metadata=pass\nrpm_production_install=pass\nrpm_upgrade_preserves_production=pass\nrpm_erase_retires_stale_request=pass\nrpm_erase_preserves_state=pass\n' \
   "${PACKAGE_ARCH}" >"${ARTIFACT_DIR}/native-package-summary.txt"
-printf 'old_version=%s\nnew_version=%s\nbuilt_packages=%s\n' \
-  "${old_version}" "${new_version}" "${PRODUCTS_DIR:+true}" >>"${ARTIFACT_DIR}/native-package-summary.txt"
+printf 'old_version=%s\nnew_version=%s\nbuilt_packages=%s\nrc_lifecycle=%s\n' \
+  "${old_version}" "${new_version}" "${PRODUCTS_DIR:+true}" "${RC_LIFECYCLE}" >>"${ARTIFACT_DIR}/native-package-summary.txt"
 printf 'deb_quartet_restore_remove=pass\ndeb_real_systemd_order=pass\ndeb_timer_lock=pass\ndeb_retention_worker=pass\ndeb_post_commit_retry=pass\ndeb_split_filesystem_restore=pass\n' \
   >>"${ARTIFACT_DIR}/native-package-summary.txt"

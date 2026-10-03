@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSET_DIR="${ASSET_DIR:?ASSET_DIR is required}"
 VERSION="${VERSION:?VERSION is required}"
-[[ $# == 0 && "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]] || exit 2
+[[ $# == 0 && "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]] || exit 2
 ASSET_DIR="$(cd -- "$ASSET_DIR" && pwd)"
 work="$(mktemp -d)"
 trap 'sudo rm -rf -- "$work"' EXIT INT TERM
@@ -37,6 +37,8 @@ for arch in amd64 arm64; do
   done
   [[ "$(dpkg-deb -f "$ASSET_DIR/$deb" Architecture)" == "$arch" ]]
   [[ "$(rpm -qp --qf '%{ARCH}' --nosignature "$ASSET_DIR/$rpm" 2>/dev/null)" == "$rpm_arch" ]]
+  [[ "$(dpkg-deb -f "$ASSET_DIR/$deb" Version)" == "${VERSION/-rc./~rc.}-1" ]]
+  [[ "$(rpm -qp --qf '%{VERSION}-%{RELEASE}' --nosignature "$ASSET_DIR/$rpm" 2>/dev/null)" == "${VERSION/-rc./~rc.}-1" ]]
   mkdir -p "$work/deb-$arch" "$work/rpm-$arch"
   dpkg-deb -x "$ASSET_DIR/$deb" "$work/deb-$arch"
   # Some rpm2cpio versions return nonzero after writing a complete payload.
