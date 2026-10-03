@@ -20,7 +20,7 @@ printf '%s\n' \
   '{"Service":"backup","State":"running","Health":"healthy"}'
 for variable in OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE \
   OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE; do
-  [[ "${!variable}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+)$ ]]
+  [[ "${!variable}" =~ ^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$ ]]
 done
 EOF
 chmod 0755 "${bin}/compose.sh"
@@ -63,6 +63,15 @@ if grep -Fq -- '-k' "${ROOT}/deploy/production/controller-release-smoke.sh"; the
   echo "release smoke must not disable TLS verification" >&2
   exit 1
 fi
+
+# The runtime smoke consumes exact RC refs and checks the RC binary identity.
+sed -i 's/0.3.0/0.3.0-rc.1/g' "${release_file}" "${bin}/curl"
+PATH="${bin}:${PATH}" \
+  OCSERV_CONTROLLER_COMPOSE_SH="${bin}/compose.sh" \
+  OCSERV_CONTROLLER_PUBLIC_URL="https://controller.example.test" \
+  SMOKE_TEST_COMPOSE_LOG="${fixture}/compose.log" \
+  SMOKE_TEST_CURL_LOG="${fixture}/curl.log" \
+  "${SMOKE}" --release-file "${release_file}"
 
 cat >"${bin}/compose.sh" <<'EOF'
 #!/usr/bin/env bash

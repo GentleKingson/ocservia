@@ -204,13 +204,13 @@ validate_manifest_file() {
         ($manifest.signer_state_version == 1) and
         ($manifest.images | keys == ["backup", "control", "edge", "gateway", "mariadb_backup", "mysql_backup", "otel", "postgres", "relay", "signer", "transport"])
       else false end) and
-      ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
-      ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+$") and . == ("v" + $manifest.release_version)) and
+      ($manifest.release_version | matches("^[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$")) and
+      ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$") and . == ("v" + $manifest.release_version)) and
       ($manifest.source_commit | matches("^[0-9a-f]{40}$")) and
       ($manifest.platform | IN("linux/amd64", "linux/arm64")) and
       ($manifest.database_migration | positive_integer) and
       ($manifest.images | type == "object" and
-        all(.[]; matches("^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+)$")))
+        all(.[]; matches("^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$")))
     end
   '
   jq -e -s "${manifest_filter}" "${path}" >/dev/null ||

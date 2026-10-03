@@ -97,6 +97,21 @@ for mode in 1 2 3; do
   ' "${work}/mode-${mode}.json" >/dev/null
 done
 
+# Exact RC image tags must survive both the input and rendered Compose checks.
+OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_GATEWAY_IMAGE=example.invalid/gateway:v1.2.0-rc.1 \
+  OCSERV_CONTROL_IMAGE=example.invalid/control:v1.2.0-rc.1 \
+  "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/rc-compose.json"
+jq -e '.services.gateway.image == "example.invalid/gateway:v1.2.0-rc.1" and
+  .services["control-plane"].image == "example.invalid/control:v1.2.0-rc.1"' "${work}/rc-compose.json" >/dev/null
+OCSERV_RELAY_IMAGE=example.invalid/relay:v1.2.0-rc.1 OCSERV_RELAY_SECRET_DIR="${OCSERV_SECRET_DIR}" \
+  "${ROOT}/deploy/production/relay/compose.sh" config --quiet
+for invalid in v1.2.0-rc.0 v1.2.0-rc.01 v1.2.0-beta.1 v1.2.0-rc.1+build; do
+  if OCSERV_CONTROL_IMAGE="example.invalid/control:${invalid}" \
+    "${ROOT}/deploy/production/compose.sh" config --quiet >"${work}/invalid-image.log" 2>&1; then
+    echo "malformed RC image accepted: ${invalid}" >&2; exit 1
+  fi
+done
+
 OCSERV_LOCAL_AUTH_ENABLED=true OCSERV_PUBLIC_ORIGIN=https://custom.example.com \
   OCSERV_SESSION_TTL=30m OCSERV_OIDC_ISSUER=https://id.example.com \
   OCSERV_OIDC_CLIENT_ID=ocservia \
@@ -215,6 +230,9 @@ expect_failure env OCSERV_RELAY_PUBLIC_HOST=controller.example.com "${ROOT}/depl
 expect_failure env OCSERV_RELAY_URL_B=https://second.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_AUTH_TRUSTED_PROXY_CIDRS= "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_CERTIFICATE_SIGNER_URL=https://elsewhere.test/sign "${ROOT}/deploy/production/compose.sh" config --quiet
+OCSERV_SIGNER_IMAGE=example.invalid/signer:v1.2.0-rc.1 \
+  OCSERV_DATABASE_BACKUP_IMAGE=example.invalid/backup:v1.2.0-rc.1 \
+  "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_SIGNER_IMAGE=signer:latest "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure "${ROOT}/deploy/production/compose.sh" up --build
 "${owner[@]}" chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"

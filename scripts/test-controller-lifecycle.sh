@@ -210,6 +210,24 @@ expect_failure() {
   fi
 }
 
+# The same generated RC manifest must pass the runtime validator and install.
+rc_release="${fixture}/release/rc.json"
+rc_images=()
+for role in gateway control transport backup postgres otel; do
+  rc_images+=(--image "${role}=registry.test/${role}:v0.2.0-rc.1")
+done
+node "${ROOT}/scripts/generate-controller-release-manifest.mjs" \
+  --output "${rc_release}" --release-version 0.2.0-rc.1 --release-tag v0.2.0-rc.1 \
+  --source-commit "${commit}" --platform linux/amd64 "${rc_images[@]}"
+mkdir -m 700 "${fixture}/rc-state"
+run_controller "${fixture}/rc-state" "${rc_release}" env
+jq -e '.release_version == "0.2.0-rc.1"' "${fixture}/rc-state/current-release.json" >/dev/null
+for invalid in 0.2.0-rc.0 0.2.0-rc.01 0.2.0-beta.1 0.2.0-rc.1+build; do
+  jq --arg version "${invalid}" '.release_version=$version | .release_tag=("v"+$version)' \
+    "${rc_release}" >"${fixture}/release/invalid-rc.json"
+  expect_failure "${fixture}/${invalid}" "${fixture}/release/invalid-rc.json" 'invalid' false env
+done
+
 seed_upgrade_state() {
   local state="$1" previous="${2:-}"
   mkdir -m 700 -- "${state}"
