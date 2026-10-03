@@ -317,3 +317,4 @@ mysql-snapshot internal/database/mysql TestMySQLArtifactHistoryMutation
 mysql-snapshot internal/database/mysql TestMySQLArtifactCrashBoundaries
 mysql-snapshot internal/database/mysql TestMySQLArtifactPreviousCheckpoint
 postgres-snapshot migrations TestPostgreSQLPreviousSnapshotBridge
+mysql-snapshot internal/database/mysql TestMySQLArtifactForeignRepair

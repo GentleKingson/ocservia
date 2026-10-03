@@ -628,17 +628,11 @@ func (b *Backend) Migrate(ctx context.Context, repair string) (result error) {
 	}
 	if journal == "" {
 		// ponytail: only the original bridge window may adopt genuine legacy
-		// receipts. Remove after the separately approved checkpoint release.
+		// receipts. Keep its classification and execution under the same lock.
 		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
 			return ErrChecksum
 		}
-		if err = releaseMigrationConnection(conn, lock); err != nil {
-			return err
-		}
-		// This connection was released deliberately. Suppress the deferred second
-		// unlock and run the unchanged bridge under its own advisory lock.
-		conn = nil
-		return b.migrateLegacy(ctx, repair)
+		return b.migrateLegacyOn(ctx, conn, repair)
 	}
 	if journal != a.meta(a.journal).After {
 		return ErrSchema
@@ -654,11 +648,7 @@ func (b *Backend) Migrate(ctx context.Context, repair string) (result error) {
 		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
 			return ErrChecksum
 		}
-		if err = releaseMigrationConnection(conn, lock); err != nil {
-			return err
-		}
-		conn = nil
-		return b.migrateLegacy(ctx, repair)
+		return b.migrateLegacyOn(ctx, conn, repair)
 	}
 	if err = validateArtifactJournalComment(ctx, conn, rows[0].checksum); err != nil {
 		return err
@@ -770,6 +760,39 @@ func (b *Backend) ValidateSchema(ctx context.Context) (result error) {
 			result = errors.Join(result, releaseMigrationConnection(conn, lock))
 		}
 	}()
+	a, err := loadMySQLArtifacts()
+	if err != nil {
+		return err
+	}
+	journal, err := schemaHashWithFingerprint(ctx, conn, step{Name: "schema_revisions", Kind: "table"}, a.fingerprint)
+	if err != nil {
+		return err
+	}
+	if journal != "" && journal != a.meta(a.journal).After {
+		return ErrSchema
+	}
+	var rows []mysqlReceipt
+	if journal != "" {
+		rows, err = readMySQLReceipts(ctx, conn)
+		if err != nil {
+			return err
+		}
+	}
+	if len(rows) == 0 {
+		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
+			return ErrChecksum
+		}
+		if journal != "" {
+			count, err := databaseObjectCount(ctx, conn)
+			if err != nil {
+				return err
+			}
+			if count == 1 {
+				return ErrDirty
+			}
+		}
+		return b.validateLegacySchemaOn(ctx, conn)
+	}
 	m, err := b.artifactSnapshotOn(ctx, conn)
 	if err != nil {
 		return err
