@@ -119,6 +119,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
   work = File.join(tmp, "work")
   files = Dir.glob(File.join(root, "scripts", "*")).select { |path| File.file?(path) }
   files += %w[.github/release.yml .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/release-upgrade.yml
+              .github/release-notes/v1.1.0-history-rewrite.md
               .github/workflows/release-products.yml
               .github/workflows/release-business-diagnostic.yml .github/workflows/release-check.yml
               rust/agent-build.Dockerfile].map { |path| File.join(root, path) }
@@ -257,7 +258,7 @@ reject("release tool cache save must require a successful miss") unless
 reject("release tool cache must not save before native build success") unless
   release_build && build_steps.index(release_build) < build_steps.index(save)
 publish = release_jobs.fetch("publish")
-reject("release publishing environment changed") unless publish.fetch("environment") == "release-publishing"
+reject("release publishing environment must disable deployment records") unless publish.fetch("environment") == {"name" => "release-publishing", "deployment" => false}
 # The exact publishing permission set is pinned by
 # test-release-workflows.rb; here it must only stay job-local with
 # release-asset write access.

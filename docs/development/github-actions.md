@@ -196,6 +196,9 @@ diagnostics. Only the tag-triggered `publish` job has `contents: write`,
 `packages: write` and the `release-publishing` environment. Reruns use ordinary
 `gh release upload --clobber`.
 
+`release-publishing` is an approval/protection boundary; the publish job does not
+create GitHub Deployment records.
+
 Release Controller jobs cache image-security tools by OS, architecture and
 tool/bootstrap identity, but never cache the vulnerability database. Each
 invocation updates it and fails on unavailable/invalid data. Scans check the
