@@ -162,128 +162,73 @@ func partialSnapshot(t *testing.T, b *Backend, a snapshotArtifact, phase string)
 
 func TestSnapshotForwardRevision(t *testing.T) {
 	ctx := context.Background()
-	b, _, _ := migrateFixture(t)
-	reference, _, _ := migrateFixture(t)
 	chain, err := loadRevisionChain(MySQL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := currentSnapshot(chain)
+	current, err := currentSnapshot(chain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sqlText := "ALTER TABLE workspaces ADD COLUMN snapshot_forward_probe INT NULL"
-	if _, err = reference.Exec(ctx, sqlText); err != nil {
+	paths, err := fs.Glob(manifests, "mysql/snapshots/*.json")
+	if err != nil {
 		t.Fatal(err)
 	}
+	var old snapshotArtifact
+	for _, path := range paths {
+		data, err := manifests.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate, err := decodeSnapshot(data, chain)
+		if err == nil && candidate.Covered == 30 {
+			old = candidate
+			break
+		}
+	}
+	if old.Covered != 30 {
+		t.Fatal("previous checkpoint descriptor missing")
+	}
+	// Recover the original schema byte ranges from the current marker artifact,
+	// then prove them against the immutable previous descriptor's schema digest.
+	for _, step := range current.Statements {
+		if step.Kind == "table" && step.Name == "schema_revisions" {
+			continue
+		}
+		old.sql = append(old.sql, []byte(snapshotSQL(current, step)+";\n")...)
+	}
+	if digest(old.sql) != old.SchemaChecksum {
+		t.Fatal("previous release SQL bytes differ")
+	}
+	b, _, _ := fixture(t)
 	conn, lock, err := migrationConnection(ctx, b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := reference.pool.Conn(ctx)
-	if err != nil {
+	if err = initializeSnapshot(ctx, conn, old, nil, "", nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	defer ref.Close()
-	before, err := schemaHash(ctx, conn, step{Name: "workspaces", Kind: "table"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := schemaHash(ctx, ref, step{Name: "workspaces", Kind: "table"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := revisionPlan{Steps: []revisionStep{{Name: "snapshot_forward_probe", Object: "workspaces", Kind: "table", SQL: sqlText, Checksum: digest([]byte(sqlText)), Before: before, After: after}}}
-	next := revision{Version: a.Covered + 1, Engine: MySQL, PreviousChecksum: chain[len(chain)-1].sum, Parents: map[string]revisionPlan{}, MetadataHashes: chain[0].MetadataHashes}
-	for parent := range chain[0].Parents {
-		next.Parents[parent] = plan
-	}
-	data, _ := json.Marshal(next)
-	chain = append(chain, revisionArtifact{revision: next, sum: digest(data)})
-
-	// Build an actual next-release artifact set. The original database predates
-	// this switch, and its descriptor is discoverable ONLY in the archive.
-	dirty, _, _ := fixture(t)
-	partialSnapshot(t, dirty, a, "after-ddl")
-	nextSnapshot, err := generateSnapshot(ctx, ref, chain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	descriptor, err := json.MarshalIndent(nextSnapshot.schemaSnapshot, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	descriptor = append(descriptor, '\n')
-	catalog := fstest.MapFS{}
-	original := manifests
-	if err = fs.WalkDir(original, ".", func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		content, e := original.ReadFile(path)
-		if e != nil {
-			return e
-		}
-		catalog[path] = &fstest.MapFile{Data: content}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	oldDescriptor, err := original.ReadFile("mysql/schema.snapshot.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog["mysql/snapshots/"+a.sum+".json"] = &fstest.MapFile{Data: oldDescriptor}
-	catalog["mysql/schema.snapshot.json"] = &fstest.MapFile{Data: descriptor}
-	catalog["mysql/schema.sql"] = &fstest.MapFile{Data: nextSnapshot.sql}
-	catalog["mysql/000031.json"] = &fstest.MapFile{Data: data}
-	manifests = artifactFiles{catalog}
-	defer func() { manifests = original }()
-	current, err := currentSnapshot(chain)
-	if err != nil || current.sum == a.sum {
-		t.Fatal("next artifact did not change", err)
-	}
-	if err = dirty.Migrate(ctx, a.sum); !errors.Is(err, ErrChecksum) {
-		t.Fatal("new artifact repaired old interrupted snapshot", err)
-	}
-	// The matching old build repairs, then the new build advances normally.
-	manifests = original
-	if err = dirty.Migrate(ctx, a.sum); err != nil {
-		t.Fatal(err)
-	}
-	manifests = artifactFiles{catalog}
-	if err = dirty.Migrate(ctx, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	// Release our inspection lock before entering the real production Migrate.
 	if err = releaseMigrationConnection(conn, lock); err != nil {
 		t.Fatal(err)
 	}
-	if err = b.Migrate(ctx, ""); err != nil {
-		t.Fatal(err)
+	for range 2 {
+		if err = b.Migrate(ctx, ""); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err = b.Migrate(ctx, ""); err != nil {
-		t.Fatal(err)
-	}
-	conn, err = b.pool.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
 	if err = b.ValidateSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-
-	var count, version int
-	if err = conn.QueryRowContext(ctx, "SELECT COUNT(*),MIN(version) FROM backend_schema_revisions").Scan(&count, &version); err != nil || count != 1 || version != a.Covered+1 {
-		t.Fatal("covered history replayed", count, version, err)
+	var actual string
+	if err = b.QueryRow(ctx, "SELECT artifact_checksum FROM backend_schema_snapshot WHERE singleton=1").Scan(&actual); err != nil || actual != old.sum {
+		t.Fatal("previous origin rewritten", actual, err)
 	}
-	if _, err = b.verifiedSnapshotOn(ctx, conn, chain); err != nil {
-		t.Fatal(err)
+	var count int
+	if err = b.QueryRow(ctx, "SELECT COUNT(*) FROM backend_schema_revisions WHERE version=31 AND state='verified'").Scan(&count); err != nil || count != 1 {
+		t.Fatal("bridge not executed", count, err)
+	}
+	if err = b.QueryRow(ctx, "SELECT COUNT(*) FROM schema_revisions WHERE epoch=1 AND revision=0 AND state='verified'").Scan(&count); err != nil || count != 1 {
+		t.Fatal("checkpoint missing", count, err)
 	}
 }
 

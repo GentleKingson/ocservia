@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const latestRevisionVersion = 30
+const latestRevisionVersion = 31
 
 type revisionArtifact struct {
 	revision
@@ -370,6 +370,9 @@ func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result er
 		return err
 	}
 	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
+	if err := validateCheckpointWindow(ctx, conn, chain); err != nil {
+		return err
+	}
 	a, err := currentSnapshot(chain)
 	if err != nil {
 		return err
@@ -414,7 +417,10 @@ func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result er
 	if repairChecksum != "" && repairChecksum != chain[len(chain)-1].sum {
 		return ErrChecksum
 	}
-	return b.migrateChainOn(ctx, conn, chain, repairChecksum)
+	if err := b.migrateChainOn(ctx, conn, chain, repairChecksum); err != nil {
+		return err
+	}
+	return b.stampCheckpointOn(ctx, conn, chain)
 }
 
 func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []revisionArtifact, repairChecksum string) error {
@@ -538,11 +544,17 @@ func (b *Backend) ValidateSchema(ctx context.Context) (result error) {
 		return err
 	}
 	defer func() { result = errors.Join(result, releaseMigrationConnection(conn, name)) }()
+	if err := validateCheckpointWindow(ctx, conn, chain); err != nil {
+		return err
+	}
 	snapshot, err := b.verifiedSnapshotOn(ctx, conn, chain)
 	if err != nil {
 		return err
 	}
-	return validateRevisionSnapshot(ctx, conn, snapshot)
+	if err := validateRevisionSnapshot(ctx, conn, snapshot); err != nil {
+		return err
+	}
+	return validateBridgeJournal(ctx, conn, chain)
 }
 
 // verifiedSnapshotOn checks immutable history and every static object without

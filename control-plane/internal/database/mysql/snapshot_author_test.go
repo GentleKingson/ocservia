@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/schemaartifact"
 )
 
 // Generation always replays immutable history into a disposable database. Check
@@ -127,9 +129,13 @@ func generateSnapshot(ctx context.Context, conn *sql.Conn, chain []revisionArtif
 	if err != nil {
 		return a, err
 	}
-	add := func(name, kind, statement, hash string, columns []string) {
-		a.Statements = append(a.Statements, schemaStatement{Name: name, Kind: kind, Offset: len(a.sql), Length: len(statement), Checksum: digest([]byte(statement)), SchemaHash: hash, Columns: columns})
+	a.sql = []byte(schemaArtifactHeader)
+	add := func(name, kind, statement, hash string, columns []string, roundtripHash string) {
+		s := schemaStatement{Name: name, Kind: kind, SchemaHash: hash, RoundtripHash: roundtripHash, Columns: columns}
+		a.sql = append(a.sql, []byte(schemaStepHeader(len(a.Statements)+1, s))...)
+		a.Statements = append(a.Statements, schemaStatement{Name: name, Kind: kind, Offset: len(a.sql), Length: len(statement), Checksum: digest([]byte(statement)), SchemaHash: hash, Columns: columns, RoundtripHash: roundtripHash})
 		a.sql = append(a.sql, []byte(statement+";\n")...)
+		a.sql = append(a.sql, []byte(schemaStepEnd)...)
 	}
 	rows, err := conn.QueryContext(ctx, "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME")
 	if err != nil {
@@ -215,15 +221,15 @@ func generateSnapshot(ctx context.Context, conn *sql.Conn, chain []revisionArtif
 		if err != nil {
 			return a, err
 		}
-		add(name, "table", ddl, hash, nil)
-		if roundtripHash != hash {
-			a.Statements[len(a.Statements)-1].RoundtripHash = roundtripHash
+		if roundtripHash == hash {
+			roundtripHash = ""
 		}
+		add(name, "table", ddl, hash, nil, roundtripHash)
 	}
 	// Capture actual seed contents, including revision-introduced guards. Never
 	// copy execution receipts from the historical replay into a fresh database.
 	for _, name := range order {
-		if strings.HasPrefix(name, "backend_") || name == "time_migration_decisions" {
+		if strings.HasPrefix(name, "backend_") || name == "time_migration_decisions" || name == "schema_revisions" {
 			continue
 		}
 		var seedColumns []string
@@ -261,7 +267,7 @@ func generateSnapshot(ctx context.Context, conn *sql.Conn, chain []revisionArtif
 			quoted = append(quoted, "`updated_at`")
 		}
 		data, _ := json.Marshal(values)
-		add(name, "seed", "INSERT INTO `"+name+"` ("+strings.Join(quoted, ",")+") VALUES "+strings.Join(literals, ","), digest(data), columns)
+		add(name, "seed", "INSERT INTO `"+name+"` ("+strings.Join(quoted, ",")+") VALUES "+strings.Join(literals, ","), digest(data), columns, "")
 	}
 	for _, kind := range []string{"function", "procedure", "trigger"} {
 		query := "SELECT ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE() AND ROUTINE_TYPE=? ORDER BY ROUTINE_NAME"
@@ -326,10 +332,13 @@ func generateSnapshot(ctx context.Context, conn *sql.Conn, chain []revisionArtif
 			if err != nil {
 				return a, err
 			}
-			add(name, kind, ddl, hash, nil)
+			add(name, kind, ddl, hash, nil, "")
 		}
 	}
 	a.SchemaChecksum = digest(a.sql)
+	if _, err := schemaartifact.Parse(a.sql, "mysql"); err != nil {
+		return a, err
+	}
 	return a, nil
 }
 

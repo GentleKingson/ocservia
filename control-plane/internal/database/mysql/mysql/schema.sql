@@ -1,3 +1,11 @@
+-- ocservia:artifact=schema
+-- ocservia:format=1
+-- ocservia:engine=mysql
+-- ocservia:epoch=1
+-- ocservia:revision=0
+
+-- ocservia:step=001:table_backend_schema_snapshot
+-- ocservia:metadata={"kind":"table","object":"backend_schema_snapshot","before":"","after":"1393fe2017259a7a2092eaa7fb8a034129c370e56bd2855329d1e83a2c0e9dca"}
 CREATE TABLE `backend_schema_snapshot` (
   `singleton` tinyint NOT NULL,
   `artifact_checksum` varbinary(64) NOT NULL,
@@ -9,6 +17,9 @@ CREATE TABLE `backend_schema_snapshot` (
   CONSTRAINT `backend_schema_snapshot_chk_1` CHECK ((`singleton` = 1)),
   CONSTRAINT `backend_schema_snapshot_chk_2` CHECK ((`state` in (_utf8mb4'running',_utf8mb4'verified')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=002:table_backend_schema_snapshot_steps
+-- ocservia:metadata={"kind":"table","object":"backend_schema_snapshot_steps","before":"","after":"75c83bc18c530f480467dc587620788058e17058eae01112247234726aa2d9d2"}
 CREATE TABLE `backend_schema_snapshot_steps` (
   `ordinal` int NOT NULL,
   `name` varbinary(64) NOT NULL,
@@ -20,6 +31,9 @@ CREATE TABLE `backend_schema_snapshot_steps` (
   UNIQUE KEY `name` (`name`),
   CONSTRAINT `backend_schema_snapshot_steps_chk_1` CHECK ((`state` in (_utf8mb4'running',_utf8mb4'verified')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=003:table_backend_migration_steps
+-- ocservia:metadata={"kind":"table","object":"backend_migration_steps","before":"","after":"fe839e0287e815c1ee67838423b8442a92949f19d0c2b87460582c76a27aef3a"}
 CREATE TABLE `backend_migration_steps` (
   `ordinal` int NOT NULL,
   `name` varbinary(64) NOT NULL,
@@ -31,6 +45,9 @@ CREATE TABLE `backend_migration_steps` (
   UNIQUE KEY `name` (`name`),
   CONSTRAINT `backend_migration_steps_chk_1` CHECK ((`state` in (_utf8mb4'running',_utf8mb4'verified')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=004:table_backend_migrations
+-- ocservia:metadata={"kind":"table","object":"backend_migrations","before":"","after":"50c201717d95567e886862166579551ad52c77bf452bd5714efb91942a49079b"}
 CREATE TABLE `backend_migrations` (
   `singleton` tinyint NOT NULL,
   `engine` varbinary(16) NOT NULL,
@@ -44,6 +61,9 @@ CREATE TABLE `backend_migrations` (
   PRIMARY KEY (`singleton`),
   CONSTRAINT `backend_migrations_chk_1` CHECK ((`singleton` = 1))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=005:table_backend_schema_revisions
+-- ocservia:metadata={"kind":"table","object":"backend_schema_revisions","before":"","after":"e1a5cf21701573b945572e85a117eed3a619e7dea97fc08f35835ac92d1dcaf2"}
 CREATE TABLE `backend_schema_revisions` (
   `version` int NOT NULL,
   `parent_checksum` varbinary(64) NOT NULL,
@@ -56,10 +76,16 @@ CREATE TABLE `backend_schema_revisions` (
   CONSTRAINT `backend_schema_revisions_chk_1` CHECK ((`version` >= 2)),
   CONSTRAINT `backend_schema_revisions_chk_2` CHECK ((`state` in (_utf8mb4'running',_utf8mb4'verified')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=006:table_business_locks
+-- ocservia:metadata={"kind":"table","object":"business_locks","before":"","after":"9f4b1ecbaf1f861998bf97284c47c8374b8877585d5525785b462410bfc1900f"}
 CREATE TABLE `business_locks` (
   `lock_key` varbinary(128) NOT NULL,
   PRIMARY KEY (`lock_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=007:table_connection_owner_fencing
+-- ocservia:metadata={"kind":"table","object":"connection_owner_fencing","before":"","after":"30692d33c2b08b901a42308fdd06763f70f4d778e064d6a4d8384bbb0218dddb"}
 CREATE TABLE `connection_owner_fencing` (
   `node_id` varbinary(512) NOT NULL,
   `owner_instance_id` varbinary(16) NOT NULL,
@@ -77,6 +103,9 @@ CREATE TABLE `connection_owner_fencing` (
   CONSTRAINT `connection_owner_fencing_lease_until_range` CHECK (((`lease_until` is null) or (`lease_until` in (-(9223372036854775808),9223372036854775807)) or ((`lease_until` >= -(211813488000000000)) and (`lease_until` < 9223371331200000000)))),
   CONSTRAINT `connection_owner_fencing_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=008:table_controller_schema_compatibility
+-- ocservia:metadata={"kind":"table","object":"controller_schema_compatibility","before":"","after":"f37ec951e686d057862e723ad6f9f19e867833dd9d6639b28b695ab0d0a7c11b"}
 CREATE TABLE `controller_schema_compatibility` (
   `singleton` tinyint(1) NOT NULL DEFAULT '1',
   `current_schema` bigint NOT NULL,
@@ -88,10 +117,16 @@ CREATE TABLE `controller_schema_compatibility` (
   CONSTRAINT `controller_schema_compatibility_controller_schema_c_981ffc9e96ac` CHECK ((`minimum_compatible_controller_schema` <= `current_schema`)),
   CONSTRAINT `controller_schema_compatibility_controller_schema_c_d8ed1bb45f00` CHECK ((`singleton` = 1))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=009:table_exact_key_guards
+-- ocservia:metadata={"kind":"table","object":"exact_key_guards","before":"","after":"a8b4b4bcb8d3596b454120b367954fe86badf4604baf0cc78ad0c9947ef6e57c"}
 CREATE TABLE `exact_key_guards` (
   `key_name` varbinary(64) NOT NULL,
   PRIMARY KEY (`key_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=010:table_identities
+-- ocservia:metadata={"kind":"table","object":"identities","before":"","after":"bf83af509e1746e633c82cc77181cd6ce54232bf28e06883e4eaa613c20d797f"}
 CREATE TABLE `identities` (
   `id` varbinary(16) NOT NULL,
   `issuer` longtext NOT NULL,
@@ -108,6 +143,9 @@ CREATE TABLE `identities` (
   CONSTRAINT `identities_text_no_nul` CHECK (((locate(0x00,cast(`issuer` as char charset binary)) = 0) and (locate(0x00,cast(`subject` as char charset binary)) = 0) and (locate(0x00,cast(`email` as char charset binary)) = 0) and (locate(0x00,cast(`display_name` as char charset binary)) = 0))),
   CONSTRAINT `identities_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=011:table_local_auth_attempts
+-- ocservia:metadata={"kind":"table","object":"local_auth_attempts","before":"","after":"58101b0338e9d64c7bf1284b3a69470062d7dbec434dd8b434d5d07049fd9e79"}
 CREATE TABLE `local_auth_attempts` (
   `username` varchar(191) NOT NULL,
   `failures` int NOT NULL DEFAULT '0',
@@ -127,6 +165,9 @@ CREATE TABLE `local_auth_attempts` (
   CONSTRAINT `local_auth_attempts_text_no_nul` CHECK ((locate(0x00,cast(`username` as char charset binary)) = 0)),
   CONSTRAINT `local_auth_attempts_window_until_range` CHECK (((`window_until` is null) or (`window_until` in (-(9223372036854775808),9223372036854775807)) or ((`window_until` >= -(211813488000000000)) and (`window_until` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=012:table_local_credentials
+-- ocservia:metadata={"kind":"table","object":"local_credentials","before":"","after":"8670731a44238f1770c3eb3099baf1edb7cfe01ec89a14f3b8b41108465fd475"}
 CREATE TABLE `local_credentials` (
   `identity_id` varbinary(16) NOT NULL,
   `username` varchar(191) NOT NULL,
@@ -145,6 +186,9 @@ CREATE TABLE `local_credentials` (
   CONSTRAINT `local_credentials_text_no_nul` CHECK (((locate(0x00,cast(`username` as char charset binary)) = 0) and (locate(0x00,cast(`password_hash` as char charset binary)) = 0))),
   CONSTRAINT `local_credentials_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=013:table_node_agent_upgrade_results
+-- ocservia:metadata={"kind":"table","object":"node_agent_upgrade_results","before":"","after":"6be15d3e187ab474e4bb0bb47c8860e84f587bd4cff631627129425186241a30"}
 CREATE TABLE `node_agent_upgrade_results` (
   `operation_id` varbinary(16) NOT NULL,
   `node_id` varbinary(16) NOT NULL,
@@ -165,12 +209,18 @@ CREATE TABLE `node_agent_upgrade_results` (
   CONSTRAINT `node_agent_upgrade_results_reported_at_range` CHECK (((`reported_at` is null) or (`reported_at` in (-(9223372036854775808),9223372036854775807)) or ((`reported_at` >= -(211813488000000000)) and (`reported_at` < 9223371331200000000)))),
   CONSTRAINT `node_agent_upgrade_results_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`target_version` as char charset binary)) = 0) and (locate(0x00,cast(`detail` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=014:table_roles
+-- ocservia:metadata={"kind":"table","object":"roles","before":"","after":"46eda1a93e1889c6cb1c5549f286c8a9da452fc1b2a7423fba78000e35e3b416"}
 CREATE TABLE `roles` (
   `name` varchar(191) NOT NULL,
   PRIMARY KEY (`name`),
   CONSTRAINT `roles_roles_name_check` CHECK ((`name` in (_utf8mb4'Viewer',_utf8mb4'Operator',_utf8mb4'UserManager',_utf8mb4'ConfigManager',_utf8mb4'Auditor',_utf8mb4'SecurityAdmin',_utf8mb4'PlatformAdmin'))),
   CONSTRAINT `roles_text_no_nul` CHECK ((locate(0x00,cast(`name` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=015:table_scheduler_leadership
+-- ocservia:metadata={"kind":"table","object":"scheduler_leadership","before":"","after":"9d9ee2ddc71be858788aa5b2f05ade840f69b35fd947514cf3513654201d12e3"}
 CREATE TABLE `scheduler_leadership` (
   `id` int NOT NULL,
   `instance_id` varbinary(16) NOT NULL,
@@ -186,6 +236,9 @@ CREATE TABLE `scheduler_leadership` (
   CONSTRAINT `scheduler_leadership_scheduler_leadership_incarnation_check` CHECK ((`incarnation` >= 0)),
   CONSTRAINT `scheduler_leadership_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=016:table_scheduler_leases
+-- ocservia:metadata={"kind":"table","object":"scheduler_leases","before":"","after":"8ba051041c577b040c52b3ad7b759529d33c88487c843fa4f6a2ff04b96a5054"}
 CREATE TABLE `scheduler_leases` (
   `lease_name` varchar(191) NOT NULL,
   `owner_id` varbinary(16) NOT NULL,
@@ -198,6 +251,28 @@ CREATE TABLE `scheduler_leases` (
   CONSTRAINT `scheduler_leases_text_no_nul` CHECK ((locate(0x00,cast(`lease_name` as char charset binary)) = 0)),
   CONSTRAINT `scheduler_leases_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=017:table_schema_revisions
+-- ocservia:metadata={"kind":"table","object":"schema_revisions","before":"","after":"e73ea739ba0b8d06f7cdc5e42a079c10cf168337b38bdc007a24a3cc36946c7e"}
+CREATE TABLE `schema_revisions` (
+  `epoch` bigint NOT NULL,
+  `revision` bigint NOT NULL,
+  `checksum` varbinary(64) NOT NULL,
+  `state` varbinary(16) NOT NULL,
+  `step` int NOT NULL,
+  `started_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `verified_at` datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`epoch`,`revision`),
+  CONSTRAINT `schema_revisions_chk_1` CHECK ((`epoch` > 0)),
+  CONSTRAINT `schema_revisions_chk_2` CHECK ((`revision` >= 0)),
+  CONSTRAINT `schema_revisions_chk_3` CHECK ((length(`checksum`) = 64)),
+  CONSTRAINT `schema_revisions_chk_4` CHECK ((`state` in (_utf8mb4'running',_utf8mb4'verified'))),
+  CONSTRAINT `schema_revisions_chk_5` CHECK ((`step` >= 0)),
+  CONSTRAINT `schema_revisions_chk_6` CHECK (((`state` = _utf8mb4'verified') = (`verified_at` is not null)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=018:table_telemetry_legacy_migration
+-- ocservia:metadata={"kind":"table","object":"telemetry_legacy_migration","before":"","after":"48334549b788aca11bea0d68a8e9cc26ee4745168593f8f41f0cf5cc581d2f44"}
 CREATE TABLE `telemetry_legacy_migration` (
   `singleton` tinyint NOT NULL,
   `state` varbinary(16) NOT NULL,
@@ -207,6 +282,9 @@ CREATE TABLE `telemetry_legacy_migration` (
   CONSTRAINT `telemetry_legacy_migration_chk_2` CHECK ((`state` in (_utf8mb4'pending',_utf8mb4'running',_utf8mb4'complete'))),
   CONSTRAINT `telemetry_legacy_migration_chk_3` CHECK (((`state` = _utf8mb4'complete') = (`completed_at` is not null)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=019:table_telemetry_maintenance_page
+-- ocservia:metadata={"kind":"table","object":"telemetry_maintenance_page","before":"","after":"3ea4bde2c610d424e2e4a0a064a7bb84f89f8220875f06cbf0cbeaf32006140c"}
 CREATE TABLE `telemetry_maintenance_page` (
   `slot` smallint NOT NULL,
   `node_id` varbinary(16) NOT NULL,
@@ -219,6 +297,9 @@ CREATE TABLE `telemetry_maintenance_page` (
   PRIMARY KEY (`slot`),
   CONSTRAINT `telemetry_maintenance_page_chk_1` CHECK ((`slot` between 1 and 80))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=020:table_telemetry_maintenance_progress
+-- ocservia:metadata={"kind":"table","object":"telemetry_maintenance_progress","before":"","after":"6cc9488596be597dd76df5f1ad84c308ed7fc1f2a32606bb9f8c7e9b6d33b994"}
 CREATE TABLE `telemetry_maintenance_progress` (
   `singleton` tinyint NOT NULL,
   `phase` tinyint NOT NULL DEFAULT '0',
@@ -230,6 +311,9 @@ CREATE TABLE `telemetry_maintenance_progress` (
   PRIMARY KEY (`singleton`),
   CONSTRAINT `telemetry_maintenance_progress_chk_1` CHECK ((`singleton` = 1))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=021:table_telemetry_rollups_1h
+-- ocservia:metadata={"kind":"table","object":"telemetry_rollups_1h","before":"","after":"e9abc6bf6141e4c86b564ec5e1fcbc1429cd86dc01696d0d231155f444db445f","roundtrip_hash":"6dbcfcd61373e1982859075d29608d5612cc6ba75a51599c7dc704dc8487c65e"}
 CREATE TABLE `telemetry_rollups_1h` (
   `node_id` varbinary(16) NOT NULL,
   `metric` longtext NOT NULL,
@@ -250,6 +334,9 @@ CREATE TABLE `telemetry_rollups_1h` (
   CONSTRAINT `telemetry_rollups_1h_text_no_nul` CHECK ((locate(0x00,cast(`metric` as char charset binary)) = 0)),
   CONSTRAINT `telemetry_rollups_1h_time_range` CHECK (((`bucket_at` in (-(9223372036854775808),9223372036854775807)) or ((`bucket_at` >= -211813488000000000) and (`bucket_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=022:table_telemetry_sample_shards
+-- ocservia:metadata={"kind":"table","object":"telemetry_sample_shards","before":"","after":"27dc2880d60d71ba7543e4c111c076acad11be1ab37cf6bae5857364c0fbebc8"}
 CREATE TABLE `telemetry_sample_shards` (
   `table_name` varbinary(64) NOT NULL,
   `start_at` bigint NOT NULL,
@@ -261,6 +348,9 @@ CREATE TABLE `telemetry_sample_shards` (
   CONSTRAINT `telemetry_sample_shards_chk_1` CHECK ((`state` in (_utf8mb4'planned',_utf8mb4'active',_utf8mb4'retired',_utf8mb4'dropped'))),
   CONSTRAINT `telemetry_sample_shards_chk_2` CHECK ((`end_at` > `start_at`))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=023:table_time_migration_decisions
+-- ocservia:metadata={"kind":"table","object":"time_migration_decisions","before":"","after":"663062e47754eb195a4c88593c442fb820bd65dba72d834eb11c7e2e42e54c9a"}
 CREATE TABLE `time_migration_decisions` (
   `table_name` varbinary(64) NOT NULL,
   `column_name` varbinary(64) NOT NULL,
@@ -270,6 +360,9 @@ CREATE TABLE `time_migration_decisions` (
   PRIMARY KEY (`table_name`,`column_name`,`row_key`),
   CONSTRAINT `time_migration_decisions_chk_1` CHECK ((`decision` in (_utf8mb4'finite',_utf8mb4'negative_infinity')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=024:table_transport_event_cursor
+-- ocservia:metadata={"kind":"table","object":"transport_event_cursor","before":"","after":"c8ef5ee545269871ea2f39b1ee8e9e0d4416fe32f71bf4c640b0a958f761726c"}
 CREATE TABLE `transport_event_cursor` (
   `singleton` tinyint(1) NOT NULL DEFAULT '1',
   `event_id` varbinary(16) NOT NULL,
@@ -282,6 +375,9 @@ CREATE TABLE `transport_event_cursor` (
   CONSTRAINT `transport_event_cursor_transport_event_cursor_singleton_check` CHECK ((`singleton` = 1)),
   CONSTRAINT `transport_event_cursor_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=025:table_transport_event_quarantine
+-- ocservia:metadata={"kind":"table","object":"transport_event_quarantine","before":"","after":"51c6f86d66c33455863bd1b50a746c031c2d719ac5d8674cbe948298f081bc75"}
 CREATE TABLE `transport_event_quarantine` (
   `event_id` varbinary(16) NOT NULL,
   `node_id` varbinary(16) NOT NULL,
@@ -300,6 +396,9 @@ CREATE TABLE `transport_event_quarantine` (
   CONSTRAINT `transport_event_quarantine_transport_event_quaranti_85dc61464f5a` CHECK ((length(`payload_sha256`) = 32)),
   CONSTRAINT `transport_event_quarantine_transport_event_quaranti_e73de9135d30` CHECK (((length(`reason_detail`) >= 1) and (length(`reason_detail`) <= 256)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=026:table_upstream_sync_records
+-- ocservia:metadata={"kind":"table","object":"upstream_sync_records","before":"","after":"a3b21deae18ebb0245bdf0795fa56cbbd99c59ed7d2cdaec8c683150efd1349f","roundtrip_hash":"e53323bc06134d05bee4e31671d2cc2bed69569cd68cf56df993298a0c0f0568"}
 CREATE TABLE `upstream_sync_records` (
   `id` varbinary(16) NOT NULL,
   `repository` longtext NOT NULL,
@@ -317,6 +416,9 @@ CREATE TABLE `upstream_sync_records` (
   CONSTRAINT `upstream_sync_records_upstream_sync_records_new_commit_check` CHECK (regexp_like(`new_commit`,_utf8mb4'(?-i)\\A[0-9a-f]{40}\\z')),
   CONSTRAINT `upstream_sync_records_upstream_sync_records_old_commit_check` CHECK (regexp_like(`old_commit`,_utf8mb4'(?-i)\\A[0-9a-f]{40}\\z'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=027:table_workspaces
+-- ocservia:metadata={"kind":"table","object":"workspaces","before":"","after":"2ea509050fd1cffe93465a4db7de100b7055385004af3786779556a9f83f2000"}
 CREATE TABLE `workspaces` (
   `id` varbinary(16) NOT NULL,
   `name` longtext NOT NULL,
@@ -333,6 +435,9 @@ CREATE TABLE `workspaces` (
   CONSTRAINT `workspaces_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000)))),
   CONSTRAINT `workspaces_workspaces_version_check` CHECK ((`version` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=028:table_approval_requests
+-- ocservia:metadata={"kind":"table","object":"approval_requests","before":"","after":"97cb920a24d14e2c6a17281dbeb32610fb85348c6797ac8c5f8849f760442eea","roundtrip_hash":"4519bcd372033c2533eb2d92b858a7ed9d3287836ed4a85b243ae6be07e2ca5e"}
 CREATE TABLE `approval_requests` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -380,6 +485,9 @@ CREATE TABLE `approval_requests` (
   CONSTRAINT `approval_requests_expires_at_range` CHECK (((`expires_at` is null) or (`expires_at` in (-(9223372036854775808),9223372036854775807)) or ((`expires_at` >= -211813488000000000) and (`expires_at` < 9223371331200000000)))),
   CONSTRAINT `approval_requests_text_no_nul` CHECK (((locate(0x00,cast(`action` as char charset binary)) = 0) and (locate(0x00,cast(`resource_type` as char charset binary)) = 0) and (locate(0x00,cast(`reason` as char charset binary)) = 0) and (locate(0x00,cast(`status` as char charset binary)) = 0) and (locate(0x00,cast(`approval_reason` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=029:table_auth_sessions
+-- ocservia:metadata={"kind":"table","object":"auth_sessions","before":"","after":"92b91700a9add79cdbe0dd0a646fd92fb996ac4d5c14a732ea52a8b699f9144e"}
 CREATE TABLE `auth_sessions` (
   `id` varbinary(16) NOT NULL,
   `identity_id` varbinary(16) NOT NULL,
@@ -399,6 +507,9 @@ CREATE TABLE `auth_sessions` (
   CONSTRAINT `auth_sessions_expires_at_range` CHECK (((`expires_at` is null) or (`expires_at` in (-(9223372036854775808),9223372036854775807)) or ((`expires_at` >= -(211813488000000000)) and (`expires_at` < 9223371331200000000)))),
   CONSTRAINT `auth_sessions_revoked_at_range` CHECK (((`revoked_at` is null) or (`revoked_at` in (-(9223372036854775808),9223372036854775807)) or ((`revoked_at` >= -(211813488000000000)) and (`revoked_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=030:table_backend_schema_revision_steps
+-- ocservia:metadata={"kind":"table","object":"backend_schema_revision_steps","before":"","after":"2603a5a7427805e5e607905300e5eca6e81d96d0a424d5466fe3a899004b1006"}
 CREATE TABLE `backend_schema_revision_steps` (
   `version` int NOT NULL,
   `ordinal` int NOT NULL,
@@ -412,6 +523,9 @@ CREATE TABLE `backend_schema_revision_steps` (
   CONSTRAINT `backend_schema_revision_steps_ibfk_1` FOREIGN KEY (`version`) REFERENCES `backend_schema_revisions` (`version`) ON DELETE RESTRICT,
   CONSTRAINT `backend_schema_revision_steps_chk_1` CHECK ((`state` in (_utf8mb4'running',_utf8mb4'verified')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=031:table_batch_operations
+-- ocservia:metadata={"kind":"table","object":"batch_operations","before":"","after":"e5e3644c5ac88a0ffcf698188d7f5f804b4ab23dc56ee5fb4c55b23dd8095210"}
 CREATE TABLE `batch_operations` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -453,6 +567,9 @@ CREATE TABLE `batch_operations` (
   CONSTRAINT `batch_operations_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`actor_id` as char charset binary)) = 0) and (locate(0x00,cast(`reason` as char charset binary)) = 0) and (locate(0x00,cast(`request_id` as char charset binary)) = 0) and (locate(0x00,cast(`traceparent` as char charset binary)) = 0) and (locate(0x00,cast(`idempotency_key` as char charset binary)) = 0))),
   CONSTRAINT `batch_operations_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=032:table_break_glass_uses
+-- ocservia:metadata={"kind":"table","object":"break_glass_uses","before":"","after":"ca9350e3dfa0ff2cfdd0499cf4d3607269b292308a85870ab15db25e9d524317"}
 CREATE TABLE `break_glass_uses` (
   `credential_fingerprint` varbinary(512) NOT NULL,
   `identity_id` varbinary(16) NOT NULL,
@@ -468,12 +585,18 @@ CREATE TABLE `break_glass_uses` (
   CONSTRAINT `break_glass_uses_chk_3` CHECK ((`rotation_required` in (0,1))),
   CONSTRAINT `break_glass_uses_used_at_range` CHECK (((`used_at` is null) or (`used_at` in (-(9223372036854775808),9223372036854775807)) or ((`used_at` >= -(211813488000000000)) and (`used_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=033:table_exact_identities
+-- ocservia:metadata={"kind":"table","object":"exact_identities","before":"","after":"c2e78a8ab272853fc1f37c5e1296b824a1adb71f7d197f23fb643750f456a83c"}
 CREATE TABLE `exact_identities` (
   `owner_id` varbinary(16) NOT NULL,
   `key_value` longblob NOT NULL,
   PRIMARY KEY (`owner_id`),
   CONSTRAINT `exact_identities_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `identities` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=034:table_exact_telemetry_rollups_1h
+-- ocservia:metadata={"kind":"table","object":"exact_telemetry_rollups_1h","before":"","after":"5af99d4d767e759aaea8baf5470f8d862183f984b998e9fff3d63c62b16cc607"}
 CREATE TABLE `exact_telemetry_rollups_1h` (
   `owner_id` bigint unsigned NOT NULL,
   `key_value` longblob NOT NULL,
@@ -481,18 +604,27 @@ CREATE TABLE `exact_telemetry_rollups_1h` (
   KEY `telemetry_key_lookup` (`key_value`(255)),
   CONSTRAINT `exact_telemetry_rollups_1h_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `telemetry_rollups_1h` (`exact_row_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=035:table_exact_upstream_sync_records
+-- ocservia:metadata={"kind":"table","object":"exact_upstream_sync_records","before":"","after":"1573a172c531ed437db21e54497fecc0f542e28bc845b4ec135c8242b4d383f0"}
 CREATE TABLE `exact_upstream_sync_records` (
   `owner_id` varbinary(16) NOT NULL,
   `key_value` longblob NOT NULL,
   PRIMARY KEY (`owner_id`),
   CONSTRAINT `exact_upstream_sync_records_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `upstream_sync_records` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=036:table_exact_workspaces
+-- ocservia:metadata={"kind":"table","object":"exact_workspaces","before":"","after":"8695c9cad3a5deabbcc8ec598f522e0b9412a7412dbb2e624299a24ed70322a6"}
 CREATE TABLE `exact_workspaces` (
   `owner_id` varbinary(16) NOT NULL,
   `key_value` longblob NOT NULL,
   PRIMARY KEY (`owner_id`),
   CONSTRAINT `exact_workspaces_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `workspaces` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=037:table_local_auth_bootstrap
+-- ocservia:metadata={"kind":"table","object":"local_auth_bootstrap","before":"","after":"4e68075758be755f595527045e1c6f847c18ed090535d7cfa959296260dd395a","roundtrip_hash":"b9d6416b16c4fadd52b818a5d016214bcefaf68b954ed0682bbaf65c9fa613e8"}
 CREATE TABLE `local_auth_bootstrap` (
   `singleton` tinyint(1) NOT NULL DEFAULT '1',
   `identity_id` varbinary(16) NOT NULL,
@@ -518,6 +650,9 @@ CREATE TABLE `local_auth_bootstrap` (
   CONSTRAINT `local_auth_bootstrap_local_auth_bootstrap_singleton_check` CHECK ((`singleton` = 1)),
   CONSTRAINT `local_auth_bootstrap_local_initialization_state` CHECK ((((0 <> `completion_pending`) and (`completed_at` is null) and (`approver_identity_id` is null)) or ((0 = `completion_pending`) and (`completed_at` is not null))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=038:table_nodes
+-- ocservia:metadata={"kind":"table","object":"nodes","before":"","after":"7a1f5c2a73e1c9861c4eb7b2103fda8d3909d76b2a73c3816adba1085a3f6c0a","roundtrip_hash":"8d2fa654e02438a5cc460125a9d3daa5f8b9b7c23da90867a7c4bd2e40bd90ef"}
 CREATE TABLE `nodes` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -541,6 +676,9 @@ CREATE TABLE `nodes` (
   CONSTRAINT `nodes_text_no_nul` CHECK (((locate(0x00,cast(`name` as char charset binary)) = 0) and (locate(0x00,cast(`status` as char charset binary)) = 0) and (locate(0x00,cast(`policy` as char charset binary)) = 0))),
   CONSTRAINT `nodes_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -211813488000000000) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=039:table_observed_groups
+-- ocservia:metadata={"kind":"table","object":"observed_groups","before":"","after":"b3c272fc8e6909b19e2c2db88be3a25a1f16226dc4d27dd37c925379cf035311","roundtrip_hash":"a4bf80cfa9c097365a6bc8466109ef3ddfdb889d2a80c41be3b03fd51f7da260"}
 CREATE TABLE `observed_groups` (
   `node_id` varbinary(16) NOT NULL,
   `group_name` varchar(191) NOT NULL,
@@ -557,6 +695,9 @@ CREATE TABLE `observed_groups` (
   CONSTRAINT `observed_groups_text_no_nul` CHECK ((locate(0x00,cast(`group_name` as char charset binary)) = 0)),
   CONSTRAINT `observed_groups_time_range` CHECK (((`observed_at` in (-(9223372036854775808),9223372036854775807)) or ((`observed_at` >= -211813488000000000) and (`observed_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=040:table_observed_user_usage
+-- ocservia:metadata={"kind":"table","object":"observed_user_usage","before":"","after":"80ee82e04030bb09e229798aa572622d4b44d45e901de1890f0c5e5249ae89ec"}
 CREATE TABLE `observed_user_usage` (
   `node_id` varbinary(16) NOT NULL,
   `username` varchar(191) NOT NULL,
@@ -576,6 +717,9 @@ CREATE TABLE `observed_user_usage` (
   CONSTRAINT `observed_user_usage_period_start_range` CHECK (((`period_start` is null) or (`period_start` in (-(9223372036854775808),9223372036854775807)) or ((`period_start` >= -(211813488000000000)) and (`period_start` < 9223371331200000000)))),
   CONSTRAINT `observed_user_usage_text_no_nul` CHECK (((locate(0x00,cast(`username` as char charset binary)) = 0) and (locate(0x00,cast(`period` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=041:table_observed_users
+-- ocservia:metadata={"kind":"table","object":"observed_users","before":"","after":"cee27d1272f65fff7e8b4b04ce158aecb4b9792388f0733e0e5f9a651aacd649"}
 CREATE TABLE `observed_users` (
   `node_id` varbinary(16) NOT NULL,
   `username` varchar(191) NOT NULL,
@@ -593,6 +737,9 @@ CREATE TABLE `observed_users` (
   CONSTRAINT `observed_users_observed_users_username_check` CHECK (regexp_like(`username`,_utf8mb4'(?-i)\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\z')),
   CONSTRAINT `observed_users_text_no_nul` CHECK ((locate(0x00,cast(`username` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=042:table_operations
+-- ocservia:metadata={"kind":"table","object":"operations","before":"","after":"717478c2f814542e2a8222f2faabf3fc5dca56166e49fad6a778746698f681de"}
 CREATE TABLE `operations` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -629,6 +776,9 @@ CREATE TABLE `operations` (
   CONSTRAINT `operations_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`request_id` as char charset binary)) = 0) and (locate(0x00,cast(`trace_id` as char charset binary)) = 0) and (locate(0x00,cast(`idempotency_key` as char charset binary)) = 0))),
   CONSTRAINT `operations_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=043:table_privd_attestation_enrollment_credentials
+-- ocservia:metadata={"kind":"table","object":"privd_attestation_enrollment_credentials","before":"","after":"4daa6f628fa82f7226ab31e0549cf44dea9ddec7276e2e64074534c65e442092"}
 CREATE TABLE `privd_attestation_enrollment_credentials` (
   `id` varbinary(16) NOT NULL,
   `node_id` varbinary(16) NOT NULL,
@@ -662,6 +812,9 @@ CREATE TABLE `privd_attestation_enrollment_credentials` (
   CONSTRAINT `privd_attestation_enrollment_credentials_privd_atte_b395bfbcfa51` CHECK ((length(`controller_nonce`) = 32)),
   CONSTRAINT `privd_attestation_enrollment_credentials_privd_atte_fe973e6d2f9e` CHECK (((ord(substr(`id`,7,1)) >> 4) = 7))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=044:table_role_bindings
+-- ocservia:metadata={"kind":"table","object":"role_bindings","before":"","after":"5b6e28e30545deb80973ac1718625e3d0737620ed7a3e3d1d53a400a9b82f774"}
 CREATE TABLE `role_bindings` (
   `id` varbinary(16) NOT NULL,
   `identity_id` varbinary(16) NOT NULL,
@@ -696,6 +849,9 @@ CREATE TABLE `role_bindings` (
   CONSTRAINT `role_bindings_role_bindings_resource_type_check` CHECK ((`resource_type` in (_utf8mb4'workspace',_utf8mb4'node',_utf8mb4'resource',_utf8mb4'secret_ref',_utf8mb4'certificate',_utf8mb4'config_plan',_utf8mb4'batch_operation',_utf8mb4'role_binding'))),
   CONSTRAINT `role_bindings_text_no_nul` CHECK (((locate(0x00,cast(`role_name` as char charset binary)) = 0) and (locate(0x00,cast(`resource_type` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=045:table_secret_provider_refs
+-- ocservia:metadata={"kind":"table","object":"secret_provider_refs","before":"","after":"7fd70a1d159104967a304d613586a47329e1d68ff7bb00dee61b87e5bade43f8"}
 CREATE TABLE `secret_provider_refs` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -720,6 +876,9 @@ CREATE TABLE `secret_provider_refs` (
   CONSTRAINT `secret_provider_refs_text_no_nul` CHECK (((locate(0x00,cast(`provider` as char charset binary)) = 0) and (locate(0x00,cast(`key_path` as char charset binary)) = 0) and (locate(0x00,cast(`version` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0))),
   CONSTRAINT `secret_provider_refs_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=046:table_security_alerts
+-- ocservia:metadata={"kind":"table","object":"security_alerts","before":"","after":"7df3fe7699d02056cb01f6b69a209f6421efc07704e8bb1fdbd016a394ae8d96"}
 CREATE TABLE `security_alerts` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) DEFAULT NULL,
@@ -748,6 +907,9 @@ CREATE TABLE `security_alerts` (
   CONSTRAINT `security_alerts_security_alerts_severity_check` CHECK ((`severity` in (_utf8mb4'high',_utf8mb4'critical'))),
   CONSTRAINT `security_alerts_text_no_nul` CHECK (((locate(0x00,cast(`severity` as char charset binary)) = 0) and (locate(0x00,cast(`kind` as char charset binary)) = 0) and (locate(0x00,cast(`resource_type` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=047:table_telemetry_ingest_batches
+-- ocservia:metadata={"kind":"table","object":"telemetry_ingest_batches","before":"","after":"8d4281b0cb1bee5d7d3e0d1d504b9c4ea9cefe76a629accfc15933f1d0266ae6"}
 CREATE TABLE `telemetry_ingest_batches` (
   `batch_id` varbinary(16) NOT NULL,
   `node_id` varbinary(16) NOT NULL,
@@ -768,6 +930,9 @@ CREATE TABLE `telemetry_ingest_batches` (
   CONSTRAINT `telemetry_ingest_batches_telemetry_ingest_batches_sequence_check` CHECK ((`sequence` >= 0)),
   CONSTRAINT `telemetry_ingest_batches_text_no_nul` CHECK ((locate(0x00,cast(`kind` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=048:table_telemetry_rollups_5m
+-- ocservia:metadata={"kind":"table","object":"telemetry_rollups_5m","before":"","after":"9eca8abde6bd5f0802c013197210f824c69fa9ffb499e044ecc57d9f1e9db6e6","roundtrip_hash":"2dd28c5da12e83ed3a62410a933c7885ceca9a26083bb98cbc11b812ce0d4623"}
 CREATE TABLE `telemetry_rollups_5m` (
   `node_id` varbinary(16) NOT NULL,
   `metric` longtext NOT NULL,
@@ -789,6 +954,9 @@ CREATE TABLE `telemetry_rollups_5m` (
   CONSTRAINT `telemetry_rollups_5m_text_no_nul` CHECK ((locate(0x00,cast(`metric` as char charset binary)) = 0)),
   CONSTRAINT `telemetry_rollups_5m_time_range` CHECK (((`bucket_at` in (-(9223372036854775808),9223372036854775807)) or ((`bucket_at` >= -211813488000000000) and (`bucket_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=049:table_telemetry_samples
+-- ocservia:metadata={"kind":"table","object":"telemetry_samples","before":"","after":"8817627c7dc1a884b144887d66195217095ffbfee371bf041c068f4e7e88e0bf"}
 CREATE TABLE `telemetry_samples` (
   `node_id` varbinary(16) NOT NULL,
   `batch_id` varbinary(16) NOT NULL,
@@ -807,6 +975,9 @@ CREATE TABLE `telemetry_samples` (
   CONSTRAINT `telemetry_samples_text_no_nul` CHECK ((locate(0x00,cast(`metric` as char charset binary)) = 0)),
   CONSTRAINT `telemetry_samples_time_range` CHECK (((`sampled_at` in (-(9223372036854775808),9223372036854775807)) or ((`sampled_at` >= -(211813488000000000)) and (`sampled_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=050:table_telemetry_samples_template
+-- ocservia:metadata={"kind":"table","object":"telemetry_samples_template","before":"","after":"f3fb8735314a026419596c51cee839f2fc29939faa0a968662082d538b3d2afb"}
 CREATE TABLE `telemetry_samples_template` (
   `node_id` varbinary(16) NOT NULL,
   `batch_id` varbinary(16) NOT NULL,
@@ -825,6 +996,9 @@ CREATE TABLE `telemetry_samples_template` (
   CONSTRAINT `telemetry_samples_template_metric` CHECK ((`metric` in (_utf8mb4'cpu_usage_ratio',_utf8mb4'memory_used_bytes',_utf8mb4'network_rx_bytes',_utf8mb4'network_tx_bytes',_utf8mb4'session_count',_utf8mb4'connection_rtt_ms'))),
   CONSTRAINT `telemetry_samples_template_month` CHECK (((`sampled_at` >= -(211813488000000000)) and (`sampled_at` < 9223371331200000000)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=051:table_telemetry_security_events
+-- ocservia:metadata={"kind":"table","object":"telemetry_security_events","before":"","after":"53b330f15111a22f197885bce02d9de5c55cd3f1bec5c0a2a01643018554c0c6","roundtrip_hash":"a02b97a9949a2d511e9efac94dcb0f37e07cad850e242e409911d8d65815b20b"}
 CREATE TABLE `telemetry_security_events` (
   `event_id` varbinary(16) NOT NULL,
   `node_id` varbinary(16) NOT NULL,
@@ -846,6 +1020,9 @@ CREATE TABLE `telemetry_security_events` (
   CONSTRAINT `telemetry_security_events_text_no_nul` CHECK (((locate(0x00,cast(`severity` as char charset binary)) = 0) and (locate(0x00,cast(`event_type` as char charset binary)) = 0))),
   CONSTRAINT `telemetry_security_events_time_range` CHECK (((`observed_at` in (-(9223372036854775808),9223372036854775807)) or ((`observed_at` >= -211813488000000000) and (`observed_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=052:table_transport_events
+-- ocservia:metadata={"kind":"table","object":"transport_events","before":"","after":"ea32f66593b14c52b175bac0e7b17ff1a0f0547a4569c5179356351f6233e428"}
 CREATE TABLE `transport_events` (
   `event_id` varbinary(16) NOT NULL,
   `ingest_sequence` bigint NOT NULL AUTO_INCREMENT,
@@ -870,6 +1047,9 @@ CREATE TABLE `transport_events` (
   CONSTRAINT `transport_events_transport_events_payload_check` CHECK ((length(`payload`) <= 1048576)),
   CONSTRAINT `transport_events_transport_events_traceparent_check` CHECK (regexp_like(`traceparent`,_utf8mb4'(?-i)\\A00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\\z'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=053:table_user_policy_enforcements
+-- ocservia:metadata={"kind":"table","object":"user_policy_enforcements","before":"","after":"e5039598d5df4f2973bcb50372601dc34be5c716bd8e7a0060f35410627d109b"}
 CREATE TABLE `user_policy_enforcements` (
   `node_id` varbinary(16) NOT NULL,
   `username` longtext NOT NULL,
@@ -898,6 +1078,9 @@ CREATE TABLE `user_policy_enforcements` (
   CONSTRAINT `user_policy_enforcements_user_policy_enforcements_r_0694bb4e74bc` CHECK ((`resulting_user_version` > 0)),
   CONSTRAINT `user_policy_enforcements_user_policy_enforcements_s_393e81dc42a5` CHECK ((`source_user_version` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=054:table_user_usage_cursors
+-- ocservia:metadata={"kind":"table","object":"user_usage_cursors","before":"","after":"2293a3c32b56cf00a7227fc0488b919a4d2a6c4d94314faf8337a88bd51b51c6"}
 CREATE TABLE `user_usage_cursors` (
   `node_id` varbinary(16) NOT NULL,
   `session_id` varchar(257) NOT NULL,
@@ -917,6 +1100,9 @@ CREATE TABLE `user_usage_cursors` (
   CONSTRAINT `user_usage_cursors_user_usage_cursors_tx_bytes_check` CHECK ((`tx_bytes` >= 0)),
   CONSTRAINT `user_usage_cursors_user_usage_cursors_username_check` CHECK (regexp_like(`username`,_utf8mb4'(?-i)\\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\\z'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=055:table_agent_rollouts
+-- ocservia:metadata={"kind":"table","object":"agent_rollouts","before":"","after":"a84081f92b5188606851515077b5fa341d31a91b27aee1d2fea769e0218f0283","roundtrip_hash":"2aaaba9ac76e6da8dde959b7192014bd78e900dff5f638c7adcfa21723988e7b"}
 CREATE TABLE `agent_rollouts` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -959,6 +1145,9 @@ CREATE TABLE `agent_rollouts` (
   CONSTRAINT `agent_rollouts_text_no_nul` CHECK (((locate(0x00,cast(`target_version` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`reason` as char charset binary)) = 0) and (locate(0x00,cast(`pause_code` as char charset binary)) = 0) and (locate(0x00,cast(`idempotency_key` as char charset binary)) = 0))),
   CONSTRAINT `agent_rollouts_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -211813488000000000) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=056:table_agent_upgrade_operations
+-- ocservia:metadata={"kind":"table","object":"agent_upgrade_operations","before":"","after":"c41e661c81c7c337c4ebe64fc212cb4c74c29e534c3824e61937f2a2c3d28cb3"}
 CREATE TABLE `agent_upgrade_operations` (
   `operation_id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -992,6 +1181,9 @@ CREATE TABLE `agent_upgrade_operations` (
   CONSTRAINT `agent_upgrade_operations_text_no_nul` CHECK (((locate(0x00,cast(`target_version` as char charset binary)) = 0) and (locate(0x00,cast(`architecture` as char charset binary)) = 0) and (locate(0x00,cast(`from_version` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0))),
   CONSTRAINT `agent_upgrade_operations_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=057:table_approval_authority_resources
+-- ocservia:metadata={"kind":"table","object":"approval_authority_resources","before":"","after":"c0ab6709f2572097b7325212f5159ae817940ab0a97ee78e4ceb34d28c77b77b"}
 CREATE TABLE `approval_authority_resources` (
   `approval_id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1007,6 +1199,9 @@ CREATE TABLE `approval_authority_resources` (
   CONSTRAINT `approval_authority_resources_chk_3` CHECK ((length(`resource_id`) = 16)),
   CONSTRAINT `approval_authority_resources_text_no_nul` CHECK ((locate(0x00,cast(`resource_type` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=058:table_approval_batch_items
+-- ocservia:metadata={"kind":"table","object":"approval_batch_items","before":"","after":"f1ed94dd72a7c8a9f9f708ee811a2a3d9eb93c0ae63a05c047cc354ac336392f"}
 CREATE TABLE `approval_batch_items` (
   `approval_id` varbinary(16) NOT NULL,
   `item_index` int NOT NULL,
@@ -1026,6 +1221,9 @@ CREATE TABLE `approval_batch_items` (
   CONSTRAINT `approval_batch_items_chk_2` CHECK ((length(`node_id`) = 16)),
   CONSTRAINT `approval_batch_items_text_no_nul` CHECK (((locate(0x00,cast(`username` as char charset binary)) = 0) and (locate(0x00,cast(`action` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=059:table_audit_events
+-- ocservia:metadata={"kind":"table","object":"audit_events","before":"","after":"e906eaf8253d146c5e6da7fc520f27829a22859fe53349f4a31dbed609df28ec","roundtrip_hash":"8a9c49f8b7aaa44baf2507e3ab50f6a5c7ca92fa21fc4235ea12489fa414a1e3"}
 CREATE TABLE `audit_events` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1078,6 +1276,9 @@ CREATE TABLE `audit_events` (
   CONSTRAINT `audit_events_occurred_at_range` CHECK (((`occurred_at` is null) or (`occurred_at` in (-(9223372036854775808),9223372036854775807)) or ((`occurred_at` >= -211813488000000000) and (`occurred_at` < 9223371331200000000)))),
   CONSTRAINT `audit_events_text_no_nul` CHECK (((locate(0x00,cast(`actor_type` as char charset binary)) = 0) and (locate(0x00,cast(`actor_id` as char charset binary)) = 0) and (locate(0x00,cast(`action` as char charset binary)) = 0) and (locate(0x00,cast(`resource_type` as char charset binary)) = 0) and (locate(0x00,cast(`request_id` as char charset binary)) = 0) and (locate(0x00,cast(`trace_id` as char charset binary)) = 0) and (locate(0x00,cast(`result` as char charset binary)) = 0) and (locate(0x00,cast(`reason` as char charset binary)) = 0) and (locate(0x00,cast(`error_type` as char charset binary)) = 0) and (locate(0x00,cast(`event_key_id` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=060:table_batch_operation_items
+-- ocservia:metadata={"kind":"table","object":"batch_operation_items","before":"","after":"d0670bb300329f5f9d47703c155945cfb6d8819f10664f6ac1ec52ea0c8fe260"}
 CREATE TABLE `batch_operation_items` (
   `batch_id` varbinary(16) NOT NULL,
   `item_index` int NOT NULL,
@@ -1112,6 +1313,9 @@ CREATE TABLE `batch_operation_items` (
   CONSTRAINT `batch_operation_items_text_no_nul` CHECK (((locate(0x00,cast(`username` as char charset binary)) = 0) and (locate(0x00,cast(`action` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`error_type` as char charset binary)) = 0))),
   CONSTRAINT `batch_operation_items_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=061:table_commands
+-- ocservia:metadata={"kind":"table","object":"commands","before":"","after":"f410bffa77d37187d35d45b7908839f4504d713ec0ed17f8f203459d0bf32566","roundtrip_hash":"879e06d964192008e57e8e56e7bb348bd22ddae7a1dcfb4294fd381970ed8be7"}
 CREATE TABLE `commands` (
   `id` varbinary(16) NOT NULL,
   `operation_id` varbinary(16) NOT NULL,
@@ -1160,6 +1364,9 @@ CREATE TABLE `commands` (
   CONSTRAINT `commands_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`payload_type` as char charset binary)) = 0) and (locate(0x00,cast(`idempotency_key` as char charset binary)) = 0) and (locate(0x00,cast(`traceparent` as char charset binary)) = 0) and (locate(0x00,cast(`resource_type` as char charset binary)) = 0) and (locate(0x00,cast(`resource_key` as char charset binary)) = 0))),
   CONSTRAINT `commands_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -211813488000000000) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=062:table_config_plans
+-- ocservia:metadata={"kind":"table","object":"config_plans","before":"","after":"b7161a297d8ac719cffcf41821a66c67bc3db122046712be0c514e4fee77c3b0","roundtrip_hash":"4aac23b76d532452223d6afa9d659db5605b96ef2a411a69b869224687d0c5a7"}
 CREATE TABLE `config_plans` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1197,6 +1404,9 @@ CREATE TABLE `config_plans` (
   CONSTRAINT `config_plans_expires_at_range` CHECK (((`expires_at` is null) or (`expires_at` in (-(9223372036854775808),9223372036854775807)) or ((`expires_at` >= -211813488000000000) and (`expires_at` < 9223371331200000000)))),
   CONSTRAINT `config_plans_text_no_nul` CHECK (((locate(0x00,cast(`template_name` as char charset binary)) = 0) and (locate(0x00,cast(`candidate_redacted` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=063:table_desired_groups
+-- ocservia:metadata={"kind":"table","object":"desired_groups","before":"","after":"a4bbfdc9c5a9fb66dc034bbc549ec0e797e91a2e51012b7aef5247b7d39335c9","roundtrip_hash":"f932d324cc915d5f94a3f39ce4d31e3549ab22e5a49b3d138829a27ace72b487"}
 CREATE TABLE `desired_groups` (
   `node_id` varbinary(16) NOT NULL,
   `group_name` varchar(191) NOT NULL,
@@ -1217,6 +1427,9 @@ CREATE TABLE `desired_groups` (
   CONSTRAINT `desired_groups_text_no_nul` CHECK ((locate(0x00,cast(`group_name` as char charset binary)) = 0)),
   CONSTRAINT `desired_groups_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -211813488000000000) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=064:table_desired_users
+-- ocservia:metadata={"kind":"table","object":"desired_users","before":"","after":"65e18b911849a826a6f493ff7d9f25f674c8165c90f3ff9037f0654e5b013f21"}
 CREATE TABLE `desired_users` (
   `node_id` varbinary(16) NOT NULL,
   `username` varchar(191) NOT NULL,
@@ -1238,6 +1451,9 @@ CREATE TABLE `desired_users` (
   CONSTRAINT `desired_users_text_no_nul` CHECK ((locate(0x00,cast(`username` as char charset binary)) = 0)),
   CONSTRAINT `desired_users_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=065:table_enrollment_tokens
+-- ocservia:metadata={"kind":"table","object":"enrollment_tokens","before":"","after":"0f0df8b1f145519d3a59969bf1de2139a6fb378080cda02e77a2f4caee39edf4"}
 CREATE TABLE `enrollment_tokens` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1271,18 +1487,27 @@ CREATE TABLE `enrollment_tokens` (
   CONSTRAINT `enrollment_tokens_expires_at_range` CHECK (((`expires_at` is null) or (`expires_at` in (-(9223372036854775808),9223372036854775807)) or ((`expires_at` >= -(211813488000000000)) and (`expires_at` < 9223371331200000000)))),
   CONSTRAINT `enrollment_tokens_text_no_nul` CHECK (((locate(0x00,cast(`expected_environment` as char charset binary)) = 0) and (locate(0x00,cast(`expected_node_name` as char charset binary)) = 0) and (locate(0x00,cast(`created_by` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=066:table_exact_nodes
+-- ocservia:metadata={"kind":"table","object":"exact_nodes","before":"","after":"68702bd738eccf645e8c0612c44524b86f861562d1632f20885558667bd583c7"}
 CREATE TABLE `exact_nodes` (
   `owner_id` varbinary(16) NOT NULL,
   `key_value` longblob NOT NULL,
   PRIMARY KEY (`owner_id`),
   CONSTRAINT `exact_nodes_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=067:table_exact_operations
+-- ocservia:metadata={"kind":"table","object":"exact_operations","before":"","after":"02846fdea0d1956598f674ff40560e057ffce44ea9e27617fe348e72bbd6d3cb"}
 CREATE TABLE `exact_operations` (
   `owner_id` varbinary(16) NOT NULL,
   `key_value` longblob NOT NULL,
   PRIMARY KEY (`owner_id`),
   CONSTRAINT `exact_operations_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `operations` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=068:table_exact_telemetry_rollups_5m
+-- ocservia:metadata={"kind":"table","object":"exact_telemetry_rollups_5m","before":"","after":"0471497d9e8898a0672402ee6d3a5185f39f79760deb60b2c55cd179cb61db45"}
 CREATE TABLE `exact_telemetry_rollups_5m` (
   `owner_id` bigint unsigned NOT NULL,
   `key_value` longblob NOT NULL,
@@ -1290,12 +1515,18 @@ CREATE TABLE `exact_telemetry_rollups_5m` (
   KEY `telemetry_key_lookup` (`key_value`(255)),
   CONSTRAINT `exact_telemetry_rollups_5m_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `telemetry_rollups_5m` (`exact_row_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=069:table_exact_user_policy_enforcements
+-- ocservia:metadata={"kind":"table","object":"exact_user_policy_enforcements","before":"","after":"06c69b88b9e5fded295262c25ddc6f073ddc32d4a005b3a8f73181152daf5cbd"}
 CREATE TABLE `exact_user_policy_enforcements` (
   `owner_id` bigint unsigned NOT NULL,
   `key_value` longblob NOT NULL,
   PRIMARY KEY (`owner_id`),
   CONSTRAINT `exact_user_policy_enforcements_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `user_policy_enforcements` (`exact_row_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=070:table_local_slice_jobs
+-- ocservia:metadata={"kind":"table","object":"local_slice_jobs","before":"","after":"bdf301ebf13b3d3765286f53e5fce482ca2175821c987b4ec1f9468f645d4996"}
 CREATE TABLE `local_slice_jobs` (
   `operation_id` varbinary(16) NOT NULL,
   `command_envelope` longblob NOT NULL,
@@ -1319,6 +1550,9 @@ CREATE TABLE `local_slice_jobs` (
   CONSTRAINT `local_slice_jobs_local_slice_jobs_traceparent_check` CHECK (regexp_like(`traceparent`,_utf8mb4'(?-i)\\A00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\\z')),
   CONSTRAINT `local_slice_jobs_text_no_nul` CHECK (((locate(0x00,cast(`traceparent` as char charset binary)) = 0) and (locate(0x00,cast(`last_error` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=071:table_node_bootstrap_tokens
+-- ocservia:metadata={"kind":"table","object":"node_bootstrap_tokens","before":"","after":"dfadc4846ced8dc13712540de26ed4f4e3cabe9557f263cf4e30e1a5f1bacb67","roundtrip_hash":"fdccc8c94507bf25c67462debe329409ddc7147fd7b35db115fc0e0a092c24b4"}
 CREATE TABLE `node_bootstrap_tokens` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1355,6 +1589,9 @@ CREATE TABLE `node_bootstrap_tokens` (
   CONSTRAINT `node_bootstrap_tokens_node_bootstrap_tokens_token_hash_check` CHECK ((length(`token_hash`) = 32)),
   CONSTRAINT `node_bootstrap_tokens_text_no_nul` CHECK (((locate(0x00,cast(`expected_environment` as char charset binary)) = 0) and (locate(0x00,cast(`expected_node_name` as char charset binary)) = 0) and (locate(0x00,cast(`created_by` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=072:table_node_capabilities
+-- ocservia:metadata={"kind":"table","object":"node_capabilities","before":"","after":"662913f77ecb54d1e749cdf65d6d4f13353fd3418b368387dc2b1c8d7f4e309e"}
 CREATE TABLE `node_capabilities` (
   `node_id` varbinary(16) NOT NULL,
   `capability` varchar(191) NOT NULL,
@@ -1366,6 +1603,9 @@ CREATE TABLE `node_capabilities` (
   CONSTRAINT `node_capabilities_node_capabilities_capability_check` CHECK (((char_length(`capability`) >= 1) and (char_length(`capability`) <= 128))),
   CONSTRAINT `node_capabilities_text_no_nul` CHECK ((locate(0x00,cast(`capability` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=073:table_node_command_leases
+-- ocservia:metadata={"kind":"table","object":"node_command_leases","before":"","after":"ee44f894764e98467eb79767e9c625399c7880f1b53a898766e5208e909d0b02"}
 CREATE TABLE `node_command_leases` (
   `node_id` varbinary(16) NOT NULL,
   `command_id` varbinary(16) NOT NULL,
@@ -1386,6 +1626,9 @@ CREATE TABLE `node_command_leases` (
   CONSTRAINT `node_command_leases_created_at_range` CHECK (((`created_at` is null) or (`created_at` in (-(9223372036854775808),9223372036854775807)) or ((`created_at` >= -(211813488000000000)) and (`created_at` < 9223371331200000000)))),
   CONSTRAINT `node_command_leases_leased_until_range` CHECK (((`leased_until` is null) or (`leased_until` in (-(9223372036854775808),9223372036854775807)) or ((`leased_until` >= -(211813488000000000)) and (`leased_until` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=074:table_node_config_state
+-- ocservia:metadata={"kind":"table","object":"node_config_state","before":"","after":"ab117e3e63eb979858073c8b46db5137a5a4546aff2966b5453dd7aac6a914e3"}
 CREATE TABLE `node_config_state` (
   `node_id` varbinary(16) NOT NULL,
   `revision` bigint NOT NULL DEFAULT '0',
@@ -1411,6 +1654,9 @@ CREATE TABLE `node_config_state` (
   CONSTRAINT `node_config_state_text_no_nul` CHECK (((locate(0x00,cast(`redacted_config` as char charset binary)) = 0) and (locate(0x00,cast(`automation_lock_reason` as char charset binary)) = 0))),
   CONSTRAINT `node_config_state_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=075:table_node_endpoint_keys
+-- ocservia:metadata={"kind":"table","object":"node_endpoint_keys","before":"","after":"b20e4515625196371230f248eadae743fac842dd66cab2e0219da82b46bbc9ef"}
 CREATE TABLE `node_endpoint_keys` (
   `node_id` varbinary(16) NOT NULL,
   `endpoint_id` varbinary(512) NOT NULL,
@@ -1428,6 +1674,9 @@ CREATE TABLE `node_endpoint_keys` (
   CONSTRAINT `node_endpoint_keys_revoked_at_range` CHECK (((`revoked_at` is null) or (`revoked_at` in (-(9223372036854775808),9223372036854775807)) or ((`revoked_at` >= -(211813488000000000)) and (`revoked_at` < 9223371331200000000)))),
   CONSTRAINT `node_endpoint_keys_text_no_nul` CHECK ((locate(0x00,cast(`state` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=076:table_node_ip_bans
+-- ocservia:metadata={"kind":"table","object":"node_ip_bans","before":"","after":"97d1c8eba5d757bc327ea6049c2f9e2b193bfd6babc27286173fc1a86ce95a60"}
 CREATE TABLE `node_ip_bans` (
   `node_id` varbinary(16) NOT NULL,
   `ip` varbinary(18) NOT NULL,
@@ -1440,6 +1689,9 @@ CREATE TABLE `node_ip_bans` (
   CONSTRAINT `node_ip_bans_node_ip_bans_seconds_remaining_check` CHECK (((`seconds_remaining` is null) or (`seconds_remaining` >= 0))),
   CONSTRAINT `node_ip_bans_observed_at_range` CHECK (((`observed_at` is null) or (`observed_at` in (-(9223372036854775808),9223372036854775807)) or ((`observed_at` >= -(211813488000000000)) and (`observed_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=077:table_node_observed_snapshots
+-- ocservia:metadata={"kind":"table","object":"node_observed_snapshots","before":"","after":"848aa902295ab4394e587be5876e4c447643c8b270144a6f637aeb7ed3c56e53","roundtrip_hash":"cc8e0a64949b83bedba0c9e44ae98ac6a2becabd70fe1fb79368d061930a8e5f"}
 CREATE TABLE `node_observed_snapshots` (
   `node_id` varbinary(16) NOT NULL,
   `boot_id` longtext NOT NULL,
@@ -1476,6 +1728,9 @@ CREATE TABLE `node_observed_snapshots` (
   CONSTRAINT `node_observed_snapshots_received_at_range` CHECK (((`received_at` is null) or (`received_at` in (-(9223372036854775808),9223372036854775807)) or ((`received_at` >= -211813488000000000) and (`received_at` < 9223371331200000000)))),
   CONSTRAINT `node_observed_snapshots_text_no_nul` CHECK (((locate(0x00,cast(`boot_id` as char charset binary)) = 0) and (locate(0x00,cast(`agent_version` as char charset binary)) = 0) and (locate(0x00,cast(`ocserv_version` as char charset binary)) = 0) and (locate(0x00,cast(`os_release` as char charset binary)) = 0) and (locate(0x00,cast(`architecture` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=078:table_node_privd_attestation_keys
+-- ocservia:metadata={"kind":"table","object":"node_privd_attestation_keys","before":"","after":"b28c2c04dd1315cf41bdc7d5742ed694d784580dcecb06b1aacfd6914418d241"}
 CREATE TABLE `node_privd_attestation_keys` (
   `node_id` varbinary(16) NOT NULL,
   `key_id` varchar(191) NOT NULL,
@@ -1514,6 +1769,9 @@ CREATE TABLE `node_privd_attestation_keys` (
   CONSTRAINT `node_privd_attestation_keys_text_no_nul` CHECK (((locate(0x00,cast(`key_id` as char charset binary)) = 0) and (locate(0x00,cast(`algorithm` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`predecessor_key_id` as char charset binary)) = 0) and (locate(0x00,cast(`successor_key_id` as char charset binary)) = 0))),
   CONSTRAINT `node_privd_attestation_keys_valid_until_range` CHECK (((`valid_until` is null) or (`valid_until` in (-(9223372036854775808),9223372036854775807)) or ((`valid_until` >= -(211813488000000000)) and (`valid_until` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=079:table_node_sealing_keys
+-- ocservia:metadata={"kind":"table","object":"node_sealing_keys","before":"","after":"fe2351eadf1e505b142b2c49989c9307b74369d45af5ddc8cd8f45dea50d8875"}
 CREATE TABLE `node_sealing_keys` (
   `node_id` varbinary(16) NOT NULL,
   `purpose` smallint NOT NULL,
@@ -1533,6 +1791,9 @@ CREATE TABLE `node_sealing_keys` (
   CONSTRAINT `node_sealing_keys_node_sealing_keys_version_check` CHECK ((`version` = 1)),
   CONSTRAINT `node_sealing_keys_text_no_nul` CHECK ((locate(0x00,cast(`key_id` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=080:table_node_sessions
+-- ocservia:metadata={"kind":"table","object":"node_sessions","before":"","after":"459c39e773a1144757b4072f58079d3360471ee83db8df5789a1e730937f90b7"}
 CREATE TABLE `node_sessions` (
   `node_id` varbinary(16) NOT NULL,
   `session_id` varchar(257) NOT NULL,
@@ -1555,6 +1816,9 @@ CREATE TABLE `node_sessions` (
   CONSTRAINT `node_sessions_observed_at_range` CHECK (((`observed_at` is null) or (`observed_at` in (-(9223372036854775808),9223372036854775807)) or ((`observed_at` >= -(211813488000000000)) and (`observed_at` < 9223371331200000000)))),
   CONSTRAINT `node_sessions_text_no_nul` CHECK (((locate(0x00,cast(`session_id` as char charset binary)) = 0) and (locate(0x00,cast(`username` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=081:table_node_trust_convergence
+-- ocservia:metadata={"kind":"table","object":"node_trust_convergence","before":"","after":"34e64d48eff98ca1b89f32b1412c7fa4672d1ac644681bc6013c99719fc64c38"}
 CREATE TABLE `node_trust_convergence` (
   `node_id` varbinary(16) NOT NULL,
   `endpoint_id` longblob NOT NULL,
@@ -1593,6 +1857,9 @@ CREATE TABLE `node_trust_convergence` (
   CONSTRAINT `node_trust_convergence_text_no_nul` CHECK (((locate(0x00,cast(`desired_state` as char charset binary)) = 0) and (locate(0x00,cast(`reason` as char charset binary)) = 0) and (locate(0x00,cast(`last_error` as char charset binary)) = 0))),
   CONSTRAINT `node_trust_convergence_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=082:table_operation_events
+-- ocservia:metadata={"kind":"table","object":"operation_events","before":"","after":"0d4a03e496adca5eb5a889443c8628e2c99493f1dd38322b86c6bf05ee58301c"}
 CREATE TABLE `operation_events` (
   `sequence` bigint NOT NULL AUTO_INCREMENT,
   `id` varbinary(16) NOT NULL,
@@ -1609,6 +1876,9 @@ CREATE TABLE `operation_events` (
   CONSTRAINT `operation_events_operation_events_state_check` CHECK ((`state` in (_utf8mb4'queued',_utf8mb4'dispatched',_utf8mb4'accepted',_utf8mb4'running',_utf8mb4'succeeded',_utf8mb4'failed',_utf8mb4'unknown',_utf8mb4'expired',_utf8mb4'rolled_back',_utf8mb4'superseded'))),
   CONSTRAINT `operation_events_text_no_nul` CHECK ((locate(0x00,cast(`state` as char charset binary)) = 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=083:table_outbox_events
+-- ocservia:metadata={"kind":"table","object":"outbox_events","before":"","after":"7cde03686e128108f572d7d2a6c907d10b4c5ca2740e1dd8e791d6c1a25eac61"}
 CREATE TABLE `outbox_events` (
   `id` varbinary(16) NOT NULL,
   `command_id` varbinary(16) NOT NULL,
@@ -1639,6 +1909,9 @@ CREATE TABLE `outbox_events` (
   CONSTRAINT `outbox_events_published_at_range` CHECK (((`published_at` is null) or (`published_at` in (-(9223372036854775808),9223372036854775807)) or ((`published_at` >= -(211813488000000000)) and (`published_at` < 9223371331200000000)))),
   CONSTRAINT `outbox_events_text_no_nul` CHECK (((locate(0x00,cast(`event_type` as char charset binary)) = 0) and (locate(0x00,cast(`last_error` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=084:table_agent_command_results
+-- ocservia:metadata={"kind":"table","object":"agent_command_results","before":"","after":"d9a6f6c2b17e0df20db2e26919b2bf474cc4399313e74ea5fc5c657a8d74cc84"}
 CREATE TABLE `agent_command_results` (
   `event_id` varbinary(16) NOT NULL,
   `command_id` varbinary(16) NOT NULL,
@@ -1684,6 +1957,9 @@ CREATE TABLE `agent_command_results` (
   CONSTRAINT `agent_command_results_created_at_range` CHECK (((`created_at` is null) or (`created_at` in (-(9223372036854775808),9223372036854775807)) or ((`created_at` >= -(211813488000000000)) and (`created_at` < 9223371331200000000)))),
   CONSTRAINT `agent_command_results_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`error_code` as char charset binary)) = 0) and (locate(0x00,cast(`receipt_verification_status` as char charset binary)) = 0) and (locate(0x00,cast(`receipt_failure_reason` as char charset binary)) = 0) and (locate(0x00,cast(`privd_attestation_key_id` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=085:table_agent_rollout_nodes
+-- ocservia:metadata={"kind":"table","object":"agent_rollout_nodes","before":"","after":"3acb2724008a862c40722be5792343ae04df36dc574dd6131b286d78e1ae6eb8"}
 CREATE TABLE `agent_rollout_nodes` (
   `rollout_id` varbinary(16) NOT NULL,
   `node_id` varbinary(16) NOT NULL,
@@ -1714,6 +1990,9 @@ CREATE TABLE `agent_rollout_nodes` (
   CONSTRAINT `agent_rollout_nodes_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`from_version` as char charset binary)) = 0) and (locate(0x00,cast(`failure_code` as char charset binary)) = 0))),
   CONSTRAINT `agent_rollout_nodes_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=086:table_audit_checkpoints
+-- ocservia:metadata={"kind":"table","object":"audit_checkpoints","before":"","after":"fa13bb11bfde738c82cf23be49b0774e1da838cfacff7e66824efbcac3939074"}
 CREATE TABLE `audit_checkpoints` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1733,6 +2012,9 @@ CREATE TABLE `audit_checkpoints` (
   CONSTRAINT `audit_checkpoints_chk_3` CHECK ((length(`through_event_id`) = 16)),
   CONSTRAINT `audit_checkpoints_created_at_range` CHECK (((`created_at` is null) or (`created_at` in (-(9223372036854775808),9223372036854775807)) or ((`created_at` >= -(211813488000000000)) and (`created_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=087:table_certificates
+-- ocservia:metadata={"kind":"table","object":"certificates","before":"","after":"10c5abbd88daceaab3745ea426bacdda647365bbec7763f55683244346d60989","roundtrip_hash":"af5ebec27b320eb68e64390e7f6a7091ece15b5847478a6e308aab40c90ccfc4"}
 CREATE TABLE `certificates` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1805,6 +2087,9 @@ CREATE TABLE `certificates` (
   CONSTRAINT `certificates_text_no_nul` CHECK (((locate(0x00,cast(`common_name` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`serial_number` as char charset binary)) = 0) and (locate(0x00,cast(`revocation_reason` as char charset binary)) = 0) and (locate(0x00,cast(`csr_privd_attestation_key_id` as char charset binary)) = 0))),
   CONSTRAINT `certificates_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -211813488000000000) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=088:table_command_attempts
+-- ocservia:metadata={"kind":"table","object":"command_attempts","before":"","after":"a1e4490345fc773979b679b52dc78f9c0045c55867b220b4f0e9e14907479109"}
 CREATE TABLE `command_attempts` (
   `id` varbinary(16) NOT NULL,
   `command_id` varbinary(16) NOT NULL,
@@ -1831,6 +2116,9 @@ CREATE TABLE `command_attempts` (
   CONSTRAINT `command_attempts_started_at_range` CHECK (((`started_at` is null) or (`started_at` in (-(9223372036854775808),9223372036854775807)) or ((`started_at` >= -(211813488000000000)) and (`started_at` < 9223371331200000000)))),
   CONSTRAINT `command_attempts_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`error_code` as char charset binary)) = 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=089:table_config_apply_operations
+-- ocservia:metadata={"kind":"table","object":"config_apply_operations","before":"","after":"a154f572a0991d968c7ddc671372d6cba272c0ac40c6af5d1e0e7c6d2d3b577a"}
 CREATE TABLE `config_apply_operations` (
   `operation_id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1873,6 +2161,9 @@ CREATE TABLE `config_apply_operations` (
   CONSTRAINT `config_apply_operations_text_no_nul` CHECK (((locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`failure_code` as char charset binary)) = 0))),
   CONSTRAINT `config_apply_operations_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=090:table_desired_user_policies
+-- ocservia:metadata={"kind":"table","object":"desired_user_policies","before":"","after":"a8e28b2d29b094de0a9b9418b8c0f6596bd274e923b8a1c2b2aba3a60bf0304b"}
 CREATE TABLE `desired_user_policies` (
   `node_id` varbinary(16) NOT NULL,
   `username` varchar(191) NOT NULL,
@@ -1898,12 +2189,18 @@ CREATE TABLE `desired_user_policies` (
   CONSTRAINT `desired_user_policies_text_no_nul` CHECK (((locate(0x00,cast(`username` as char charset binary)) = 0) and (locate(0x00,cast(`quota_period` as char charset binary)) = 0) and (locate(0x00,cast(`quota_direction` as char charset binary)) = 0))),
   CONSTRAINT `desired_user_policies_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=091:table_exact_agent_command_results
+-- ocservia:metadata={"kind":"table","object":"exact_agent_command_results","before":"","after":"35974c8aeea59286c7114b5be210f04a49456c1a8ace600d9394827fbd4175db"}
 CREATE TABLE `exact_agent_command_results` (
   `owner_id` varbinary(16) NOT NULL,
   `key_value` longblob NOT NULL,
   PRIMARY KEY (`owner_id`),
   CONSTRAINT `exact_agent_command_results_owner_fk` FOREIGN KEY (`owner_id`) REFERENCES `agent_command_results` (`event_id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- ocservia:end-step
+-- ocservia:step=092:table_user_policy_mutations
+-- ocservia:metadata={"kind":"table","object":"user_policy_mutations","before":"","after":"b94a8c5fb71a5202f89dc9f9f1797ea51afa81abc33cbb16220148c6b19dac3b"}
 CREATE TABLE `user_policy_mutations` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1927,6 +2224,9 @@ CREATE TABLE `user_policy_mutations` (
   CONSTRAINT `user_policy_mutations_user_policy_mutations_policy_version_check` CHECK ((`policy_version` > 0)),
   CONSTRAINT `user_policy_mutations_user_policy_mutations_request_hash_check` CHECK ((length(`request_hash`) = 32))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=093:table_artifact_operations
+-- ocservia:metadata={"kind":"table","object":"artifact_operations","before":"","after":"9e7b61b011559eaf747cc662327a3690aaf8fa6cd26144bceabc5a75b7015222"}
 CREATE TABLE `artifact_operations` (
   `id` varbinary(16) NOT NULL,
   `workspace_id` varbinary(16) NOT NULL,
@@ -1997,14 +2297,41 @@ CREATE TABLE `artifact_operations` (
   CONSTRAINT `artifact_operations_text_no_nul` CHECK (((locate(0x00,cast(`purpose` as char charset binary)) = 0) and (locate(0x00,cast(`state` as char charset binary)) = 0) and (locate(0x00,cast(`active_grant_subject` as char charset binary)) = 0) and (locate(0x00,cast(`consume_request_id` as char charset binary)) = 0))),
   CONSTRAINT `artifact_operations_updated_at_range` CHECK (((`updated_at` is null) or (`updated_at` in (-(9223372036854775808),9223372036854775807)) or ((`updated_at` >= -(211813488000000000)) and (`updated_at` < 9223371331200000000))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+-- ocservia:end-step
+-- ocservia:step=094:seed_business_locks
+-- ocservia:metadata={"kind":"seed","object":"business_locks","before":"","after":"92aaf496e8ae19e8796e43a3329e252b37aacbdb9de474ce84713a30c0061042","columns":["lock_key"]}
 INSERT INTO `business_locks` (`lock_key`) VALUES (CAST(X'74656c656d657472792d73686172642d636174616c6f67' AS BINARY));
+-- ocservia:end-step
+-- ocservia:step=095:seed_exact_key_guards
+-- ocservia:metadata={"kind":"seed","object":"exact_key_guards","before":"","after":"c88a67659c491569d1c10745f32bedd9a683bad6a516639162aa1251fa427c39","columns":["key_name"]}
 INSERT INTO `exact_key_guards` (`key_name`) VALUES (CAST(X'6167656e745f636f6d6d616e645f726573756c7473' AS BINARY)),(CAST(X'6964656e746974696573' AS BINARY)),(CAST(X'6e6f646573' AS BINARY)),(CAST(X'6f7065726174696f6e73' AS BINARY)),(CAST(X'74656c656d657472795f726f6c6c7570735f3168' AS BINARY)),(CAST(X'74656c656d657472795f726f6c6c7570735f356d' AS BINARY)),(CAST(X'757073747265616d5f73796e635f7265636f726473' AS BINARY)),(CAST(X'757365725f706f6c6963795f656e666f7263656d656e7473' AS BINARY)),(CAST(X'776f726b737061636573' AS BINARY));
+-- ocservia:end-step
+-- ocservia:step=096:seed_roles
+-- ocservia:metadata={"kind":"seed","object":"roles","before":"","after":"1f9d1718f823ed7d16a33c4dc97cfb968d081b9809f81460d76988f19da3168e","columns":["name"]}
 INSERT INTO `roles` (`name`) VALUES (CAST(X'41756469746f72' AS BINARY)),(CAST(X'436f6e6669674d616e61676572' AS BINARY)),(CAST(X'4f70657261746f72' AS BINARY)),(CAST(X'506c6174666f726d41646d696e' AS BINARY)),(CAST(X'536563757269747941646d696e' AS BINARY)),(CAST(X'557365724d616e61676572' AS BINARY)),(CAST(X'566965776572' AS BINARY));
+-- ocservia:end-step
+-- ocservia:step=097:seed_scheduler_leadership
+-- ocservia:metadata={"kind":"seed","object":"scheduler_leadership","before":"","after":"998312bbfe219bdf8797c58c6497c55682ed0ef451927d5d054175f27bbdcfe5","columns":["id","instance_id","incarnation","epoch","lease_until"]}
 INSERT INTO `scheduler_leadership` (`id`,`instance_id`,`incarnation`,`epoch`,`lease_until`,`updated_at`) VALUES (CAST(X'31' AS BINARY),CAST(X'00000000000000000000000000000000' AS BINARY),CAST(X'30' AS BINARY),CAST(X'30' AS BINARY),CAST(X'2d39323233333732303336383534373735383038' AS BINARY),TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6)));
+-- ocservia:end-step
+-- ocservia:step=098:seed_telemetry_legacy_migration
+-- ocservia:metadata={"kind":"seed","object":"telemetry_legacy_migration","before":"","after":"afbdec78e9cf5ec42f10219b9985277a9ac666bc61c561ae4f5e078a18368d7f","columns":["singleton","state","completed_at"]}
 INSERT INTO `telemetry_legacy_migration` (`singleton`,`state`,`completed_at`) VALUES (CAST(X'31' AS BINARY),CAST(X'70656e64696e67' AS BINARY),NULL);
+-- ocservia:end-step
+-- ocservia:step=099:seed_telemetry_maintenance_progress
+-- ocservia:metadata={"kind":"seed","object":"telemetry_maintenance_progress","before":"","after":"f1581c3a8fa55c72b787832eaa9b6c7022fb113dda6510ca3daf3ee632dd6b04","columns":["singleton","phase","cutoff","candidate","cursor_at","cursor_node","cursor_metric"]}
 INSERT INTO `telemetry_maintenance_progress` (`singleton`,`phase`,`cutoff`,`candidate`,`cursor_at`,`cursor_node`,`cursor_metric`) VALUES (CAST(X'31' AS BINARY),CAST(X'30' AS BINARY),CAST(X'30' AS BINARY),NULL,NULL,NULL,NULL);
+-- ocservia:end-step
+-- ocservia:step=100:seed_upstream_sync_records
+-- ocservia:metadata={"kind":"seed","object":"upstream_sync_records","before":"","after":"e829ca9f651d9a71f9a8653a1b5bde893c992bcd691f31c10bb375e9d2a783f4","columns":["id","repository","old_ref","old_commit","new_ref","new_commit","rollback_ref","synced_at","classification"]}
 INSERT INTO `upstream_sync_records` (`id`,`repository`,`old_ref`,`old_commit`,`new_ref`,`new_commit`,`rollback_ref`,`synced_at`,`classification`) VALUES (CAST(X'019fdc5bb93972a1ae678efd197e5688' AS BINARY),CAST(X'6d6d746165652f6f63736572762d64617368626f617264' AS BINARY),CAST(X'76342e39' AS BINARY),CAST(X'62386635393032366334643837396634306331646134336463303064393765333466393739306263' AS BINARY),CAST(X'6d6173746572' AS BINARY),CAST(X'34643235343738353830643839396237373436306264663063663061353930636664643236303330' AS BINARY),CAST(X'7075626c69636174696f6e3a20726576657274205052313520696e646570656e64656e746c793b20696d706c656d656e746174696f6e3a2073746f7020493134207363686564756c65722f4150492c207265636f6e63696c6520636f6d6d616e64732c2072657665727420505231342c207468656e206170706c79206d6967726174696f6e2030303030313320646f776e206f6e6c79207768656e20706f6c69637920616e642062617463682064617461206e656564206e6f742062652072657461696e6564' AS BINARY),CAST(X'383339343336313132303030303030' AS BINARY),CAST(X'7b2241223a205b5d2c202242223a205b227765622f7372632f636f6d706f6e656e74732f617574682f5365747570466f726d2e767565225d2c202243223a205b2271756f746120616e64206578706972792073656d616e74696373206d617070656420746f206e6f64652d73636f706564206465736972656420706f6c69637920616e64207363686564756c6572225d2c202244223a205b22446f636b65722f6e6174697665206f6363746c20657865637574696f6e222c20226c6f63616c2063726f6e206a6f75726e616c222c20226469726563742070617373776f72642f636f6e6669672066696c6573222c20227065726d616e656e742064656c6574696f6e225d7d' AS BINARY));
+-- ocservia:end-step
+-- ocservia:step=101:seed_exact_upstream_sync_records
+-- ocservia:metadata={"kind":"seed","object":"exact_upstream_sync_records","before":"","after":"02816ec964df1e6f17fc63b66da17ed98f7206b02f4bfd2cdef0ae3d72db2426","columns":["owner_id","key_value"]}
 INSERT INTO `exact_upstream_sync_records` (`owner_id`,`key_value`) VALUES (CAST(X'019fdc5bb93972a1ae678efd197e5688' AS BINARY),CAST(X'00000000000000176d6d746165652f6f63736572762d64617368626f617264000000000000002862386635393032366334643837396634306331646134336463303064393765333466393739306263000000000000002834643235343738353830643839396237373436306264663063663061353930636664643236303330' AS BINARY));
+-- ocservia:end-step
+-- ocservia:step=102:function_ocserv_jsonb_array_valid
+-- ocservia:metadata={"kind":"function","object":"ocserv_jsonb_array_valid","before":"","after":"243f01f66c11a70d31c91e1c43de9bcb109decdb2d7e03c3ce874e63c094ce20"}
 CREATE FUNCTION `ocserv_jsonb_array_valid`(doc LONGBLOB) RETURNS tinyint(1)
     NO SQL
     DETERMINISTIC
@@ -2073,6 +2400,9 @@ BEGIN
  IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;
  RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'ARRAY';
 END;
+-- ocservia:end-step
+-- ocservia:step=103:function_ocserv_jsonb_object_valid
+-- ocservia:metadata={"kind":"function","object":"ocserv_jsonb_object_valid","before":"","after":"40cc96bbe056f9c8cb9b649d08f02f2f9c5b0d810c440c3173d9a961cc3de6bf"}
 CREATE FUNCTION `ocserv_jsonb_object_valid`(doc LONGBLOB) RETURNS tinyint(1)
     NO SQL
     DETERMINISTIC
@@ -2141,6 +2471,9 @@ BEGIN
  IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;
  RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'OBJECT';
 END;
+-- ocservia:end-step
+-- ocservia:step=104:function_ocserv_jsonb_value_valid
+-- ocservia:metadata={"kind":"function","object":"ocserv_jsonb_value_valid","before":"","after":"4aacb7b9f59e94989a011dbc355c05f13f15100af9ee4ac5d0ddda98ce8f4d01"}
 CREATE FUNCTION `ocserv_jsonb_value_valid`(doc LONGBLOB) RETURNS tinyint(1)
     NO SQL
     DETERMINISTIC
@@ -2209,6 +2542,9 @@ BEGIN
  IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;
  RETURN TRUE;
 END;
+-- ocservia:end-step
+-- ocservia:step=105:function_ocserv_rollout_exclusions_valid
+-- ocservia:metadata={"kind":"function","object":"ocserv_rollout_exclusions_valid","before":"","after":"a9b904951431aba59bf35fd0073e5f41b44c4fd1176ab45d870aca7009c2208e"}
 CREATE FUNCTION `ocserv_rollout_exclusions_valid`(doc LONGBLOB) RETURNS tinyint(1)
     NO SQL
     DETERMINISTIC
@@ -2277,6 +2613,9 @@ BEGIN
  IF NOT JSON_VALID(masked) THEN RETURN FALSE; END IF;
  RETURN CAST(JSON_TYPE(masked) AS BINARY)=_binary'ARRAY' AND JSON_LENGTH(masked)<=500;
 END;
+-- ocservia:end-step
+-- ocservia:step=106:function_ocserv_text_array_valid
+-- ocservia:metadata={"kind":"function","object":"ocserv_text_array_valid","before":"","after":"05fbc9dd60753f3c42d99d1491c1a1236dd54f14ba8b229e8b9bd6a9c9a05092"}
 CREATE FUNCTION `ocserv_text_array_valid`(doc LONGBLOB) RETURNS tinyint(1)
     NO SQL
     DETERMINISTIC
@@ -2319,10 +2658,19 @@ BEGIN
  END WHILE;
  RETURN TRUE;
 END;
+-- ocservia:end-step
+-- ocservia:step=107:procedure_audit_compact_detail
+-- ocservia:metadata={"kind":"procedure","object":"audit_compact_detail","before":"","after":"4b15b21344c4e118d13e5a58743d17c7a416efa70b4576d466c6fe39f09e3cc8"}
 CREATE PROCEDURE `audit_compact_detail`(IN p_id VARBINARY(16),IN p_hash VARBINARY(32),IN p_key VARBINARY(128),IN p_mac VARBINARY(32),IN p_at BIGINT)
 BEGIN UPDATE audit_events SET reason=NULL,before_summary=NULL,after_summary=NULL,details_compacted_at=p_at,compaction_key_id=p_key,compaction_mac=p_mac WHERE id=p_id AND event_hash=p_hash AND details_compacted_at IS NULL AND auth_version=1 AND BINARY action<>BINARY 'audit.auth.transition' AND occurred_at<=p_at-7776000000000 AND p_at<=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED); SELECT ROW_COUNT()=1; END;
+-- ocservia:end-step
+-- ocservia:step=108:procedure_security_compact_details
+-- ocservia:metadata={"kind":"procedure","object":"security_compact_details","before":"","after":"87a9648de7e89b83a9ab3287a2ef22d67a667a7760d54acee75933488cd07035"}
 CREATE PROCEDURE `security_compact_details`(IN p_cutoff BIGINT)
 BEGIN UPDATE telemetry_security_events SET detail_sha256=UNHEX(SHA2(detail,256)),detail='{}',details_compacted_at=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED) WHERE details_compacted_at IS NULL AND observed_at<LEAST(p_cutoff,CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)-7776000000000) ORDER BY observed_at,event_id LIMIT 32; END;
+-- ocservia:end-step
+-- ocservia:step=109:procedure_telemetry_prune_rollups
+-- ocservia:metadata={"kind":"procedure","object":"telemetry_prune_rollups","before":"","after":"32318aacdcf8bab5f5ad87689f14f72a3f2109933e6c0420ab6c9671656d8e0d"}
 CREATE PROCEDURE `telemetry_prune_rollups`(IN maintenance_time BIGINT)
 BEGIN
  DECLARE clock_at BIGINT;
@@ -2336,6 +2684,9 @@ BEGIN
  DELETE FROM telemetry_rollups_5m WHERE bucket_at<maintenance_time-7776000000000 ORDER BY bucket_at,exact_row_id LIMIT 1000;
  DELETE FROM telemetry_rollups_1h WHERE bucket_at<cut_hour ORDER BY bucket_at,exact_row_id LIMIT 1000;
 END;
+-- ocservia:end-step
+-- ocservia:step=110:procedure_telemetry_retire_shards
+-- ocservia:metadata={"kind":"procedure","object":"telemetry_retire_shards","before":"","after":"9cd38b1d7f8dd965de77176f3c5c60197ff57e027b8fbe2c2403df09524ee9a5"}
 CREATE PROCEDURE `telemetry_retire_shards`(IN requested_cutoff BIGINT)
 main: BEGIN
  DECLARE clock_at BIGINT;
@@ -2519,51 +2870,174 @@ SET statement_open=FALSE;
  SET @telemetry_batch_sql=NULL,@telemetry_batch_matches=NULL;
  SELECT TRUE AS done;
 END;
+-- ocservia:end-step
+-- ocservia:step=111:trigger_approval_summary_insert
+-- ocservia:metadata={"kind":"trigger","object":"approval_summary_insert","before":"","after":"22dbb092adf61e04ada2af2d43a57e7cfbca12ba8e15cc3676a3cb6aaa5f8869"}
 CREATE TRIGGER `approval_summary_insert` BEFORE INSERT ON `approval_requests` FOR EACH ROW BEGIN IF NEW.request_summary IS NOT NULL AND (NOT ocserv_jsonb_value_valid(NEW.request_summary) OR LEFT(TRIM(REPLACE(REPLACE(REPLACE(CONVERT(NEW.request_summary USING utf8mb4),CHAR(9),' '),CHAR(10),' '),CHAR(13),' ')),1) NOT IN ('[','{')) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid approval JSON'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=112:trigger_approval_summary_update
+-- ocservia:metadata={"kind":"trigger","object":"approval_summary_update","before":"","after":"93ad0f62439a19fd2257ac1115f28279a6b2e5a07ac86993d49ca26a593856c3"}
 CREATE TRIGGER `approval_summary_update` BEFORE UPDATE ON `approval_requests` FOR EACH ROW BEGIN IF NEW.request_summary IS NOT NULL AND (NOT ocserv_jsonb_value_valid(NEW.request_summary) OR LEFT(TRIM(REPLACE(REPLACE(REPLACE(CONVERT(NEW.request_summary USING utf8mb4),CHAR(9),' '),CHAR(10),' '),CHAR(13),' ')),1) NOT IN ('[','{')) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid approval JSON'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=113:trigger_audit_checkpoints_reject_delete
+-- ocservia:metadata={"kind":"trigger","object":"audit_checkpoints_reject_delete","before":"","after":"0af7c06405d4177292543f7960aee5fa35b0ff0cad29542b6f3488d68af69084"}
 CREATE TRIGGER `audit_checkpoints_reject_delete` BEFORE DELETE ON `audit_checkpoints` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record';
+-- ocservia:end-step
+-- ocservia:step=114:trigger_audit_checkpoints_reject_update
+-- ocservia:metadata={"kind":"trigger","object":"audit_checkpoints_reject_update","before":"","after":"fa482fd81b40e17cd98fb23c88a3c0fe93400cd99555a6dbe22182ab25f7d923"}
 CREATE TRIGGER `audit_checkpoints_reject_update` BEFORE UPDATE ON `audit_checkpoints` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record';
+-- ocservia:end-step
+-- ocservia:step=115:trigger_audit_events_reject_delete
+-- ocservia:metadata={"kind":"trigger","object":"audit_events_reject_delete","before":"","after":"c840e13d3104c6d8a3deb37c080818af932691fb655ff5f066fd5ad9545fd0bd"}
 CREATE TRIGGER `audit_events_reject_delete` BEFORE DELETE ON `audit_events` FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='append-only audit record';
+-- ocservia:end-step
+-- ocservia:step=116:trigger_audit_events_reject_update
+-- ocservia:metadata={"kind":"trigger","object":"audit_events_reject_update","before":"","after":"ba2087afbd4d5fdeffeabade078bd579b78df879f939345e33199d5cfe6817fb"}
 CREATE TRIGGER `audit_events_reject_update` BEFORE UPDATE ON `audit_events` FOR EACH ROW BEGIN IF NOT (
  OLD.details_compacted_at IS NULL AND OLD.auth_version=1 AND BINARY OLD.action<>BINARY 'audit.auth.transition'
  AND NEW.details_compacted_at IS NOT NULL AND OLD.occurred_at<=NEW.details_compacted_at-7776000000000
  AND NEW.details_compacted_at<=CAST(UNIX_TIMESTAMP(UTC_TIMESTAMP(6))*1000000 AS SIGNED)
  AND NEW.reason IS NULL AND NEW.before_summary IS NULL AND NEW.after_summary IS NULL
  AND (CAST(NEW.`id` AS BINARY)<=>CAST(OLD.`id` AS BINARY)) AND (CAST(NEW.`workspace_id` AS BINARY)<=>CAST(OLD.`workspace_id` AS BINARY)) AND (CAST(NEW.`occurred_at` AS BINARY)<=>CAST(OLD.`occurred_at` AS BINARY)) AND (CAST(NEW.`actor_type` AS BINARY)<=>CAST(OLD.`actor_type` AS BINARY)) AND (CAST(NEW.`actor_id` AS BINARY)<=>CAST(OLD.`actor_id` AS BINARY)) AND (CAST(NEW.`source_session_id` AS BINARY)<=>CAST(OLD.`source_session_id` AS BINARY)) AND (CAST(NEW.`action` AS BINARY)<=>CAST(OLD.`action` AS BINARY)) AND (CAST(NEW.`resource_type` AS BINARY)<=>CAST(OLD.`resource_type` AS BINARY)) AND (CAST(NEW.`resource_id` AS BINARY)<=>CAST(OLD.`resource_id` AS BINARY)) AND (CAST(NEW.`node_id` AS BINARY)<=>CAST(OLD.`node_id` AS BINARY)) AND (CAST(NEW.`request_id` AS BINARY)<=>CAST(OLD.`request_id` AS BINARY)) AND (CAST(NEW.`trace_id` AS BINARY)<=>CAST(OLD.`trace_id` AS BINARY)) AND (CAST(NEW.`command_id` AS BINARY)<=>CAST(OLD.`command_id` AS BINARY)) AND (CAST(NEW.`approval_id` AS BINARY)<=>CAST(OLD.`approval_id` AS BINARY)) AND (CAST(NEW.`result` AS BINARY)<=>CAST(OLD.`result` AS BINARY)) AND (CAST(NEW.`error_type` AS BINARY)<=>CAST(OLD.`error_type` AS BINARY)) AND (CAST(NEW.`previous_event_hash` AS BINARY)<=>CAST(OLD.`previous_event_hash` AS BINARY)) AND (CAST(NEW.`event_hash` AS BINARY)<=>CAST(OLD.`event_hash` AS BINARY)) AND (CAST(NEW.`auth_version` AS BINARY)<=>CAST(OLD.`auth_version` AS BINARY)) AND (CAST(NEW.`event_key_id` AS BINARY)<=>CAST(OLD.`event_key_id` AS BINARY)) AND (CAST(NEW.`event_mac` AS BINARY)<=>CAST(OLD.`event_mac` AS BINARY))) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit permits only authenticated aged detail compaction'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=117:trigger_audit_jsonb_insert
+-- ocservia:metadata={"kind":"trigger","object":"audit_jsonb_insert","before":"","after":"3d191970aeedfe1e2205b810384ad18611cfc845590bc24f382abed26027fb9e"}
 CREATE TRIGGER `audit_jsonb_insert` BEFORE INSERT ON `audit_events` FOR EACH ROW BEGIN IF (NEW.before_summary IS NOT NULL AND NOT ocserv_jsonb_value_valid(NEW.before_summary)) OR (NEW.after_summary IS NOT NULL AND NOT ocserv_jsonb_value_valid(NEW.after_summary)) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid audit JSON'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=118:trigger_certificate_jsonb_insert
+-- ocservia:metadata={"kind":"trigger","object":"certificate_jsonb_insert","before":"","after":"ddd44daf8d76e6a3b474a15fb633921653270d10a0417fd1d72ceb19b3e5ec90"}
 CREATE TRIGGER `certificate_jsonb_insert` BEFORE INSERT ON `certificates` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.dns_names) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid certificate JSON array'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=119:trigger_certificate_jsonb_update
+-- ocservia:metadata={"kind":"trigger","object":"certificate_jsonb_update","before":"","after":"43c332e97b9e57a92c039952985c886f6864787ce6f7fb2d914df43d8013bb20"}
 CREATE TRIGGER `certificate_jsonb_update` BEFORE UPDATE ON `certificates` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.dns_names) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid certificate JSON array'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=120:trigger_config_plan_jsonb_insert
+-- ocservia:metadata={"kind":"trigger","object":"config_plan_jsonb_insert","before":"","after":"838904042e42da2cf634f08ef75458e6e04d63646356045701d221dc64f39493"}
 CREATE TRIGGER `config_plan_jsonb_insert` BEFORE INSERT ON `config_plans` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.warnings) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid configuration warnings JSON array'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=121:trigger_config_plan_jsonb_update
+-- ocservia:metadata={"kind":"trigger","object":"config_plan_jsonb_update","before":"","after":"5a23716d47378b81a8870bdfe82ba3ff7bfd661582f1bcbf2917bca815885c0d"}
 CREATE TRIGGER `config_plan_jsonb_update` BEFORE UPDATE ON `config_plans` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_array_valid(NEW.warnings) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid configuration warnings JSON array'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=122:trigger_desired_groups_logical_insert
+-- ocservia:metadata={"kind":"trigger","object":"desired_groups_logical_insert","before":"","after":"e2f4d6b0cd4e74822762a39355eb637e109bac57bc7b21dfccce6557787b59f9"}
 CREATE TRIGGER `desired_groups_logical_insert` BEFORE INSERT ON `desired_groups` FOR EACH ROW BEGIN IF NOT ocserv_text_array_valid(NEW.members) OR JSON_LENGTH(JSON_EXTRACT(CONVERT(NEW.members USING utf8mb4),'$.elements'))>4096 THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid logical value'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=123:trigger_desired_groups_logical_update
+-- ocservia:metadata={"kind":"trigger","object":"desired_groups_logical_update","before":"","after":"c7a7eb4ca6406808904ad46182ffc27da446c3c5a2c36d371722aa944daf1047"}
 CREATE TRIGGER `desired_groups_logical_update` BEFORE UPDATE ON `desired_groups` FOR EACH ROW BEGIN IF NOT ocserv_text_array_valid(NEW.members) OR JSON_LENGTH(JSON_EXTRACT(CONVERT(NEW.members USING utf8mb4),'$.elements'))>4096 THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid logical value'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=124:trigger_exact_agent_command_results_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_agent_command_results_insert","before":"","after":"388c8fe706c48ba378043e4e098d5d4abcae54f1efb69672c0f8b9f05491f95e"}
 CREATE TRIGGER `exact_agent_command_results_insert` AFTER INSERT ON `agent_command_results` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='agent_command_results' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; IF NEW.`receipt_verification_status` = 'verified' AND NEW.`privd_attestation_key_id` IS NOT NULL AND NEW.`effect_record_id` IS NOT NULL AND NEW.`effect_sequence` IS NOT NULL THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`privd_attestation_key_id` AS BINARY))),16,'0')),CAST(NEW.`privd_attestation_key_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`effect_record_id` AS BINARY))),16,'0')),CAST(NEW.`effect_record_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`effect_sequence` AS BINARY))),16,'0')),CAST(NEW.`effect_sequence` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_agent_command_results` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_agent_command_results` (owner_id,key_value) VALUES(NEW.`event_id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=125:trigger_exact_agent_command_results_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_agent_command_results_update","before":"","after":"da04223681dca7dbef1c997f4ef5a9dd080d24f517e7a8faaac31ab3e38cb9d2"}
 CREATE TRIGGER `exact_agent_command_results_update` AFTER UPDATE ON `agent_command_results` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='agent_command_results' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM `exact_agent_command_results` WHERE owner_id=NEW.`event_id`; IF NEW.`receipt_verification_status` = 'verified' AND NEW.`privd_attestation_key_id` IS NOT NULL AND NEW.`effect_record_id` IS NOT NULL AND NEW.`effect_sequence` IS NOT NULL THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`privd_attestation_key_id` AS BINARY))),16,'0')),CAST(NEW.`privd_attestation_key_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`effect_record_id` AS BINARY))),16,'0')),CAST(NEW.`effect_record_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`effect_sequence` AS BINARY))),16,'0')),CAST(NEW.`effect_sequence` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_agent_command_results` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_agent_command_results` (owner_id,key_value) VALUES(NEW.`event_id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=126:trigger_exact_identities_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_identities_insert","before":"","after":"12f478be8b01a733b0471ba352a8af08140a9528233b7c13bd4c944c8bfce398"}
 CREATE TRIGGER `exact_identities_insert` AFTER INSERT ON `identities` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='identities' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`issuer` AS BINARY))),16,'0')),CAST(NEW.`issuer` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`subject` AS BINARY))),16,'0')),CAST(NEW.`subject` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_identities` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_identities` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=127:trigger_exact_identities_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_identities_update","before":"","after":"022af936bc17573dfb96c1a27ca6d59118d4b017b3fff73093d66e9b753bdf73"}
 CREATE TRIGGER `exact_identities_update` AFTER UPDATE ON `identities` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='identities' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM `exact_identities` WHERE owner_id=NEW.`id`; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`issuer` AS BINARY))),16,'0')),CAST(NEW.`issuer` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`subject` AS BINARY))),16,'0')),CAST(NEW.`subject` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_identities` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_identities` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=128:trigger_exact_key_guards_immutable
+-- ocservia:metadata={"kind":"trigger","object":"exact_key_guards_immutable","before":"","after":"fb775e6d1f824d62222eb32bea68c0f116a8c6af43480a8166608df5d33b1bc6"}
 CREATE TRIGGER `exact_key_guards_immutable` BEFORE UPDATE ON `exact_key_guards` FOR EACH ROW SIGNAL SQLSTATE '42000' SET MYSQL_ERRNO=1142,MESSAGE_TEXT='exact-key guards are immutable';
+-- ocservia:end-step
+-- ocservia:step=129:trigger_exact_nodes_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_nodes_insert","before":"","after":"4c3657b81b3f9065ecc1c2c7d1766bc6984f7d7685ac673fc9527a0766230f8b"}
 CREATE TRIGGER `exact_nodes_insert` AFTER INSERT ON `nodes` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='nodes' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`workspace_id` AS BINARY))),16,'0')),CAST(NEW.`workspace_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`name` AS BINARY))),16,'0')),CAST(NEW.`name` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_nodes` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_nodes` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=130:trigger_exact_nodes_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_nodes_update","before":"","after":"9bfc38b7b99c4ec41a438d7921d06bdd223016fa8ac01b6ff1c02de6b70484d7"}
 CREATE TRIGGER `exact_nodes_update` AFTER UPDATE ON `nodes` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='nodes' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM `exact_nodes` WHERE owner_id=NEW.`id`; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`workspace_id` AS BINARY))),16,'0')),CAST(NEW.`workspace_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`name` AS BINARY))),16,'0')),CAST(NEW.`name` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_nodes` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_nodes` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=131:trigger_exact_operations_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_operations_insert","before":"","after":"9d1d9c2151de68859034c62c99801e011ae255841412b4140dbc38a46ba9b056"}
 CREATE TRIGGER `exact_operations_insert` AFTER INSERT ON `operations` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='operations' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; IF NEW.`idempotency_key` IS NOT NULL THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`workspace_id` AS BINARY))),16,'0')),CAST(NEW.`workspace_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`idempotency_key` AS BINARY))),16,'0')),CAST(NEW.`idempotency_key` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_operations` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_operations` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=132:trigger_exact_operations_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_operations_update","before":"","after":"a4f5aead4a5cd204e36ecc1b2ba1f5f33c25693e201cb8eb185eea8ab2efac9b"}
 CREATE TRIGGER `exact_operations_update` AFTER UPDATE ON `operations` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='operations' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM `exact_operations` WHERE owner_id=NEW.`id`; IF NEW.`idempotency_key` IS NOT NULL THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`workspace_id` AS BINARY))),16,'0')),CAST(NEW.`workspace_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`idempotency_key` AS BINARY))),16,'0')),CAST(NEW.`idempotency_key` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_operations` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_operations` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=133:trigger_exact_telemetry_rollups_1h_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_telemetry_rollups_1h_insert","before":"","after":"b6636eef80b102a5ada95c4aa0b1b9bf1e1da4cc1f9a0928cef0f3f4844760d7"}
 CREATE TRIGGER `exact_telemetry_rollups_1h_insert` AFTER INSERT ON `telemetry_rollups_1h` FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF OCTET_LENGTH(NEW.metric)<=255 THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_1h' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_1h WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_1h(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END;
+-- ocservia:end-step
+-- ocservia:step=134:trigger_exact_telemetry_rollups_1h_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_telemetry_rollups_1h_update","before":"","after":"f9f3b0d96bdea6a2ffee17c44ee07c9065320d9c8ae2d337ff50c9921754a98a"}
 CREATE TRIGGER `exact_telemetry_rollups_1h_update` AFTER UPDATE ON `telemetry_rollups_1h` FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF NEW.node_id=OLD.node_id AND BINARY NEW.metric=BINARY OLD.metric AND NEW.bucket_at=OLD.bucket_at THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_1h' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM exact_telemetry_rollups_1h WHERE owner_id=NEW.exact_row_id; IF OCTET_LENGTH(NEW.metric)<=255 THEN LEAVE main; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_1h WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_1h(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END;
+-- ocservia:end-step
+-- ocservia:step=135:trigger_exact_telemetry_rollups_5m_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_telemetry_rollups_5m_insert","before":"","after":"0ee0d41a1b329d4cc254ccaa80ddfcdfe3582bbb8c340c031021dd2a2cde193e"}
 CREATE TRIGGER `exact_telemetry_rollups_5m_insert` AFTER INSERT ON `telemetry_rollups_5m` FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF OCTET_LENGTH(NEW.metric)<=255 THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_5m' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_5m WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_5m(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END;
+-- ocservia:end-step
+-- ocservia:step=136:trigger_exact_telemetry_rollups_5m_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_telemetry_rollups_5m_update","before":"","after":"548aed7a5e86642d996b2c9e1b8adcf16a7a514c05d00621a3f2965a0f197184"}
 CREATE TRIGGER `exact_telemetry_rollups_5m_update` AFTER UPDATE ON `telemetry_rollups_5m` FOR EACH ROW main: BEGIN DECLARE encoded LONGBLOB; DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; IF NEW.node_id=OLD.node_id AND BINARY NEW.metric=BINARY OLD.metric AND NEW.bucket_at=OLD.bucket_at THEN LEAVE main; END IF; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='telemetry_rollups_5m' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM exact_telemetry_rollups_5m WHERE owner_id=NEW.exact_row_id; IF OCTET_LENGTH(NEW.metric)<=255 THEN LEAVE main; END IF; SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`metric` AS BINARY))),16,'0')),CAST(NEW.`metric` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`bucket_at` AS BINARY))),16,'0')),CAST(NEW.`bucket_at` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM exact_telemetry_rollups_5m WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO exact_telemetry_rollups_5m(owner_id,key_value) VALUES(NEW.exact_row_id,encoded); END;
+-- ocservia:end-step
+-- ocservia:step=137:trigger_exact_upstream_sync_records_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_upstream_sync_records_insert","before":"","after":"312befad3876c4d23325bd3bc2aee71ecd029df4c592cd186dc52bf6937cec73"}
 CREATE TRIGGER `exact_upstream_sync_records_insert` AFTER INSERT ON `upstream_sync_records` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='upstream_sync_records' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`repository` AS BINARY))),16,'0')),CAST(NEW.`repository` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`old_commit` AS BINARY))),16,'0')),CAST(NEW.`old_commit` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`new_commit` AS BINARY))),16,'0')),CAST(NEW.`new_commit` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_upstream_sync_records` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_upstream_sync_records` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=138:trigger_exact_upstream_sync_records_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_upstream_sync_records_update","before":"","after":"8cd480eb0a29c3e704487826503cd0be9a064a05478ff7e99e176b4e4004440a"}
 CREATE TRIGGER `exact_upstream_sync_records_update` AFTER UPDATE ON `upstream_sync_records` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='upstream_sync_records' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM `exact_upstream_sync_records` WHERE owner_id=NEW.`id`; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`repository` AS BINARY))),16,'0')),CAST(NEW.`repository` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`old_commit` AS BINARY))),16,'0')),CAST(NEW.`old_commit` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`new_commit` AS BINARY))),16,'0')),CAST(NEW.`new_commit` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_upstream_sync_records` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_upstream_sync_records` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=139:trigger_exact_user_policy_enforcements_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_user_policy_enforcements_insert","before":"","after":"dc6c78e0a3fbc204e6d790ce35c4aba540fa5fbc11588c3bba9ba5b1ec138065"}
 CREATE TRIGGER `exact_user_policy_enforcements_insert` AFTER INSERT ON `user_policy_enforcements` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='user_policy_enforcements' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`username` AS BINARY))),16,'0')),CAST(NEW.`username` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`policy_version` AS BINARY))),16,'0')),CAST(NEW.`policy_version` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`cause` AS BINARY))),16,'0')),CAST(NEW.`cause` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`period_start` AS BINARY))),16,'0')),CAST(NEW.`period_start` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_user_policy_enforcements` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_user_policy_enforcements` (owner_id,key_value) VALUES(NEW.`exact_row_id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=140:trigger_exact_user_policy_enforcements_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_user_policy_enforcements_update","before":"","after":"224185a504dee08a0ea8f1e45f07b23d498e65d84c3c52393da4af862f1c1c34"}
 CREATE TRIGGER `exact_user_policy_enforcements_update` AFTER UPDATE ON `user_policy_enforcements` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner BIGINT UNSIGNED; DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='user_policy_enforcements' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM `exact_user_policy_enforcements` WHERE owner_id=NEW.`exact_row_id`; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`node_id` AS BINARY))),16,'0')),CAST(NEW.`node_id` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`username` AS BINARY))),16,'0')),CAST(NEW.`username` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`policy_version` AS BINARY))),16,'0')),CAST(NEW.`policy_version` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`cause` AS BINARY))),16,'0')),CAST(NEW.`cause` AS BINARY),UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`period_start` AS BINARY))),16,'0')),CAST(NEW.`period_start` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_user_policy_enforcements` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_user_policy_enforcements` (owner_id,key_value) VALUES(NEW.`exact_row_id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=141:trigger_exact_workspaces_insert
+-- ocservia:metadata={"kind":"trigger","object":"exact_workspaces_insert","before":"","after":"0c620299ee8ad470c1850f237c1e98f2210a1031e4e13dda1910a4d621339f4c"}
 CREATE TRIGGER `exact_workspaces_insert` AFTER INSERT ON `workspaces` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='workspaces' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`slug` AS BINARY))),16,'0')),CAST(NEW.`slug` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_workspaces` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_workspaces` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=142:trigger_exact_workspaces_update
+-- ocservia:metadata={"kind":"trigger","object":"exact_workspaces_update","before":"","after":"fc2489b86602f5b7cbe4e722c424e142fa4896bd74aa7457a71e886b3c87c009"}
 CREATE TRIGGER `exact_workspaces_update` AFTER UPDATE ON `workspaces` FOR EACH ROW BEGIN DECLARE guard_name VARBINARY(64); DECLARE duplicate_owner VARBINARY(16); DECLARE encoded LONGBLOB; DECLARE CONTINUE HANDLER FOR NOT FOUND SET duplicate_owner=NULL; SELECT key_name INTO guard_name FROM exact_key_guards WHERE key_name='workspaces' FOR UPDATE; IF guard_name IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='missing exact-key guard'; END IF; DELETE FROM `exact_workspaces` WHERE owner_id=NEW.`id`; IF TRUE THEN SET encoded=CONCAT(UNHEX(LPAD(HEX(OCTET_LENGTH(CAST(NEW.`slug` AS BINARY))),16,'0')),CAST(NEW.`slug` AS BINARY)); SELECT owner_id INTO duplicate_owner FROM `exact_workspaces` WHERE key_value=encoded LIMIT 1 FOR UPDATE; IF duplicate_owner IS NOT NULL THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=1062,MESSAGE_TEXT='duplicate exact natural key'; END IF; INSERT INTO `exact_workspaces` (owner_id,key_value) VALUES(NEW.`id`,encoded); END IF; END;
+-- ocservia:end-step
+-- ocservia:step=143:trigger_nodes_jsonb_insert
+-- ocservia:metadata={"kind":"trigger","object":"nodes_jsonb_insert","before":"","after":"2db2db59926175477e0546e940f138d64950d5b5f287500bafb4553d6535e013"}
 CREATE TRIGGER `nodes_jsonb_insert` BEFORE INSERT ON `nodes` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_value_valid(NEW.`labels`) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid shared storage JSON'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=144:trigger_nodes_jsonb_update
+-- ocservia:metadata={"kind":"trigger","object":"nodes_jsonb_update","before":"","after":"926fc2a745b275daf9a431ae108273ed0f7a3054b8899cf7267d62e2b0d5797d"}
 CREATE TRIGGER `nodes_jsonb_update` BEFORE UPDATE ON `nodes` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_value_valid(NEW.`labels`) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid shared storage JSON'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=145:trigger_node_snapshot_jsonb_insert
+-- ocservia:metadata={"kind":"trigger","object":"node_snapshot_jsonb_insert","before":"","after":"a42389a9e03edf80a43df7fc50cd103de12db03033477ba641385f857caca96f"}
 CREATE TRIGGER `node_snapshot_jsonb_insert` BEFORE INSERT ON `node_observed_snapshots` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_object_valid(NEW.ocserv) OR NOT ocserv_jsonb_object_valid(NEW.system) OR NOT ocserv_jsonb_object_valid(NEW.path) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid snapshot JSON object'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=146:trigger_node_snapshot_jsonb_update
+-- ocservia:metadata={"kind":"trigger","object":"node_snapshot_jsonb_update","before":"","after":"1330827431f2ebd5529753b43ce949f65ae667d98a6731e1865c6587b26f3d8d"}
 CREATE TRIGGER `node_snapshot_jsonb_update` BEFORE UPDATE ON `node_observed_snapshots` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_object_valid(NEW.ocserv) OR NOT ocserv_jsonb_object_valid(NEW.system) OR NOT ocserv_jsonb_object_valid(NEW.path) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid snapshot JSON object'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=147:trigger_observed_groups_logical_insert
+-- ocservia:metadata={"kind":"trigger","object":"observed_groups_logical_insert","before":"","after":"d90a58354e79a9ce1fd1ea494a7fa51fc21e77bf3a2b7a40f81f435917b9170c"}
 CREATE TRIGGER `observed_groups_logical_insert` BEFORE INSERT ON `observed_groups` FOR EACH ROW BEGIN IF NOT ocserv_text_array_valid(NEW.`members`) OR JSON_LENGTH(JSON_EXTRACT(CONVERT(NEW.members USING utf8mb4),'$.elements'))>4096 THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid logical value'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=148:trigger_observed_groups_logical_update
+-- ocservia:metadata={"kind":"trigger","object":"observed_groups_logical_update","before":"","after":"870d5fb66f16eca695a60d4876a8312718a573795b0f15518d89e200702fb124"}
 CREATE TRIGGER `observed_groups_logical_update` BEFORE UPDATE ON `observed_groups` FOR EACH ROW BEGIN IF NOT ocserv_text_array_valid(NEW.`members`) OR JSON_LENGTH(JSON_EXTRACT(CONVERT(NEW.members USING utf8mb4),'$.elements'))>4096 THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid logical value'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=149:trigger_rollout_jsonb_insert
+-- ocservia:metadata={"kind":"trigger","object":"rollout_jsonb_insert","before":"","after":"beeb2867a49fcf468ee4a3736e8abb8b4646d66df8d9bdf2acd0c808379bef4a"}
 CREATE TRIGGER `rollout_jsonb_insert` BEFORE INSERT ON `agent_rollouts` FOR EACH ROW BEGIN IF NOT ocserv_rollout_exclusions_valid(NEW.exclusions) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid rollout exclusions JSON array'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=150:trigger_rollout_jsonb_update
+-- ocservia:metadata={"kind":"trigger","object":"rollout_jsonb_update","before":"","after":"6380761b964605df6d5e073b0db4ffdbd5784ac0057c047e26e92f9842df6d93"}
 CREATE TRIGGER `rollout_jsonb_update` BEFORE UPDATE ON `agent_rollouts` FOR EACH ROW BEGIN IF NOT ocserv_rollout_exclusions_valid(NEW.exclusions) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid rollout exclusions JSON array'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=151:trigger_telemetry_legacy_insert_guard
+-- ocservia:metadata={"kind":"trigger","object":"telemetry_legacy_insert_guard","before":"","after":"1ac292bbd2da5520287071b9c24011d5ab055d3fb540671033ac23ccf84223f1"}
 CREATE TRIGGER `telemetry_legacy_insert_guard` BEFORE INSERT ON `telemetry_samples` FOR EACH ROW BEGIN
  DECLARE guard_key VARBINARY(128);
  DECLARE migration_state VARBINARY(16);
@@ -2576,6 +3050,9 @@ CREATE TRIGGER `telemetry_legacy_insert_guard` BEFORE INSERT ON `telemetry_sampl
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='finite telemetry must use its monthly shard';
  END IF;
 END;
+-- ocservia:end-step
+-- ocservia:step=152:trigger_telemetry_legacy_update_guard
+-- ocservia:metadata={"kind":"trigger","object":"telemetry_legacy_update_guard","before":"","after":"6774adaa77d2955a5b139cf07bee40a8d09a2aadc5a0bf725fd146bf21d83ccf"}
 CREATE TRIGGER `telemetry_legacy_update_guard` BEFORE UPDATE ON `telemetry_samples` FOR EACH ROW BEGIN
  DECLARE guard_key VARBINARY(128);
  DECLARE migration_state VARBINARY(16);
@@ -2588,7 +3065,20 @@ CREATE TRIGGER `telemetry_legacy_update_guard` BEFORE UPDATE ON `telemetry_sampl
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='finite telemetry must use its monthly shard';
  END IF;
 END;
+-- ocservia:end-step
+-- ocservia:step=153:trigger_telemetry_security_events_logical_insert
+-- ocservia:metadata={"kind":"trigger","object":"telemetry_security_events_logical_insert","before":"","after":"63e71d007899b4f224711231d036720f3852c2065e5dbcf4b1e7301e468861ef"}
 CREATE TRIGGER `telemetry_security_events_logical_insert` BEFORE INSERT ON `telemetry_security_events` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_object_valid(NEW.`detail`) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid logical value'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=154:trigger_telemetry_security_events_logical_update
+-- ocservia:metadata={"kind":"trigger","object":"telemetry_security_events_logical_update","before":"","after":"be290c56de4fd1a1d824f755101c7f6b1b1398b7e7e277f17a3c867a37279b14"}
 CREATE TRIGGER `telemetry_security_events_logical_update` BEFORE UPDATE ON `telemetry_security_events` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_object_valid(NEW.`detail`) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid logical value'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=155:trigger_upstream_sync_records_jsonb_insert
+-- ocservia:metadata={"kind":"trigger","object":"upstream_sync_records_jsonb_insert","before":"","after":"d651f264d424c3f7039f849cf80f1d20efcc53770132feca20ef8c2da8fab8bb"}
 CREATE TRIGGER `upstream_sync_records_jsonb_insert` BEFORE INSERT ON `upstream_sync_records` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_object_valid(NEW.`classification`) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid shared storage JSON'; END IF; END;
+-- ocservia:end-step
+-- ocservia:step=156:trigger_upstream_sync_records_jsonb_update
+-- ocservia:metadata={"kind":"trigger","object":"upstream_sync_records_jsonb_update","before":"","after":"9250ce97f1757d710b1c3f10aeab011a5b41f2a61f9ae971d6e766cfe779aa61"}
 CREATE TRIGGER `upstream_sync_records_jsonb_update` BEFORE UPDATE ON `upstream_sync_records` FOR EACH ROW BEGIN IF NOT ocserv_jsonb_object_valid(NEW.`classification`) THEN SIGNAL SQLSTATE '23000' SET MYSQL_ERRNO=3819,MESSAGE_TEXT='invalid shared storage JSON'; END IF; END;
+-- ocservia:end-step
