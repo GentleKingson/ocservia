@@ -49,6 +49,7 @@ interface View {
   summary?: string;
   error: string;
   canApprove: boolean;
+  displayStatus?: string;
   approve(): Promise<void>;
   loadApproval(): Promise<void>;
 }
@@ -151,7 +152,9 @@ describe("approval review", () => {
   it("expires while open without another fetch", async () => {
     const view = await mount();
     review(view);
+    expect(view.displayStatus).toBe("pending");
     await vi.advanceTimersByTimeAsync(3_600_001);
+    expect(view.displayStatus).toBe("expired");
     expect(view.canApprove).toBe(false);
     await view.approve();
     expect(mocks.approveRequest).not.toHaveBeenCalled();

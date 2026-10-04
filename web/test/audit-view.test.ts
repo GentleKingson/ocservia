@@ -33,6 +33,11 @@ const record = {
 };
 interface View {
   items: object[];
+  rows: { item: object; key: string }[];
+  search: string;
+  resultFilter: string;
+  expanded: string[];
+  toggle(key: string): void;
   error: string;
   initialized: boolean;
   loading: boolean;
@@ -118,4 +123,33 @@ it("clears old workspace data and rejects a late response", async () => {
   resolve({ items: [record] });
   await old;
   expect(view.items).toEqual([]);
+});
+it("filters only the loaded slice and resets expansion on workspace change", async () => {
+  const failed = {
+    id: "audit-b",
+    action: "user.disable",
+    actor_id: "admin",
+    result: "failed",
+  };
+  mocks.listAuditEvents.mockResolvedValue({
+    items: [{ ...record, result: "intent" }, failed],
+  });
+  const view = await mount();
+  view.resultFilter = "failed";
+  await flush();
+  expect(view.rows.map((row) => row.item)).toEqual([failed]);
+  view.resultFilter = "";
+  view.search = "NODE.APP";
+  await flush();
+  expect(view.rows).toHaveLength(1);
+  view.search = "missing";
+  await flush();
+  expect(view.rows).toEqual([]);
+  expect(mocks.listAuditEvents).toHaveBeenCalledTimes(1);
+  view.toggle("audit-a0");
+  view.toggle("audit-b1");
+  view.toggle("audit-a0");
+  expect(view.expanded).toEqual(["audit-b1"]);
+  window.dispatchEvent(new Event("workspace"));
+  expect(view.expanded).toEqual([]);
 });

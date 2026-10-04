@@ -301,6 +301,35 @@ reads as fully successful while any node failed or is unknown.
 detail refresh, partial rollout failures, polling stopping on leave and a
 single resume request, and `e2e/agent-rollout.spec.ts` covers the rollout flow.
 
+### Approvals and audit
+
+`ApprovalsView` and `AuditView` keep their loading, Workspace checks,
+cursor and decision code; only the presentation changed.
+
+- The pending queue keeps cursor paging (Next page replaces the rows) and
+  clears stale rows after a failed refresh. Deep links, lookup and queue rows
+  all open `/approvals/:approvalId`.
+- The detail shows a status badge (`approvalTone` in
+  `features/operations/state-tone.ts`) with an explanation per status. Approved
+  only authorizes: the requester still runs the action, and its outcome is on
+  the resulting operation, never on the approval. A pending request past its
+  expiry shows as expired and has no decision form.
+- The decision still requires a reason and the reviewed checkbox. A lost or
+  rejected decision (including a 409 conflict) clears the details and asks for
+  a refresh; it is never resent.
+- Audit still reads only the most recent 50 records. Search and the result
+  filter run on that slice in the browser and never page or query the server.
+  Each row expands to show the remaining fields, with links to the node and
+  the approval.
+- Narrow screens scroll the tables inside their card. An expanded audit row
+  keeps its details within the visible width.
+
+`test/approvals-view.test.ts`, `test/audit-view.test.ts` and
+`test/operation-state-tone.test.ts` cover the state and filters;
+`e2e/approval-queue.spec.ts` and `e2e/approvals-audit.spec.ts` cover deep
+links, used and expired approvals, a decision conflict, audit permission,
+retry, empty and filter states.
+
 ## Node detail workflows
 
 NodeDetail composes configuration and certificate workflows during setup.

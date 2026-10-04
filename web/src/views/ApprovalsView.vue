@@ -20,6 +20,23 @@ import {
   type WorkspaceContext,
 } from "../api/workspace";
 import { formatTimestamp } from "../shared/timestamp";
+import DataState from "@/components/common/DataState.vue";
+import FormField from "@/components/common/FormField.vue";
+import PageHeader from "@/components/common/PageHeader.vue";
+import SectionCard from "@/components/common/SectionCard.vue";
+import StatusBadge from "@/components/common/StatusBadge.vue";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import { approvalTone } from "@/features/operations/state-tone";
 
 const { t } = useI18n();
 const route = useRoute();
@@ -149,6 +166,12 @@ const summary = computed(() => {
     ? JSON.stringify(content, null, 2)
     : undefined;
 });
+// A pending request past its expiry is shown as expired; the server decides.
+const displayStatus = computed(() =>
+  expired.value && approval.value?.status === "pending"
+    ? "expired"
+    : approval.value?.status,
+);
 const canApprove = computed(() =>
   Boolean(
     approval.value?.status === "pending" &&
@@ -290,282 +313,224 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="overview approvals-view">
-    <div class="page-heading">
-      <div>
-        <p>{{ $t("workspace") }}</p>
-        <h1>{{ $t("approvals") }}</h1>
-      </div>
-      <button
-        type="button"
-        class="icon-command page-command"
-        :disabled="loading || queueLoading || submitting"
-        :title="$t('refresh')"
-        :aria-label="$t('refresh')"
-        @click="refresh"
+  <main class="overview">
+    <PageHeader :eyebrow="$t('workspace')" :title="$t('approvals')">
+      <template #actions>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          :disabled="loading || queueLoading || submitting"
+          :title="$t('refresh')"
+          :aria-label="$t('refresh')"
+          @click="refresh"
+        >
+          <RefreshCw aria-hidden="true" />
+        </Button>
+      </template>
+    </PageHeader>
+    <SectionCard :title="$t('pendingApprovals')">
+      <p class="text-muted-foreground m-0 text-sm">
+        {{ $t("approvalQueueScope") }}
+      </p>
+      <p
+        v-if="queueLoading"
+        class="text-muted-foreground m-0 text-sm"
+        role="status"
       >
-        <RefreshCw :size="16" />
-      </button>
-    </div>
-    <section class="approval-queue" :aria-label="$t('pendingApprovals')">
-      <h2>{{ $t("pendingApprovals") }}</h2>
-      <p>{{ $t("approvalQueueScope") }}</p>
-      <p v-if="queueLoading" role="status">{{ $t("loading") }}</p>
-      <p v-else-if="queueError" class="operation-error" role="alert">
+        {{ $t("loading") }}
+      </p>
+      <p
+        v-else-if="queueError"
+        class="text-destructive m-0 text-sm"
+        role="alert"
+      >
         {{ queueError }}
       </p>
-      <p v-else-if="queueInitialized && !queue.length">
+      <p
+        v-else-if="queueInitialized && !queue.length"
+        class="text-muted-foreground m-0 text-sm"
+      >
         {{ $t("noPendingApprovals") }}
       </p>
-      <div v-if="queue.length" class="approval-queue-table">
-        <table>
-          <thead>
-            <tr>
-              <th>{{ $t("approvalAction") }}</th>
-              <th>{{ $t("approvalResource") }}</th>
-              <th>{{ $t("approvalRequester") }}</th>
-              <th>{{ $t("state") }}</th>
-              <th>{{ $t("expires") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in queue" :key="item.id">
-              <td>
-                <button
-                  type="button"
-                  class="queue-inspect"
-                  :disabled="submitting || queueLoading"
-                  @click="inspectQueued(item)"
-                >
-                  {{ item.action }}
-                </button>
-              </td>
-              <td>
-                {{ item.resourceType }} <code>{{ item.resourceId }}</code>
-              </td>
-              <td>
-                <code>{{ item.requesterId }}</code>
-              </td>
-              <td>{{ item.status }}</td>
-              <td>{{ formatTimestamp(item.expiresAt) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <button
+      <Table v-if="queue.length" class="min-w-[48rem]">
+        <TableHeader>
+          <TableRow class="hover:bg-transparent">
+            <TableHead class="text-muted-foreground">{{
+              $t("approvalAction")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("approvalResource")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("approvalRequester")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("state")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("expires")
+            }}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow
+            v-for="item in queue"
+            :key="item.id"
+            :data-state="approval?.id === item.id ? 'selected' : undefined"
+          >
+            <TableCell>
+              <Button
+                type="button"
+                variant="link"
+                class="h-auto p-0"
+                :disabled="submitting || queueLoading"
+                @click="inspectQueued(item)"
+              >
+                {{ item.action }}
+              </Button>
+            </TableCell>
+            <TableCell class="whitespace-normal">
+              {{ item.resourceType }}
+              <code class="text-xs break-all">{{ item.resourceId }}</code>
+            </TableCell>
+            <TableCell class="whitespace-normal">
+              <code class="text-xs break-all">{{ item.requesterId }}</code>
+            </TableCell>
+            <TableCell>
+              <StatusBadge
+                :tone="approvalTone(item.status)"
+                :label="$t(`approvalStatus_${item.status}`)"
+              />
+            </TableCell>
+            <TableCell class="text-muted-foreground">{{
+              formatTimestamp(item.expiresAt)
+            }}</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+      <Button
         v-if="nextCursor"
         type="button"
-        class="primary-button"
+        variant="outline"
+        class="justify-self-center"
         :disabled="queueLoading || submitting"
         @click="loadQueue(nextCursor)"
       >
         {{ $t("nextPage") }}
-      </button>
-    </section>
-    <form class="approval-lookup" @submit.prevent="inspect">
-      <label for="approval-lookup">{{ $t("approvalId") }}</label>
-      <input
-        id="approval-lookup"
-        v-model="lookupId"
-        required
-        :disabled="submitting"
-      />
-      <button
+      </Button>
+    </SectionCard>
+    <form class="mb-6 flex max-w-xl items-end gap-2" @submit.prevent="inspect">
+      <FormField id="approval-lookup" :label="$t('approvalId')" class="flex-1">
+        <Input
+          id="approval-lookup"
+          v-model="lookupId"
+          required
+          class="font-mono"
+          :disabled="submitting"
+        />
+      </FormField>
+      <Button
         type="submit"
-        class="icon-command"
+        variant="outline"
+        size="icon"
         :disabled="submitting || !lookupId.trim()"
         :title="$t('inspectApproval')"
         :aria-label="$t('inspectApproval')"
       >
-        <Search :size="18" />
-      </button>
+        <Search aria-hidden="true" />
+      </Button>
     </form>
-    <p v-if="error" class="operation-error" role="alert">{{ error }}</p>
-    <p v-if="loading" role="status">{{ $t("loading") }}</p>
-    <section
-      v-if="approval"
-      class="approval-details"
-      :aria-label="$t('approvalDetails')"
+    <p v-if="error" class="text-destructive m-0 mb-4 text-sm" role="alert">
+      {{ error }}
+    </p>
+    <DataState v-if="loading" kind="loading" :message="$t('loading')" />
+    <SectionCard
+      v-if="approval && displayStatus"
+      :title="$t('approvalDetails')"
     >
-      <dl>
-        <dt>{{ $t("approvalId") }}</dt>
-        <dd>
+      <div class="flex flex-wrap items-start gap-x-3 gap-y-1">
+        <StatusBadge
+          data-testid="approval-status"
+          :tone="approvalTone(displayStatus)"
+          :label="$t(`approvalStatus_${displayStatus}`)"
+        />
+        <p
+          class="text-muted-foreground m-0 min-w-0 flex-1 basis-60 text-sm"
+          data-testid="approval-status-help"
+        >
+          {{ $t(`approvalStatusHelp_${displayStatus}`) }}
+        </p>
+      </div>
+      <dl
+        class="m-0 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[max-content_1fr] sm:gap-y-3"
+      >
+        <dt class="text-muted-foreground">{{ $t("approvalId") }}</dt>
+        <dd class="m-0 mb-2 break-all sm:mb-0">
           <code>{{ approval.id }}</code>
         </dd>
-        <dt>{{ $t("state") }}</dt>
-        <dd data-testid="approval-status">
-          {{
-            expired && approval.status === "pending"
-              ? "expired"
-              : approval.status
-          }}
-        </dd>
-        <dt>{{ $t("approvalAction") }}</dt>
-        <dd>{{ approval.action }}</dd>
-        <dt>{{ $t("approvalResource") }}</dt>
-        <dd>
+        <dt class="text-muted-foreground">{{ $t("approvalAction") }}</dt>
+        <dd class="m-0 mb-2 sm:mb-0">{{ approval.action }}</dd>
+        <dt class="text-muted-foreground">{{ $t("approvalResource") }}</dt>
+        <dd class="m-0 mb-2 break-all sm:mb-0">
           {{ approval.resourceType }} <code>{{ approval.resourceId }}</code>
         </dd>
-        <dt>{{ $t("approvalRequester") }}</dt>
-        <dd>
+        <dt class="text-muted-foreground">{{ $t("approvalRequester") }}</dt>
+        <dd class="m-0 mb-2 break-all sm:mb-0">
           <code>{{ approval.requesterId }}</code>
         </dd>
-        <dt>{{ $t("approvalApprover") }}</dt>
-        <dd>
+        <dt class="text-muted-foreground">{{ $t("approvalApprover") }}</dt>
+        <dd class="m-0 mb-2 break-all sm:mb-0">
           <code>{{ approval.approverId ?? "-" }}</code>
         </dd>
-        <dt>{{ $t("reason") }}</dt>
-        <dd>{{ approval.reason }}</dd>
-        <dt>{{ $t("expires") }}</dt>
-        <dd>{{ formatTimestamp(approval.expiresAt) }}</dd>
-        <dt>{{ $t("approvalHash") }}</dt>
-        <dd>
+        <dt class="text-muted-foreground">{{ $t("reason") }}</dt>
+        <dd class="m-0 mb-2 break-words sm:mb-0">{{ approval.reason }}</dd>
+        <dt class="text-muted-foreground">{{ $t("expires") }}</dt>
+        <dd class="m-0 mb-2 sm:mb-0">
+          {{ formatTimestamp(approval.expiresAt) }}
+        </dd>
+        <dt class="text-muted-foreground">{{ $t("approvalHash") }}</dt>
+        <dd class="m-0 break-all">
           <code data-testid="approval-hash">{{
             approval.requestHash ?? "-"
           }}</code>
         </dd>
       </dl>
-      <h2>{{ $t("approvalContent") }}</h2>
-      <pre data-testid="approval-summary">{{ summary ?? "-" }}</pre>
+      <h3 class="m-0 text-sm font-semibold">{{ $t("approvalContent") }}</h3>
+      <pre
+        class="bg-muted border-border m-0 overflow-x-auto rounded-md border p-4 text-xs break-words whitespace-pre-wrap"
+        data-testid="approval-summary"
+        >{{ summary ?? "-" }}</pre>
       <form
         v-if="approval.status === 'pending' && !expired"
-        class="approval-decision"
+        class="grid max-w-2xl gap-4"
         @submit.prevent="approve"
       >
-        <label for="approval-reason">{{ $t("approvalDecisionReason") }}</label>
-        <textarea
-          id="approval-reason"
-          v-model="reason"
-          required
-          maxlength="512"
-          :disabled="submitting"
-        />
-        <label class="approval-reviewed"
-          ><input v-model="reviewed" type="checkbox" :disabled="submitting" />{{
-            $t("approvalReviewed")
-          }}</label
+        <FormField id="approval-reason" :label="$t('approvalDecisionReason')">
+          <Textarea
+            id="approval-reason"
+            v-model="reason"
+            required
+            maxlength="512"
+            :disabled="submitting"
+          />
+        </FormField>
+        <label class="flex items-center gap-2 text-sm">
+          <input
+            v-model="reviewed"
+            type="checkbox"
+            class="accent-primary size-4"
+            :disabled="submitting"
+          />{{ $t("approvalReviewed") }}
+        </label>
+        <Button
+          type="submit"
+          class="justify-self-start"
+          :disabled="!canApprove"
         >
-        <button type="submit" class="primary-button" :disabled="!canApprove">
-          <Check :size="16" />{{ $t("approve") }}
-        </button>
+          <Check aria-hidden="true" />{{ $t("approve") }}
+        </Button>
       </form>
-    </section>
+    </SectionCard>
   </main>
 </template>
-
-<style scoped>
-.approval-queue h2 {
-  font-size: 18px;
-}
-.approval-queue > p {
-  color: #64748b;
-}
-.approval-queue-table {
-  overflow-x: auto;
-  max-width: 100%;
-  margin: 16px 0;
-}
-.approval-queue table {
-  width: 100%;
-  min-width: 800px;
-  border-collapse: collapse;
-}
-.approval-queue th,
-.approval-queue td {
-  text-align: left;
-  padding: 12px;
-  border-bottom: 1px solid #dce2e9;
-  overflow-wrap: anywhere;
-}
-.queue-inspect {
-  background: none;
-  border: 0;
-  padding: 0;
-  color: #215c51;
-  font: inherit;
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.approval-lookup {
-  display: grid;
-  grid-template-columns: auto minmax(0, 32rem) 36px;
-  align-items: center;
-  gap: 12px;
-  margin: 24px 0;
-}
-.approval-lookup input,
-.approval-decision textarea {
-  min-width: 0;
-  width: 100%;
-  padding: 9px;
-  border: 1px solid #cbd5e1;
-  border-radius: 4px;
-  font: inherit;
-}
-.approval-details {
-  padding-top: 24px;
-  border-top: 1px solid #dce2e9;
-}
-.approval-details dl {
-  display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
-  gap: 12px 20px;
-  margin: 0;
-}
-.approval-details dt {
-  color: #64748b;
-}
-.approval-details dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.approval-details h2 {
-  font-size: 16px;
-  margin-top: 28px;
-}
-.approval-details pre {
-  padding: 16px;
-  background: #f3f5f7;
-  border: 1px solid #dce2e9;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 13px;
-}
-.approval-decision {
-  display: grid;
-  gap: 12px;
-  max-width: 42rem;
-  margin: 24px 0;
-}
-.approval-decision textarea {
-  min-height: 80px;
-  resize: vertical;
-}
-.approval-reviewed {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.approval-decision button {
-  justify-self: start;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-@media (max-width: 640px) {
-  .approval-lookup {
-    grid-template-columns: minmax(0, 1fr) 36px;
-  }
-  .approval-lookup label {
-    grid-column: 1 / -1;
-  }
-  .approval-details dl {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
-  }
-  .approval-details dd {
-    margin-bottom: 12px;
-  }
-}
-</style>

@@ -237,59 +237,6 @@ h1 {
   margin-top: 20px;
   align-items: start;
 }
-.node-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-.node-table th {
-  height: 42px;
-  padding: 0 14px;
-  color: #6a7772;
-  background: #f8faf9;
-  border-bottom: 1px solid #dce3e0;
-  font-size: 11px;
-  font-weight: 650;
-  text-align: left;
-  text-transform: uppercase;
-}
-.node-table td {
-  height: 62px;
-  padding: 8px 14px;
-  border-bottom: 1px solid #edf0ef;
-  color: #53615c;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.node-table tr:last-child td {
-  border-bottom: 0;
-}
-.node-table tbody tr {
-  cursor: pointer;
-}
-.node-table tbody tr:focus-visible {
-  outline: 2px solid #247653;
-  outline-offset: -2px;
-}
-.node-table tbody tr:hover,
-.node-table tbody tr.selected {
-  background: #f0f8f4;
-}
-.node-table td:nth-child(2) {
-  display: grid;
-  align-content: center;
-  gap: 4px;
-}
-.node-table td strong {
-  color: #1d2623;
-  font-size: 13px;
-}
-.node-table code {
-  color: #7b8783;
-  font-size: 11px;
-}
 .detail-state {
   min-height: 220px;
   display: grid;
@@ -307,46 +254,8 @@ h1 {
 .detail-state[role="alert"] {
   color: #a33d37;
 }
-.icon-command {
-  min-width: 30px;
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 8px;
-  color: #35443f;
-  background: #fff;
-  border: 1px solid #ced8d4;
-  border-radius: 5px;
-  cursor: pointer;
-}
-.icon-command {
-  width: 30px;
-  min-width: 30px;
-  height: 30px;
-  padding: 0;
-  color: #35443f;
-  background: #fff;
-  border: 1px solid #ced8d4;
-  border-radius: 5px;
-  cursor: pointer;
-}
-.icon-command:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.operation-error {
-  margin: 10px 18px 0;
-  color: #a33d37;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
 .page-error {
   margin: 0 0 14px;
-}
-.page-command {
-  flex: 0 0 auto;
 }
 .dialog-backdrop {
   position: fixed;
@@ -443,10 +352,6 @@ h1 {
   .fleet-layout {
     grid-template-columns: 1fr;
   }
-  .node-table th,
-  .node-table td {
-    padding-inline: 10px;
-  }
   .activity-header {
     align-items: flex-start;
     flex-direction: column;
@@ -468,22 +373,4 @@ h1 {
   .event-list time {
     display: none;
   }
-}
-
-.audit-table-wrap {
-  overflow-x: auto;
-}
-.audit-table {
-  min-width: 820px;
-}
-.audit-table td {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-  overflow-wrap: anywhere;
-  vertical-align: top;
-}
-
-.audit-table tbody tr {
-  cursor: default;
 }
