@@ -64,34 +64,34 @@ coverage for every `.vue` file.
 Paths are relative to `web/src`. Remove an entry point when its last consumer
 disappears; do not retain unused forwarding exports.
 
-| Owner | Exports | Production callers | Preserved semantics |
-| --- | --- | --- | --- |
-| `shared/session.ts` | `consumeLoginReturnPath` | `App.vue` | Consume once; clear OIDC attempt; validate internal return path |
-| `api/workspace.ts` | `listAuthorizedWorkspaces` | `App.vue`, `shared/localSlice.ts` | Cache and coalesce discovery; explicit refresh; remembered selection |
-| `api/workspace.ts` | `getWorkspace` | `App.vue`, `shared/{fleet,localSlice,overview}.ts`, `views/{OperationsView,SettingsView}.vue` | Use selected Workspace, otherwise discover; fail on empty authorization |
-| `api/workspace.ts` | `selectWorkspace` | `App.vue` | Authorized selection only; persist and notify only on changed ID |
-| `api/workspace.ts` | `workspaceContext`, `WorkspaceContext` | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView}.vue`; type-only in `features/node-workflow.ts` and configuration/certificate features | Snapshot of ID and generation; features receive the page's getter |
-| `api/workspace.ts` | `workspaceChangedEvent` | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView,SettingsView}.vue` | Existing event name and ID detail |
-| `api/platform.ts` | `getReadiness`, `getVersion` | `shared/readiness.ts`, `views/SettingsView.vue`, respectively | Same generated requests through shared transport |
-| `api/platform.ts` | `probeAuthentication` | `shared/{fleet,localSlice}.ts` | Coalesce only concurrent probes; keep Workspace state independent |
-| `api/events.ts` | `eventStreamPath` | `shared/{fleet,localSlice}.ts` | Encode `after` and `workspace_id`; existing development-token fallback; no token in URL |
-| `api/events.ts` | `listEvents` | `shared/{localSlice,overview}.ts` | Workspace header, page size 200, optional cursor/order/signal |
-| `api/events.ts` | `platformEventsEvent` | `shared/{fleet,overview}.ts` | Existing event name; stores retain dispatch/subscription ownership |
-| `api/nodes.ts` | `listNodes`, `getNode`, `listNodeSessions`, `listNodeIpBans`, `listNodeUserGroupState` | `shared/fleet.ts` | Workspace-scoped list; node-specific reads; pagination and signals |
-| `api/operations.ts` | `listOperations` | `shared/{localSlice,overview}.ts`, `views/OperationsView.vue` | Workspace header, page size 200, optional cursor/signal |
-| `api/operations.ts` | `operationSummary` | `shared/overview.ts` | Workspace header and signal |
-| `api/operations.ts` | `getOperation` | `shared/{fleet,localSlice}.ts`, `views/OperationsView.vue`, configuration/certificate features | Operation ID and signal; no terminal-state interpretation |
-| `api/operations.ts` | `createLocalSimulation` | `shared/localSlice.ts` | Existing development endpoint, scenario and signal |
-| `api/operations.ts` | `disconnectSession`, `terminateSession`, `removeIpBan`, `reloadService` | `shared/fleet.ts` | Revision If-Match, unique idempotency key, 60-second TTL; session boot binding; reload approval header |
-| `api/users.ts` | `createUser`, `disableUser`, `enableUser`, `rotateUserPassword`, `applyGroup` | `shared/fleet.ts` | Revision If-Match, unique idempotency key, 86400-second TTL; sealed-password envelope; member deduplication |
-| `api/users.ts` | `getUserPolicy`, `setUserPolicy` | `adapters/user-policy.ts` | Node/username and signals; mutation idempotency; no added If-Match |
-| `api/configuration.ts` | `createConfigPlan`, `getConfigPlan`, `applyConfigPlan` | `features/configuration/useNodeConfiguration.ts` | Request revision/approval unchanged; idempotency on create/apply; signals |
-| `api/certificates.ts` | `createCertificate`, `getCertificate`, `listNodeCertificates`, `issueCertificate`, `createCertificateP12`, `revokeCertificate` | `features/certificates/useNodeCertificates.ts` | List item extraction; signals; idempotency on create/P12/revoke, not issue |
-| `api/certificates.ts` | `downloadCertificateArtifact` | `features/certificates/useNodeCertificates.ts` | Encoded artifact ID; grant token plus optional development bearer; same-origin credentials; no Workspace header; Blob/error handling |
-| `api/agents.ts` | `upgradeNodeAgent` | `shared/fleet.ts` | Trusted target version only; revision If-Match, idempotency, approval in body |
-| `api/agents.ts` | `createAgentRollout` | `views/NodesView.vue` | Workspace header, idempotency and unchanged target/node/batch/approval body |
-| `api/agents.ts` | `listAgentRollouts` | `views/OperationsView.vue` | Workspace header and optional limit/signal |
-| `api/agents.ts` | `getAgentRollout`, `resumeAgentRollout` | `views/RolloutDetailView.vue` | Workspace header and signal; resume idempotency |
+| Owner                  | Exports                                                                                                                        | Production callers                                                                                                                                                    | Preserved semantics                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `shared/session.ts`    | `consumeLoginReturnPath`                                                                                                       | `App.vue`                                                                                                                                                             | Consume once; clear OIDC attempt; validate internal return path                                                                      |
+| `api/workspace.ts`     | `listAuthorizedWorkspaces`                                                                                                     | `App.vue`, `shared/localSlice.ts`                                                                                                                                     | Cache and coalesce discovery; explicit refresh; remembered selection                                                                 |
+| `api/workspace.ts`     | `getWorkspace`                                                                                                                 | `App.vue`, `shared/{fleet,localSlice,overview}.ts`, `views/{OperationsView,SettingsView}.vue`                                                                         | Use selected Workspace, otherwise discover; fail on empty authorization                                                              |
+| `api/workspace.ts`     | `selectWorkspace`                                                                                                              | `App.vue`                                                                                                                                                             | Authorized selection only; persist and notify only on changed ID                                                                     |
+| `api/workspace.ts`     | `workspaceContext`, `WorkspaceContext`                                                                                         | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView}.vue`; type-only in `features/node-workflow.ts` and configuration/certificate features | Snapshot of ID and generation; features receive the page's getter                                                                    |
+| `api/workspace.ts`     | `workspaceChangedEvent`                                                                                                        | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView,SettingsView}.vue`                                                                     | Existing event name and ID detail                                                                                                    |
+| `api/platform.ts`      | `getReadiness`, `getVersion`                                                                                                   | `shared/readiness.ts`, `views/SettingsView.vue`, respectively                                                                                                         | Same generated requests through shared transport                                                                                     |
+| `api/platform.ts`      | `probeAuthentication`                                                                                                          | `shared/{fleet,localSlice}.ts`                                                                                                                                        | Coalesce only concurrent probes; keep Workspace state independent                                                                    |
+| `api/events.ts`        | `eventStreamPath`                                                                                                              | `shared/{fleet,localSlice}.ts`                                                                                                                                        | Encode `after` and `workspace_id`; existing development-token fallback; no token in URL                                              |
+| `api/events.ts`        | `listEvents`                                                                                                                   | `shared/{localSlice,overview}.ts`                                                                                                                                     | Workspace header, page size 200, optional cursor/order/signal                                                                        |
+| `api/events.ts`        | `platformEventsEvent`                                                                                                          | `shared/{fleet,overview}.ts`                                                                                                                                          | Existing event name; stores retain dispatch/subscription ownership                                                                   |
+| `api/nodes.ts`         | `listNodes`, `getNode`, `listNodeSessions`, `listNodeIpBans`, `listNodeUserGroupState`                                         | `shared/fleet.ts`                                                                                                                                                     | Workspace-scoped list; node-specific reads; pagination and signals                                                                   |
+| `api/operations.ts`    | `listOperations`                                                                                                               | `shared/{localSlice,overview}.ts`, `views/OperationsView.vue`                                                                                                         | Workspace header, page size 200, optional cursor/signal                                                                              |
+| `api/operations.ts`    | `operationSummary`                                                                                                             | `shared/overview.ts`                                                                                                                                                  | Workspace header and signal                                                                                                          |
+| `api/operations.ts`    | `getOperation`                                                                                                                 | `shared/{fleet,localSlice}.ts`, `views/OperationsView.vue`, configuration/certificate features                                                                        | Operation ID and signal; no terminal-state interpretation                                                                            |
+| `api/operations.ts`    | `createLocalSimulation`                                                                                                        | `shared/localSlice.ts`                                                                                                                                                | Existing development endpoint, scenario and signal                                                                                   |
+| `api/operations.ts`    | `disconnectSession`, `terminateSession`, `removeIpBan`, `reloadService`                                                        | `shared/fleet.ts`                                                                                                                                                     | Revision If-Match, unique idempotency key, 60-second TTL; session boot binding; reload approval header                               |
+| `api/users.ts`         | `createUser`, `disableUser`, `enableUser`, `rotateUserPassword`, `applyGroup`                                                  | `shared/fleet.ts`                                                                                                                                                     | Revision If-Match, unique idempotency key, 86400-second TTL; sealed-password envelope; member deduplication                          |
+| `api/users.ts`         | `getUserPolicy`, `setUserPolicy`                                                                                               | `adapters/user-policy.ts`                                                                                                                                             | Node/username and signals; mutation idempotency; no added If-Match                                                                   |
+| `api/configuration.ts` | `createConfigPlan`, `getConfigPlan`, `applyConfigPlan`                                                                         | `features/configuration/useNodeConfiguration.ts`                                                                                                                      | Request revision/approval unchanged; idempotency on create/apply; signals                                                            |
+| `api/certificates.ts`  | `createCertificate`, `getCertificate`, `listNodeCertificates`, `issueCertificate`, `createCertificateP12`, `revokeCertificate` | `features/certificates/useNodeCertificates.ts`                                                                                                                        | List item extraction; signals; idempotency on create/P12/revoke, not issue                                                           |
+| `api/certificates.ts`  | `downloadCertificateArtifact`                                                                                                  | `features/certificates/useNodeCertificates.ts`                                                                                                                        | Encoded artifact ID; grant token plus optional development bearer; same-origin credentials; no Workspace header; Blob/error handling |
+| `api/agents.ts`        | `upgradeNodeAgent`                                                                                                             | `shared/fleet.ts`                                                                                                                                                     | Trusted target version only; revision If-Match, idempotency, approval in body                                                        |
+| `api/agents.ts`        | `createAgentRollout`                                                                                                           | `views/NodesView.vue`                                                                                                                                                 | Workspace header, idempotency and unchanged target/node/batch/approval body                                                          |
+| `api/agents.ts`        | `listAgentRollouts`                                                                                                            | `views/OperationsView.vue`                                                                                                                                            | Workspace header and optional limit/signal                                                                                           |
+| `api/agents.ts`        | `getAgentRollout`, `resumeAgentRollout`                                                                                        | `views/RolloutDetailView.vue`                                                                                                                                         | Workspace header and signal; resume idempotency                                                                                      |
 
 `workspaceID` is now an internal cross-module helper exported by the Workspace
 owner. `configuration`, `authenticatedFetch`, `devAuthToken`, `requestInit` and
@@ -174,15 +174,15 @@ Compare upstream changes by hand (keyboard behavior, ARIA, Portal and props)
 and keep the local modifications below. When the CLI generates icon imports
 from `lucide-vue-next`, rewrite them to the existing `@lucide/vue` package.
 
-| Component | Upstream | Local modifications |
-| --- | --- | --- |
-| `button` | `apps/v4/registry/new-york-v4/ui/button` | Prettier; `asChild` defaults to `false` for `exactOptionalPropertyTypes` |
-| `badge` | `apps/v4/registry/new-york-v4/ui/badge` | Prettier; renders `span` by default; binds `as`/`asChild` instead of `reactiveOmit` from `@vueuse/core` |
-| `input` | `apps/v4/registry/new-york-v4/ui/input` | Prettier; `defineModel` replaces `useVModel` from `@vueuse/core`; `defaultValue` prop removed |
-| `table` | `apps/v4/registry/new-york-v4/ui/table` | Prettier; `TableEmpty` and `TableFooter` not imported |
-| `sheet` | `apps/v4/registry/new-york-v4/ui/sheet` | Prettier; `SheetHeader`, `SheetFooter` and `SheetClose` not imported; `tw-animate-css` enter/exit classes removed (not installed, so open and close are instant); close button gets `data-slot`, a 32px target and a `closeLabel` prop for the translated name; `withDefaults` mirrors Reka UI's `as` defaults for `exactOptionalPropertyTypes` |
-| `label` | `apps/v4/registry/new-york-v4/ui/label` | Prettier; `for` falls through as an attribute and `as` defaults to `label`, both for `exactOptionalPropertyTypes` |
-| `lib/utils.ts` | `apps/v4/registry/new-york-v4/lib/utils.ts` | Prettier |
+| Component      | Upstream                                    | Local modifications                                                                                                                                                                                                                                                                                                                             |
+| -------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `button`       | `apps/v4/registry/new-york-v4/ui/button`    | Prettier; `asChild` defaults to `false` for `exactOptionalPropertyTypes`                                                                                                                                                                                                                                                                        |
+| `badge`        | `apps/v4/registry/new-york-v4/ui/badge`     | Prettier; renders `span` by default; binds `as`/`asChild` instead of `reactiveOmit` from `@vueuse/core`                                                                                                                                                                                                                                         |
+| `input`        | `apps/v4/registry/new-york-v4/ui/input`     | Prettier; `defineModel` replaces `useVModel` from `@vueuse/core`; `defaultValue` prop removed                                                                                                                                                                                                                                                   |
+| `table`        | `apps/v4/registry/new-york-v4/ui/table`     | Prettier; `TableEmpty` and `TableFooter` not imported                                                                                                                                                                                                                                                                                           |
+| `sheet`        | `apps/v4/registry/new-york-v4/ui/sheet`     | Prettier; `SheetHeader`, `SheetFooter` and `SheetClose` not imported; `tw-animate-css` enter/exit classes removed (not installed, so open and close are instant); close button gets `data-slot`, a 32px target and a `closeLabel` prop for the translated name; `withDefaults` mirrors Reka UI's `as` defaults for `exactOptionalPropertyTypes` |
+| `label`        | `apps/v4/registry/new-york-v4/ui/label`     | Prettier; `for` falls through as an attribute and `as` defaults to `label`, both for `exactOptionalPropertyTypes`                                                                                                                                                                                                                               |
+| `lib/utils.ts` | `apps/v4/registry/new-york-v4/lib/utils.ts` | Prettier                                                                                                                                                                                                                                                                                                                                        |
 
 All sources were taken on 2026-10-04 from `unovue/shadcn-vue` commit
 `b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) and are MIT licensed;
@@ -205,6 +205,30 @@ skip link precedes the shell. `components/common` holds `PageHeader` and
 `DataState` (loading and error states with `status`/`alert` roles); pages
 keep their own data and pass display values in.
 
+### Nodes list
+
+`NodesView` reads the fleet store only; search, filters, sorting and optional
+columns never send requests. The store replaces `fleet.nodes` only after every
+page has loaded, so filter buckets and counts always cover the complete
+snapshot, and a failed refresh is labelled as the last successful snapshot.
+`features/nodes/node-list.ts` owns the pure rules:
+
+- Filter values within a group are alternatives and groups intersect. Buckets
+  hold only API-defined values; a missing path or Agent version state is
+  `unknown`. Search matches name or ID.
+- Name sorts ascending and heartbeat newest first; unknown heartbeats sort
+  last and the node ID breaks ties. `infinity` and extended years are ordered
+  without `Date` coercion and display through `formatTimestamp`.
+- The view state lives in the URL query (`q`, the group names, `sort`,
+  `columns`); defaults are omitted and other parameters are kept.
+
+Rollout selection stays keyed by node ID. The header checkbox only selects
+visible eligible rows, the footer states how many selected nodes the filters
+hide, the confirmation lists every target, and a Workspace change clears the
+selection. The list has no action availability, so rows offer only the detail
+link. Narrow screens scroll the table inside its own region instead of hiding
+columns.
+
 The development-only `/dev` route renders `components/dev/UiPreview.vue` to
 check primitives next to legacy styles.
 
@@ -218,14 +242,14 @@ and controlled-action handlers remain in the page.
 
 Paths below are relative to `web/src`.
 
-| Owner | Responsibilities |
-| --- | --- |
-| `views/NodeDetailView.vue` | Route ID, Fleet selection, authorized-read readiness, Workspace listener, closing dialogs on navigation, and template composition |
+| Owner                                            | Responsibilities                                                                                                                   |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `views/NodeDetailView.vue`                       | Route ID, Fleet selection, authorized-read readiness, Workspace listener, closing dialogs on navigation, and template composition  |
 | `features/configuration/useNodeConfiguration.ts` | Configuration form, captured revision, Plan/Apply requests, Plan polling, receipt recovery, errors/loading and dialog cancellation |
-| `features/certificates/useNodeCertificates.ts` | Certificate form, CSR polling, issue/P12/download/revoke requests, receipt/grant recovery, errors/loading and dialog cancellation |
-| `features/node-workflow.ts` | Existing shared context fence, cancellable wait, pending-mutation tickets, identifier receipts and expiring in-memory grants |
-| `shared/fleet.ts` | Shared operation tracking and telemetry; feature disposal does not stop Fleet tracking |
-| `api/workspace.ts` | Sole Workspace authority; features receive its context getter, not a second Workspace store |
+| `features/certificates/useNodeCertificates.ts`   | Certificate form, CSR polling, issue/P12/download/revoke requests, receipt/grant recovery, errors/loading and dialog cancellation  |
+| `features/node-workflow.ts`                      | Existing shared context fence, cancellable wait, pending-mutation tickets, identifier receipts and expiring in-memory grants       |
+| `shared/fleet.ts`                                | Shared operation tracking and telemetry; feature disposal does not stop Fleet tracking                                             |
+| `api/workspace.ts`                               | Sole Workspace authority; features receive its context getter, not a second Workspace store                                        |
 
 Each feature receives only a readonly node ref, readonly successful-read flag,
 Workspace context getter, operation-tracking callback and translator. Neither

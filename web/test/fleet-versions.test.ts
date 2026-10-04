@@ -105,7 +105,7 @@ describe("version intelligence presentation", () => {
       "utf8",
     );
     expect(source).toContain("agentVersionState");
-    expect(source).toContain("version-badge");
+    expect(source).toContain('data-testid="agent-version-state"');
     expect(source).not.toContain("semver");
   });
 

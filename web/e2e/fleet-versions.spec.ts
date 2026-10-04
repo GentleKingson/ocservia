@@ -136,18 +136,20 @@ test("shows server-derived version badges on the fleet list", async ({
   await page.goto("/nodes");
 
   const currentRow = page.locator("tr", { hasText: "node-current" });
-  await expect(currentRow.locator(".version-badge")).toHaveText("Current");
+  await expect(currentRow.getByTestId("agent-version-state")).toHaveText(
+    "Current",
+  );
   await expect(currentRow).toContainText("0.2.0");
   const updateRow = page.locator("tr", { hasText: "node-update" });
-  await expect(updateRow.locator(".version-badge")).toHaveText(
+  await expect(updateRow.getByTestId("agent-version-state")).toHaveText(
     "Update available",
   );
   const unknownRow = page.locator("tr", { hasText: "node-unknown" });
-  await expect(unknownRow.locator(".version-badge")).toHaveText(
+  await expect(unknownRow.getByTestId("agent-version-state")).toHaveText(
     "No version observation",
   );
   const aheadRow = page.locator("tr", { hasText: "node-ahead" });
-  await expect(aheadRow.locator(".version-badge")).toHaveText("Ahead");
+  await expect(aheadRow.getByTestId("agent-version-state")).toHaveText("Ahead");
 });
 
 test("summarizes version states on the overview dashboard", async ({
@@ -245,7 +247,7 @@ test("retains observed versions when there is no recommendation", async ({
   await page.goto("/nodes");
   const row = page.locator("tr", { hasText: "node-update" });
   await expect(row).toContainText("0.1.1");
-  await expect(row.locator(".version-badge")).toHaveText(
+  await expect(row.getByTestId("agent-version-state")).toHaveText(
     "Recommendation not configured",
   );
 });

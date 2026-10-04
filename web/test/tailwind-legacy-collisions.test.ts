@@ -18,6 +18,7 @@ const tailwind = join(web, "node_modules/tailwindcss");
 const migrated = new Set([
   "src/App.vue",
   "src/views/LoginView.vue",
+  "src/views/NodesView.vue",
   "src/views/SettingsView.vue",
 ]);
 
