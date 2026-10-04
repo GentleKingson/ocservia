@@ -77,30 +77,43 @@ function restoreFocus(event: Event): void {
       </SheetContent>
     </Sheet>
     <span class="hidden md:inline">{{ $t("platform") }}</span>
-    <div class="flex min-w-0 flex-1 items-center gap-2 md:ml-6">
-      <label
-        for="workspace-select"
-        class="text-xs font-medium uppercase max-sm:sr-only"
-      >
-        {{ $t("workspace") }}
-      </label>
-      <select
-        id="workspace-select"
-        v-model="selectedWorkspaceId"
-        class="border-input bg-background text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 rounded-md border px-2 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-1 disabled:opacity-100"
-        :disabled="workspaces.length < 2"
-        @change="
-          emit('changeWorkspace', ($event.target as HTMLSelectElement).value)
-        "
-      >
-        <option
-          v-for="workspace in workspaces"
-          :key="workspace.id"
-          :value="workspace.id"
+    <div
+      data-testid="workspace"
+      class="flex min-w-0 flex-1 items-center gap-2 md:ml-6"
+    >
+      <template v-if="workspaces.length > 1">
+        <label
+          for="workspace-select"
+          class="text-xs font-medium uppercase max-sm:sr-only"
         >
-          {{ workspace.name }}
-        </option>
-      </select>
+          {{ $t("workspace") }}
+        </label>
+        <select
+          id="workspace-select"
+          v-model="selectedWorkspaceId"
+          class="border-input bg-background text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 rounded-md border px-2 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-1"
+          @change="
+            emit('changeWorkspace', ($event.target as HTMLSelectElement).value)
+          "
+        >
+          <option
+            v-for="workspace in workspaces"
+            :key="workspace.id"
+            :value="workspace.id"
+          >
+            {{ workspace.name }}
+          </option>
+        </select>
+      </template>
+      <!-- A single authorized Workspace has nothing to choose, so it reads as text. -->
+      <template v-else-if="workspaces.length === 1">
+        <span class="text-xs font-medium uppercase max-sm:sr-only">
+          {{ $t("workspace") }}
+        </span>
+        <span class="text-foreground truncate font-semibold">
+          {{ workspaces[0]?.name }}
+        </span>
+      </template>
     </div>
     <div
       data-testid="readiness"
