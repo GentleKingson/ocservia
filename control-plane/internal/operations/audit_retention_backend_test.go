@@ -12,7 +12,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
@@ -130,16 +129,12 @@ func (f *outboxFixture) replaceAuditEvidence(t *testing.T, id uuid.UUID, field s
 		f.exec(t, `ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only`, ``)
 		defer f.exec(t, `ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`, ``)
 	} else {
-		f.exec(t, ``, `DROP TRIGGER audit_events_reject_update`)
 		var restore string
-		for _, step := range mysql.AuditRetentionSteps() {
-			if step.Name == "audit_compaction_guard" {
-				restore = step.SQL
-			}
+		var name, mode, charset, collation, databaseCollation, created any
+		if err := f.owner.QueryRow(context.Background(), `SHOW CREATE TRIGGER audit_events_reject_update`).Scan(&name, &mode, &restore, &charset, &collation, &databaseCollation, &created); err != nil {
+			t.Fatal(err)
 		}
-		if restore == "" {
-			t.Fatal("missing audit guard")
-		}
+		f.exec(t, ``, `DROP TRIGGER audit_events_reject_update`)
 		defer f.exec(t, ``, restore)
 	}
 	f.exec(t, `UPDATE audit_events SET `+field+`=$1 WHERE id=$2`, `UPDATE audit_events SET `+field+`=? WHERE id=?`, data, id)
