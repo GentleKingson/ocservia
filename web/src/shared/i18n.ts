@@ -317,6 +317,15 @@ export const i18n = createI18n({
       quotaSize: "Quota size",
       quotaUnit: "Quota unit",
       expiresAtUtc: "Expires at (UTC)",
+      quotaPeriodHelp:
+        "Monthly usage restarts at the start of each UTC month. Lifetime counts all observed usage.",
+      quotaSizeHelp:
+        "The user is disabled once usage in this direction reaches the size. 0 disables at once; choose No quota for no limit.",
+      expiresAtHelp:
+        "The user is disabled at this UTC time. Leave empty for no expiry.",
+      approvalIdHelp:
+        "This action runs only with an approved request. Enter its approval ID.",
+      closeDialog: "Close dialog",
       convergence_converged: "Converged",
       convergence_pending: "Pending",
       convergence_offline_pending: "Offline pending",

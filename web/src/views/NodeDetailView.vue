@@ -22,7 +22,6 @@ import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { getUserPasswordSealingKey } from "../api/users";
 import { sealUserPassword } from "../features/user-password";
-import AccessibleDialog from "../shared/AccessibleDialog.vue";
 import { formatTimestamp } from "../shared/timestamp";
 
 import { workspaceContext } from "../api/workspace";
@@ -35,6 +34,13 @@ import {
   type UserPolicyForm,
 } from "../adapters/user-policy";
 import UserPolicyFields from "../upstream/UserPolicyFields.vue";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import FormField from "../components/common/FormField.vue";
+import OperationDialog from "../components/common/OperationDialog.vue";
+import SectionCard from "../components/common/SectionCard.vue";
 import NodeDetailHeader from "../components/nodes/NodeDetailHeader.vue";
 import NodeDetailNav from "../components/nodes/NodeDetailNav.vue";
 import NodeDetailSkeleton from "../components/nodes/NodeDetailSkeleton.vue";
@@ -469,6 +475,18 @@ async function submitPolicy(): Promise<void> {
     if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
   }
 }
+function operationTone(state: string): string {
+  if (state === "succeeded") return "text-success";
+  return ["failed", "unknown", "expired", "drifted"].includes(state)
+    ? "text-destructive"
+    : "";
+}
+function convergenceTone(key: string): string {
+  if (key === "convergence_converged") return "text-success";
+  return key === "convergence_drifted"
+    ? "text-destructive"
+    : "text-muted-foreground";
+}
 </script>
 
 <template>
@@ -503,967 +521,1135 @@ async function submitPolicy(): Promise<void> {
       />
       <NodeDetailNav />
       <NodeObservedDetails id="node-overview" :node="currentNode">
-        <p
-          v-if="currentNode.freshness === 'stale'"
-          class="state-banner"
-          role="status"
-        >
-          {{ $t("staleNode") }}
-        </p>
-        <div class="node-actions">
-          <button
-            type="button"
-            :disabled="operationBusy || !actionAvailable('service.reload')"
-            :title="actionExplanation('service.reload') || $t('reloadOcserv')"
-            @click="openAction('reload', '', $t('reloadOcserv'))"
+        <div class="mb-4 grid gap-3">
+          <p
+            v-if="currentNode.freshness === 'stale'"
+            class="m-0 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+            role="status"
           >
-            <Power :size="15" />{{ $t("reload") }}
-          </button>
-          <button
-            v-if="upgradeEligible"
-            type="button"
-            data-testid="upgrade-agent"
-            :disabled="operationBusy"
-            :title="$t('upgradeAgentTitle')"
-            @click="
-              openAction(
-                'upgradeAgent',
-                currentNode.recommendedAgentVersion ?? '',
-                $t('upgradeAgentTitle'),
-              )
-            "
+            {{ $t("staleNode") }}
+          </p>
+          <div class="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              :disabled="operationBusy || !actionAvailable('service.reload')"
+              :title="actionExplanation('service.reload') || $t('reloadOcserv')"
+              @click="openAction('reload', '', $t('reloadOcserv'))"
+            >
+              <Power aria-hidden="true" />{{ $t("reload") }}
+            </Button>
+            <Button
+              v-if="upgradeEligible"
+              type="button"
+              variant="outline"
+              size="sm"
+              data-testid="upgrade-agent"
+              :disabled="operationBusy"
+              :title="$t('upgradeAgentTitle')"
+              @click="
+                openAction(
+                  'upgradeAgent',
+                  currentNode.recommendedAgentVersion ?? '',
+                  $t('upgradeAgentTitle'),
+                )
+              "
+            >
+              <ArrowUpCircle aria-hidden="true" />{{ $t("upgradeAgent") }}
+            </Button>
+          </div>
+          <p
+            v-if="!actionAvailable('service.reload')"
+            class="text-muted-foreground m-0 text-xs"
           >
-            <ArrowUpCircle :size="15" />{{ $t("upgradeAgent") }}
-          </button>
+            {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
+          </p>
+          <div
+            v-if="fleet.latestOperation"
+            class="flex flex-wrap items-center gap-2 text-sm"
+            data-testid="operation-status"
+            aria-live="polite"
+          >
+            <span class="text-muted-foreground">{{
+              $t("latestOperation")
+            }}</span>
+            <strong
+              :class="operationTone(fleet.latestOperation.state)"
+              data-testid="operation-state"
+              >{{ $t(operationStatusKey(fleet.latestOperation)) }}</strong
+            >
+            <code
+              v-if="fleet.latestOperation.agentUpgradeTargetVersion"
+              class="text-xs"
+              >{{ fleet.latestOperation.agentUpgradeTargetVersion }}</code
+            >
+            <Button
+              v-if="
+                fleet.operationTracking &&
+                fleet.latestOperation.state === 'unknown'
+              "
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              :title="$t('stopTrackingOperation')"
+              :aria-label="$t('stopTrackingOperation')"
+              @click="fleet.detachOperation"
+            >
+              <CircleStop aria-hidden="true" />
+            </Button>
+          </div>
+          <p
+            v-if="fleet.operationError"
+            class="text-destructive m-0 text-sm break-words"
+            role="alert"
+          >
+            {{ fleet.operationError }}
+          </p>
         </div>
-        <p
-          v-if="!actionAvailable('service.reload')"
-          class="action-availability-note"
-        >
-          {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
-        </p>
-        <div
-          v-if="fleet.latestOperation"
-          class="operation-status"
-          aria-live="polite"
-        >
-          <span>{{ $t("latestOperation") }}</span>
-          <strong :class="fleet.latestOperation.state">{{
-            $t(operationStatusKey(fleet.latestOperation))
-          }}</strong>
-          <code v-if="fleet.latestOperation.agentUpgradeTargetVersion">{{
-            fleet.latestOperation.agentUpgradeTargetVersion
-          }}</code>
-          <button
-            v-if="
-              fleet.operationTracking &&
-              fleet.latestOperation.state === 'unknown'
-            "
-            type="button"
-            class="icon-command"
-            :title="$t('stopTrackingOperation')"
-            :aria-label="$t('stopTrackingOperation')"
-            @click="fleet.detachOperation"
-          >
-            <CircleStop :size="15" />
-          </button>
-        </div>
-        <p v-if="fleet.operationError" class="operation-error" role="alert">
-          {{ fleet.operationError }}
-        </p>
       </NodeObservedDetails>
 
-      <section class="node-detail node-detail-page">
-        <section id="node-sessions" class="detail-section">
-          <header>
-            <h2>{{ $t("sessions") }}</h2>
-          </header>
-          <div class="session-list">
-            <h3>{{ $t("currentSessions") }}</h3>
-            <div v-for="session in fleet.sessions" :key="session.id">
-              <span class="session-identity"
-                ><strong>{{ session.username }}</strong
-                ><span>{{ session.clientIp }}</span></span
-              >
-              <span class="session-actions">
-                <button
+      <SectionCard id="node-sessions" :title="$t('sessions')">
+        <div class="grid gap-2">
+          <h3 class="m-0 text-sm font-semibold">
+            {{ $t("currentSessions") }}
+          </h3>
+          <ul v-if="fleet.sessions.length" class="m-0 grid list-none p-0">
+            <li
+              v-for="session in fleet.sessions"
+              :key="session.id"
+              class="border-border flex items-center justify-between gap-2 border-b py-1.5 last:border-b-0"
+            >
+              <span class="grid min-w-0 text-sm">
+                <strong class="break-words">{{ session.username }}</strong>
+                <span class="text-muted-foreground text-xs">{{
+                  session.clientIp
+                }}</span>
+              </span>
+              <span class="flex shrink-0 gap-1">
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   :disabled="operationBusy || !currentNode.bootId"
                   :title="$t('disconnect')"
+                  :aria-label="$t('disconnect')"
                   @click="
                     openAction('disconnect', session.id, $t('disconnect'))
                   "
                 >
-                  <LogOut :size="14" />
-                </button>
-                <button
+                  <LogOut aria-hidden="true" />
+                </Button>
+                <Button
                   type="button"
-                  class="danger"
+                  variant="ghost"
+                  size="icon-sm"
+                  class="text-destructive hover:text-destructive"
                   :disabled="operationBusy || !currentNode.bootId"
                   :title="$t('terminate')"
+                  :aria-label="$t('terminate')"
                   @click="openAction('terminate', session.id, $t('terminate'))"
                 >
-                  <ShieldOff :size="14" />
-                </button>
+                  <ShieldOff aria-hidden="true" />
+                </Button>
               </span>
-            </div>
-            <p v-if="fleet.sessions.length === 0">{{ $t("noSessions") }}</p>
-          </div>
-          <div class="session-list ban-list">
-            <h3>{{ $t("ipBans") }}</h3>
-            <div v-for="ban in fleet.ipBans" :key="ban.ip">
-              <span class="session-identity"
-                ><strong>{{ ban.ip }}</strong></span
-              >
-              <span class="session-actions">
-                <button
-                  type="button"
-                  :disabled="operationBusy"
-                  :title="$t('removeBan')"
-                  @click="openAction('unban', ban.ip, $t('removeBan'))"
-                >
-                  <Ban :size="14" />
-                </button>
-              </span>
-            </div>
-            <p v-if="fleet.ipBans.length === 0">{{ $t("noIpBans") }}</p>
-          </div>
-        </section>
-
-        <section id="node-users-groups" class="detail-section">
-          <header>
-            <h2>{{ $t("usersAndGroups") }}</h2>
-          </header>
-          <div class="state-toolbar">
-            <div class="segmented" role="tablist">
-              <button
-                type="button"
-                :class="{ active: stateTab === 'users' }"
-                @click="stateTab = 'users'"
-              >
-                {{ $t("users") }}
-              </button>
-              <button
-                type="button"
-                :class="{ active: stateTab === 'groups' }"
-                @click="stateTab = 'groups'"
-              >
-                {{ $t("groups") }}
-              </button>
-            </div>
-            <button
-              v-if="stateTab === 'users'"
-              type="button"
-              class="icon-command"
-              :disabled="operationBusy || !actionAvailable('user.manage')"
-              :title="actionExplanation('user.manage') || $t('createUser')"
-              @click="openDesired('create')"
-            >
-              <UserPlus :size="15" />
-            </button>
-            <button
-              v-else
-              type="button"
-              class="icon-command"
-              :disabled="operationBusy || !actionAvailable('group.manage')"
-              :title="actionExplanation('group.manage') || $t('applyGroup')"
-              @click="openDesired('group')"
-            >
-              <ListPlus :size="15" />
-            </button>
-          </div>
-          <p
-            v-if="
-              !actionAvailable(
-                stateTab === 'users' ? 'user.manage' : 'group.manage',
-              )
-            "
-            class="action-availability-note"
-          >
-            {{
-              actionExplanation(
-                stateTab === "users" ? "user.manage" : "group.manage",
-              )
-            }}
+            </li>
+          </ul>
+          <p v-else class="text-muted-foreground m-0 text-sm">
+            {{ $t("noSessions") }}
           </p>
-          <div class="desired-state-list" v-if="stateTab === 'users'">
-            <div v-for="item in usersState" :key="item.name">
-              <span
-                ><strong>{{ item.name }}</strong
-                ><small :class="resourceStatusKey(item)">{{
-                  $t(resourceStatusKey(item))
-                }}</small
-                ><small
-                  v-if="item.recoveryRequired && !item.recoveryMutationKind"
-                  class="drifted"
-                  >{{ $t("manualReconciliationRequired") }}</small
-                ></span
+        </div>
+        <div class="grid gap-2">
+          <h3 class="m-0 text-sm font-semibold">{{ $t("ipBans") }}</h3>
+          <ul v-if="fleet.ipBans.length" class="m-0 grid list-none p-0">
+            <li
+              v-for="ban in fleet.ipBans"
+              :key="ban.ip"
+              class="border-border flex items-center justify-between gap-2 border-b py-1.5 last:border-b-0"
+            >
+              <strong class="min-w-0 text-sm break-all">{{ ban.ip }}</strong>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                :disabled="operationBusy"
+                :title="$t('removeBan')"
+                :aria-label="$t('removeBan')"
+                @click="openAction('unban', ban.ip, $t('removeBan'))"
               >
-              <span class="session-actions">
-                <button
+                <Ban aria-hidden="true" />
+              </Button>
+            </li>
+          </ul>
+          <p v-else class="text-muted-foreground m-0 text-sm">
+            {{ $t("noIpBans") }}
+          </p>
+        </div>
+      </SectionCard>
+
+      <SectionCard id="node-users-groups" :title="$t('usersAndGroups')">
+        <template #actions>
+          <div
+            class="bg-muted inline-flex gap-0.5 rounded-md p-0.5"
+            role="group"
+            :aria-label="$t('usersAndGroups')"
+          >
+            <Button
+              type="button"
+              size="sm"
+              :variant="stateTab === 'users' ? 'outline' : 'ghost'"
+              :aria-pressed="stateTab === 'users'"
+              @click="stateTab = 'users'"
+            >
+              {{ $t("users") }}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              :variant="stateTab === 'groups' ? 'outline' : 'ghost'"
+              :aria-pressed="stateTab === 'groups'"
+              @click="stateTab = 'groups'"
+            >
+              {{ $t("groups") }}
+            </Button>
+          </div>
+          <Button
+            v-if="stateTab === 'users'"
+            type="button"
+            variant="outline"
+            size="icon-sm"
+            :disabled="operationBusy || !actionAvailable('user.manage')"
+            :title="actionExplanation('user.manage') || $t('createUser')"
+            :aria-label="$t('createUser')"
+            @click="openDesired('create')"
+          >
+            <UserPlus aria-hidden="true" />
+          </Button>
+          <Button
+            v-else
+            type="button"
+            variant="outline"
+            size="icon-sm"
+            :disabled="operationBusy || !actionAvailable('group.manage')"
+            :title="actionExplanation('group.manage') || $t('applyGroup')"
+            :aria-label="$t('applyGroup')"
+            @click="openDesired('group')"
+          >
+            <ListPlus aria-hidden="true" />
+          </Button>
+        </template>
+        <p
+          v-if="
+            !actionAvailable(
+              stateTab === 'users' ? 'user.manage' : 'group.manage',
+            )
+          "
+          class="text-muted-foreground m-0 text-xs"
+        >
+          {{
+            actionExplanation(
+              stateTab === "users" ? "user.manage" : "group.manage",
+            )
+          }}
+        </p>
+        <template v-if="stateTab === 'users'">
+          <ul v-if="usersState.length" class="m-0 grid list-none p-0">
+            <li
+              v-for="item in usersState"
+              :key="item.name"
+              class="border-border flex flex-wrap items-center justify-between gap-2 border-b py-1.5 last:border-b-0"
+            >
+              <span class="flex min-w-0 flex-wrap items-center gap-2 text-sm">
+                <strong class="break-words">{{ item.name }}</strong>
+                <Badge
+                  variant="outline"
+                  :class="convergenceTone(resourceStatusKey(item))"
+                  >{{ $t(resourceStatusKey(item)) }}</Badge
+                >
+                <Badge
+                  v-if="item.recoveryRequired && !item.recoveryMutationKind"
+                  variant="outline"
+                  class="text-destructive"
+                  >{{ $t("manualReconciliationRequired") }}</Badge
+                >
+              </span>
+              <span class="flex shrink-0 gap-1">
+                <Button
                   v-if="item.desiredVersion"
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   :disabled="operationBusy || !item.desiredVersion"
                   :title="$t('quotaAndExpiry')"
+                  :aria-label="$t('quotaAndExpiry')"
                   @click="openPolicy(item.name)"
                 >
-                  <SlidersHorizontal :size="14" />
-                </button>
-                <button
+                  <SlidersHorizontal aria-hidden="true" />
+                </Button>
+                <Button
                   v-if="recoveryDialogKind(item) === 'create'"
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   :disabled="
                     operationBusy ||
                     !actionAvailable('user.manage') ||
                     !item.desiredVersion
                   "
                   :title="$t('retryCreateUser')"
+                  :aria-label="$t('retryCreateUser')"
                   @click="
                     openDesired('create', item.name, item.desiredVersion ?? 0)
                   "
                 >
-                  <UserPlus :size="14" />
-                </button>
-                <button
+                  <UserPlus aria-hidden="true" />
+                </Button>
+                <Button
                   v-else-if="recoveryDialogKind(item) === 'rotate'"
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   :disabled="
                     operationBusy ||
                     !actionAvailable('user.manage') ||
                     !item.desiredVersion
                   "
                   :title="$t('retryRotatePassword')"
+                  :aria-label="$t('retryRotatePassword')"
                   @click="
                     openDesired('rotate', item.name, item.desiredVersion ?? 0)
                   "
                 >
-                  <KeyRound :size="14" />
-                </button>
-                <button
+                  <KeyRound aria-hidden="true" />
+                </Button>
+                <Button
                   v-else-if="recoveryDialogKind(item) === 'disable'"
                   type="button"
-                  class="danger"
+                  variant="ghost"
+                  size="icon-sm"
+                  class="text-destructive hover:text-destructive"
                   :disabled="
                     operationBusy ||
                     !actionAvailable('user.manage') ||
                     !item.desiredVersion
                   "
                   :title="$t('retryDisableUser')"
+                  :aria-label="$t('retryDisableUser')"
                   @click="
                     openDesired('disable', item.name, item.desiredVersion ?? 0)
                   "
                 >
-                  <UserX :size="14" />
-                </button>
-                <button
+                  <UserX aria-hidden="true" />
+                </Button>
+                <Button
                   v-else-if="recoveryDialogKind(item) === 'enable'"
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   :disabled="
                     operationBusy ||
                     !actionAvailable('user.manage') ||
                     !item.desiredVersion
                   "
                   :title="$t('retryEnableUser')"
+                  :aria-label="$t('retryEnableUser')"
                   @click="
                     openDesired('enable', item.name, item.desiredVersion ?? 0)
                   "
                 >
-                  <UserCheck :size="14" />
-                </button>
-                <button
+                  <UserCheck aria-hidden="true" />
+                </Button>
+                <Button
                   v-if="!item.recoveryRequired"
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   :disabled="
                     operationBusy ||
                     !actionAvailable('user.manage') ||
                     !item.desiredVersion
                   "
                   :title="$t('rotatePassword')"
+                  :aria-label="$t('rotatePassword')"
                   @click="
                     openDesired('rotate', item.name, item.desiredVersion ?? 0)
                   "
                 >
-                  <KeyRound :size="14" />
-                </button>
-                <button
+                  <KeyRound aria-hidden="true" />
+                </Button>
+                <Button
                   v-if="!item.recoveryRequired && item.desiredEnabled === false"
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   :disabled="
                     operationBusy ||
                     !actionAvailable('user.manage') ||
                     !item.desiredVersion
                   "
                   :title="$t('enableUser')"
+                  :aria-label="$t('enableUser')"
                   @click="
                     openDesired('enable', item.name, item.desiredVersion ?? 0)
                   "
                 >
-                  <UserCheck :size="14" />
-                </button>
-                <button
+                  <UserCheck aria-hidden="true" />
+                </Button>
+                <Button
                   v-else-if="!item.recoveryRequired"
                   type="button"
-                  class="danger"
+                  variant="ghost"
+                  size="icon-sm"
+                  class="text-destructive hover:text-destructive"
                   :disabled="
                     operationBusy ||
                     !actionAvailable('user.manage') ||
                     !item.desiredVersion
                   "
                   :title="$t('disableUser')"
+                  :aria-label="$t('disableUser')"
                   @click="
                     openDesired('disable', item.name, item.desiredVersion ?? 0)
                   "
                 >
-                  <UserX :size="14" />
-                </button>
+                  <UserX aria-hidden="true" />
+                </Button>
               </span>
-            </div>
-            <p v-if="usersState.length === 0">{{ $t("noUsers") }}</p>
-          </div>
-          <div class="desired-state-list" v-else>
-            <div v-for="item in groupsState" :key="item.name">
-              <span
-                ><strong>{{ item.name }}</strong
-                ><small :class="resourceStatusKey(item)">{{
-                  $t(resourceStatusKey(item))
-                }}</small
-                ><small
+            </li>
+          </ul>
+          <p v-else class="text-muted-foreground m-0 text-sm">
+            {{ $t("noUsers") }}
+          </p>
+        </template>
+        <template v-else>
+          <ul v-if="groupsState.length" class="m-0 grid list-none p-0">
+            <li
+              v-for="item in groupsState"
+              :key="item.name"
+              class="border-border flex flex-wrap items-center justify-between gap-2 border-b py-1.5 last:border-b-0"
+            >
+              <span class="flex min-w-0 flex-wrap items-center gap-2 text-sm">
+                <strong class="break-words">{{ item.name }}</strong>
+                <Badge
+                  variant="outline"
+                  :class="convergenceTone(resourceStatusKey(item))"
+                  >{{ $t(resourceStatusKey(item)) }}</Badge
+                >
+                <Badge
                   v-if="item.recoveryRequired && !item.recoveryMutationKind"
-                  class="drifted"
-                  >{{ $t("manualReconciliationRequired") }}</small
-                ></span
-              >
-              <button
+                  variant="outline"
+                  class="text-destructive"
+                  >{{ $t("manualReconciliationRequired") }}</Badge
+                >
+              </span>
+              <Button
                 v-if="recoveryDialogKind(item) === 'group'"
                 type="button"
-                class="icon-command"
+                variant="ghost"
+                size="icon-sm"
                 :disabled="operationBusy || !actionAvailable('group.manage')"
                 :title="$t('retryApplyGroup')"
+                :aria-label="$t('retryApplyGroup')"
                 @click="
                   openDesired('group', item.name, item.desiredVersion ?? 0)
                 "
               >
-                <ListPlus :size="14" />
-              </button>
-              <button
+                <ListPlus aria-hidden="true" />
+              </Button>
+              <Button
                 v-else-if="!item.recoveryRequired"
                 type="button"
-                class="icon-command"
+                variant="ghost"
+                size="icon-sm"
                 :disabled="operationBusy || !actionAvailable('group.manage')"
                 :title="$t('applyGroup')"
+                :aria-label="$t('applyGroup')"
                 @click="
                   openDesired('group', item.name, item.desiredVersion ?? 0)
                 "
               >
-                <ListPlus :size="14" />
-              </button>
-            </div>
-            <p v-if="groupsState.length === 0">{{ $t("noGroups") }}</p>
-          </div>
-        </section>
-
-        <section id="node-configuration" class="detail-section">
-          <header>
-            <h2>{{ $t("configurationSection") }}</h2>
-          </header>
-          <div class="detail-section-actions">
-            <FileCheck2 :size="18" />
-            <span>{{ $t("configPlan") }}</span>
-            <button
-              type="button"
-              :disabled="
-                operationBusy ||
-                currentConfigRevision === undefined ||
-                !actionAvailable('config.plan')
-              "
-              :title="$t('configPlan')"
-              @click="openConfigPlan"
-            >
-              {{ $t("plan") }}
-            </button>
-          </div>
-          <p
-            v-if="!actionAvailable('config.plan')"
-            class="action-availability-note"
-          >
-            {{ actionExplanation("config.plan") }}
+                <ListPlus aria-hidden="true" />
+              </Button>
+            </li>
+          </ul>
+          <p v-else class="text-muted-foreground m-0 text-sm">
+            {{ $t("noGroups") }}
           </p>
-        </section>
+        </template>
+      </SectionCard>
 
-        <section id="node-certificates" class="detail-section">
-          <header>
-            <h2>{{ $t("certificatesSection") }}</h2>
-          </header>
-          <div class="detail-section-actions">
-            <span
-              >{{ $t("certificateLifecycle")
-              }}<small v-if="!actionAvailable('certificate.issue')">
-                · {{ actionExplanation("certificate.issue") }}</small
-              ></span
-            >
-            <button
-              type="button"
-              :disabled="operationBusy || !actionAvailable('certificate.read')"
-              :title="
-                actionExplanation('certificate.read') ||
-                $t('certificateLifecycle')
-              "
-              @click="openCertificate"
-            >
-              {{ $t("certificate") }}
-            </button>
-          </div>
-        </section>
-      </section>
-    </template>
+      <SectionCard id="node-configuration" :title="$t('configurationSection')">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <span class="inline-flex items-center gap-2 text-sm">
+            <FileCheck2
+              class="text-muted-foreground size-4"
+              aria-hidden="true"
+            />
+            {{ $t("configPlan") }}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            :disabled="
+              operationBusy ||
+              currentConfigRevision === undefined ||
+              !actionAvailable('config.plan')
+            "
+            :title="$t('configPlan')"
+            @click="openConfigPlan"
+          >
+            {{ $t("plan") }}
+          </Button>
+        </div>
+        <p
+          v-if="!actionAvailable('config.plan')"
+          class="text-muted-foreground m-0 text-xs"
+        >
+          {{ actionExplanation("config.plan") }}
+        </p>
+      </SectionCard>
 
-    <div
-      v-if="certificateDialog"
-      class="dialog-backdrop"
-      @click.self="certificateDialog = false"
-    >
-      <form class="operation-dialog" @submit.prevent="submitCertificateRequest">
-        <header>
-          <h2>{{ $t("certificateLifecycle") }}</h2>
-          <code>{{ currentNode?.name }}</code>
-        </header>
+      <SectionCard id="node-certificates" :title="$t('certificatesSection')">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <span class="text-sm">{{ $t("certificateLifecycle") }}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            :disabled="operationBusy || !actionAvailable('certificate.read')"
+            :title="
+              actionExplanation('certificate.read') ||
+              $t('certificateLifecycle')
+            "
+            @click="openCertificate"
+          >
+            {{ $t("certificate") }}
+          </Button>
+        </div>
         <p
           v-if="!actionAvailable('certificate.issue')"
-          class="action-availability-note"
+          class="text-muted-foreground m-0 text-xs"
         >
-          {{ $t("requestCsr") }}: {{ actionExplanation("certificate.issue") }}
+          {{ actionExplanation("certificate.issue") }}
         </p>
-        <template v-if="!certificate && actionAvailable('certificate.issue')">
-          <label for="certificate-cn">{{ $t("commonName") }}</label>
-          <input
+      </SectionCard>
+    </template>
+
+    <OperationDialog
+      v-if="certificateDialog"
+      :title="$t('certificateLifecycle')"
+      :subject="currentNode?.name"
+      :error="certificateError"
+      @close="certificateDialog = false"
+      @submit="submitCertificateRequest"
+    >
+      <p
+        v-if="!actionAvailable('certificate.issue')"
+        class="text-muted-foreground m-0 text-xs"
+      >
+        {{ $t("requestCsr") }}: {{ actionExplanation("certificate.issue") }}
+      </p>
+      <template v-if="!certificate && actionAvailable('certificate.issue')">
+        <FormField id="certificate-cn" :label="$t('commonName')">
+          <Input
             id="certificate-cn"
             v-model="certificateCommonName"
             maxlength="253"
             required
           />
-          <label for="certificate-dns">{{ $t("dnsNames") }}</label>
-          <input
+        </FormField>
+        <FormField id="certificate-dns" :label="$t('dnsNames')">
+          <Input
             id="certificate-dns"
             v-model="certificateDnsNames"
             maxlength="4096"
           />
-        </template>
-        <template v-else-if="certificate">
-          <div class="config-plan-result" aria-live="polite">
-            <span class="freshness-badge" :class="certificate.state">{{
-              certificate.state
-            }}</span>
-            <code>{{ certificate.id }}</code>
-            <small v-if="certificate.notAfter"
-              >{{ $t("expires") }}
-              {{ formatTimestamp(certificate.notAfter) }}</small
-            >
-          </div>
-          <template
-            v-if="
-              certificate.state === 'csr_ready' ||
-              certificate.state === 'signer_unavailable' ||
-              certificate.state === 'issued' ||
-              certificate.state === 'expiring'
+        </FormField>
+      </template>
+      <template v-else-if="certificate">
+        <div
+          class="bg-muted/50 border-border flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-3 text-sm"
+          aria-live="polite"
+        >
+          <Badge
+            variant="outline"
+            :class="
+              certificate.state === 'issued'
+                ? 'text-success'
+                : certificate.state === 'expiring'
+                  ? 'text-amber-800'
+                  : undefined
             "
+            >{{ certificate.state }}</Badge
           >
-            <label for="certificate-approval">{{ $t("approvalId") }}</label>
-            <input
-              id="certificate-approval"
-              v-model="certificateApproval"
-              autocomplete="off"
-              required
-            />
-          </template>
-          <template v-if="certificateGrant?.password">
-            <label for="certificate-password">{{ $t("p12Password") }}</label>
-            <input
-              id="certificate-password"
-              :value="certificateGrant.password"
-              readonly
-              autocomplete="off"
-            />
-            <small>{{ $t("oneTimeCredential") }}</small>
-          </template>
-        </template>
-        <label for="certificate-reason">{{ $t("reason") }}</label>
-        <textarea
+          <code class="min-w-0 text-xs break-all">{{ certificate.id }}</code>
+          <small v-if="certificate.notAfter" class="text-muted-foreground"
+            >{{ $t("expires") }}
+            {{ formatTimestamp(certificate.notAfter) }}</small
+          >
+        </div>
+        <FormField
+          v-if="
+            certificate.state === 'csr_ready' ||
+            certificate.state === 'signer_unavailable' ||
+            certificate.state === 'issued' ||
+            certificate.state === 'expiring'
+          "
+          id="certificate-approval"
+          :label="$t('approvalId')"
+          :help="$t('approvalIdHelp')"
+          v-slot="{ describedBy }"
+        >
+          <Input
+            id="certificate-approval"
+            v-model="certificateApproval"
+            :aria-describedby="describedBy"
+            autocomplete="off"
+            required
+          />
+        </FormField>
+        <FormField
+          v-if="certificateGrant?.password"
+          id="certificate-password"
+          :label="$t('p12Password')"
+          :help="$t('oneTimeCredential')"
+          v-slot="{ describedBy }"
+        >
+          <Input
+            id="certificate-password"
+            class="font-mono"
+            :model-value="certificateGrant.password"
+            :aria-describedby="describedBy"
+            readonly
+            autocomplete="off"
+          />
+        </FormField>
+      </template>
+      <FormField id="certificate-reason" :label="$t('reason')">
+        <Textarea
           id="certificate-reason"
           v-model="certificateReason"
           maxlength="512"
           required
-        ></textarea>
-        <p v-if="certificateError" class="operation-error" role="alert">
-          {{ certificateError }}
-        </p>
-        <p v-if="certificateOperation || certificate?.operationId">
-          {{ $t("operationId") }}:
-          <code>{{
-            certificateOperation?.id ?? certificate?.operationId
-          }}</code>
-          <span v-if="certificateOperation">{{
-            $t(operationStatusKey(certificateOperation))
-          }}</span>
-        </p>
-        <footer>
-          <button type="button" @click="certificateDialog = false">
-            {{ $t("cancel") }}
-          </button>
-          <button
-            v-if="!certificate"
-            type="submit"
-            class="primary"
-            :disabled="
-              certificateLoading ||
-              !actionAvailable('certificate.issue') ||
-              !certificateReason.trim()
-            "
-          >
-            {{ $t("requestCsr") }}
-          </button>
-          <button
-            v-else-if="
-              certificate.state === 'csr_ready' ||
-              certificate.state === 'signer_unavailable'
-            "
+        />
+      </FormField>
+      <p
+        v-if="certificateOperation || certificate?.operationId"
+        class="m-0 flex flex-wrap items-center gap-2 text-sm"
+      >
+        {{ $t("operationId") }}:
+        <code class="text-xs break-all">{{
+          certificateOperation?.id ?? certificate?.operationId
+        }}</code>
+        <span v-if="certificateOperation">{{
+          $t(operationStatusKey(certificateOperation))
+        }}</span>
+      </p>
+      <template #footer>
+        <Button
+          v-if="!certificate"
+          type="submit"
+          :disabled="
+            certificateLoading ||
+            !actionAvailable('certificate.issue') ||
+            !certificateReason.trim()
+          "
+        >
+          {{ $t("requestCsr") }}
+        </Button>
+        <Button
+          v-else-if="
+            certificate.state === 'csr_ready' ||
+            certificate.state === 'signer_unavailable'
+          "
+          type="button"
+          :disabled="
+            certificateLoading ||
+            !actionAvailable('certificate.issue') ||
+            !certificateApproval.trim() ||
+            !certificateReason.trim()
+          "
+          @click="submitCertificateIssue"
+        >
+          {{ $t("issueCertificate") }}
+        </Button>
+        <template
+          v-else-if="
+            certificate.state === 'issued' || certificate.state === 'expiring'
+          "
+        >
+          <Button
             type="button"
-            class="primary"
+            variant="outline"
             :disabled="
               certificateLoading ||
-              !actionAvailable('certificate.issue') ||
-              !certificateApproval.trim() ||
+              !actionAvailable('certificate.private_key.export') ||
+              Boolean(certificateGrant?.downloadToken) ||
               !certificateReason.trim()
             "
-            @click="submitCertificateIssue"
+            @click="createP12"
           >
-            {{ $t("issueCertificate") }}
-          </button>
-          <template
-            v-else-if="
-              certificate.state === 'issued' || certificate.state === 'expiring'
+            <KeyRound aria-hidden="true" />{{ $t("createP12") }}
+          </Button>
+          <Button
+            v-if="certificateGrant?.downloadToken"
+            type="button"
+            :disabled="certificateLoading"
+            @click="downloadP12"
+          >
+            <Download aria-hidden="true" />{{ $t("download") }}
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            :disabled="
+              certificateLoading ||
+              !actionAvailable('certificate.revoke') ||
+              !certificateReason.trim()
             "
+            @click="revokeCurrentCertificate"
           >
-            <button
-              type="button"
-              :disabled="
-                certificateLoading ||
-                !actionAvailable('certificate.private_key.export') ||
-                Boolean(certificateGrant?.downloadToken) ||
-                !certificateReason.trim()
-              "
-              @click="createP12"
-            >
-              <KeyRound :size="15" />{{ $t("createP12") }}
-            </button>
-            <button
-              v-if="certificateGrant?.downloadToken"
-              type="button"
-              class="primary"
-              :disabled="certificateLoading"
-              @click="downloadP12"
-            >
-              <Download :size="15" />{{ $t("download") }}
-            </button>
-            <button
-              type="button"
-              class="danger"
-              :disabled="
-                certificateLoading ||
-                !actionAvailable('certificate.revoke') ||
-                !certificateReason.trim()
-              "
-              @click="revokeCurrentCertificate"
-            >
-              {{ $t("revoke") }}
-            </button>
-          </template>
-        </footer>
-      </form>
-    </div>
-
-    <div
-      v-if="pendingAction"
-      class="dialog-backdrop"
-      @click.self="pendingAction = undefined"
-    >
-      <form class="operation-dialog" @submit.prevent="submitAction">
-        <header>
-          <h2>{{ pendingAction.label }}</h2>
-          <code v-if="pendingAction.target">{{ pendingAction.target }}</code>
-        </header>
-        <template v-if="pendingAction.kind === 'upgradeAgent'">
-          <label for="upgrade-target">{{ $t("targetVersion") }}</label>
-          <output id="upgrade-target" class="read-only-value">{{
-            pendingAction.target
-          }}</output>
-          <p class="dialog-hint">{{ $t("upgradeTargetReadOnly") }}</p>
+            {{ $t("revoke") }}
+          </Button>
         </template>
-        <label for="operation-reason">{{ $t("reason") }}</label>
-        <textarea
+      </template>
+    </OperationDialog>
+
+    <OperationDialog
+      v-if="pendingAction"
+      :title="pendingAction.label"
+      :subject="pendingAction.target || currentNode?.name"
+      @close="pendingAction = undefined"
+      @submit="submitAction"
+    >
+      <FormField
+        v-if="pendingAction.kind === 'upgradeAgent'"
+        id="upgrade-target"
+        :label="$t('targetVersion')"
+        :help="$t('upgradeTargetReadOnly')"
+      >
+        <output id="upgrade-target" class="font-mono text-sm">{{
+          pendingAction.target
+        }}</output>
+      </FormField>
+      <FormField id="operation-reason" :label="$t('reason')">
+        <Textarea
           id="operation-reason"
           v-model="reason"
           maxlength="512"
           required
-        ></textarea>
-        <template
-          v-if="
-            pendingAction.kind === 'reload' ||
-            pendingAction.kind === 'upgradeAgent'
+        />
+      </FormField>
+      <FormField
+        v-if="
+          pendingAction.kind === 'reload' ||
+          pendingAction.kind === 'upgradeAgent'
+        "
+        id="approval-id"
+        :label="$t('approvalId')"
+        :help="$t('approvalIdHelp')"
+        v-slot="{ describedBy }"
+      >
+        <Input
+          id="approval-id"
+          v-model="approvalId"
+          :aria-describedby="describedBy"
+          autocomplete="off"
+          required
+        />
+      </FormField>
+      <template #footer>
+        <Button
+          type="submit"
+          :variant="
+            pendingAction.kind === 'terminate' ? 'destructive' : 'default'
+          "
+          :disabled="
+            !reason.trim() ||
+            ((pendingAction.kind === 'reload' ||
+              pendingAction.kind === 'upgradeAgent') &&
+              !approvalId.trim())
           "
         >
-          <label for="approval-id">{{ $t("approvalId") }}</label>
-          <input
-            id="approval-id"
-            v-model="approvalId"
-            autocomplete="off"
-            required
-          />
-        </template>
-        <footer>
-          <button type="button" @click="pendingAction = undefined">
-            {{ $t("cancel") }}
-          </button>
-          <button
-            type="submit"
-            class="primary"
-            :disabled="
-              !reason.trim() ||
-              ((pendingAction.kind === 'reload' ||
-                pendingAction.kind === 'upgradeAgent') &&
-                !approvalId.trim())
-            "
-          >
-            {{ $t("confirm") }}
-          </button>
-        </footer>
-      </form>
-    </div>
+          {{ $t("confirm") }}
+        </Button>
+      </template>
+    </OperationDialog>
 
-    <AccessibleDialog
+    <OperationDialog
       v-if="desiredDialog"
-      labelledby="node-desired-dialog-title"
+      :title="
+        $t(
+          desiredDialog.kind === 'create'
+            ? 'createUser'
+            : desiredDialog.kind === 'disable'
+              ? 'disableUser'
+              : desiredDialog.kind === 'enable'
+                ? 'enableUser'
+                : desiredDialog.kind === 'rotate'
+                  ? 'rotatePassword'
+                  : 'applyGroup',
+        )
+      "
+      :subject="desiredDialog.name || currentNode?.name"
+      :error="desiredError"
       @close="desiredDialog = undefined"
+      @submit="submitDesired"
     >
-      <form class="operation-dialog" @submit.prevent="submitDesired">
-        <header>
-          <h2 id="node-desired-dialog-title">
-            {{
-              $t(
-                desiredDialog.kind === "create"
-                  ? "createUser"
-                  : desiredDialog.kind === "disable"
-                    ? "disableUser"
-                    : desiredDialog.kind === "enable"
-                      ? "enableUser"
-                      : desiredDialog.kind === "rotate"
-                        ? "rotatePassword"
-                        : "applyGroup",
-              )
-            }}
-          </h2>
-          <code v-if="desiredDialog.name">{{ desiredDialog.name }}</code>
-        </header>
-        <template
-          v-if="
-            desiredDialog.kind === 'create' || desiredDialog.kind === 'group'
+      <FormField
+        v-if="desiredDialog.kind === 'create' || desiredDialog.kind === 'group'"
+        id="desired-name"
+        :label="$t(desiredDialog.kind === 'group' ? 'group' : 'user')"
+      >
+        <Input
+          id="desired-name"
+          v-model="desiredName"
+          :disabled="
+            desiredDialog.kind === 'create' && desiredDialog.version > 0
           "
-          ><label for="desired-name">{{
-            $t(desiredDialog.kind === "group" ? "group" : "user")
-          }}</label
-          ><input
-            id="desired-name"
-            v-model="desiredName"
-            :disabled="
-              desiredDialog.kind === 'create' && desiredDialog.version > 0
-            "
-            maxlength="64"
-            required
-        /></template>
-        <template
-          v-if="
-            desiredDialog.kind === 'create' || desiredDialog.kind === 'rotate'
-          "
-          ><label for="desired-password">{{ $t("password") }}</label>
-          <input
-            id="desired-password"
-            v-model="desiredPassword"
-            type="password"
-            autocomplete="new-password"
-            :disabled="desiredLoading"
-            required
-          />
-          <p class="form-help">{{ $t("passwordSealingHelp") }}</p>
-        </template>
-        <template v-if="desiredDialog.kind === 'group'"
-          ><label for="group-members">{{ $t("members") }}</label
-          ><textarea
-            id="group-members"
-            v-model="groupMembers"
-            maxlength="65535"
-          ></textarea>
-        </template>
-        <p v-if="desiredError" role="alert">{{ desiredError }}</p>
-        <label for="desired-reason">{{ $t("reason") }}</label
-        ><textarea
+          maxlength="64"
+          required
+        />
+      </FormField>
+      <FormField
+        v-if="
+          desiredDialog.kind === 'create' || desiredDialog.kind === 'rotate'
+        "
+        id="desired-password"
+        :label="$t('password')"
+        :help="$t('passwordSealingHelp')"
+        v-slot="{ describedBy }"
+      >
+        <Input
+          id="desired-password"
+          v-model="desiredPassword"
+          type="password"
+          autocomplete="new-password"
+          :aria-describedby="describedBy"
+          :disabled="desiredLoading"
+          required
+        />
+      </FormField>
+      <FormField
+        v-if="desiredDialog.kind === 'group'"
+        id="group-members"
+        :label="$t('members')"
+      >
+        <Textarea id="group-members" v-model="groupMembers" maxlength="65535" />
+      </FormField>
+      <FormField id="desired-reason" :label="$t('reason')">
+        <Textarea
           id="desired-reason"
           v-model="desiredReason"
           maxlength="512"
           required
-        ></textarea>
-        <footer>
-          <button type="button" @click="desiredDialog = undefined">
-            {{ $t("cancel") }}</button
-          ><button
-            type="submit"
-            class="primary"
-            :disabled="
-              desiredLoading ||
-              !desiredReason.trim() ||
-              ((desiredDialog.kind === 'create' ||
-                desiredDialog.kind === 'rotate') &&
-                !desiredPassword)
-            "
-          >
-            {{ $t("confirm") }}
-          </button>
-        </footer>
-      </form>
-    </AccessibleDialog>
+        />
+      </FormField>
+      <template #footer>
+        <Button
+          type="submit"
+          :variant="
+            desiredDialog.kind === 'disable' ? 'destructive' : 'default'
+          "
+          :disabled="
+            desiredLoading ||
+            !desiredReason.trim() ||
+            ((desiredDialog.kind === 'create' ||
+              desiredDialog.kind === 'rotate') &&
+              !desiredPassword)
+          "
+        >
+          {{ $t("confirm") }}
+        </Button>
+      </template>
+    </OperationDialog>
 
-    <div
+    <OperationDialog
       v-if="policyDialog"
-      class="dialog-backdrop"
-      @click.self="policyDialog = undefined"
+      :title="$t('quotaAndExpiry')"
+      :subject="policyDialog.username"
+      :error="policyError"
+      @close="policyDialog = undefined"
+      @submit="submitPolicy"
     >
-      <form class="operation-dialog" @submit.prevent="submitPolicy">
-        <header>
-          <h2>{{ $t("quotaAndExpiry") }}</h2>
-          <code>{{ policyDialog.username }}</code>
-        </header>
-        <UserPolicyFields v-model="policyForm" />
-        <label for="policy-reason">{{ $t("reason") }}</label>
-        <textarea
+      <UserPolicyFields v-model="policyForm" />
+      <FormField id="policy-reason" :label="$t('reason')">
+        <Textarea
           id="policy-reason"
           v-model="policyReason"
           maxlength="512"
           required
-        ></textarea>
-        <p v-if="policyError" class="operation-error" role="alert">
-          {{ policyError }}
-        </p>
-        <footer>
-          <button type="button" @click="policyDialog = undefined">
-            {{ $t("cancel") }}
-          </button>
-          <button
-            type="submit"
-            class="primary"
-            :disabled="policyLoading || !policyReason.trim()"
-          >
-            {{ $t("confirm") }}
-          </button>
-        </footer>
-      </form>
-    </div>
+        />
+      </FormField>
+      <template #footer>
+        <Button type="submit" :disabled="policyLoading || !policyReason.trim()">
+          {{ $t("confirm") }}
+        </Button>
+      </template>
+    </OperationDialog>
 
-    <div
+    <OperationDialog
       v-if="configDialog"
-      class="dialog-backdrop"
-      @click.self="configDialog = false"
+      wide
+      :title="$t('configPlan')"
+      :subject="currentNode?.name"
+      :error="configError"
+      @close="configDialog = false"
+      @submit="submitConfigPlan"
     >
-      <form
-        class="operation-dialog config-plan-dialog"
-        @submit.prevent="submitConfigPlan"
-      >
-        <header>
-          <h2>{{ $t("configPlan") }}</h2>
-          <code>{{ currentNode?.name }}</code>
-        </header>
-        <p class="config-source-note" role="note">
-          {{ $t("configTemplateSource") }}
-        </p>
-        <p class="config-source-note">
+      <template #description>
+        <span class="mt-2 block" role="note">{{
+          $t("configTemplateSource")
+        }}</span>
+      </template>
+      <div class="text-muted-foreground grid gap-1 text-xs">
+        <p class="m-0">
           {{ $t("configSourceRevision") }}:
           <code>{{ configSourceRevision }}</code>
         </p>
-        <p class="config-source-note">{{ $t("configRiskFields") }}</p>
-        <label for="config-port">{{ $t("tcpPort") }}</label>
-        <input
-          id="config-port"
-          v-model.number="configPort"
-          type="number"
-          min="1"
-          max="65535"
-          required
-        />
-        <label for="config-clients">{{ $t("maxClients") }}</label>
-        <input
-          id="config-clients"
-          v-model.number="configMaxClients"
-          type="number"
-          min="1"
-          max="65535"
-          required
-        />
-        <label for="config-udp-port">{{ $t("udpPort") }}</label>
-        <input
-          id="config-udp-port"
-          v-model.number="configUdpPort"
-          type="number"
-          min="0"
-          max="65535"
-          required
-        />
-        <label for="config-device">{{ $t("vpnDevice") }}</label>
-        <input
-          id="config-device"
-          v-model="configDevice"
-          maxlength="15"
-          required
-        />
-        <label for="config-network">{{ $t("ipv4Network") }}</label>
-        <input
-          id="config-network"
-          v-model="configNetwork"
-          maxlength="18"
-          required
-        />
-        <label for="config-dns">{{ $t("dnsServer") }}</label>
-        <input id="config-dns" v-model="configDns" maxlength="15" required />
-        <label for="config-same-clients">{{ $t("maxSameClients") }}</label>
-        <input
-          id="config-same-clients"
-          v-model.number="configMaxSameClients"
-          type="number"
-          min="1"
-          :max="configMaxClients"
-          required
-        />
-        <label for="config-cookie-timeout">{{ $t("cookieTimeout") }}</label>
-        <input
-          id="config-cookie-timeout"
-          v-model.number="configCookieTimeout"
-          type="number"
-          min="60"
-          max="86400"
-          required
-        />
-        <label for="config-route">{{ $t("route") }}</label>
-        <input
-          id="config-route"
-          v-model="configRoute"
-          maxlength="256"
-          required
-        />
-        <label for="config-certificate-key">{{ $t("certificateRef") }}</label>
-        <input
-          id="config-certificate-key"
-          v-model="configCertificateSecretRefId"
-          maxlength="36"
-          required
-        />
-        <label for="config-private-key">{{ $t("privateKeyRef") }}</label>
-        <input
-          id="config-private-key"
-          v-model="configPrivateKeySecretRefId"
-          maxlength="36"
-          required
-        />
-        <label for="config-reason">{{ $t("reason") }}</label>
-        <textarea
+        <p class="m-0">{{ $t("configRiskFields") }}</p>
+      </div>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField id="config-port" :label="$t('tcpPort')">
+          <Input
+            id="config-port"
+            v-model.number="configPort"
+            type="number"
+            min="1"
+            max="65535"
+            required
+          />
+        </FormField>
+        <FormField id="config-clients" :label="$t('maxClients')">
+          <Input
+            id="config-clients"
+            v-model.number="configMaxClients"
+            type="number"
+            min="1"
+            max="65535"
+            required
+          />
+        </FormField>
+        <FormField id="config-udp-port" :label="$t('udpPort')">
+          <Input
+            id="config-udp-port"
+            v-model.number="configUdpPort"
+            type="number"
+            min="0"
+            max="65535"
+            required
+          />
+        </FormField>
+        <FormField id="config-device" :label="$t('vpnDevice')">
+          <Input
+            id="config-device"
+            v-model="configDevice"
+            maxlength="15"
+            required
+          />
+        </FormField>
+        <FormField id="config-network" :label="$t('ipv4Network')">
+          <Input
+            id="config-network"
+            v-model="configNetwork"
+            maxlength="18"
+            required
+          />
+        </FormField>
+        <FormField id="config-dns" :label="$t('dnsServer')">
+          <Input id="config-dns" v-model="configDns" maxlength="15" required />
+        </FormField>
+        <FormField id="config-same-clients" :label="$t('maxSameClients')">
+          <Input
+            id="config-same-clients"
+            v-model.number="configMaxSameClients"
+            type="number"
+            min="1"
+            :max="configMaxClients"
+            required
+          />
+        </FormField>
+        <FormField id="config-cookie-timeout" :label="$t('cookieTimeout')">
+          <Input
+            id="config-cookie-timeout"
+            v-model.number="configCookieTimeout"
+            type="number"
+            min="60"
+            max="86400"
+            required
+          />
+        </FormField>
+        <FormField id="config-route" :label="$t('route')">
+          <Input
+            id="config-route"
+            v-model="configRoute"
+            maxlength="256"
+            required
+          />
+        </FormField>
+        <FormField id="config-certificate-key" :label="$t('certificateRef')">
+          <Input
+            id="config-certificate-key"
+            v-model="configCertificateSecretRefId"
+            maxlength="36"
+            required
+          />
+        </FormField>
+        <FormField id="config-private-key" :label="$t('privateKeyRef')">
+          <Input
+            id="config-private-key"
+            v-model="configPrivateKeySecretRefId"
+            maxlength="36"
+            required
+          />
+        </FormField>
+      </div>
+      <FormField id="config-reason" :label="$t('reason')">
+        <Textarea
           id="config-reason"
           v-model="configReason"
           maxlength="512"
           required
-        ></textarea>
-        <div v-if="configPlan" class="config-plan-result" aria-live="polite">
-          <span class="freshness-badge" :class="configPlan.validation">{{
-            configPlan.validation
-          }}</span>
-          <label>{{ $t("configPlanId") }}</label>
-          <code>{{ configPlan.id }}</code>
-          <label>{{ $t("candidateHash") }}</label>
-          <code>{{ configPlan.candidateHash }}</code>
-          <template v-if="configPlan.materializedHash">
-            <label>{{ $t("materializedHash") }}</label>
-            <code>{{ configPlan.materializedHash }}</code>
-          </template>
-          <p class="config-source-note">{{ $t("configCandidateSource") }}</p>
-          <p class="config-source-note">
-            {{ $t("configSourceRevision") }}:
-            <code>{{ configPlan.expectedRevision }}</code>
-          </p>
-          <pre v-if="configPlan.diffRedacted">{{
-            configPlan.diffRedacted
-          }}</pre>
-          <ul v-if="configPlan.warnings.length">
-            <li v-for="(warning, index) in configPlan.warnings" :key="index">
-              {{ warning }}
-            </li>
-          </ul>
-          <p
-            v-if="!actionAvailable('config.apply')"
-            class="action-availability-note"
+        />
+      </FormField>
+      <div
+        v-if="configPlan"
+        class="bg-muted/50 border-border grid min-w-0 gap-3 rounded-md border p-3"
+        data-testid="config-plan-result"
+        aria-live="polite"
+      >
+        <Badge
+          variant="outline"
+          :class="
+            configPlan.validation === 'valid'
+              ? 'text-success'
+              : 'text-destructive'
+          "
+          >{{ configPlan.validation }}</Badge
+        >
+        <dl class="m-0 grid gap-2 text-sm">
+          <div class="grid min-w-0 gap-1">
+            <dt class="text-muted-foreground text-xs">
+              {{ $t("configPlanId") }}
+            </dt>
+            <dd class="m-0">
+              <code class="text-xs break-all">{{ configPlan.id }}</code>
+            </dd>
+          </div>
+          <div class="grid min-w-0 gap-1">
+            <dt class="text-muted-foreground text-xs">
+              {{ $t("candidateHash") }}
+            </dt>
+            <dd class="m-0">
+              <code class="text-xs break-all">{{
+                configPlan.candidateHash
+              }}</code>
+            </dd>
+          </div>
+          <div v-if="configPlan.materializedHash" class="grid min-w-0 gap-1">
+            <dt class="text-muted-foreground text-xs">
+              {{ $t("materializedHash") }}
+            </dt>
+            <dd class="m-0">
+              <code class="text-xs break-all">{{
+                configPlan.materializedHash
+              }}</code>
+            </dd>
+          </div>
+          <div class="grid min-w-0 gap-1">
+            <dt class="text-muted-foreground text-xs">
+              {{ $t("configSourceRevision") }}
+            </dt>
+            <dd class="m-0">
+              <code class="text-xs">{{ configPlan.expectedRevision }}</code>
+            </dd>
+          </div>
+        </dl>
+        <p class="text-muted-foreground m-0 text-xs">
+          {{ $t("configCandidateSource") }}
+        </p>
+        <pre
+          v-if="configPlan.diffRedacted"
+          class="bg-background border-border m-0 max-h-80 overflow-auto rounded-md border p-3 text-xs"
+          >{{ configPlan.diffRedacted }}</pre>
+        <ul
+          v-if="configPlan.warnings.length"
+          class="m-0 list-disc pl-5 text-sm text-amber-900"
+        >
+          <li v-for="(warning, index) in configPlan.warnings" :key="index">
+            {{ warning }}
+          </li>
+        </ul>
+        <p
+          v-if="!actionAvailable('config.apply')"
+          class="text-muted-foreground m-0 text-xs"
+        >
+          {{ $t("apply") }}: {{ actionExplanation("config.apply") }}
+        </p>
+        <template v-if="configPlan.validation === 'valid'">
+          <FormField
+            id="config-apply-approval"
+            :label="$t('approvalId')"
+            :help="$t('approvalIdHelp')"
+            v-slot="{ describedBy }"
           >
-            {{ $t("apply") }}: {{ actionExplanation("config.apply") }}
-          </p>
-          <template v-if="configPlan.validation === 'valid'">
-            <label for="config-apply-approval">{{ $t("approvalId") }}</label>
-            <input
+            <Input
               id="config-apply-approval"
               v-model="configApplyApproval"
+              :aria-describedby="describedBy"
               required
             />
-            <label for="config-apply-reason">{{ $t("reason") }}</label>
-            <textarea
+          </FormField>
+          <FormField id="config-apply-reason" :label="$t('reason')">
+            <Textarea
               id="config-apply-reason"
               v-model="configApplyReason"
               maxlength="512"
-            ></textarea>
-            <button
-              type="button"
-              class="primary"
-              :disabled="
-                configLoading ||
-                !canSubmitConfigPlan ||
-                !actionAvailable('config.apply') ||
-                !configApplyApproval.trim() ||
-                !configApplyReason.trim()
-              "
-              @click="submitConfigApply"
-            >
-              {{ $t("apply") }}
-            </button>
-          </template>
-        </div>
-        <p v-if="configError" class="operation-error" role="alert">
-          {{ configError }}
-        </p>
-        <p v-if="configOperation || configPlan?.operationId">
-          {{ $t("operationId") }}:
-          <code>{{ configOperation?.id ?? configPlan?.operationId }}</code>
-          <span v-if="configOperation">{{
-            $t(operationStatusKey(configOperation))
-          }}</span>
-        </p>
-        <footer>
-          <button type="button" @click="configDialog = false">
-            {{ $t("cancel") }}
-          </button>
-          <button
-            type="submit"
-            class="primary"
+            />
+          </FormField>
+          <Button
+            type="button"
+            class="w-fit"
             :disabled="
               configLoading ||
               !canSubmitConfigPlan ||
-              !actionAvailable('config.plan') ||
-              !configReason.trim()
+              !actionAvailable('config.apply') ||
+              !configApplyApproval.trim() ||
+              !configApplyReason.trim()
             "
+            @click="submitConfigApply"
           >
-            {{ $t("plan") }}
-          </button>
-        </footer>
-      </form>
-    </div>
+            {{ $t("apply") }}
+          </Button>
+        </template>
+      </div>
+      <p
+        v-if="configOperation || configPlan?.operationId"
+        class="m-0 flex flex-wrap items-center gap-2 text-sm"
+      >
+        {{ $t("operationId") }}:
+        <code class="text-xs break-all">{{
+          configOperation?.id ?? configPlan?.operationId
+        }}</code>
+        <span v-if="configOperation">{{
+          $t(operationStatusKey(configOperation))
+        }}</span>
+      </p>
+      <template #footer>
+        <Button
+          type="submit"
+          :variant="configPlan ? 'outline' : 'default'"
+          :disabled="
+            configLoading ||
+            !canSubmitConfigPlan ||
+            !actionAvailable('config.plan') ||
+            !configReason.trim()
+          "
+        >
+          {{ $t("plan") }}
+        </Button>
+      </template>
+    </OperationDialog>
   </main>
 </template>

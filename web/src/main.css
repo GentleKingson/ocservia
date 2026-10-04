@@ -81,7 +81,12 @@
     padding: 0;
     border: 0 solid var(--color-border);
   }
-  :where(button[data-slot], input[data-slot]) {
+  :where(
+    button[data-slot],
+    input[data-slot],
+    textarea[data-slot],
+    select[data-slot]
+  ) {
     font: inherit;
     letter-spacing: inherit;
     color: inherit;

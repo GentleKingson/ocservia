@@ -207,13 +207,15 @@ test("walks the reconciled upgrade lifecycle to success", async ({ page }) => {
     .fill("019fc0a4-6d92-765c-a8a1-4af556614ee5");
   await page.getByRole("button", { name: "Confirm" }).click();
 
-  const status = page.locator(".operation-status");
-  await expect(status.locator("strong")).toHaveText(
+  const status = page.getByTestId("operation-status");
+  await expect(status.getByTestId("operation-state")).toHaveText(
     "Waiting for restart & reconnect",
   );
   await expect(status).toContainText(recommended);
-  await expect(status.locator("strong")).toHaveText("Verifying target version");
-  await expect(status.locator("strong")).toHaveText("Succeeded");
+  await expect(status.getByTestId("operation-state")).toHaveText(
+    "Verifying target version",
+  );
+  await expect(status.getByTestId("operation-state")).toHaveText("Succeeded");
 });
 
 test("surfaces a forced local upgrade failure as the terminal outcome", async ({
@@ -245,11 +247,11 @@ test("surfaces a forced local upgrade failure as the terminal outcome", async ({
     .fill("019fc0a4-6d92-765c-a8a1-4af556614ee6");
   await page.getByRole("button", { name: "Confirm" }).click();
 
-  const status = page.locator(".operation-status");
-  await expect(status.locator("strong")).toHaveText(
+  const status = page.getByTestId("operation-status");
+  await expect(status.getByTestId("operation-state")).toHaveText(
     "Waiting for restart & reconnect",
   );
-  await expect(status.locator("strong")).toHaveText("Failed");
+  await expect(status.getByTestId("operation-state")).toHaveText("Failed");
 });
 
 test("hides the upgrade entry point for an ineligible node", async ({

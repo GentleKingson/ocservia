@@ -137,7 +137,8 @@ their existing markup until they are migrated one consumer at a time.
   Unlayered Vue scoped styles (`LoginView`, `ApprovalsView`) still win over
   every layer.
 - Tailwind's global Preflight is not imported. `ui-base` applies the reset the
-  primitives need only to elements carrying the `data-slot` marker, which also
+  primitives need only to elements carrying the `data-slot` marker (form
+  controls also inherit font and color), which also
   covers content a primitive teleports to `<body>`. Do not render primitives
   inside legacy containers whose descendant selectors would still style them.
 - Tailwind scans all of `web/src`. `test/tailwind-legacy-collisions.test.ts`
@@ -174,15 +175,18 @@ Compare upstream changes by hand (keyboard behavior, ARIA, Portal and props)
 and keep the local modifications below. When the CLI generates icon imports
 from `lucide-vue-next`, rewrite them to the existing `@lucide/vue` package.
 
-| Component      | Upstream                                    | Local modifications                                                                                                                                                                                                                                                                                                                             |
-| -------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `button`       | `apps/v4/registry/new-york-v4/ui/button`    | Prettier; `asChild` defaults to `false` for `exactOptionalPropertyTypes`                                                                                                                                                                                                                                                                        |
-| `badge`        | `apps/v4/registry/new-york-v4/ui/badge`     | Prettier; renders `span` by default; binds `as`/`asChild` instead of `reactiveOmit` from `@vueuse/core`                                                                                                                                                                                                                                         |
-| `input`        | `apps/v4/registry/new-york-v4/ui/input`     | Prettier; `defineModel` replaces `useVModel` from `@vueuse/core`; `defaultValue` prop removed                                                                                                                                                                                                                                                   |
-| `table`        | `apps/v4/registry/new-york-v4/ui/table`     | Prettier; `TableEmpty` and `TableFooter` not imported                                                                                                                                                                                                                                                                                           |
-| `sheet`        | `apps/v4/registry/new-york-v4/ui/sheet`     | Prettier; `SheetHeader`, `SheetFooter` and `SheetClose` not imported; `tw-animate-css` enter/exit classes removed (not installed, so open and close are instant); close button gets `data-slot`, a 32px target and a `closeLabel` prop for the translated name; `withDefaults` mirrors Reka UI's `as` defaults for `exactOptionalPropertyTypes` |
-| `label`        | `apps/v4/registry/new-york-v4/ui/label`     | Prettier; `for` falls through as an attribute and `as` defaults to `label`, both for `exactOptionalPropertyTypes`                                                                                                                                                                                                                               |
-| `lib/utils.ts` | `apps/v4/registry/new-york-v4/lib/utils.ts` | Prettier                                                                                                                                                                                                                                                                                                                                        |
+| Component       | Upstream                                        | Local modifications                                                                                                                                                                                                                                                                                                                                               |
+| --------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `button`        | `apps/v4/registry/new-york-v4/ui/button`        | Prettier; `asChild` defaults to `false` for `exactOptionalPropertyTypes`                                                                                                                                                                                                                                                                                          |
+| `badge`         | `apps/v4/registry/new-york-v4/ui/badge`         | Prettier; renders `span` by default; binds `as`/`asChild` instead of `reactiveOmit` from `@vueuse/core`                                                                                                                                                                                                                                                           |
+| `input`         | `apps/v4/registry/new-york-v4/ui/input`         | Prettier; `defineModel` replaces `useVModel` from `@vueuse/core`; `defaultValue` prop removed                                                                                                                                                                                                                                                                     |
+| `table`         | `apps/v4/registry/new-york-v4/ui/table`         | Prettier; `TableEmpty` and `TableFooter` not imported                                                                                                                                                                                                                                                                                                             |
+| `sheet`         | `apps/v4/registry/new-york-v4/ui/sheet`         | Prettier; `SheetHeader`, `SheetFooter` and `SheetClose` not imported; `tw-animate-css` enter/exit classes removed (not installed, so open and close are instant); close button gets `data-slot`, a 32px target and a `closeLabel` prop for the translated name; `withDefaults` mirrors Reka UI's `as` defaults for `exactOptionalPropertyTypes`                   |
+| `label`         | `apps/v4/registry/new-york-v4/ui/label`         | Prettier; `for` falls through as an attribute and `as` defaults to `label`, both for `exactOptionalPropertyTypes`                                                                                                                                                                                                                                                 |
+| `dialog`        | `apps/v4/registry/new-york-v4/ui/dialog`        | Prettier; `DialogTrigger`, `DialogClose` and `DialogScrollContent` not imported; `tw-animate-css` enter/exit classes removed; content scrolls inside the viewport (`max-h-[calc(100dvh-2rem)]`); close button gets a 32px target and a `closeLabel` prop; `DialogFooter` drops its `showCloseButton` close button; `withDefaults` mirrors Reka UI's `as` defaults |
+| `textarea`      | `apps/v4/registry/new-york-v4/ui/textarea`      | Prettier; `defineModel` replaces `useVModel`; `defaultValue` prop removed                                                                                                                                                                                                                                                                                         |
+| `native-select` | `apps/v4/registry/new-york-v4/ui/native-select` | Prettier; `defineModel` replaces `useVModel`; attributes fall through to `select` without `delegatedProps`; `NativeSelectOption` and `NativeSelectOptGroup` not imported (plain `option` is used)                                                                                                                                                                 |
+| `lib/utils.ts`  | `apps/v4/registry/new-york-v4/lib/utils.ts`     | Prettier                                                                                                                                                                                                                                                                                                                                                          |
 
 All sources were taken on 2026-10-04 from `unovue/shadcn-vue` commit
 `b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) and are MIT licensed;
@@ -242,8 +246,34 @@ came from (keeping its query) or to `/nodes`. `NodeStatusSummary` and
 blank, and `CopyButton` copies the node ID and identity values, which stay
 selectable when the clipboard is unavailable. `NodeDetailNav` links to the
 existing in-page sections; it does not switch tabs or load data. The only
-added timer is the local clock for relative heartbeat time. Write buttons,
-dialogs, forms and the not-found or unavailable states keep legacy styles.
+added timer is the local clock for relative heartbeat time. The not-found and
+unavailable states keep legacy styles shared with other detail views.
+
+### Node detail write forms
+
+Every NodeDetail write form (controlled actions, desired users and groups,
+quota and expiry, configuration Plan/Apply and certificates) renders through
+`components/common/OperationDialog.vue`, a Reka UI `Dialog` holding one
+`form`. It only presents: the page still mounts it with `v-if`, owns every
+field, handler, disabled rule and error, and receives `close` from Cancel,
+Escape, an outside click or the close button. The dialog traps focus, hides
+the rest of the page from assistive technology and returns focus to the
+trigger. Submit buttons stay disabled while a request is pending, and
+controlled actions close on submit, so a second click or Enter sends nothing. `FormField` pairs a `Label` with help text
+referenced by `aria-describedby`; field IDs are unchanged. `SectionCard`
+frames the sessions, users and groups, configuration and certificate
+sections.
+
+- Disabled write controls keep the advisory explanation as their `title` and
+  repeat it as visible text; Reload states a missing or unknown permission
+  the same way.
+- Approval-gated actions show an Approval ID field with help text and keep
+  Confirm disabled until it is filled; the server still decides.
+- Quota help states the UTC monthly period, the direction, that 0 disables
+  the user at once and that "No quota" means no limit; expiry is UTC. The
+  payload and `expected_version` are unchanged.
+- Server errors render in the dialog's alert without clearing the inputs.
+  Passwords and P12 passphrases are still cleared by their existing owners.
 
 ## Node detail workflows
 
@@ -316,11 +346,13 @@ Serve the production build on an available BuildServer port, set
 `PLAYWRIGHT_BASE_URL`, then run the existing focused browser smoke:
 
 ```sh
-npx playwright test config-plan.spec.ts certificate-lifecycle.spec.ts --project=desktop --project=mobile
+npx playwright test config-plan.spec.ts certificate-lifecycle.spec.ts node-forms.spec.ts --project=desktop --project=mobile
 ```
 
-This checks Plan/Apply and certificate/P12 UI interactions, not a live
-Controller, database recovery or installation.
+This checks Plan/Apply and certificate/P12 UI interactions, and in
+`node-forms.spec.ts` denied and unknown permissions, closing without a
+request, approval IDs, server errors and duplicate submits. It does not cover a
+live Controller, database recovery or installation.
 
 ### Advisory action availability
 
