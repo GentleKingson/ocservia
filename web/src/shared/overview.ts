@@ -15,8 +15,8 @@ import {
 import { listEvents, platformEventsEvent } from "../api/events";
 import { listOperations, operationSummary } from "../api/operations";
 
-const recentOperationWindow = 20;
-const recentEventLimit = 12;
+export const recentOperationWindow = 20;
+export const recentEventLimit = 12;
 const retainedEventLimit = 50;
 const platformRefreshDelay = 500;
 
@@ -30,6 +30,9 @@ export const useOverviewStore = defineStore("overview", () => {
   const eventsLoaded = ref(false);
   const operationsUnavailable = ref(false);
   const eventsUnavailable = ref(false);
+  // Last successful load of each source, kept while a later refresh fails.
+  const operationsAt = ref<Date>();
+  const eventsAt = ref<Date>();
   let operationsController: AbortController | undefined;
   let eventsController: AbortController | undefined;
   let operationsSequence = 0;
@@ -92,6 +95,7 @@ export const useOverviewStore = defineStore("overview", () => {
       operations.value = page.items;
       summary.value = counts;
       operationsLoaded.value = true;
+      operationsAt.value = new Date();
       operationsUnavailable.value = false;
     } catch {
       if (!context) return;
@@ -148,6 +152,7 @@ export const useOverviewStore = defineStore("overview", () => {
         ? [...events.value, ...collected].slice(-retainedEventLimit)
         : collected.slice(-retainedEventLimit);
       eventsLoaded.value = true;
+      eventsAt.value = new Date();
       eventsUnavailable.value = false;
     } catch {
       if (!context) return;
@@ -195,6 +200,8 @@ export const useOverviewStore = defineStore("overview", () => {
     eventsLoaded.value = false;
     operationsUnavailable.value = false;
     eventsUnavailable.value = false;
+    operationsAt.value = undefined;
+    eventsAt.value = undefined;
   }
 
   function resetWorkspace(): void {
@@ -247,6 +254,8 @@ export const useOverviewStore = defineStore("overview", () => {
     eventsLoaded,
     operationsUnavailable,
     eventsUnavailable,
+    operationsAt,
+    eventsAt,
     activeOperations,
     unknownOperations,
     recentFailedOperations,

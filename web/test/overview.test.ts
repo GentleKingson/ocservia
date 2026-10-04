@@ -21,6 +21,10 @@ import { listNodes } from "../src/api/nodes";
 import { listOperations, operationSummary } from "../src/api/operations";
 import { useFleetStore } from "../src/shared/fleet";
 import { useOverviewStore } from "../src/shared/overview";
+import {
+  sourceState,
+  sourceValue,
+} from "../src/features/overview/source-state";
 
 vi.mock("../src/api/workspace", () => ({
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
@@ -372,6 +376,65 @@ describe("operational overview", () => {
     expect(overview.operationsUnavailable).toBe(false);
     expect(overview.activeOperations).toBe(1);
     overview.stop();
+  });
+
+  it("keeps stale operations and their load time after a failed refresh", async () => {
+    vi.mocked(listOperations).mockResolvedValue(
+      operationPage([operation("op-1", "unknown")]),
+    );
+    vi.mocked(operationSummary).mockResolvedValue({ active: 0, unknown: 1 });
+    const overview = useOverviewStore();
+    overview.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const loadedAt = overview.operationsAt;
+    expect(loadedAt).toBeInstanceOf(Date);
+    expect(
+      sourceState(overview.operationsLoaded, overview.operationsUnavailable),
+    ).toBe("ready");
+
+    vi.mocked(listOperations).mockRejectedValueOnce(new Error("offline"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    overview.refresh();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const state = sourceState(
+      overview.operationsLoaded,
+      overview.operationsUnavailable,
+    );
+    expect(state).toBe("stale");
+    expect(sourceValue(state, overview.unknownOperations)).toBe("1");
+    expect(overview.recentOperations).toHaveLength(1);
+    expect(overview.operationsAt).toBe(loadedAt);
+    overview.stop();
+    expect(overview.operationsAt).toBeUndefined();
+  });
+
+  it("records the node snapshot time only on a complete rebuild", async () => {
+    vi.mocked(listNodes).mockResolvedValue({
+      items: [node("019fc0a4-6d92-765c-a8a1-4af556614cc3", "offline")],
+      page: { hasMore: false },
+    });
+    const fleet = useFleetStore();
+    await fleet.rebuild();
+    const snapshotAt = fleet.snapshotAt;
+    expect(snapshotAt).toBeInstanceOf(Date);
+
+    vi.mocked(listNodes).mockRejectedValueOnce(new Error("offline"));
+    await fleet.rebuild();
+    expect(sourceState(fleet.initialized, fleet.unavailable)).toBe("stale");
+    expect(fleet.snapshotAt).toBe(snapshotAt);
+    expect(fleet.nodes[0]?.freshness).toBe("stale");
+    fleet.$dispose();
+  });
+
+  it("separates loading, unavailable, stale and ready sources", () => {
+    expect(sourceState(false, false)).toBe("loading");
+    expect(sourceState(false, true)).toBe("unavailable");
+    expect(sourceState(true, true)).toBe("stale");
+    expect(sourceState(true, false)).toBe("ready");
+    expect(sourceValue("loading", 3)).toBe("…");
+    expect(sourceValue("unavailable", 3)).toBe("–");
+    expect(sourceValue("stale", 0)).toBe("0");
   });
 
   it("treats an empty workspace as loaded, not unavailable", async () => {

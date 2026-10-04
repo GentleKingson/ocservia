@@ -102,6 +102,8 @@ export const useFleetStore = defineStore("fleet", () => {
   const selecting = ref(false);
   const selectionError = ref<"" | "notFound" | "unavailable">("");
   const unavailable = ref(false);
+  // When the complete node snapshot was last replaced, for freshness labels.
+  const snapshotAt = ref<Date>();
   let source: EventSource | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let connectSequence = 0;
@@ -239,6 +241,7 @@ export const useFleetStore = defineStore("fleet", () => {
       } while (cursor);
       if (!isLatestRebuild()) return;
       nodes.value = rebuilt;
+      snapshotAt.value = new Date();
       initialized.value = true;
       if (selected.value && selectSequence === selectSequenceAtStart)
         await select(selected.value.id);
@@ -571,6 +574,7 @@ export const useFleetStore = defineStore("fleet", () => {
   function resetWorkspace(): void {
     disconnect();
     nodes.value = [];
+    snapshotAt.value = undefined;
     selected.value = undefined;
     sessions.value = [];
     ipBans.value = [];
@@ -607,6 +611,7 @@ export const useFleetStore = defineStore("fleet", () => {
     selecting,
     selectionError,
     unavailable,
+    snapshotAt,
     online,
     offline,
     relay,

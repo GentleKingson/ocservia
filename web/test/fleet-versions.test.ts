@@ -128,7 +128,7 @@ describe("version intelligence presentation", () => {
       resolve(import.meta.dirname, "../src/views/OverviewView.vue"),
       "utf8",
     );
-    expect(source).toContain('data-testid="overview-agent-versions"');
+    expect(source).toContain('value-testid="overview-agent-versions"');
     expect(source).toContain("agentUpdateAvailable");
     expect(source).toContain("agentAhead");
     expect(source).toContain("agentUnknown");

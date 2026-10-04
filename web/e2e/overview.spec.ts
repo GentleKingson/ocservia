@@ -279,6 +279,12 @@ test("switching workspaces replaces every overview number and list", async ({
   await expect(
     page.getByTestId("overview-connectivity").locator(".."),
   ).toContainText("Includes offline nodes");
+  await expect(
+    page.getByTestId("overview-sessions").locator("../.."),
+  ).toContainText("Nodes with stale data: 1.");
+  await expect(
+    page.getByTestId("overview-operations").locator(".."),
+  ).toContainText("1 failed in the latest 20");
   await expect(page.getByTestId("overview-events")).toContainText(
     "Telemetry observation",
   );
