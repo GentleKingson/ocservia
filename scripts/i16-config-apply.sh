@@ -17,7 +17,7 @@ fi
 
 grep -Fq '/config-plans/{plan_id}/apply' "${ROOT}/openapi/openapi.yaml"
 grep -Fq 'ConfigApplyResult' "${ROOT}/proto/ocserv/platform/agent/v1/agent.proto"
-grep -Fq 'automation_locked' "${ROOT}/control-plane/migrations/000015_config_apply_rollback.up.sql"
+grep -Fq 'automation_locked' "${ROOT}/control-plane/migrations/schema.sql"
 grep -Fq 'atomic_replace(&stage_path, &self.resources.config)' "${ROOT}/rust/crates/ocserv-adapter/src/lib.rs"
 grep -Fq 'sync_directory(parent).await' "${ROOT}/rust/crates/ocserv-adapter/src/lib.rs"
 grep -Fq 'config_apply.rollback_failed' "${ROOT}/control-plane/internal/database/postgres/command_result.go"

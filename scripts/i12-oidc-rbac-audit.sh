@@ -15,4 +15,4 @@ fi
 
 grep -q 'oauth2.S256ChallengeOption' "${ROOT}/control-plane/internal/auth/service.go"
 grep -q 'subtle.ConstantTimeCompare.*attempt.Nonce' "${ROOT}/control-plane/internal/auth/service.go"
-grep -q 'requester_id IS DISTINCT FROM approver_id' "${ROOT}/control-plane/migrations/000011_oidc_rbac_approvals_audit.up.sql"
+grep -q 'requester_id IS DISTINCT FROM approver_id' "${ROOT}/control-plane/migrations/schema.sql"

@@ -18,13 +18,13 @@ fi
 grep -Fq '/artifacts/{artifact_id}' "${ROOT}/openapi/openapi.yaml"
 grep -Fq 'X-Artifact-Token' "${ROOT}/openapi/openapi.yaml"
 grep -Fq 'rpc FetchArtifact' "${ROOT}/proto/ocserv/platform/transport/v1/transport.proto"
-grep -Fq 'content_size BETWEEN 1 AND 67108864' "${ROOT}/control-plane/migrations/000016_certificate_secret_lifecycle.up.sql"
-grep -Fq 'Opaque external secret references only' "${ROOT}/control-plane/migrations/000016_certificate_secret_lifecycle.up.sql"
+grep -Eq 'content_size.*>= 1.*content_size.*<= 67108864' "${ROOT}/control-plane/migrations/schema.sql"
+grep -Fq 'Opaque external secret references only' "${ROOT}/control-plane/migrations/schema.sql"
 grep -Fq 'certificate_p12_is_encrypted_bounded_and_replayable' "${ROOT}/rust/crates/ocserv-adapter/src/lib.rs"
 
 if grep -REnE 'ca_private_key|private_key_pem|plaintext_password|artifact_(source_)?path|caller_path|target_path' \
   "${ROOT}/control-plane/internal/certificates" \
-  "${ROOT}/control-plane/migrations/000016_certificate_secret_lifecycle.up.sql" \
+  "${ROOT}/control-plane/migrations/schema.sql" \
   "${ROOT}/proto/ocserv/platform/agent/v1/agent.proto" \
   "${ROOT}/proto/ocserv/platform/transport/v1/transport.proto"; then
   echo "I17 exposed CA/private-key/plaintext-secret or caller-selected artifact path material" >&2

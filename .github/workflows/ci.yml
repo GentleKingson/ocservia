@@ -214,6 +214,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Cache pinned go-test tools
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -238,7 +239,7 @@ jobs:
           restore-keys: |
             basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
-      - name: Enforce SQL artifact window and immutable bridge sources
+      - name: Enforce SQL artifact window and fixed checkpoint
         run: bash scripts/database-artifact-policy.sh "$ENGINE"
       - if: matrix.engine == 'postgres'
         run: scripts/database-integration.sh

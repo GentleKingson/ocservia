@@ -35,6 +35,12 @@ ordinary deployment configuration. Release publication uses normal GitHub asset
 replacement on reruns and version image tags. It maintains no separate signing,
 provenance, registry binding, or immutable-release contract.
 
+SQL artifact builds record PostgreSQL `database_migration` as
+`{"epoch": N, "revision": R}` from the current `schema.sql` headers. The
+source commit binds the corresponding schema and upgrade bytes. Launchers also
+accept the positive integer in existing published manifests; no historical
+migration files are needed to generate a new manifest.
+
 AgentUpgrade retains the Controller-authorized `target_version`,
 `package_sha256`, and `architecture`. The upgrade verifies the archive SHA-256
 against that command, refuses a mismatch, and then uses existing protected
