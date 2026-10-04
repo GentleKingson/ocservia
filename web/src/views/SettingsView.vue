@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { CheckCircle2, CircleAlert, Settings2 } from "@lucide/vue";
+import { CheckCircle2, CircleAlert } from "@lucide/vue";
 import type { BuildInfo, Workspace } from "@ocservia/api-client";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
+import DataState from "../components/common/DataState.vue";
+import PageHeader from "../components/common/PageHeader.vue";
 import { getWorkspace, workspaceChangedEvent } from "../api/workspace";
 import { getVersion } from "../api/platform";
 import { useReadinessStore } from "../shared/readiness";
@@ -57,63 +59,93 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="overview settings-view">
-    <div class="page-heading">
-      <div>
-        <p>{{ $t("platform") }}</p>
-        <h1>{{ $t("settings") }}</h1>
-      </div>
-    </div>
-    <div v-if="loading" class="detail-state" role="status">
-      <Settings2 :size="24" /><span>{{ $t("loading") }}</span>
-    </div>
-    <div v-else-if="unavailable" class="detail-state" role="alert">
-      <CircleAlert :size="24" /><span>{{ $t("noWorkspace") }}</span>
-    </div>
-    <section v-else class="settings-layout">
-      <section class="settings-section">
-        <header>
-          <div>
-            <span>{{ $t("workspace") }}</span>
-            <h2>{{ $t("workspaceInformation") }}</h2>
-          </div>
+  <main class="overview">
+    <PageHeader :eyebrow="$t('platform')" :title="$t('settings')" />
+    <DataState v-if="loading" kind="loading" :message="$t('loading')" />
+    <DataState
+      v-else-if="unavailable"
+      kind="error"
+      :message="$t('noWorkspace')"
+    />
+    <div v-else class="grid gap-4 md:grid-cols-2">
+      <section
+        class="bg-card border-border rounded-lg border p-5"
+        aria-labelledby="settings-workspace"
+      >
+        <header class="border-border border-b pb-3">
+          <p class="text-muted-foreground m-0 mb-1 text-xs uppercase">
+            {{ $t("workspace") }}
+          </p>
+          <h2 id="settings-workspace" class="m-0 text-base font-semibold">
+            {{ $t("workspaceInformation") }}
+          </h2>
         </header>
-        <dl>
-          <div>
-            <dt>{{ $t("workspaceName") }}</dt>
-            <dd>{{ workspace?.name ?? $t("notAvailable") }}</dd>
+        <dl class="m-0 mt-2 text-sm">
+          <div
+            class="border-border flex justify-between gap-4 border-b py-2.5 last:border-b-0"
+          >
+            <dt class="text-muted-foreground">{{ $t("workspaceName") }}</dt>
+            <dd class="m-0 text-right wrap-anywhere">
+              {{ workspace?.name ?? $t("notAvailable") }}
+            </dd>
           </div>
-          <div>
-            <dt>{{ $t("workspaceSlug") }}</dt>
-            <dd>{{ workspace?.slug ?? $t("notAvailable") }}</dd>
+          <div
+            class="border-border flex justify-between gap-4 border-b py-2.5 last:border-b-0"
+          >
+            <dt class="text-muted-foreground">{{ $t("workspaceSlug") }}</dt>
+            <dd class="m-0 text-right wrap-anywhere">
+              {{ workspace?.slug ?? $t("notAvailable") }}
+            </dd>
           </div>
-          <div>
-            <dt>{{ $t("workspaceId") }}</dt>
-            <dd>
-              <code>{{ workspace?.id ?? $t("notAvailable") }}</code>
+          <div
+            class="border-border flex justify-between gap-4 border-b py-2.5 last:border-b-0"
+          >
+            <dt class="text-muted-foreground">{{ $t("workspaceId") }}</dt>
+            <dd class="m-0 text-right wrap-anywhere">
+              <code class="font-mono text-xs">{{
+                workspace?.id ?? $t("notAvailable")
+              }}</code>
             </dd>
           </div>
         </dl>
       </section>
-      <section class="settings-section">
-        <header>
-          <div>
-            <span>{{ $t("platform") }}</span>
-            <h2>{{ $t("platformContext") }}</h2>
-          </div>
+      <section
+        class="bg-card border-border rounded-lg border p-5"
+        aria-labelledby="settings-platform"
+      >
+        <header class="border-border border-b pb-3">
+          <p class="text-muted-foreground m-0 mb-1 text-xs uppercase">
+            {{ $t("platform") }}
+          </p>
+          <h2 id="settings-platform" class="m-0 text-base font-semibold">
+            {{ $t("platformContext") }}
+          </h2>
         </header>
-        <dl>
-          <div>
-            <dt>{{ $t("readiness") }}</dt>
-            <dd class="settings-status">
-              <CheckCircle2 v-if="readiness.isReady" :size="16" />
-              <CircleAlert v-else :size="16" />
+        <dl class="m-0 mt-2 text-sm">
+          <div
+            class="border-border flex justify-between gap-4 border-b py-2.5 last:border-b-0"
+          >
+            <dt class="text-muted-foreground">{{ $t("readiness") }}</dt>
+            <dd
+              class="m-0 inline-flex items-center gap-1.5 text-right"
+              :class="readiness.isReady ? 'text-success' : 'text-destructive'"
+            >
+              <CheckCircle2
+                v-if="readiness.isReady"
+                :size="16"
+                aria-hidden="true"
+              />
+              <CircleAlert v-else :size="16" aria-hidden="true" />
               {{ $t(readiness.isReady ? "ready" : "unavailable") }}
             </dd>
           </div>
-          <div>
-            <dt>{{ $t("recommendedAgentVersion") }}</dt>
-            <dd>
+          <div
+            class="border-border flex justify-between gap-4 border-b py-2.5 last:border-b-0"
+          >
+            <dt class="text-muted-foreground">
+              {{ $t("recommendedAgentVersion") }}
+            </dt>
+            <dd class="m-0 text-right wrap-anywhere">
               {{
                 buildUnavailable
                   ? $t("recommendationUnavailable")
@@ -124,6 +156,6 @@ onBeforeUnmount(() => {
           </div>
         </dl>
       </section>
-    </section>
+    </div>
   </main>
 </template>

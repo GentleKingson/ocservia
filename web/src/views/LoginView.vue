@@ -4,6 +4,10 @@ import type { AuthMethods } from "@ocservia/api-client";
 import { onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+
 import {
   hasOIDCLoginAttempt,
   startOIDCLoginAttempt,
@@ -100,136 +104,88 @@ onMounted(loadMethods);
 </script>
 
 <template>
-  <main class="login-view">
-    <section class="login-content" :aria-label="t('loginTitle')">
-      <div class="login-brand">
-        <Activity :size="24" /><span>{{ t("brand") }}</span>
+  <main class="grid min-h-screen place-items-center px-5 py-8">
+    <section class="w-full max-w-[360px]" :aria-label="t('loginTitle')">
+      <div class="text-primary flex items-center gap-2.5 text-xl font-semibold">
+        <Activity :size="24" aria-hidden="true" /><span>{{ t("brand") }}</span>
       </div>
-      <h1>{{ t("loginTitle") }}</h1>
-      <p v-if="loading" role="status">{{ t("loading") }}</p>
-      <p v-if="error" class="login-error" role="alert">{{ error }}</p>
-      <form v-if="methods?.local" @submit.prevent="signInLocal">
-        <label for="login-username">{{ t("loginUsername") }}</label>
-        <input
+      <h1 class="text-foreground mt-7 mb-6 text-2xl font-semibold">
+        {{ t("loginTitle") }}
+      </h1>
+      <p v-if="loading" class="text-muted-foreground text-sm" role="status">
+        {{ t("loading") }}
+      </p>
+      <p
+        v-if="error"
+        class="border-destructive/30 bg-destructive/5 text-destructive mb-4 rounded-md border px-3 py-2 text-sm wrap-anywhere"
+        role="alert"
+      >
+        {{ error }}
+      </p>
+      <form
+        v-if="methods?.local"
+        class="grid gap-3"
+        @submit.prevent="signInLocal"
+      >
+        <Label for="login-username">{{ t("loginUsername") }}</Label>
+        <Input
           id="login-username"
           v-model="username"
+          class="bg-card h-10"
           name="username"
           autocomplete="username"
           required
           :disabled="pending"
         />
-        <label for="login-password">{{ t("loginPassword") }}</label>
-        <input
+        <Label for="login-password">{{ t("loginPassword") }}</Label>
+        <Input
           id="login-password"
           v-model="password"
+          class="bg-card h-10"
           name="password"
           type="password"
           autocomplete="current-password"
           required
           :disabled="pending"
         />
-        <button class="primary" type="submit" :disabled="pending">
-          <LogIn :size="18" />{{
+        <Button class="mt-2 h-10 w-full" type="submit" :disabled="pending">
+          <LogIn aria-hidden="true" />{{
             t(pending ? "loginSubmitting" : "loginSubmit")
           }}
-        </button>
+        </Button>
       </form>
-      <div v-if="methods?.local && methods.oidc" class="login-divider">
+      <div
+        v-if="methods?.local && methods.oidc"
+        class="text-muted-foreground before:bg-border after:bg-border my-6 flex items-center gap-3.5 text-sm before:h-px before:flex-1 after:h-px after:flex-1"
+      >
         {{ t("loginOr") }}
       </div>
-      <button
+      <Button
         v-if="methods?.oidc && (methods.local || ssoStopped)"
+        class="h-10 w-full"
+        variant="outline"
         type="button"
         :disabled="pending"
         @click="signInSSO"
       >
-        <LogIn :size="18" />{{ t("loginSSO") }}
-      </button>
-      <p v-if="methods?.oidc && !methods.local && !ssoStopped" role="status">
+        <LogIn aria-hidden="true" />{{ t("loginSSO") }}
+      </Button>
+      <p
+        v-if="methods?.oidc && !methods.local && !ssoStopped"
+        class="text-muted-foreground text-sm"
+        role="status"
+      >
         {{ t("loginRedirecting") }}
       </p>
-      <button v-if="!loading && !methods" type="button" @click="loadMethods">
+      <Button
+        v-if="!loading && !methods"
+        class="h-10 w-full"
+        variant="outline"
+        type="button"
+        @click="loadMethods"
+      >
         {{ t("loginRetry") }}
-      </button>
+      </Button>
     </section>
   </main>
 </template>
-
-<style scoped>
-.login-view {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 32px 20px;
-}
-.login-content {
-  width: 100%;
-  max-width: 360px;
-}
-.login-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 20px;
-  font-weight: 650;
-  color: #176d47;
-}
-h1 {
-  font-size: 24px;
-  margin: 28px 0 24px;
-}
-form {
-  display: grid;
-  gap: 12px;
-}
-label {
-  font-size: 14px;
-  font-weight: 650;
-}
-input,
-button {
-  width: 100%;
-  min-width: 0;
-  min-height: 42px;
-  border: 1px solid #bac7c2;
-  border-radius: 5px;
-  background: #fff;
-  padding: 10px 12px;
-  font: inherit;
-}
-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  cursor: pointer;
-}
-button.primary {
-  margin-top: 8px;
-  background: #176d47;
-  border-color: #176d47;
-  color: #fff;
-}
-button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.login-divider {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 24px 0;
-  color: #5d6b66;
-}
-.login-divider::before,
-.login-divider::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: #d4ddd9;
-}
-.login-error {
-  color: #a12c36;
-  overflow-wrap: anywhere;
-}
-</style>
