@@ -143,10 +143,13 @@ their existing markup until they are migrated one consumer at a time.
 - Tailwind scans all of `web/src`. `test/tailwind-legacy-collisions.test.ts`
   compiles every class name defined in `styles.css` or used by a template that
   is not yet migrated (static `class` and literal `:class` values) against the
-  project configuration and fails if any of them is also a utility. Resolve a
-  hit by renaming the legacy class; list a template in the test's `migrated`
-  set only once it no longer relies on legacy classes that could collide.
-  Delete the test together with the `legacy` layer.
+  project configuration and fails if any of them is also a utility. All of
+  `web/src/components` is skipped by directory, so components there must use
+  utilities only and never legacy classes. Templates outside it (views,
+  `App.vue`) are skipped only when listed in the test's `migrated` set; add one
+  only once it no longer relies on legacy classes that could collide. Resolve
+  a hit by renaming the legacy class. Delete the test together with the
+  `legacy` layer.
 - Theme tokens are plain custom properties on `:root`, mapped through
   `@theme inline`. The `dark` variant only matches an explicit `.dark` class;
   dark mode is not a product capability and must not follow the OS setting.

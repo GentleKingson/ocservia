@@ -12,7 +12,9 @@ import { expect, it } from "vitest";
 const web = join(dirname(fileURLToPath(import.meta.url)), "..");
 const tailwind = join(web, "node_modules/tailwindcss");
 
-// Templates styled only by utilities; their class tokens are intentional.
+// All of src/components is skipped: it is utility-only and must not use
+// legacy classes. Templates outside it are listed here once migrated; their
+// class tokens are intentional utilities.
 const migrated = new Set([
   "src/App.vue",
   "src/views/LoginView.vue",
