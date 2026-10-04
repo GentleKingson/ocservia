@@ -16,7 +16,7 @@ source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid ruby python3 curl sha256sum
 require_test_docker
 require_go_race
-(cd "${ROOT}" && sha256sum -c docs/database-migrations.sha256)
+bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
 
 UPSTREAM_MANIFEST="${ROOT}/docs/upstream/v4.9-post1.manifest.json"
 EXPECTED_UPSTREAM_RECORD="$(jq -r '[(.repository | sub("^https://github.com/"; "")), .old.ref, .old.commit, .new.ref, .new.commit, .imported_at] | join("|")' "${UPSTREAM_MANIFEST}")"
