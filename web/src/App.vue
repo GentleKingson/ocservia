@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Workspace } from "@ocservia/api-client";
+import { ResponseError, type Workspace } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
@@ -18,6 +18,9 @@ const router = useRouter();
 const isLogin = computed(() => router.currentRoute.value.name === "login");
 const workspaces = ref<Workspace[]>([]);
 const selectedWorkspaceId = ref("");
+// The shell stays hidden until the session is confirmed, so signed-out
+// visits go to the login page without rendering the console first.
+const authenticated = ref(false);
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 let stopLoginWatch: (() => void) | undefined;
 
@@ -32,13 +35,17 @@ onMounted(async () => {
       refreshTimer = setInterval(() => void readiness.refresh(), 15_000);
       try {
         workspaces.value = await listAuthorizedWorkspaces();
+        authenticated.value = true;
         selectedWorkspaceId.value = (await getWorkspace()).id;
         const returnTo = consumeLoginReturnPath();
         if (returnTo && returnTo !== router.currentRoute.value.fullPath) {
           await router.replace(returnTo);
         }
-      } catch {
-        // The centralized API handler opens the unified login page.
+      } catch (cause) {
+        // The centralized API handler opens the unified login page on 401;
+        // other failures still show the shell so pages report their errors.
+        if (!(cause instanceof ResponseError && cause.response.status === 401))
+          authenticated.value = true;
       }
     },
     { immediate: true },
@@ -61,7 +68,10 @@ function focusMainContent(): void {
 
 <template>
   <RouterView v-if="isLogin" />
-  <div v-else class="min-h-screen md:grid md:grid-cols-[15rem_minmax(0,1fr)]">
+  <div
+    v-else-if="authenticated"
+    class="min-h-screen md:grid md:grid-cols-[15rem_minmax(0,1fr)]"
+  >
     <a
       href="#main-content"
       class="bg-primary text-primary-foreground focus-visible:outline-ring sr-only z-50 rounded-md px-4 py-2 text-sm font-medium focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus-visible:outline-2 focus-visible:outline-offset-2"
