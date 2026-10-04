@@ -18,6 +18,8 @@ const tailwind = join(web, "node_modules/tailwindcss");
 const migrated = new Set([
   "src/App.vue",
   "src/views/LoginView.vue",
+  "src/upstream/UserPolicyFields.vue",
+  "src/views/NodeDetailView.vue",
   "src/views/NodesView.vue",
   "src/views/SettingsView.vue",
 ]);
@@ -79,6 +81,6 @@ it("detects utility names with the project Tailwind configuration", async () => 
 
 it("keeps legacy class names out of the Tailwind utility namespace", async () => {
   const names = [...legacyClassNames()];
-  expect(names.length).toBeGreaterThan(100);
+  expect(names.length).toBeGreaterThan(50);
   expect(await utilityClassNames(names)).toEqual([]);
 });

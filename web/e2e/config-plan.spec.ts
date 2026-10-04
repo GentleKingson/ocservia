@@ -214,7 +214,7 @@ test("submits a typed configuration plan and renders a safe diff", async ({
   await page.getByTitle("Configuration plan").click();
   await expect(page.getByText("valid", { exact: true })).toBeVisible();
   await expect(
-    page.locator(".config-plan-result").getByText(planId, { exact: true }),
+    page.getByTestId("config-plan-result").getByText(planId, { exact: true }),
   ).toBeVisible();
   expect(planRequests).toBe(1);
 
