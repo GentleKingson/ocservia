@@ -1,18 +1,10 @@
 <script setup lang="ts">
-import {
-  Activity,
-  Boxes,
-  FlaskConical,
-  LayoutDashboard,
-  ListChecks,
-  ScrollText,
-  Settings,
-  ShieldCheck,
-} from "@lucide/vue";
 import type { Workspace } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
+import AppHeader from "./components/layout/AppHeader.vue";
+import AppSidebar from "./components/layout/AppSidebar.vue";
 import { consumeLoginReturnPath } from "./shared/session";
 import {
   getWorkspace,
@@ -20,7 +12,6 @@ import {
   selectWorkspace,
 } from "./api/workspace";
 import { useReadinessStore } from "./shared/readiness";
-import { developmentRuntime } from "./shared/routes";
 
 const readiness = useReadinessStore();
 const router = useRouter();
@@ -58,77 +49,46 @@ onBeforeUnmount(() => {
   clearInterval(refreshTimer);
 });
 
-async function changeWorkspace(event: Event): Promise<void> {
-  const workspaceId = (event.target as HTMLSelectElement).value;
+async function changeWorkspace(workspaceId: string): Promise<void> {
   selectedWorkspaceId.value = (await selectWorkspace(workspaceId)).id;
 }
 
-const links = [
-  { to: "/", label: "overview", icon: LayoutDashboard },
-  { to: "/nodes", label: "nodes", icon: Boxes },
-  { to: "/operations", label: "operations", icon: ListChecks },
-  { to: "/approvals", label: "approvals", icon: ShieldCheck },
-  { to: "/audit", label: "audit", icon: ScrollText },
-  ...(developmentRuntime
-    ? [{ to: "/dev", label: "development", icon: FlaskConical }]
-    : []),
-];
+const mainContent = ref<HTMLElement>();
+function focusMainContent(): void {
+  mainContent.value?.focus();
+}
 </script>
 
 <template>
   <RouterView v-if="isLogin" />
-  <div v-else class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <Activity :size="22" stroke-width="2.4" /><span>{{ $t("brand") }}</span>
-      </div>
-      <div class="workspace-switcher">
-        <label for="workspace-select">{{ $t("workspace") }}</label>
-        <select
-          id="workspace-select"
-          v-model="selectedWorkspaceId"
-          :aria-label="$t('workspace')"
-          :disabled="workspaces.length < 2"
-          @change="changeWorkspace"
-        >
-          <option
-            v-for="workspace in workspaces"
-            :key="workspace.id"
-            :value="workspace.id"
-          >
-            {{ workspace.name }}
-          </option>
-        </select>
-      </div>
-      <nav :aria-label="$t('navigation')">
-        <RouterLink
-          v-for="link in links"
-          :key="link.to"
-          :to="link.to"
-          :aria-label="$t(link.label)"
-          :title="$t(link.label)"
-        >
-          <component :is="link.icon" :size="18" /><span>{{
-            $t(link.label)
-          }}</span>
-        </RouterLink>
-      </nav>
-      <RouterLink
-        class="settings-link"
-        to="/settings"
-        :aria-label="$t('settings')"
-        :title="$t('settings')"
-        ><Settings :size="18" /><span>{{ $t("settings") }}</span></RouterLink
-      >
+  <div v-else class="min-h-screen md:grid md:grid-cols-[15rem_minmax(0,1fr)]">
+    <a
+      href="#main-content"
+      class="bg-primary text-primary-foreground focus-visible:outline-ring sr-only z-50 rounded-md px-4 py-2 text-sm font-medium focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus-visible:outline-2 focus-visible:outline-offset-2"
+      @click.prevent="focusMainContent"
+      >{{ $t("skipToContent") }}</a
+    >
+    <aside
+      class="bg-card border-border sticky top-0 hidden h-screen border-r md:block"
+    >
+      <AppSidebar />
     </aside>
-    <section class="content-shell">
-      <header class="topbar">
-        <span>{{ $t("platform") }}</span>
-        <div class="status" :class="{ unavailable: !readiness.isReady }">
-          <i></i>{{ $t(readiness.isReady ? "ready" : "unavailable") }}
-        </div>
-      </header>
-      <RouterView />
-    </section>
+    <div class="min-w-0">
+      <AppHeader
+        v-model:workspace-id="selectedWorkspaceId"
+        :workspaces="workspaces"
+        :ready="readiness.isReady"
+        @change-workspace="changeWorkspace"
+        @navigated="focusMainContent"
+      />
+      <div
+        id="main-content"
+        ref="mainContent"
+        tabindex="-1"
+        class="focus:outline-none"
+      >
+        <RouterView />
+      </div>
+    </div>
   </div>
 </template>

@@ -76,6 +76,10 @@ export const i18n = createI18n({
       allSystems: "All systems operational",
       systemsUnavailable: "System status unavailable",
       navigation: "Primary navigation",
+      openNavigation: "Open navigation",
+      closeNavigation: "Close navigation",
+      navigationDescription: "Pages in this console",
+      skipToContent: "Skip to main content",
       fleetStatus: "Fleet status",
       liveTelemetry: "Live telemetry",
       action_missing_capability:

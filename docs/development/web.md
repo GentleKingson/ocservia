@@ -140,10 +140,13 @@ their existing markup until they are migrated one consumer at a time.
   primitives need only to elements carrying the `data-slot` marker, which also
   covers content a primitive teleports to `<body>`. Do not render primitives
   inside legacy containers whose descendant selectors would still style them.
-- Utilities are generated only from `web/src/components` (`source(none)` plus
-  `@source`), so legacy class names never turn into utilities. Before adding
-  another `@source` path, check its class names against the generated
-  utilities.
+- Tailwind scans all of `web/src`. `test/tailwind-legacy-collisions.test.ts`
+  compiles every class name defined in `styles.css` or used by a template that
+  is not yet migrated (static `class` and literal `:class` values) against the
+  project configuration and fails if any of them is also a utility. Resolve a
+  hit by renaming the legacy class; list a template in the test's `migrated`
+  set only once it no longer relies on legacy classes that could collide.
+  Delete the test together with the `legacy` layer.
 - Theme tokens are plain custom properties on `:root`, mapped through
   `@theme inline`. The `dark` variant only matches an explicit `.dark` class;
   dark mode is not a product capability and must not follow the OS setting.
@@ -174,15 +177,30 @@ from `lucide-vue-next`, rewrite them to the existing `@lucide/vue` package.
 | `badge` | `apps/v4/registry/new-york-v4/ui/badge` | Prettier; renders `span` by default; binds `as`/`asChild` instead of `reactiveOmit` from `@vueuse/core` |
 | `input` | `apps/v4/registry/new-york-v4/ui/input` | Prettier; `defineModel` replaces `useVModel` from `@vueuse/core`; `defaultValue` prop removed |
 | `table` | `apps/v4/registry/new-york-v4/ui/table` | Prettier; `TableEmpty` and `TableFooter` not imported |
+| `sheet` | `apps/v4/registry/new-york-v4/ui/sheet` | Prettier; `SheetHeader`, `SheetFooter` and `SheetClose` not imported; `tw-animate-css` enter/exit classes removed (not installed, so open and close are instant); close button gets `data-slot`, a 32px target and a `closeLabel` prop for the translated name; `withDefaults` mirrors Reka UI's `as` defaults for `exactOptionalPropertyTypes` |
+| `label` | `apps/v4/registry/new-york-v4/ui/label` | Prettier; `for` falls through as an attribute and `as` defaults to `label`, both for `exactOptionalPropertyTypes` |
 | `lib/utils.ts` | `apps/v4/registry/new-york-v4/lib/utils.ts` | Prettier |
 
 All sources were taken on 2026-10-04 from `unovue/shadcn-vue` commit
 `b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) and are MIT licensed;
 the notice is kept in `web/src/components/ui/LICENSE.shadcn-vue`. Runtime
-dependencies are pinned in `web/package.json`: `reka-ui`,
-`class-variance-authority`, `clsx` and `tailwind-merge`; build-time
+dependencies are pinned in `web/package.json`: `reka-ui`, `@vueuse/core`
+(already required by `reka-ui`), `class-variance-authority`, `clsx` and
+`tailwind-merge`; build-time
 `tailwindcss` and `@tailwindcss/vite`. Primitives do not call APIs, read the
 Workspace or decide permissions.
+
+### Shell and page components
+
+`App.vue` keeps readiness polling, Workspace loading and selection, and the
+login return path. `components/layout` only presents them: `AppSidebar` is the
+section navigation (the current section is marked with `aria-current="page"`,
+including detail routes under it) and `AppHeader` holds the Workspace
+selector, readiness and, below the `md` breakpoint, a titled navigation
+`Sheet` that closes on navigation and then moves focus to the main content. A
+skip link precedes the shell. `components/common` holds `PageHeader` and
+`DataState` (loading and error states with `status`/`alert` roles); pages
+keep their own data and pass display values in.
 
 The development-only `/dev` route renders `components/dev/UiPreview.vue` to
 check primitives next to legacy styles.

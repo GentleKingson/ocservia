@@ -9,10 +9,11 @@
 
 @import "tailwindcss/theme.css" layer(theme);
 @import "./styles.css" layer(legacy);
-@import "tailwindcss/utilities.css" layer(utilities) source(none);
-
-/* Only scan new UI sources so legacy class names never become utilities. */
-@source "./components";
+/*
+ * Scan all of src. test/tailwind-legacy-collisions.test.ts keeps legacy class
+ * names from also being utility names.
+ */
+@import "tailwindcss/utilities.css" layer(utilities) source(".");
 
 /* Dark mode is not a product capability yet; never follow the OS setting. */
 @custom-variant dark (&:where(.dark, .dark *));
@@ -34,6 +35,7 @@
   --accent: #eef0f3;
   --accent-foreground: #111827;
   --destructive: #b42318;
+  --success: #17773f;
   --border: #e3e6ea;
   --input: #c2c8d0;
   --ring: #2f5f9e;
@@ -55,6 +57,7 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
