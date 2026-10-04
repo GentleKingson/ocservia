@@ -1,7 +1,0 @@
-{
-  "format": 1,
-  "engine": "postgresql-18",
-  "covered_version": 41,
-  "schema_sha256": "d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172",
-  "history_sha256": "2013444695e5e91acb766893339871db9a2e503a0083d712c621fda97fc7484e"
-}

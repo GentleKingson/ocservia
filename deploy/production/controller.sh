@@ -194,6 +194,12 @@ validate_manifest_file() {
   manifest_filter='
     def matches($pattern): if type == "string" then test($pattern) else false end;
     def positive_integer: if type == "number" then (floor == . and . >= 1 and . <= 9007199254740991) else false end;
+    def migration_identity:
+      if type == "object" then
+        keys == ["epoch", "revision"] and
+        (.epoch | positive_integer) and
+        (.revision | type == "number" and floor == . and . >= 0 and . <= 9007199254740991)
+      else positive_integer end;
     if length != 1 then false
     else
       .[0] as $manifest |
@@ -211,7 +217,7 @@ validate_manifest_file() {
       ($manifest.release_tag | matches("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[.][1-9][0-9]*)?$") and . == ("v" + $manifest.release_version)) and
       ($manifest.source_commit | matches("^[0-9a-f]{40}$")) and
       ($manifest.platform | IN("linux/amd64", "linux/arm64")) and
-      ($manifest.database_migration | positive_integer) and
+      ($manifest.database_migration | migration_identity) and
       ($manifest.images | type == "object" and
         all(.[]; matches("^[^[:space:]@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$")))
     end

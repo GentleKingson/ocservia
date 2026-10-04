@@ -2,14 +2,8 @@ package migrations
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"embed"
 	"errors"
 	"fmt"
-	"io/fs"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,25 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-//go:embed *.up.sql
-var migrationFiles embed.FS
-
 const migrationLockID int64 = 764057383691829796
-
-type Migration struct {
-	Version  int64
-	Name     string
-	SQL      string
-	Checksum [sha256.Size]byte
-}
-
-type appliedMigration struct {
-	Version  int64
-	Name     string
-	Checksum []byte
-}
-
-type Preflight func(context.Context, pgx.Tx, int64) error
 
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
@@ -65,15 +41,8 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-func Migrate(ctx context.Context, pool *pgxpool.Pool, preflights ...Preflight) error {
-	return migrateArtifacts(ctx, pool, preflights)
-}
-
-func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current snapshot, preflights []Preflight) error {
-	if _, _, err := baselineArtifact(current.SQL); err != nil {
-		return err
-	}
-	return withMigrationConnection(ctx, pool, func(conn *pgxpool.Conn) error { return migrateLegacyOn(ctx, conn, known, current, preflights) })
+func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	return migrateArtifacts(ctx, pool)
 }
 
 func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*pgxpool.Conn) error) (result error) {
@@ -113,80 +82,11 @@ func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*
 	return run(conn)
 }
 
-func migrateLegacyOn(ctx context.Context, conn *pgxpool.Conn, known []Migration, current snapshot, preflights []Preflight) error {
-	hasHistory, empty, err := databaseState(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("classify PostgreSQL database: %w", err)
-	}
-	if empty {
-		if err := initializeSnapshot(ctx, conn, current, known); err != nil {
-			return err
-		}
-	} else if !hasHistory {
-		return errors.New("nonempty PostgreSQL database has no recognized migration history; refusing initialization")
-	}
-	applied, err := readAppliedMigrations(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if err := validateAppliedMigrations(known, applied); err != nil {
-		return err
-	}
-	for _, row := range applied {
-		found := false
-		for _, m := range known {
-			if m.Version == row.Version {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return errors.New("unsupported PostgreSQL history at checkpoint")
-		}
-	}
-	recognized := false
-	for _, row := range applied {
-		for _, m := range known {
-			if row.Version == m.Version {
-				recognized = true
-				break
-			}
-		}
-	}
-	if !recognized {
-		return errors.New("PostgreSQL database has no known migration history; refusing adoption")
-	}
-	if err := validateOrigin(ctx, conn, known, applied); err != nil {
-		return err
-	}
-	appliedVersions := make(map[int64]struct{}, len(applied))
-	for _, m := range applied {
-		appliedVersions[m.Version] = struct{}{}
-	}
-	for _, m := range known {
-		if _, ok := appliedVersions[m.Version]; ok {
-			continue
-		}
-		if err := applyMigration(ctx, conn, m, preflights); err != nil {
-			return err
-		}
-	}
-	if err := stampCheckpoint(ctx, conn, current, known); err != nil {
-		return err
-	}
-
-	// Owner-only, repeated by --migrate-only to advance the provisioned horizon.
-	if _, err := conn.Exec(ctx, `SELECT telemetry_ensure_month_partition(month AT TIME ZONE 'UTC') FROM generate_series(date_trunc('month',now() AT TIME ZONE 'UTC')-interval '1 month',date_trunc('month',now() AT TIME ZONE 'UTC')+interval '2 months',interval '1 month') AS month`); err != nil {
-		return fmt.Errorf("provision telemetry partitions: %w", err)
-	}
-	return nil
-}
-
 func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string) error {
 	identifier := pgx.Identifier{role}.Sanitize()
 	statements := []string{
 		"GRANT USAGE ON SCHEMA public TO " + identifier,
-		"GRANT SELECT ON schema_migrations, schema_snapshot_origin, schema_revisions TO " + identifier,
+		"GRANT SELECT ON schema_revisions TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces, nodes, operations TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON enrollment_tokens, node_endpoint_keys, node_capabilities TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_bootstrap_tokens TO " + identifier,
@@ -265,135 +165,6 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 type queryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func readAppliedMigrations(ctx context.Context, db queryer) ([]appliedMigration, error) {
-	rows, err := db.Query(ctx, "SELECT version, name, checksum FROM schema_migrations ORDER BY version")
-	if err != nil {
-		return nil, fmt.Errorf("read applied migrations: %w", err)
-	}
-	defer rows.Close()
-
-	var applied []appliedMigration
-	for rows.Next() {
-		var migration appliedMigration
-		if err := rows.Scan(&migration.Version, &migration.Name, &migration.Checksum); err != nil {
-			return nil, fmt.Errorf("scan applied migration: %w", err)
-		}
-		applied = append(applied, migration)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate applied migrations: %w", err)
-	}
-	return applied, nil
-}
-
-func validateAppliedMigrations(known []Migration, applied []appliedMigration) error {
-	knownByVersion := make(map[int64]Migration, len(known))
-	for _, migration := range known {
-		knownByVersion[migration.Version] = migration
-	}
-	present := make(map[int64]bool, len(applied))
-	var highestKnown int64
-	for _, migration := range applied {
-		if _, ok := knownByVersion[migration.Version]; ok {
-			present[migration.Version] = true
-			if migration.Version > highestKnown {
-				highestKnown = migration.Version
-			}
-		}
-	}
-	for _, migration := range known {
-		if migration.Version <= highestKnown && !present[migration.Version] {
-			return fmt.Errorf("migration history has a gap at known version %d", migration.Version)
-		}
-	}
-	for _, migration := range applied {
-		expected, ok := knownByVersion[migration.Version]
-		if !ok {
-			continue
-		}
-		if migration.Name != expected.Name {
-			return fmt.Errorf("migration %d name does not match the applied schema", migration.Version)
-		}
-		if !equalChecksum(migration.Checksum, expected.Checksum[:]) {
-			return fmt.Errorf("migration %d checksum does not match the applied schema", migration.Version)
-		}
-	}
-	return nil
-}
-
-func readCurrentSchemaVersion(ctx context.Context, db queryer) (int64, error) {
-	var version int64
-	err := db.QueryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version)
-	if err != nil {
-		return 0, fmt.Errorf("read schema version: %w", err)
-	}
-	return version, nil
-}
-
-func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration Migration, preflights []Preflight) error {
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin migration %d: %w", migration.Version, err)
-	}
-	defer func() {
-		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = tx.Rollback(rollbackCtx)
-	}()
-	for _, preflight := range preflights {
-		if err := preflight(ctx, tx, migration.Version); err != nil {
-			return fmt.Errorf("preflight migration %d: %w", migration.Version, err)
-		}
-	}
-	if _, err := tx.Exec(ctx, migration.SQL); err != nil {
-		return fmt.Errorf("apply migration %d: %w", migration.Version, err)
-	}
-	if _, err := tx.Exec(ctx, "INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)", migration.Version, migration.Name, migration.Checksum[:]); err != nil {
-		return fmt.Errorf("record migration %d: %w", migration.Version, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit migration %d: %w", migration.Version, err)
-	}
-	return nil
-}
-
-func loadMigrations() ([]Migration, error) {
-	entries, err := fs.ReadDir(migrationFiles, ".")
-	if err != nil {
-		return nil, fmt.Errorf("read embedded migrations: %w", err)
-	}
-	result := make([]Migration, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".up.sql") {
-			continue
-		}
-		parts := strings.SplitN(entry.Name(), "_", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid migration name %q", entry.Name())
-		}
-		version, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid migration version %q: %w", parts[0], err)
-		}
-		data, err := migrationFiles.ReadFile(entry.Name())
-		if err != nil {
-			return nil, fmt.Errorf("read migration %q: %w", entry.Name(), err)
-		}
-		result = append(result, Migration{Version: version, Name: entry.Name(), SQL: string(data), Checksum: sha256.Sum256(data)})
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Version < result[j].Version })
-	for i := 1; i < len(result); i++ {
-		if result[i-1].Version == result[i].Version {
-			return nil, errors.New("duplicate migration version")
-		}
-	}
-	return result, nil
-}
-
-func equalChecksum(left, right []byte) bool {
-	return subtle.ConstantTimeCompare(left, right) == 1
 }
 
 func validatePostgreSQLVersion(version int) error {

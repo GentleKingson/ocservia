@@ -64,28 +64,30 @@ function parseArguments(argv) {
 }
 
 function deriveMigrationHead(directory) {
-  let entries;
+  let schema;
   try {
-    entries = fs.readdirSync(directory, { withFileTypes: true });
+    schema = fs.readFileSync(path.join(directory, "schema.sql"), "utf8");
   } catch (error) {
-    fail(`cannot read migration directory ${directory}: ${error.message}`);
+    fail(`cannot read schema artifact in ${directory}: ${error.message}`);
   }
-
-  const migrations = [];
-  const versions = new Set();
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    if (!entry.name.endsWith(".up.sql")) continue;
-    const match = /^(\d+)_.+\.up\.sql$/.exec(entry.name);
-    if (!match) fail(`invalid migration name ${entry.name}`);
-    const version = Number.parseInt(match[1], 10);
-    if (!Number.isSafeInteger(version)) fail(`migration version is too large: ${match[1]}`);
-    if (versions.has(version)) fail(`duplicate migration version ${match[1]}`);
-    versions.add(version);
-    migrations.push(version);
+  const headers = {};
+  for (const line of schema.split("\n")) {
+    if (line.startsWith("-- ocservia:step=")) break;
+    const match = /^-- ocservia:(artifact|format|engine|epoch|revision)=(.+)$/.exec(line);
+    if (!match) continue;
+    if (headers[match[1]] !== undefined) fail(`duplicate schema header ${match[1]}`);
+    headers[match[1]] = match[2];
   }
-  if (migrations.length === 0) fail(`no up migrations found in ${directory}`);
-  return Math.max(...migrations);
+  if (headers.artifact !== "schema" || headers.format !== "1" || headers.engine !== "postgresql") {
+    fail("unsupported PostgreSQL schema artifact");
+  }
+  for (const key of ["epoch", "revision"]) {
+    if (!/^(0|[1-9][0-9]*)$/.test(headers[key] ?? "") || !Number.isSafeInteger(Number(headers[key]))) {
+      fail(`invalid schema ${key}`);
+    }
+  }
+  if (Number(headers.epoch) < 1) fail("invalid schema epoch");
+  return { epoch: Number(headers.epoch), revision: Number(headers.revision) };
 }
 
 const values = parseArguments(process.argv.slice(2));

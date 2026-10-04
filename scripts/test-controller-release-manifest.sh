@@ -41,13 +41,7 @@ assert_rejected() {
 run_manifest "${fixture}/manifest-a.json"
 run_manifest "${fixture}/manifest-b.json"
 cmp -s "${fixture}/manifest-a.json" "${fixture}/manifest-b.json"
-expected_head=0
-for migration in "${ROOT}"/control-plane/migrations/*.up.sql; do
-  number="$(basename "${migration}")"
-  number="${number%%_*}"
-  if (( 10#${number} > expected_head )); then expected_head=$((10#${number})); fi
-done
-[[ "${expected_head}" -gt 0 ]]
+expected_head="$(awk -F= '/^-- ocservia:epoch=/{epoch=$2} /^-- ocservia:revision=/{revision=$2} END {printf "{\"epoch\":%s,\"revision\":%s}", epoch, revision}' "${ROOT}/control-plane/migrations/schema.sql")"
 jq -e --argjson expected_head "${expected_head}" '
   .manifest_version == 1 and
   .release_version == "0.2.0" and

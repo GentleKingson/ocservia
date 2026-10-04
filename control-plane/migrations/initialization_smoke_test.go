@@ -35,11 +35,6 @@ func TestDatabaseInitializationSmoke(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT name FROM workspaces WHERE id=$1`, id).Scan(&name); err != nil || name != "initialization smoke" {
 		t.Fatal(name, err)
 	}
-	// Receipt numbers must not select historical, less restricted grants.
-	// This is the disposable smoke database, not a historical schema fixture.
-	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET version=-version`); err != nil {
-		t.Fatal(err)
-	}
 	if err := GrantRuntimePrivileges(ctx, pool, "ocservia_app"); err != nil {
 		t.Fatal(err)
 	}
@@ -47,16 +42,13 @@ func TestDatabaseInitializationSmoke(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT NOT has_table_privilege('ocservia_app','telemetry_rollups_5m','DELETE,TRUNCATE') AND NOT has_table_privilege('ocservia_app','telemetry_rollups_1h','DELETE,TRUNCATE') AND NOT has_function_privilege('ocservia_app','telemetry_ensure_month_partition(timestamptz)','EXECUTE') AND has_function_privilege('ocservia_app','telemetry_prune_rollups(timestamptz)','EXECUTE')`).Scan(&safe); err != nil || !safe {
 		t.Fatal("current runtime privilege boundary changed with receipt numbers", safe, err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET version=-version`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE schema_revisions SET epoch=2`); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE schema_revisions SET epoch=3`); err != nil {
 		t.Fatal(err)
 	}
 	if err := Migrate(ctx, pool); err == nil {
 		t.Fatal("unsupported epoch was accepted")
 	}
-	if _, err := pool.Exec(ctx, "UPDATE schema_revisions SET epoch=1"); err != nil {
+	if _, err := pool.Exec(ctx, "UPDATE schema_revisions SET epoch=2"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex')`); err != nil {

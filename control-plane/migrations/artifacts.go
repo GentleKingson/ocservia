@@ -15,8 +15,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+//go:embed schema.sql
+var schemaSQL string
+
 //go:embed upgrade.sql
 var upgradeSQL []byte
+
+const checkpointRef = "v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483"
+const checkpointChecksum = "d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172"
 
 type postgresArtifacts struct {
 	schema, upgrade schemaartifact.Artifact
@@ -51,6 +57,9 @@ func parsePostgresArtifacts(schema, upgrade []byte) (postgresArtifacts, error) {
 	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != int64(len(a.upgrade.Revisions)) || a.upgrade.Base == nil || (a.schema.Epoch > 1 && a.upgrade.Previous == nil) {
 		return a, errors.New("PostgreSQL artifact window mismatch")
 	}
+	if a.schema.Epoch > 1 && a.schema.Baseline.Number == 0 && a.schema.HistoryChecksum != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
+		return a, errors.New("PostgreSQL transition checksum mismatch")
+	}
 	if a.schema.Baseline.Number > 0 {
 		history, err := schemaartifact.HistoryChecksum(a.upgrade, a.schema.Baseline.Number)
 		if err != nil || a.schema.HistoryChecksum != history {
@@ -78,7 +87,16 @@ func parsePostgresArtifacts(schema, upgrade []byte) (postgresArtifacts, error) {
 		}
 	}
 	if a.upgrade.Previous != nil {
-		if a.upgrade.Previous.Receipt == nil {
+		transition := a.upgrade.Transition
+		if transition == nil || len(transition.Steps) < 2 || transition.Steps[len(transition.Steps)-1].Name != fmt.Sprintf("%03d:legacy_cleanup", len(transition.Steps)) {
+			return a, errors.New("PostgreSQL transition requires a final legacy cleanup step")
+		}
+		final, err := catalogMetadata(transition.Steps[len(transition.Steps)-1].Metadata)
+		baseline, _ := a.catalog(0)
+		if err != nil || final != baseline {
+			return a, errors.New("PostgreSQL transition/fresh fingerprint mismatch")
+		}
+		if a.upgrade.Previous.Receipt == nil || a.upgrade.Previous.Ref != checkpointRef || a.upgrade.Previous.Epoch != 1 || a.upgrade.Previous.Revision != 0 || a.upgrade.Previous.Receipt.Checksum != checkpointChecksum || a.upgrade.Previous.Receipt.Steps != 1 {
 			return a, errors.New("previous checkpoint requires a pinned receipt")
 		}
 		if _, err := catalogMetadata(a.upgrade.Previous.Receipt.Metadata); err != nil {
@@ -156,7 +174,7 @@ func (a postgresArtifacts) admit(rows []revisionReceipt) (int64, bool, error) {
 			if row.revision != 0 {
 				return 0, false, errors.New("missing PostgreSQL checkpoint transition")
 			}
-			sum, steps = fmt.Sprintf("%x", a.upgrade.Transition.Checksum), len(a.upgrade.Transition.Steps)
+			sum, steps = a.upgrade.Base.Checksum, a.upgrade.Base.Steps
 		} else if i == 0 {
 			checkpoint := a.upgrade.Base
 			if row.revision > 0 {
@@ -217,7 +235,11 @@ func applyArtifactRevision(ctx context.Context, conn *pgxpool.Conn, a postgresAr
 		return err
 	}
 	defer rollbackMigration(tx)
-	for _, s := range r.Steps {
+	stepsToApply := r.Steps
+	if transition {
+		stepsToApply = r.Steps[:len(r.Steps)-1]
+	}
+	for _, s := range stepsToApply {
 		if _, err = tx.Exec(ctx, string(s.SQL)); err != nil {
 			return fmt.Errorf("PostgreSQL revision %d: %w", r.Number, err)
 		}
@@ -229,23 +251,48 @@ func applyArtifactRevision(ctx context.Context, conn *pgxpool.Conn, a postgresAr
 	if err != nil {
 		return err
 	}
-	if err = validateStaticSchema(ctx, tx, expected); err != nil {
+	if err = validateRevisionSchema(ctx, tx, expected, transition); err != nil {
 		return err
 	}
 	sum, steps := fmt.Sprintf("%x", r.Checksum), len(r.Steps)
+	if transition {
+		sum, steps = a.upgrade.Base.Checksum, a.upgrade.Base.Steps
+	}
 	if err = insertRevisionReceipt(ctx, tx, a.schema.Epoch, r.Number, sum, steps); err != nil {
 		return err
+	}
+	if transition {
+		rows, err := readRevisionReceipts(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, pending, err := a.admit(rows); err != nil || pending {
+			return errors.New("PostgreSQL new checkpoint was not verified before legacy cleanup")
+		}
+		if _, err := tx.Exec(ctx, string(r.Steps[len(r.Steps)-1].SQL)); err != nil {
+			return err
+		}
+		if err := validateStaticSchema(ctx, tx, expected); err != nil {
+			return err
+		}
+		rows, err = readRevisionReceipts(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, pending, err := a.admit(rows); err != nil || pending || len(rows) != 1 {
+			return errors.New("PostgreSQL new checkpoint changed during legacy cleanup")
+		}
 	}
 	return tx.Commit(ctx)
 }
 
-func migrateArtifacts(ctx context.Context, pool *pgxpool.Pool, preflights []Preflight) error {
-	a, err := parsePostgresArtifacts([]byte(snapshotSQL), upgradeSQL)
+func migrateArtifacts(ctx context.Context, pool *pgxpool.Pool) error {
+	a, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
 	if err != nil {
 		return err
 	}
 	return withMigrationConnection(ctx, pool, func(conn *pgxpool.Conn) error {
-		_, empty, err := databaseState(ctx, conn)
+		empty, err := databaseState(ctx, conn)
 		if err != nil {
 			return err
 		}
@@ -266,26 +313,7 @@ func migrateArtifacts(ctx context.Context, pool *pgxpool.Pool, preflights []Pref
 			}
 		}
 		if len(rows) == 0 {
-			// ponytail: only the epoch-1 bridge accepts verified legacy history.
-			// The next major removes this fallback after the checkpoint release.
-			if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
-				return errors.New("legacy PostgreSQL state requires the designated bridge build")
-			}
-			known, err := loadMigrations()
-			if err != nil {
-				return err
-			}
-			current, err := loadSnapshot(known)
-			if err != nil {
-				return err
-			}
-			if err := migrateLegacyOn(ctx, conn, known, current, preflights); err != nil {
-				return err
-			}
-			rows, err = readRevisionReceipts(ctx, conn)
-			if err != nil {
-				return err
-			}
+			return errors.New("nonempty PostgreSQL database has no trusted checkpoint; upgrade with the designated v1.2.0 bridge first")
 		}
 		head, transition, err := a.admit(rows)
 		if err != nil {

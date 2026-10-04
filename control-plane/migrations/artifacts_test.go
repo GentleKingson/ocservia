@@ -3,7 +3,6 @@ package migrations
 import (
 	"context"
 	"crypto/sha256"
-	"embed"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -15,9 +14,9 @@ import (
 
 func usePostgresArtifacts(t *testing.T, schema string, upgrade []byte) {
 	t.Helper()
-	originalSchema, originalUpgrade := snapshotSQL, upgradeSQL
-	t.Cleanup(func() { snapshotSQL, upgradeSQL = originalSchema, originalUpgrade })
-	snapshotSQL, upgradeSQL = schema, upgrade
+	originalSchema, originalUpgrade := schemaSQL, upgradeSQL
+	t.Cleanup(func() { schemaSQL, upgradeSQL = originalSchema, originalUpgrade })
+	schemaSQL, upgradeSQL = schema, upgrade
 }
 
 func futurePostgresArtifacts(t *testing.T) (string, []byte, string) {
@@ -37,11 +36,12 @@ func futurePostgresArtifacts(t *testing.T) (string, []byte, string) {
 	}
 	sum := sha256.Sum256([]byte(catalog))
 	after := fmt.Sprintf("%x", sum)
-	_, before, err := baselineArtifact(snapshotSQL)
+	original, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
+	before, _ := original.catalog(original.schema.Baseline.Number)
 	if err != nil {
 		t.Fatal(err)
 	}
-	schema := strings.Replace(snapshotSQL, "-- ocservia:revision=0", "-- ocservia:revision=1", 1)
+	schema := strings.Replace(schemaSQL, "-- ocservia:revision=0", "-- ocservia:revision=1", 1)
 	schema = strings.Replace(schema, before, after, 1)
 	schema = strings.Replace(schema, "-- ocservia:end-step\n", statement+"-- ocservia:end-step\n", 1)
 	checkpoint, _ := json.Marshal(schemaartifact.Receipt{Checksum: fmt.Sprintf("%x", sha256.Sum256([]byte(schema))), Steps: 1})
@@ -55,7 +55,7 @@ func futurePostgresArtifacts(t *testing.T) (string, []byte, string) {
 		t.Fatal(err)
 	}
 	oldHash := fmt.Sprintf("%x", sha256.Sum256([]byte(schema)))
-	schema = strings.Replace(schema, "-- ocservia:revision=1\n", "-- ocservia:revision=1\n-- ocservia:history-sha256="+history+"\n", 1)
+	schema = strings.Replace(schema, original.schema.HistoryChecksum, history, 1)
 	upgrade = strings.Replace(upgrade, oldHash, fmt.Sprintf("%x", sha256.Sum256([]byte(schema))), 1)
 	return schema, []byte(upgrade), after
 }
@@ -81,10 +81,6 @@ func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 	}
 	schema, upgrade, after := futurePostgresArtifacts(t)
 	usePostgresArtifacts(t, schema, upgrade)
-	// Fresh and checkpoint paths do not read legacy SQL or JSON at all.
-	originalHistory, originalDescriptor := migrationFiles, snapshotDescriptor
-	migrationFiles, snapshotDescriptor = embed.FS{}, []byte("invalid legacy descriptor")
-	t.Cleanup(func() { migrationFiles, snapshotDescriptor = originalHistory, originalDescriptor })
 	for range 2 {
 		if err := Migrate(ctx, upgraded); err != nil {
 			t.Fatal(err)
@@ -101,7 +97,7 @@ func TestPostgreSQLArtifactFreshAndUpgrade(t *testing.T) {
 			t.Fatal(err)
 		}
 		var old int
-		if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&old); err != nil || old != 0 {
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin')").Scan(&old); err != nil || old != 0 {
 			t.Fatal("fabricated legacy history", old, err)
 		}
 	}
@@ -154,7 +150,7 @@ func TestPostgreSQLArtifactRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	schema, upgrade, _ := futurePostgresArtifacts(t)
-	upgrade = []byte(strings.Replace(string(upgrade), "-- ocservia:end-step\n", "SELECT 1/0;\n-- ocservia:end-step\n", 1))
+	upgrade = []byte(strings.Replace(string(upgrade), "ADD COLUMN artifact_probe text;\n", "ADD COLUMN artifact_probe text;\nSELECT 1/0;\n", 1))
 	// This is a new unpublished failing revision: keep its covered-history
 	// provenance internally consistent so execution reaches the rollback case.
 	a, err := schemaartifact.Parse(upgrade, "postgresql")
@@ -185,7 +181,7 @@ func TestPostgreSQLArtifactMalformedNoMutation(t *testing.T) {
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	usePostgresArtifacts(t, snapshotSQL, append(append([]byte(nil), upgradeSQL...), []byte("-- ocservia:revision=2\n")...))
+	usePostgresArtifacts(t, schemaSQL, append(append([]byte(nil), upgradeSQL...), []byte("-- ocservia:revision=2\n")...))
 	before := postgresDatabaseDigest(t, pool)
 	if err := Migrate(ctx, pool); err == nil {
 		t.Fatal("malformed artifact accepted")
@@ -213,41 +209,13 @@ func TestPostgreSQLArtifactHistoryMutationNoMutation(t *testing.T) {
 	}
 }
 
-func TestPostgreSQLArtifactPreviousCheckpoint(t *testing.T) {
-	ctx := context.Background()
-	pool := snapshotDatabase(t)
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
-	original, err := parsePostgresArtifacts([]byte(snapshotSQL), upgradeSQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := strings.Replace(snapshotSQL, "-- ocservia:epoch=1", "-- ocservia:epoch=2", 1)
-	base := *original.upgrade.Base
-	base.Checksum = fmt.Sprintf("%x", sha256.Sum256([]byte(schema)))
-	baseline, _ := json.Marshal(base)
-	previous, _ := json.Marshal(original.upgrade.Base)
-	upgrade := "-- ocservia:artifact=upgrade\n-- ocservia:format=1\n-- ocservia:engine=postgresql\n-- ocservia:epoch=2\n-- ocservia:baseline=" + string(baseline) + "\n-- ocservia:previous-checkpoint-epoch=1\n-- ocservia:previous-checkpoint-revision=0\n-- ocservia:previous-checkpoint-ref=test-only-checkpoint\n-- ocservia:previous-checkpoint-receipt=" + string(previous) + "\n-- ocservia:transition=1:0->2:0\n-- ocservia:step=001:transition\nSELECT 1;\n-- ocservia:end-step\n-- ocservia:end-transition\n"
-	usePostgresArtifacts(t, schema, []byte(upgrade))
-	for range 2 {
-		if err := Migrate(ctx, pool); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rows, err := readRevisionReceipts(ctx, pool)
-	if err != nil || len(rows) != 2 || rows[1].epoch != 2 || rows[1].revision != 0 {
-		t.Fatal("checkpoint transition", rows, err)
-	}
-}
-
 func TestPostgreSQLArtifactCatalog(t *testing.T) {
-	a, err := parsePostgresArtifacts([]byte(snapshotSQL), upgradeSQL)
+	a, err := parsePostgresArtifacts([]byte(schemaSQL), upgradeSQL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 || a.upgrade.Previous != nil {
-		t.Fatal("Phase A bridge window changed without checkpoint qualification")
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 0 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != checkpointRef {
+		t.Fatal("major cutover must use the released immutable checkpoint")
 	}
 	for _, metadata := range []string{`{"catalog_sha256":"` + strings.Repeat("a", 64) + `","unknown":1}`, `{"catalog_sha256":"` + strings.Repeat("a", 64) + `","catalog_sha256":"` + strings.Repeat("a", 64) + `"}`, `{"catalog_sha256":"` + strings.Repeat("A", 64) + `"}`} {
 		if _, err := catalogMetadata([]byte(metadata)); err == nil {

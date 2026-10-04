@@ -531,7 +531,7 @@ test -s "${not_older_state}/compose.log"
 
 different_schema_previous="${fixture}/release/controller-release-schema-different.json"
 cross_schema_current="${fixture}/release/controller-release-schema-current.json"
-jq '.database_migration += 1' "${next_release_file}" >"${cross_schema_current}"
+jq '.database_migration.revision += 1' "${next_release_file}" >"${cross_schema_current}"
 cp -- "${release_file}" "${different_schema_previous}"
 for schema in 1 100; do
   schema_state="${fixture}/rollback-schema-${schema}"
@@ -1159,7 +1159,7 @@ jq --arg ref "registry.test/image@${digest}" '.manifest_version = 2 | .signer_st
   "${release_file}" >"${integrated_release}"
 integrated_state="${fixture}/integrated"
 expect_failure "${fixture}/integrated-v1" "${release_file}" "requires a v2 release manifest" false env OCSERV_DEPLOYMENT_MODE=integrated
-for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .images.signer' 'del(.images.mysql_backup)' '.images.mariadb_backup = .images.mysql_backup'; do
+for filter in '.signer_state_version = 2' '.extra = true' '.images.extra = .images.signer' 'del(.images.mysql_backup)' '.images.mariadb_backup = .images.mysql_backup' '.database_migration.epoch = 0' '.database_migration.revision = -1' '.database_migration.revision = "0"' '.database_migration.extra = true'; do
   rejected="${fixture}/release/integrated-rejected.json"
   jq "${filter}" "${integrated_release}" >"${rejected}"
   rejection_state="$(mktemp -d "${fixture}/v2-rejection.XXXXXX")"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reconstruct current state from immutable history, then export final objects.
+# Reconstruct the bounded window from the released checkpoint, then export
+# final objects. History is read from Git; no archive artifact is maintained.
 # check never overwrites checked-in artifacts.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,8 +19,33 @@ for ((i=0;i<60;i++)); do
 done
 [[ "$ready" == true ]] || { echo 'snapshot PostgreSQL not ready' >&2; exit 1; }
 psql() { docker exec -i "$name" psql -X -v ON_ERROR_STOP=1 -U ocservia_owner -d snapshot "$@"; }
-psql -c 'CREATE ROLE ocservia_app; CREATE TABLE schema_migrations (version bigint PRIMARY KEY, name text NOT NULL, checksum bytea NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());' >/dev/null
-for file in "$ROOT"/control-plane/migrations/*.up.sql; do psql --single-transaction < "$file" >/dev/null; done
+checkpoint_tag=v1.2.0
+checkpoint_sha=169102557cd610847c9f6ac2083336cdcf82c483
+checkpoint_receipt=d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172
+if ! git -C "$ROOT" rev-parse --verify "${checkpoint_tag}^{commit}" >/dev/null 2>&1; then
+ git -C "$ROOT" fetch origin "refs/tags/${checkpoint_tag}:refs/tags/${checkpoint_tag}"
+fi
+[[ "$(git -C "$ROOT" rev-parse "${checkpoint_tag}^{commit}")" == "$checkpoint_sha" ]] || { echo 'designated checkpoint tag moved' >&2; exit 1; }
+git -C "$ROOT" show "$checkpoint_sha:control-plane/migrations/schema.sql" > "$tmp/checkpoint.sql"
+[[ "$(sha256sum "$tmp/checkpoint.sql" | cut -d' ' -f1)" == "$checkpoint_receipt" ]] || { echo 'published checkpoint receipt changed' >&2; exit 1; }
+psql -c 'CREATE ROLE ocservia_app' >/dev/null
+psql --single-transaction < "$tmp/checkpoint.sql" >/dev/null
+psql -c "INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(1,0,decode('$checkpoint_receipt','hex'),'verified',1,now())" >/dev/null
+# Authoring replays the bounded SQL independently. The real executor's
+# admission, verified-before-cleanup and rollback are exercised by the required
+# PostgreSQL lifecycle tests; this export never stamps historical execution.
+python3 - "$ROOT/control-plane/migrations" "$tmp/replay.sql" <<'PY_REPLAY'
+import hashlib,json,pathlib,re,sys
+root=pathlib.Path(sys.argv[1]);upgrade=(root/'upgrade.sql').read_text()
+base=json.loads(re.search(r'^-- ocservia:baseline=(.+)$',upgrade,re.M).group(1))
+transition=upgrade[upgrade.index('-- ocservia:transition='):upgrade.index('-- ocservia:end-transition')]
+first,cleanup=transition.split('-- ocservia:step=002:legacy_cleanup\n',1)
+# All SQL comes from the two active artifacts; journal publication precedes
+# the encoded cleanup statement, in the same PostgreSQL transaction.
+receipt="INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,0,decode('%s','hex'),'verified',%d,now());\n"%(base['checksum'],base['steps'])
+pathlib.Path(sys.argv[2]).write_text('BEGIN;\n'+first+receipt+cleanup+'COMMIT;\n')
+PY_REPLAY
+psql < "$tmp/replay.sql" >/dev/null
 # There are no business rows in this isolated replay. Calendar partitions are
 # runtime provisioning, never part of a reproducible static snapshot.
 psql -Atc "SELECT format('DROP TABLE %I.%I;', n.nspname,c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname ~ '^telemetry_samples_[0-9]{6}$' ORDER BY c.relname" | psql >/dev/null
@@ -29,7 +55,7 @@ docker exec "$name" pg_dump -U ocservia_owner -d snapshot --data-only --no-owner
 # uses its schema default at initialization time, just as migration 24 does.
 psql -Atc "SELECT format('INSERT INTO public.scheduler_leadership(id,instance_id,incarnation,epoch,lease_until) VALUES(%s,%L,%s,%s,%L);',id,instance_id,incarnation,epoch,lease_until) FROM scheduler_leadership ORDER BY id" > "$tmp/scheduler.sql"
 psql -Atc "SELECT coalesce(json_agg(json_build_object('table',c.relname,'column',a.attname,'name',x.conname) ORDER BY c.relname,a.attnum),'[]') FROM pg_constraint x JOIN pg_class c ON c.oid=x.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=x.conkey[1] WHERE x.contype='n' AND n.nspname='public'" > "$tmp/not-null.json"
-python3 - "$ROOT/control-plane/migrations/bridge.go" "$tmp/catalog.sql" <<'PY_CATALOG'
+python3 - "$ROOT/control-plane/migrations/fingerprint.go" "$tmp/catalog.sql" <<'PY_CATALOG'
 import pathlib,re,sys
 source=pathlib.Path(sys.argv[1]).read_text()
 query=re.search(r'const staticFingerprintSQL = `([^`]+)`',source).group(1)
@@ -65,15 +91,12 @@ for line in (tmp/'schema.raw').read_text().splitlines():
 sql=normalize('\n'.join(lines))+'\n'+normalize((tmp/'seeds.raw').read_text())+'\n'+(tmp/'scheduler.sql').read_text()
 catalog=hashlib.sha256((tmp/'catalog.json').read_bytes().removesuffix(b'\n')).hexdigest()
 metadata=json.dumps({'catalog_sha256':catalog},separators=(',',':'))
-sql='-- ocservia:artifact=schema\n-- ocservia:format=1\n-- ocservia:engine=postgresql\n-- ocservia:epoch=1\n-- ocservia:revision=0\n\n-- ocservia:step=001:baseline\n-- ocservia:metadata='+metadata+'\n'+sql+'-- ocservia:end-step\n'
+upgrade=(root/'upgrade.sql').read_text()
+transition=upgrade[upgrade.index('-- ocservia:step=001:checkpoint'):upgrade.index('-- ocservia:end-transition')]
+history=hashlib.sha256(transition.encode()).hexdigest()
+sql='-- ocservia:artifact=schema\n-- ocservia:format=1\n-- ocservia:engine=postgresql\n-- ocservia:epoch=2\n-- ocservia:revision=0\n-- ocservia:history-sha256='+history+'\n\n-- ocservia:step=001:baseline\n-- ocservia:metadata='+metadata+'\n'+sql+'-- ocservia:end-step\n'
 (tmp/'schema.sql').write_text(sql)
-history=b''
-files=sorted(root.glob('*.up.sql'))
-for f in files:
- version=int(f.name.split('_')[0]); digest=hashlib.sha256(f.read_bytes()).hexdigest()
- history+=f'{version}\t{f.name}\t{digest}\n'.encode()
-descriptor={'format':1,'engine':'postgresql-18','covered_version':version,'schema_sha256':hashlib.sha256(sql.encode()).hexdigest(),'history_sha256':hashlib.sha256(history).hexdigest()}
-(tmp/'schema.snapshot.json').write_text(json.dumps(descriptor,indent=2)+'\n')
+
 PY
 # Apply the final SQL directly in a separate database, independently of history.
 # Compare all pg_dump schema semantics (including ACLs and routine security),
@@ -109,10 +132,18 @@ for name in ['schema.raw','seeds.raw','scheduler.sql']:
  after=normalize((root/('equivalent-'+name)).read_text(),'snapshot_equivalence')
  if before!=after:
   print(''.join(difflib.unified_diff(before.splitlines(True),after.splitlines(True))))
-  raise SystemExit('historical replay and direct snapshot differ: '+name)
+  raise SystemExit('released checkpoint upgrade and fresh schema differ: '+name)
 
 PY_COMPARE
-for file in schema.sql schema.snapshot.json; do
+for file in schema.sql; do
  if [[ "$mode" == generate ]]; then cp "$tmp/$file" "$ROOT/control-plane/migrations/$file"; else diff -u "$ROOT/control-plane/migrations/$file" "$tmp/$file"; fi
 done
-echo 'PostgreSQL current snapshot: source freshness and independent schema/seed equivalence PASS'
+if [[ "$mode" == generate ]]; then
+ python3 - "$ROOT/control-plane/migrations" <<'PY_BASELINE'
+import hashlib,pathlib,re,sys
+root=pathlib.Path(sys.argv[1]);upgrade=root/'upgrade.sql'
+digest=hashlib.sha256((root/'schema.sql').read_bytes()).hexdigest()
+upgrade.write_text(re.sub(r'(-- ocservia:baseline=\{"checksum":")[a-f0-9]{64}',r'\g<1>'+digest,upgrade.read_text(),count=1))
+PY_BASELINE
+fi
+echo 'PostgreSQL bounded artifacts: pinned v1.2.0 upgrade and fresh schema/ACL/seed equivalence PASS'
