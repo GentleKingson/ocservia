@@ -216,3 +216,28 @@ test("callback rejection is terminal and revisiting login offers manual retry", 
   ).toBeVisible();
   expect(starts).toBe(1);
 });
+
+test("signed-out visits never render the console shell before login", async ({
+  page,
+}) => {
+  await methods(page, true, false);
+  await page.addInitScript(() => {
+    new MutationObserver(() => {
+      if (document.querySelector("#main-content, aside"))
+        sessionStorage.setItem("test.shell-rendered", "true");
+    }).observe(document, {
+      childList: true,
+      subtree: true,
+    });
+  });
+  await page.route("**/api/v1/workspaces", (route) =>
+    route.fulfill({ status: 401, json: {} }),
+  );
+  await page.route("**/api/v1/readyz", (route) => route.fulfill({ json: {} }));
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("test.shell-rendered")),
+  ).toBeNull();
+});
