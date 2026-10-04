@@ -66,21 +66,17 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, preflights ...Preflight) error {
-	known, err := loadMigrations()
-	if err != nil {
-		return err
-	}
-	current, err := loadSnapshot(known)
-	if err != nil {
-		return err
-	}
-	return migrate(ctx, pool, known, current, preflights)
+	return migrateArtifacts(ctx, pool, preflights)
 }
 
-func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current snapshot, preflights []Preflight) (result error) {
+func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current snapshot, preflights []Preflight) error {
 	if _, _, err := baselineArtifact(current.SQL); err != nil {
 		return err
 	}
+	return withMigrationConnection(ctx, pool, func(conn *pgxpool.Conn) error { return migrateLegacyOn(ctx, conn, known, current, preflights) })
+}
+
+func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*pgxpool.Conn) error) (result error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
@@ -114,6 +110,10 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, known []Migration, current
 		}
 		conn.Release()
 	}()
+	return run(conn)
+}
+
+func migrateLegacyOn(ctx context.Context, conn *pgxpool.Conn, known []Migration, current snapshot, preflights []Preflight) error {
 	hasHistory, empty, err := databaseState(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("classify PostgreSQL database: %w", err)
