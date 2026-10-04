@@ -237,10 +237,6 @@ h1 {
   margin-top: 20px;
   align-items: start;
 }
-.fleet-list-panel {
-  margin-top: 20px;
-}
-.node-table-wrap,
 .node-detail {
   background: white;
   border: 1px solid #dce3e0;
@@ -283,15 +279,6 @@ h1 {
   outline: 2px solid #247653;
   outline-offset: -2px;
 }
-.fleet-table td small {
-  display: block;
-  margin-top: 3px;
-  color: #7b8783;
-  font-size: 10px;
-}
-.fleet-table td time {
-  white-space: normal;
-}
 .node-table tbody tr:hover,
 .node-table tbody tr.selected {
   background: #f0f8f4;
@@ -316,12 +303,6 @@ h1 {
   margin-right: 7px;
   border-radius: 50%;
   background: #89948f;
-}
-.state-dot.fresh {
-  background: #28a96b;
-}
-.state-dot.stale {
-  background: #c97c22;
 }
 .node-detail header {
   display: flex;
@@ -934,18 +915,6 @@ h1 {
   .fleet-layout {
     grid-template-columns: 1fr;
   }
-  .fleet-table th:nth-child(3),
-  .fleet-table td:nth-child(3),
-  .fleet-table th:nth-child(4),
-  .fleet-table td:nth-child(4),
-  .fleet-table th:nth-child(7),
-  .fleet-table td:nth-child(7),
-  .fleet-table th:nth-child(8),
-  .fleet-table td:nth-child(8),
-  .fleet-table th:nth-child(9),
-  .fleet-table td:nth-child(9) {
-    display: none;
-  }
   .node-table th,
   .node-table td {
     padding-inline: 10px;
@@ -974,11 +943,6 @@ h1 {
 }
 
 /* Fleet agent rollouts */
-.rollout-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding: 10px 2px 0;
-}
 .rollouts-panel {
   display: grid;
   gap: 10px;
@@ -1133,39 +1097,6 @@ h1 {
 
 .audit-table tbody tr {
   cursor: default;
-}
-
-.fleet-refresh-status {
-  min-height: 20px;
-  margin: 0 0 8px;
-  font-size: 12px;
-  color: #6a7772;
-}
-.nodes-view .node-table-wrap {
-  overflow-x: auto;
-}
-.fleet-table {
-  min-width: 1000px;
-}
-.fleet-table th:nth-child(1) {
-  width: 44px;
-}
-.fleet-table th:nth-child(2) {
-  width: 180px;
-}
-.fleet-table th:nth-child(5) {
-  width: 110px;
-}
-.fleet-table th:nth-child(6) {
-  width: 100px;
-}
-.fleet-table th:nth-child(10) {
-  width: 85px;
-}
-@media (max-width: 760px) {
-  .fleet-table {
-    min-width: 560px;
-  }
 }
 
 .accessible-dialog {
