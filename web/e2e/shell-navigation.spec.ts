@@ -58,7 +58,7 @@ test("desktop navigation marks the current section on detail routes", async ({
   await expect(
     page.getByRole("button", { name: "Open navigation" }),
   ).toBeHidden();
-  await expect(page.getByLabel("Workspace")).toBeVisible();
+  await expect(page.getByTestId("workspace")).toBeVisible();
 });
 
 test("navigation sheet opens and closes from the keyboard", async ({
@@ -67,8 +67,8 @@ test("navigation sheet opens and closes from the keyboard", async ({
 }) => {
   test.skip(!isMobile, "the navigation sheet is the narrow-screen navigation");
   await page.goto(`/nodes/${nodeId}`);
-  await expect(page.getByLabel("Workspace")).toBeVisible();
-  await expect(page.getByLabel("Workspace")).toContainText("Alpha");
+  await expect(page.getByTestId("workspace")).toBeVisible();
+  await expect(page.getByTestId("workspace")).toContainText("Alpha");
   await expectNoPageOverflow(page);
   await expect(page.getByRole("navigation")).toHaveCount(0);
 

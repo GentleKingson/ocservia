@@ -58,7 +58,7 @@ test("local-only login restores return path and initializes the shell without st
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page).toHaveURL(/\/nodes\?filter=login#latest$/);
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  await expect(page.getByLabel("Workspace")).toContainText("Alpha");
+  await expect(page.getByTestId("workspace")).toContainText("Alpha");
   await expect(page.getByTestId("readiness")).toHaveText("Ready");
   expect(
     await page.evaluate(() =>
