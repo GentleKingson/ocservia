@@ -104,7 +104,9 @@ onMounted(loadMethods);
 </script>
 
 <template>
-  <main class="grid min-h-screen place-items-center px-5 py-8">
+  <main
+    class="grid min-h-screen content-start justify-items-center px-5 pt-[18vh] pb-8"
+  >
     <section class="w-full max-w-[360px]" :aria-label="t('loginTitle')">
       <div class="text-primary flex items-center gap-2.5 text-xl font-semibold">
         <Activity :size="24" aria-hidden="true" /><span>{{ t("brand") }}</span>
