@@ -79,7 +79,7 @@ func parseMySQLArtifacts(schema, upgrade []byte) (mysqlArtifacts, error) {
 		return a, fmt.Errorf("%w: upgrade markers: %v", ErrChecksum, err)
 	}
 	head := int64(len(a.upgrade.Revisions))
-	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != head || a.upgrade.Base == nil {
+	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != head || a.upgrade.Base == nil || (a.schema.Epoch > 1 && a.upgrade.Previous == nil) {
 		return a, fmt.Errorf("%w: artifact window", ErrChecksum)
 	}
 	cp := a.upgrade.Base
@@ -628,17 +628,11 @@ func (b *Backend) Migrate(ctx context.Context, repair string) (result error) {
 	}
 	if journal == "" {
 		// ponytail: only the original bridge window may adopt genuine legacy
-		// receipts. Remove after the separately approved checkpoint release.
+		// receipts. Keep its classification and execution under the same lock.
 		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
 			return ErrChecksum
 		}
-		if err = releaseMigrationConnection(conn, lock); err != nil {
-			return err
-		}
-		// This connection was released deliberately. Suppress the deferred second
-		// unlock and run the unchanged bridge under its own advisory lock.
-		conn = nil
-		return b.migrateLegacy(ctx, repair)
+		return b.migrateLegacyOn(ctx, conn, repair)
 	}
 	if journal != a.meta(a.journal).After {
 		return ErrSchema
@@ -654,11 +648,7 @@ func (b *Backend) Migrate(ctx context.Context, repair string) (result error) {
 		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
 			return ErrChecksum
 		}
-		if err = releaseMigrationConnection(conn, lock); err != nil {
-			return err
-		}
-		conn = nil
-		return b.migrateLegacy(ctx, repair)
+		return b.migrateLegacyOn(ctx, conn, repair)
 	}
 	if err = validateArtifactJournalComment(ctx, conn, rows[0].checksum); err != nil {
 		return err
@@ -770,6 +760,39 @@ func (b *Backend) ValidateSchema(ctx context.Context) (result error) {
 			result = errors.Join(result, releaseMigrationConnection(conn, lock))
 		}
 	}()
+	a, err := loadMySQLArtifacts()
+	if err != nil {
+		return err
+	}
+	journal, err := schemaHashWithFingerprint(ctx, conn, step{Name: "schema_revisions", Kind: "table"}, a.fingerprint)
+	if err != nil {
+		return err
+	}
+	if journal != "" && journal != a.meta(a.journal).After {
+		return ErrSchema
+	}
+	var rows []mysqlReceipt
+	if journal != "" {
+		rows, err = readMySQLReceipts(ctx, conn)
+		if err != nil {
+			return err
+		}
+	}
+	if len(rows) == 0 {
+		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
+			return ErrChecksum
+		}
+		if journal != "" {
+			count, err := databaseObjectCount(ctx, conn)
+			if err != nil {
+				return err
+			}
+			if count == 1 {
+				return ErrDirty
+			}
+		}
+		return b.validateLegacySchemaOn(ctx, conn)
+	}
 	m, err := b.artifactSnapshotOn(ctx, conn)
 	if err != nil {
 		return err
@@ -789,19 +812,29 @@ func validateArtifactJournalComment(ctx context.Context, conn *sql.Conn, sum str
 }
 
 // ArtifactChecksum identifies exactly the SQL whose running receipt may be resumed.
-func ArtifactChecksum(engine Engine, kind string) (string, error) {
-	if engine != MySQL {
+func ArtifactChecksum(engine Engine, kind string, selected ...int64) (string, error) {
+	if engine != MySQL || len(selected) > 1 {
 		return "", ErrChecksum
 	}
 	a, err := loadMySQLArtifacts()
 	if err != nil {
 		return "", err
 	}
-	if kind == "schema" {
+	if kind == "schema" && len(selected) == 0 {
 		return fmt.Sprintf("%x", a.schema.Checksum), nil
 	}
-	if kind == "upgrade" && len(a.upgrade.Revisions) > 0 {
-		return fmt.Sprintf("%x", a.upgrade.Revisions[len(a.upgrade.Revisions)-1].Checksum), nil
+	if kind != "upgrade" {
+		return "", ErrChecksum
 	}
-	return "", ErrChecksum
+	number := int64(len(a.upgrade.Revisions))
+	if len(selected) == 1 {
+		number = selected[0]
+	}
+	if number == 0 && a.upgrade.Transition != nil {
+		return fmt.Sprintf("%x", a.upgrade.Transition.Checksum), nil
+	}
+	if number < 1 || number > int64(len(a.upgrade.Revisions)) {
+		return "", ErrChecksum
+	}
+	return fmt.Sprintf("%x", a.upgrade.Revisions[number-1].Checksum), nil
 }

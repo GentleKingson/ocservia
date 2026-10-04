@@ -255,6 +255,29 @@ directory, not shared Docker images/caches or another task's `.tools`. An initia
 failure, skipped non-required integration test, simulated platform test, native
 Go run and container run must be reported separately.
 
+## SQL artifact acceptance
+
+`scripts/database-artifact-policy.sh all` checks the two active SQL files per
+engine through the shared marker parser and backend metadata validation. It also
+checks immutable bridge source hashes. The new paths read only `schema.sql` and
+`upgrade.sql`; Phase A retains history and descriptors for the explicit legacy
+bridge and independent generation checks.
+
+The `postgres-snapshot` and `mysql-snapshot` inventories in
+`scripts/required-go-tests.txt` require real database execution, final pass, and
+zero skips. They include genuine pre-bridge snapshot upgrades, fresh versus
+current-epoch upgrade, pinned previous-checkpoint transitions, unsupported zero
+mutation, raw checksum mutation, transactional rollback, and MySQL subprocess
+kill/recovery boundaries. The full MySQL inventory includes `mysql-snapshot`.
+Do not replace these checks with a test run lacking database credentials.
+
+Each database CI job enforces artifact policy and independent legacy
+replay/schema/seed equivalence. Full Basic CI additionally runs the PostgreSQL
+physical and MySQL logical backup/restore jobs, compares original receipts after
+restore and repeat migration, and checks runtime read/DDL boundaries. Record
+results at the immutable final stacked head. Component workflow dispatches on
+an open stack do not qualify it as a main-branch Release Check.
+
 ## Bundled PostgreSQL initialization
 
 Run the focused initializer regression only in an authorized, isolated

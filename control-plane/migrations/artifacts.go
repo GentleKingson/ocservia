@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/hex"
@@ -29,7 +30,8 @@ func catalogMetadata(data []byte) (string, error) {
 		return "", errors.New("invalid PostgreSQL schema verification metadata")
 	}
 	decoded, err := hex.DecodeString(m.CatalogSHA256)
-	if err != nil || len(decoded) != 32 {
+	canonical, _ := json.Marshal(m)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != m.CatalogSHA256 || !bytes.Equal(data, canonical) {
 		return "", errors.New("missing PostgreSQL schema fingerprint")
 	}
 	return m.CatalogSHA256, nil
@@ -46,7 +48,7 @@ func parsePostgresArtifacts(schema, upgrade []byte) (postgresArtifacts, error) {
 	if err != nil {
 		return a, err
 	}
-	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != int64(len(a.upgrade.Revisions)) || a.upgrade.Base == nil {
+	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != int64(len(a.upgrade.Revisions)) || a.upgrade.Base == nil || (a.schema.Epoch > 1 && a.upgrade.Previous == nil) {
 		return a, errors.New("PostgreSQL artifact window mismatch")
 	}
 	if a.schema.Baseline.Number > 0 {
