@@ -38,6 +38,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import DataState from "../components/common/DataState.vue";
 import FormField from "../components/common/FormField.vue";
 import OperationDialog from "../components/common/OperationDialog.vue";
 import SectionCard from "../components/common/SectionCard.vue";
@@ -490,7 +491,7 @@ function convergenceTone(key: string): string {
 </script>
 
 <template>
-  <main class="overview node-detail-view">
+  <main>
     <NodeDetailHeader
       :title="
         currentNode?.name ??
@@ -503,16 +504,19 @@ function convergenceTone(key: string): string {
     />
 
     <NodeDetailSkeleton v-if="detailLoading" />
-    <div v-else-if="detailState === 'not-found'" class="detail-state">
-      <Server :size="24" /><span>{{ $t("nodeNotFound") }}</span>
-    </div>
     <div
-      v-else-if="detailState === 'unavailable'"
-      class="detail-state"
-      role="alert"
+      v-else-if="detailState === 'not-found'"
+      class="bg-card border-border text-muted-foreground grid min-h-56 place-content-center justify-items-center gap-2.5 rounded-lg border p-7 text-center text-sm"
     >
-      <Server :size="24" /><span>{{ $t("nodeUnavailable") }}</span>
+      <Server class="size-6" aria-hidden="true" /><span>{{
+        $t("nodeNotFound")
+      }}</span>
     </div>
+    <DataState
+      v-else-if="detailState === 'unavailable'"
+      kind="error"
+      :message="$t('nodeUnavailable')"
+    />
 
     <template v-else-if="currentNode">
       <NodeStatusSummary

@@ -85,7 +85,7 @@ function focusMainContent(): void {
         id="main-content"
         ref="mainContent"
         tabindex="-1"
-        class="focus:outline-none"
+        class="mx-auto max-w-[1180px] px-[18px] py-[26px] focus:outline-none md:px-9 md:py-[34px]"
       >
         <RouterView />
       </div>

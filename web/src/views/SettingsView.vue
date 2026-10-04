@@ -59,7 +59,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="overview">
+  <main>
     <PageHeader :eyebrow="$t('platform')" :title="$t('settings')" />
     <DataState v-if="loading" kind="loading" :message="$t('loading')" />
     <DataState

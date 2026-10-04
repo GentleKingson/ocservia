@@ -123,37 +123,40 @@ It is not full E2E or database validation.
 
 ## UI components and styles
 
-The console is migrating to [shadcn-vue](https://www.shadcn-vue.com) primitives
-built on [Reka UI](https://reka-ui.com) and Tailwind CSS v4. Legacy pages keep
-their existing markup until they are migrated one consumer at a time.
+The console is built from [shadcn-vue](https://www.shadcn-vue.com) primitives
+on [Reka UI](https://reka-ui.com) and Tailwind CSS v4. Every page uses
+utilities and these components; there is no second stylesheet or class
+system.
 
 ### Cascade
 
 `web/src/main.css` is the only CSS entry and owns the layer order
-`theme, legacy, ui-base, utilities`:
+`theme, base, ui-base, utilities`:
 
-- `styles.css` is imported into the `legacy` layer, so utilities win over
-  legacy rules by layer order rather than specificity or `!important`.
-  Unlayered Vue scoped styles (`LoginView`, `ApprovalsView`) still win over
-  every layer.
+- `base` holds the few page-wide rules: font stack, page color and background
+  from the tokens, `box-sizing`, `body` margin and minimum width, and links
+  inheriting color. Add a rule here only when every page needs it; style
+  anything else with utilities in the component that renders it.
 - Tailwind's global Preflight is not imported. `ui-base` applies the reset the
   primitives need only to elements carrying the `data-slot` marker (form
-  controls also inherit font and color), which also
-  covers content a primitive teleports to `<body>`. Do not render primitives
-  inside legacy containers whose descendant selectors would still style them.
-- Tailwind scans all of `web/src`. `test/tailwind-legacy-collisions.test.ts`
-  compiles every class name defined in `styles.css` or used by a template that
-  is not yet migrated (static `class` and literal `:class` values) against the
-  project configuration and fails if any of them is also a utility. All of
-  `web/src/components` is skipped by directory, so components there must use
-  utilities only and never legacy classes. Templates outside it (views,
-  `App.vue`) are skipped only when listed in the test's `migrated` set; add one
-  only once it no longer relies on legacy classes that could collide. Resolve
-  a hit by renaming the legacy class. Delete the test together with the
-  `legacy` layer.
-- Theme tokens are plain custom properties on `:root`, mapped through
-  `@theme inline`. The `dark` variant only matches an explicit `.dark` class;
-  dark mode is not a product capability and must not follow the OS setting.
+  controls also inherit font and color), which also covers content a
+  primitive teleports to `<body>`. Use `components/ui` primitives instead of
+  bare form controls, which keep browser default styles.
+- Utilities win over both by layer order, never by `!important`. Unlayered
+  rules (Vue scoped styles) would beat every layer; no component has one.
+- Tailwind scans all of `web/src`, so a class name in a template is always a
+  utility.
+
+### Tokens
+
+Theme tokens are plain custom properties on `:root` in `main.css`, mapped to
+Tailwind colors and radii through `@theme inline`: `background`, `foreground`,
+`card`, `popover`, `primary`, `secondary`, `muted`, `accent` (each with a
+`-foreground` pair), `destructive`, `success`, `border`, `input`, `ring` and
+`--radius` (`rounded-sm` to `rounded-xl`). Change a color by editing its token,
+not the utilities that use it. Warning states use Tailwind's `amber` scale
+directly. The `dark` variant only matches an explicit `.dark` class; dark mode
+is not a product capability and must not follow the OS setting.
 
 ### Supported browsers
 
@@ -200,14 +203,18 @@ Workspace or decide permissions.
 ### Shell and page components
 
 `App.vue` keeps readiness polling, Workspace loading and selection, and the
-login return path. `components/layout` only presents them: `AppSidebar` is the
+login return path; its `#main-content` container owns the page width and
+padding, so views render a bare `<main>`. `components/layout` only presents them: `AppSidebar` is the
 section navigation (the current section is marked with `aria-current="page"`,
 including detail routes under it) and `AppHeader` holds the Workspace
 selector, readiness and, below the `md` breakpoint, a titled navigation
 `Sheet` that closes on navigation and then moves focus to the main content. A
-skip link precedes the shell. `components/common` holds `PageHeader` and
-`DataState` (loading and error states with `status`/`alert` roles); pages
-keep their own data and pass display values in.
+skip link precedes the shell. `components/common` holds the shared page
+pieces: `PageHeader`, `SectionCard`, `DataState` (loading and error states
+with `status`/`alert` roles), `StatusBadge`, `FormField`, `CopyButton` and
+`OperationDialog`. Feature folders (`components/nodes`, `components/overview`)
+hold pieces used by one area. These components never load data; pages keep
+their own data and pass display values in.
 
 ### Nodes list
 
@@ -228,13 +235,10 @@ snapshot, and a failed refresh is labelled as the last successful snapshot.
 
 Rollout selection stays keyed by node ID. The header checkbox only selects
 visible eligible rows, the footer states how many selected nodes the filters
-hide, the confirmation lists every target, and a Workspace change clears the
+hide, the confirmation (`OperationDialog`) lists every target, and a Workspace change clears the
 selection. The list has no action availability, so rows offer only the detail
 link. Narrow screens scroll the table inside its own region instead of hiding
 columns.
-
-The development-only `/dev` route renders `components/dev/UiPreview.vue` to
-check primitives next to legacy styles.
 
 ### Node detail read areas
 
@@ -246,8 +250,8 @@ came from (keeping its query) or to `/nodes`. `NodeStatusSummary` and
 blank, and `CopyButton` copies the node ID and identity values, which stay
 selectable when the clipboard is unavailable. `NodeDetailNav` links to the
 existing in-page sections; it does not switch tabs or load data. The only
-added timer is the local clock for relative heartbeat time. The not-found and
-unavailable states keep legacy styles shared with other detail views.
+added timer is the local clock for relative heartbeat time. The not-found state
+is a plain card and the unavailable state uses `DataState`.
 
 ### Node detail write forms
 
@@ -359,6 +363,26 @@ unavailable, stale (an earlier load is shown after a failed refresh) or ready.
 `test/overview.test.ts` covers stale and unknown sources and the source-state
 rules; `e2e/overview.spec.ts` covers the cards, the failed window, stale
 reports and a Workspace switch.
+
+### UI regression checklist
+
+Run this for any change to `components/ui`, `components/common`, `main.css`
+or the shell, and record the result in the pull request (mark skipped items
+as not run):
+
+- `bash scripts/web-check.sh basic`, then the full Playwright suite
+  (`npm run test:e2e` in `web/`) on desktop and mobile. Specs that need the
+  development simulator (`local-slice`, the first two `overview` tests) fail
+  without a running backend; report them as not run rather than passing.
+- Screenshots of every route (`/`, `/nodes`, a node detail, a missing node,
+  `/operations`, a rollout, `/approvals`, an approval, `/audit`, `/settings`,
+  `/login`) at 1440 px and 390 px with the same fixtures before and after,
+  checking that the page never scrolls horizontally.
+- Keyboard: skip link, sidebar and mobile navigation sheet, Nodes search,
+  filters and a detail link, and opening, cancelling (Escape) and confirming a
+  dialog with focus returning to its trigger.
+- Bundle size: compare `vite build` CSS and JS output with the base branch and
+  explain any new dependency.
 
 ## Node detail workflows
 

@@ -186,7 +186,17 @@ test("runs the canary and batch rollout to completion", async ({ page }) => {
   await page.getByRole("checkbox").first().check();
   await page.getByRole("checkbox").nth(1).check();
   await page.getByRole("checkbox").nth(2).check();
-  await page.getByRole("button", { name: /Rolling upgrade \(3\)/ }).click();
+  const open = page.getByRole("button", { name: /Rolling upgrade \(3\)/ });
+  await open.click();
+  await expect(
+    page.getByRole("dialog", {
+      name: "Start a canary and rolling agent upgrade",
+    }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(open).toBeFocused();
+  await open.click();
   await expect(page.locator("#rollout-target")).toHaveText(recommended);
   await page.locator("#rollout-reason").fill("fleet rollout e2e");
   await page
