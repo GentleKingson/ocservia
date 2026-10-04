@@ -198,8 +198,8 @@ test("runs the canary and batch rollout to completion", async ({ page }) => {
     page.getByRole("heading", { name: "Rolling upgrade" }),
   ).toBeVisible();
   await expect(page.getByText("Canary").first()).toBeVisible();
-  await expect(page.locator(".health")).toHaveText("Running");
-  await expect(page.locator(".health")).toHaveText("Succeeded", {
+  await expect(page.getByTestId("rollout-state")).toHaveText("Running");
+  await expect(page.getByTestId("rollout-state")).toHaveText("Succeeded", {
     timeout: 10000,
   });
 });
@@ -252,6 +252,6 @@ test("pauses on a failed node and resumes only the failed node", async ({
     page.getByRole("button", { name: "Resume rollout" }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "Resume rollout" }).click();
-  await expect(page.locator(".health")).toHaveText("Running");
+  await expect(page.getByTestId("rollout-state")).toHaveText("Running");
   expect(resumed).toBe(true);
 });

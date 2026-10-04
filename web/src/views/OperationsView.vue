@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { RefreshCw, Server } from "@lucide/vue";
+import { RefreshCw } from "@lucide/vue";
 import type { AgentRollout, Operation } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
 
 import { getOperation, listOperations } from "../api/operations";
 import {
@@ -13,11 +12,24 @@ import {
 } from "../api/workspace";
 import { listAgentRollouts } from "../api/agents";
 import { operationStatusKey } from "../shared/operation-status";
+import { operationTone, rolloutTone } from "../features/operations/state-tone";
+import DataState from "../components/common/DataState.vue";
+import PageHeader from "../components/common/PageHeader.vue";
+import SectionCard from "../components/common/SectionCard.vue";
+import StatusBadge from "../components/common/StatusBadge.vue";
+import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { formatTimestamp } from "../shared/timestamp";
 
 const operations = ref<Operation[]>([]);
 const { t } = useI18n();
-const router = useRouter();
 const rollouts = ref<AgentRollout[]>([]);
 const rolloutsUnavailable = ref(false);
 const detailState = ref<{ selected?: Operation; error: string }>({ error: "" });
@@ -131,10 +143,6 @@ async function loadRollouts(): Promise<void> {
   }
 }
 
-function openRollout(rolloutId: string): void {
-  void router.push({ name: "rollout-detail", params: { rolloutId } });
-}
-
 function refreshForWorkspace(): void {
   detailState.value = { error: "" };
   void loadOperations();
@@ -153,180 +161,258 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="overview operations-view">
-    <div class="page-heading">
-      <div>
-        <p>{{ $t("workspace") }}</p>
-        <h1>{{ $t("operations") }}</h1>
-      </div>
-      <button
-        type="button"
-        class="icon-command page-command"
-        :disabled="loading"
-        :title="$t('refresh')"
-        :aria-label="$t('refresh')"
-        @click="loadOperations()"
-      >
-        <RefreshCw :size="16" />
-      </button>
-    </div>
-    <p v-if="error" class="operation-error page-error" role="alert">
+  <main class="overview">
+    <PageHeader :eyebrow="$t('workspace')" :title="$t('operations')">
+      <template #actions>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          :disabled="loading"
+          :title="$t('refresh')"
+          :aria-label="$t('refresh')"
+          @click="loadOperations()"
+        >
+          <RefreshCw aria-hidden="true" />
+        </Button>
+      </template>
+    </PageHeader>
+    <p v-if="error" class="text-destructive m-0 mb-4 text-sm" role="alert">
       {{ error }}
     </p>
-    <section
+    <SectionCard
       v-if="rollouts.length || !rolloutsUnavailable"
-      class="rollouts-panel"
+      :title="$t('rollouts')"
     >
-      <h2>{{ $t("rollouts") }}</h2>
-      <div v-if="rollouts.length" class="operations-table-wrap">
-        <table class="operations-table">
-          <thead>
-            <tr>
-              <th>{{ $t("targetVersion") }}</th>
-              <th>{{ $t("state") }}</th>
-              <th>{{ $t("reason") }}</th>
-              <th>{{ $t("created") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in rollouts"
-              :key="item.id"
-              tabindex="0"
-              @click="openRollout(item.id)"
-              @keydown.enter="openRollout(item.id)"
-            >
-              <td>
-                <code>{{ item.targetVersion }}</code>
-              </td>
-              <td>
-                <span class="state-dot" :class="item.state"></span
-                >{{ $t(`rolloutState_${item.state}`) }}
-              </td>
-              <td>{{ item.reason }}</td>
-              <td>{{ new Date(item.createdAt).toLocaleString() }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-else class="empty-state">
-        <Server :size="24" /><span>{{ $t("noRollouts") }}</span>
-      </div>
-    </section>
-    <div v-if="loading && operations.length === 0" class="detail-state">
-      <Server :size="24" /><span>{{ $t("loading") }}</span>
-    </div>
-    <div
+      <Table v-if="rollouts.length" class="min-w-[36rem]">
+        <TableHeader>
+          <TableRow class="hover:bg-transparent">
+            <TableHead class="text-muted-foreground">{{
+              $t("targetVersion")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("state")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("reason")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("created")
+            }}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow v-for="item in rollouts" :key="item.id">
+            <TableCell>
+              <RouterLink
+                :to="{ name: 'rollout-detail', params: { rolloutId: item.id } }"
+                class="text-primary font-mono underline-offset-4 hover:underline"
+                >{{ item.targetVersion }}</RouterLink
+              >
+            </TableCell>
+            <TableCell>
+              <StatusBadge
+                :tone="rolloutTone(item.state)"
+                :label="$t(`rolloutState_${item.state}`)"
+              />
+            </TableCell>
+            <TableCell class="max-w-64 truncate" :title="item.reason">{{
+              item.reason
+            }}</TableCell>
+            <TableCell class="text-muted-foreground">{{
+              formatTimestamp(item.createdAt)
+            }}</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+      <p v-else class="text-muted-foreground m-0 text-sm">
+        {{ $t("noRollouts") }}
+      </p>
+    </SectionCard>
+    <DataState
+      v-if="loading && operations.length === 0"
+      kind="loading"
+      :message="$t('loading')"
+    />
+    <DataState
       v-else-if="unavailable && operations.length === 0"
-      class="detail-state"
-    >
-      <Server :size="24" /><span>{{ $t("systemsUnavailable") }}</span>
-    </div>
-    <section v-else class="operations-panel">
-      <div v-if="operations.length === 0" class="empty-state">
-        <Server :size="24" /><span>{{ $t("noOperations") }}</span>
-      </div>
-      <div v-else class="operations-table-wrap">
-        <table class="operations-table">
-          <thead>
-            <tr>
-              <th>{{ $t("operationId") }}</th>
-              <th>{{ $t("state") }}</th>
-              <th>{{ $t("operationNode") }}</th>
-              <th>{{ $t("created") }}</th>
-              <th>{{ $t("updated") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="operation in operations" :key="operation.id">
-              <td>
-                <button
-                  type="button"
-                  class="table-link"
-                  @click="inspectOperation(operation.id)"
+      kind="error"
+      :message="$t('systemsUnavailable')"
+    />
+    <SectionCard v-else :title="$t('operations')">
+      <p
+        v-if="operations.length === 0"
+        class="text-muted-foreground m-0 text-sm"
+      >
+        {{ $t("noOperations") }}
+      </p>
+      <Table v-else class="min-w-[44rem]">
+        <TableHeader>
+          <TableRow class="hover:bg-transparent">
+            <TableHead class="text-muted-foreground">{{
+              $t("operationId")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("state")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("operationNode")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("created")
+            }}</TableHead>
+            <TableHead class="text-muted-foreground">{{
+              $t("updated")
+            }}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow
+            v-for="operation in operations"
+            :key="operation.id"
+            :data-state="
+              selectedOperation?.id === operation.id ? 'selected' : undefined
+            "
+          >
+            <TableCell>
+              <Button
+                type="button"
+                variant="link"
+                class="h-auto p-0 font-mono text-xs"
+                :aria-pressed="selectedOperation?.id === operation.id"
+                @click="inspectOperation(operation.id)"
+              >
+                {{ operation.id }}
+              </Button>
+            </TableCell>
+            <TableCell>
+              <span class="flex flex-wrap items-center gap-2">
+                <StatusBadge
+                  :tone="operationTone(operation)"
+                  :label="$t(operationStatusKey(operation))"
+                />
+                <code
+                  v-if="operation.agentUpgradeTargetVersion"
+                  class="text-xs"
+                  >{{ operation.agentUpgradeTargetVersion }}</code
                 >
-                  {{ operation.id }}
-                </button>
-              </td>
-              <td>
-                <strong :class="operation.state">{{
-                  $t(operationStatusKey(operation))
-                }}</strong>
-                <code v-if="operation.agentUpgradeTargetVersion">{{
-                  operation.agentUpgradeTargetVersion
-                }}</code>
-              </td>
-              <td>
-                <code v-if="operation.nodeId">{{
-                  operation.nodeId.slice(0, 8)
-                }}</code
-                ><span v-else>{{ $t("notAvailable") }}</span>
-              </td>
-              <td>
-                <span>{{ formatTimestamp(operation.createdAt) }}</span>
-              </td>
-              <td>
-                <span>{{ formatTimestamp(operation.updatedAt) }}</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <button
+              </span>
+            </TableCell>
+            <TableCell>
+              <RouterLink
+                v-if="operation.nodeId"
+                :to="{
+                  name: 'node-detail',
+                  params: { nodeId: operation.nodeId },
+                }"
+                class="text-primary font-mono text-xs underline-offset-4 hover:underline"
+                :title="operation.nodeId"
+                >{{ operation.nodeId.slice(0, 8) }}</RouterLink
+              ><span v-else class="text-muted-foreground">{{
+                $t("notAvailable")
+              }}</span>
+            </TableCell>
+            <TableCell class="text-muted-foreground">{{
+              formatTimestamp(operation.createdAt)
+            }}</TableCell>
+            <TableCell class="text-muted-foreground">{{
+              formatTimestamp(operation.updatedAt)
+            }}</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+      <Button
         v-if="hasMore"
         type="button"
-        class="load-more"
+        variant="outline"
+        class="justify-self-center"
         :disabled="loading"
         @click="loadOperations(false)"
       >
         {{ $t("loadMore") }}
-      </button>
-    </section>
-    <p v-if="detailError" class="operation-error page-error" role="alert">
+      </Button>
+    </SectionCard>
+    <p
+      v-if="detailError"
+      class="text-destructive m-0 mb-4 text-sm"
+      role="alert"
+    >
       {{ detailError }}
     </p>
-    <section v-if="selectedOperation" class="operation-detail">
-      <header>
-        <h2>{{ $t("operationDetails") }}</h2>
-        <button
+    <SectionCard
+      v-if="selectedOperation"
+      :title="$t('operationDetails')"
+      data-testid="operation-detail"
+    >
+      <template #actions>
+        <Button
           type="button"
-          class="icon-command"
+          variant="outline"
+          size="icon-sm"
           :disabled="detailLoading"
           :title="$t('refresh')"
           :aria-label="$t('refresh')"
           @click="inspectOperation(selectedOperation.id)"
         >
-          <RefreshCw :size="15" />
-        </button>
-      </header>
-      <dl>
-        <div>
-          <dt>{{ $t("operationId") }}</dt>
-          <dd>
-            <code>{{ selectedOperation.id }}</code>
+          <RefreshCw aria-hidden="true" />
+        </Button>
+      </template>
+      <dl
+        class="m-0 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[max-content_1fr] sm:gap-y-3"
+      >
+        <dt class="text-muted-foreground">
+          {{ $t("operationId") }}
+        </dt>
+        <dd class="m-0 break-all">
+          <code>{{ selectedOperation.id }}</code>
+        </dd>
+        <dt class="text-muted-foreground">{{ $t("state") }}</dt>
+        <dd class="m-0">
+          <StatusBadge
+            :tone="operationTone(selectedOperation)"
+            :label="$t(operationStatusKey(selectedOperation))"
+          />
+        </dd>
+        <template v-if="selectedOperation.agentUpgradeTargetVersion">
+          <dt class="text-muted-foreground">
+            {{ $t("targetVersion") }}
+          </dt>
+          <dd class="m-0">
+            <code>{{ selectedOperation.agentUpgradeTargetVersion }}</code>
           </dd>
-        </div>
-        <div>
-          <dt>{{ $t("state") }}</dt>
-          <dd>{{ $t(operationStatusKey(selectedOperation)) }}</dd>
-        </div>
-        <div v-if="selectedOperation.agentUpgradeTargetVersion">
-          <dt>{{ $t("targetVersion") }}</dt>
-          <dd>{{ selectedOperation.agentUpgradeTargetVersion }}</dd>
-        </div>
-        <div>
-          <dt>{{ $t("operationNode") }}</dt>
-          <dd>{{ selectedOperation.nodeId ?? $t("notAvailable") }}</dd>
-        </div>
-        <div>
-          <dt>{{ $t("created") }}</dt>
-          <dd>{{ formatTimestamp(selectedOperation.createdAt) }}</dd>
-        </div>
-        <div>
-          <dt>{{ $t("updated") }}</dt>
-          <dd>{{ formatTimestamp(selectedOperation.updatedAt) }}</dd>
-        </div>
+        </template>
+        <template v-if="selectedOperation.configApplyFailureCode">
+          <dt class="text-muted-foreground">
+            {{ $t("failureCode") }}
+          </dt>
+          <dd class="text-destructive m-0 break-all">
+            <code>{{ selectedOperation.configApplyFailureCode }}</code>
+          </dd>
+        </template>
+        <dt class="text-muted-foreground">
+          {{ $t("operationNode") }}
+        </dt>
+        <dd class="m-0 break-all">
+          <RouterLink
+            v-if="selectedOperation.nodeId"
+            :to="{
+              name: 'node-detail',
+              params: { nodeId: selectedOperation.nodeId },
+            }"
+            class="text-primary font-mono underline-offset-4 hover:underline"
+            >{{ selectedOperation.nodeId }}</RouterLink
+          >
+          <span v-else>{{ $t("notAvailable") }}</span>
+        </dd>
+        <dt class="text-muted-foreground">{{ $t("created") }}</dt>
+        <dd class="m-0">
+          {{ formatTimestamp(selectedOperation.createdAt) }}
+        </dd>
+        <dt class="text-muted-foreground">{{ $t("updated") }}</dt>
+        <dd class="m-0">
+          {{ formatTimestamp(selectedOperation.updatedAt) }}
+        </dd>
       </dl>
-    </section>
+    </SectionCard>
   </main>
 </template>
