@@ -22,6 +22,10 @@ export default defineConfig({
       },
     },
   ],
+  build: {
+    // Supported browsers: docs/development/web.md#supported-browsers.
+    target: ["chrome111", "edge111", "firefox128", "safari16.4"],
+  },
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },

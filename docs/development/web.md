@@ -148,9 +148,17 @@ their existing markup until they are migrated one consumer at a time.
   `@theme inline`. The `dark` variant only matches an explicit `.dark` class;
   dark mode is not a product capability and must not follow the OS setting.
 
-Tailwind v4 output targets Chrome 111, Safari 16.4 and Firefox 128. Production
-pages do not consume primitives yet; decide the supported browser range before
-the first production consumer.
+### Supported browsers
+
+The Web console supports Chrome 111+, Safari 16.4+, Firefox 128+ and other
+Chromium-based browsers built on Chromium 111+ (for example Edge 111+). This
+matches Tailwind CSS v4's baseline (cascade layers, `@property`,
+`color-mix()`), and `vite.config.ts` sets the same `build.target`. Change both
+together; do not lower the range without a reviewed compatibility plan.
+
+Automated browser checks run only on Playwright Chromium, including its
+iPhone 13 emulation. Safari and Firefox are supported targets but are not
+covered by CI; record manual results for UI changes that depend on them.
 
 ### Component sources
 
