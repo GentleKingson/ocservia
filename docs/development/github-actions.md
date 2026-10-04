@@ -36,9 +36,11 @@ Runtime DDL denial is the small retained failure path: it verifies the
 Controller is not accidentally tested with owner credentials. MySQL
 retains production configuration and verified TLS in this same flow.
 
-Both profiles verify current snapshot initialization, identical retry, provenance
-integrity and forward-only continuation. Independent historical replay checks
-schema/security/seed equivalence and refuses stale artifacts. PostgreSQL also
+Both profiles verify current SQL initialization, identical retry, receipt
+integrity and forward-only continuation. Independent checks compare fresh SQL
+with the immutable v1.2.0 checkpoint upgrade for schema/security/seed equivalence
+and refuse stale artifacts. Database checkout fetches that release history; the
+active tree contains only the two SQL artifacts per engine. PostgreSQL also
 checks its actual volume layout and legacy-layout rejection. Full selects the
 existing full database suites, including migration failures and recovery; it
 does not add another backend or a Controller-version admission window. Explicit

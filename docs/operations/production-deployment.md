@@ -631,6 +631,16 @@ deploy/production/compose.sh config --quiet
 deploy/production/compose.sh up -d
 ```
 
-Migration `000021` introduces authenticated audit events. Before upgrading a database that already contains audit history, stop API writes and let the previous scheduler create a checkpoint covering each workspace's exact audit tail. Keep that checkpoint key available to the migration container. While holding the audit tables against concurrent writes, the migration preflight verifies every legacy chain and its exact tail checkpoint before applying any `000021` schema change. A failed preflight leaves the database at schema `20`, so the previous release remains usable. Do not bypass this check or rewrite old rows. After the one-shot migration succeeds, each new event carries a domain-separated HMAC, version, and key ID, and checkpoint creation first verifies the entire event chain.
+Before a major database cutover, first upgrade existing environments to the
+stable v1.2.0 checkpoint at `169102557cd610847c9f6ac2083336cdcf82c483` and retain a
+verified backup. Confirm its epoch-1/revision-0 receipt before installing the
+new major; the epoch-2 binary cannot replay earlier migrations. Preserve the
+real audit event and checkpoint keys. Historical audit events remain business
+data: startup still verifies the chain and refuses an unauthenticated legacy
+tail unless its exact tail is checkpointed. Do not rewrite audit evidence or
+schema receipts to bypass either check. Stop old writers before migration and
+use the normal owner process; only a successful verified cutover permits
+starting the new runtime. Rollback uses the old binary with its compatible
+backup, not a schema downgrade.
 
 Verify `/readyz`, an authenticated read, a node connection through each relay, OTLP delivery when enabled, and a restore from the newest backup. Never expose PostgreSQL, Unix sockets, Docker sockets, or host `/proc` and `/sys` mounts.

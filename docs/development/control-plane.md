@@ -101,58 +101,57 @@ role ordinary data access while keeping audit events read/append-only.
 PostgreSQL grants `SELECT`/`INSERT`; MySQL additionally grants a narrow
 column UPDATE privilege for locking reads, while immutable triggers reject
 actual updates. PostgreSQL uses an advisory lock and transactional SQL migrations.
-MySQL uses a dedicated connection's `GET_LOCK` for migration
-serialization, immutable backend manifests and journaled, verified steps because
-DDL can implicitly commit. Its revision numbers are not PostgreSQL migration
-numbers. Actual dirty execution, mismatched known content and SQL failures
-remain errors, not automatic force-clean. Unknown completed receipts are not a
-software-version rejection and are preserved. Initialization does not reverse
-SQL or reset persistent state. Frozen compatibility metadata in published SQL
-is retained as historical data, not maintained or used for admission.
+MySQL uses a dedicated connection's `GET_LOCK` and durable, verified step
+progress because DDL can implicitly commit. Both engines refuse unknown epochs,
+revisions, checksums, schema drift and nonempty databases without supported
+provenance before mutation. Interrupted MySQL execution requires explicit repair
+with the exact original artifact; neither engine automatically force-cleans or
+downgrades. Uncertain lock release discards the connection.
 
-### Current schema snapshots and forward upgrades
+### Current SQL artifacts and bounded upgrades
 
-Each backend has one current executable `schema.sql`: PostgreSQL in
-`control-plane/migrations/`, MySQL in
-`control-plane/internal/database/mysql/mysql/`. Its adjacent
-`schema.snapshot.json` pins the SQL hash and complete ordered historical source.
-Under the backend's migration lock, only a genuinely empty database takes this
-path. Existing tables, views, routines or incomplete metadata without valid
-provenance cause refusal before initialization writes.
+Each engine has exactly two active SQL files: `schema.sql` and `upgrade.sql`.
+PostgreSQL stores them in `control-plane/migrations/`; MySQL in
+`control-plane/internal/database/mysql/mysql/`. `schema_revisions` is the only
+migration journal. There are no numbered SQL/JSON migrations or snapshot
+descriptors. Schema identity is the epoch, revision and raw artifact checksums,
+not an old migration filename counter or Controller compatibility range.
 
-PostgreSQL installs the snapshot, seeds and coverage receipt in one transaction.
-Covered `schema_migrations` rows are explicitly marked as snapshot coverage.
-MySQL records a snapshot origin and the statements actually executed; it does
-not manufacture old baseline or revision-step receipts. MySQL initialization
-uses a dedicated locked connection, durable running/verified steps and actual
-postconditions because DDL is not an all-or-nothing transaction.
+Only a genuinely empty database executes `schema.sql`. Existing databases must
+match the current epoch's known receipt history or the sole previous checkpoint:
+`v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0.
+That immutable release remains the anchor when main advances. Earlier databases
+must first upgrade with v1.2.0; a major candidate cannot replay removed history.
 
-A database with valid history or snapshot provenance receives only unapplied
-forward migrations/revisions. Its original receipt remains unchanged when the
-current snapshot changes. Repeated owner maintenance may reapply grants and
-provision dynamic telemetry objects; it never reexecutes `schema.sql` on that
-database. Unknown completed history remains preserved, while known names,
-checksums and provenance must match. Dirty or unproven state is not adopted.
+PostgreSQL installs or transitions in one transaction. Its transition verifies
+the new schema, writes the verified epoch-2 baseline, executes legacy metadata
+cleanup from `upgrade.sql`, then validates the full result before committing.
+MySQL verifies its epoch-2 transition before running eight cleanup DROP steps as
+revision 1. Each DDL step records same-row progress and validates the actual
+before/after object definition; data work and progress commit together. Recovery
+requires the matching SQL checksum and refuses foreign or partial definitions.
 
-When adding a migration or revision, preserve historical bytes and regenerate
-the affected backend's snapshot from the real historical replay:
+Within an epoch, append forward revisions to `upgrade.sql`, preserving published
+block bytes. Update `schema.sql` to the equivalent fresh result and its bound
+history checksum. Repeated owner maintenance can reapply grants and provision
+calendar-dependent telemetry objects; it does not replay fresh SQL. Check both
+fresh/current revision paths and the fixed release transition:
 
 ```bash
-bash scripts/database-postgres-snapshot.sh generate
-bash scripts/database-mysql-snapshot.sh generate
+bash scripts/database-artifact-policy.sh all
 bash scripts/database-postgres-snapshot.sh check
 bash scripts/database-mysql-snapshot.sh check
 ```
 
-`check` is read-only with respect to tracked artifacts. It independently
-compares replayed and directly initialized schema/seed semantics. Run the
-backend's lifecycle tests too, including an already-created prior snapshot
-upgrading through the next forward change. Calendar-dependent telemetry objects
-remain owner-provisioned and are not frozen into generated SQL. Execution
-evidence such as MySQL `time_migration_decisions` remains in genuine historical
-databases but is not inserted as a new-database seed. Initialization timestamps
-are generated at initialization; deterministic application seed values are
-compared exactly.
+These checks leave tracked artifacts unchanged. PostgreSQL's existing author
+command can regenerate current SQL from the fixed checkpoint transition; MySQL
+checks its executable SQL directly. Each backend compares actual schema, ACL and
+mandatory seed semantics between the immutable checkpoint upgrade and fresh
+initialization. Historical fixtures come from that Git release, not an archived
+active migration tree. Initialization timestamps are generated on installation;
+deterministic seed values are compared exactly. See
+[major cutover acceptance](database-major-cutover.md) for the migration window
+and retained failure coverage.
 
 Readiness checks current core reads, permissions and event-stream health, not
 migration history or Controller schema ranges. Current startup also validates

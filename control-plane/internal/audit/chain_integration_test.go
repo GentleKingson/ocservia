@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
@@ -320,30 +319,11 @@ func TestLegacyAuditTransitionRequiresCheckpointedTailIntegration(t *testing.T) 
 	}
 	checkpointKey := integrationCheckpointKey(t)
 	manager := NewBackendManager(postgres.WrapPool(pool), checkpointKey)
-	preflight := func() error {
-		return database.Within(ctx, postgres.WrapPool(owner), database.ReadCommitted, func(tx database.Tx) error {
-			store, err := auditstore.From(tx)
-			if err != nil {
-				return err
-			}
-			legacy := store.(auditstore.LegacyPreflight)
-			if err := legacy.LockLegacy(ctx); err != nil {
-				return err
-			}
-			return manager.preflightLegacyWorkspace(ctx, tx, legacy, workspaceID)
-		})
-	}
-	if err := preflight(); err == nil || err.Error() != "legacy audit tail is not checkpointed" {
-		t.Fatalf("legacy migration preflight without checkpoint: %v", err)
-	}
 	if err := manager.EnsureAuthenticity(ctx); err == nil {
 		t.Fatal("uncheckpointed legacy audit tail was accepted")
 	}
 	if _, err := owner.Exec(ctx, `INSERT INTO audit_checkpoints(id,workspace_id,through_event_id,through_event_hash,signature,created_at) VALUES($1,$2,$3,$4,$5,now())`, uuid.Must(uuid.NewV7()), workspaceID, eventID, eventHash[:], signCheckpoint(checkpointKey, workspaceID, eventID, eventHash[:])); err != nil {
 		t.Fatal(err)
-	}
-	if err := preflight(); err != nil {
-		t.Fatalf("checkpointed legacy migration preflight: %v", err)
 	}
 	if err := manager.EnsureAuthenticity(ctx); err != nil {
 		t.Fatal(err)

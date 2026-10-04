@@ -86,30 +86,34 @@ not supplied by this tooling.
 
 ## Schema provenance after restore
 
-Backups must include `schema_revisions` and every retained legacy receipt,
-including timestamps, checksums, progress, and initialization comments. Validate
-them with the matching Controller/backend before allowing writes. Owner migration
-on a valid restored database applies only unapplied forward SQL; it does not
-replay `schema.sql`. A fresh database contains one verified schema checkpoint
-and no fabricated historical execution. Phase A retains old receipt tables for
-bridge recovery and provenance; a verified new journal is the execution authority.
+Backups must preserve every `schema_revisions` row, including checksums, state,
+step progress and timestamps. Validate them with the matching Controller/backend
+before allowing writes. Owner migration applies only supported forward SQL;
+it does not replay `schema.sql` on a restored database. Fresh initialization
+records its real baseline execution. Checkpoint upgrades retain their actual
+verified transition/cleanup receipts in the same journal.
 
-An interrupted MySQL SQL artifact refuses ordinary migration. In a controlled
+The sole previous checkpoint is v1.2.0 at
+`169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0. Retain a verified
+backup from that release before a major upgrade. Earlier databases must first
+reach that release; restoring an older unsupported database is not permission
+to adopt or force-clean it. Downgrade requires restoring a compatible backup and
+binary, not executing reverse SQL against an upgraded database.
+
+An interrupted MySQL artifact refuses ordinary migration. In a controlled
 test/development recovery environment, obtain the checksum from the exact
 matching build with `ocserv-db-foundation --mode schema-artifact-checksum` for
-fresh initialization, or `--mode upgrade-artifact-checksum` for the latest
-running upgrade revision. Use `--revision N` to select its exact logical block
-when the file also contains later revisions; revision zero selects the declared
+fresh initialization, or `--mode upgrade-artifact-checksum` for a running upgrade.
+Use `--revision N` for its exact logical block; revision zero selects the
 previous-checkpoint transition. Supply that reviewed checksum with
-`--mode repair --repair-checksum <checksum>`. If a later snapshot has changed,
-recover with the original schema SQL first, then upgrade. DDL recovery accepts
-only a pinned before/after fingerprint; data and progress commit in one InnoDB
-transaction. Foreign objects and partial postconditions require investigation.
+`--mode repair --repair-checksum <checksum>`. Recover an interrupted fresh install
+using its original schema bytes before upgrading with newer artifacts. DDL
+recovery accepts only pinned before/after fingerprints; data and progress commit
+in one InnoDB transaction. Foreign objects and partial postconditions require
+investigation. Cleanup DROP steps use the same recovery protocol.
 
-The bounded legacy bridge retains `--mode snapshot-checksum` for an interrupted
-old snapshot and `--mode manifest-checksum` for an old revision. These checksums
-identify different artifacts and cannot substitute for a new running journal's
-SQL checksum. Never mark a running operation verified by editing its journal.
 The foundation tool's existing production restriction remains in place. Runtime
-and maintenance accounts can read checkpoint evidence but cannot write journals
-or execute arbitrary DDL.
+and maintenance accounts can read receipts but cannot write the journal or run
+arbitrary DDL. Never mark running work verified by editing `schema_revisions`.
+Old manifest/snapshot repair modes and journals are removed in the major; they
+cannot substitute for the new artifact checksum.
