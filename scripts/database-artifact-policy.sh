@@ -10,7 +10,7 @@ case "${1:-all}" in
   *) echo 'usage: database-artifact-policy.sh [postgres|mysql|all]' >&2; exit 2 ;;
 esac
 for directory in control-plane/migrations control-plane/internal/database/mysql/mysql; do
-  actual="$(rg --files --hidden "${ROOT}/${directory}" -g "*.sql" -g "*.json" | sort)"
+  actual="$(find "${ROOT}/${directory}" -type f \( -name "*.sql" -o -name "*.json" \) | sort)"
   expected="$(printf '%s\n' "${ROOT}/${directory}/schema.sql" "${ROOT}/${directory}/upgrade.sql")"
   [[ "$actual" == "$expected" ]] || { echo "unexpected migration artifacts in ${directory}" >&2; exit 1; }
 done

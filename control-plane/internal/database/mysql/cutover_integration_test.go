@@ -23,6 +23,7 @@ const previousCheckpointChecksum = "3dc39a92ff4b54bff922872fae296843cea8dea1f2d1
 // archive embedded in the current executable.
 func checkpointFixture(t *testing.T) (*Backend, *Backend, Options) {
 	t.Helper()
+	_ = testOptions(t)
 	tag, err := exec.Command("git", "rev-parse", "v1.2.0^{commit}").Output()
 	if err != nil || strings.TrimSpace(string(tag)) != previousCheckpointCommit {
 		t.Fatal("published checkpoint tag/commit mismatch", err)
