@@ -100,8 +100,8 @@ esac
 assert_current_checkpoint() {
   local container=$1 database=$2 expected_checksum
   expected_checksum="$(sha256sum "${ROOT}/control-plane/migrations/schema.sql" | cut -d' ' -f1)"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=1 AND revision=0 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc 'SELECT count(*) FROM schema_migrations')" = 0
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=2 AND revision=0 AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin')")" = 0
 }
 
 assert_local_bootstrap_schema() {
@@ -238,7 +238,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     done
     # Deliberate corruption is last, after all current-schema business checks.
     docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=1 AND revision=0" >/dev/null
+      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=2 AND revision=0" >/dev/null
     if OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-checksum-rejected.log" 2>&1; then
       echo 'migration accepted a checksum mismatch' >&2; exit 1
@@ -264,8 +264,8 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # detector actually observes renewal, loss, and session snapshotting.
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 -race ./internal/coordination ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
-  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./migrations -run '^TestMigrationFailureIsAtomicIntegration$' -count=1)
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_SNAPSHOT_DATABASE_URL="${owner_url}" \
+    go test -p 1 ./migrations -run '^TestPostgreSQLArtifactRollback$' -count=1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/api -run '^TestReadinessRequiresDatabaseConnectivityIntegration$' -count=1)
 
@@ -457,10 +457,10 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   assert_current_checkpoint "${container}" ocservia
   assert_local_bootstrap_schema "${container}" ocservia
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (9000001, '9000001_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,9000001,decode(repeat('00',32),'hex'),'verified',1,now())" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "200"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 9000001" >/dev/null
+    "DELETE FROM schema_revisions WHERE epoch=2 AND revision=9000001" >/dev/null
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
 
   docker stop "${container}" >/dev/null

@@ -4,13 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/schemaartifact"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"strings"
 )
 
 // staticFingerprintSQL excludes owner-managed calendar partition leaves and
@@ -62,20 +58,6 @@ SELECT jsonb_build_object(
  'sequences',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY relname),'[]') FROM sequences s)
 )::text`
 
-func baselineArtifact(sql string) (schemaartifact.Artifact, string, error) {
-	a, err := schemaartifact.Parse([]byte(sql), "postgresql")
-	if err != nil {
-		return a, "", err
-	}
-	var metadata struct {
-		CatalogSHA256 string `json:"catalog_sha256"`
-	}
-	if a.Kind != "schema" || a.Epoch != 1 || len(a.Baseline.Steps) != 1 || json.Unmarshal(a.Baseline.Steps[0].Metadata, &metadata) != nil || len(metadata.CatalogSHA256) != 64 {
-		return a, "", errors.New("invalid PostgreSQL checkpoint artifact")
-	}
-	return a, metadata.CatalogSHA256, nil
-}
-
 func validateStaticSchema(ctx context.Context, db queryer, expected string) error {
 	var catalog string
 	if err := db.QueryRow(ctx, staticFingerprintSQL).Scan(&catalog); err != nil {
@@ -88,61 +70,20 @@ func validateStaticSchema(ctx context.Context, db queryer, expected string) erro
 	return nil
 }
 
-// stampCheckpoint never invents historical execution. Revision zero records
-// only the validated bridge baseline; legacy receipts remain intact.
-func stampCheckpoint(ctx context.Context, conn *pgxpool.Conn, current snapshot, known []Migration) error {
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
+// A transition verifies the new business schema and journal before the old
+// metadata tables are removed. No other object is omitted from admission.
+func validateRevisionSchema(ctx context.Context, db queryer, expected string, transition bool) error {
+	if !transition {
+		return validateStaticSchema(ctx, db, expected)
+	}
+	query := strings.Replace(staticFingerprintSQL, "AND NOT c.relispartition", "AND c.relname NOT IN ('schema_migrations','schema_snapshot_origin') AND NOT c.relispartition", 1)
+	var catalog string
+	if err := db.QueryRow(ctx, query).Scan(&catalog); err != nil {
 		return err
 	}
-	defer rollbackMigration(tx)
-	if err := stampCheckpointOn(ctx, tx, current, known); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func stampCheckpointOn(ctx context.Context, tx pgx.Tx, current snapshot, known []Migration) error {
-	a, catalog, err := baselineArtifact(current.SQL)
-	if err != nil {
-		return err
-	}
-	// pg_dump's schema snapshot deliberately clears search_path within its
-	// transaction. Restore the same visibility used by catalog authoring.
-	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO public"); err != nil {
-		return err
-	}
-	applied, err := readAppliedMigrations(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if len(applied) != len(known) {
-		return errors.New("unsupported PostgreSQL history at checkpoint")
-	}
-	if err = validateAppliedMigrations(known, applied); err != nil {
-		return err
-	}
-	if err = validateOrigin(ctx, tx, known, applied); err != nil {
-		return err
-	}
-	if err = validateStaticSchema(ctx, tx, catalog); err != nil {
-		return err
-	}
-	var count int
-	if err = tx.QueryRow(ctx, "SELECT count(*) FROM schema_revisions").Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		_, err = tx.Exec(ctx, `INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(1,0,$1,'verified',1,now())`, a.Checksum[:])
-	} else {
-		var valid bool
-		err = tx.QueryRow(ctx, `SELECT count(*)=1 AND coalesce(bool_and(epoch=1 AND revision=0 AND checksum=$1 AND state='verified' AND step=1 AND verified_at>=started_at),false) FROM schema_revisions`, a.Checksum[:]).Scan(&valid)
-		if err == nil && !valid {
-			return errors.New("PostgreSQL checkpoint journal mismatch")
-		}
-	}
-	if err != nil {
-		return err
+	sum := sha256.Sum256([]byte(catalog))
+	if hex.EncodeToString(sum[:]) != expected {
+		return errors.New("PostgreSQL schema differs from new checkpoint artifact")
 	}
 	return nil
 }

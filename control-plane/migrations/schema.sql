@@ -1,11 +1,12 @@
 -- ocservia:artifact=schema
 -- ocservia:format=1
 -- ocservia:engine=postgresql
--- ocservia:epoch=1
+-- ocservia:epoch=2
 -- ocservia:revision=0
+-- ocservia:history-sha256=970d63e2b1845808d8d49885bf90b2a133b4cf28fa08c336b0a45ff7e51cb5bd
 
 -- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"a69f2e270c62191be30309d10fffcacc27b960487784a984c18ed69081c84a3b"}
+-- ocservia:metadata={"catalog_sha256":"096ad0fc5ad94f3d8c93fb94ffb9935b65a40bab31bc15cc84b7961d7755800c"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -783,7 +784,7 @@ CREATE TABLE public.local_auth_attempts (
     lease_until timestamp with time zone DEFAULT '-infinity'::timestamp with time zone CONSTRAINT "local_auth_attempts_lease_until_not_null" NOT NULL,
     expires_at timestamp with time zone CONSTRAINT "local_auth_attempts_expires_at_not_null" NOT NULL,
     CONSTRAINT local_auth_attempts_failures_check CHECK (((failures >= 0) AND (failures <= 14))),
-    CONSTRAINT local_auth_attempts_username_check CHECK ((((octet_length(username) >= 1) AND (octet_length(username) <= 128)) AND ((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text)))
+    CONSTRAINT local_auth_attempts_username_check CHECK (((octet_length(username) >= 1) AND (octet_length(username) <= 128) AND ((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text)))
 );
 
 CREATE TABLE public.local_auth_bootstrap (
@@ -808,7 +809,7 @@ CREATE TABLE public.local_credentials (
     updated_at timestamp with time zone CONSTRAINT "local_credentials_updated_at_not_null" NOT NULL,
     password_changed_at timestamp with time zone CONSTRAINT "local_credentials_password_changed_at_not_null" NOT NULL,
     CONSTRAINT local_credentials_password_hash_check CHECK (((octet_length(password_hash) >= 1) AND (octet_length(password_hash) <= 512))),
-    CONSTRAINT local_credentials_username_check CHECK ((((octet_length(username) >= 1) AND (octet_length(username) <= 128)) AND ((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text)))
+    CONSTRAINT local_credentials_username_check CHECK (((octet_length(username) >= 1) AND (octet_length(username) <= 128) AND ((username COLLATE "C") ~ '^[a-z0-9][a-z0-9._-]*$'::text)))
 );
 
 CREATE TABLE public.local_slice_jobs (
@@ -1218,14 +1219,6 @@ CREATE TABLE public.scheduler_leases (
     CONSTRAINT scheduler_leases_lease_name_check CHECK (((length(lease_name) >= 1) AND (length(lease_name) <= 128)))
 );
 
-CREATE TABLE public.schema_migrations (
-    version bigint CONSTRAINT "schema_migrations_version_not_null" NOT NULL,
-    name text CONSTRAINT "schema_migrations_name_not_null" NOT NULL,
-    checksum bytea CONSTRAINT "schema_migrations_checksum_not_null" NOT NULL,
-    applied_at timestamp with time zone DEFAULT now() CONSTRAINT "schema_migrations_applied_at_not_null" NOT NULL,
-    snapshot_covered boolean DEFAULT false CONSTRAINT "schema_migrations_snapshot_covered_not_null" NOT NULL
-);
-
 CREATE TABLE public.schema_revisions (
     epoch bigint CONSTRAINT "schema_revisions_epoch_not_null" NOT NULL,
     revision bigint CONSTRAINT "schema_revisions_revision_not_null" NOT NULL,
@@ -1242,22 +1235,6 @@ CREATE TABLE public.schema_revisions (
     CONSTRAINT schema_revisions_step_check CHECK ((step >= 0))
 );
 
-CREATE TABLE public.schema_snapshot_origin (
-    singleton boolean DEFAULT true CONSTRAINT "schema_snapshot_origin_singleton_not_null" NOT NULL,
-    covered_version bigint CONSTRAINT "schema_snapshot_origin_covered_version_not_null" NOT NULL,
-    history_sha256 bytea CONSTRAINT "schema_snapshot_origin_history_sha256_not_null" NOT NULL,
-    schema_sha256 bytea CONSTRAINT "schema_snapshot_origin_schema_sha256_not_null" NOT NULL,
-    receipt_sha256 bytea CONSTRAINT "schema_snapshot_origin_receipt_sha256_not_null" NOT NULL,
-    initialized_at timestamp with time zone DEFAULT now() CONSTRAINT "schema_snapshot_origin_initialized_at_not_null" NOT NULL,
-    CONSTRAINT schema_snapshot_origin_covered_version_check CHECK ((covered_version > 0)),
-    CONSTRAINT schema_snapshot_origin_history_sha256_check CHECK ((octet_length(history_sha256) = 32)),
-    CONSTRAINT schema_snapshot_origin_receipt_sha256_check CHECK ((octet_length(receipt_sha256) = 32)),
-    CONSTRAINT schema_snapshot_origin_schema_sha256_check CHECK ((octet_length(schema_sha256) = 32)),
-    CONSTRAINT schema_snapshot_origin_singleton_check CHECK (singleton)
-);
-
-COMMENT ON TABLE public.schema_snapshot_origin IS 'Atomic snapshot coverage provenance; covered schema_migrations rows are coverage, not individually executed migrations.';
-
 CREATE TABLE public.secret_provider_refs (
     id uuid CONSTRAINT "secret_provider_refs_id_not_null" NOT NULL,
     workspace_id uuid CONSTRAINT "secret_provider_refs_workspace_id_not_null" NOT NULL,
@@ -1268,7 +1245,7 @@ CREATE TABLE public.secret_provider_refs (
     rotated_at timestamp with time zone,
     created_at timestamp with time zone CONSTRAINT "secret_provider_refs_created_at_not_null" NOT NULL,
     updated_at timestamp with time zone CONSTRAINT "secret_provider_refs_updated_at_not_null" NOT NULL,
-    CONSTRAINT secret_provider_refs_key_path_check CHECK ((((length(key_path) >= 1) AND (length(key_path) <= 512)) AND (key_path !~ '(^|/)\.\.(/|$)'::text))),
+    CONSTRAINT secret_provider_refs_key_path_check CHECK (((length(key_path) >= 1) AND (length(key_path) <= 512) AND (key_path !~ '(^|/)\.\.(/|$)'::text))),
     CONSTRAINT secret_provider_refs_provider_check CHECK ((provider ~ '^[A-Za-z0-9._-]{1,64}$'::text)),
     CONSTRAINT secret_provider_refs_state_check CHECK ((state = ANY (ARRAY['active'::text, 'rotating'::text, 'disabled'::text, 'unavailable'::text]))),
     CONSTRAINT secret_provider_refs_version_check CHECK (((length(version) >= 1) AND (length(version) <= 128)))
@@ -1740,14 +1717,8 @@ ALTER TABLE ONLY public.scheduler_leadership
 ALTER TABLE ONLY public.scheduler_leases
     ADD CONSTRAINT scheduler_leases_pkey PRIMARY KEY (lease_name);
 
-ALTER TABLE ONLY public.schema_migrations
-    ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
-
 ALTER TABLE ONLY public.schema_revisions
     ADD CONSTRAINT schema_revisions_pkey PRIMARY KEY (epoch, revision);
-
-ALTER TABLE ONLY public.schema_snapshot_origin
-    ADD CONSTRAINT schema_snapshot_origin_pkey PRIMARY KEY (singleton);
 
 ALTER TABLE ONLY public.secret_provider_refs
     ADD CONSTRAINT secret_provider_refs_pkey PRIMARY KEY (id);

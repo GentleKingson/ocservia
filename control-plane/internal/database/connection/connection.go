@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -111,9 +110,7 @@ func (c *Connection) Close() {
 
 func (c *Connection) Migrate(ctx context.Context, manager *audit.Manager) error {
 	if c.pg != nil {
-		return migrations.Migrate(ctx, c.pg, func(ctx context.Context, tx pgx.Tx, version int64) error {
-			return manager.PreflightAuthenticityMigration(ctx, postgres.WrapTx(tx), version)
-		})
+		return migrations.Migrate(ctx, c.pg)
 	}
 	// MySQL's immutable chain includes its own guarded audit-copy validation.
 	// Normal startup never repairs an interrupted revision implicitly.
