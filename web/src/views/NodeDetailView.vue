@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import {
-  ArrowLeft,
   ArrowUpCircle,
   Ban,
-  Cable,
   CircleStop,
   Download,
   FileCheck2,
-  Gauge,
   KeyRound,
   ListPlus,
   LogOut,
@@ -18,7 +15,6 @@ import {
   UserCheck,
   UserPlus,
   UserX,
-  Users,
 } from "@lucide/vue";
 import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -28,7 +24,6 @@ import { getUserPasswordSealingKey } from "../api/users";
 import { sealUserPassword } from "../features/user-password";
 import AccessibleDialog from "../shared/AccessibleDialog.vue";
 import { formatTimestamp } from "../shared/timestamp";
-import { agentVersionLabel } from "../shared/agent-version";
 
 import { workspaceContext } from "../api/workspace";
 import { useNodeConfiguration } from "../features/configuration/useNodeConfiguration";
@@ -40,6 +35,11 @@ import {
   type UserPolicyForm,
 } from "../adapters/user-policy";
 import UserPolicyFields from "../upstream/UserPolicyFields.vue";
+import NodeDetailHeader from "../components/nodes/NodeDetailHeader.vue";
+import NodeDetailNav from "../components/nodes/NodeDetailNav.vue";
+import NodeDetailSkeleton from "../components/nodes/NodeDetailSkeleton.vue";
+import NodeObservedDetails from "../components/nodes/NodeObservedDetails.vue";
+import NodeStatusSummary from "../components/nodes/NodeStatusSummary.vue";
 import {
   recoveryDialogKind,
   resourceStatusKey,
@@ -234,15 +234,18 @@ onBeforeUnmount(() => {
 });
 watch(routeNodeId, () => void selectRouteNode(), { flush: "sync" });
 
-function pathMode(node: NodeObservedState): string {
-  if (node.path?.mode === "relay") return "relay";
-  if (node.path?.mode === "direct") return "direct";
-  return "unknown";
-}
-
-function pathRtt(node: NodeObservedState): string {
-  return node.path ? String(Math.round(node.path.rttMs)) : "";
-}
+const detailStatus = computed<{
+  key: string;
+  tone: "ok" | "error" | "muted";
+}>(() => {
+  if (detailLoading.value) return { key: "nodeLoading", tone: "muted" };
+  if (fleet.unavailable || detailState.value === "unavailable")
+    return { key: "systemsUnavailable", tone: "error" };
+  if (!currentNode.value) return { key: "notObserved", tone: "muted" };
+  return currentNode.value.freshness === "fresh"
+    ? { key: "latestObservation", tone: "ok" }
+    : { key: currentNode.value.freshness, tone: "muted" };
+});
 
 const upgradeEligible = computed(
   () =>
@@ -470,75 +473,18 @@ async function submitPolicy(): Promise<void> {
 
 <template>
   <main class="overview node-detail-view">
-    <div class="page-heading">
-      <div>
-        <RouterLink class="back-link" to="/nodes"
-          ><ArrowLeft :size="15" />{{ $t("backToNodes") }}</RouterLink
-        >
-        <p>{{ $t("nodeDetail") }}</p>
-        <h1>
-          {{
-            currentNode?.name ??
-            fleet.nodes?.find((node) => node.id === routeNodeId)?.name ??
-            $t("nodeDetail")
-          }}
-        </h1>
-      </div>
-      <span class="health" :class="{ unavailable: fleet.unavailable }"
-        ><i></i
-        >{{
-          $t(
-            detailLoading
-              ? "nodeLoading"
-              : fleet.unavailable || detailState === "unavailable"
-                ? "systemsUnavailable"
-                : currentNode
-                  ? currentNode.freshness === "fresh"
-                    ? "latestObservation"
-                    : currentNode.freshness
-                  : "notObserved",
-          )
-        }}</span
-      >
-    </div>
+    <NodeDetailHeader
+      :title="
+        currentNode?.name ??
+        fleet.nodes?.find((node) => node.id === routeNodeId)?.name ??
+        $t('nodeDetail')
+      "
+      :node-id="routeNodeId"
+      :status="$t(detailStatus.key)"
+      :tone="detailStatus.tone"
+    />
 
-    <div
-      v-if="detailLoading"
-      class="detail-skeleton"
-      aria-busy="true"
-      role="status"
-      :aria-label="$t('nodeLoading')"
-    >
-      <div class="detail-nav" aria-hidden="true">
-        <span
-          v-for="label in [
-            'nodeOverview',
-            'sessions',
-            'usersAndGroups',
-            'configurationSection',
-            'certificatesSection',
-          ]"
-          :key="label"
-          >{{ $t(label) }}</span
-        >
-      </div>
-      <div class="node-detail node-detail-page" aria-hidden="true">
-        <section
-          v-for="label in [
-            'nodeOverview',
-            'sessions',
-            'usersAndGroups',
-            'configurationSection',
-            'certificatesSection',
-          ]"
-          :key="label"
-          class="detail-section skeleton-section"
-        >
-          <h2>{{ $t(label) }}</h2>
-          <div v-for="row in 3" :key="row" class="skeleton-line"></div>
-        </section>
-      </div>
-    </div>
+    <NodeDetailSkeleton v-if="detailLoading" />
     <div v-else-if="detailState === 'not-found'" class="detail-state">
       <Server :size="24" /><span>{{ $t("nodeNotFound") }}</span>
     </div>
@@ -551,162 +497,83 @@ async function submitPolicy(): Promise<void> {
     </div>
 
     <template v-else-if="currentNode">
-      <nav class="detail-nav" :aria-label="$t('nodeDetail')">
-        <a href="#node-overview">{{ $t("nodeOverview") }}</a>
-        <a href="#node-sessions">{{ $t("sessions") }}</a>
-        <a href="#node-users-groups">{{ $t("usersAndGroups") }}</a>
-        <a href="#node-configuration">{{ $t("configurationSection") }}</a>
-        <a href="#node-certificates">{{ $t("certificatesSection") }}</a>
-      </nav>
+      <NodeStatusSummary
+        :node="currentNode"
+        :session-count="fleet.sessions.length"
+      />
+      <NodeDetailNav />
+      <NodeObservedDetails id="node-overview" :node="currentNode">
+        <p
+          v-if="currentNode.freshness === 'stale'"
+          class="state-banner"
+          role="status"
+        >
+          {{ $t("staleNode") }}
+        </p>
+        <div class="node-actions">
+          <button
+            type="button"
+            :disabled="operationBusy || !actionAvailable('service.reload')"
+            :title="actionExplanation('service.reload') || $t('reloadOcserv')"
+            @click="openAction('reload', '', $t('reloadOcserv'))"
+          >
+            <Power :size="15" />{{ $t("reload") }}
+          </button>
+          <button
+            v-if="upgradeEligible"
+            type="button"
+            data-testid="upgrade-agent"
+            :disabled="operationBusy"
+            :title="$t('upgradeAgentTitle')"
+            @click="
+              openAction(
+                'upgradeAgent',
+                currentNode.recommendedAgentVersion ?? '',
+                $t('upgradeAgentTitle'),
+              )
+            "
+          >
+            <ArrowUpCircle :size="15" />{{ $t("upgradeAgent") }}
+          </button>
+        </div>
+        <p
+          v-if="!actionAvailable('service.reload')"
+          class="action-availability-note"
+        >
+          {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
+        </p>
+        <div
+          v-if="fleet.latestOperation"
+          class="operation-status"
+          aria-live="polite"
+        >
+          <span>{{ $t("latestOperation") }}</span>
+          <strong :class="fleet.latestOperation.state">{{
+            $t(operationStatusKey(fleet.latestOperation))
+          }}</strong>
+          <code v-if="fleet.latestOperation.agentUpgradeTargetVersion">{{
+            fleet.latestOperation.agentUpgradeTargetVersion
+          }}</code>
+          <button
+            v-if="
+              fleet.operationTracking &&
+              fleet.latestOperation.state === 'unknown'
+            "
+            type="button"
+            class="icon-command"
+            :title="$t('stopTrackingOperation')"
+            :aria-label="$t('stopTrackingOperation')"
+            @click="fleet.detachOperation"
+          >
+            <CircleStop :size="15" />
+          </button>
+        </div>
+        <p v-if="fleet.operationError" class="operation-error" role="alert">
+          {{ fleet.operationError }}
+        </p>
+      </NodeObservedDetails>
 
       <section class="node-detail node-detail-page">
-        <section id="node-overview" class="detail-section">
-          <header>
-            <div>
-              <span>{{ $t("observedState") }}</span>
-              <h2>{{ currentNode.name }}</h2>
-            </div>
-            <span class="freshness-badge" :class="currentNode.freshness">{{
-              $t(currentNode.freshness)
-            }}</span>
-          </header>
-          <p
-            v-if="currentNode.freshness === 'stale'"
-            class="state-banner"
-            role="status"
-          >
-            {{ $t("staleNode") }}
-          </p>
-          <div class="node-actions">
-            <button
-              type="button"
-              :disabled="operationBusy || !actionAvailable('service.reload')"
-              :title="actionExplanation('service.reload') || $t('reloadOcserv')"
-              @click="openAction('reload', '', $t('reloadOcserv'))"
-            >
-              <Power :size="15" />{{ $t("reload") }}
-            </button>
-            <button
-              v-if="upgradeEligible"
-              type="button"
-              data-testid="upgrade-agent"
-              :disabled="operationBusy"
-              :title="$t('upgradeAgentTitle')"
-              @click="
-                openAction(
-                  'upgradeAgent',
-                  currentNode.recommendedAgentVersion ?? '',
-                  $t('upgradeAgentTitle'),
-                )
-              "
-            >
-              <ArrowUpCircle :size="15" />{{ $t("upgradeAgent") }}
-            </button>
-          </div>
-          <p
-            v-if="!actionAvailable('service.reload')"
-            class="action-availability-note"
-          >
-            {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
-          </p>
-          <div
-            v-if="fleet.latestOperation"
-            class="operation-status"
-            aria-live="polite"
-          >
-            <span>{{ $t("latestOperation") }}</span>
-            <strong :class="fleet.latestOperation.state">{{
-              $t(operationStatusKey(fleet.latestOperation))
-            }}</strong>
-            <code v-if="fleet.latestOperation.agentUpgradeTargetVersion">{{
-              fleet.latestOperation.agentUpgradeTargetVersion
-            }}</code>
-            <button
-              v-if="
-                fleet.operationTracking &&
-                fleet.latestOperation.state === 'unknown'
-              "
-              type="button"
-              class="icon-command"
-              :title="$t('stopTrackingOperation')"
-              :aria-label="$t('stopTrackingOperation')"
-              @click="fleet.detachOperation"
-            >
-              <CircleStop :size="15" />
-            </button>
-          </div>
-          <p v-if="fleet.operationError" class="operation-error" role="alert">
-            {{ fleet.operationError }}
-          </p>
-          <dl>
-            <div>
-              <dt><Cable :size="15" />{{ $t("path") }}</dt>
-              <dd>
-                <span>{{ $t(pathMode(currentNode)) }}</span>
-                <template v-if="currentNode.path">
-                  · {{ pathRtt(currentNode) }} {{ $t("milliseconds") }}
-                </template>
-              </dd>
-            </div>
-            <div>
-              <dt><Gauge :size="15" />{{ $t("ocserv") }}</dt>
-              <dd>{{ currentNode.ocservVersion ?? $t("notAvailable") }}</dd>
-            </div>
-            <div>
-              <dt><Server :size="15" />{{ $t("agent") }}</dt>
-              <dd>
-                {{ currentNode.agentVersion ?? $t("notAvailable") }}
-                <span
-                  class="version-badge"
-                  :class="currentNode.agentVersionState"
-                  >{{ $t(agentVersionLabel(currentNode)) }}</span
-                >
-              </dd>
-            </div>
-            <div>
-              <dt>{{ $t("versionState") }}</dt>
-              <dd>
-                {{ $t(agentVersionLabel(currentNode)) }}
-              </dd>
-            </div>
-            <div>
-              <dt>{{ $t("recommendedAgentVersion") }}</dt>
-              <dd>
-                {{
-                  currentNode.recommendedAgentVersion ||
-                  $t("recommendationNotConfigured")
-                }}
-              </dd>
-            </div>
-            <div>
-              <dt>{{ $t("osRelease") }}</dt>
-              <dd>{{ currentNode.osRelease ?? $t("notAvailable") }}</dd>
-            </div>
-            <div>
-              <dt><Users :size="15" />{{ $t("sessions") }}</dt>
-              <dd>{{ fleet.sessions.length }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t("trust") }}</dt>
-              <dd>{{ $t(currentNode.trustStatus) }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t("connection") }}</dt>
-              <dd>{{ $t(currentNode.connectionState) }}</dd>
-            </div>
-            <div>
-              <dt>{{ $t("lastHeartbeat") }}</dt>
-              <dd>
-                {{
-                  currentNode.lastHeartbeatAt
-                    ? formatTimestamp(currentNode.lastHeartbeatAt)
-                    : $t("notObserved")
-                }}
-              </dd>
-            </div>
-          </dl>
-        </section>
-
         <section id="node-sessions" class="detail-section">
           <header>
             <h2>{{ $t("sessions") }}</h2>

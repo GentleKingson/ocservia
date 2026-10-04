@@ -315,35 +315,6 @@ h1 {
 .node-detail-page {
   overflow: hidden;
 }
-.back-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-bottom: 12px;
-  color: #247653;
-  font-size: 12px;
-  font-weight: 650;
-}
-.detail-nav {
-  display: flex;
-  gap: 4px;
-  margin-top: 20px;
-  overflow-x: auto;
-  border-bottom: 1px solid #dce3e0;
-}
-.detail-nav a {
-  flex: 0 0 auto;
-  padding: 10px 12px;
-  color: #66746f;
-  border-bottom: 2px solid transparent;
-  font-size: 12px;
-  font-weight: 650;
-}
-.detail-nav a:hover,
-.detail-nav a:focus-visible {
-  color: #176d47;
-  border-bottom-color: #5dd69f;
-}
 .detail-section {
   scroll-margin-top: 16px;
   border-bottom: 1px solid #e6ebe8;
@@ -434,53 +405,6 @@ h1 {
 .freshness-badge.stale {
   color: #8c5418 !important;
   background: #fff0dc;
-}
-.version-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 2px 6px;
-  border-radius: 5px;
-  color: #52615c !important;
-  background: #edf1ef;
-  white-space: nowrap;
-  font-size: 11px;
-}
-.version-badge.current {
-  color: #176d47 !important;
-  background: #e3f5eb;
-}
-.version-badge.upgrade_available {
-  color: #8c5418 !important;
-  background: #fff0dc;
-}
-.version-badge.ahead {
-  color: #1f5d7a !important;
-  background: #e2f0f7;
-}
-.node-detail dl {
-  margin: 0;
-  padding: 8px 18px;
-}
-.node-detail dl div {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px 0;
-  border-bottom: 1px solid #edf0ef;
-}
-.node-detail dt {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #6a7772;
-  font-size: 12px;
-}
-.node-detail dd {
-  margin: 0;
-  color: #1d2623;
-  font-size: 12px;
-  text-align: right;
-  overflow-wrap: anywhere;
 }
 .session-list {
   padding: 12px 18px 18px;
@@ -1109,31 +1033,6 @@ h1 {
 }
 .accessible-dialog::backdrop {
   background: rgb(20 28 25 / 48%);
-}
-.detail-skeleton .detail-nav span {
-  flex: 0 0 auto;
-  padding: 10px 12px;
-  font-size: 12px;
-  font-weight: 650;
-  color: #66746f;
-}
-.skeleton-section {
-  padding: 18px;
-  min-height: 160px;
-}
-.skeleton-section h2 {
-  margin: 0 0 18px;
-  font-size: 15px;
-}
-.skeleton-line {
-  height: 12px;
-  margin: 16px 0;
-  width: 75%;
-  border-radius: 4px;
-  background: #e6ebe8;
-}
-.skeleton-line:last-child {
-  width: 50%;
 }
 
 .config-source-note {

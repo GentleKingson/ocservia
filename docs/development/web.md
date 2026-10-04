@@ -232,6 +232,19 @@ columns.
 The development-only `/dev` route renders `components/dev/UiPreview.vue` to
 check primitives next to legacy styles.
 
+### Node detail read areas
+
+`NodeDetailView` keeps the route, Fleet selection, readiness, Workspace
+listener and every write workflow; `components/nodes` only presents the
+selected node. `NodeDetailHeader` returns to the Nodes list entry the user
+came from (keeping its query) or to `/nodes`. `NodeStatusSummary` and
+`NodeObservedDetails` label missing observations instead of leaving them
+blank, and `CopyButton` copies the node ID and identity values, which stay
+selectable when the clipboard is unavailable. `NodeDetailNav` links to the
+existing in-page sections; it does not switch tabs or load data. The only
+added timer is the local clock for relative heartbeat time. Write buttons,
+dialogs, forms and the not-found or unavailable states keep legacy styles.
+
 ## Node detail workflows
 
 NodeDetail composes configuration and certificate workflows during setup.

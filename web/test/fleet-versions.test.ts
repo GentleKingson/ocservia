@@ -111,7 +111,10 @@ describe("version intelligence presentation", () => {
 
   it("shows observed, recommended, and state on node detail", async () => {
     const source = await readFile(
-      resolve(import.meta.dirname, "../src/views/NodeDetailView.vue"),
+      resolve(
+        import.meta.dirname,
+        "../src/components/nodes/NodeObservedDetails.vue",
+      ),
       "utf8",
     );
     expect(source).toContain("recommendedAgentVersion");
