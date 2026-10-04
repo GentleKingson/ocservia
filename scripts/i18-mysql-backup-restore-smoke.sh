@@ -57,24 +57,21 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 docker exec "${source_container}" "${CLIENT}" --protocol=TCP -h127.0.0.1 -uroot -p"${password}" -e 'SELECT 1' >/dev/null
-# Use the current generated metadata definitions for this transport-only fixture.
+# Use the current SQL journal definition for this transport-only fixture.
 # Its deliberately synthetic checksum is not evidence of a valid migration chain;
 # the second database below exercises genuine origin/checksum validation.
 docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e 'CREATE DATABASE ocservia'
 python3 - "${ROOT}" <<'PYSQL' | docker exec -i "${source_container}" "${CLIENT}" -uroot -p"${password}" ocservia
-import json, pathlib, sys
-folder = pathlib.Path(sys.argv[1]) / 'control-plane/internal/database/mysql/mysql'
-sql = (folder / 'schema.sql').read_bytes()
-for statement in json.loads((folder / 'schema.snapshot.json').read_text())['statements']:
-    if statement['kind'] == 'table' and statement['name'] in {
-        'backend_migrations', 'backend_migration_steps', 'backend_schema_revisions',
-        'backend_schema_revision_steps', 'backend_schema_snapshot', 'backend_schema_snapshot_steps'
-    }:
-        print(sql[statement['offset']:statement['offset'] + statement['length']].decode() + ';')
+import pathlib, re, sys
+sql = (pathlib.Path(sys.argv[1]) / 'control-plane/internal/database/mysql/mysql/schema.sql').read_text()
+for block in re.findall(r'-- ocservia:step=.*?-- ocservia:end-step\n', sql, re.S):
+    if '"object":"schema_revisions"' in block:
+        print(block[block.index('CREATE TABLE'):block.index('-- ocservia:end-step')])
+
 PYSQL
 docker exec -i "${source_container}" "${CLIENT}" -uroot -p"${password}" <<'SQL'
 USE ocservia;
-INSERT INTO backend_migrations(singleton,engine,manifest_checksum,version,dirty) VALUES(1,'mysql',REPEAT('0',64),1,FALSE);
+INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,1,REPEAT('0',64),'verified',1,CURRENT_TIMESTAMP(6));
 CREATE TABLE audit_events(id INT PRIMARY KEY,event_hash BINARY(32) NOT NULL,event_mac BINARY(32) NOT NULL);
 INSERT INTO audit_events VALUES(1,REPEAT(0x11,32),REPEAT(0x22,32));
 CREATE TABLE identities(id INT PRIMARY KEY,marker VARCHAR(32));
@@ -160,7 +157,7 @@ fi
 # A checksum-valid dump with dirty provenance must fail the state summary.
 mkdir "${work}/schema-invalid"
 cp -a "${backup_dir}/." "${work}/schema-invalid/"
-printf '\nUSE ocservia; UPDATE backend_migrations SET dirty=TRUE WHERE singleton=1;\n' >>"${work}/schema-invalid/database.sql"
+printf "\nUSE ocservia; UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=2 AND revision=1;\n" >>"${work}/schema-invalid/database.sql"
 (cd "${work}/schema-invalid" && sha256sum database.sql metadata >SHA256SUMS)
 docker exec "${target_container}" "${CLIENT}" -uroot -p"${password}" -e 'DROP DATABASE ocservia'
 set +e
@@ -205,21 +202,18 @@ controller_migrate source >"${ARTIFACT_DIR}/snapshot-initialize.log" 2>&1
 foundation source check >"${ARTIFACT_DIR}/snapshot-source-check.log" 2>&1
 snapshot_checksum="$(foundation source schema-artifact-checksum)"
 source_checksum="$(docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -Nse \
-  "SELECT checksum FROM snapshot_restore.schema_revisions WHERE epoch=1 AND revision=0 AND state='verified'")"
+  "SELECT checksum FROM snapshot_restore.schema_revisions WHERE epoch=2 AND revision=1 AND state='verified'")"
 [[ "${source_checksum}" == "${snapshot_checksum}" ]]
 docker exec "${source_container}" "${CLIENT}" -uroot -p"${password}" -e \
   "INSERT INTO snapshot_restore.identities(id,issuer,subject,created_at,updated_at) VALUES(UNHEX(REPEAT('11',16)),'backup-test','snapshot-restore-marker',0,0); UPDATE snapshot_restore.scheduler_leadership SET lease_until=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',UTC_TIMESTAMP(6))-1000000 WHERE id=1;"
 receipt_query="SELECT CONCAT_WS('|',epoch,revision,checksum,state,step,started_at,verified_at) FROM schema_revisions ORDER BY epoch,revision;
 SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='schema_revisions';
-SELECT CONCAT_WS('|',singleton,artifact_checksum,state,repair_count,started_at,verified_at) FROM backend_schema_snapshot ORDER BY singleton;
-SELECT CONCAT_WS('|',ordinal,name,checksum,state,started_at,verified_at) FROM backend_schema_snapshot_steps ORDER BY ordinal;
-SELECT CONCAT('legacy:',(SELECT COUNT(*) FROM backend_migrations),':',(SELECT COUNT(*) FROM backend_migration_steps),':',(SELECT COUNT(*) FROM backend_schema_revisions),':',(SELECT COUNT(*) FROM backend_schema_revision_steps),':',(SELECT COUNT(*) FROM backend_schema_snapshot),':',(SELECT COUNT(*) FROM backend_schema_snapshot_steps));
-SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='backend_schema_snapshot';"
+SELECT CONCAT('legacy_tables:',COUNT(*)) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('backend_migrations','backend_migration_steps','backend_schema_revisions','backend_schema_revision_steps','backend_schema_snapshot','backend_schema_snapshot_steps','time_migration_decisions','controller_schema_compatibility');"
 receipts() {
   docker exec "$1" "${CLIENT}" -uroot -p"${password}" --database=snapshot_restore -Nse "${receipt_query}"
 }
 receipts "${source_container}" >"${ARTIFACT_DIR}/snapshot-source-receipts.txt"
-grep -Fxq 'legacy:0:0:0:0:0:0' "${ARTIFACT_DIR}/snapshot-source-receipts.txt"
+grep -Fxq 'legacy_tables:0' "${ARTIFACT_DIR}/snapshot-source-receipts.txt"
 set_backup_owner 999:999
 docker run --name "${backup_container}" --network "${network}" \
   -e DATABASE_BACKEND=mysql -e MYSQL_DATABASE=snapshot_restore \
@@ -252,7 +246,7 @@ cmp "${ARTIFACT_DIR}/snapshot-source-receipts.txt" "${ARTIFACT_DIR}/snapshot-res
   "SELECT subject FROM snapshot_restore.identities WHERE id=UNHEX(REPEAT('11',16))")" == snapshot-restore-marker ]]
 runtime_read="$(docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}" \
   --protocol=TCP -h127.0.0.1 -usnapshot_runtime --database=snapshot_restore -Nse \
-  "SELECT subject FROM identities WHERE id=UNHEX(REPEAT('11',16)); SELECT COUNT(*) FROM schema_revisions WHERE epoch=1 AND revision=0 AND state='verified';")"
+  "SELECT subject FROM identities WHERE id=UNHEX(REPEAT('11',16)); SELECT COUNT(*) FROM schema_revisions WHERE epoch=2 AND revision=1 AND state='verified';")"
 [[ "${runtime_read}" == $'snapshot-restore-marker\n1' ]]
 printf '%s\n' "${runtime_read}" >"${ARTIFACT_DIR}/snapshot-runtime-read.log"
 if docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}" \
@@ -269,7 +263,7 @@ if docker exec -e MYSQL_PWD=snapshot-test-only "${target_container}" "${CLIENT}"
   exit 1
 fi
 grep -Fq 'UPDATE command denied' "${ARTIFACT_DIR}/snapshot-runtime-journal-write.log"
-printf 'snapshot_checksum=%s\nsnapshot_backup_id=%s\nvalidation=passed\nreceipts=unchanged\nlegacy_receipts=empty\nruntime_read=passed\nruntime_ddl=denied\n' \
+printf 'snapshot_checksum=%s\nsnapshot_backup_id=%s\nvalidation=passed\nreceipts=unchanged\nlegacy_tables=absent\nruntime_read=passed\nruntime_ddl=denied\n' \
   "${snapshot_checksum}" "${snapshot_backup_id}" >"${ARTIFACT_DIR}/snapshot-restore-summary.txt"
 
 printf 'backend=%s\nbackup_id=%s\nobjects=%s\n' "${ENGINE}" "${backup_id}" "${objects//$'\n'/,}" \

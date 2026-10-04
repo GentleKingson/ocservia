@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Replay immutable MySQL history and compare independently initialized schema.
+# Compare the immutable published checkpoint upgrade with current fresh SQL.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 mode="${1:-check}"
-case "$mode" in generate|check) ;; *) echo 'usage: database-mysql-snapshot.sh [generate|check]' >&2; exit 2 ;; esac
+case "$mode" in check) ;; *) echo 'usage: database-mysql-snapshot.sh [check]' >&2; exit 2 ;; esac
 name="ocservia-mysql-snapshot-$$"
 cleanup() { docker rm -fv "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -25,6 +25,6 @@ SQL
 port="$(docker port "$name" 3306/tcp | sed 's/127.0.0.1://')"
 export PR02_ENGINE=mysql PR02_DSN="root:pr02-isolated-test-root@tcp(127.0.0.1:${port})/ocservia?tls=false"
 unset PR02_SNAPSHOT_DIRECTORY PR02_SNAPSHOT_CHECK
-if [[ "$mode" == generate ]]; then export PR02_SNAPSHOT_DIRECTORY="${ROOT}/control-plane/internal/database/mysql/mysql"; else export PR02_SNAPSHOT_CHECK=yes; fi
+
 cd "${ROOT}/control-plane"
-bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestCurrentSnapshotGeneration
+bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestMySQLCutoverCheckpointEquivalence

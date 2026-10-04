@@ -26,6 +26,8 @@ type finalizeProxy struct {
 	blocked                           atomic.Bool
 	command                           string
 	forward                           bool
+	occurrence                        atomic.Int32
+	seen                              atomic.Int32
 }
 
 func newFinalizeProxy(t *testing.T, address, command string, forward bool) *finalizeProxy {
@@ -35,6 +37,7 @@ func newFinalizeProxy(t *testing.T, address, command string, forward bool) *fina
 		t.Fatal(err)
 	}
 	p := &finalizeProxy{listener: listener, stop: make(chan struct{}), accepted: make(chan struct{}), hit: make(chan struct{}), disconnected: make(chan struct{}), command: command, forward: forward}
+	p.occurrence.Store(1)
 	go func() {
 		defer close(p.accepted)
 		for {
@@ -129,7 +132,7 @@ func (p *finalizeProxy) serve(client net.Conn, address string) {
 		if len(packet) >= 9 && packet[4] == 23 && preparedValid.Load() && binary.LittleEndian.Uint32(packet[5:9]) == preparedID.Load() {
 			matches = true
 		}
-		if matches && p.blocked.CompareAndSwap(false, true) {
+		if matches && p.seen.Add(1) == p.occurrence.Load() && p.blocked.CompareAndSwap(false, true) {
 			blackhole.Store(true)
 			if !p.forward {
 				close(p.hit)

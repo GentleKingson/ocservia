@@ -14,6 +14,17 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/schemaartifact"
 )
 
+type artifactStepMetadata struct {
+	Kind           string   `json:"kind"`
+	Object         string   `json:"object"`
+	Before         string   `json:"before"`
+	After          string   `json:"after"`
+	VerifySQL      string   `json:"verify_sql,omitempty"`
+	CheckBeforeSQL string   `json:"check_before_sql,omitempty"`
+	RoundtripHash  string   `json:"roundtrip_hash,omitempty"`
+	Columns        []string `json:"columns,omitempty"`
+}
+
 const artifactCommentPrefix = "ocservia-schema:"
 
 var artifactCommentSuffix = regexp.MustCompile(` COMMENT='ocservia-schema:[0-9a-f]{64}'$`)
@@ -21,7 +32,7 @@ var artifactCommentSuffix = regexp.MustCompile(` COMMENT='ocservia-schema:[0-9a-
 type mysqlArtifacts struct {
 	schema, upgrade schemaartifact.Artifact
 	metadata        map[string]artifactStepMetadata
-	shapes          []manifest
+	shapes          []schemaShape
 	known           map[string]bool
 	roundtrip       map[string]string
 	journal         schemaartifact.Step
@@ -51,11 +62,11 @@ func decodeArtifactMetadata(s schemaartifact.Step) (artifactStepMetadata, error)
 	}
 	switch m.Kind {
 	case "table", "trigger", "procedure", "function":
-		if m.Before == m.After || m.VerifySQL != "" || m.CheckBeforeSQL != "" || m.Repairable || len(m.Columns) != 0 {
+		if m.Before == m.After || m.VerifySQL != "" || m.CheckBeforeSQL != "" || len(m.Columns) != 0 {
 			return m, ErrChecksum
 		}
 	case "seed":
-		if m.Before != "" || !validHash(m.After) || len(m.Columns) == 0 || m.VerifySQL != "" || m.CheckBeforeSQL != "" || m.Repairable || m.RoundtripHash != "" {
+		if m.Before != "" || !validHash(m.After) || len(m.Columns) == 0 || m.VerifySQL != "" || m.CheckBeforeSQL != "" || m.RoundtripHash != "" {
 			return m, ErrChecksum
 		}
 	case "data":
@@ -163,7 +174,7 @@ func parseMySQLArtifacts(schema, upgrade []byte) (mysqlArtifacts, error) {
 		shapes[i] = before
 	}
 	for _, shape := range shapes {
-		a.shapes = append(a.shapes, a.manifest(shape))
+		a.shapes = append(a.shapes, a.schemaShape(shape))
 	}
 	if p := a.upgrade.Previous; p != nil {
 		if p.Receipt == nil {
@@ -227,14 +238,14 @@ func applyShape(shape map[string]step, m artifactStepMetadata) {
 		shape[objectKey(m)] = step{Name: m.Object, Kind: m.Kind, SchemaHash: m.After}
 	}
 }
-func (a mysqlArtifacts) manifest(shape map[string]step) manifest {
-	m := manifest{artifactOwned: true, fingerprint: a.fingerprint}
+func (a mysqlArtifacts) schemaShape(shape map[string]step) schemaShape {
+	m := schemaShape{fingerprint: a.fingerprint}
 	for _, s := range shape {
 		m.Steps = append(m.Steps, s)
 	}
 	return m
 }
-func shapeOf(m manifest) map[string]step {
+func shapeOf(m schemaShape) map[string]step {
 	out := map[string]step{}
 	for _, s := range m.Steps {
 		out[s.Kind+":"+s.Name] = s
@@ -261,11 +272,11 @@ func (a mysqlArtifacts) fingerprint(definition string) string {
 	return exact
 }
 func loadMySQLArtifacts() (mysqlArtifacts, error) {
-	schema, err := manifests.ReadFile("mysql/schema.sql")
+	schema, err := artifactSources.ReadFile("mysql/schema.sql")
 	if err != nil {
 		return mysqlArtifacts{}, ErrChecksum
 	}
-	upgrade, err := manifests.ReadFile("mysql/upgrade.sql")
+	upgrade, err := artifactSources.ReadFile("mysql/upgrade.sql")
 	if err != nil {
 		return mysqlArtifacts{}, ErrChecksum
 	}
@@ -381,7 +392,7 @@ func (a mysqlArtifacts) admit(rows []mysqlReceipt, repair string) (int64, *mysql
 	return last, nil, false, nil
 }
 func (a mysqlArtifacts) validateShape(ctx context.Context, conn *sql.Conn, shape map[string]step, dynamic bool) error {
-	m := a.manifest(shape)
+	m := a.schemaShape(shape)
 	if err := validateSnapshot(ctx, conn, m); err != nil {
 		return err
 	}
@@ -549,7 +560,7 @@ func (a mysqlArtifacts) executeSteps(ctx context.Context, conn *sql.Conn, r mysq
 		return err
 	}
 	if !fresh {
-		if err := validateRevisionSnapshot(ctx, conn, a.manifest(shape)); err != nil {
+		if err := validateRevisionSnapshot(ctx, conn, a.schemaShape(shape)); err != nil {
 			return err
 		}
 	}
@@ -627,12 +638,7 @@ func (b *Backend) Migrate(ctx context.Context, repair string) (result error) {
 		return err
 	}
 	if journal == "" {
-		// ponytail: only the original bridge window may adopt genuine legacy
-		// receipts. Keep its classification and execution under the same lock.
-		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
-			return ErrChecksum
-		}
-		return b.migrateLegacyOn(ctx, conn, repair)
+		return ErrChecksum
 	}
 	if journal != a.meta(a.journal).After {
 		return ErrSchema
@@ -645,10 +651,7 @@ func (b *Backend) Migrate(ctx context.Context, repair string) (result error) {
 		if count == 1 {
 			return a.initialize(ctx, conn, repair, true)
 		}
-		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
-			return ErrChecksum
-		}
-		return b.migrateLegacyOn(ctx, conn, repair)
+		return ErrChecksum
 	}
 	if err = validateArtifactJournalComment(ctx, conn, rows[0].checksum); err != nil {
 		return err
@@ -725,27 +728,27 @@ func (b *Backend) Migrate(ctx context.Context, repair string) (result error) {
 	}
 	return validateRevisionSnapshot(ctx, conn, a.shapes[len(a.shapes)-1])
 }
-func (b *Backend) artifactSnapshotOn(ctx context.Context, conn *sql.Conn) (manifest, error) {
+func (b *Backend) artifactSnapshotOn(ctx context.Context, conn *sql.Conn) (schemaShape, error) {
 	a, err := loadMySQLArtifacts()
 	if err != nil {
-		return manifest{}, err
+		return schemaShape{}, err
 	}
 	rows, err := readMySQLReceipts(ctx, conn)
 	if err != nil {
-		return manifest{}, err
+		return schemaShape{}, err
 	}
 	if len(rows) == 0 {
-		return manifest{}, ErrChecksum
+		return schemaShape{}, ErrChecksum
 	}
 	if err = validateArtifactJournalComment(ctx, conn, rows[0].checksum); err != nil {
-		return manifest{}, err
+		return schemaShape{}, err
 	}
 	head, r, transition, err := a.admit(rows, "")
 	if err != nil {
-		return manifest{}, err
+		return schemaShape{}, err
 	}
 	if r != nil || transition || head != int64(len(a.upgrade.Revisions)) {
-		return manifest{}, ErrChecksum
+		return schemaShape{}, ErrChecksum
 	}
 	m := a.shapes[head]
 	return m, validateSnapshot(ctx, conn, m)
@@ -779,19 +782,7 @@ func (b *Backend) ValidateSchema(ctx context.Context) (result error) {
 		}
 	}
 	if len(rows) == 0 {
-		if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 {
-			return ErrChecksum
-		}
-		if journal != "" {
-			count, err := databaseObjectCount(ctx, conn)
-			if err != nil {
-				return err
-			}
-			if count == 1 {
-				return ErrDirty
-			}
-		}
-		return b.validateLegacySchemaOn(ctx, conn)
+		return ErrChecksum
 	}
 	m, err := b.artifactSnapshotOn(ctx, conn)
 	if err != nil {

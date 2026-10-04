@@ -13,7 +13,7 @@ import (
 )
 
 // The owner API verifies the complete published ledger before touching data;
-// these tests therefore require the real latest manifest, not candidate DDL.
+// these tests therefore require the real latest schemaShape, not candidate DDL.
 func legacyTelemetryFixture(t *testing.T) (*Backend, Options, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	b, _, options := migrateFixture(t)
@@ -305,9 +305,13 @@ func TestRealTelemetryLegacySchemaRefusal(t *testing.T) {
 	if err := b.QueryRow(ctx, `SELECT state FROM telemetry_legacy_migration WHERE singleton=1`).Scan(&state); err != nil || state != "pending" {
 		t.Fatal("schema refusal rewrote receipt", state, err)
 	}
-	for _, step := range TelemetryLegacyMigrationSteps() {
-		if step.Name == "telemetry_legacy_insert_guard" {
-			if _, err := b.Exec(ctx, step.SQL); err != nil {
+	a, err := loadMySQLArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range a.schema.Baseline.Steps {
+		if a.meta(step).Object == "telemetry_legacy_insert_guard" {
+			if _, err := b.Exec(ctx, string(step.SQL)); err != nil {
 				t.Fatal(err)
 			}
 		}

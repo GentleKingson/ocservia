@@ -3,9 +3,7 @@ package mysql
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -68,82 +66,6 @@ func migrateFixture(t *testing.T) (*Backend, *Backend, Options) {
 	return b, a, o
 }
 
-func TestRealInitializationAndHistory(t *testing.T) {
-	b, _ := historicalFixture(t, false)
-	if err := b.Migrate(context.Background(), ""); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	if err := b.Migrate(ctx, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.ValidateSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// Historical range metadata is not authority to reject current execution.
-	for _, query := range []string{
-		`UPDATE backend_migrations SET version=9001,controller_schema=9001,minimum_controller_schema=9000`,
-		`INSERT INTO controller_schema_compatibility(singleton,current_schema,minimum_compatible_controller_schema) VALUES(1,9001,9000) ON DUPLICATE KEY UPDATE current_schema=9001,minimum_compatible_controller_schema=9000`,
-		`INSERT INTO backend_schema_revisions(version,parent_checksum,manifest_checksum,state,verified_at) VALUES(9001,REPEAT('a',64),REPEAT('b',64),'verified',CURRENT_TIMESTAMP(6))`,
-		`INSERT INTO backend_schema_revision_steps(version,ordinal,name,checksum,state,verified_at) VALUES(9001,1,'opaque_completed_step',REPEAT('c',64),'verified',CURRENT_TIMESTAMP(6))`,
-	} {
-		if _, err := b.Exec(ctx, query); err != nil {
-			t.Fatal(err)
-		}
-	}
-	opaqueReceipts := func() string {
-		t.Helper()
-		var receipt string
-		if err := b.QueryRow(ctx, `SELECT CONCAT_WS('|',m.version,r.version,r.parent_checksum,r.manifest_checksum,r.state,r.repair_count,r.started_at,r.verified_at,s.ordinal,s.name,s.checksum,s.state,s.started_at,s.verified_at) FROM backend_migrations m JOIN backend_schema_revisions r ON r.version=9001 JOIN backend_schema_revision_steps s ON s.version=r.version`).Scan(&receipt); err != nil {
-			t.Fatal(err)
-		}
-		return receipt
-	}
-	before := opaqueReceipts()
-	if err := b.Migrate(ctx, ""); err != nil {
-		t.Fatal("legacy rows became authority after a verified checkpoint", err)
-	}
-	if err := b.PrepareControllerTelemetry(ctx); err != nil {
-		t.Fatal("opaque completed receipts blocked current startup", err)
-	}
-	if err := b.ValidateSchema(ctx); err != nil {
-		t.Fatal("legacy rows became authority after a verified checkpoint", err)
-	}
-	if after := opaqueReceipts(); after != before {
-		t.Fatal("initialization rewrote opaque completed receipts", before, after)
-	}
-	if _, err := b.Exec(ctx, "DELETE FROM schema_revisions"); err != nil {
-		t.Fatal(err)
-	}
-	sum, err := ManifestChecksum(b.engine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, table := range []string{"backend_schema_revisions", "backend_schema_revision_steps"} {
-		if _, err := b.Exec(ctx, "UPDATE "+table+" SET state='running' WHERE version=9001"); err != nil {
-			t.Fatal(err)
-		}
-		if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
-			t.Fatal("unknown unfinished work accepted", table, err)
-		}
-		if err := b.Migrate(ctx, sum); !errors.Is(err, ErrDirty) {
-			t.Fatal("unknown unfinished work repaired without its content", table, err)
-		}
-		if err := b.ValidateSchema(ctx); !errors.Is(err, ErrDirty) {
-			t.Fatal("unfinished legacy work passed validation", table, err)
-		}
-		if _, err := b.Exec(ctx, "UPDATE "+table+" SET state='verified' WHERE version=9001"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := b.Exec(ctx, "UPDATE backend_migrations SET manifest_checksum=REPEAT('0',64)"); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Migrate(ctx, ""); !errors.Is(err, ErrChecksum) {
-		t.Fatal("checksum conflict accepted")
-	}
-}
-
 func TestRealTLS(t *testing.T) {
 	o := testOptions(t)
 	ca := os.Getenv("PR02_TLS_CA_FILE")
@@ -179,31 +101,6 @@ func TestRealConcurrentMigration(t *testing.T) {
 		}
 	}
 }
-func TestRealSchemaDriftRepairRefused(t *testing.T) {
-	b, _ := historicalFixture(t, false)
-	if err := b.Migrate(context.Background(), ""); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	// This fixture exercises an interrupted legacy bridge before its checkpoint.
-	if _, err := b.Exec(ctx, "DELETE FROM schema_revisions"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Exec(ctx, "ALTER TABLE workspaces ADD COLUMN unexpected INT"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Exec(ctx, "UPDATE backend_schema_revisions SET state='running' WHERE version=?", latestRevisionVersion); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
-		t.Fatal("dirty history accepted", err)
-	}
-	sum, _ := ManifestChecksum(b.engine)
-	if err := b.Migrate(ctx, sum); !errors.Is(err, ErrSchema) {
-		t.Fatal("repair adopted foreign schema", err)
-	}
-}
-
 func TestCrashChild(t *testing.T) {
 	if os.Getenv("PR02_CRASH_CHILD") != "yes" {
 		t.Skip("subprocess only")
@@ -213,92 +110,11 @@ func TestCrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	if os.Getenv("PR02_CRASH_LEGACY") == "yes" {
-		ctx := context.Background()
-		conn, lock, err := migrationConnection(ctx, b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer releaseMigrationConnection(conn, lock)
-		m, sum, err := loadManifest(b.engine)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = b.migrateBaseline(ctx, conn, m, sum, ""); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
+
 	if err = b.Migrate(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 }
-func TestRealCrashAndRepair(t *testing.T) {
-	b, admin, o := fixture(t)
-	ctx := context.Background()
-	for _, ddl := range []string{metadataDDL, stepsDDL, "CREATE TRIGGER pause_verification BEFORE UPDATE ON backend_migration_steps FOR EACH ROW SET @pause= SLEEP(60)"} {
-		if _, err := b.Exec(ctx, ddl); err != nil {
-			t.Fatal(err)
-		}
-	}
-	child := exec.Command(os.Args[0], "-test.run=^TestCrashChild$", "-test.timeout=90s")
-	child.Env = append(os.Environ(), "PR02_CRASH_CHILD=yes", "PR02_CRASH_LEGACY=yes", "PR02_DSN="+o.DSN)
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer child.Process.Kill()
-	m, _, _ := loadManifest(b.engine)
-	deadline := time.Now().Add(15 * time.Second)
-	observed := false
-	for time.Now().Before(deadline) {
-		var count int
-		err := b.QueryRow(ctx, "SELECT count(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?", m.Steps[0].Name).Scan(&count)
-		if err == nil && count == 1 {
-			observed = true
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if !observed {
-		t.Fatal("child did not reach committed DDL")
-	}
-	var name string
-	if err := b.QueryRow(ctx, "SELECT DATABASE()").Scan(&name); err != nil {
-		t.Fatal(err)
-	}
-	var connection int64
-	if err := b.QueryRow(ctx, "SELECT IS_USED_LOCK(?)", "ocservia:"+digest([]byte(name))[:48]).Scan(&connection); err != nil {
-		t.Fatal(err)
-	}
-	if err := child.Process.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	_ = child.Wait()
-	// Ensure the killed client's server-side sleep/session has also terminated.
-	if _, err := admin.pool.ExecContext(ctx, fmt.Sprintf("KILL CONNECTION %d", connection)); err != nil {
-		var serverError *driver.MySQLError
-		if !errors.As(err, &serverError) || serverError.Number != 1094 {
-			t.Fatal(safeError(err))
-		}
-	}
-	if _, err := b.Exec(ctx, "DROP TRIGGER pause_verification"); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
-		t.Fatalf("crash not dirty: %v", err)
-	}
-	if err := b.Migrate(ctx, "wrong"); !errors.Is(err, ErrChecksum) {
-		t.Fatal("invalid repair token")
-	}
-	sum, _ := ManifestChecksum(b.engine)
-	if err := b.Migrate(ctx, sum); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.ValidateSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestRealCancellationAndUnlockFailure(t *testing.T) {
 	b, _, _ := fixture(t)
 	ctx := context.Background()
@@ -391,7 +207,7 @@ func TestRealSessionAndLocks(t *testing.T) {
 }
 
 func TestRealPrivileges(t *testing.T) {
-	b, o := historicalFixture(t, false)
+	b, _, o := migrateFixture(t)
 	if err := b.Migrate(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
@@ -448,23 +264,23 @@ func TestRealPrivileges(t *testing.T) {
 			t.Fatal("database-wide DELETE accepted")
 		}
 	})
-	for _, table := range []string{"backend_schema_revisions", "backend_schema_revision_steps"} {
+	for _, table := range []string{"schema_revisions"} {
 		var count int
 		if err := runtime.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil {
 			t.Fatalf("runtime cannot read revision history: %v", err)
 		}
-		for _, query := range []string{"UPDATE " + table + " SET state='verified'", "DELETE FROM " + table, "INSERT INTO " + table + "(version) VALUES(999)"} {
+		for _, query := range []string{"UPDATE " + table + " SET state='verified'", "DELETE FROM " + table, "INSERT INTO " + table + "(epoch) VALUES(999)"} {
 			if _, err := runtime.Exec(ctx, query); !errors.Is(err, database.ErrPermission) {
 				t.Fatalf("runtime can mutate revision history: %v", err)
 			}
 		}
 	}
-	for _, query := range []string{"SELECT * FROM backend_migrations", "UPDATE local_auth_bootstrap SET completion_pending=completion_pending WHERE singleton=0", "UPDATE transport_events SET transport_cursor_valid=transport_cursor_valid WHERE 1=0"} {
+	for _, query := range []string{"SELECT * FROM schema_revisions", "UPDATE local_auth_bootstrap SET completion_pending=completion_pending WHERE singleton=0", "UPDATE transport_events SET transport_cursor_valid=transport_cursor_valid WHERE 1=0"} {
 		if _, err := runtime.Exec(ctx, query); err != nil {
 			t.Fatalf("allowed operation denied: %v", err)
 		}
 	}
-	for _, query := range []string{"UPDATE backend_migrations SET dirty=FALSE", "DELETE FROM backend_migration_steps", "CREATE TABLE forbidden(id INT)", "ALTER TABLE workspaces ADD COLUMN forbidden INT", "TRUNCATE TABLE audit_events", "UPDATE audit_events SET reason='forbidden'", "DELETE FROM audit_checkpoints", "UPDATE local_auth_bootstrap SET identity_id=NULL", "UPDATE transport_events SET payload=0x00", "GRANT SELECT ON workspaces TO 'ocservia_maintenance'@'%'"} {
+	for _, query := range []string{"UPDATE schema_revisions SET checksum=checksum", "DELETE FROM schema_revisions", "CREATE TABLE forbidden(id INT)", "ALTER TABLE workspaces ADD COLUMN forbidden INT", "TRUNCATE TABLE audit_events", "UPDATE audit_events SET reason='forbidden'", "DELETE FROM audit_checkpoints", "UPDATE local_auth_bootstrap SET identity_id=NULL", "UPDATE transport_events SET payload=0x00", "GRANT SELECT ON workspaces TO 'ocservia_maintenance'@'%'"} {
 		if _, err := runtime.Exec(ctx, query); !errors.Is(err, database.ErrPermission) {
 			t.Fatalf("forbidden operation not denied: %s: %v", strings.Fields(query)[0], err)
 		}
@@ -483,7 +299,7 @@ func TestRealPrivileges(t *testing.T) {
 	if _, err = maintenance.Exec(ctx, "DELETE FROM audit_events"); !errors.Is(err, database.ErrPermission) {
 		t.Fatal("maintenance can rewrite audit")
 	}
-	if _, err = maintenance.Exec(ctx, "UPDATE backend_migrations SET dirty=FALSE"); !errors.Is(err, database.ErrPermission) {
+	if _, err = maintenance.Exec(ctx, "UPDATE schema_revisions SET checksum=checksum"); !errors.Is(err, database.ErrPermission) {
 		t.Fatal("maintenance can repair migration metadata")
 	}
 }
