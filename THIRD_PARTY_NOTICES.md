@@ -12,6 +12,12 @@ license texts are recorded by `Cargo.lock` and the generated dependency SBOM.
 
 The project itself is licensed under `Apache-2.0`.
 
+The Web console includes UI component source adapted from shadcn-vue
+commit `b251d9fd92aa496495e127137a7734704fb34a29`, licensed under the MIT
+License. Copyright (c) 2023 unovue. The full notice is in
+`web/src/components/ui/LICENSE.shadcn-vue`; provenance and local changes are
+recorded in `docs/development/web.md`.
+
 The Controller embeds Django 5.2.6's common/breached password blocklist,
 from commit `75c4403f07b8ad25893f7832dbe8fc6814b53b2d`, under BSD-3-Clause.
 Copyright (c) Django Software Foundation and individual contributors.

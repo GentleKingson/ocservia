@@ -1,0 +1,96 @@
+/*
+ * Cascade order owner. Legacy page styles live in their own layer so that
+ * new UI utilities win by layer order instead of selector specificity or
+ * `!important`. Tailwind's global Preflight is intentionally not imported:
+ * the `ui-base` layer resets only elements rendered by components/ui.
+ * Unlayered rules (Vue scoped styles) still beat every layer here.
+ */
+@layer theme, legacy, ui-base, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "./styles.css" layer(legacy);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+
+/* Only scan new UI sources so legacy class names never become utilities. */
+@source "./components";
+
+/* Dark mode is not a product capability yet; never follow the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --radius: 0.5rem;
+  --background: #f6f7f9;
+  --foreground: #111827;
+  --card: #ffffff;
+  --card-foreground: #111827;
+  --popover: #ffffff;
+  --popover-foreground: #111827;
+  --primary: #2f5f9e;
+  --primary-foreground: #ffffff;
+  --secondary: #eef0f3;
+  --secondary-foreground: #1f2937;
+  --muted: #f1f3f5;
+  --muted-foreground: #5b6472;
+  --accent: #eef0f3;
+  --accent-foreground: #111827;
+  --destructive: #b42318;
+  --border: #e3e6ea;
+  --input: #c2c8d0;
+  --ring: #2f5f9e;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/*
+ * The subset of Preflight that components/ui relies on, scoped by the
+ * `data-slot` marker every primitive renders. It also applies to content a
+ * primitive teleports to <body>. Zero specificity keeps utilities in charge.
+ */
+@layer ui-base {
+  :where([data-slot]),
+  :where([data-slot])::before,
+  :where([data-slot])::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid var(--color-border);
+  }
+  :where(button[data-slot], input[data-slot]) {
+    font: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+    background-color: transparent;
+    border-radius: 0;
+    appearance: none;
+  }
+  :where(button[data-slot]:not(:disabled)) {
+    cursor: pointer;
+  }
+  :where(table[data-slot="table"]) {
+    border-collapse: collapse;
+    text-indent: 0;
+  }
+}

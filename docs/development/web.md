@@ -36,9 +36,10 @@ The existing [`eslint.config.ts`](../../web/eslint.config.ts) uses ESLint's core
 configuration/certificate feature directories. These modules must not directly
 import views, `vue-router`, `shared/router` or the concrete `shared/fleet` and
 `shared/localSlice` stores. API modules must not import feature workflows either.
-Relative imports at different depths, static re-exports and type-only imports
-are subject to the same restrictions. There are currently no source aliases in
-the Web TypeScript/Vite configuration.
+Relative imports at different depths, `@/` alias imports, static re-exports and
+type-only imports are subject to the same restrictions. The `@/` alias maps to
+`web/src` in both `tsconfig.json` and `vite.config.ts` (Vitest reuses the Vite
+configuration); keep the two definitions identical.
 
 Generated clients/types, domain APIs and Workspace remain legitimate
 dependencies. In particular, `api/transport.ts` may call `shared/session.ts`;
@@ -119,6 +120,64 @@ authority, headers, signals, mutation fences and artifact downloads. The
 existing browser runner covers 12 focused login/Workspace/SSE regressions
 against the production build, including late responses and rapid switches.
 It is not full E2E or database validation.
+
+## UI components and styles
+
+The console is migrating to [shadcn-vue](https://www.shadcn-vue.com) primitives
+built on [Reka UI](https://reka-ui.com) and Tailwind CSS v4. Legacy pages keep
+their existing markup until they are migrated one consumer at a time.
+
+### Cascade
+
+`web/src/main.css` is the only CSS entry and owns the layer order
+`theme, legacy, ui-base, utilities`:
+
+- `styles.css` is imported into the `legacy` layer, so utilities win over
+  legacy rules by layer order rather than specificity or `!important`.
+  Unlayered Vue scoped styles (`LoginView`, `ApprovalsView`) still win over
+  every layer.
+- Tailwind's global Preflight is not imported. `ui-base` applies the reset the
+  primitives need only to elements carrying the `data-slot` marker, which also
+  covers content a primitive teleports to `<body>`. Do not render primitives
+  inside legacy containers whose descendant selectors would still style them.
+- Utilities are generated only from `web/src/components` (`source(none)` plus
+  `@source`), so legacy class names never turn into utilities. Before adding
+  another `@source` path, check its class names against the generated
+  utilities.
+- Theme tokens are plain custom properties on `:root`, mapped through
+  `@theme inline`. The `dark` variant only matches an explicit `.dark` class;
+  dark mode is not a product capability and must not follow the OS setting.
+
+Tailwind v4 output targets Chrome 111, Safari 16.4 and Firefox 128. Production
+pages do not consume primitives yet; decide the supported browser range before
+the first production consumer.
+
+### Component sources
+
+`web/components.json` records the shadcn-vue CLI settings. Primitives are
+project-owned source in `web/src/components/ui`; a CLI run is not an upgrade.
+Compare upstream changes by hand (keyboard behavior, ARIA, Portal and props)
+and keep the local modifications below. When the CLI generates icon imports
+from `lucide-vue-next`, rewrite them to the existing `@lucide/vue` package.
+
+| Component | Upstream | Local modifications |
+| --- | --- | --- |
+| `button` | `apps/v4/registry/new-york-v4/ui/button` | Prettier; `asChild` defaults to `false` for `exactOptionalPropertyTypes` |
+| `badge` | `apps/v4/registry/new-york-v4/ui/badge` | Prettier; renders `span` by default; binds `as`/`asChild` instead of `reactiveOmit` from `@vueuse/core` |
+| `input` | `apps/v4/registry/new-york-v4/ui/input` | Prettier; `defineModel` replaces `useVModel` from `@vueuse/core`; `defaultValue` prop removed |
+| `table` | `apps/v4/registry/new-york-v4/ui/table` | Prettier; `TableEmpty` and `TableFooter` not imported |
+| `lib/utils.ts` | `apps/v4/registry/new-york-v4/lib/utils.ts` | Prettier |
+
+All sources were taken on 2026-10-04 from `unovue/shadcn-vue` commit
+`b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) and are MIT licensed;
+the notice is kept in `web/src/components/ui/LICENSE.shadcn-vue`. Runtime
+dependencies are pinned in `web/package.json`: `reka-ui`,
+`class-variance-authority`, `clsx` and `tailwind-merge`; build-time
+`tailwindcss` and `@tailwindcss/vite`. Primitives do not call APIs, read the
+Workspace or decide permissions.
+
+The development-only `/dev` route renders `components/dev/UiPreview.vue` to
+check primitives next to legacy styles.
 
 ## Node detail workflows
 

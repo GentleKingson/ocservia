@@ -1,7 +1,7 @@
 import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 
-// Match relative imports at any depth; the project has no source aliases.
+// Match relative imports at any depth and the `@/` source alias.
 const pageOwnedImports = {
   regex:
     "(^|/)(views(/|$)|shared/(router|fleet|localSlice)(\\.[^/]+)?$)|^vue-router(/|$)",

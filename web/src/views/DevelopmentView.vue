@@ -3,6 +3,7 @@ import type { SimulationScenario } from "@ocservia/api-client";
 import { Clock3, Play, Server, Workflow } from "@lucide/vue";
 import { onMounted, ref } from "vue";
 
+import UiPreview from "../components/dev/UiPreview.vue";
 import { useLocalSliceStore } from "../shared/localSlice";
 import { useReadinessStore } from "../shared/readiness";
 
@@ -130,5 +131,6 @@ function timeLabel(value: string): string {
         </li>
       </ol>
     </section>
+    <UiPreview />
   </main>
 </template>
