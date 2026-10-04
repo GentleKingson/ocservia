@@ -330,6 +330,36 @@ cursor and decision code; only the presentation changed.
 links, used and expired approvals, a decision conflict, audit permission,
 retry, empty and filter states.
 
+### Overview
+
+`OverviewView` keeps the stores' loading, refresh and Workspace reset code;
+it only arranges the existing numbers into a summary. Each card names its
+source in `components/overview/MetricCard.vue`, and
+`features/overview/source-state.ts` decides whether a value is loading,
+unavailable, stale (an earlier load is shown after a failed refresh) or ready.
+
+| Card                       | Source                                                                     |
+| -------------------------- | -------------------------------------------------------------------------- |
+| Control plane              | Console readiness check; not a node online rate                            |
+| Nodes                      | The Workspace's complete node snapshot in `shared/fleet.ts`                |
+| Observed sessions          | Sum of each node's last reported `sessionCount`; never called live users   |
+| Active operations          | Workspace-wide active and unknown counts; failed counts only the latest 20 |
+| Last observed direct paths | Each node's last observed path, offline nodes included                     |
+| Agent versions             | Current, update available, ahead and unknown; a missing version is unknown |
+
+- Fleet status shows when the node snapshot was last replaced, recent
+  operations and events show when they last loaded, and each says so when a
+  refresh failed and older data is shown. The sessions card also counts nodes
+  that report stale data.
+- The page lists the latest 12 operations and 12 events; the store still keeps
+  50 events and refreshes them incrementally. Offline or stale nodes link to
+  their detail.
+- No trends or charts: the console has no history behind them.
+
+`test/overview.test.ts` covers stale and unknown sources and the source-state
+rules; `e2e/overview.spec.ts` covers the cards, the failed window, stale
+reports and a Workspace switch.
+
 ## Node detail workflows
 
 NodeDetail composes configuration and certificate workflows during setup.

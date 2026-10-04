@@ -115,6 +115,23 @@ export const i18n = createI18n({
       navigationDescription: "Pages in this console",
       skipToContent: "Skip to main content",
       fleetStatus: "Fleet status",
+      observedSessions: "Observed sessions",
+      overviewActiveOperations: "Active operations",
+      overviewSourceReadiness:
+        "Console readiness check. Not a node online rate.",
+      overviewSourceNodes: "All nodes in this workspace's latest snapshot.",
+      overviewSourceSessions:
+        "Sum of each node's last reported session count; not live users.",
+      overviewStaleReports: "Nodes with stale data: {count}.",
+      overviewSourceOperations: "Active and unknown cover the whole workspace.",
+      overviewRecentFailed: "{count} failed in the latest {window}",
+      overviewSourcePaths: "Last observed path per node, not current traffic.",
+      overviewSourceAgents:
+        "Compared with the recommended version; missing versions count as unknown.",
+      overviewUpdatedAt: "Updated {time}",
+      overviewStaleSource: "Refresh failed. Showing the last successful data.",
+      overviewRecentScope: "Latest {count}",
+      viewAllOperations: "View all operations",
       liveTelemetry: "Live telemetry",
       action_missing_capability:
         "This node has no approved capability for this action.",
