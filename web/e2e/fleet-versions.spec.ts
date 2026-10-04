@@ -175,7 +175,7 @@ test("shows observed, recommended, and state on node detail", async ({
     has: page.getByText("Agent", { exact: true }),
   });
   await expect(agentRow).toContainText("0.1.1");
-  await expect(agentRow.locator(".version-badge")).toHaveText(
+  await expect(agentRow.getByTestId("agent-version-state")).toHaveText(
     "Update available",
   );
   await expect(
