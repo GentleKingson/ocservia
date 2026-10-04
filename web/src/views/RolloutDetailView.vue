@@ -126,7 +126,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="overview">
+  <main>
     <RouterLink
       :to="{ name: 'operations' }"
       class="text-primary mb-4 inline-flex items-center gap-1.5 text-sm underline-offset-4 hover:underline"

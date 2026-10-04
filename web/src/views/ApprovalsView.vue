@@ -313,7 +313,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="overview">
+  <main>
     <PageHeader :eyebrow="$t('workspace')" :title="$t('approvals')">
       <template #actions>
         <Button

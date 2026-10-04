@@ -9,10 +9,13 @@ import { useRoute, useRouter } from "vue-router";
 import { createAgentRollout } from "../api/agents";
 import { workspaceChangedEvent } from "../api/workspace";
 import DataState from "../components/common/DataState.vue";
+import FormField from "../components/common/FormField.vue";
+import OperationDialog from "../components/common/OperationDialog.vue";
 import PageHeader from "../components/common/PageHeader.vue";
 import NodeTableToolbar from "../components/nodes/NodeTableToolbar.vue";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
 import {
   Table,
   TableBody,
@@ -21,6 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table";
+import { Textarea } from "../components/ui/textarea";
 import {
   countFilterValues,
   filterNodes,
@@ -174,7 +178,7 @@ async function submitRollout(): Promise<void> {
 </script>
 
 <template>
-  <main class="overview">
+  <main>
     <PageHeader :eyebrow="$t('fleet')" :title="$t('nodes')">
       <template #actions>
         <span
@@ -493,31 +497,32 @@ async function submitRollout(): Promise<void> {
       </section>
     </template>
 
-    <div
+    <OperationDialog
       v-if="rolloutDialog"
-      class="dialog-backdrop"
-      @click.self="rolloutDialog = false"
+      :title="$t('rollingUpgradeTitle')"
+      :subject="rolloutTarget"
+      :error="rolloutError"
+      @close="rolloutDialog = false"
+      @submit="submitRollout"
     >
-      <form class="operation-dialog" @submit.prevent="submitRollout">
-        <header>
-          <h2>{{ $t("rollingUpgradeTitle") }}</h2>
-          <code>{{ rolloutTarget }}</code>
-        </header>
-        <label for="rollout-target">{{ $t("targetVersion") }}</label>
-        <output id="rollout-target" class="read-only-value">{{
+      <FormField id="rollout-target" :label="$t('targetVersion')">
+        <output id="rollout-target" class="font-mono text-sm">{{
           rolloutTarget
         }}</output>
-        <label for="rollout-nodes">{{ $t("selectedNodes") }}</label>
-        <output id="rollout-nodes" class="read-only-value"
+      </FormField>
+      <FormField id="rollout-nodes" :label="$t('selectedNodes')">
+        <output id="rollout-nodes" class="text-sm break-words"
           >{{ selectedNodes.length }}:
           {{ selectedNodes.map((node) => node.name).join(", ") }}</output
         >
-        <label for="rollout-canary">{{ $t("canary") }}</label>
-        <output id="rollout-canary" class="read-only-value">{{
+      </FormField>
+      <FormField id="rollout-canary" :label="$t('canary')">
+        <output id="rollout-canary" class="text-sm">{{
           $t("canaryOneNode")
         }}</output>
-        <label for="rollout-batch-size">{{ $t("batchSize") }}</label>
-        <input
+      </FormField>
+      <FormField id="rollout-batch-size" :label="$t('batchSize')">
+        <Input
           id="rollout-batch-size"
           v-model.number="rolloutBatchSize"
           type="number"
@@ -525,42 +530,37 @@ async function submitRollout(): Promise<void> {
           max="20"
           required
         />
-        <label for="rollout-reason">{{ $t("reason") }}</label>
-        <textarea
+      </FormField>
+      <FormField id="rollout-reason" :label="$t('reason')">
+        <Textarea
           id="rollout-reason"
           v-model="rolloutReason"
           maxlength="512"
           required
-        ></textarea>
-        <label for="rollout-approval">{{ $t("approvalId") }}</label>
-        <input
+        />
+      </FormField>
+      <FormField id="rollout-approval" :label="$t('approvalId')">
+        <Input
           id="rollout-approval"
           v-model="rolloutApprovalId"
           autocomplete="off"
           required
         />
-        <p v-if="rolloutError" class="page-error" role="alert">
-          {{ rolloutError }}
-        </p>
-        <footer>
-          <button type="button" @click="rolloutDialog = false">
-            {{ $t("cancel") }}
-          </button>
-          <button
-            type="submit"
-            class="primary"
-            :disabled="
-              rolloutStarting ||
-              !rolloutReason.trim() ||
-              !rolloutApprovalId.trim() ||
-              rolloutBatchSize < 1 ||
-              rolloutBatchSize > 20
-            "
-          >
-            {{ $t(rolloutStarting ? "rolloutStarting" : "startRollout") }}
-          </button>
-        </footer>
-      </form>
-    </div>
+      </FormField>
+      <template #footer>
+        <Button
+          type="submit"
+          :disabled="
+            rolloutStarting ||
+            !rolloutReason.trim() ||
+            !rolloutApprovalId.trim() ||
+            rolloutBatchSize < 1 ||
+            rolloutBatchSize > 20
+          "
+        >
+          {{ $t(rolloutStarting ? "rolloutStarting" : "startRollout") }}
+        </Button>
+      </template>
+    </OperationDialog>
   </main>
 </template>

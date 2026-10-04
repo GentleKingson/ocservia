@@ -193,7 +193,6 @@ export const i18n = createI18n({
       configRevision: "Configuration revision",
       observedAt: "Observed at",
       architecture: "Architecture",
-      identity: "Identity",
       copyValue: "Copy {label}",
       copied: "Copied",
       copyFailed: "Copy failed",

@@ -3,7 +3,10 @@ import type { SimulationScenario } from "@ocservia/api-client";
 import { Clock3, Play, Server, Workflow } from "@lucide/vue";
 import { onMounted, ref } from "vue";
 
-import UiPreview from "../components/dev/UiPreview.vue";
+import PageHeader from "../components/common/PageHeader.vue";
+import SectionCard from "../components/common/SectionCard.vue";
+import StatusBadge from "../components/common/StatusBadge.vue";
+import { Button } from "../components/ui/button";
 import { useLocalSliceStore } from "../shared/localSlice";
 import { useReadinessStore } from "../shared/readiness";
 
@@ -47,90 +50,123 @@ function timeLabel(value: string): string {
 </script>
 
 <template>
-  <main class="overview">
-    <div class="page-heading">
-      <div>
-        <p>{{ $t("workspace") }}</p>
-        <h1>{{ $t("development") }}</h1>
-      </div>
-      <span class="health" :class="{ unavailable: !readiness.isReady }"
-        ><i></i
-        >{{ $t(readiness.isReady ? "allSystems" : "systemsUnavailable") }}</span
+  <main>
+    <PageHeader :eyebrow="$t('workspace')" :title="$t('development')">
+      <template #actions>
+        <StatusBadge
+          :tone="readiness.isReady ? 'success' : 'danger'"
+          :label="$t(readiness.isReady ? 'allSystems' : 'systemsUnavailable')"
+        />
+      </template>
+    </PageHeader>
+    <section
+      class="mb-6 grid gap-3.5 md:grid-cols-3"
+      aria-label="Platform status"
+    >
+      <article
+        v-for="metric in [
+          {
+            label: 'controlPlane',
+            value: $t(readiness.isReady ? 'ready' : 'unavailable'),
+            icon: Server,
+          },
+          {
+            label: 'activeNodes',
+            value: slice.activeNodes,
+            icon: Workflow,
+            testid: 'active-nodes',
+          },
+          {
+            label: 'pendingOperations',
+            value: slice.pendingOperations,
+            icon: Clock3,
+            testid: 'pending-operations',
+          },
+        ]"
+        :key="metric.label"
+        class="bg-card border-border flex items-start justify-between gap-3 rounded-lg border p-4"
       >
-    </div>
-    <section class="metrics" aria-label="Platform status">
-      <article>
-        <div>
-          <span>{{ $t("controlPlane") }}</span
-          ><strong>{{
-            $t(readiness.isReady ? "ready" : "unavailable")
-          }}</strong>
+        <div class="grid gap-2">
+          <span class="text-muted-foreground text-sm">{{
+            $t(metric.label)
+          }}</span>
+          <strong
+            class="text-2xl leading-none font-semibold"
+            :data-testid="metric.testid"
+            >{{ metric.value }}</strong
+          >
         </div>
-        <Server :size="20" />
-      </article>
-      <article>
-        <div>
-          <span>{{ $t("activeNodes") }}</span
-          ><strong data-testid="active-nodes">{{ slice.activeNodes }}</strong>
-        </div>
-        <Workflow :size="20" />
-      </article>
-      <article>
-        <div>
-          <span>{{ $t("pendingOperations") }}</span
-          ><strong data-testid="pending-operations">{{
-            slice.pendingOperations
-          }}</strong>
-        </div>
-        <Clock3 :size="20" />
+        <component
+          :is="metric.icon"
+          class="text-muted-foreground size-5 shrink-0"
+          aria-hidden="true"
+        />
       </article>
     </section>
-    <section class="activity-panel">
-      <header class="activity-header">
-        <h2>{{ $t("recentActivity") }}</h2>
-        <div class="probe-controls">
-          <div class="segmented" :aria-label="$t('probeMode')">
-            <button
-              v-for="choice in [
-                'normal',
-                'duplicate',
-                'error',
-                'disconnect',
-              ] as const"
-              :key="choice"
-              type="button"
-              :class="{ active: mode === choice }"
-              @click="mode = choice"
-            >
-              {{ $t(choice) }}
-            </button>
-          </div>
-          <button
-            class="run-probe"
+    <SectionCard :title="$t('recentActivity')">
+      <template #actions>
+        <div
+          class="border-border flex overflow-hidden rounded-md border"
+          role="group"
+          :aria-label="$t('probeMode')"
+        >
+          <Button
+            v-for="choice in [
+              'normal',
+              'duplicate',
+              'error',
+              'disconnect',
+            ] as const"
+            :key="choice"
             type="button"
-            :disabled="slice.running"
-            :title="$t('runProbe')"
-            :aria-label="$t('runProbe')"
-            data-testid="run-probe"
-            @click="slice.run(scenarios[mode])"
+            size="sm"
+            :variant="mode === choice ? 'default' : 'ghost'"
+            class="border-border rounded-none border-r text-xs last:border-r-0"
+            :aria-pressed="mode === choice"
+            @click="mode = choice"
           >
-            <Play :size="16" fill="currentColor" />
-          </button>
+            {{ $t(choice) }}
+          </Button>
         </div>
-      </header>
-      <div v-if="slice.events.length === 0" class="empty-state">
-        <Clock3 :size="24" /><span>{{ $t("noActivity") }}</span>
+        <Button
+          type="button"
+          size="icon-sm"
+          :disabled="slice.running"
+          :title="$t('runProbe')"
+          :aria-label="$t('runProbe')"
+          data-testid="run-probe"
+          @click="slice.run(scenarios[mode])"
+        >
+          <Play fill="currentColor" aria-hidden="true" />
+        </Button>
+      </template>
+      <div
+        v-if="slice.events.length === 0"
+        class="text-muted-foreground grid min-h-40 place-content-center justify-items-center gap-2.5 text-sm"
+      >
+        <Clock3 class="size-6" aria-hidden="true" /><span>{{
+          $t("noActivity")
+        }}</span>
       </div>
-      <ol v-else class="event-list" data-testid="event-list">
-        <li v-for="event in [...slice.events].reverse()" :key="event.id">
-          <span class="event-type">{{ $t(eventLabel(event.type)) }}</span>
+      <ol
+        v-else
+        class="m-0 max-h-80 list-none overflow-auto p-0"
+        data-testid="event-list"
+      >
+        <li
+          v-for="event in [...slice.events].reverse()"
+          :key="event.id"
+          class="border-border text-muted-foreground grid min-h-12 grid-cols-[minmax(92px,1fr)_auto] items-center gap-4 border-b text-xs last:border-b-0 md:grid-cols-[minmax(110px,1fr)_minmax(80px,1fr)_auto]"
+        >
+          <span class="text-foreground font-semibold">{{
+            $t(eventLabel(event.type))
+          }}</span>
           <code>{{ event.nodeId.slice(0, 8) }}</code>
-          <time :datetime="event.occurredAt">{{
+          <time class="hidden md:block" :datetime="event.occurredAt">{{
             timeLabel(event.occurredAt)
           }}</time>
         </li>
       </ol>
-    </section>
-    <UiPreview />
+    </SectionCard>
   </main>
 </template>

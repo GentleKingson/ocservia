@@ -41,7 +41,9 @@ const tones = {
         <p class="text-muted-foreground text-xs font-semibold uppercase">
           {{ $t("nodeDetail") }}
         </p>
-        <h1 class="text-2xl font-semibold break-words">{{ title }}</h1>
+        <h1 class="m-0 text-2xl leading-tight font-semibold break-words">
+          {{ title }}
+        </h1>
         <p
           v-if="nodeId"
           class="text-muted-foreground flex min-w-0 items-center gap-1 text-xs"
