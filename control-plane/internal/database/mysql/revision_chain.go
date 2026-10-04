@@ -334,10 +334,22 @@ func applyRevision(ctx context.Context, conn *sql.Conn, artifact revisionArtifac
 }
 
 func validateRevisionSnapshot(ctx context.Context, conn *sql.Conn, snapshot manifest) error {
+	if snapshot.artifactOwned {
+		var events int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE()").Scan(&events); err != nil {
+			return safeError(err)
+		}
+		if events != 0 {
+			return ErrSchema
+		}
+	}
 	if err := validateSnapshot(ctx, conn, snapshot); err != nil {
 		return err
 	}
 	extra := 2
+	if snapshot.artifactOwned {
+		extra = -2
+	}
 	hasCatalog, hasTemplate := false, false
 	for _, s := range snapshot.Steps {
 		if s.Kind == "table" && s.Name == "telemetry_sample_shards" {
@@ -360,7 +372,7 @@ func validateRevisionSnapshot(ctx context.Context, conn *sql.Conn, snapshot mani
 	return validateObjectCounts(ctx, conn, snapshot, extra)
 }
 
-func (b *Backend) Migrate(ctx context.Context, repairChecksum string) (result error) {
+func (b *Backend) migrateLegacy(ctx context.Context, repairChecksum string) (result error) {
 	chain, err := loadRevisionChain(b.engine)
 	if err != nil {
 		return err
@@ -534,7 +546,7 @@ func (b *Backend) migrateChainOn(ctx context.Context, conn *sql.Conn, chain []re
 	return validateRevisionSnapshot(ctx, conn, snapshot)
 }
 
-func (b *Backend) ValidateSchema(ctx context.Context) (result error) {
+func (b *Backend) validateLegacySchema(ctx context.Context) (result error) {
 	chain, err := loadRevisionChain(b.engine)
 	if err != nil {
 		return err

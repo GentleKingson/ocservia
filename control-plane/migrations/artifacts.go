@@ -143,13 +143,19 @@ func (a postgresArtifacts) admit(rows []revisionReceipt) (int64, bool, error) {
 		}
 	}
 	var last int64
+	retainedPrevious := len(current) != len(rows)
 	for i, row := range current {
 		if row.epoch != a.schema.Epoch || row.revision < 0 || row.revision > int64(len(a.upgrade.Revisions)) || (i > 0 && row.revision != last+1) {
 			return 0, false, errors.New("unsupported or noncontiguous PostgreSQL journal")
 		}
 		var sum string
 		var steps int
-		if i == 0 {
+		if i == 0 && retainedPrevious {
+			if row.revision != 0 {
+				return 0, false, errors.New("missing PostgreSQL checkpoint transition")
+			}
+			sum, steps = fmt.Sprintf("%x", a.upgrade.Transition.Checksum), len(a.upgrade.Transition.Steps)
+		} else if i == 0 {
 			checkpoint := a.upgrade.Base
 			if row.revision > 0 {
 				checkpoint = a.upgrade.Revisions[row.revision-1].Checkpoint
@@ -225,9 +231,6 @@ func applyArtifactRevision(ctx context.Context, conn *pgxpool.Conn, a postgresAr
 		return err
 	}
 	sum, steps := fmt.Sprintf("%x", r.Checksum), len(r.Steps)
-	if transition {
-		sum, steps = a.upgrade.Base.Checksum, a.upgrade.Base.Steps
-	}
 	if err = insertRevisionReceipt(ctx, tx, a.schema.Epoch, r.Number, sum, steps); err != nil {
 		return err
 	}
