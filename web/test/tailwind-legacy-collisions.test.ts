@@ -21,6 +21,8 @@ const migrated = new Set([
   "src/upstream/UserPolicyFields.vue",
   "src/views/NodeDetailView.vue",
   "src/views/NodesView.vue",
+  "src/views/OperationsView.vue",
+  "src/views/RolloutDetailView.vue",
   "src/views/SettingsView.vue",
 ]);
 
@@ -81,6 +83,6 @@ it("detects utility names with the project Tailwind configuration", async () => 
 
 it("keeps legacy class names out of the Tailwind utility namespace", async () => {
   const names = [...legacyClassNames()];
-  expect(names.length).toBeGreaterThan(50);
+  expect(names.length).toBeGreaterThan(20);
   expect(await utilityClassNames(names)).toEqual([]);
 });

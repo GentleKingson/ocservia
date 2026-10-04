@@ -275,6 +275,32 @@ sections.
 - Server errors render in the dialog's alert without clearing the inputs.
   Passwords and P12 passphrases are still cleared by their existing owners.
 
+### Operations and rollouts
+
+`OperationsView` and `RolloutDetailView` keep their loading, cursor paging,
+selection, polling and resume code; only the presentation changed.
+`features/operations/state-tone.ts` maps states to a `StatusBadge` tone and
+never decides polling. A plain operation's `unknown` is a warning and
+`shared/fleet.ts` keeps polling it, while an upgrade's `unknown` ("Outcome
+unknown") and a rollout node's `unknown` are terminal and shown as failures.
+Rollout totals and batch summaries count succeeded, failed (including rolled
+back) and unknown nodes separately, so a running or finished rollout never
+reads as fully successful while any node failed or is unknown.
+
+- The operations list links each rollout to its detail and each node to
+  `node-detail`; the selected operation shows its ID, state, target version,
+  configuration failure code, node and times. Refreshing the detail reads only
+  that operation.
+- The rollout detail links back to Operations instead of the browser history,
+  and each node links to its detail with the operation ID and failure code.
+  Leaving the route stops polling.
+- Narrow screens scroll the tables inside their card.
+
+`test/operation-state-tone.test.ts` covers the tone rules;
+`e2e/operations.spec.ts` covers both unknown kinds, cursor paging, a read-only
+detail refresh, partial rollout failures, polling stopping on leave and a
+single resume request, and `e2e/agent-rollout.spec.ts` covers the rollout flow.
+
 ## Node detail workflows
 
 NodeDetail composes configuration and certificate workflows during setup.
