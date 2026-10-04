@@ -16,8 +16,8 @@ import (
 )
 
 func run() error {
-	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, manifest-checksum, snapshot-checksum, schema-artifact-checksum, upgrade-artifact-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
-	checksum := flag.String("repair-checksum", "", "reviewed revision or snapshot checksum for forward repair")
+	mode := flag.String("mode", "check", "check, migrate, repair, grant-test-privileges, schema-artifact-checksum, upgrade-artifact-checksum, telemetry-provision, telemetry-migrate-history, or telemetry-collect")
+	checksum := flag.String("repair-checksum", "", "reviewed SQL artifact checksum for forward repair")
 	revision := flag.Int64("revision", -1, "upgrade-artifact-checksum revision; 0 is the previous-checkpoint transition")
 	month := flag.String("month", "", "UTC month YYYY-MM for owner-only telemetry provisioning")
 	flag.Parse()
@@ -43,22 +43,6 @@ func run() error {
 			selected = append(selected, *revision)
 		}
 		sum, err := mysql.ArtifactChecksum(engine, kind, selected...)
-		if err != nil {
-			return err
-		}
-		fmt.Println(sum)
-		return nil
-	}
-	if *mode == "snapshot-checksum" {
-		sum, err := mysql.SnapshotChecksum(engine)
-		if err != nil {
-			return err
-		}
-		fmt.Println(sum)
-		return nil
-	}
-	if *mode == "manifest-checksum" {
-		sum, err := mysql.ManifestChecksum(engine)
 		if err != nil {
 			return err
 		}

@@ -8,62 +8,8 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
-
-func TestRealAuthenticationSentinelRepair(t *testing.T) {
-	b, _ := versionTwoFixture(t, false)
-	ctx := context.Background()
-	chain, err := loadRevisionChain(b.engine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, lock, err := migrationConnection(ctx, b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = b.migrateChainOn(ctx, conn, chain[:2], "")
-	unlock := releaseMigrationConnection(conn, lock)
-	if err != nil || unlock != nil {
-		t.Fatal(err, unlock)
-	}
-	if _, err = b.Exec(ctx, `INSERT INTO local_auth_attempts(username,window_until,expires_at) VALUES('sentinel-repair','2026-01-01','2026-01-01')`); err != nil {
-		t.Fatal(err)
-	}
-	if err = b.Migrate(ctx, ""); !errors.Is(err, ErrSchema) {
-		t.Fatalf("ambiguous auth defaults silently adopted: %v", err)
-	}
-	if err = b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
-		t.Fatalf("dirty auth migration resumed: %v", err)
-	}
-	conn, lock, err = migrationConnection(ctx, b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = conn.ExecContext(ctx, `INSERT INTO time_migration_decisions VALUES('local_auth_attempts','blocked_until','sentinel-repair','1000-01-01','finite'),('local_auth_attempts','lease_until','sentinel-repair','1000-01-01','negative_infinity')`)
-	unlock = releaseMigrationConnection(conn, lock)
-	if err != nil || unlock != nil {
-		t.Fatal(err, unlock)
-	}
-	if err = b.Migrate(ctx, chain[len(chain)-1].sum); err != nil {
-		t.Fatal(err)
-	}
-	var blocked, lease value.Timestamp
-	if err = b.QueryRow(ctx, `SELECT blocked_until,lease_until FROM local_auth_attempts WHERE username='sentinel-repair'`).Scan(&blocked, &lease); err != nil {
-		t.Fatal(err)
-	}
-	finite, err := value.FromTime(time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if blocked != finite || lease.Micros != value.NegativeInfinity {
-		t.Fatalf("explicit meanings changed: %+v %+v", blocked, lease)
-	}
-	if err = b.ValidateSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestRealAuthenticationExpiryAfterLockWait(t *testing.T) {
 	b, _, _ := migrateFixture(t)

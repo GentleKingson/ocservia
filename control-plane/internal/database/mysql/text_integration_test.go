@@ -17,14 +17,18 @@ import (
 func TestRealSchemaTextRegex(t *testing.T) {
 	b, _, _ := migrateFixture(t)
 	ctx := context.Background()
-	m, _, err := loadManifest(b.engine)
+	m, err := loadMySQLArtifacts()
 	if err != nil {
 		t.Fatal(err)
 	}
 	patterns := map[string]string{}
-	extract := regexp.MustCompile(`REGEXP '([^']*)'`)
-	columns := regexp.MustCompile("(?m)^  `([a-z_]+)` (?:LONGTEXT|VARCHAR\\([0-9]+\\))")
-	for _, s := range m.Steps {
+	extract := regexp.MustCompile(`(?i)regexp_like\([^,]+,(?:_utf8mb4)?'([^']*)'`)
+	columns := regexp.MustCompile("(?mi)^  `([a-z0-9_]+)` (?:LONGTEXT|VARCHAR\\([0-9]+\\))")
+	for _, statement := range m.schema.Baseline.Steps {
+		if m.meta(statement).Kind != "table" {
+			continue
+		}
+		s := struct{ Name, SQL string }{m.meta(statement).Object, string(statement.SQL)}
 		for _, v := range extract.FindAllStringSubmatch(s.SQL, -1) {
 			actual := strings.ReplaceAll(v[1], `\\`, `\`)
 			if !strings.HasPrefix(actual, "(?-i)") {
@@ -34,7 +38,7 @@ func TestRealSchemaTextRegex(t *testing.T) {
 			patterns[pg] = actual
 		}
 		for _, c := range columns.FindAllStringSubmatch(s.SQL, -1) {
-			if !strings.Contains(s.SQL, "LOCATE(0x00,CAST(`"+c[1]+"` AS BINARY))=0") {
+			if !strings.Contains(strings.Join(strings.Fields(strings.ToLower(s.SQL)), ""), "locate(0x00,cast(`"+c[1]+"`ascharcharsetbinary))=0") {
 				t.Fatalf("%s.%s lacks SQL-side NUL rejection", s.Name, c[1])
 			}
 		}

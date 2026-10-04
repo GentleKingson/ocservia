@@ -15,7 +15,7 @@ import (
 // accounts; only obsolete telemetry rollup DELETE grants are revoked here.
 // The acceptance harness creates and checks those accounts independently.
 var runtimePrivileges = []struct{ privileges, tables string }{
-	{"SELECT", "schema_revisions,backend_schema_snapshot,backend_schema_snapshot_steps,backend_migrations,backend_migration_steps,backend_schema_revisions,backend_schema_revision_steps,roles,upstream_sync_records,telemetry_legacy_migration"},
+	{"SELECT", "schema_revisions,roles,upstream_sync_records,telemetry_legacy_migration"},
 	{"SELECT,INSERT,UPDATE,DELETE", "workspaces,nodes,operations,local_auth_attempts,local_slice_jobs,commands,outbox_events,command_attempts,node_command_leases,operation_events,node_sessions"},
 	{"SELECT,INSERT,UPDATE", "telemetry_rollups_5m,telemetry_rollups_1h"},
 	{"DELETE", "user_policy_enforcements"},
@@ -87,6 +87,16 @@ func (b *Backend) GrantRuntimePrivileges(ctx context.Context, account string) er
 		for _, table := range strings.Split(g.tables, ",") {
 			if _, err := b.Exec(ctx, "GRANT "+g.privileges+" ON `"+name+"`.`"+table+"` TO "+quoted); err != nil {
 				return err
+			}
+		}
+	}
+	// DROP TABLE does not remove table-specific grants. Revoke the old
+	// checkpoint metadata reads so upgraded and fresh runtime ACLs agree.
+	for _, table := range []string{"backend_schema_snapshot", "backend_schema_snapshot_steps", "backend_migrations", "backend_migration_steps", "backend_schema_revisions", "backend_schema_revision_steps"} {
+		if _, err := b.pool.ExecContext(ctx, "REVOKE SELECT ON `"+name+"`.`"+table+"` FROM "+quoted); err != nil {
+			var serverError *driver.MySQLError
+			if !errors.As(err, &serverError) || serverError.Number != 1147 {
+				return safeError(err)
 			}
 		}
 	}

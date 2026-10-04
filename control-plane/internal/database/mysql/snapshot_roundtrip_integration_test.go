@@ -23,20 +23,17 @@ func TestSnapshotDumpTableRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restored.Close()
-	chain, err := loadRevisionChain(MySQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := currentSnapshot(chain)
+	a, err := loadMySQLArtifacts()
 	if err != nil {
 		t.Fatal(err)
 	}
 	identityHash := ""
-	for _, statement := range a.Statements {
-		if statement.Kind != "table" {
+	for _, statement := range a.schema.Baseline.Steps {
+		m := a.meta(statement)
+		if m.Kind != "table" {
 			continue
 		}
-		name := statement.Name
+		name := m.Object
 		var returned, ddl, after string
 		if err = original.QueryRowContext(ctx, "SHOW CREATE TABLE `"+name+"`").Scan(&returned, &ddl); err != nil {
 			t.Fatal(err)

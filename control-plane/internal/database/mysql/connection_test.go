@@ -88,27 +88,6 @@ func TestSafeErrors(t *testing.T) {
 	}
 }
 
-func TestPinnedManifests(t *testing.T) {
-	for _, engine := range []Engine{MySQL} {
-		m, _, err := loadManifest(engine)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tables := 0
-		for _, s := range m.Steps {
-			if s.Kind == "table" {
-				tables++
-			}
-			if len(s.SchemaHash) != 64 {
-				t.Fatalf("missing schema fingerprint %s/%s", engine, s.Name)
-			}
-		}
-		if tables != 70 {
-			t.Fatalf("baseline has %d tables", tables)
-		}
-	}
-}
-
 func TestValueCodecs(t *testing.T) {
 	for _, literal := range []string{"192.0.2.123/24", "2001:db8::123/64", "::ffff:192.0.2.1/128"} {
 		prefix := netip.MustParsePrefix(literal)

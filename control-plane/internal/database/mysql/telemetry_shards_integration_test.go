@@ -14,6 +14,34 @@ import (
 )
 
 // This tests the physical shard lifecycle, not Controller workflow acceptance.
+// Minimal independent shard-fixture definitions are test-only. Complete
+// current initialization and upgrade use the two SQL artifacts exclusively.
+const TelemetryShardCatalogDDL = `CREATE TABLE telemetry_sample_shards (
+ table_name VARBINARY(64) NOT NULL PRIMARY KEY,
+ start_at BIGINT NOT NULL UNIQUE,
+ end_at BIGINT NOT NULL,
+ state VARBINARY(8) NOT NULL CHECK(state IN ('planned','active','retired','dropped')),
+ CHECK(end_at>start_at)
+) ENGINE=InnoDB`
+
+// Runtime receives EXECUTE only. No DDL and no catalog UPDATE privilege is
+// granted to runtime; the bounded retirement participates in its caller's Tx.
+const TelemetryRetireShardsDDL = `CREATE PROCEDURE telemetry_retire_shards(IN cutoff BIGINT)
+SQL SECURITY DEFINER
+BEGIN
+ DECLARE clock_at BIGINT;
+ DECLARE guard_key VARBINARY(128);
+ SET clock_at = TIMESTAMPDIFF(MICROSECOND,'2000-01-01 00:00:00',UTC_TIMESTAMP(6));
+ IF cutoff IS NULL OR cutoff < clock_at-7776000000000 OR cutoff > clock_at THEN
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry retention cutoff outside permitted window';
+ END IF;
+ SELECT lock_key INTO guard_key FROM business_locks WHERE lock_key='telemetry-shard-catalog' LOCK IN SHARE MODE;
+ IF guard_key IS NULL THEN
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='telemetry catalog guard is unavailable';
+ END IF;
+ UPDATE telemetry_sample_shards SET state='retired' WHERE state='active' AND end_at<=cutoff;
+END`
+
 func TestRealTelemetryShardLifecycle(t *testing.T) {
 	b, _, options := fixture(t)
 	ctx := context.Background()

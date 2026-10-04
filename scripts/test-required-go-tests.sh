@@ -43,7 +43,7 @@ for scope in full; do
      | . + {Action: "run"}, . + {Action: "pass"}][]
   ' >"${tmp}/mysql.json"
   check "${tmp}/mysql.json" "${group}"
-  for name in TestRealTLS TestRealPrivileges TestRealInitializationAndHistory TestRealUsageTransactions TestRealOutboxCommitDisconnect/claim-request-lost; do
+  for name in TestRealTLS TestRealPrivileges TestDatabaseInitializationSmoke TestRealUsageTransactions TestRealOutboxCommitDisconnect/claim-request-lost; do
     jq -c --arg name "${name}" 'select(.Test != $name)' "${tmp}/mysql.json" >"${tmp}/bad.json"
     if check "${tmp}/bad.json" "${group}" >/dev/null 2>&1; then
       echo "${group} accepted missing ${name}" >&2; exit 1
@@ -54,8 +54,8 @@ for scope in full; do
     echo "${group} accepted skipped regression" >&2; exit 1
   fi
 done
-# A full invocation must not accidentally validate just the daily selection.
-jq -c 'select(.Test != "TestRealCrashAndRepair")' "${tmp}/mysql.json" >"${tmp}/bad.json"
+# Full acceptance must require actual checkpoint cutover crash recovery.
+jq -c 'select(.Test != "TestMySQLCutoverCrashRecovery")' "${tmp}/mysql.json" >"${tmp}/bad.json"
 if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
   echo 'full database guard accepted missing crash recovery' >&2; exit 1
 fi

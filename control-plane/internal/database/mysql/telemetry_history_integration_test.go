@@ -337,17 +337,6 @@ func TestRealTelemetryHistoryWorkflow(t *testing.T) {
 				t.Fatalf("expired %s aggregates recreated: count=%d err=%v", resolution, count, err)
 			}
 		}
-		if _, err := owner.Exec(ctx, TelemetryFinalizationSteps()[1].SQL); err != nil {
-			t.Fatal(err)
-		}
-		if state(ancientName) != "active" || state(names[0]) != "dropped" {
-			t.Fatal("upgrade did not requeue surviving unverified retirement only")
-		}
-		if err := maintain(false); err != nil {
-			t.Fatal(err)
-		}
-		if state(ancientName) != "retired" {
-			t.Fatal("requeued retirement did not finalize")
-		}
+
 	})
 }

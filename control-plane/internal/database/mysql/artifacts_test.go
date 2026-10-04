@@ -18,10 +18,10 @@ import (
 
 func useMySQLArtifacts(t *testing.T, schema, upgrade []byte) {
 	t.Helper()
-	original := manifests
-	t.Cleanup(func() { manifests = original })
+	original := artifactSources
+	t.Cleanup(func() { artifactSources = original })
 	// New execution and validation must succeed with no JSON/history files.
-	manifests = artifactFiles{fstest.MapFS{"mysql/schema.sql": {Data: schema}, "mysql/upgrade.sql": {Data: upgrade}}}
+	artifactSources = artifactFiles{fstest.MapFS{"mysql/schema.sql": {Data: schema}, "mysql/upgrade.sql": {Data: upgrade}}}
 }
 func artifactStepText(n int, name string, m artifactStepMetadata, statement string) string {
 	data, _ := json.Marshal(m)
@@ -41,19 +41,21 @@ func pinMySQLFuture(t *testing.T, schema, upgrade []byte) ([]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	history, err := schemaartifact.HistoryChecksum(parsed, 1)
+	history, err := schemaartifact.HistoryChecksum(parsed, int64(len(parsed.Revisions)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	schema = []byte(strings.Replace(string(schema), "-- ocservia:revision=1\n", "-- ocservia:revision=1\n-- ocservia:history-sha256="+history+"\n", 1))
+	schema = []byte(strings.Replace(string(schema), fmt.Sprintf("-- ocservia:revision=%d\n", len(parsed.Revisions)), fmt.Sprintf("-- ocservia:revision=%d\n-- ocservia:history-sha256=", len(parsed.Revisions))+history+"\n", 1))
 	cp := schemaartifact.Receipt{Checksum: digest(schema), Steps: strings.Count(string(schema), "-- ocservia:step=")}
 	receipt, _ := json.Marshal(cp)
 	lines := strings.Split(string(upgrade), "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "-- ocservia:checkpoint=") {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], "-- ocservia:checkpoint=") {
 			lines[i] = "-- ocservia:checkpoint=" + string(receipt)
+			break
 		}
 	}
+
 	return schema, []byte(strings.Join(lines, "\n"))
 }
 func futureMySQLArtifacts(t *testing.T) ([]byte, []byte) {
@@ -64,11 +66,11 @@ func futureMySQLArtifacts(t *testing.T) ([]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schema, err := manifests.ReadFile("mysql/schema.sql")
+	schema, err := artifactSources.ReadFile("mysql/schema.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upgrade, err := manifests.ReadFile("mysql/upgrade.sql")
+	upgrade, err := artifactSources.ReadFile("mysql/upgrade.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +97,11 @@ func futureMySQLArtifacts(t *testing.T) ([]byte, []byte) {
 	data, _ := json.Marshal(values)
 	table := artifactStepMetadata{Kind: "table", Object: "artifact_probe", After: after}
 	seed := artifactStepMetadata{Kind: "seed", Object: "artifact_probe", After: digest(data), Columns: []string{"id", "value"}}
-	schema = []byte(strings.Replace(string(schema), "-- ocservia:revision=0", "-- ocservia:revision=1", 1) + artifactStepText(len(base.schema.Baseline.Steps)+1, "probe_table", table, ddl) + artifactStepText(len(base.schema.Baseline.Steps)+2, "probe_seed", seed, "INSERT INTO artifact_probe VALUES(1,2);\n"))
+	schema = []byte(strings.Replace(string(schema), "-- ocservia:revision=1", "-- ocservia:revision=2", 1) + artifactStepText(len(base.schema.Baseline.Steps)+1, "probe_table", table, ddl) + artifactStepText(len(base.schema.Baseline.Steps)+2, "probe_seed", seed, "INSERT INTO artifact_probe VALUES(1,2);\n"))
 	cp, _ := json.Marshal(schemaartifact.Receipt{Checksum: digest(schema), Steps: len(base.schema.Baseline.Steps) + 2})
 	insert := artifactStepMetadata{Kind: "data", Object: "artifact_probe", After: digest([]byte("valid")), VerifySQL: "SELECT IF(COUNT(*)=1,'valid','invalid') FROM artifact_probe WHERE id=1 AND value=1"}
 	update := artifactStepMetadata{Kind: "data", Object: "artifact_probe", After: digest([]byte("valid")), VerifySQL: "SELECT IF(COUNT(*)=1,'valid','invalid') FROM artifact_probe WHERE id=1 AND value=2"}
-	upgrade = append(upgrade, []byte("\n-- ocservia:revision=1\n-- ocservia:checkpoint="+string(cp)+"\n"+artifactStepText(1, "probe_create", table, ddl)+artifactStepText(2, "probe_insert", insert, "INSERT INTO artifact_probe VALUES(1,1);\n")+artifactStepText(3, "probe_update", update, "UPDATE artifact_probe SET value=value+1 WHERE id=1;\n")+"-- ocservia:end-revision\n")...)
+	upgrade = append(upgrade, []byte("\n-- ocservia:revision=2\n-- ocservia:checkpoint="+string(cp)+"\n"+artifactStepText(1, "probe_create", table, ddl)+artifactStepText(2, "probe_insert", insert, "INSERT INTO artifact_probe VALUES(1,1);\n")+artifactStepText(3, "probe_update", update, "UPDATE artifact_probe SET value=value+1 WHERE id=1;\n")+"-- ocservia:end-revision\n")...)
 	return pinMySQLFuture(t, schema, upgrade)
 }
 func mysqlArtifactDigest(t *testing.T, b *Backend) string {
@@ -123,6 +125,16 @@ func mysqlArtifactDigest(t *testing.T, b *Backend) string {
 		all = append(all, n+k+c)
 	}
 	rows.Close()
+	for _, line := range append([]string(nil), all...) {
+		name := strings.Split(line, "BASE TABLE")[0]
+		if strings.Contains(line, "BASE TABLE") {
+			var n, ddl string
+			if err = conn.QueryRowContext(ctx, "SHOW CREATE TABLE `"+name+"`").Scan(&n, &ddl); err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, ddl)
+		}
+	}
 	for _, table := range []string{"schema_revisions", "artifact_probe"} {
 		var exists int
 		if err = conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?", table).Scan(&exists); err != nil {
@@ -174,18 +186,16 @@ func TestMySQLArtifactFreshAndUpgrade(t *testing.T) {
 		if err := b.QueryRow(ctx, "SELECT COUNT(*) FROM schema_revisions").Scan(&count); err != nil || count != want {
 			t.Fatal("fabricated/missing receipts", count, want, err)
 		}
-		if err := b.QueryRow(ctx, "SELECT COUNT(*) FROM backend_schema_revisions").Scan(&count); err != nil || count != 0 {
-			t.Fatal("legacy read/write", count, err)
-		}
+
 	}
 }
 func TestMySQLArtifactUnsupportedNoMutation(t *testing.T) {
 	ctx := context.Background()
 	b, _, _ := migrateFixture(t)
-	for _, tamper := range []string{"UPDATE schema_revisions SET epoch=3", "UPDATE schema_revisions SET revision=42", "UPDATE schema_revisions SET checksum=REPEAT('0',64)", "UPDATE schema_revisions SET step=0", "UPDATE schema_revisions SET state='running',verified_at=NULL", "INSERT INTO schema_revisions SELECT epoch,2,checksum,state,step,started_at,verified_at FROM schema_revisions", "ALTER TABLE schema_revisions COMMENT='ocservia-schema:0000000000000000000000000000000000000000000000000000000000000000'"} {
+	for _, tamper := range []string{"UPDATE schema_revisions SET epoch=3", "UPDATE schema_revisions SET revision=42", "UPDATE schema_revisions SET checksum=REPEAT('0',64)", "UPDATE schema_revisions SET step=0", "UPDATE schema_revisions SET state='running',verified_at=NULL", "INSERT INTO schema_revisions SELECT epoch,3,checksum,state,step,started_at,verified_at FROM schema_revisions", "ALTER TABLE schema_revisions COMMENT='ocservia-schema:0000000000000000000000000000000000000000000000000000000000000000'"} {
 		t.Run(tamper, func(t *testing.T) {
 			// Restore only task-owned test receipts before the next admission case.
-			schema, err := manifests.ReadFile("mysql/schema.sql")
+			schema, err := artifactSources.ReadFile("mysql/schema.sql")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -198,7 +208,7 @@ func TestMySQLArtifactUnsupportedNoMutation(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err = b.Exec(ctx, "INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(1,0,?,'verified',?,CURRENT_TIMESTAMP(6))", digest(schema), len(a.schema.Baseline.Steps)); err != nil {
+			if _, err = b.Exec(ctx, "INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,1,?,'verified',?,CURRENT_TIMESTAMP(6))", digest(schema), len(a.schema.Baseline.Steps)); err != nil {
 				t.Fatal(err)
 			}
 			if _, err = b.Exec(ctx, tamper); err != nil {
@@ -223,12 +233,12 @@ func TestMySQLArtifactInterruptedUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := a.upgrade.Revisions[0]
+	r := a.upgrade.Revisions[len(a.upgrade.Revisions)-1]
 	conn, err := b.pool.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = startMySQLRevision(ctx, conn, 1, 1, fmt.Sprintf("%x", r.Checksum)); err != nil {
+	if err = startMySQLRevision(ctx, conn, a.schema.Epoch, 2, fmt.Sprintf("%x", r.Checksum)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = conn.ExecContext(ctx, string(r.Steps[0].SQL)); err != nil {
@@ -266,7 +276,7 @@ func TestMySQLArtifactDataRollback(t *testing.T) {
 		t.Fatal("invalid data verification accepted", err)
 	}
 	var progress, value int
-	if err := b.QueryRow(ctx, "SELECT step FROM schema_revisions WHERE revision=1").Scan(&progress); err != nil || progress != 2 {
+	if err := b.QueryRow(ctx, "SELECT step FROM schema_revisions WHERE revision=2").Scan(&progress); err != nil || progress != 2 {
 		t.Fatal(progress, err)
 	}
 	if err := b.QueryRow(ctx, "SELECT value FROM artifact_probe").Scan(&value); err != nil || value != 1 {
@@ -362,56 +372,12 @@ func TestMySQLArtifactCrashBoundaries(t *testing.T) {
 	}
 }
 
-func TestMySQLArtifactPreviousCheckpoint(t *testing.T) {
-	ctx := context.Background()
-	old, _, _ := migrateFixture(t)
-	base, err := loadMySQLArtifacts()
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema, err := manifests.ReadFile("mysql/schema.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema = []byte(strings.Replace(string(schema), "-- ocservia:epoch=1", "-- ocservia:epoch=2", 1))
-	priorMeta, _ := json.Marshal(shapeOf(base.shapes[0]))
-	priorReceipt, _ := json.Marshal(schemaartifact.Receipt{Checksum: fmt.Sprintf("%x", base.schema.Checksum), Steps: len(base.schema.Baseline.Steps), Metadata: priorMeta})
-	nextReceipt, _ := json.Marshal(schemaartifact.Receipt{Checksum: digest(schema), Steps: len(base.schema.Baseline.Steps)})
-	transition := artifactStepMetadata{Kind: "data", Object: "schema_revisions", After: digest([]byte("valid")), VerifySQL: "SELECT 'valid'"}
-	upgrade := []byte("-- ocservia:artifact=upgrade\n-- ocservia:format=1\n-- ocservia:engine=mysql\n-- ocservia:epoch=2\n-- ocservia:baseline=" + string(nextReceipt) + "\n-- ocservia:previous-checkpoint-epoch=1\n-- ocservia:previous-checkpoint-revision=0\n-- ocservia:previous-checkpoint-ref=test-only-checkpoint\n-- ocservia:previous-checkpoint-receipt=" + string(priorReceipt) + "\n-- ocservia:transition=1:0->2:0\n" + artifactStepText(1, "transition", transition, "SELECT 1;\n") + "-- ocservia:end-transition\n")
-	useMySQLArtifacts(t, schema, upgrade)
-	for range 2 {
-		if err = old.Migrate(ctx, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err = old.ValidateSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	a, err := loadMySQLArtifacts()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sum string
-	selected, err := ArtifactChecksum(MySQL, "upgrade", 0)
-	if err != nil || selected != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
-		t.Fatal("transition repair checksum unavailable", selected, err)
-	}
-	if err = old.QueryRow(ctx, "SELECT checksum FROM schema_revisions WHERE epoch=2 AND revision=0").Scan(&sum); err != nil || sum != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
-		t.Fatal("transition SQL receipt lost", sum, err)
-	}
-	fresh, _, _ := migrateFixture(t)
-	if err = fresh.ValidateSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestMySQLArtifactCatalog(t *testing.T) {
-	schema, err := manifests.ReadFile("mysql/schema.sql")
+	schema, err := artifactSources.ReadFile("mysql/schema.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	upgrade, err := manifests.ReadFile("mysql/upgrade.sql")
+	upgrade, err := artifactSources.ReadFile("mysql/upgrade.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,30 +390,30 @@ func TestMySQLArtifactCatalog(t *testing.T) {
 	if got := a.fingerprint("foreign table definition"); got != digest([]byte("foreign table definition")) {
 		t.Fatal("unknown fingerprint adopted", got)
 	}
-	if a.schema.Epoch != 1 || a.schema.Baseline.Number != 0 || a.upgrade.Previous != nil {
-		t.Fatal("Phase A bridge window changed without checkpoint qualification")
+	if a.schema.Epoch != 2 || a.schema.Baseline.Number != 1 || a.upgrade.Previous == nil || a.upgrade.Previous.Ref != previousCheckpointRef || a.upgrade.Previous.Receipt.Checksum != previousCheckpointChecksum {
+		t.Fatal("published checkpoint identity changed")
 	}
 }
 
 func TestMySQLArtifactForeignRepair(t *testing.T) {
 	ctx := context.Background()
 	schema, upgrade := futureMySQLArtifacts(t)
-	original := manifests
+	original := artifactSources
 	for _, partial := range []bool{false, true} {
 		t.Run(fmt.Sprint(partial), func(t *testing.T) {
-			manifests = original
+			artifactSources = original
 			b, _, _ := migrateFixture(t)
 			useMySQLArtifacts(t, schema, upgrade)
 			a, err := loadMySQLArtifacts()
 			if err != nil {
 				t.Fatal(err)
 			}
-			rev := a.upgrade.Revisions[0]
+			rev := a.upgrade.Revisions[len(a.upgrade.Revisions)-1]
 			conn, err := b.pool.Conn(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = startMySQLRevision(ctx, conn, 1, 1, fmt.Sprintf("%x", rev.Checksum)); err != nil {
+			if err = startMySQLRevision(ctx, conn, a.schema.Epoch, 2, fmt.Sprintf("%x", rev.Checksum)); err != nil {
 				t.Fatal(err)
 			}
 			if partial {

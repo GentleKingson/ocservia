@@ -23,16 +23,16 @@ func assertRuntimeDiagnostics(t *testing.T, owner, runtime *Backend) {
 	var checksum string
 	var progress int
 	var verified time.Time
-	if err := owner.QueryRow(ctx, "SELECT checksum,step,verified_at FROM schema_revisions WHERE epoch=1 AND revision=0").Scan(&checksum, &progress, &verified); err != nil {
+	if err := owner.QueryRow(ctx, "SELECT checksum,step,verified_at FROM schema_revisions WHERE epoch=2 AND revision=1").Scan(&checksum, &progress, &verified); err != nil {
 		t.Fatal(err)
 	}
 	restore := func() {
 		t.Helper()
-		if _, err := owner.Exec(ctx, "UPDATE schema_revisions SET checksum=?,state='verified',step=?,verified_at=? WHERE epoch=1 AND revision=0", checksum, progress, verified); err != nil {
+		if _, err := owner.Exec(ctx, "UPDATE schema_revisions SET checksum=?,state='verified',step=?,verified_at=? WHERE epoch=2 AND revision=1", checksum, progress, verified); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, query := range []string{"UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=1 AND revision=0", fmt.Sprintf("UPDATE schema_revisions SET step=%d WHERE epoch=1 AND revision=0", progress+1), "UPDATE schema_revisions SET checksum=REPEAT('0',64) WHERE epoch=1 AND revision=0"} {
+	for _, query := range []string{"UPDATE schema_revisions SET state='running',verified_at=NULL WHERE epoch=2 AND revision=1", fmt.Sprintf("UPDATE schema_revisions SET step=%d WHERE epoch=2 AND revision=1", progress+1), "UPDATE schema_revisions SET checksum=REPEAT('0',64) WHERE epoch=2 AND revision=1"} {
 		if n, err := owner.Exec(ctx, query); err != nil || n != 1 {
 			t.Fatal("alter schema fixture", n, err)
 		}

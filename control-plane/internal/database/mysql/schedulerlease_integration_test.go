@@ -40,9 +40,9 @@ func TestRealSchedulerRunnerTransactions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	for _, sql := range []string{`SELECT * FROM time_migration_decisions`, `INSERT INTO time_migration_decisions VALUES('scheduler_leadership','lease_until','1','1000-01-01','finite')`, `UPDATE time_migration_decisions SET decision='finite'`, `DELETE FROM time_migration_decisions`} {
+	for _, sql := range []string{`INSERT INTO schema_revisions(epoch) VALUES(2)`, `UPDATE schema_revisions SET state='verified'`, `DELETE FROM schema_revisions`} {
 		if _, err := b.Exec(ctx, sql); !errors.Is(err, database.ErrPermission) {
-			t.Fatal("runtime can access migration decisions", err)
+			t.Fatal("runtime can mutate migration receipts", err)
 		}
 	}
 	var seed value.Timestamp
@@ -90,67 +90,5 @@ func TestRealSchedulerRunnerTransactions(t *testing.T) {
 		return database.Within(sessionCtx, b, database.ReadCommitted, func(tx database.Tx) error { return coordination.AssertFenceTx(sessionCtx, tx, s) })
 	}); err != nil {
 		t.Fatal("actual runner acquire/renew/fenced work", err)
-	}
-}
-
-func TestRealSchedulerAmbiguousSentinelDecision(t *testing.T) {
-	for _, decision := range []string{"finite", "negative_infinity"} {
-		t.Run(decision, func(t *testing.T) {
-			b, _ := versionTwoFixture(t, false)
-			ctx := context.Background()
-			chain, err := loadRevisionChain(b.engine)
-			if err != nil {
-				t.Fatal(err)
-			}
-			conn, lock, err := migrationConnection(ctx, b)
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = b.migrateChainOn(ctx, conn, chain[:2], "")
-			unlock := releaseMigrationConnection(conn, lock)
-			if err != nil || unlock != nil {
-				t.Fatal(err, unlock)
-			}
-			id := uuid.New()
-			if _, err := b.Exec(ctx, `UPDATE scheduler_leadership SET instance_id=?,incarnation=3,epoch=9 WHERE id=1`, id[:]); err != nil {
-				t.Fatal(err)
-			}
-			if err := b.Migrate(ctx, ""); !errors.Is(err, ErrSchema) {
-				t.Fatalf("ambiguous sentinel migrated: %v", err)
-			}
-			if err := b.Migrate(ctx, ""); !errors.Is(err, ErrDirty) {
-				t.Fatalf("dirty revision resumed implicitly: %v", err)
-			}
-			if _, err := b.Exec(ctx, `UPDATE scheduler_leadership SET epoch=10 WHERE id=1`); err == nil {
-				t.Fatal("owner bypassed migration writer guard")
-			}
-			conn, name, err := migrationConnection(ctx, b)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = conn.ExecContext(ctx, `INSERT INTO time_migration_decisions VALUES('scheduler_leadership','lease_until','1','1000-01-01 00:00:00',?)`, decision)
-			unlock = releaseMigrationConnection(conn, name)
-			if err != nil || unlock != nil {
-				t.Fatal(err, unlock)
-			}
-			if err = b.Migrate(ctx, chain[len(chain)-1].sum); err != nil {
-				t.Fatal(err)
-			}
-			var got value.Timestamp
-			if err := b.QueryRow(ctx, `SELECT lease_until FROM scheduler_leadership WHERE id=1`).Scan(&got.Micros); err != nil {
-				t.Fatal(err)
-			}
-			want := int64(value.NegativeInfinity)
-			if decision == "finite" {
-				finite, err := value.FromTime(time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC))
-				if err != nil {
-					t.Fatal(err)
-				}
-				want = finite.Micros
-			}
-			if got.Micros != want {
-				t.Fatal("owner decision lost", got.Micros, want)
-			}
-		})
 	}
 }

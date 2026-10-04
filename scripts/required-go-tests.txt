@@ -59,7 +59,6 @@ backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration/r
 backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration/node-binding-and-revocation
 backend-enrollment internal/enrollment TestAttestationSafetyBackendIntegration/expiry-during-node-lock-wait
 # Explicit automatic gate; the current/history inventories below remain full-only.
-regression-mysql internal/database/mysql TestRealInitializationAndHistory
 regression-mysql internal/database/mysql TestRealTLS
 regression-mysql internal/database/mysql TestRealPrivileges
 regression-mysql internal/database/mysql TestRealIndependentTransactionCleanup
@@ -142,11 +141,9 @@ regression-disconnect internal/database/mysql TestRealOutboxCommitDisconnect/cla
 regression-telemetry internal/telemetry TestTelemetryBackendWorkflowIntegration
 backend-mysql-current internal/database/mysql TestRealApprovalControllerWorkflow
 backend-mysql-current internal/database/mysql TestRealArtifactDownloadTransactions
-backend-mysql-current internal/database/mysql TestRealAuditMigrationGuardAfterCrash
 backend-mysql-current internal/database/mysql TestRealAuthenticationExactKeyLockOrder
 backend-mysql-current internal/database/mysql TestRealAuthenticationExpiryAfterLockWait
 backend-mysql-current internal/database/mysql TestRealAuthenticationFullTimeWrites
-backend-mysql-current internal/database/mysql TestRealAuthenticationSentinelRepair
 backend-mysql-current internal/database/mysql TestRealBoundedTransactionFinalization
 backend-mysql-current internal/database/mysql TestRealCancellationAndUnlockFailure
 backend-mysql-current internal/database/mysql TestRealCertificateIssuanceTransactions
@@ -156,12 +153,10 @@ backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent
 backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain
 backend-mysql-current internal/database/mysql TestRealConfigurationReadAndIntent/consumer-service-chain/apply-rollback
 backend-mysql-current internal/database/mysql TestRealConnectionOwner
-backend-mysql-current internal/database/mysql TestRealCrashAndRepair
 backend-mysql-current internal/database/mysql TestRealExistingLongTextBounds
 backend-mysql-current internal/database/mysql TestRealFiniteTimestampBackfill
 backend-mysql-current internal/database/mysql TestRealIdentityProfiles
 backend-mysql-current internal/database/mysql TestRealIndependentTransactionCleanup
-backend-mysql-current internal/database/mysql TestRealInitializationAndHistory
 backend-mysql-current internal/database/mysql TestRealLocalSliceLifecycle
 backend-mysql-current internal/database/mysql TestRealLogicalValueValidators
 backend-mysql-current internal/database/mysql TestRealLogicalValues
@@ -170,8 +165,6 @@ backend-mysql-current internal/database/mysql TestRealLongKeyPermissions
 backend-mysql-current internal/database/mysql TestRealLongKeyUpdateAndConcurrency
 backend-mysql-current internal/database/mysql TestRealLongKeyWrites
 backend-mysql-current internal/database/mysql TestRealLongReceiptAndResourceKey
-backend-mysql-current internal/database/mysql TestRealMigrationProtectsVerifiedSourceCopy
-backend-mysql-current internal/database/mysql TestRealNextRevisionCrashAfterData
 backend-mysql-current internal/database/mysql TestRealObservedStateTransactions
 backend-mysql-current internal/database/mysql TestRealOperationDispatch
 backend-mysql-current internal/database/mysql TestRealOperationIntentTransaction
@@ -179,11 +172,8 @@ backend-mysql-current internal/database/mysql TestRealOperationReads
 backend-mysql-current internal/database/mysql TestRealOperationReaping
 backend-mysql-current internal/database/mysql TestRealPrivdAttestationWorkflow
 backend-mysql-current internal/database/mysql TestRealPrivileges
-backend-mysql-current internal/database/mysql TestRealRevisionConstraintFailureAndRepair
-backend-mysql-current internal/database/mysql TestRealRevisionCrashAfterDDL
 backend-mysql-current internal/database/mysql TestRealRolloutCreation
 backend-mysql-current internal/database/mysql TestRealRowsClosePoisonsDrainError
-backend-mysql-current internal/database/mysql TestRealSchedulerAmbiguousSentinelDecision
 backend-mysql-current internal/database/mysql TestRealSchedulerRunnerTransactions
 backend-mysql-current internal/database/mysql TestRealSchemaDriftRepairRefused
 backend-mysql-current internal/database/mysql TestRealSchemaTextRegex
@@ -197,10 +187,8 @@ backend-mysql-current internal/database/mysql TestRealTelemetryLegacyConflictRec
 backend-mysql-current internal/database/mysql TestRealTelemetryLegacyPartialProgress
 backend-mysql-current internal/database/mysql TestRealTelemetryLegacySchemaRefusal
 backend-mysql-current internal/database/mysql TestRealTelemetryShardLifecycle
-backend-mysql-current internal/database/mysql TestRealTelemetryTimeMigration
 backend-mysql-current internal/database/mysql TestRealTransportResults
 backend-mysql-current internal/database/mysql TestRealTrustConvergence
-backend-mysql-current internal/database/mysql TestRealTypeUpgradeRejectsInvalidLegacyArray
 backend-mysql-current internal/database/mysql TestRealUpgradeReconciliation
 backend-mysql-current internal/database/mysql TestRealUsageTransactions
 backend-mysql-current internal/database/mysql TestRealValueConstraints
@@ -295,15 +283,6 @@ postgres-snapshot migrations TestPostgreSQLCutoverPreviousRejectsNoMutation
 postgres-snapshot migrations TestPostgreSQLCutoverUnknownDatabase
 postgres-snapshot migrations TestPostgreSQLSnapshotCatalogReadPermissions
 
-mysql-snapshot internal/database/mysql TestSnapshotLifecycle
-mysql-snapshot internal/database/mysql TestMySQLBridgeCheckpoint
-mysql-snapshot internal/database/mysql TestMySQLBridgeDoesNotStampUnverifiedLegacy
-mysql-snapshot internal/database/mysql TestSnapshotForwardRevision
-mysql-snapshot internal/database/mysql TestSnapshotLegacyLineages
-mysql-snapshot internal/database/mysql TestSnapshotArtifactValidation
-mysql-snapshot internal/database/mysql TestSnapshotRuntimePermissions
-mysql-snapshot internal/database/mysql TestSnapshotCrashAfterDDL
-mysql-snapshot internal/database/mysql TestSnapshotGenerationDeterminism
 mysql-snapshot internal/database/mysql TestSnapshotDumpTableRoundtrip
 mysql-snapshot internal/database/mysql TestMySQLArtifactFreshAndUpgrade
 mysql-snapshot internal/database/mysql TestMySQLArtifactUnsupportedNoMutation
@@ -311,5 +290,24 @@ mysql-snapshot internal/database/mysql TestMySQLArtifactInterruptedUpgrade
 mysql-snapshot internal/database/mysql TestMySQLArtifactDataRollback
 mysql-snapshot internal/database/mysql TestMySQLArtifactHistoryMutation
 mysql-snapshot internal/database/mysql TestMySQLArtifactCrashBoundaries
-mysql-snapshot internal/database/mysql TestMySQLArtifactPreviousCheckpoint
 mysql-snapshot internal/database/mysql TestMySQLArtifactForeignRepair
+mysql-snapshot internal/database/mysql TestMySQLCutoverArtifactIntegrity
+mysql-snapshot internal/database/mysql TestMySQLCutoverCheckpointEquivalence
+mysql-snapshot internal/database/mysql TestMySQLCutoverCrashRecovery
+mysql-snapshot internal/database/mysql TestMySQLCutoverForeignCleanupRepair
+mysql-snapshot internal/database/mysql TestMySQLCutoverTransitionArtifactTamper
+mysql-snapshot internal/database/mysql TestMySQLCutoverUnsupportedNoMutation
+backend-mysql-current internal/database/mysql TestMySQLCutoverArtifactIntegrity
+backend-mysql-current internal/database/mysql TestMySQLCutoverCheckpointEquivalence
+backend-mysql-current internal/database/mysql TestMySQLCutoverCrashRecovery
+backend-mysql-current internal/database/mysql TestMySQLCutoverForeignCleanupRepair
+backend-mysql-current internal/database/mysql TestMySQLCutoverTransitionArtifactTamper
+backend-mysql-current internal/database/mysql TestMySQLCutoverUnsupportedNoMutation
+backend-mysql-current internal/database/mysql TestMySQLArtifactFreshAndUpgrade
+backend-mysql-current internal/database/mysql TestMySQLArtifactUnsupportedNoMutation
+backend-mysql-current internal/database/mysql TestMySQLArtifactInterruptedUpgrade
+backend-mysql-current internal/database/mysql TestMySQLArtifactDataRollback
+backend-mysql-current internal/database/mysql TestMySQLArtifactHistoryMutation
+backend-mysql-current internal/database/mysql TestMySQLArtifactCrashBoundaries
+backend-mysql-current internal/database/mysql TestMySQLArtifactForeignRepair
+backend-mysql-current internal/database/mysql TestSnapshotDumpTableRoundtrip
