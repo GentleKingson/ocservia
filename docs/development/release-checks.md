@@ -53,27 +53,32 @@ upgrade package digests.
 
 ## Database checkpoint release boundary
 
-Phase A keeps one epoch-1 baseline per engine: PostgreSQL legacy revision 41
-and MySQL legacy revision 31 bridge genuine old receipts into `schema_revisions`.
-The active SQL pair is `schema.sql` plus `upgrade.sql`; new fresh databases stamp
-one checkpoint and leave legacy journals empty. Retained SQL/JSON/descriptors
-serve only the bounded bridge and its validation. The immutable bridge sources
-are listed in `docs/database-migrations.sha256`.
+Phase A is complete. The real stable [v1.2.0 release](https://github.com/GentleKingson/ocservia/releases/tag/v1.2.0)
+was published on 2026-10-04 at 01:34:48 UTC from
+`169102557cd610847c9f6ac2083336cdcf82c483`; its
+[Release run](https://github.com/GentleKingson/ocservia/actions/runs/37167143839)
+succeeded and uploaded actual assets. Both engines record epoch 1 / revision 0:
 
-Review and merge the six Phase A changes in dependency order: contract,
-PostgreSQL bridge, MySQL bridge, PostgreSQL executor, MySQL executor, then
-policy/CI/operations. An open stack must pass full Basic CI, Security Checks,
-Native Business Diagnostics with production Signer and resilience, and both
-backup/restore recovery jobs at its final head. These are review evidence;
-Release Check itself remains main-only. After separately approved merges,
-qualify the exact main commit and publish a real checkpoint release through the
-existing release process. A build-only dispatch is not a checkpoint release.
+| Engine | Checkpoint schema receipt |
+| --- | --- |
+| PostgreSQL | `d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172` |
+| MySQL | `3dc39a92ff4b54bff922872fae296843cea8dea1f2d1b36b42d86c9069dcb450` |
 
-Stop before deleting legacy sources or declaring the next epoch until that
-release exists and its two journals and checksums are fixed. The next major's
-sole previous-checkpoint window must reference that actual release and its
-verified receipts. Never invent a tag, treat an RC/build-only run as this release,
-merge the open stack automatically, or enable auto-merge to bypass the boundary.
+This release is the old major's bridge checkpoint, not the completed rebaseline.
+The next major's only previous-checkpoint window pins that tag, commit and those
+receipts. Do not replace the anchor with a newer main commit. Environments with
+pending old migrations must first upgrade using v1.2.0 before moving to epoch 2.
+
+Phase B proves the released checkpoint upgrade equivalent to fresh SQL before
+removing legacy migration/journal machinery. PostgreSQL PR07 and MySQL PR08
+provide the cutovers; PR09 supplies cross-backend acceptance. The open stack must
+pass full Basic CI, Security Checks, Native Business Diagnostics with production
+Signer and finite resilience, and both backup/restore jobs at its final head.
+Build-only Release validates packages without publishing. Release Check remains
+main-only: after separately authorized merges, qualify the exact final main SHA
+before a separately authorized major release. Do not bypass that guard or treat
+component dispatches as main qualification. See
+[major cutover acceptance](database-major-cutover.md).
 
 ## Release notes and changelog
 

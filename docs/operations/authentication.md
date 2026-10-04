@@ -343,17 +343,18 @@ function that generates a different UUID version.
 
 #### PostgreSQL
 
-Inspect the applied execution records:
+Inspect the verified schema journal:
 
 ```sql
-SELECT version, name FROM schema_migrations ORDER BY version;
+SELECT epoch, revision, encode(checksum, 'hex') AS checksum, state, step
+FROM schema_revisions ORDER BY epoch, revision;
 ```
 
-Owner initialization checks known SQL names/checksums and records completed
-execution to prevent repeated DDL. Unknown completed records are preserved,
-not treated as a software version rejection. Neither a maximum number nor
-frozen compatibility metadata proves current readiness or cross-version safety.
-Readiness uses current reads and permissions, not this history query.
+Owner initialization validates the supported epoch/revision, exact artifact
+receipts and actual schema before applying forward SQL. Unknown or altered
+history is refused; do not rewrite the journal. The previous-checkpoint window
+is fixed to v1.2.0, epoch 1 / revision 0. Readiness checks current reads and
+permissions; it does not use a legacy migration filename counter.
 
 PostgreSQL stores the workspace ID as native `uuid` and the times as
 `timestamptz`. On an empty database, provision the workspace:
@@ -365,25 +366,21 @@ VALUES ('<management-workspace-uuidv7>', 'Administration', 'administration', now
 
 #### MySQL
 
-MySQL has immutable manifests and appended revision
-histories under `control-plane/internal/database/mysql/mysql`.
-Inspect both the baseline and appended history after the migration process
-succeeds:
+Inspect the sole schema journal after owner migration succeeds:
 
 ```sql
-SELECT engine, version, dirty, manifest_checksum FROM backend_migrations;
-SELECT version, state, manifest_checksum FROM backend_schema_revisions ORDER BY version;
+SELECT epoch, revision, checksum, state, step
+FROM schema_revisions ORDER BY epoch, revision;
 ```
 
-The engine must match the deployment, `dirty` must be false, and every appended
-revision required by the installed release must be present and `verified`.
-The baseline row's `version` is not the latest appended revision or Controller
-schema version. Frozen compatibility fields are historical data, not admission
-authority. Owner initialization verifies known content, receipts and actual
-schema requirements. Runtime startup checks current telemetry structures and
-permissions; readiness checks current core reads and stream health. Do not
-manually mark a dirty migration clean, rewrite receipts, or copy PostgreSQL
-migration numbers into these tables.
+Every required row must be `verified` and match the installed SQL artifacts.
+Fresh epoch-2 initialization records revision 1; a checkpoint upgrade verifies
+revision 0 before journaled cleanup revision 1. A `running` row requires exact
+artifact repair rather than manual editing. Owner migration verifies actual
+schema and runtime privileges. Runtime startup checks current telemetry
+structures and permissions; readiness checks core reads and stream health.
+Epoch/revision values are backend artifact identities, not PostgreSQL legacy
+migration numbers or a Controller compatibility range.
 
 At the current migrated schema, workspace IDs are `VARBINARY(16)` with an exact
 16-byte length constraint, using unswapped RFC UUID byte order.

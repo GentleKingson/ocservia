@@ -257,26 +257,28 @@ Go run and container run must be reported separately.
 
 ## SQL artifact acceptance
 
-`scripts/database-artifact-policy.sh all` checks the two active SQL files per
-engine through the shared marker parser and backend metadata validation. It also
-checks immutable bridge source hashes. The new paths read only `schema.sql` and
-`upgrade.sql`; Phase A retains history and descriptors for the explicit legacy
-bridge and independent generation checks.
+`scripts/database-artifact-policy.sh all` enforces exactly `schema.sql` and
+`upgrade.sql` per engine, absence of legacy manifests, and the shared marker
+parser/backend metadata checks. The previous-checkpoint identity is fixed to
+v1.2.0, not the current main branch.
 
 The `postgres-snapshot` and `mysql-snapshot` inventories in
-`scripts/required-go-tests.txt` require real database execution, final pass, and
-zero skips. They include genuine pre-bridge snapshot upgrades, fresh versus
-current-epoch upgrade, pinned previous-checkpoint transitions, unsupported zero
-mutation, raw checksum mutation, transactional rollback, and MySQL subprocess
-kill/recovery boundaries. The full MySQL inventory includes `mysql-snapshot`.
-Do not replace these checks with a test run lacking database credentials.
+`scripts/required-go-tests.txt` require real database execution, final pass and
+zero skips. They cover checkpoint/fresh schema, ACL and seed equivalence, current
+forward upgrades, unknown/altered databases with zero mutation, raw checksum
+mutation, PostgreSQL rollback/locking, and MySQL subprocess kill/recovery at
+fresh, transition and cleanup boundaries. The full MySQL inventory includes
+these artifact checks alongside retained authentication, audit, scheduler,
+telemetry, transaction and permission behavior. Do not replace them with a test
+run lacking database credentials.
 
-Each database CI job enforces artifact policy and independent legacy
-replay/schema/seed equivalence. Full Basic CI additionally runs the PostgreSQL
-physical and MySQL logical backup/restore jobs, compares original receipts after
-restore and repeat migration, and checks runtime read/DDL boundaries. Record
-results at the immutable final stacked head. Component workflow dispatches on
-an open stack do not qualify it as a main-branch Release Check.
+Each database CI job fetches the fixed release history and checks independent
+checkpoint/fresh equivalence. Full Basic CI additionally runs PostgreSQL physical
+and MySQL logical backup/restore, preserves receipts across restore and repeat
+migration, and verifies runtime read/DDL boundaries. Record all required results
+at the immutable final stacked head. Component workflow dispatches on an open
+stack do not qualify it as a main-branch Release Check. See
+[major cutover acceptance](database-major-cutover.md).
 
 ## Bundled PostgreSQL initialization
 
