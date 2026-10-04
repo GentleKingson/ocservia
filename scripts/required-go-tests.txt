@@ -294,6 +294,8 @@ postgres-snapshot migrations TestPostgreSQLBridgeRefusesUnverifiedState
 postgres-snapshot migrations TestPostgreSQLBridgeFreshRollback
 
 mysql-snapshot internal/database/mysql TestSnapshotLifecycle
+mysql-snapshot internal/database/mysql TestMySQLBridgeCheckpoint
+mysql-snapshot internal/database/mysql TestMySQLBridgeDoesNotStampUnverifiedLegacy
 mysql-snapshot internal/database/mysql TestSnapshotForwardRevision
 mysql-snapshot internal/database/mysql TestSnapshotLegacyLineages
 mysql-snapshot internal/database/mysql TestSnapshotArtifactValidation

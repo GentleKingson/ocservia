@@ -1,9 +1,12 @@
 package mysql
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/schemaartifact"
 )
 
 type schemaStatement struct {
@@ -32,6 +35,14 @@ type snapshotArtifact struct {
 	schemaSnapshot
 	sum string
 	sql []byte
+}
+
+const schemaArtifactHeader = "-- ocservia:artifact=schema\n-- ocservia:format=1\n-- ocservia:engine=mysql\n-- ocservia:epoch=1\n-- ocservia:revision=0\n\n"
+const schemaStepEnd = "-- ocservia:end-step\n"
+
+func schemaStepHeader(ordinal int, s schemaStatement) string {
+	metadata, _ := json.Marshal(artifactStepMetadata{Kind: s.Kind, Object: s.Name, After: s.SchemaHash, RoundtripHash: s.RoundtripHash, Columns: s.Columns})
+	return fmt.Sprintf("-- ocservia:step=%03d:%s_%s\n-- ocservia:metadata=%s\n", ordinal, s.Kind, s.Name, metadata)
 }
 
 func historyChecksum(chain []revisionArtifact, parent string, through int) (string, error) {
@@ -69,10 +80,17 @@ func decodeSnapshot(data []byte, chain []revisionArtifact) (snapshotArtifact, er
 		return a, ErrChecksum
 	}
 	offset := 0
+	marked := len(a.Statements) > 0 && a.Statements[0].Offset != 0
+	if marked {
+		offset = len(schemaArtifactHeader)
+	}
 	seen := map[string]bool{}
-	for _, s := range a.Statements {
+	for i, s := range a.Statements {
+		if marked {
+			offset += len(schemaStepHeader(i+1, s))
+		}
 		key := s.Kind + ":" + s.Name
-		if !identifier.MatchString(s.Name) || seen[key] || s.Offset < 0 || s.Offset != offset || s.Length <= 0 || s.Length > int(^uint(0)>>1)-offset-2 || len(s.Checksum) != 64 || len(s.SchemaHash) != 64 {
+		if !identifier.MatchString(s.Name) || seen[key] || s.Offset < 0 || s.Offset != offset || s.Length <= 0 || s.Length > int(^uint(0)>>1)-s.Offset-2 || len(s.Checksum) != 64 || len(s.SchemaHash) != 64 {
 			return a, ErrChecksum
 		}
 		if s.Kind != "table" && s.Kind != "trigger" && s.Kind != "function" && s.Kind != "procedure" && s.Kind != "seed" {
@@ -87,7 +105,10 @@ func decodeSnapshot(data []byte, chain []revisionArtifact) (snapshotArtifact, er
 			return a, ErrChecksum
 		}
 		seen[key] = true
-		offset += s.Length + 2 // Each complete statement is followed by ;\n.
+		offset = s.Offset + s.Length + 2
+		if marked {
+			offset += len(schemaStepEnd)
+		}
 	}
 	if a.Statements[0].Name != "backend_schema_snapshot" || a.Statements[0].Kind != "table" || a.Statements[1].Name != "backend_schema_snapshot_steps" || a.Statements[1].Kind != "table" {
 		return a, ErrChecksum
@@ -110,7 +131,15 @@ func currentSnapshot(chain []revisionArtifact) (snapshotArtifact, error) {
 		return a, ErrChecksum
 	}
 	end := 0
-	for _, s := range a.Statements {
+	var parsed schemaartifact.Artifact
+	marked := bytes.HasPrefix(a.sql, []byte("-- ocservia:"))
+	if marked {
+		parsed, err = schemaartifact.Parse(a.sql, "mysql")
+		if err != nil || parsed.Kind != "schema" || parsed.Epoch != 1 || len(parsed.Baseline.Steps) != len(a.Statements) {
+			return a, ErrChecksum
+		}
+	}
+	for i, s := range a.Statements {
 		if s.Offset < 0 || s.Offset > len(a.sql) || len(a.sql)-s.Offset < 2 || s.Length <= 0 || s.Length > len(a.sql)-s.Offset-2 {
 			return a, ErrChecksum
 		}
@@ -118,8 +147,17 @@ func currentSnapshot(chain []revisionArtifact) (snapshotArtifact, error) {
 		if string(a.sql[end:end+2]) != ";\n" || digest(a.sql[s.Offset:end]) != s.Checksum {
 			return a, ErrChecksum
 		}
+		if marked && !bytes.Equal(parsed.Baseline.Steps[i].SQL, a.sql[s.Offset:end+2]) {
+			return a, ErrChecksum
+		}
+		if marked {
+			metadata, _ := json.Marshal(artifactStepMetadata{Kind: s.Kind, Object: s.Name, After: s.SchemaHash, RoundtripHash: s.RoundtripHash, Columns: s.Columns})
+			if !bytes.Equal(parsed.Baseline.Steps[i].Metadata, metadata) {
+				return a, ErrChecksum
+			}
+		}
 	}
-	if end+2 != len(a.sql) {
+	if !marked && end+2 != len(a.sql) {
 		return a, ErrChecksum
 	}
 	return a, nil
