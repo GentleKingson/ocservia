@@ -1,4 +1,6 @@
+import tailwindcss from "@tailwindcss/vite";
 import vue from "@vitejs/plugin-vue";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const apiTarget = process.env.VITE_API_TARGET ?? "http://127.0.0.1:8080";
@@ -7,6 +9,7 @@ const devAuthToken = process.env.VITE_DEV_AUTH_TOKEN;
 export default defineConfig({
   plugins: [
     vue(),
+    tailwindcss(),
     {
       name: "reject-build-dev-auth-token",
       configResolved(config) {
@@ -19,6 +22,13 @@ export default defineConfig({
       },
     },
   ],
+  build: {
+    // Supported browsers: docs/development/web.md#supported-browsers.
+    target: ["chrome111", "edge111", "firefox128", "safari16.4"],
+  },
+  resolve: {
+    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+  },
   server: {
     allowedHosts: ["web"],
     host: "0.0.0.0",

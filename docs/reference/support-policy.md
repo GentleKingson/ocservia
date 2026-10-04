@@ -83,6 +83,7 @@ a second support matrix.
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` | See note below |
 | Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated relays](../how-to/dedicated-relays.md) |
 | Authentication | Local only, OIDC only, or Local + OIDC | [Authentication](../operations/authentication.md) |
+| Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; automated checks cover Chromium only | [Supported browsers](../development/web.md#supported-browsers) |
 
 Managed-ocserv note: the node adapter admits exactly `1.2.x`, `1.3.x`, `1.4.x`,
 and `1.5.0` from real ocserv version output. `1.5.0` is the release-validated

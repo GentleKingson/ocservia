@@ -10,6 +10,7 @@
     "useUnknownInCatchVariables": true,
     "noEmit": true,
     "skipLibCheck": true,
+    "paths": { "@/*": ["./src/*"] },
     "types": ["node", "vite/client", "vitest/globals"]
   },
   "include": [
