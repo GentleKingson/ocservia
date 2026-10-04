@@ -94,3 +94,10 @@ it("keeps unknown optional fields readable", async () => {
   expect(html).toContain("unknown");
   expect(html).toContain("notAvailable");
 });
+it("shows a neutral loading badge before the first fleet snapshot", async () => {
+  mocks.fleet.initialized = false;
+  mocks.fleet.loading = true;
+  const html = await render();
+  expect(html).not.toContain("liveTelemetry");
+  expect(html).not.toContain("systemsUnavailable");
+});

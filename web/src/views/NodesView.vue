@@ -182,6 +182,17 @@ async function submitRollout(): Promise<void> {
     <PageHeader :eyebrow="$t('fleet')" :title="$t('nodes')">
       <template #actions>
         <span
+          v-if="!fleet.initialized && !fleet.unavailable"
+          class="text-muted-foreground inline-flex items-center gap-2 text-sm font-medium"
+        >
+          <span
+            class="bg-muted-foreground size-2 rounded-full"
+            aria-hidden="true"
+          ></span>
+          {{ $t("loading") }}
+        </span>
+        <span
+          v-else
           class="inline-flex items-center gap-2 text-sm font-medium"
           :class="fleet.unavailable ? 'text-destructive' : 'text-success'"
         >

@@ -87,7 +87,7 @@ function focusMainContent(): void {
       <AppHeader
         v-model:workspace-id="selectedWorkspaceId"
         :workspaces="workspaces"
-        :ready="readiness.isReady"
+        :readiness="readiness.state"
         @change-workspace="changeWorkspace"
         @navigated="focusMainContent"
       />

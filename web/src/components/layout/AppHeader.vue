@@ -17,7 +17,7 @@ import AppSidebar from "./AppSidebar.vue";
 
 defineProps<{
   workspaces: Workspace[];
-  ready: boolean;
+  readiness: "loading" | "ready" | "unavailable";
 }>();
 const selectedWorkspaceId = defineModel<string>("workspaceId", {
   required: true,
@@ -108,14 +108,16 @@ function restoreFocus(event: Event): void {
     >
       <span
         class="size-2 rounded-full"
-        :class="
-          ready
-            ? 'bg-success ring-success/20 ring-3'
-            : 'bg-destructive ring-destructive/20 ring-3'
-        "
+        :class="{
+          'bg-muted-foreground ring-muted-foreground/20 ring-3':
+            readiness === 'loading',
+          'bg-success ring-success/20 ring-3': readiness === 'ready',
+          'bg-destructive ring-destructive/20 ring-3':
+            readiness === 'unavailable',
+        }"
         aria-hidden="true"
       ></span>
-      {{ $t(ready ? "ready" : "unavailable") }}
+      {{ $t(readiness) }}
     </div>
   </header>
 </template>
