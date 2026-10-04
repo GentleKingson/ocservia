@@ -59,6 +59,22 @@ export const i18n = createI18n({
       auditResource: "Resource",
       auditResult: "Result",
       auditRequest: "Request ID",
+      auditSearch: "Search loaded records",
+      auditFilterScope:
+        "Search and result filters apply only to the records shown; they do not query older records.",
+      auditResultAll: "All results",
+      auditResult_intent: "Intent",
+      auditResult_succeeded: "Succeeded",
+      auditResult_failed: "Failed",
+      auditNoMatches: "No loaded records match the filters",
+      auditDetails: "Details",
+      auditActorType: "Actor type",
+      auditNode: "Node",
+      auditTrace: "Trace ID",
+      auditCommand: "Command ID",
+      auditErrorType: "Error type",
+      auditEventHash: "Event hash",
+      auditPreviousHash: "Previous event hash",
       settings: "Settings",
       workspace: "Workspace",
       platform: "Platform",
@@ -227,6 +243,21 @@ export const i18n = createI18n({
         "Approval denied. The requester cannot approve their own request; the approver must have authority for every bound resource.",
       approvalDecisionUnconfirmed:
         "Approval was not confirmed. Refresh its status before making another decision.",
+      approvalStatus_pending: "Pending",
+      approvalStatus_approved: "Approved",
+      approvalStatus_rejected: "Rejected",
+      approvalStatus_expired: "Expired",
+      approvalStatus_consumed: "Used",
+      approvalStatusHelp_pending:
+        "Waiting for an independent approver. Nothing runs until it is approved.",
+      approvalStatusHelp_approved:
+        "Approved, not run. The requester still starts the action with this approval ID; check the resulting operation for its outcome.",
+      approvalStatusHelp_rejected:
+        "Rejected. The action cannot run with this request.",
+      approvalStatusHelp_expired:
+        "Expired. It can no longer be approved or used; ask for a new request.",
+      approvalStatusHelp_consumed:
+        "Used by the requested action. Its outcome is on the resulting operation, not on this approval.",
       upgradeAgent: "Upgrade Agent",
       upgradeAgentTitle: "Upgrade the node agent to the recommended release",
       targetVersion: "Target version",

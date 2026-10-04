@@ -81,10 +81,12 @@ test("discovers a request and reuses bound independent approval details", async 
   await expect(page.getByTestId("approval-hash")).toHaveText("ab".repeat(32));
   const decision = page.getByRole("button", { name: "Approve", exact: true });
   await expect(decision).toBeDisabled();
-  await page.locator("#approval-reason").fill("independent review");
-  await page.locator(".approval-reviewed input").check();
+  await page.getByLabel("Decision reason").fill("independent review");
+  await page
+    .getByLabel("I have reviewed this request and its bound content")
+    .check();
   await decision.click();
-  await expect(page.getByTestId("approval-status")).toHaveText("approved");
+  await expect(page.getByTestId("approval-status")).toHaveText("Approved");
   await expect(
     page.getByText("No pending requests you can approve", { exact: true }),
   ).toBeVisible();

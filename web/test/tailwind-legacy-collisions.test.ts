@@ -23,6 +23,8 @@ const migrated = new Set([
   "src/views/NodesView.vue",
   "src/views/OperationsView.vue",
   "src/views/RolloutDetailView.vue",
+  "src/views/ApprovalsView.vue",
+  "src/views/AuditView.vue",
   "src/views/SettingsView.vue",
 ]);
 
