@@ -8,6 +8,13 @@ case "${scope}" in
   smoke|full|regression) ;;
   *) echo 'DATABASE_TEST_SCOPE must be smoke, full or regression' >&2; exit 2 ;;
 esac
+# Full CI runs three complementary shards in parallel; unset runs all of them.
+shard="${DATABASE_SHARD-}"
+case "${shard}" in
+  ''|mysql-cutover|mysql-core|services) ;;
+  *) echo 'DATABASE_SHARD must be mysql-cutover, mysql-core or services' >&2; exit 2 ;;
+esac
+if [[ -n "${shard}" && "${scope}" != full ]]; then echo 'DATABASE_SHARD requires DATABASE_TEST_SCOPE=full' >&2; exit 2; fi
 ENGINE="${ENGINE:?ENGINE must be mysql}"
 case "${ENGINE}" in
   mysql) IMAGE='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'; CLIENT=mysql ;;
@@ -101,7 +108,9 @@ if [[ "${scope}" == smoke ]]; then
   bash "${ROOT}/scripts/required-go-tests.sh" mysql-snapshot --select -race -timeout=15m
   exit 0
 fi
-(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)
+if [[ "${shard}" != mysql-* ]]; then
+  (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-controller-startup --select -race)
+fi
 if [[ "${scope}" == regression ]]; then
   (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" mysql-snapshot --select -race -timeout=15m)
   (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" regression-mysql --select -race -timeout=60m)
@@ -109,8 +118,15 @@ if [[ "${scope}" == regression ]]; then
     (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" "${group}" --select -race -timeout=10m)
   done
 else
-echo "Full current database acceptance: ${ENGINE}"
-(cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql)
+echo "Full current database acceptance: ${ENGINE}${shard:+ shard=${shard}}"
+# Cutover/artifact crash boundaries take about half of the package.
+mysql_split='^Test(MySQLCutover|MySQLArtifact)'
+case "${shard}" in
+  '') (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql) ;;
+  mysql-cutover) (cd "${ROOT}/control-plane" && REQUIRED_SHARD_RUN="${mysql_split}" bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql) ;;
+  mysql-core) (cd "${ROOT}/control-plane" && REQUIRED_SHARD_SKIP="${mysql_split}" bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql) ;;
+esac
+if [[ "${shard}" != mysql-* ]]; then
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -timeout=10m ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend|HistoryRetentionBackend|AuditRetentionBackend)Integration$')
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-enrollment --select -race -timeout=10m)
 bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
@@ -119,6 +135,7 @@ bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-api --select -race -timeout=10m)
 (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-auth -race -timeout=10m ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety|Legacy)Integration$')
 (cd "${ROOT}/control-plane" && go test -count=1 -race -timeout=5m -v ./internal/telemetry -run '^TestTelemetryBackendWorkflowIntegration$')
+fi
 fi
 # Controller configuration checks retain the production safety requirements.
 (cd "${ROOT}/control-plane" && go test -count=1 ./internal/platform/config ./cmd/ocserv-db-foundation)

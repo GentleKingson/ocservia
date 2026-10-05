@@ -22,6 +22,23 @@ if [[ "${1:-}" == --select ]]; then
   echo "Selected ${group}: ${package} -run ${pattern}"
   set -- "$@" "${package}" -run "${pattern}"
 fi
+# One top-level pattern selects a shard (-run) or its complement (-skip) and
+# scopes the manifest guard to the same half, so both shards cover the group.
+shard_mode=""
+shard_pattern=""
+if [[ -n "${REQUIRED_SHARD_RUN:-}" && -n "${REQUIRED_SHARD_SKIP:-}" ]]; then
+  echo 'REQUIRED_SHARD_RUN and REQUIRED_SHARD_SKIP are exclusive' >&2; exit 2
+elif [[ -n "${REQUIRED_SHARD_RUN:-}" ]]; then
+  shard_mode=run; shard_pattern="${REQUIRED_SHARD_RUN}"
+elif [[ -n "${REQUIRED_SHARD_SKIP:-}" ]]; then
+  shard_mode=skip; shard_pattern="${REQUIRED_SHARD_SKIP}"
+fi
+if [[ -n "${shard_mode}" ]]; then
+  for arg in "$@"; do
+    [[ "${arg}" != -run && "${arg}" != -skip ]] || { echo 'shard selection cannot combine with -run or -skip' >&2; exit 2; }
+  done
+  set -- "$@" "-${shard_mode}" "${shard_pattern}"
+fi
 if [[ "${group}" == database-* ]]; then
   : "${OCSERV_TEST_DATABASE_URL:?database acceptance requires a runtime connection}"
   : "${OCSERV_TEST_OWNER_DATABASE_URL:?database acceptance requires an owner connection}"
@@ -65,7 +82,7 @@ if [[ -n "${smoke_test}" ]]; then
   ' "${result}" >/dev/null || { echo "Core test did not run and pass: ${smoke_test}" >&2; exit 1; }
   exit 0
 fi
-summary="$(jq -cse --arg group "${group}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
+summary="$(jq -cse --arg group "${group}" --arg shard_mode "${shard_mode}" --arg shard_pattern "${shard_pattern}" --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" \
   -f "${ROOT}/scripts/check-required-go-tests.jq" "${result}")"
 printf '%s\n' "${summary}"
 if [[ -n "${DATABASE_CASE_RESULTS:-}" ]]; then
