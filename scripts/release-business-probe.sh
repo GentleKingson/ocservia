@@ -12,6 +12,7 @@ export SOURCE_COMMIT
 # shellcheck disable=SC1091
 source "$ROOT/scripts/env.sh"
 : "${BUSINESS_PROFILE:=smoke}"
+export BUSINESS_PROFILE
 : "${PRODUCTION_SIGNER_ACCEPTANCE:=false}"
 : "${BUSINESS_RUN_RESILIENCE:=false}"
 [[ "$BUSINESS_RUN_RESILIENCE" == true || "$BUSINESS_RUN_RESILIENCE" == false ]]
@@ -520,6 +521,7 @@ if [[ "${BUSINESS_PROFILE}" == extended ]]; then
 next_stage certificate
 python3 "${ROOT}/scripts/release-business-api.py" certificate
 record real_certificate_lifecycle
+fi
 next_stage browser
 npm --prefix "${ROOT}/web" ci --ignore-scripts
 (cd "${ROOT}/web" && npx playwright install --with-deps chromium)
@@ -533,9 +535,8 @@ python3 "${ROOT}/scripts/release-business-api.py" browser_prepare
 NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
 python3 "${ROOT}/scripts/release-business-api.py" browser_verify
 record real_browser_subset
-else
-  next_stage config_apply
-  python3 "${ROOT}/scripts/release-business-api.py" smoke_config_apply
+if [[ "${BUSINESS_PROFILE}" == smoke ]]; then
+  next_stage signer_vpn_user
   python3 "${ROOT}/scripts/release-business-api.py" smoke_user
   record approved_config_apply_and_vpn_user
 fi

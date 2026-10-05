@@ -422,57 +422,6 @@ def config_prepare():
     record('complete_config_tls_provisioned', reference_id=reference['id'], version='v1', file_identity='0:0:400:1', overwrite_rejected=True)
 
 
-def smoke_directives(max_clients):
-    reference = json.loads((WORK / 'config-reference.json').read_text())['id']
-    values = {'auth': 'plain[passwd=/etc/ocserv/ocpasswd]', 'cookie-timeout': '360', 'device': 'vpns',
-              'dns': '1.1.1.1', 'ipv4-network': '10.208.0.0/24', 'max-clients': str(max_clients),
-              'max-same-clients': '2', 'route': 'default', 'socket-file': '/run/ocserv.socket',
-              'tcp-port': '44443', 'udp-port': '0'}
-    return ([{'name': name, 'value': value} for name, value in values.items()] +
-            [{'name': name, 'secret_ref': {'secret_ref_id': reference}} for name in ('server-cert', 'server-key')])
-
-
-def smoke_plan(directives, revision, name):
-    node = os.environ['T07_NODE']
-    planned = api(f'nodes/{node}/config-plans',
-                  {'expected_revision': revision, 'template': {'name': name, 'directives': directives},
-                   'ttl_seconds': 900, 'reason': 'T07 Release Business Smoke'},
-                  headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-    def planned_result():
-        value = api('config-plans/' + planned['id'])
-        if value['state'] == 'failed':
-            raise RuntimeError(name + ' failed')
-        return value if value['state'] == 'succeeded' else None
-
-    plan = wait_for(name, planned_result)
-    assert plan['validation'] == 'valid'
-    return plan
-
-
-def smoke_config_apply():
-    node = os.environ['T07_NODE']
-    physical_before = run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0]
-    plan = smoke_plan(smoke_directives(4), 0, 't07-smoke-apply')
-    assert plan['materialized_hash'] != physical_before
-    approval_id = approval('config.apply', 'config_plan', plan['id'])
-    operation = api(f"config-plans/{plan['id']}/apply",
-                    {'approval_id': approval_id, 'reason': 'T07 Release Business Smoke'},
-                    headers={'Idempotency-Key': secrets.token_hex(16)}, status=202)
-    def applied_result():
-        value = api('operations/' + operation['id'])
-        if value['state'] in ('failed', 'expired', 'cancelled'):
-            raise RuntimeError('positive ConfigPlan apply ' + value['state'])
-        return value if value['state'] == 'succeeded' else None
-
-    result = wait_for('positive ConfigPlan apply', applied_result)
-    assert result['config_apply_state'] == 'succeeded'
-    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == plan['materialized_hash']
-    assert api(f'nodes/{node}')['config_revision'] == 1
-    (WORK / 'smoke-applied.json').write_text(json.dumps({'operation_id': operation['id'],
-                                                         'materialized_hash': plan['materialized_hash']}))
-    record('smoke_config_plan_applied', operation_id=operation['id'], materialized_hash=plan['materialized_hash'])
-
-
 def smoke_user():
     node = os.environ['T07_NODE']
     password = secrets.token_hex(24)
@@ -745,8 +694,24 @@ def deep_resilience():
 
 
 def browser_verify():
-    for entry in json.loads((EVIDENCE / 'browser-checkpoints.json').read_text()):
+    entries = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
+    required = {'browser_user_mutation', 'browser_approved_reload',
+                'browser_consumed_approval_cannot_authorize_new_operation',
+                'browser_complete_config_apply', 'browser_login_workspace_forbidden_refresh'}
+    if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'extended':
+        required |= {'browser_certificate_csr', 'browser_certificate_issue_export_one_use',
+                     'browser_certificate_revoke'}
+    for name in required:
+        assert sum(entry['name'] == name for entry in entries) == 1, 'missing or duplicate browser checkpoint: ' + name
+    approvals = {entry['action'] for entry in entries if entry['name'] == 'browser_bound_approval'}
+    assert {'service.reload', 'config.apply'} <= approvals, 'missing browser approval'
+    assert next(entry for entry in entries if entry['name'] == 'browser_login_workspace_forbidden_refresh')['status'] == 'PASS'
+    operation_checks = {'browser_user_mutation', 'browser_approved_reload', 'browser_complete_config_apply',
+                        'browser_certificate_csr', 'browser_certificate_issue_export_one_use', 'browser_certificate_revoke'}
+    for entry in entries:
         operation_id = entry.get('operation_id') or entry.get('operation', {}).get('id')
+        if entry['name'] in operation_checks:
+            assert operation_id, 'missing browser operation: ' + entry['name']
         if not operation_id:
             continue
         operation = wait_for('browser operation', lambda: (value if (value := api('operations/' + operation_id))['state'] == 'succeeded' else None))
@@ -754,6 +719,15 @@ def browser_verify():
         assert snapshot['database_state'] == 'succeeded'
         assert snapshot['journal_count_state_error_receipt'] == '1|succeeded||1'
         assert snapshot['root_count_state_response'] == '1|applied|1'
+    applied = next(entry for entry in entries if entry['name'] == 'browser_complete_config_apply')
+    operation_id = applied['operation']['id']
+    assert api('operations/' + operation_id)['config_apply_state'] == 'succeeded'
+    assert api('config-plans/' + applied['plan_id'])['materialized_hash'] == applied['materialized_hash']
+    assert api(f"nodes/{os.environ['T07_NODE']}")['config_revision'] == 1
+    assert run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf').split()[0] == applied['materialized_hash']
+    if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'smoke':
+        (WORK / 'smoke-applied.json').write_text(json.dumps({
+            'operation_id': operation_id, 'materialized_hash': applied['materialized_hash']}))
     record('browser_operations_durable_cross_check')
 
 
@@ -1056,7 +1030,7 @@ def vpn_smoke(phase, relay_recovery=False):
 if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
-                     'browser_prepare', 'browser_verify', 'business', 'smoke_config_apply', 'smoke_user',
+                     'browser_prepare', 'browser_verify', 'business', 'smoke_user',
                      'vpn_after_config_apply', 'vpn_after_rollback', 'resilience'):
         raise SystemExit('unknown phase')
     if phase.startswith('vpn_'):

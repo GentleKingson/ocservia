@@ -191,30 +191,85 @@ test("callback rejection is terminal and revisiting login offers manual retry", 
 }) => {
   await methods(page, false, true);
   let starts = 0;
+  let callbacks = 0;
+  let authenticated = false;
+  await page.route("**/api/v1/workspaces", (route) =>
+    authenticated
+      ? route.fulfill({
+          json: {
+            items: [
+              { id: "workspace-a", name: "Alpha", slug: "alpha", version: 1 },
+            ],
+          },
+        })
+      : route.fulfill({ status: 401, json: {} }),
+  );
+  await page.route("**/api/v1/readyz", (route) => route.fulfill({ json: {} }));
+  await page.route("**/api/v1/operations/summary", (route) =>
+    route.fulfill({ json: { active: 0, unknown: 0 } }),
+  );
+  for (const resource of ["nodes", "operations", "events"]) {
+    await page.route(`**/api/v1/${resource}?**`, (route) =>
+      route.fulfill({ json: { items: [], page: { has_more: false } } }),
+    );
+  }
+  await page.route("**/api/v1/events/stream?**", (route) =>
+    route.fulfill({ contentType: "text/event-stream", body: "" }),
+  );
   await page.route("**/api/v1/auth/login", (route) => {
     starts += 1;
+    // A new navigation from the simulated IdP lets Playwright intercept the
+    // callback; it does not re-route requests within a fulfilled 302 chain.
     return route.fulfill({
-      status: 302,
-      headers: { Location: "/api/v1/auth/callback?state=test&code=test" },
+      contentType: "text/html",
+      body: `<script>location.replace("/api/v1/auth/callback?state=test&code=test")</script>`,
     });
   });
-  await page.route("**/api/v1/auth/callback?**", (route) =>
-    route.fulfill({
-      status: 401,
-      json: {
-        type: "https://ocservia.dev/problems/oidc-callback-rejected",
-        title: "Login rejected",
-      },
-    }),
-  );
-  await page.goto("/login");
+  await page.route("**/api/v1/auth/callback?**", (route) => {
+    callbacks += 1;
+    if (callbacks === 1) {
+      return route.fulfill({
+        status: 401,
+        json: {
+          type: "https://ocservia.dev/problems/oidc-callback-rejected",
+          title: "Login rejected",
+        },
+      });
+    }
+    authenticated = true;
+    return route.fulfill({ status: 302, headers: { Location: "/" } });
+  });
+  const rejected = page.waitForResponse("**/api/v1/auth/callback?**");
+  await page.goto("/nodes?filter=login#latest");
+  expect((await rejected).status()).toBe(401);
   await expect(page).toHaveURL(/\/api\/v1\/auth\/callback\?/);
+  await expect(page.locator("body")).toContainText("Login rejected");
+  expect(callbacks).toBe(1);
   expect(starts).toBe(1);
   await page.goto("/login");
-  await expect(
-    page.getByRole("button", { name: "Sign in with SSO" }),
-  ).toBeVisible();
+  const retry = page.getByRole("button", { name: "Sign in with SSO" });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveText(
+    "SSO did not complete. Sign in with SSO to try again.",
+  );
+  await page.reload();
+  await expect(retry).toBeVisible();
   expect(starts).toBe(1);
+  expect(callbacks).toBe(1);
+
+  const accepted = page.waitForResponse("**/api/v1/auth/callback?**");
+  await retry.click();
+  expect((await accepted).status()).toBe(302);
+  await expect(page).toHaveURL(/\/nodes\?filter=login#latest$/);
+  await expect(page.getByTestId("workspace")).toContainText("Alpha");
+  expect(starts).toBe(2);
+  expect(callbacks).toBe(2);
+  expect(
+    await page.evaluate(() => [
+      sessionStorage.getItem("ocservia.login.oidc-attempt"),
+      sessionStorage.getItem("ocservia.login.return-to"),
+    ]),
+  ).toEqual([null, null]);
 });
 
 test("signed-out visits never render the console shell before login", async ({

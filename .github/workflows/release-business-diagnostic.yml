@@ -97,7 +97,7 @@ jobs:
             "$DIAGNOSTICS/result.json" >/dev/null
           jq -e --arg profile "$BUSINESS_PROFILE" '
             (if $profile == "smoke" then
-              (["approved_config_apply_and_vpn_user", "real_vpn_after_config_apply"] - .passed_checkpoints | length) == 0
+              (["real_browser_subset", "approved_config_apply_and_vpn_user", "real_vpn_after_config_apply"] - .passed_checkpoints | length) == 0
              else
               (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset", "real_vpn_business_and_recovery"] - .passed_checkpoints | length) == 0
              end)' "$DIAGNOSTICS/result.json" >/dev/null
