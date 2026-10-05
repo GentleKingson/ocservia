@@ -9,7 +9,7 @@ name="ocservia-mysql-snapshot-$$"
 cleanup() { docker rm -fv "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 image='mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6'
-docker run -d --name "$name" -p 127.0.0.1::3306 -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia "$image" --log-bin-trust-function-creators=1 >/dev/null
+docker run -d --name "$name" -p 127.0.0.1::3306 -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia "$image" --log-bin-trust-function-creators=1 --innodb-flush-log-at-trx-commit=2 --sync-binlog=0 >/dev/null
 ready=false
 for ((i=0;i<90;i++)); do
  if docker exec -e MYSQL_PWD=pr02-isolated-test-root "$name" mysql --protocol=TCP -h127.0.0.1 -uroot -Nse 'SELECT 1' >/dev/null 2>&1; then ready=true; break; fi
