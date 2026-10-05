@@ -55,7 +55,7 @@ The focused Compose mode certifies the Relay arguments and merged network
 boundary, not reachability. It does not certify the untouched database overlay's
 `nofile` limits: the existing full I18 assertion expects limits that the baseline
 Postgres and backup services do not declare. The full and `--contract-only` I18
-checks retain that assertion and are not reported as passing by this task.
+checks retain that assertion and need separate validation.
 The database support matrix remains unchanged.
 
 ## Network Probe

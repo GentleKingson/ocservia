@@ -35,7 +35,8 @@ external PostgreSQL 18 descriptor is also implemented; it uses a dedicated
 egress network and requires `sslmode=verify-full` plus `database-ca.pem` for
 owner, runtime, and backup connections. External MySQL 8.4 LTS is supported with verified TLS and backend-specific logical backups.
 Bundled MySQL is rejected.
-The project publishes only TCP 443. Bundled database, application, and
+Standalone publishes only TCP 443. Integrated mode additionally publishes
+UDP 7842 for its Relay; see the [integrated topology](../../deploy/production/integrated/README.md). Bundled database, application, and
 observability traffic remain on internal networks. External database
 deployments additionally attach database clients to the dedicated non-internal
 `database-egress` network; no database port is published by ocservia.
@@ -110,7 +111,8 @@ any existing Collector in the same project; `down` also includes the optional
 Collector. The launcher ignores inherited `COMPOSE_PROFILES`, `COMPOSE_ENV_FILES`,
 and automatic Compose `.env` files, using only the exported lifecycle configuration;
 use the endpoint setting, not a manually selected profile, to enable observability.
-The release manifest still pins all six images, including `otel` for later opt-in.
+Both release manifest schemas include `otel` for later opt-in; their image
+inventories are listed under [Release manifests](#release-manifests).
 
 The optional OTEL layout is part of the target's production deployment files.
 The lifecycle resolves the verified target source rather than requiring its
@@ -119,7 +121,28 @@ or guarantee that an arbitrary target can run against existing state.
 
 ## Production secrets
 
-Use explicit `vX.Y.Z` or `vX.Y.Z-rc.N` tags or SHA256 references for prebuilt `OCSERV_*_IMAGE` values. Put referenced secret files in an absolute, canonical, launcher-owned, mode-`0700` `OCSERV_SECRET_DIR` outside the checkout; every ancestor must be root- or launcher-owned and not group/world writable. General secrets must be launcher-owned mode `0444`: the private parent directory prevents host traversal while the read-only file allows each explicitly mounted non-root service to read it. The Ed25519 Controller command private key, `controller-command-signing-key.pem`, and the 32-byte lowercase-hex audit event key, `audit-event-key`, must be owned by UID/GID `65534:65532` with mode `0400`, matching the non-root Controller process. Set a non-secret stable identifier such as `OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1`; the identifier is stored with each event. The audit event key is independent from `audit-checkpoint-key` and must never be reused for checkpoints or another purpose. File-backed Compose secrets are bind mounts on supported deployments, so the source ownership is required even though the Compose target also declares it. The Iroh Controller key and relay token must be owned by UID/GID 65532 with mode `0400`. The launcher rejects missing files, symbolic links, unsafe host ancestry, and ownership or mode mismatches; the Controller loader additionally rejects a hard-linked audit event key and unsafe in-container ancestry. Do not place credentials in Compose environment variables.
+Use explicit `vX.Y.Z` / `vX.Y.Z-rc.N` tags or SHA-256 references for prebuilt
+`OCSERV_*_IMAGE` values. Keep secrets outside the checkout in a canonical absolute
+`OCSERV_SECRET_DIR`. Every ancestor must be root- or launcher-owned without
+group/world write permission. The launcher rejects missing files, symlinks and
+ownership/mode mismatches. Never put credentials in Compose environment values.
+
+| Path or file class | Host owner | Mode / additional checks |
+| --- | --- | --- |
+| `OCSERV_SECRET_DIR` | Launcher | `0700`; private parent prevents host traversal |
+| General secrets, including session, OIDC and enabled OTEL files | Launcher | `0444`; only explicitly mounted services receive them |
+| `controller-command-signing-key.pem`, `audit-event-key` | `65534:65532` | `0400`; audit loader also rejects hard links and unsafe container ancestry |
+| `controller-iroh.key`, `relay-access-token` | `65532:65532` | `0400` |
+| `controller-command-verification-key.pem` | `0:65532` | `0440`, one-link regular file |
+| Optional `relay-ca.pem` | `0:0` | `0444`, nonempty one-link regular file |
+| `OCSERV_BACKUP_DIR` | `999:999` | `0700`, no symlinks |
+
+File-backed Compose secrets are bind mounts, so host ownership matters even when
+the descriptor declares a target owner. `audit-event-key` is an independent
+32-byte key encoded as lowercase hex; never reuse the audit checkpoint key.
+`OCSERV_AUDIT_EVENT_KEY_ID` is its stable, non-secret identifier stored with events.
+Integrated Relay and Signer files have additional
+[secret/state requirements](../../deploy/production/integrated/README.md).
 
 For a private Relay CA, provision the public PEM bundle as
 `${OCSERV_SECRET_DIR}/relay-ca.pem`: a nonempty one-link `root:root` regular
@@ -140,10 +163,11 @@ must be a one-link regular file owned by `0:65532`, mode `0440`; transportd moun
 only this public key to verify connection fences. Provision
 it before installing or upgrading to this descriptor, and rotate it with the
 matching signing key. Distribute the same public key to Agents through the node
-provisioning channel described in `docs/development/command-authorization-v1.md`.
+provisioning channel in [command authorization](../development/command-authorization-v1.md).
 `transportd` must never receive the private key. Missing, unreadable or mismatched
 verification keys fail closed; do not remove fencing to make a node connect.
-The deployment descriptor rollback guard still applies to this added mount.
+Rollback must satisfy the target's actual secret and mount requirements;
+descriptor equality is not an admission gate.
 
 Provision the backup bind mount for the non-root PostgreSQL UID before startup. The launcher rejects missing, symbolic-link, incorrectly owned, or overly permissive paths:
 
@@ -153,29 +177,18 @@ sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
 
 ### PostgreSQL initialization updates
 
-Bundled PostgreSQL role initialization passes application and backup passwords
-through standard input, not process arguments. This concerns initialization,
-not a persistent exposure from an already initialized database.
+Bundled PostgreSQL role initialization passes passwords through standard input.
+Its scripts come from the selected release checkout's `postgres-init` directory;
+replacing a Controller image or Agent package does not replace them. The official
+PostgreSQL image runs them only on an empty data directory. Do not delete a volume
+or rebuild a database to rerun initialization. Assess any historical credential
+exposure separately and use [credential rotation](incident-recovery.md#postgresql-credential-rotation)
+when required.
 
-For new installations or a planned reinitialization, use a release checkout
-containing the updated `deploy/production/postgres-init/001-runtime-role.sh`.
-The production Compose descriptor mounts that checkout's `postgres-init`
-directory; updating an Agent package or a Controller image alone does not
-replace these initialization files.
+## Release manifests
 
-The [official PostgreSQL image](https://hub.docker.com/_/postgres) runs
-`/docker-entrypoint-initdb.d` scripts only when the data directory is empty.
-Restarting or upgrading an existing database does not rerun this initialization.
-Do not delete a data volume or rebuild a database just to apply this update.
-The update does not undo any historical credential access. Assess application
-and backup credential rotation separately based on who could access the host
-during initialization; do not assume credentials were read. When rotation is
-needed, use the existing credential-rotation procedure below as a separate
-operator action, not an automatic part of this update.
-
-### Release manifests
-
-The v1 schema remains strictly supported for standalone installations. The v2
+The v1 schema supports standalone installations with six roles: `gateway`,
+`control`, `transport`, `backup`, `postgres` and `otel`. The v2
 reader additionally requires `signer_state_version: 1` and four exact image
 roles: `edge`, `relay`, `signer`, `mysql_backup`. It retains
 the same per-architecture filenames and protected local file rules. Integrated requires
@@ -211,110 +224,51 @@ configuration files must be regular root- or launcher-owned files, without
 symlink ancestry or group/world write permission. Rollback and start use the
 protected local lifecycle state and do not need the original download.
 
-Supported Controller hosts are Ubuntu 22.04, 24.04, and 26.04 and Debian 11,
-12, and 13 on amd64 or arm64, plus Ubuntu 20.04 as an existing-Docker
-compatibility host. Prepare a fresh supported host with the prerequisite
-bootstrap before the first lifecycle command:
+## Host and configuration contract
 
-```bash
-deploy/production/bootstrap-host.sh check
-sudo deploy/production/bootstrap-host.sh install --backup-dir "$OCSERV_BACKUP_DIR"
-```
+| Host | Architecture | Bootstrap policy |
+| --- | --- | --- |
+| Ubuntu 22.04 / 24.04 / 26.04; Debian 12 / 13 | amd64, arm64 | Installs missing prerequisites and Docker if absent |
+| Debian 11 | amd64, arm64 | Bootstrappable; regular LTS ended 2026-08-31, arrange ELTS or equivalent maintenance |
+| Ubuntu 20.04 | amd64, arm64 | Existing compatible Docker only; arrange ESM or equivalent maintenance |
 
-`check` is read-only and reports whether the host satisfies the Controller
-lifecycle prerequisites. `install` is idempotent and installs only what is
-missing: `jq`, `flock` (`util-linux`), `curl`, `openssl`, and CA certificates
-through apt, and — only when Docker is absent entirely — Docker Engine, the
-CLI, containerd, Buildx, and the Compose plugin from Docker's official apt
-repository for the detected distribution (`download.docker.com/linux/ubuntu`
-with the Ubuntu codename on Ubuntu, `download.docker.com/linux/debian` with
-`bullseye`/`bookworm`/`trixie` on Debian), never the `get.docker.com`
-convenience script. Ubuntu 20.04 is a legacy compatibility host: it can run
-the Controller only against an already-installed compatible Docker (Docker
-Engine with Compose v2 and `docker compose up --wait`), automatic Docker
-bootstrap fails closed because Ubuntu 20.04 is outside Docker's current
-official Ubuntu support matrix, and standard security maintenance ended
-2025-05-31, so the host needs Ubuntu Pro/ESM or an equivalent maintenance
-strategy (never configured by the bootstrap). Debian 11 remains fully
-bootstrappable while Docker still lists it, but regular Debian LTS security
-maintenance ended 2026-08-31; the bootstrap prints a legacy warning and
-production hosts need Debian ELTS or an equivalent sustained security
-maintenance (also never configured automatically). An existing
-compatible Docker installation is preserved without reinstall or upgrade on
-every supported host; an existing runtime that conflicts with the lifecycle —
-the official Docker conflict set such as `docker.io`, `docker-doc`,
-`docker-buildx`, `podman-docker`, `containerd`, `runc`, and the
-distribution's `docker-compose` (plus `docker-compose-v2` on Ubuntu) while
-the Compose v2 plugin is unavailable, or a standalone `docker-compose` in the
-same situation — fails closed with an actionable message pointing at the
-Docker installation guidance for the detected distribution and is never
-uninstalled.
+`bootstrap-host.sh check` is read-only. Its `install` command installs missing
+`jq`, `flock`, `curl`, `openssl` and CA certificates through apt. When Docker is
+absent on a bootstrappable host, it uses Docker's distribution-specific official
+apt repository. It preserves compatible existing Docker and refuses conflicting
+runtimes or an unavailable Compose v2 plugin; it never uninstalls them. Docker
+must support `docker compose up --wait`.
 
-The launcher model is explicit: the lifecycle runs as the `sudo`-invoking user
-of the bootstrap, or as root when the bootstrap itself runs as root. That
-launcher user must already have Docker daemon access — deliberately configured
-by the operator following Docker's official post-install steps — or the whole
-flow must run as root. Both `check` and `install` verify the launcher can
-actually reach the Docker daemon (`install` probes the `sudo`-invoking user
-through `runuser`) and fail closed with remediation before any lifecycle
-directory is created, because the bootstrap never modifies the Docker
-permission model, group membership, or socket.
+The launcher is the bootstrap's sudo-invoking user, or root for a root lifecycle.
+That user must already be able to reach the Docker daemon. Bootstrap never
+changes group membership, socket permissions, firewall rules or Docker TCP
+listeners. Fresh hosts without Docker require the installer's explicit
+`--root-lifecycle`, or separately prepared Docker access. The root path forwards
+only allowlisted settings and removes `SUDO_USER`; do not substitute `sudo -E`.
 
-The bootstrap creates `/var/lib/ocservia-controller` (or the configured
-`OCSERV_CONTROLLER_STATE_ROOT`) under the exact `controller.sh` state contract —
-absolute canonical path, no symlink ancestry, no group/world-writable
-ancestors, and mode `0700` owned by precisely the launcher user — and
-`--backup-dir` creates the backup bind mount with the required `999:999`
-mode-`0700` contract; existing directories with the wrong owner or mode are
-reported, not repaired. The bootstrap never starts a Docker TCP listener,
-never edits the firewall (it only warns when `ufw` is active, because
-published ports bypass it), and never creates or rotates any secret, key,
-token, or password. Both commands end with a read-only summary of the operator
-prerequisites that remain, such as `OCSERV_SECRET_DIR` and `OCSERV_BACKUP_DIR`.
+The state root defaults to `/var/lib/ocservia-controller`: canonical absolute
+path, safe root/launcher-owned ancestry without group/world write, launcher-owned
+mode `0700`. Bootstrap can also create `OCSERV_BACKUP_DIR` as `999:999 0700`.
+Incorrect existing ownership or modes are reported, not repaired. Secrets,
+trust material and host security maintenance remain operator-provisioned.
 
-For a first deployment, `deploy/production/install.sh` orchestrates those
-steps from a clean checkout of an exact `vX.Y.Z` release tag: it verifies the
-release-tag identity and clean checkout, selects the release manifest matching
-the host architecture (`amd64` or `arm64`), runs the host bootstrap through
-`sudo` in launcher mode (the root lifecycle re-execs once through a controlled
-`sudo env`), downloads the selected `controller-release-<arch>.json` over
-HTTPS into
-`<state-root>/release-bundles/vX.Y.Z` with mode-`0700` directories and
-mode-`0600` launcher-owned files, and delegates activation to
-`controller.sh install --release-file`. It must run as the lifecycle launcher
-user (not through whole-script `sudo`, which would mismatch the bootstrap's
-SUDO_USER launcher against the activating user). A deliberate
-whole-lifecycle-as-root install is available through
-`deploy/production/install.sh --root-lifecycle`: when started by a non-root
-operator it obtains root through a controlled `sudo env` that forwards only
-the allowlisted production `OCSERV_*` settings from the operator session, then
-strips `SUDO_USER` (which `sudo -i` retains) so the bootstrap provisions the
-root for the same root user that activates the Controller, and never infers
-intent from `SUDO_COMMAND`. Do not replace this with `sudo -E`.
-Because a freshly installed Docker grants no non-root daemon access and
-neither the installer nor the bootstrap ever modifies the Docker permission
-model, the installer fails closed before any host mutation when a non-root
-launcher runs it on a host without a Docker client: the fresh-host
-one-command path requires `--root-lifecycle`, or Docker must be installed
-separately first with the launcher's daemon access deliberately granted per
-Docker's official post-install steps. `controller.sh` remains the
-verification and activation authority, and the installer creates no secrets
-and no trust material.
+The installer loads `install.env`; explicit exported settings override it,
+including empty values. Subsequent lifecycle and Compose commands need the same
+effective exported environment; they do not reload that file. Lifecycle commands
+restore image settings from their selected manifest. See the complete
+[first-install procedure](../getting-started/production.md) for configuration,
+secrets, host preparation and activation.
 
-For a fresh Controller host, install the exact release selected by the local
-manifest through the lifecycle entrypoint:
+## Lifecycle state and failure recovery
 
-```bash
-# amd64 host
-deploy/production/controller.sh install \
-  --release-file /path/to/controller-release-amd64.json
+Command examples live in [Controller lifecycle](../how-to/controller-lifecycle.md).
+Use `controller.sh` for install, upgrade, rollback, start and uninstall.
+Implementation: [controller.sh](../../deploy/production/controller.sh) and
+[compose.sh](../../deploy/production/compose.sh).
+The versioned bootstrap is only a first-install entrypoint; rerunning an unpinned
+Stage-0 script is not an upgrade procedure.
 
-# arm64 host
-deploy/production/controller.sh install \
-  --release-file /path/to/controller-release-arm64.json
-```
-
-The entrypoint requires Docker Compose v2 with
+`install` requires Docker Compose v2 with
 `docker compose up --wait` support. It takes an exclusive local lock in
 `/var/lib/ocservia-controller`, rejects an existing
 `current-release.json`, validates that the checkout HEAD and clean working tree
@@ -332,30 +286,15 @@ committed as `current-release.json` (and, for upgrades,
 `previous-release.json`), all with mode `0600`. Upgrade pending evidence also
 records the pre-activation current manifest so recovery can restore the
 previous-release state before clearing completed evidence. It does not create
-or rotate secrets, certificates, or identity keys. To upgrade an installed Controller,
-provide a newer canonical manifest:
+or rotate secrets, certificates, or identity keys.
 
-```bash
-# amd64 host
-deploy/production/controller.sh upgrade \
-  --release-file /path/to/controller-release-amd64.json
-
-# arm64 host
-deploy/production/controller.sh upgrade \
-  --release-file /path/to/controller-release-arm64.json
-```
-
-Run the v1.1.0 lifecycle with the verified target bundle. Its `source_commit`
+Run the lifecycle with the validated target configuration. Its `source_commit`
 must be available locally (fetch the exact commit from the trusted repository
 if the checkout is shallow). The lifecycle reuses the matching clean checkout,
 or retains a separate clean Git checkout under the protected state root; it
 never edits an existing checkout to force a match. Compose and smoke come from
 that target source, including during later start/uninstall. Retained source
 checkouts are not database backups and are not removed by runtime uninstall.
-The versioned bootstrap remains a first-install entrypoint, not an upgrade
-command. Do not rerun an unpinned
-or `latest` Stage-0 convenience script as an implicit upgrade; Stage-0 is not a
-long-term lifecycle manager.
 
 Upgrade validates the confirmed current state and target first, checks the
 target `source_commit` against a clean checkout before any Compose operation,
@@ -368,12 +307,6 @@ no-op. Lower, equal and higher software version targets use the same execution
 path; a different artifact with the same version string is not a no-op.
 Failures after activation return non-zero without redeploying old
 images, running down migrations, or changing confirmed release state.
-
-To roll back the last confirmed Controller release, run:
-
-```bash
-deploy/production/controller.sh rollback
-```
 
 Rollback uses only the protected `previous-release.json`; it never accepts an
 operator-selected manifest. It does not require a lower version, equal migration
@@ -392,82 +325,34 @@ retry; it does not automatically redeploy the current images.
 [Backend-specific recovery](incident-recovery.md#database-recovery) is the
 disaster-recovery boundary, not an application rollback mechanism.
 
-To stop and remove the production Controller runtime without deleting its
-persistent data, run:
+### Start and uninstall
 
-```bash
-deploy/production/controller.sh uninstall
-```
+`start` resolves the retained current manifest's image inventory and exact source,
+runs the target Compose graph with `up -d --wait` and release smoke, and leaves
+confirmed state unchanged. Keep the production environment, secrets and backup
+directory available. Do not use `install` when confirmed state already exists.
 
-Uninstall takes the lifecycle lock, validates the confirmed release state, and
-calls the protected Compose launcher with `down`. This removes the Controller
-containers and project networks while retaining the selected bundled database,
-`transport-runtime`, and `trust-runtime` named volumes. It also retains every
-external database,
-`current-release.json`, `previous-release.json` when present, the configured
-backup bind mount, and `OCSERV_SECRET_DIR` including PKI, signing keys, and
-Iroh identities. The command does not require `--release-file`; it reads the
-image digests from the confirmed current state. The same production environment
-and protected secret files required by `compose.sh` are still required so the
-launcher can safely resolve and validate the Compose project. Repeating this
-command after a successful uninstall is a safe no-op for the already-removed
-containers and networks.
+Uninstall takes the lifecycle lock and runs protected Compose `down`. It retains
+named database/transport/trust volumes, external databases, confirmed manifests,
+source checkouts, backups and secrets. Repeating a successful uninstall is safe.
+`--purge-data` additionally removes production project volumes and local release
+state after successful shutdown; integrated mode refuses it. The lock, secrets,
+backup directory, external databases, off-host backups, source checkouts, images
+and unrelated volumes remain. Purge is neither secure erase nor database recovery.
 
-Do not use `install` to restart a Controller whose confirmed state was retained
-by the default uninstall; `install` correctly refuses an existing current
-release. Start that same release through the lifecycle entrypoint:
+Both uninstall forms refuse pending transactions. Shutdown failure leaves
+confirmed state and data untouched. Failed volume purge retains lifecycle state;
+failed state cleanup reports residual paths. Neither operation re-enters Stage-0.
 
-```bash
-deploy/production/controller.sh start
-```
-
-`start` reads the retained `current-release.json`, reconstructs all six digest
-image variables, validates that the checkout still matches the confirmed
-release descriptor, and runs the protected Compose launcher with
-`up -d --wait` followed by release smoke. The protected secret directory,
-backup directory, and other required production configuration variables must
-still be available in the environment; image variables no longer need to be
-reconstructed manually. `start` does not change confirmed release state.
-
-To explicitly delete Controller-owned local persistent data as part of the
-uninstall, run:
-
-```bash
-deploy/production/controller.sh uninstall --purge-data
-```
-
-After `down --volumes` succeeds for the fixed `ocservia-production` Compose
-project, this removes the project named volumes, including PostgreSQL data and
-the transport/trust runtime volumes, and removes the local Controller release
-state. It does not remove `OCSERV_SECRET_DIR`, `OCSERV_BACKUP_DIR`, any external
-database, protected
-off-host backups, operator-created TLS/PKI/key material, the repository
-checkout, Docker images, or unrelated Docker volumes. The lifecycle lock is
-retained so a later invocation cannot create an unprotected replacement state
-root. This is local data deletion, not secure erase and not disaster-recovery
-backup deletion; use the matching [database recovery procedure](incident-recovery.md#database-recovery)
-when needed.
-
-Both forms refuse to run while a pending install, upgrade, or rollback
-transaction exists. A Compose shutdown failure leaves confirmed state and data
-untouched. A failed volume purge is reported as partial and retains lifecycle
-state; a failed state cleanup reports the residual state paths instead of
-claiming that purge completed.
-
-Controller rollback and uninstall remain `controller.sh` operations over the
-protected lifecycle state. Neither operation downloads or re-enters Stage-0.
-
-The target's owner-only database initialization preserves execution receipts,
-checks known migration content, serializes execution and propagates actual SQL
-and partial-execution failures. PostgreSQL and MySQL do not compare a
-Controller schema range or reject an unknown completed receipt as a software
-version policy. Frozen compatibility metadata remains historical data; it is
-not readiness authority. Readiness checks current core reads, permissions and
-event-stream health, with current functional startup requirements still enforced.
-No database reverse migration or automatic state restore accompanies a binary
-rollback. Use [backend-specific database recovery](incident-recovery.md#database-recovery).
-
-Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
+The target's owner-only database initialization validates supported SQL artifact
+checksums and execution receipts, serializes execution and propagates SQL or
+partial-execution failures. There is no software-version/schema-range admission
+policy, but unsupported epochs, unknown/noncontiguous receipts and invalid content
+still fail closed. Readiness checks current core reads, permissions and event
+streams; it does not certify historical database compatibility. Use
+[SQL artifact contracts](../development/control-plane.md#current-sql-artifacts-and-bounded-upgrades)
+and [backend recovery](incident-recovery.md#database-recovery), never edit receipts
+to force startup.
 
 Lifecycle acceptance keeps separate evidence for five boundaries: Compose
 container health and dependency readiness; functional release identity from the
@@ -476,45 +361,17 @@ database initialization, permissions and business behavior; and
 disaster recovery through the selected backend's documented procedure. Passing one boundary
 does not establish the others.
 
-For bundled PostgreSQL, backups retain the configured number of verified base
-backups. WAL cleanup is anchored to the oldest retained base backup, so
-point-in-time recovery remains possible across the retained window without
-allowing the local archive to grow forever. Monitor backup-worker health and
-the `LATEST` timestamp, copy each completed base backup plus its required WAL
-range to protected off-host storage, and confirm the off-host copy before
-reducing local retention.
+## Backup and credential operations
 
-For bundled PostgreSQL, set `postgres.pgpass` to
-`postgres:5432:*:ocservia_backup:<password>` using the protected
-backup-role password supplied during initialization. The passfile covers both
-the regular database connection for the server-major check and replication. For external PostgreSQL,
-use its actual hostname and port and include entries for both `ocservia` (the
-server-major preflight) and `replication` (`pg_basebackup`). The backup
-entrypoint copies the read-only Compose secret into a private mode-0600 passfile
-before invoking libpq tools.
+Use [database backup and restore](database-backup-restore.md) for retention,
+backup-role connection files, off-host copies and isolated restore verification.
+Use [PostgreSQL credential rotation](incident-recovery.md#postgresql-credential-rotation)
+to update database verifiers and secret files together. Neither image replacement
+nor replacing a secret file rotates a database password.
 
-External PostgreSQL receives only verified base backup coverage from this
-deployment. Continuous WAL archiving on an external server is independently managed by
-the database operator. This deployment does not certify PITR readiness for
-bundled or external PostgreSQL. Existing backup and WAL retention stay intact.
+## Relay and application networking
 
-External MySQL 8.4 LTS uses the backend-specific logical
-backup and restore procedure in [MySQL backup and restore
-validation](database-backup-restore.md#mysql). That procedure does not claim snapshot, PITR,
-failover, or cross-engine recovery coverage.
-
-Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:
-
-```bash
-export OCSERV_NEW_POSTGRES_APP_PASSWORD_FILE=/protected/new-app-password
-export OCSERV_NEW_POSTGRES_BACKUP_PASSWORD_FILE=/protected/new-backup-password
-export OCSERV_TERMINATE_OLD_POSTGRES_SESSIONS=true # incident rotations only
-deploy/production/rotate-postgres-credentials.sh
-```
-
-The workflow holds an exclusive mode-`0600` lock in the private secret directory for the complete rotation lifecycle, then verifies the current credentials, executes real `ALTER ROLE` statements through the local administrative connection, verifies both new credentials and rejects both old credentials for new connections, atomically updates the four Compose secret sources, recreates the Control Plane and backup clients, and verifies their new connections. A waiting rotation reads its baseline only after the preceding rotation releases that lock. Recovery restores the previous verifiers and files only when the database and files still match either the baseline or values written by that invocation; unexpected later state is never overwritten. Keep any reported recovery snapshot protected and services stopped until recovery completes. The script never accepts passwords as command-line arguments and does not print them.
-
-Each deployment uses one dedicated HTTPS Relay:
+Standalone uses one independently deployed HTTPS Relay:
 
 ```bash
 export OCSERV_RELAY_URL_A=https://relay.example.com
@@ -523,11 +380,13 @@ export OCSERV_RELAY_URL_B=
 
 A is required; B must be absent or empty. Nonempty B is rejected before install
 or process execution. These values can be set in `install.env` without editing
-release files. For an existing A/B deployment, deliberately clear B on both
+release files. Integrated mode derives its Relay URL from its public host; use
+[its configuration contract](../../deploy/production/integrated/README.md#lifecycle-configuration)
+instead of overriding standalone Relay settings. For an existing A/B deployment, deliberately clear B on both
 Controller and Agents while preserving identity and trust material, then
 restart and verify A-only traffic. See [dedicated Relay configuration](../how-to/dedicated-relay.md).
 
-Only transportd joins the additional non-internal `relay-egress` network for
+In standalone mode, only transportd joins the non-internal `relay-egress` network for
 DNS and outbound HTTPS to independently deployed relays. The application,
 database and observability networks remain internal; this adds no published
 Controller ports. The existing socket healthcheck does not establish relay
@@ -536,16 +395,11 @@ observations separately. Normal production direct connectivity is unchanged.
 
 The control plane runs `--role=all`. Terminate public TLS at the gateway and use an HTTPS certificate signer. Set `OCSERV_PUBLIC_ORIGIN` to the public HTTPS origin. When OIDC is enabled, configure its redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback`; its origin must match `OCSERV_PUBLIC_ORIGIN`.
 
-### Authentication request budgets
+<a id="authentication-request-budgets"></a>
+### Gateway addressing and proxy trust
 
-Login and callback each allow 30 requests per source per minute, 120 total
-requests per minute, and 8 in-flight requests per API process. Their budgets
-are independent, so starting logins cannot consume callback capacity. Excess
-requests receive `429` with `Retry-After`; no account is persistently locked.
-Each source table holds at most 4096 addresses and retains live windows rather
-than evicting them to give an attacker fresh capacity. These are fixed one-minute
-windows, not rolling quotas. Multiple API replicas multiply the limits; keep
-edge protection for distributed floods.
+Request limits and trusted-client-IP handling are documented in
+[authentication](authentication.md#authentication-request-budgets-and-proxy-trust).
 
 Production Compose assigns the gateway the static application-network address
 `172.30.240.2` and defaults `OCSERV_AUTH_TRUSTED_PROXY_CIDRS` to that address's
@@ -571,25 +425,9 @@ Preserve durable state and follow [incident recovery](incident-recovery.md)
 when a target cannot start with the existing deployment. A missing compatibility
 rejection is not proof that cross-version state is safe.
 
-The shipped Caddy overwrites `X-Ocservia-Client-IP` with its direct peer address.
-The API accepts this single IP only from configured trusted peers; it ignores
-client-supplied `X-Forwarded-For`. Do not trust the entire shared application
-network or publish the Controller's port.
+Do not trust the entire application subnet or publish the Controller port.
 
-Outside production Compose, the API still defaults to trusting no proxy.
-Requests then share the directly connected peer's budget, including all users
-behind an unconfigured gateway. If another proxy is placed in
-front of Caddy, its clients share that proxy's budget; enforce client-level
-limits there rather than trusting arbitrary forwarded addresses.
-
-Break-glass has its own 4-request in-flight budget and permits 5 invalid token
-attempts per source per minute. A matching enabled emergency credential bypasses
-the failed-request rate/table limits, but never bypasses origin validation,
-rotation enforcement, auditing, or session creation checks. OIDC outages or
-exhausted OIDC budgets therefore do not consume emergency capacity. Keep the
-offline credential available and alert on authentication `429` responses through
-the existing HTTP telemetry. Rate limiting does not replace an external DDoS
-control or make a stolen emergency credential safe.
+## Runtime boundaries and verification
 
 The reference Controller enables bounded shared SSE fan-out with 128 global,
 8 identity, 4 session, 32 workspace, 16 resource, and 64 watcher limits. These
@@ -601,8 +439,8 @@ while an active durable-event watcher is in database backoff; alert on
 `sse_unhealthy_watchers` and verify cursor catch-up rather than restarting a
 healthy fan-out loop repeatedly.
 
-Migration `000023` adds root-authenticated privd key enrollment, key rotation
-state, receipt evidence, and certificate receipt bindings. Deploy Controller
+Privileged commands require root-authenticated privd key enrollment, key
+rotation state, receipt evidence and certificate receipt bindings. Deploy Controller
 support first, register each root-owned key with its one-time credential, then
 approve `privd_result_attestation_v1` and upgrade privd and Agent. Until this is
 complete, the node remains readable but privileged certificate, secret,
@@ -628,7 +466,6 @@ Before starting, validate rendered configuration without printing secret content
 
 ```bash
 deploy/production/compose.sh config --quiet
-deploy/production/compose.sh up -d
 ```
 
 Before a major database cutover, first upgrade existing environments to the
@@ -643,4 +480,5 @@ use the normal owner process; only a successful verified cutover permits
 starting the new runtime. Rollback uses the old binary with its compatible
 backup, not a schema downgrade.
 
-Verify `/readyz`, an authenticated read, a node connection through each relay, OTLP delivery when enabled, and a restore from the newest backup. Never expose PostgreSQL, Unix sockets, Docker sockets, or host `/proc` and `/sys` mounts.
+Activate through the lifecycle, then verify `/api/v1/readyz`, an authenticated
+read, a node connection through the configured relay, OTLP delivery when enabled, and a restore from the newest backup. Never expose PostgreSQL, Unix sockets, Docker sockets, or host `/proc` and `/sys` mounts.

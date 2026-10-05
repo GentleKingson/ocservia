@@ -31,95 +31,38 @@ decide operation terminal states.
 
 ### Static import boundaries
 
-The existing [`eslint.config.ts`](../../web/eslint.config.ts) uses ESLint's core
-`no-restricted-imports` rule for handwritten `src/api/**/*.ts` and the
-configuration/certificate feature directories. These modules must not directly
-import views, `vue-router`, `shared/router` or the concrete `shared/fleet` and
-`shared/localSlice` stores. API modules must not import feature workflows either.
-Relative imports at different depths, `@/` alias imports, static re-exports and
-type-only imports are subject to the same restrictions. The `@/` alias maps to
-`web/src` in both `tsconfig.json` and `vite.config.ts` (Vitest reuses the Vite
-configuration); keep the two definitions identical.
+[`eslint.config.ts`](../../web/eslint.config.ts) restricts static imports and
+re-exports in handwritten API modules and configuration/certificate features.
+They cannot import views, routing or concrete Fleet/local-slice stores; API
+modules also cannot import features. Generated sources are excluded. This is
+not a transitive dependency or runtime ownership check and does not cover
+constructed/dynamic imports or every Vue SFC.
 
-Generated clients/types, domain APIs and Workspace remain legitimate
-dependencies. In particular, `api/transport.ts` may call `shared/session.ts`;
-this is not a ban on `shared/**`. Features may use Vue and `features/node-workflow.ts`
-while receiving context getters and tracking callbacks from their caller.
+Keep the `@/` mapping to `web/src` identical in TypeScript and Vite configuration.
+Features receive context and tracking callbacks from the page; they may use Vue,
+generated types, domain APIs and `features/node-workflow.ts`. API transport may
+call the session coordinator. Remove unused forwarding exports when their last
+consumer disappears; use the [API source directory](../../web/src/api) for the
+current export inventory.
 
-Run `npm run lint` from `web` on BuildServer; its existing prelint builds the
-generated client. For a configuration-only edit, also run
-`npx --no-install prettier --check eslint.config.ts`. Other changes should select
-checks from [Validate a change](testing.md), rather than running every command
-below by default.
+<a id="export-and-caller-inventory"></a>
+### Request and Workspace invariants
 
-This is a static import/re-export check, not dynamic-import or constructed-string
-analysis, a transitive dependency graph, runtime state-ownership enforcement or
-a complete security proof. Generated sources retain their existing lint ignore;
-tests/fixtures outside these source directories and other features receive no
-new restriction. Vue SFC parsing is unchanged, so this does not claim equivalent
-coverage for every `.vue` file.
+Domain adapters preserve workspace headers, pagination, abort signals, revision
+`If-Match`, approvals, command TTLs and endpoint-specific idempotency policy.
+Do not add mutation retries or assume every endpoint uses identical headers.
+Certificate downloads use their grant token and same-origin session, without a
+Workspace header; event-stream URLs must never contain bearer tokens.
 
-### Export And Caller Inventory
+Workspace discovery is cached and coalesced; selection accepts authorized IDs
+only and increments a generation on change. Async consumers must fence results
+by both Workspace ID and generation, including a switch away and back to the
+same ID. The independent authentication probe must not change that authority.
+Login return paths are validated internal paths and consumed once. SSE stores
+own their subscriptions, timers and cancellation; importing an API starts none.
 
-Paths are relative to `web/src`. Remove an entry point when its last consumer
-disappears; do not retain unused forwarding exports.
-
-| Owner                  | Exports                                                                                                                        | Production callers                                                                                                                                                    | Preserved semantics                                                                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `shared/session.ts`    | `consumeLoginReturnPath`                                                                                                       | `App.vue`                                                                                                                                                             | Consume once; clear OIDC attempt; validate internal return path                                                                      |
-| `api/workspace.ts`     | `listAuthorizedWorkspaces`                                                                                                     | `App.vue`, `shared/localSlice.ts`                                                                                                                                     | Cache and coalesce discovery; explicit refresh; remembered selection                                                                 |
-| `api/workspace.ts`     | `getWorkspace`                                                                                                                 | `App.vue`, `shared/{fleet,localSlice,overview}.ts`, `views/{OperationsView,SettingsView}.vue`                                                                         | Use selected Workspace, otherwise discover; fail on empty authorization                                                              |
-| `api/workspace.ts`     | `selectWorkspace`                                                                                                              | `App.vue`                                                                                                                                                             | Authorized selection only; persist and notify only on changed ID                                                                     |
-| `api/workspace.ts`     | `workspaceContext`, `WorkspaceContext`                                                                                         | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView}.vue`; type-only in `features/node-workflow.ts` and configuration/certificate features | Snapshot of ID and generation; features receive the page's getter                                                                    |
-| `api/workspace.ts`     | `workspaceChangedEvent`                                                                                                        | `shared/{fleet,localSlice,overview}.ts`, `views/{NodeDetailView,OperationsView,SettingsView}.vue`                                                                     | Existing event name and ID detail                                                                                                    |
-| `api/platform.ts`      | `getReadiness`, `getVersion`                                                                                                   | `shared/readiness.ts`, `views/SettingsView.vue`, respectively                                                                                                         | Same generated requests through shared transport                                                                                     |
-| `api/platform.ts`      | `probeAuthentication`                                                                                                          | `shared/{fleet,localSlice}.ts`                                                                                                                                        | Coalesce only concurrent probes; keep Workspace state independent                                                                    |
-| `api/events.ts`        | `eventStreamPath`                                                                                                              | `shared/{fleet,localSlice}.ts`                                                                                                                                        | Encode `after` and `workspace_id`; existing development-token fallback; no token in URL                                              |
-| `api/events.ts`        | `listEvents`                                                                                                                   | `shared/{localSlice,overview}.ts`                                                                                                                                     | Workspace header, page size 200, optional cursor/order/signal                                                                        |
-| `api/events.ts`        | `platformEventsEvent`                                                                                                          | `shared/{fleet,overview}.ts`                                                                                                                                          | Existing event name; stores retain dispatch/subscription ownership                                                                   |
-| `api/nodes.ts`         | `listNodes`, `getNode`, `listNodeSessions`, `listNodeIpBans`, `listNodeUserGroupState`                                         | `shared/fleet.ts`                                                                                                                                                     | Workspace-scoped list; node-specific reads; pagination and signals                                                                   |
-| `api/operations.ts`    | `listOperations`                                                                                                               | `shared/{localSlice,overview}.ts`, `views/OperationsView.vue`                                                                                                         | Workspace header, page size 200, optional cursor/signal                                                                              |
-| `api/operations.ts`    | `operationSummary`                                                                                                             | `shared/overview.ts`                                                                                                                                                  | Workspace header and signal                                                                                                          |
-| `api/operations.ts`    | `getOperation`                                                                                                                 | `shared/{fleet,localSlice}.ts`, `views/OperationsView.vue`, configuration/certificate features                                                                        | Operation ID and signal; no terminal-state interpretation                                                                            |
-| `api/operations.ts`    | `createLocalSimulation`                                                                                                        | `shared/localSlice.ts`                                                                                                                                                | Existing development endpoint, scenario and signal                                                                                   |
-| `api/operations.ts`    | `disconnectSession`, `terminateSession`, `removeIpBan`, `reloadService`                                                        | `shared/fleet.ts`                                                                                                                                                     | Revision If-Match, unique idempotency key, 60-second TTL; session boot binding; reload approval header                               |
-| `api/users.ts`         | `createUser`, `disableUser`, `enableUser`, `rotateUserPassword`, `applyGroup`                                                  | `shared/fleet.ts`                                                                                                                                                     | Revision If-Match, unique idempotency key, 86400-second TTL; sealed-password envelope; member deduplication                          |
-| `api/users.ts`         | `getUserPolicy`, `setUserPolicy`                                                                                               | `adapters/user-policy.ts`                                                                                                                                             | Node/username and signals; mutation idempotency; no added If-Match                                                                   |
-| `api/configuration.ts` | `createConfigPlan`, `getConfigPlan`, `applyConfigPlan`                                                                         | `features/configuration/useNodeConfiguration.ts`                                                                                                                      | Request revision/approval unchanged; idempotency on create/apply; signals                                                            |
-| `api/certificates.ts`  | `createCertificate`, `getCertificate`, `listNodeCertificates`, `issueCertificate`, `createCertificateP12`, `revokeCertificate` | `features/certificates/useNodeCertificates.ts`                                                                                                                        | List item extraction; signals; idempotency on create/P12/revoke, not issue                                                           |
-| `api/certificates.ts`  | `downloadCertificateArtifact`                                                                                                  | `features/certificates/useNodeCertificates.ts`                                                                                                                        | Encoded artifact ID; grant token plus optional development bearer; same-origin credentials; no Workspace header; Blob/error handling |
-| `api/agents.ts`        | `upgradeNodeAgent`                                                                                                             | `shared/fleet.ts`                                                                                                                                                     | Trusted target version only; revision If-Match, idempotency, approval in body                                                        |
-| `api/agents.ts`        | `createAgentRollout`                                                                                                           | `views/NodesView.vue`                                                                                                                                                 | Workspace header, idempotency and unchanged target/node/batch/approval body                                                          |
-| `api/agents.ts`        | `listAgentRollouts`                                                                                                            | `views/OperationsView.vue`                                                                                                                                            | Workspace header and optional limit/signal                                                                                           |
-| `api/agents.ts`        | `getAgentRollout`, `resumeAgentRollout`                                                                                        | `views/RolloutDetailView.vue`                                                                                                                                         | Workspace header and signal; resume idempotency                                                                                      |
-
-`workspaceID` is now an internal cross-module helper exported by the Workspace
-owner. `configuration`, `authenticatedFetch`, `devAuthToken`, `requestInit` and
-`newIdempotencyKey` are transport exports used by the domain modules above.
-`redirectToLogin` is the session coordinator entry point used by transport.
-None is a new public HTTP contract.
-
-### Verification
-
-Run in the authorized BuildServer checkout, from `web`:
-
-```sh
-npm ci
-npm run typecheck
-npm run test:generated-auth
-npm test
-npm run lint
-npm run format:check
-npm run build
-node test/run-auth-browser.mjs
-```
-
-`test/api-client.test.ts` exercises real handwritten modules and generated
-serialization against a stub fetch, including 401 coordination, Workspace
-authority, headers, signals, mutation fences and artifact downloads. The
-existing browser runner covers 12 focused login/Workspace/SSE regressions
-against the production build, including late responses and rapid switches.
-It is not full E2E or database validation.
+<a id="verification"></a>
+Validation entry points are collected in [Validation](#validation).
 
 ## UI components and styles
 
@@ -144,8 +87,8 @@ system.
   bare form controls, which keep browser default styles.
 - Utilities win over both by layer order, never by `!important`. Unlayered
   rules (Vue scoped styles) would beat every layer; no component has one.
-- Tailwind scans all of `web/src`, so a class name in a template is always a
-  utility.
+- Tailwind scans `web/src` for utility candidates. Keep complete utility class
+  names visible in source; constructed class fragments are not reliable scan input.
 
 ### Tokens
 
@@ -178,18 +121,16 @@ Compare upstream changes by hand (keyboard behavior, ARIA, Portal and props)
 and keep the local modifications below. When the CLI generates icon imports
 from `lucide-vue-next`, rewrite them to the existing `@lucide/vue` package.
 
-| Component       | Upstream                                        | Local modifications                                                                                                                                                                                                                                                                                                                                               |
-| --------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `button`        | `apps/v4/registry/new-york-v4/ui/button`        | Prettier; `asChild` defaults to `false` for `exactOptionalPropertyTypes`                                                                                                                                                                                                                                                                                          |
-| `badge`         | `apps/v4/registry/new-york-v4/ui/badge`         | Prettier; renders `span` by default; binds `as`/`asChild` instead of `reactiveOmit` from `@vueuse/core`                                                                                                                                                                                                                                                           |
-| `input`         | `apps/v4/registry/new-york-v4/ui/input`         | Prettier; `defineModel` replaces `useVModel` from `@vueuse/core`; `defaultValue` prop removed                                                                                                                                                                                                                                                                     |
-| `table`         | `apps/v4/registry/new-york-v4/ui/table`         | Prettier; `TableEmpty` and `TableFooter` not imported                                                                                                                                                                                                                                                                                                             |
-| `sheet`         | `apps/v4/registry/new-york-v4/ui/sheet`         | Prettier; `SheetHeader`, `SheetFooter` and `SheetClose` not imported; `tw-animate-css` enter/exit classes removed (not installed, so open and close are instant); close button gets `data-slot`, a 32px target and a `closeLabel` prop for the translated name; `withDefaults` mirrors Reka UI's `as` defaults for `exactOptionalPropertyTypes`                   |
-| `label`         | `apps/v4/registry/new-york-v4/ui/label`         | Prettier; `for` falls through as an attribute and `as` defaults to `label`, both for `exactOptionalPropertyTypes`                                                                                                                                                                                                                                                 |
-| `dialog`        | `apps/v4/registry/new-york-v4/ui/dialog`        | Prettier; `DialogTrigger`, `DialogClose` and `DialogScrollContent` not imported; `tw-animate-css` enter/exit classes removed; content scrolls inside the viewport (`max-h-[calc(100dvh-2rem)]`); close button gets a 32px target and a `closeLabel` prop; `DialogFooter` drops its `showCloseButton` close button; `withDefaults` mirrors Reka UI's `as` defaults |
-| `textarea`      | `apps/v4/registry/new-york-v4/ui/textarea`      | Prettier; `defineModel` replaces `useVModel`; `defaultValue` prop removed                                                                                                                                                                                                                                                                                         |
-| `native-select` | `apps/v4/registry/new-york-v4/ui/native-select` | Prettier; `defineModel` replaces `useVModel`; attributes fall through to `select` without `delegatedProps`; `NativeSelectOption` and `NativeSelectOptGroup` not imported (plain `option` is used)                                                                                                                                                                 |
-| `lib/utils.ts`  | `apps/v4/registry/new-york-v4/lib/utils.ts`     | Prettier                                                                                                                                                                                                                                                                                                                                                          |
+The upstream paths are `apps/v4/registry/new-york-v4/ui/<component>` and
+`apps/v4/registry/new-york-v4/lib/utils.ts`. Preserve these local adaptations:
+
+| Area | Local behavior to preserve |
+| --- | --- |
+| Button, Badge, Label, Sheet, Dialog | Explicit `as`/`asChild` defaults for `exactOptionalPropertyTypes`; Badge defaults to `span`, Label to `label` with `for` falling through |
+| Input and Textarea | `defineModel` replaces `useVModel`; no `defaultValue` prop |
+| NativeSelect | `defineModel`, attributes fall through to `select`; plain `option` children |
+| Sheet and Dialog | No `tw-animate-css` dependency; instant open/close, translated `closeLabel`, 32px close targets; Sheet close carries `data-slot` |
+| Dialog | Content scrolls within `max-h-[calc(100dvh-2rem)]`; no footer-generated close button |
 
 All sources were taken on 2026-10-04 from `unovue/shadcn-vue` commit
 `b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) and are MIT licensed;
@@ -202,187 +143,67 @@ Workspace or decide permissions.
 
 ### Shell and page components
 
-`App.vue` keeps readiness polling, Workspace loading and selection, and the
-login return path; its `#main-content` container owns the page width and
-padding, so views render a bare `<main>`. `components/layout` only presents them: `AppSidebar` is the
-section navigation (the current section is marked with `aria-current="page"`,
-including detail routes under it) and `AppHeader` holds the Workspace
-selector, readiness and, below the `md` breakpoint, a titled navigation
-`Sheet` that closes on navigation and then moves focus to the main content. A
-skip link precedes the shell. `components/common` holds the shared page
-pieces: `PageHeader`, `SectionCard`, `DataState` (loading and error states
-with `status`/`alert` roles), `StatusBadge`, `FormField`, `CopyButton` and
-`OperationDialog`. Feature folders (`components/nodes`, `components/overview`)
-hold pieces used by one area. These components never load data; pages keep
-their own data and pass display values in.
+`App.vue` owns readiness, Workspace selection and login-return navigation.
+Layout/common components present caller-owned data; primitives do not fetch or
+decide permissions. The shell owns page width and padding; views render a bare
+`<main>`. Keep the skip link, `aria-current` navigation, titled mobile Sheet,
+focus movement after navigation and `status`/`alert` data states.
 
-### Nodes list
+Node write forms use `OperationDialog` with one form. Pages own fields, pending
+state and submit handlers. Preserve focus trapping/return, Escape/Cancel behavior,
+translated labels and help through `aria-describedby`. Pending requests disable
+submission; errors retain ordinary inputs while secret owners clear passwords.
+Show disabled-action reasons visibly as well as in `title`; approval fields do
+not replace server authorization. Quota help must explain UTC monthly periods,
+direction, zero disabling the user and unlimited quota; expiry is UTC.
 
-`NodesView` reads the fleet store only; search, filters, sorting and optional
-columns never send requests. The store replaces `fleet.nodes` only after every
-page has loaded, so filter buckets and counts always cover the complete
-snapshot, and a failed refresh is labelled as the last successful snapshot.
-`features/nodes/node-list.ts` owns the pure rules:
+<a id="nodes-list"></a>
+<a id="node-detail-read-areas"></a>
+<a id="node-detail-write-forms"></a>
+### Read models and list state
 
-- Filter values within a group are alternatives and groups intersect. Buckets
-  hold only API-defined values; a missing path or Agent version state is
-  `unknown`. Search matches name or ID.
-- Name sorts ascending and heartbeat newest first; unknown heartbeats sort
-  last and the node ID breaks ties. `infinity` and extended years are ordered
-  without `Date` coercion and display through `formatTimestamp`.
-- The view state lives in the URL query (`q`, the group names, `sort`,
-  `columns`); defaults are omitted and other parameters are kept.
+- Nodes filters, search, sorting and optional columns run on the complete Fleet
+  snapshot. Replace it only after all pages load; label failed refreshes as stale.
+  [`node-list.ts`](../../web/src/features/nodes/node-list.ts) owns filter/sort and
+  URL query rules. Keep unknown observations explicit and timestamp handling
+  valid for infinity/extended years.
+- Rollout selection uses node IDs. Select-all covers visible eligible rows,
+  confirmation lists every selected target, hidden selections remain visible as
+  a count, and Workspace changes clear selection. Node list rows have no action
+  availability; advisory write permissions come from detail reads.
+- Detail navigation preserves the originating list query when available. Missing
+  observations and unavailable/not-found states remain distinguishable. Views
+  own route/selection and refresh; presentation components add no data loading.
+- Overview metrics name their sources and distinguish ready, stale, unavailable
+  and loading. Observed sessions are last-reported counts; direct paths include
+  offline nodes. Active/unknown operations are workspace-wide, but failed counts
+  cover only the latest 20. Do not turn these snapshots into historical trends.
 
-Rollout selection stays keyed by node ID. The header checkbox only selects
-visible eligible rows, the footer states how many selected nodes the filters
-hide, the confirmation (`OperationDialog`) lists every target, and a Workspace change clears the
-selection. The list has no action availability, so rows offer only the detail
-link. Narrow screens scroll the table inside its own region instead of hiding
-columns.
+<a id="operations-and-rollouts"></a>
+<a id="approvals-and-audit"></a>
+<a id="overview"></a>
+### Operations, approvals and audit
 
-### Node detail read areas
+A plain operation's `unknown` is a warning and Fleet keeps polling it. Upgrade
+and rollout-node `unknown` are terminal failures. Tone helpers never decide
+polling. Rollout totals distinguish success, failure (including rolled back) and
+unknown, and leaving rollout detail stops its polling. See
+[`fleet.ts`](../../web/src/shared/fleet.ts) and
+[`state-tone.ts`](../../web/src/features/operations/state-tone.ts).
 
-`NodeDetailView` keeps the route, Fleet selection, readiness, Workspace
-listener and every write workflow; `components/nodes` only presents the
-selected node. `NodeDetailHeader` returns to the Nodes list entry the user
-came from (keeping its query) or to `/nodes`. `NodeStatusSummary` and
-`NodeObservedDetails` label missing observations instead of leaving them
-blank, and `CopyButton` copies the node ID and identity values, which stay
-selectable when the clipboard is unavailable. `NodeDetailNav` links to the
-existing in-page sections; it does not switch tabs or load data. The only
-added timer is the local clock for relative heartbeat time. The not-found state
-is a plain card and the unavailable state uses `DataState`.
+Approval queues use cursor paging and clear stale rows after refresh failure.
+Deep links, lookup and queue rows share the detail route. Approval authorizes
+execution; its status is not the resulting operation's outcome. Expired requests
+have no decision form. Decisions require a reason and reviewed checkbox; lost
+or rejected decisions (including 409) clear detail and require refresh, never an
+automatic resend. Audit search/filter covers only the latest 50 records loaded
+in the browser; it is not a server-wide search.
 
-### Node detail write forms
+Keep wide tables inside scrollable regions on narrow screens, with expanded
+content constrained to the visible width.
 
-Every NodeDetail write form (controlled actions, desired users and groups,
-quota and expiry, configuration Plan/Apply and certificates) renders through
-`components/common/OperationDialog.vue`, a Reka UI `Dialog` holding one
-`form`. It only presents: the page still mounts it with `v-if`, owns every
-field, handler, disabled rule and error, and receives `close` from Cancel,
-Escape, an outside click or the close button. The dialog traps focus, hides
-the rest of the page from assistive technology and returns focus to the
-trigger. Submit buttons stay disabled while a request is pending, and
-controlled actions close on submit, so a second click or Enter sends nothing. `FormField` pairs a `Label` with help text
-referenced by `aria-describedby`; field IDs are unchanged. `SectionCard`
-frames the sessions, users and groups, configuration and certificate
-sections.
-
-- Disabled write controls keep the advisory explanation as their `title` and
-  repeat it as visible text; Reload states a missing or unknown permission
-  the same way.
-- Approval-gated actions show an Approval ID field with help text and keep
-  Confirm disabled until it is filled; the server still decides.
-- Quota help states the UTC monthly period, the direction, that 0 disables
-  the user at once and that "No quota" means no limit; expiry is UTC. The
-  payload and `expected_version` are unchanged.
-- Server errors render in the dialog's alert without clearing the inputs.
-  Passwords and P12 passphrases are still cleared by their existing owners.
-
-### Operations and rollouts
-
-`OperationsView` and `RolloutDetailView` keep their loading, cursor paging,
-selection, polling and resume code; only the presentation changed.
-`features/operations/state-tone.ts` maps states to a `StatusBadge` tone and
-never decides polling. A plain operation's `unknown` is a warning and
-`shared/fleet.ts` keeps polling it, while an upgrade's `unknown` ("Outcome
-unknown") and a rollout node's `unknown` are terminal and shown as failures.
-Rollout totals and batch summaries count succeeded, failed (including rolled
-back) and unknown nodes separately, so a running or finished rollout never
-reads as fully successful while any node failed or is unknown.
-
-- The operations list links each rollout to its detail and each node to
-  `node-detail`; the selected operation shows its ID, state, target version,
-  configuration failure code, node and times. Refreshing the detail reads only
-  that operation.
-- The rollout detail links back to Operations instead of the browser history,
-  and each node links to its detail with the operation ID and failure code.
-  Leaving the route stops polling.
-- Narrow screens scroll the tables inside their card.
-
-`test/operation-state-tone.test.ts` covers the tone rules;
-`e2e/operations.spec.ts` covers both unknown kinds, cursor paging, a read-only
-detail refresh, partial rollout failures, polling stopping on leave and a
-single resume request, and `e2e/agent-rollout.spec.ts` covers the rollout flow.
-
-### Approvals and audit
-
-`ApprovalsView` and `AuditView` keep their loading, Workspace checks,
-cursor and decision code; only the presentation changed.
-
-- The pending queue keeps cursor paging (Next page replaces the rows) and
-  clears stale rows after a failed refresh. Deep links, lookup and queue rows
-  all open `/approvals/:approvalId`.
-- The detail shows a status badge (`approvalTone` in
-  `features/operations/state-tone.ts`) with an explanation per status. Approved
-  only authorizes: the requester still runs the action, and its outcome is on
-  the resulting operation, never on the approval. A pending request past its
-  expiry shows as expired and has no decision form.
-- The decision still requires a reason and the reviewed checkbox. A lost or
-  rejected decision (including a 409 conflict) clears the details and asks for
-  a refresh; it is never resent.
-- Audit still reads only the most recent 50 records. Search and the result
-  filter run on that slice in the browser and never page or query the server.
-  Each row expands to show the remaining fields, with links to the node and
-  the approval.
-- Narrow screens scroll the tables inside their card. An expanded audit row
-  keeps its details within the visible width.
-
-`test/approvals-view.test.ts`, `test/audit-view.test.ts` and
-`test/operation-state-tone.test.ts` cover the state and filters;
-`e2e/approval-queue.spec.ts` and `e2e/approvals-audit.spec.ts` cover deep
-links, used and expired approvals, a decision conflict, audit permission,
-retry, empty and filter states.
-
-### Overview
-
-`OverviewView` keeps the stores' loading, refresh and Workspace reset code;
-it only arranges the existing numbers into a summary. Each card names its
-source in `components/overview/MetricCard.vue`, and
-`features/overview/source-state.ts` decides whether a value is loading,
-unavailable, stale (an earlier load is shown after a failed refresh) or ready.
-
-| Card                       | Source                                                                     |
-| -------------------------- | -------------------------------------------------------------------------- |
-| Control plane              | Console readiness check; not a node online rate                            |
-| Nodes                      | The Workspace's complete node snapshot in `shared/fleet.ts`                |
-| Observed sessions          | Sum of each node's last reported `sessionCount`; never called live users   |
-| Active operations          | Workspace-wide active and unknown counts; failed counts only the latest 20 |
-| Last observed direct paths | Each node's last observed path, offline nodes included                     |
-| Agent versions             | Current, update available, ahead and unknown; a missing version is unknown |
-
-- Fleet status shows when the node snapshot was last replaced, recent
-  operations and events show when they last loaded, and each says so when a
-  refresh failed and older data is shown. The sessions card also counts nodes
-  that report stale data.
-- The page lists the latest 12 operations and 12 events; the store still keeps
-  50 events and refreshes them incrementally. Offline or stale nodes link to
-  their detail.
-- No trends or charts: the console has no history behind them.
-
-`test/overview.test.ts` covers stale and unknown sources and the source-state
-rules; `e2e/overview.spec.ts` covers the cards, the failed window, stale
-reports and a Workspace switch.
-
-### UI regression checklist
-
-Run this for any change to `components/ui`, `components/common`, `main.css`
-or the shell, and record the result in the pull request (mark skipped items
-as not run):
-
-- `bash scripts/web-check.sh basic`, then the full Playwright suite
-  (`npm run test:e2e` in `web/`) on desktop and mobile. Specs that need the
-  development simulator (`local-slice`, the first two `overview` tests) fail
-  without a running backend; report them as not run rather than passing.
-- Screenshots of every route (`/`, `/nodes`, a node detail, a missing node,
-  `/operations`, a rollout, `/approvals`, an approval, `/audit`, `/settings`,
-  `/login`) at 1440 px and 390 px with the same fixtures before and after,
-  checking that the page never scrolls horizontally.
-- Keyboard: skip link, sidebar and mobile navigation sheet, Nodes search,
-  filters and a detail link, and opening, cancelling (Escape) and confirming a
-  dialog with focus returning to its trigger.
-- Bundle size: compare `vite build` CSS and JS output with the base branch and
-  explain any new dependency.
+<a id="ui-regression-checklist"></a>
+UI regression checks are listed under [Validation](#validation).
 
 ## Node detail workflows
 
@@ -432,36 +253,8 @@ readiness from detail loading, Fleet selection and selection error.
   the selected certificate. Falling back to another certificate, or finding no
   active certificate, does not fetch or display the old receipt's operation.
 
-### Verification
-
-Run validation in the authorized BuildServer checkout. Existing entry points:
-
-```sh
-cd web
-npm ci
-npm run typecheck
-npm test
-npm run lint
-npm run format:check
-npm run build
-```
-
-`configuration-feature.test.ts` and `certificates-feature.test.ts` exercise the
-features in independent Vue effect scopes without a page, router or store.
-The existing `node-config-plan.test.ts` and `node-workflows.test.ts` continue to
-mount the real NodeDetail setup for PR-01/02 integration regressions.
-
-Serve the production build on an available BuildServer port, set
-`PLAYWRIGHT_BASE_URL`, then run the existing focused browser smoke:
-
-```sh
-npx playwright test config-plan.spec.ts certificate-lifecycle.spec.ts node-forms.spec.ts --project=desktop --project=mobile
-```
-
-This checks Plan/Apply and certificate/P12 UI interactions, and in
-`node-forms.spec.ts` denied and unknown permissions, closing without a
-request, approval IDs, server errors and duplicate submits. It does not cover a
-live Controller, database recovery or installation.
+<a id="verification-1"></a>
+Feature and browser validation are listed under [Validation](#validation).
 
 ### Advisory action availability
 
@@ -482,3 +275,38 @@ source and captured revision; generated results identify the full redacted
 candidate without inventing current field values. Existing desired/observed
 fields distinguish unmanaged resources and missing observations in the display,
 without changing convergence records or taking over existing accounts.
+
+## Validation
+
+Use an authorized isolated environment with dependencies installed; select checks
+according to [Validate a change](testing.md). Paths in the table are relative to
+`web/` unless a repository script is shown.
+
+| Change | Relevant evidence |
+| --- | --- |
+| API adapters, session or Workspace | `test/api-client.test.ts`, generated-auth serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
+| Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-config-plan.test.ts`, `test/node-workflows.test.ts`; browser specs `e2e/config-plan.spec.ts`, `e2e/certificate-lifecycle.spec.ts`, `e2e/node-forms.spec.ts` on desktop/mobile |
+| Operations/rollouts | `test/operation-state-tone.test.ts`; browser specs `e2e/operations.spec.ts`, `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume |
+| Approvals, audit, overview | Corresponding view/unit tests and browser specs `e2e/approval-queue.spec.ts`, `e2e/approvals-audit.spec.ts`, `e2e/overview.spec.ts`; verify permission, stale/empty states and Workspace switching |
+| Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
+| ESLint configuration | `npm run lint` and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
+
+`scripts/web-check.sh basic` runs generated-client build, formatting, lint,
+typecheck, unit tests, production build and generated-auth checks. Its `full`
+mode adds the focused authentication browser runner. This runner and stubbed
+browser specs do not validate a live Controller, database recovery or installation.
+Specs requiring the development simulator (`local-slice` and the first two
+`overview` tests) need a running backend; report missing coverage as not run.
+For a separately served production build, set `PLAYWRIGHT_BASE_URL` before
+running focused Playwright specs.
+
+For shared UI changes, record in the PR:
+
+- Before/after screenshots with identical fixtures at 1440 px and 390 px for
+  overview, nodes, node detail/missing node, operations, rollout, approvals/detail,
+  audit, settings and login. The page itself must not scroll horizontally.
+- Keyboard skip link, sidebar/mobile navigation, Nodes filters/detail link, and
+  dialog open/cancel/confirm with focus returning to the trigger.
+- CSS/JS bundle size compared with the base branch and reasons for new dependencies.
+- Manual Safari/Firefox results when affected; Chromium device emulation does
+  not supply those browsers' coverage.

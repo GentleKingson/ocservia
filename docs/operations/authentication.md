@@ -86,9 +86,9 @@ settings from the validated deployment configuration for direct `compose.sh` com
 nonempty, checks the OIDC secret permissions only in that case, and passes the
 same authentication settings to migrations and the Controller. Use this launcher
 rather than starting the base YAML alone. PostgreSQL credential rotation also
-retains the OIDC overlay when recreating the Controller. The overlay is covered
-by the existing deployment-descriptor rollback guard; do not bypass that guard
-to roll back across this deployment change.
+retains the OIDC overlay when recreating the Controller. Rollback resolves the
+target's deployment files and must satisfy its actual
+authentication settings and secret mounts; descriptor equality is not a gate.
 
 ## Local login from a terminal and 401 diagnosis
 
@@ -192,64 +192,22 @@ Discovery metadata and ID Token `iss` must match it; the OIDC library constructs
 the Discovery request URL without changing the identity identifier. Do not use
 email or username to link accounts or disable issuer verification to fix a mismatch.
 
-### Correcting a historical issuer configuration
-
-An already working no-trailing-slash issuer needs no configuration or data
-change: its `(issuer, subject)` key, identity ID, role bindings and sessions remain
-unchanged. The former application code removed one final slash before Discovery.
-If the provider actually advertised the slash, strict Discovery validation failed
-before login or identity insertion. Such a deployment does not need an identity
-migration merely because it encountered this bug. An ID Token issuer mismatch
-also failed before insertion.
-
-If Discovery and tokens instead both used the no-slash value, earlier logins
-could have succeeded under that value, even when the configured value ended in
-a slash. Confirm the provider's authoritative issuer before changing configuration;
-if it is still no-slash, configure that exact value. Import/manual provisioning or
-an actual provider issuer change can also leave historical rows. Never infer
-their presence or ownership from the configuration alone.
-
-Changing an existing row's issuer changes the unique `(issuer, subject)` key.
-The slash and no-slash values are distinct accounts; the application neither
-merges nor migrates them. If a separately approved migration is genuinely needed:
-
-1. In a maintenance window, stop login/session writes for the affected deployment.
-   Record a change ticket, operator, approver, exact old/new issuers and an explicit
-   list of identity IDs and subjects. Obtain independent IdP evidence that each
-   subject still identifies the same person; matching email/name is insufficient.
-2. Take a restorable database backup and export the selected identity rows,
-   role bindings (including workspace/resource scope), active sessions and other
-   identity-ID references. Keep the original configuration and a before/after
-   manifest in the restricted change record, not tokens or client secrets.
-3. Read both issuer populations and check target-key conflicts, including disabled
-   identities. For each approved subject, query `identities` for both exact issuer
-   values. Review `role_bindings` by identity ID with the security owner. Any
-   existing target `(issuer, subject)` is a stop condition, not permission to merge,
-   delete the target, or transfer roles.
-4. Rehearse on a restored isolated database. In an explicit transaction, lock
-   `identities` against concurrent writes, repeat the conflict/ownership checks,
-   and update only approved IDs whose old issuer and subject still match the
-   manifest. Require exactly the approved row count. Preserve IDs, subjects,
-   disabled state and roles; revoke affected active sessions and require fresh
-   login. Roll back on any discrepancy. Record the committed before/after mapping
-   through the approved operational audit process; do not rewrite historical audit
-   events. Apply the exact new issuer configuration through normal change control.
-5. Verify fresh Discovery/token validation, unchanged role ownership, and no
-   duplicate identities before reopening login. For rollback, stop writes again,
-   verify the manifest and absence of old-key conflicts, then transactionally
-   restore only the mapped issuers and original configuration. Revoke sessions
-   issued during the migration window; never reactivate revoked sessions. Stop for
-   manual review if identities/roles have since changed, rather than overwriting
-   newer data. Retain rollback evidence with the same change ticket.
-
-These steps require a separately approved migration; login never performs them.
-
 The origin (scheme, host and effective port) of `OCSERV_OIDC_REDIRECT_URL` must
 equal `OCSERV_PUBLIC_ORIGIN`. A mismatch fails production startup. In dual-auth,
 Local does not make an invalid OIDC configuration acceptable. During an IdP
 outage, existing sessions remain usable, new SSO logins fail closed, and Local
 login remains available when enabled. The browser receives Secure, HttpOnly,
 SameSite cookies, not OIDC tokens in browser storage.
+
+### Correcting a historical issuer configuration
+
+Use the provider's authoritative issuer exactly, including its trailing slash.
+Before changing an existing installation, inspect stored `(issuer, subject)`
+values: failed Discovery/token validation created no identity, and configuration
+alone does not prove historical rows exist. Working identities need no migration.
+The application never merges slash/no-slash accounts. If stored identities must
+change, follow [OIDC issuer recovery](incident-recovery.md#oidc-issuer-correction)
+with independent subject-ownership evidence and explicit migration approval.
 
 ## Bootstrap the first Local admin
 
@@ -491,35 +449,15 @@ can request/execute a reset with a surviving SecurityAdmin's approval; it cannot
 self-approve and must follow the existing rotation/incident policy.
 
 If no usable administrator/independent approver pair remains, stop writes,
-preserve incident evidence and follow the authorized
-[backend-specific recovery procedure](incident-recovery.md#database-recovery) to a verified state
-with independently controlled credentials. Keep all initialization markers and
-audit history. Before reopening access, revoke restored sessions using the
-protected administrative connection. For PostgreSQL:
-
-```sql
-UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
-```
-
-For the current MySQL schema, session times use the same BIGINT
-microsecond epoch described above:
-
-```sql
-UPDATE auth_sessions
-SET revoked_at=TIMESTAMPDIFF(MICROSECOND, '2000-01-01 00:00:00', UTC_TIMESTAMP(6))
-WHERE revoked_at IS NULL;
-```
-
-Record this offline recovery in the incident/change record, verify both logins
-and approval separation, and rotate any exposed credentials through the normal
-flows. No generic account-unlock CLI or anonymous HTTP recovery endpoint is
-introduced. **Never delete/edit the Bootstrap marker to reinitialize.**
+preserve incident evidence and follow [Local authority recovery](incident-recovery.md#lost-local-administration-authority).
+Preserve initialization markers and audit history; never delete or edit the
+bootstrap marker to reinitialize. Recovery includes revoking restored sessions
+before access reopens.
 
 ## Local new-password policy
 
-All Local password writes (trusted `CreateLocalCredential`, bootstrap, managed
-user creation, self-service change and administrator reset) use
-`ValidateNewPassword` through the shared hashing function.
+Bootstrap, managed user creation, self-service password changes and administrator
+resets share the same new-password policy:
 
 - At least 15 Unicode code points, at most 1024 UTF-8 bytes; invalid UTF-8 is rejected.
 - Long passwords, spaces and valid Unicode are supported. No uppercase, digit
@@ -542,13 +480,49 @@ remain unchanged. The length and blocklist rules follow
 [NIST SP 800-63B-4, section 3.1.1.2](https://pages.nist.gov/800-63-4/sp800-63b.html#passwordver).
 Unicode normalization is deliberately deferred to preserve historical hashes.
 
-## Local account failure backoff (R2)
+## Authentication request budgets and proxy trust
 
-Local login retains the existing per-IP request limit, per-process global
-request budget, Argon2id concurrency ceiling and trusted-proxy source validation.
-These are resource budgets, not password failure counters. OIDC and Break-glass
-keep their own entry points and budgets, including the independent emergency
-budget for a valid Break-glass credential.
+OIDC login and callback each allow 30 requests per source per minute, 120 total
+requests per minute, and 8 in-flight requests per API process. Their budgets
+are independent, so starting logins cannot consume callback capacity. Excess
+requests receive `429` with `Retry-After`; no account is persistently locked.
+Each source table holds at most 4096 addresses and retains live windows rather
+than evicting them to give an attacker fresh capacity. These are fixed one-minute
+windows, not rolling quotas. Multiple API replicas multiply the limits; keep
+edge protection for distributed floods.
+
+Local login separately allows 5 requests per source per minute, 120 total
+requests per minute and 4 concurrent requests per API process. These limits
+apply even to correct passwords; account backoff below is a separate boundary.
+
+The shipped Caddy overwrites `X-Ocservia-Client-IP` with its direct peer address.
+The API accepts this single IP only from configured trusted peers; it ignores
+client-supplied `X-Forwarded-For`. Do not trust the entire shared application
+network or publish the Controller's port.
+
+Outside production Compose, the API still defaults to trusting no proxy.
+Requests then share the directly connected peer's budget, including all users
+behind an unconfigured gateway. If another proxy is placed in
+front of Caddy, its clients share that proxy's budget; enforce client-level
+limits there rather than trusting arbitrary forwarded addresses.
+
+Break-glass has its own 4-request in-flight budget and permits 5 invalid token
+attempts per source per minute. A matching enabled emergency credential bypasses
+the failed-request rate/table limits, but never bypasses origin validation,
+rotation enforcement, auditing, or session creation checks. OIDC outages or
+exhausted OIDC budgets therefore do not consume emergency capacity. Keep the
+offline credential available and alert on authentication `429` responses through
+the existing HTTP telemetry. Rate limiting does not replace an external DDoS
+control or make a stolen emergency credential safe.
+
+For gateway addresses and subnet overrides, see
+[deployment networking](production-deployment.md#authentication-request-budgets).
+
+<a id="local-account-failure-backoff-r2"></a>
+## Local account failure backoff
+
+Account backoff is shared across Controllers and is independent of the
+[per-process request budgets](#authentication-request-budgets-and-proxy-trust).
 
 Account admission uses the selected backend's `local_auth_attempts`, keyed by the exact
 Local username normalization (trim, lowercase, existing ASCII/input rules).
@@ -572,38 +546,15 @@ dummy Argon2id; account-refused requests do not execute KDF. Existing IP/global
 resource refusals continue to use 429 and `Retry-After`. A valid concurrent login
 can therefore receive 401 while another request holds that account's lease.
 
-Database and corrupt-hash errors are not password failures. A correct password
-for a disabled identity cannot create a session and is not counted as incorrect.
-Once an incorrect password is observed, completion uses a separate bounded
-context so client cancellation cannot erase it. Cancellation before verification
-releases the reservation without adding a failure. Process exit, ambiguous commit
-or unavailable completion leaves at most the lease duration before admission can
-recover; abandoned reservations are not silently classified as bad passwords.
-Expired lease holders cannot clear replacement state or create a session.
-
-Expiry is driven by the database clock. Admission deletes expired rows through
-the expiry index before allocating capacity. Rows expire when the observation
-window, cooldown and active lease no longer require them. Without login traffic,
-expired rows may remain physically present until the next admission, but the
-table remains bounded. Random usernames cannot evict live state: at capacity,
-new keys receive generic 503 while tracked keys retain their protection.
-Cleanup/admission/completion errors also fail closed with generic 503, never
-unlimited verification. PostgreSQL autovacuum handles its dead tuples; this is
-not a MySQL maintenance mechanism.
-
-Password reset and disable delete the account state in the existing credential,
-revocation and audit transaction. Rollback preserves it. Credential revalidation
-and lease-token matching prevent an older verified request from clearing failures
-or leases created after that transaction commits.
-
-PostgreSQL migration `000033` created the table and expiry index; MySQL
-provides them through its own baseline and time-storage revisions. The normal migration runner
-grants only SELECT/INSERT/UPDATE/DELETE on this table to the runtime role; Owner
-or TRUNCATE permissions are not needed. There is no minimum Controller schema
-admission check. Stop affected Local login instances before replacement and
-verify the target's real authentication behavior before resuming service.
-Preserve backoff state; binary rollback does not reverse the database or
-establish safe mixed-version login handling.
+Database or corrupt-hash failures are not incorrect passwords. A correct password
+for a disabled identity still cannot create a session. At username capacity,
+new keys receive generic 503 while tracked keys retain protection; live state is
+never evicted to admit new names. Infrastructure errors also fail closed with 503.
+Abandoned verification leases expire after at most 30 seconds. Reset and disable
+clear account state transactionally. Stop affected Local login instances before
+replacement, preserve backoff state and verify authentication before resuming service. Binary rollback does not undo it.
+See [attempt completion and expiry](../development/identity-authorization-audit.md#attempt-completion-and-expiry)
+for cancellation, lease fencing and database-clock behavior.
 
 This is bounded account protection, not a solution to targeted denial of login:
 an attacker can still cause temporary account cooldown, and a saturated table
@@ -612,7 +563,8 @@ account protection, as discussed in the OWASP
 [Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html#login-throttling)
 and [Credential Stuffing Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html).
 
-## Authentication security logs (R6)
+<a id="authentication-security-logs-r6"></a>
+## Authentication security logs
 
 Local login and OIDC start/callback reuse the Controller's structured `slog`
 output. These routes replace the duplicate `http request` entry with one
@@ -716,6 +668,6 @@ This validates Compose and secret metadata, not secret contents or IdP reachabil
 Controller startup performs full authentication configuration validation. Verify
 the intended login options over HTTPS, successful login and logout, RBAC and
 session revocation after installation. Do not print secret contents for diagnosis.
-Repository regression checks are `scripts/test-production-auth-config.sh`,
-`scripts/docs-check.sh`, and the targeted Go config tests; run local validation
-on `BuildServer` as required by `AGENTS.md`.
+For documentation and implementation changes, use the appropriate checks in
+[Validate a change](../development/testing.md) in an authorized isolated environment.
+The focused deployment configuration check is `scripts/test-production-auth-config.sh`.

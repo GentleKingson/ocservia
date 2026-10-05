@@ -37,7 +37,7 @@ This documentation defines the technical specifications and operational protocol
 
 - [Validate a change](development/testing.md)
 - [Control-plane development](development/control-plane.md)
-- [Contracts and toolchains](development/contracts.md)
+- [Schema sources and generation](reference/stable-contracts.md#schema-sources-and-generation)
 - [GitHub Actions validation](development/github-actions.md)
 - [Release policy and package validation](development/release-checks.md)
 - [Business Smoke and Integration](development/real-business-validation.md)
@@ -45,7 +45,7 @@ This documentation defines the technical specifications and operational protocol
 - [Single-instance resilience](development/resilience.md)
 - [Single dedicated Relay validation](development/single-relay-validation.md)
 - [Simulated-Agent resilience and capacity](development/p1-resilience-capacity.md)
-- [Database major cutover acceptance](development/database-major-cutover.md)
+- [Database migration contract](development/control-plane.md#current-sql-artifacts-and-bounded-upgrades)
 
 ## Technical reference
 

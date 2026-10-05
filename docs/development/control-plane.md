@@ -123,6 +123,17 @@ match the current epoch's known receipt history or the sole previous checkpoint:
 That immutable release remains the anchor when main advances. Earlier databases
 must first upgrade with v1.2.0; a major candidate cannot replay removed history.
 
+| Engine | v1.2.0 checkpoint schema receipt | Current fresh schema |
+| --- | --- | --- |
+| PostgreSQL 18.x | `d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172` | Epoch 2 / revision 0 |
+| MySQL 8.4 LTS | `3dc39a92ff4b54bff922872fae296843cea8dea1f2d1b36b42d86c9069dcb450` | Epoch 2 / revision 1 |
+
+Fresh and checkpoint-upgraded databases must have equivalent business schema,
+mandatory seeds and runtime ACLs. Their execution receipts record different
+valid paths: fresh initialization records its actual schema steps; a MySQL
+checkpoint upgrade records the transition and eight cleanup steps. Do not
+rewrite either history to make the receipts identical.
+
 PostgreSQL installs or transitions in one transaction. Its transition verifies
 the new schema, writes the verified epoch-2 baseline, executes legacy metadata
 cleanup from `upgrade.sql`, then validates the full result before committing.
@@ -150,8 +161,8 @@ mandatory seed semantics between the immutable checkpoint upgrade and fresh
 initialization. Historical fixtures come from that Git release, not an archived
 active migration tree. Initialization timestamps are generated on installation;
 deterministic seed values are compared exactly. See
-[major cutover acceptance](database-major-cutover.md) for the migration window
-and retained failure coverage.
+[SQL artifact acceptance](testing.md#sql-artifact-acceptance) for required
+failure, repair and backup/restore coverage.
 
 Readiness checks current core reads, permissions and event-stream health, not
 migration history or Controller schema ranges. Current startup also validates

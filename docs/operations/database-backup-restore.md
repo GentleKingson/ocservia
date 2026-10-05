@@ -11,6 +11,25 @@ backup.
 
 The production initializer creates the separate `ocservia_backup` login with replication permission; it is neither the database owner nor the application role. Encrypt backup storage, monitor age and verification failures, and copy backups off the application host according to the deployment retention policy.
 
+### Retention and connection credentials
+
+For bundled PostgreSQL, backups retain the configured number of verified base
+backups. WAL cleanup is anchored to the oldest retained base backup, so
+point-in-time recovery remains possible across the retained window without
+allowing the local archive to grow forever. Monitor backup-worker health and
+the `LATEST` timestamp, copy each completed base backup plus its required WAL
+range to protected off-host storage, and confirm the off-host copy before
+reducing local retention.
+
+For bundled PostgreSQL, set `postgres.pgpass` to
+`postgres:5432:*:ocservia_backup:<password>` using the protected
+backup-role password supplied during initialization. The passfile covers both
+the regular database connection for the server-major check and replication. For external PostgreSQL,
+use its actual hostname and port and include entries for both `ocservia` (the
+server-major preflight) and `replication` (`pg_basebackup`). The backup
+entrypoint copies the read-only Compose secret into a private mode-0600 passfile
+before invoking libpq tools.
+
 ### Deployment boundaries
 
 Bundled PostgreSQL 18 configures `archive_mode` and an `archive_command` that
