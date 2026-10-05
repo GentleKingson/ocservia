@@ -15,6 +15,9 @@ case "${1:-}" in
 esac
 [[ $# -le 1 ]] || exit 2
 case "${CONTROLLER_ARCH}:$(uname -m)" in amd64:x86_64|arm64:aarch64) ;; *) exit 2 ;; esac
+# buildx forwards SOURCE_DATE_EPOCH as a build arg, which stamps WORKDIR and
+# changes cache keys per commit; keep keys identical to the main cache refresh.
+unset SOURCE_DATE_EPOCH
 driver_opts=()
 if [[ "${BUILD_CACHE_AVAILABLE:-false}" == true ]]; then
   driver_opts+=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
