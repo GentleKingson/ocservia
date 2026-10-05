@@ -97,11 +97,13 @@ test("filters the complete fleet through the URL without writes", async ({
   );
 
   await page.getByRole("button", { name: "Filters" }).click();
-  await page.getByRole("checkbox", { name: /^Fresh/ }).check();
-  await page.getByRole("checkbox", { name: /^Stale/ }).check();
+  await page.getByRole("menuitemcheckbox", { name: /^Fresh/ }).click();
+  await page.getByRole("menuitemcheckbox", { name: /^Stale/ }).click();
   await expect(page.getByText("Showing 3 of 4 nodes")).toBeVisible();
-  await page.getByRole("checkbox", { name: /^Relay/ }).check();
+  await page.getByRole("menuitemcheckbox", { name: /^Relay/ }).click();
   await expect(page.getByText("Showing 1 of 4 nodes")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
   await expect(page).toHaveURL(/keep=1/);
   await expect(page).toHaveURL(/freshness=fresh%2Cstale|freshness=fresh,stale/);
   await expect(page).toHaveURL(/path=relay/);
@@ -114,6 +116,10 @@ test("filters the complete fleet through the URL without writes", async ({
   await expect(page).toHaveURL(/\/nodes\/019fc0a4/);
   await page.goBack();
   await expect(page.getByText("Showing 1 of 4 nodes")).toBeVisible();
+
+  await page.getByRole("button", { name: "Remove filter Path: Relay" }).click();
+  await expect(page.getByText("Showing 3 of 4 nodes")).toBeVisible();
+  await expect(page).not.toHaveURL(/path=relay/);
 
   await page.getByLabel("Search nodes").fill("nothing-matches");
   await expect(

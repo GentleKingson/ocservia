@@ -7,7 +7,7 @@ const headingId = useId();
 
 <template>
   <section
-    class="bg-card border-border mb-6 scroll-mt-4 rounded-lg border"
+    class="bg-card border-border mb-6 scroll-mt-4 rounded-xl border shadow-xs"
     :aria-labelledby="headingId"
   >
     <header

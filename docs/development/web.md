@@ -95,8 +95,11 @@ system.
 Theme tokens are plain custom properties on `:root` in `main.css`, mapped to
 Tailwind colors and radii through `@theme inline`: `background`, `foreground`,
 `card`, `popover`, `primary`, `secondary`, `muted`, `accent` (each with a
-`-foreground` pair), `destructive`, `success`, `border`, `input`, `ring` and
-`--radius` (`rounded-sm` to `rounded-xl`). Change a color by editing its token,
+`-foreground` pair), `destructive`, `success`, `border`, `input`, `ring`,
+`sidebar` (with `-foreground`, `-accent`, `-accent-foreground`, `-border`) and
+`--radius` (`rounded-sm` to `rounded-xl`). Values follow the shadcn-vue
+new-york-v4 neutral palette, with muted text, input and ring darkened for
+contrast. Change a color by editing its token,
 not the utilities that use it. Warning states use Tailwind's `amber` scale
 directly. The `dark` variant only matches an explicit `.dark` class; dark mode
 is not a product capability and must not follow the OS setting.
@@ -131,6 +134,7 @@ The upstream paths are `apps/v4/registry/new-york-v4/ui/<component>` and
 | NativeSelect | `defineModel`, attributes fall through to `select`; plain `option` children |
 | Sheet and Dialog | No `tw-animate-css` dependency; instant open/close, translated `closeLabel`, 32px close targets; Sheet close carries `data-slot` |
 | Dialog | Content scrolls within `max-h-[calc(100dvh-2rem)]`; no footer-generated close button |
+| DropdownMenu | No animation utilities; Trigger defaults `as` to `button`; explicit `as`/`dir`/`modelValue` defaults, Content limited to `align`/`side`/`sideOffset` and items without `textValue` for `exactOptionalPropertyTypes`; no Sub or Radio parts |
 
 All sources were taken on 2026-10-04 from `unovue/shadcn-vue` commit
 `b251d9fd92aa496495e127137a7734704fb34a29` (CLI 2.8.2) and are MIT licensed;
@@ -142,6 +146,11 @@ dependencies are pinned in `web/package.json`: `reka-ui`, `@vueuse/core`
 Workspace or decide permissions.
 
 ### Shell and page components
+
+The shell follows the shadcn-vue `dashboard-01` inset layout without the
+`sidebar` primitive set: the sidebar sits on the `sidebar` token, page content
+is an inset rounded panel, and the site header shows the current section title
+from `components/layout/navigation.ts`.
 
 `App.vue` owns readiness, Workspace selection and login-return navigation.
 Layout/common components present caller-owned data; primitives do not fetch or
@@ -166,7 +175,10 @@ direction, zero disabling the user and unlimited quota; expiry is UTC.
   snapshot. Replace it only after all pages load; label failed refreshes as stale.
   [`node-list.ts`](../../web/src/features/nodes/node-list.ts) owns filter/sort and
   URL query rules. Keep unknown observations explicit and timestamp handling
-  valid for infinity/extended years.
+  valid for infinity/extended years. The list follows the Tailscale Machines
+  layout: search, a single Filters menu, removable chips for active filter
+  values, and a per-row action menu. Filter groups stay flat in one menu;
+  nested submenus are unreliable on touch screens.
 - Rollout selection uses node IDs. Select-all covers visible eligible rows,
   confirmation lists every selected target, hidden selections remain visible as
   a count, and Workspace changes clear selection. Node list rows have no action

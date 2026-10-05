@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Radio, Server, Users } from "@lucide/vue";
+import { Ellipsis } from "@lucide/vue";
 import type { NodeObservedState } from "@ocservia/api-client";
 import { defaultWindow, useEventListener, useNow } from "@vueuse/core";
 import { computed, onMounted, ref } from "vue";
@@ -15,6 +15,12 @@ import PageHeader from "../components/common/PageHeader.vue";
 import NodeTableToolbar from "../components/nodes/NodeTableToolbar.vue";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
 import { Input } from "../components/ui/input";
 import {
   Table,
@@ -84,6 +90,7 @@ const trustBadge: Record<string, string> = {
   pending: "border-primary/40 text-primary",
   revoked: "border-destructive/40 text-destructive",
 };
+const columnHead = "text-muted-foreground text-xs font-medium uppercase";
 const agentBadge: Record<string, "default" | "secondary" | "destructive"> = {
   upgrade_available: "default",
   ahead: "secondary",
@@ -179,7 +186,7 @@ async function submitRollout(): Promise<void> {
 
 <template>
   <main>
-    <PageHeader :eyebrow="$t('fleet')" :title="$t('nodes')">
+    <PageHeader :title="$t('nodes')" :description="$t('nodesDescription')">
       <template #actions>
         <span
           v-if="!fleet.initialized && !fleet.unavailable"
@@ -224,42 +231,6 @@ async function submitRollout(): Promise<void> {
     />
 
     <template v-else>
-      <section
-        class="mb-2 grid gap-3 sm:grid-cols-3"
-        :aria-label="$t('fleetStatus')"
-      >
-        <div
-          v-for="metric in [
-            {
-              label: 'onlineNodes',
-              value: `${fleet.online} / ${fleet.nodes.length}`,
-              icon: Server,
-            },
-            { label: 'relayPaths', value: fleet.relay, icon: Radio },
-            {
-              label: 'activeSessions',
-              value: fleet.sessionCount,
-              icon: Users,
-            },
-          ]"
-          :key="metric.label"
-          class="bg-card border-border flex items-center justify-between rounded-lg border px-4 py-3"
-        >
-          <div class="grid gap-1">
-            <span class="text-muted-foreground text-xs">{{
-              $t(metric.label)
-            }}</span>
-            <strong class="text-xl font-semibold tabular-nums">{{
-              metric.value
-            }}</strong>
-          </div>
-          <component
-            :is="metric.icon"
-            class="text-muted-foreground size-5"
-            aria-hidden="true"
-          />
-        </div>
-      </section>
       <p class="text-muted-foreground mb-4 text-xs">
         {{
           $t(fleet.unavailable ? "fleetCountScopeStale" : "fleetCountScope", {
@@ -297,6 +268,36 @@ async function submitRollout(): Promise<void> {
             @update="updateListState"
           />
           <div
+            class="mb-3 flex flex-wrap items-center justify-end gap-3 text-sm"
+          >
+            <span
+              v-if="selectedNodes.length > 0"
+              class="text-muted-foreground"
+              aria-live="polite"
+              >{{
+                $t("selectionSummary", {
+                  selected: selectedNodes.length,
+                  hidden: hiddenSelectedCount,
+                })
+              }}</span
+            >
+            <Button
+              v-if="selectedNodes.length > 0"
+              type="button"
+              variant="ghost"
+              @click="selected = []"
+            >
+              {{ $t("clearSelection") }}
+            </Button>
+            <Button
+              type="button"
+              :disabled="selectedNodes.length === 0"
+              @click="openRolloutDialog"
+            >
+              {{ $t("rollingUpgrade") }} ({{ selectedNodes.length }})
+            </Button>
+          </div>
+          <div
             v-if="visibleNodes.length === 0"
             class="bg-card border-border text-muted-foreground grid min-h-40 place-content-center justify-items-center gap-3 rounded-lg border p-7 text-center text-sm"
           >
@@ -307,10 +308,10 @@ async function submitRollout(): Promise<void> {
           </div>
           <div
             v-else
-            class="bg-card border-border overflow-hidden rounded-lg border"
+            class="bg-card border-border overflow-hidden rounded-xl border"
           >
-            <Table class="min-w-[44rem]">
-              <TableHeader class="bg-muted/50">
+            <Table class="min-w-[48rem]">
+              <TableHeader>
                 <TableRow class="hover:bg-transparent">
                   <TableHead class="w-10 pl-4">
                     <input
@@ -322,39 +323,31 @@ async function submitRollout(): Promise<void> {
                       @change="selectVisibleEligible"
                     />
                   </TableHead>
-                  <TableHead class="text-muted-foreground">{{
-                    $t("node")
-                  }}</TableHead>
-                  <TableHead class="text-muted-foreground">{{
-                    $t("trust")
-                  }}</TableHead>
-                  <TableHead class="text-muted-foreground">{{
+                  <TableHead :class="columnHead">{{ $t("node") }}</TableHead>
+                  <TableHead :class="columnHead">{{ $t("version") }}</TableHead>
+                  <TableHead :class="columnHead">{{
                     $t("connection")
                   }}</TableHead>
-                  <TableHead class="text-muted-foreground">{{
-                    $t("agent")
-                  }}</TableHead>
-                  <TableHead class="text-muted-foreground text-right">{{
+                  <TableHead :class="[columnHead, 'text-right']">{{
                     $t("sessions")
                   }}</TableHead>
-                  <TableHead class="text-muted-foreground">{{
-                    $t("lastHeartbeat")
+                  <TableHead :class="columnHead">{{
+                    $t("lastSeen")
+                  }}</TableHead>
+                  <TableHead v-if="showColumn('path')" :class="columnHead">{{
+                    $t("path")
+                  }}</TableHead>
+                  <TableHead v-if="showColumn('ocserv')" :class="columnHead">{{
+                    $t("ocserv")
                   }}</TableHead>
                   <TableHead
-                    v-if="showColumn('path')"
-                    class="text-muted-foreground"
-                    >{{ $t("path") }}</TableHead
-                  >
-                  <TableHead
-                    v-if="showColumn('ocserv')"
-                    class="text-muted-foreground"
-                    >{{ $t("ocserv") }}</TableHead
-                  >
-                  <TableHead
                     v-if="showColumn('platform')"
-                    class="text-muted-foreground pr-4"
+                    :class="columnHead"
                     >{{ $t("archOs") }}</TableHead
                   >
+                  <TableHead class="w-12 pr-4">
+                    <span class="sr-only">{{ $t("actions") }}</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -375,15 +368,22 @@ async function submitRollout(): Promise<void> {
                       @change="toggleSelection(node.id)"
                     />
                   </TableCell>
-                  <TableCell class="max-w-64 py-3 whitespace-normal">
-                    <RouterLink
-                      :to="{
-                        name: 'node-detail',
-                        params: { nodeId: node.id },
-                      }"
-                      class="text-foreground focus-visible:outline-ring font-medium break-words hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2"
-                      >{{ node.name }}</RouterLink
-                    >
+                  <TableCell class="max-w-72 py-3 whitespace-normal">
+                    <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <RouterLink
+                        :to="{
+                          name: 'node-detail',
+                          params: { nodeId: node.id },
+                        }"
+                        class="text-foreground focus-visible:outline-ring font-medium break-words hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2"
+                        >{{ node.name }}</RouterLink
+                      >
+                      <Badge
+                        variant="outline"
+                        :class="trustBadge[node.trustStatus]"
+                        >{{ $t(node.trustStatus) }}</Badge
+                      >
+                    </div>
                     <code
                       class="text-muted-foreground block max-w-28 truncate text-xs"
                       :title="node.id"
@@ -391,10 +391,20 @@ async function submitRollout(): Promise<void> {
                     >
                   </TableCell>
                   <TableCell class="py-3">
-                    <Badge
-                      variant="outline"
-                      :class="trustBadge[node.trustStatus]"
-                      >{{ $t(node.trustStatus) }}</Badge
+                    <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span>{{ node.agentVersion ?? $t("unknown") }}</span>
+                      <Badge
+                        data-testid="agent-version-state"
+                        :variant="
+                          agentBadge[node.agentVersionState ?? ''] ?? 'outline'
+                        "
+                        >{{ $t(agentVersionLabel(node)) }}</Badge
+                      >
+                    </div>
+                    <span
+                      v-if="node.osRelease"
+                      class="text-muted-foreground block text-xs"
+                      >{{ node.osRelease }}</span
                     >
                   </TableCell>
                   <TableCell class="py-3">
@@ -418,18 +428,6 @@ async function submitRollout(): Promise<void> {
                           : 'text-muted-foreground'
                       "
                       >{{ $t(node.freshness) }}</span
-                    >
-                  </TableCell>
-                  <TableCell class="py-3">
-                    <span class="block">{{
-                      node.agentVersion ?? $t("unknown")
-                    }}</span>
-                    <Badge
-                      data-testid="agent-version-state"
-                      :variant="
-                        agentBadge[node.agentVersionState ?? ''] ?? 'outline'
-                      "
-                      >{{ $t(agentVersionLabel(node)) }}</Badge
                     >
                   </TableCell>
                   <TableCell class="py-3 text-right tabular-nums">{{
@@ -465,46 +463,44 @@ async function submitRollout(): Promise<void> {
                   }}</TableCell>
                   <TableCell
                     v-if="showColumn('platform')"
-                    class="py-3 pr-4 whitespace-normal"
+                    class="py-3 whitespace-normal"
                   >
                     {{ node.architecture || $t("unknown") }}
                     <span class="text-muted-foreground block text-xs">{{
                       node.osRelease ?? $t("notAvailable")
                     }}</span>
                   </TableCell>
+                  <TableCell class="py-3 pr-4 text-right">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger as-child>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          :aria-label="$t('nodeActions', { name: node.name })"
+                        >
+                          <Ellipsis aria-hidden="true" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          @select="
+                            router.push({
+                              name: 'node-detail',
+                              params: { nodeId: node.id },
+                            })
+                          "
+                        >
+                          {{ $t("viewDetails") }}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </TableCell>
                 </TableRow>
               </TableBody>
             </Table>
           </div>
         </template>
-        <div class="mt-4 flex flex-wrap items-center justify-end gap-3 text-sm">
-          <span
-            v-if="selectedNodes.length > 0"
-            class="text-muted-foreground"
-            aria-live="polite"
-            >{{
-              $t("selectionSummary", {
-                selected: selectedNodes.length,
-                hidden: hiddenSelectedCount,
-              })
-            }}</span
-          >
-          <Button
-            v-if="selectedNodes.length > 0"
-            type="button"
-            variant="ghost"
-            @click="selected = []"
-          >
-            {{ $t("clearSelection") }}
-          </Button>
-          <Button
-            type="button"
-            :disabled="selectedNodes.length === 0"
-            @click="openRolloutDialog"
-          >
-            {{ $t("rollingUpgrade") }} ({{ selectedNodes.length }})
-          </Button>
-        </div>
       </section>
     </template>
 

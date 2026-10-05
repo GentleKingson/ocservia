@@ -13,7 +13,7 @@ defineProps<{
 
 <template>
   <article
-    class="bg-card border-border grid content-start gap-2 rounded-lg border p-4"
+    class="from-primary/5 to-card border-border text-card-foreground grid content-start gap-3 rounded-xl border bg-gradient-to-t p-5 shadow-xs"
   >
     <div class="flex items-start justify-between gap-3">
       <h2 class="text-muted-foreground m-0 text-sm font-medium">
@@ -27,7 +27,7 @@ defineProps<{
     </div>
     <div class="grid gap-1">
       <strong
-        class="text-foreground text-2xl leading-none font-semibold"
+        class="text-foreground text-2xl leading-none font-semibold tabular-nums md:text-3xl"
         :data-testid="valueTestid"
         >{{ value }}</strong
       >

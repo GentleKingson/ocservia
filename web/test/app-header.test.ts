@@ -1,7 +1,9 @@
 import { createSSRApp, h } from "vue";
 import { renderToString } from "vue/server-renderer";
 import { expect, it, vi } from "vitest";
-vi.mock("vue-router", () => ({ useRoute: () => ({ fullPath: "/" }) }));
+vi.mock("vue-router", () => ({
+  useRoute: () => ({ fullPath: "/", path: "/" }),
+}));
 import AppHeader from "../src/components/layout/AppHeader.vue";
 
 const workspace = (id: string, name: string) => ({

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Menu } from "@lucide/vue";
 import type { Workspace } from "@ocservia/api-client";
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/sheet";
 
 import AppSidebar from "./AppSidebar.vue";
+import { isCurrentSection, navigationLinks } from "./navigation";
 
 defineProps<{
   workspaces: Workspace[];
@@ -29,6 +30,11 @@ const emit = defineEmits<{
 
 const route = useRoute();
 const navigationOpen = ref(false);
+const sectionLabel = computed(
+  () =>
+    navigationLinks.find((link) => isCurrentSection(link.to, route.path))
+      ?.label,
+);
 let closedByNavigation = false;
 
 function closeForNavigation(): void {
@@ -49,7 +55,7 @@ function restoreFocus(event: Event): void {
 
 <template>
   <header
-    class="bg-card text-muted-foreground border-border flex min-h-14 items-center gap-3 border-b px-4 text-sm md:px-7"
+    class="text-muted-foreground border-border flex min-h-12 items-center gap-2 border-b px-4 text-sm md:px-6"
   >
     <Sheet v-model:open="navigationOpen">
       <SheetTrigger as-child>
@@ -57,7 +63,7 @@ function restoreFocus(event: Event): void {
           type="button"
           variant="ghost"
           size="icon"
-          class="-ml-2 size-10 md:hidden"
+          class="-ml-2 size-9 md:hidden"
           :aria-label="$t('openNavigation')"
         >
           <Menu class="size-5" aria-hidden="true" />
@@ -76,10 +82,18 @@ function restoreFocus(event: Event): void {
         <AppSidebar @navigate="closeForNavigation" />
       </SheetContent>
     </Sheet>
-    <span class="hidden md:inline">{{ $t("platform") }}</span>
+    <span
+      class="bg-border h-4 w-px shrink-0 md:hidden"
+      aria-hidden="true"
+    ></span>
+    <span
+      v-if="sectionLabel"
+      class="text-foreground truncate text-base font-medium"
+      >{{ $t(sectionLabel) }}</span
+    >
     <div
       data-testid="workspace"
-      class="flex min-w-0 flex-1 items-center gap-2 md:ml-6"
+      class="ml-auto flex min-w-0 items-center justify-end gap-2"
     >
       <template v-if="workspaces.length > 1">
         <label
@@ -115,9 +129,10 @@ function restoreFocus(event: Event): void {
         </span>
       </template>
     </div>
+    <span class="bg-border h-4 w-px shrink-0" aria-hidden="true"></span>
     <div
       data-testid="readiness"
-      class="ml-auto inline-flex shrink-0 items-center gap-2"
+      class="inline-flex shrink-0 items-center gap-2"
     >
       <span
         class="size-2 rounded-full"
