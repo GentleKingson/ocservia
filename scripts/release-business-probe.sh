@@ -185,10 +185,27 @@ if [[ "$EUID" == 0 ]]; then
   mkdir -p "$ROOT/rust/target"
   chown -R 0:0 "$ROOT/.cache" "$ROOT/.tools" "$ROOT/rust/target"
 fi
-next_stage agent_package_build
-env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
-next_stage controller_image_build
-bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+next_stage product_build_and_dependency_install
+# Agent packages (plain docker), Controller images (own buildx builder) and
+# host packages have disjoint outputs. Wait for all three before failing so no
+# build outlives cleanup.
+env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1 &
+agent_build_pid=$!
+bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1 &
+controller_build_pid=$!
+{
+  sudo apt-get update -qq
+  sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
+} &
+dependency_install_pid=$!
+parallel_failed=()
+wait "$agent_build_pid" || parallel_failed+=(agent_package_build)
+wait "$controller_build_pid" || parallel_failed+=(controller_image_build)
+wait "$dependency_install_pid" || parallel_failed+=(dependency_install)
+if ((${#parallel_failed[@]})); then
+  echo "parallel stage failed: ${parallel_failed[*]}" >&2
+  exit 1
+fi
 for name in gateway control transport backup edge relay signer mysql_backup; do
   docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
 done
@@ -196,9 +213,6 @@ export T07_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$C
 docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH" "${BUILDX_BUILDER}-relay"
 docker run --rm --entrypoint /usr/local/bin/iroh-relay "${BUILDX_BUILDER}-relay" --version >"${ARTIFACT_DIR}/relay-version.txt"
 record products_built
-next_stage dependency_install
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping
 sudo systemctl stop ocserv
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
 # Subsequent output can contain task-only secret data. Keep it private until
