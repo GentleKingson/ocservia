@@ -192,6 +192,10 @@ next_stage controller_image_build
 echo "::group::controller build $(date -u +%T)"
 bash "${ROOT}/scripts/build-release-controller.sh" 2>&1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%T)" "$line"; done | tee "${ARTIFACT_DIR}/controller-build.log"
 echo "::endgroup::"
+echo "::group::buildkitd cache debug"
+docker logs "buildx_buildkit_${BUILDX_BUILDER}0" 2>&1 | grep -iE 'gha|cache|actions|twirp|results|token|scope|40[0-9]|50[0-9]' | grep -v 'sha256:[0-9a-f]\{64\} [0-9.]' | head -400 || true
+echo "::endgroup::"
+echo "DIAG: stopping after controller build"; exit 1
 ls -l "$OUTPUT_DIR"
 for name in gateway control transport backup edge relay signer mysql_backup; do
   load_start=$SECONDS

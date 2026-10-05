@@ -24,7 +24,7 @@ if [[ "${BUILD_CACHE_AVAILABLE:-false}" == true ]]; then
 fi
 docker buildx create --driver docker-container \
   --driver-opt image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8 \
-  "${driver_opts[@]}" --name "${BUILDX_BUILDER}" --bootstrap --use
+  "${driver_opts[@]}" --buildkitd-flags '--debug' --name "${BUILDX_BUILDER}" --bootstrap --use
 build_image() {
   local name="$1" dockerfile="$2" cache_mode=min
   local -a args=(--builder "${BUILDX_BUILDER}" --platform "linux/${CONTROLLER_ARCH}"
