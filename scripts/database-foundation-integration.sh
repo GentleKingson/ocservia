@@ -77,14 +77,11 @@ chmod 755 "${TLS_DIR}"
 chmod 644 "${TLS_DIR}"/*.pem
 # Ephemeral test credentials only, never deployment defaults. Loopback binding
 # is required even in CI. An explicit ephemeral port survives Docker restart.
-# Per-test schema DDL dominates runtime; commits still reach the OS at once (so
-# a container restart keeps them) but skip per-commit fsync. Binary logging stays on.
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
 docker run -d --name "${NAME}" -p "127.0.0.1:${PORT}:3306" \
   -v "${TLS_DIR}:/tls:ro" \
   -e MYSQL_ROOT_PASSWORD=pr02-isolated-test-root -e MYSQL_DATABASE=ocservia \
   "${IMAGE}" --log-bin-trust-function-creators=1 \
-  --innodb-flush-log-at-trx-commit=2 --sync-binlog=0 \
   --ssl-ca=/tls/server-cert.pem --ssl-cert=/tls/server-cert.pem --ssl-key=/tls/server-key.pem >/dev/null
 ready=false
 for ((i=0; i<90; i++)); do
