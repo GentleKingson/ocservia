@@ -70,7 +70,7 @@ function focusMainContent(): void {
   <RouterView v-if="isLogin" />
   <div
     v-else-if="authenticated"
-    class="min-h-screen md:grid md:grid-cols-[15rem_minmax(0,1fr)]"
+    class="bg-sidebar min-h-screen md:grid md:grid-cols-[16rem_minmax(0,1fr)]"
   >
     <a
       href="#main-content"
@@ -78,12 +78,12 @@ function focusMainContent(): void {
       @click.prevent="focusMainContent"
       >{{ $t("skipToContent") }}</a
     >
-    <aside
-      class="bg-card border-border sticky top-0 hidden h-screen border-r md:block"
-    >
+    <aside class="sticky top-0 hidden h-screen md:block">
       <AppSidebar />
     </aside>
-    <div class="min-w-0">
+    <div
+      class="bg-background min-h-screen min-w-0 md:m-2 md:ml-0 md:min-h-[calc(100vh-1rem)] md:rounded-xl md:shadow-sm"
+    >
       <AppHeader
         v-model:workspace-id="selectedWorkspaceId"
         :workspaces="workspaces"
@@ -95,7 +95,7 @@ function focusMainContent(): void {
         id="main-content"
         ref="mainContent"
         tabindex="-1"
-        class="mx-auto max-w-[1180px] px-[18px] py-[26px] focus:outline-none md:px-9 md:py-[34px]"
+        class="px-4 py-4 focus:outline-none md:px-6 md:py-6"
       >
         <RouterView />
       </div>
