@@ -55,7 +55,7 @@ preceding duplicate `cargo check`.
 - Browser or runtime behavior: `make e2e`
 - Rust behavior or boundaries: `make rust-check`
 - Web behavior: `make web-check`
-- Real cross-VM behavior: follow [real E2E validation](real-e2e.md); module checks and browser fixtures are not substitutes
+- Real cross-VM behavior: follow [cross-VM enrollment validation](cross-vm-enrollment-validation.md); module checks and browser fixtures are not substitutes
 - Business checks on authorized disposable native runners: [Business Smoke and Integration](real-business-validation.md)
 - Release acceptance: use [Release Check](release-checks.md); selected single-node recovery checks are described in [Resilience](resilience.md)
 

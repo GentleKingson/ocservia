@@ -8,7 +8,7 @@ The P1 network prototype was developed against source baseline
 Signer to the existing lifecycle. P4 added native build checks; P5 checks
 the real deployment rather than inferring acceptance from configuration tests.
 Historical prototype results below retain their original scope. Read the
-[P0 contract](../../../docs/development/integrated-deployment-adr.md).
+[Integrated deployment contract](../../../docs/development/integrated-deployment-contract.md).
 Do not bypass the deployment-configuration checks in `controller.sh` for deployment.
 
 ## Lifecycle configuration

@@ -78,7 +78,7 @@ explicitly planned [isolated restore](../operations/incident-recovery.md#databas
 ## Production Signer
 
 Signer is a separate Go module/process under the
-[Integrated custody boundary](integrated-deployment-adr.md#signer-contract),
+[Integrated custody boundary](integrated-deployment-contract.md#signer-contract),
 not a Controller command-signing provider. The Python business signer is a test fixture.
 
 ### Runtime contract

@@ -525,7 +525,7 @@ A is required; B must be absent or empty. Nonempty B is rejected before install
 or process execution. These values can be set in `install.env` without editing
 release files. For an existing A/B deployment, deliberately clear B on both
 Controller and Agents while preserving identity and trust material, then
-restart and verify A-only traffic. See [dedicated Relay configuration](../how-to/dedicated-relays.md).
+restart and verify A-only traffic. See [dedicated Relay configuration](../how-to/dedicated-relay.md).
 
 Only transportd joins the additional non-internal `relay-egress` network for
 DNS and outbound HTTPS to independently deployed relays. The application,

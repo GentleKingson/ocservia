@@ -106,4 +106,4 @@ Rerun failed owners with complete checks and shared fault timelines together;
 earlier candidates cannot supply missing acceptance or cross-version safety.
 
 Existing [single-Relay](single-relay-validation.md) and
-[cross-VM enrollment](real-e2e.md) profiles retain their original scope.
+[cross-VM enrollment](cross-vm-enrollment-validation.md) profiles retain their original scope.

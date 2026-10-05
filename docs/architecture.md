@@ -85,7 +85,7 @@ Node enrollment operates via an isolated protocol. An ephemeral pre-shared token
 
 Disruptions to the Controller or database halt workflows that require validation or durable writes. Unprocessed operations wait in the outbox until they expire or exhaust retries. If `Agent` or `privd` fails midway through execution, the state transition is indeterminate even if the network delivery succeeded. A Relay partition drops administrative transport. Recovery means restoring the Relay node, re-establishing secure sessions, and executing state reconciliation across connected nodes.
 
-System recovery prioritizes the immutability of command logs, local journal entries, cryptographic identities, and monotonic sequence counters. Cold backups require an independently validated restoration workflow; they do not provide automatic failover or cross-version schema guarantees. Detailed specifications appear in [incident recovery](operations/incident-recovery.md), [Signer recovery](development/integrated-deployment-adr.md#compatibility-and-recovery), and [resilience coverage](development/resilience.md).
+System recovery prioritizes the immutability of command logs, local journal entries, cryptographic identities, and monotonic sequence counters. Cold backups require an independently validated restoration workflow; they do not provide automatic failover or cross-version schema guarantees. Detailed specifications appear in [incident recovery](operations/incident-recovery.md), [Signer recovery](development/integrated-deployment-contract.md#compatibility-and-recovery), and [resilience coverage](development/resilience.md).
 
 ## Design tradeoffs and capacity
 
@@ -148,7 +148,7 @@ Subsystem decomposition into standalone services requires demonstrable needs for
 
 Architectural Decision Records (ADRs) document significant design trade-offs alongside subsystem documentation. Each record captures the status, context, decision, evaluated alternatives, consequences, verification protocols, and revisit triggers. Draft proposals are explicitly marked, and superseded records maintain links to subsequent decisions. Routine patches and localized enhancements do not warrant formal ADRs.
 
-The [Integrated deployment contract](development/integrated-deployment-adr.md) documents decisions on single-host networking, the Signer subsystem, and reliable message delivery. The authoritative execution workflow is in the [deployment procedure](../deploy/production/integrated/README.md). The architectural contract does not confer runtime certification or alter the [production support policy](reference/support-policy.md).
+The [Integrated deployment contract](development/integrated-deployment-contract.md) documents decisions on single-host networking, the Signer subsystem, and reliable message delivery. The authoritative execution workflow is in the [deployment procedure](../deploy/production/integrated/README.md). The architectural contract does not confer runtime certification or alter the [production support policy](reference/support-policy.md).
 
 Design documentation follows Lenciel's [How to write system design docs](https://lenciel.com/2021/01/how-to-write-system-design-docs/), grounding exposition in user execution paths, operational constraints, persistence models, and requirement-driven trade-offs. The methodology aligns with [Awesome Architecture](https://github.com/study8677/awesome-architecture) (chapters 02 and 08), structural diagrams observe the [C4 guidance](https://c4model.com/diagrams), and historical records use [Nygard's ADR method](https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions). These frameworks are guidelines; concrete boundaries derive directly from the repository code and specifications.
 
@@ -157,7 +157,7 @@ Design documentation follows Lenciel's [How to write system design docs](https:/
 - [Deploy the Controller](getting-started/production.md)
 - [Install a managed node](getting-started/managed-node.md)
 - [Enroll a node](how-to/enroll-node.md)
-- [Dedicated relays](how-to/dedicated-relays.md)
+- [Dedicated Relay](how-to/dedicated-relay.md)
 - [Production deployment reference](operations/production-deployment.md)
 - [Agent package lifecycle](operations/agent-lifecycle.md)
 - [Technical reference](README.md#technical-reference)

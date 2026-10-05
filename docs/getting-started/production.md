@@ -154,7 +154,7 @@ Also verify that login works, a managed node can connect through each configured
 
 - [Install a managed node](managed-node.md)
 - [Enroll a node](../how-to/enroll-node.md)
-- [Configure dedicated relays](../how-to/dedicated-relays.md)
+- [Configure a dedicated Relay](../how-to/dedicated-relay.md)
 - [Back up and restore PostgreSQL](../operations/database-backup-restore.md#postgresql)
 - [Back up and restore MySQL](../operations/database-backup-restore.md#mysql)
 - [Production deployment reference](../operations/production-deployment.md)

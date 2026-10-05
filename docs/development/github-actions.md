@@ -164,7 +164,7 @@ relay connectivity. Run them manually on suitable local or dedicated servers:
   `scripts/security-acceptance-f3.sh` retain the live security acceptance phases.
 - `scripts/real-e2e-controller.sh`, `scripts/real-e2e-node.sh`,
   `scripts/real-e2e-artifact.sh`, and `deploy/real-e2e` remain available; see
-  [Cross-VM real E2E validation](real-e2e.md) for manual execution.
+  [Cross-VM enrollment validation](cross-vm-enrollment-validation.md) for manual execution.
 
 `make real-e2e-check` only checks the three real-E2E scripts' Bash syntax. It
 does not read workflow files or run live acceptance, and Basic CI does not call it.
