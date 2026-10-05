@@ -21,7 +21,7 @@ Full has a separate concurrency group and cannot cancel Quick.
 | go | gofmt, vet and ordinary fast tests in both Go modules; no full-package race |
 | rust | Format, clippy and workspace tests |
 | web | Format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
-| database-smoke | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance; both check current snapshot equivalence |
+| database-smoke | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance (MySQL as three parallel `DATABASE_SHARD` legs: `mysql-cutover`, `mysql-core`, `services`); both check current snapshot equivalence |
 | database-recovery-full | PostgreSQL physical and MySQL logical backup/restore, including snapshot provenance, Full only |
 | Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
 

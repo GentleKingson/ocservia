@@ -128,6 +128,10 @@ else
 fi
 
 matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"}]}'
+if [[ "${database_scope}" == full ]]; then
+  # MySQL full acceptance is the critical path; its complementary shards run in parallel.
+  matrix='{"include":[{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10","shard":"mysql-cutover"},{"engine":"mysql","version":"8.4.10","shard":"mysql-core"},{"engine":"mysql","version":"8.4.10","shard":"services"}]}'
+fi
 
 {
   printf 'database_matrix=%s\n' "${matrix}"

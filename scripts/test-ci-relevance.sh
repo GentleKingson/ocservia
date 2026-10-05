@@ -17,7 +17,14 @@ expect() {
 check_matrix() {
   local out=$1 profile=$2
   sed -n 's/^database_matrix=//p' "${out}" | jq -e --arg profile "${profile}" '
-    .include == [{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"}]' >/dev/null
+    if $profile == "full" then
+      .include == [{"engine":"postgres","postgres":"18","version":"18.6"},
+        {"engine":"mysql","version":"8.4.10","shard":"mysql-cutover"},
+        {"engine":"mysql","version":"8.4.10","shard":"mysql-core"},
+        {"engine":"mysql","version":"8.4.10","shard":"services"}]
+    else
+      .include == [{"engine":"postgres","postgres":"18","version":"18.6"},{"engine":"mysql","version":"8.4.10"}]
+    end' >/dev/null
 }
 while read -r path selected; do
   git -C "${fixture}" checkout -q --detach "${base}"

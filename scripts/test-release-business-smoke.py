@@ -40,6 +40,7 @@ python3() { echo "api:$2"; if [[ "$2" == browser_verify ]]; then return "${VERIF
 node() { echo browser; return "${BROWSER_EXIT}"; }
 npm() { :; }
 npx() { :; }
+cd() { :; }
 sudo() { :; }
 mkdir() { :; }
 certutil() { :; }

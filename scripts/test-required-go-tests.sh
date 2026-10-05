@@ -59,6 +59,21 @@ jq -c 'select(.Test != "TestMySQLCutoverCrashRecovery")' "${tmp}/mysql.json" >"$
 if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
   echo 'full database guard accepted missing crash recovery' >&2; exit 1
 fi
+# CI shards: one pattern partitions the full guard; each half still fails closed.
+shard_check() {
+  PR02_ENGINE=mysql jq -se --arg group backend-mysql-full --arg shard_mode "$2" --arg shard_pattern '^Test(MySQLCutover|MySQLArtifact)' \
+    --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" -f "${ROOT}/scripts/check-required-go-tests.jq" "$1"
+}
+full_required="$(check "${tmp}/mysql.json" backend-mysql-full | jq .required)"
+run_required="$(shard_check "${tmp}/mysql.json" run | jq .required)"
+skip_required="$(shard_check "${tmp}/mysql.json" skip | jq .required)"
+((run_required > 0 && skip_required > 0 && run_required + skip_required == full_required)) || {
+  echo "MySQL shards do not partition the full guard: ${run_required}+${skip_required}!=${full_required}" >&2; exit 1; }
+jq -c 'select(.Test | startswith("TestMySQLCutover") or startswith("TestMySQLArtifact") | not)' "${tmp}/mysql.json" >"${tmp}/core.json"
+shard_check "${tmp}/core.json" skip >/dev/null
+if shard_check "${tmp}/core.json" run >/dev/null 2>&1; then echo 'cutover shard accepted missing crash recovery' >&2; exit 1; fi
+jq -c 'select(.Test != "TestRealTLS")' "${tmp}/core.json" >"${tmp}/bad.json"
+if shard_check "${tmp}/bad.json" skip >/dev/null 2>&1; then echo 'core shard accepted missing TestRealTLS' >&2; exit 1; fi
 echo 'MySQL current correctness and recovery guards passed'
 # Exercise every explicit critical inventory, not just a successful go exit.
 for engine in mysql; do
@@ -247,7 +262,7 @@ cp "${ROOT}/scripts/required-go-tests.txt" "${tmp}/wrapper/scripts/"
 mkdir "${tmp}/wrapper/control-plane"
 cat >"${tmp}/wrapper/scripts/required-go-tests.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"${ROUTE_LOG}"
+printf '%s%s\n' "${REQUIRED_SHARD_RUN:+run=${REQUIRED_SHARD_RUN} }${REQUIRED_SHARD_SKIP:+skip=${REQUIRED_SHARD_SKIP} }" "$*" >>"${ROUTE_LOG}"
 SH
 cat >"${tmp}/wrapper/scripts/test-enrollment-restart.sh" <<'SH'
 #!/usr/bin/env bash
@@ -292,6 +307,27 @@ grep -q '^backend-enrollment-restart$' "${tmp}/current.route"
 grep -q '^backend-policy-userstate --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-policy-useroperations --select -race -timeout=10m$' "${tmp}/current.route"
 grep -q '^backend-policy-api --select -race -timeout=10m$' "${tmp}/current.route"
+# The three CI shards together run exactly the unsharded route.
+for shard in mysql-cutover mysql-core services; do
+  export ROUTE_LOG="${tmp}/shard-${shard}.route"
+  PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=full DATABASE_SHARD="${shard}" ENGINE=mysql \
+    bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null
+done
+grep -qx 'run=^Test(MySQLCutover|MySQLArtifact) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-cutover.route"
+grep -qx 'skip=^Test(MySQLCutover|MySQLArtifact) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-core.route"
+# Only the split package and the cheap per-runner configuration check repeat.
+{ cat "${tmp}/current.route"; grep -E '^backend-mysql-full |^test -count=1 \./internal/platform/config ' "${tmp}/current.route"
+  grep -E '^test -count=1 \./internal/platform/config ' "${tmp}/current.route"; } | sort >"${tmp}/expected.route"
+sed -E 's/^(run|skip)=[^ ]+ //' "${tmp}"/shard-*.route | sort >"${tmp}/shards.route"
+cmp -s "${tmp}/expected.route" "${tmp}/shards.route" || {
+  diff "${tmp}/expected.route" "${tmp}/shards.route" >&2; echo 'MySQL shards duplicate, drop or change a full route' >&2; exit 1; }
+for bad in 'smoke unknown-shard' 'smoke services'; do
+  read -r scope shard <<<"${bad}"
+  if PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE="${scope}" DATABASE_SHARD="${shard}" ENGINE=mysql \
+    bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null 2>&1; then
+    echo "invalid MySQL shard accepted: ${bad}" >&2; exit 1
+  fi
+done
 echo 'Full current database routing passed'
 for script in database-foundation-integration.sh database-postgres-smoke.sh; do
   export ROUTE_LOG="${tmp}/${script}.route"

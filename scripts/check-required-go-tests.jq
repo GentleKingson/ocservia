@@ -4,7 +4,9 @@
    | select(.[0] == $group or
      ($group == "backend-mysql-full" and
        (.[0] == "backend-mysql-current" or .[0] == "backend-audit-mysql" or .[0] == "mysql-snapshot")))
-   | {package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), test: .[2]})) as $required
+   | {package: ("github.com/GentleKingson/ocservia/control-plane/" + .[1]), test: .[2]})
+ | map(select(($ARGS.named.shard_mode // "") == "" or
+     ((.test | split("/")[0] | test($ARGS.named.shard_pattern)) == ($ARGS.named.shard_mode == "run"))))) as $required
 | if ($ARGS.named.mode // "check") == "select" then
     # Only top-level sets or children of ONE parent are supported. Do not
     # generate per-level unions for unrelated parents (a cross product).
