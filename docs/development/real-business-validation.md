@@ -1,9 +1,15 @@
 # Business Smoke and Integration
 
 Business Smoke exercises the real Controller, native systemd Agent/privd/ocserv,
-Local requester/approver login, approved ConfigPlan apply, OpenConnect VPN,
+Local requester/approver browser login, Workspace selection, user creation,
+approval/reload and approved ConfigPlan apply, OpenConnect VPN,
 production Signer sealing and internal TLS on disposable amd64 runners.
-Manual integration adds OIDC, PKI/P12/revoke, browser, rollback and deep recovery.
+Manual integration adds OIDC, PKI/P12/revoke (including browser checks), rollback
+and deep recovery. Smoke retains a separate API-created VPN user to verify
+production Signer password sealing. Its configuration is applied once through
+the browser and checked against the operation receipts and native file hash
+before VPN and recovery checks. Both profiles require `real_browser_subset`;
+missing browser checkpoints fail acceptance.
 No production binary, service, Relay or VPN is mocked. Use
 [Release policy](release-checks.md) for dispatch commands, topology selection,
 coverage ownership and publication gates; Business alone establishes neither
@@ -58,8 +64,8 @@ The following limitations are deliberately retained, not scored as PASS:
   operator custody. The Controller container trust store is provisioned with
   the task CA; TLS verification stays enabled.
 - Extended certificate/P12 checks include node restarts and one-use download.
-  The real browser uses the built gateway and Controller API without route
-  mocks, simulator or TLS exceptions. Missing phase checkpoints remain NOT RUN;
+  In both profiles, the real browser uses the built gateway and Controller API
+  without route mocks, simulator or TLS exceptions. Missing phase checkpoints remain NOT RUN;
   source implementation is not proof of runtime success. The reviewed complete
   node-local TLS profile is exercised through browser plan/approval/apply and
   native exact-byte rollback/restart checks; only their checkpoints prove that

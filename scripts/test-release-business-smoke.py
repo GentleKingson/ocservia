@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -23,6 +24,41 @@ def main():
         with patch.dict(os.environ, env), patch('ssl.create_default_context'):
             business = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(business)
+
+        # Exercise the driver's real profile branch with external commands
+        # stubbed: no native installation, browser, or business mutation here.
+        driver = (root / 'scripts/release-business-probe.sh').read_text()
+        browser_stage = driver.split('record native_node_services\n', 1)[1].split('next_stage vpn_client_setup', 1)[0]
+        shell = r"""
+set -euo pipefail
+ROOT="$1"
+work="$2"
+BUSINESS_PROFILE="$3"
+next_stage() { :; }
+record() { echo "checkpoint:$1"; }
+python3() { echo "api:$2"; if [[ "$2" == browser_verify ]]; then return "${VERIFY_EXIT}"; fi; }
+node() { echo browser; return "${BROWSER_EXIT}"; }
+npm() { :; }
+npx() { :; }
+sudo() { :; }
+mkdir() { :; }
+certutil() { :; }
+"""
+        for profile in ('smoke', 'extended'):
+            result = subprocess.run(['bash', '-c', shell + browser_stage, 'browser-stage', str(root), str(work), profile],
+                                    env={**os.environ, 'BROWSER_EXIT': '0', 'VERIFY_EXIT': '0'}, capture_output=True, text=True, check=True)
+            expected = (['api:certificate', 'checkpoint:real_certificate_lifecycle'] if profile == 'extended' else [])
+            expected += ['api:browser_prepare', 'browser', 'api:browser_verify', 'checkpoint:real_browser_subset']
+            if profile == 'smoke':
+                expected += ['api:smoke_user', 'checkpoint:approved_config_apply_and_vpn_user']
+            assert result.stdout.splitlines() == expected
+            for failure in ('BROWSER_EXIT', 'VERIFY_EXIT'):
+                failed = subprocess.run(['bash', '-c', shell + browser_stage, 'browser-stage', str(root), str(work), profile],
+                                        env={**os.environ, 'BROWSER_EXIT': '0', 'VERIFY_EXIT': '0', failure: '9'},
+                                        capture_output=True, text=True)
+                assert failed.returncode == 9
+                assert 'checkpoint:real_browser_subset' not in failed.stdout
+
 
         with patch.object(business, 'sql', side_effect=['f', 'f', 't']) as sql, \
                 patch.object(business.time, 'sleep') as sleep, patch.object(business, 'record') as record:
@@ -169,45 +205,107 @@ def main():
                     record.assert_not_called()
                 assert events == expected
 
-        directives = business.smoke_directives(4)
-        assert {item['name'] for item in directives} == {
-            'auth', 'cookie-timeout', 'device', 'dns', 'ipv4-network', 'max-clients',
-            'max-same-clients', 'route', 'socket-file', 'tcp-port', 'udp-port', 'server-cert', 'server-key'}
-        assert next(item for item in directives if item['name'] == 'max-clients')['value'] == '4'
-        assert all(item['secret_ref']['secret_ref_id'] == 'tls-ref' for item in directives if 'secret_ref' in item)
-
-        requests = []
-
-        def plan_api(path, body=None, **_kwargs):
-            if path == 'nodes/node/config-plans':
-                requests.append(body)
-                return {'id': 'plan'}
-            if path == 'config-plans/plan':
-                return {'id': 'plan', 'state': 'succeeded', 'validation': 'valid'}
-            raise AssertionError(path)
-
-        with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=plan_api):
-            business.smoke_plan(directives, 0, 'smoke')
-        assert requests[0]['expected_revision'] == 0
-        assert requests[0]['template'] == {'name': 'smoke', 'directives': directives}
-
         def api(path, *_args, **_kwargs):
-            if path.endswith('/apply') or path.endswith('/users'):
+            if path.endswith('/users'):
                 return {'id': 'operation'}
             if path == 'operations/operation':
-                return {'state': 'succeeded', 'config_apply_state': 'succeeded'}
+                return {'id': 'operation', 'state': 'succeeded', 'config_apply_state': 'succeeded'}
             if path == 'nodes/node':
                 return {'config_revision': 1}
+            if path == 'config-plans/plan':
+                return {'materialized_hash': 'newhash'}
             raise AssertionError(path)
 
-        with patch.dict(os.environ, env), patch.object(business, 'smoke_plan', return_value={
-            'id': 'plan', 'materialized_hash': 'newhash'}), patch.object(business, 'approval', return_value='approval'), \
-                patch.object(business, 'api', side_effect=api), patch.object(business, 'record') as record, \
-                patch.object(business, 'run', side_effect=['oldhash  /etc/ocserv/ocserv.conf',
-                                                          'newhash  /etc/ocserv/ocserv.conf']):
-            business.smoke_config_apply()
-            record.assert_called_once()
-        assert json.loads((work / 'smoke-applied.json').read_text())['materialized_hash'] == 'newhash'
+        browser_entries = [
+            {'name': 'browser_user_mutation', 'operation': {'id': 'operation'}},
+            {'name': 'browser_approved_reload', 'operation': {'id': 'operation'}},
+            {'name': 'browser_consumed_approval_cannot_authorize_new_operation', 'operation_id': 'operation'},
+            {'name': 'browser_complete_config_apply', 'operation': {'id': 'operation'},
+             'plan_id': 'plan', 'materialized_hash': 'newhash'},
+            {'name': 'browser_login_workspace_forbidden_refresh', 'status': 'PASS'},
+            {'name': 'browser_bound_approval', 'action': 'service.reload'},
+            {'name': 'browser_bound_approval', 'action': 'config.apply'},
+        ]
+        certificate_entries = [
+            {'name': name, 'operation_id': 'operation'} for name in
+            ('browser_certificate_csr', 'browser_certificate_issue_export_one_use', 'browser_certificate_revoke')]
+        snapshot = {'database_state': 'succeeded', 'journal_count_state_error_receipt': '1|succeeded||1',
+                    'root_count_state_response': '1|applied|1'}
+        browser_file = work / 'evidence/browser-checkpoints.json'
+        applied_file = work / 'smoke-applied.json'
+        for profile in ('smoke', 'extended'):
+            entries = browser_entries + (certificate_entries if profile == 'extended' else [])
+            browser_file.write_text(json.dumps(entries))
+            with patch.dict(os.environ, {**env, 'BUSINESS_PROFILE': profile}), \
+                    patch.object(business, 'api', side_effect=api), \
+                    patch.object(business, 'cross_check', return_value=snapshot), \
+                    patch.object(business, 'run', return_value='newhash  /etc/ocserv/ocserv.conf'), \
+                    patch.object(business, 'record') as record:
+                business.browser_verify()
+                record.assert_called_once_with('browser_operations_durable_cross_check')
+                if profile == 'smoke':
+                    assert json.loads(applied_file.read_text()) == {'operation_id': 'operation', 'materialized_hash': 'newhash'}
+                    assert business.confirmed_config()[1] == 'newhash'
+                    applied_file.unlink()
+                else:
+                    assert not applied_file.exists()
+
+        # Missing/duplicate checkpoints and incomplete operations cannot grant
+        # acceptance or create the evidence consumed by smoke recovery.
+        invalid_entries = [[], browser_entries + [browser_entries[0]]]
+        invalid_entries += [browser_entries[:i] + browser_entries[i + 1:] for i in range(len(browser_entries))]
+        invalid_entries += [[{**entry, 'operation': {}} if entry['name'] == 'browser_user_mutation' else entry
+                             for entry in browser_entries]]
+        for entries in invalid_entries:
+            browser_file.write_text(json.dumps(entries))
+            with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=api), \
+                    patch.object(business, 'cross_check', return_value=snapshot), \
+                    patch.object(business, 'record') as record:
+                try:
+                    business.browser_verify()
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError('incomplete browser evidence accepted')
+                record.assert_not_called()
+                assert not applied_file.exists()
+
+        browser_file.write_text(json.dumps(browser_entries))
+        with patch.dict(os.environ, {**env, 'BUSINESS_PROFILE': 'extended'}), patch.object(business, 'record') as record:
+            try:
+                business.browser_verify()
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError('extended profile accepted without certificate checks')
+            record.assert_not_called()
+        for path, bad_value in [('nodes/node', {'config_revision': 2}),
+                                ('config-plans/plan', {'materialized_hash': 'wrong'}),
+                                ('operations/operation', {'state': 'succeeded', 'config_apply_state': 'failed'})]:
+            with patch.dict(os.environ, env), \
+                    patch.object(business, 'api', side_effect=lambda requested, p=path, bad=bad_value: bad if requested == p else api(requested)), \
+                    patch.object(business, 'cross_check', return_value=snapshot), \
+                    patch.object(business, 'record') as record:
+                try:
+                    business.browser_verify()
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError('unconfirmed configuration accepted')
+                record.assert_not_called()
+                assert not applied_file.exists()
+        with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=api), \
+                patch.object(business, 'cross_check', return_value=snapshot), \
+                patch.object(business, 'run', return_value='wrong  /etc/ocserv/ocserv.conf'), \
+                patch.object(business, 'record') as record:
+            try:
+                business.browser_verify()
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError('wrong native configuration accepted')
+            record.assert_not_called()
+            assert not applied_file.exists()
 
         with patch.dict(os.environ, {**env, 'PRODUCTION_SIGNER_ACCEPTANCE': 'true'}), \
                 patch.object(business, 'run', return_value='{"ciphertext":"sealed"}') as signer, \

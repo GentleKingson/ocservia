@@ -8,28 +8,38 @@ const { chromium, expect } = require("@playwright/test");
 const work = process.env.T07_WORK;
 const node = process.env.T07_NODE;
 const workspace = process.env.T07_WORKSPACE;
+const profile = process.env.BUSINESS_PROFILE ?? "extended";
+if (!["smoke", "extended"].includes(profile)) throw new Error(`Unknown business profile: ${profile}`);
 const browser = await chromium.launch({ headless: true });
 const observations = [];
 try {
   const origin = process.env.OCSERV_CONTROLLER_PUBLIC_URL || "https://localhost";
   const context = await browser.newContext({ baseURL: origin, locale: "en-US" });
   const page = await context.newPage();
-  const approver = await browser.newContext({ baseURL: origin });
+  const approver = await browser.newContext({ baseURL: origin, locale: "en-US" });
   const approvalPage = await approver.newPage();
   const requesterApprovalPage = await context.newPage();
   const headers = { Origin: origin, "X-Workspace-ID": workspace };
+  async function selectBrowserWorkspace(currentPage) {
+    // Wait for the authorized list before deciding whether a selector exists.
+    await expect(currentPage.getByTestId("workspace")).toContainText("T07");
+    const selector = currentPage.getByRole("combobox", { name: "Workspace", exact: true });
+    if (await selector.count()) {
+      await selector.selectOption(workspace);
+      await expect(selector).toHaveValue(workspace);
+    }
+    await expect.poll(() => currentPage.evaluate(() => sessionStorage.getItem("ocservia.workspace-id"))).toBe(workspace);
+  }
   await approvalPage.goto("/approvals");
   await expect(approvalPage).toHaveURL(/\/login$/);
   await approvalPage.getByLabel("Username", { exact: true }).fill("t07-approver");
   await approvalPage.getByLabel("Password", { exact: true }).fill(fs.readFileSync(`${work}/private/approver-password`, "utf8").trim());
   await approvalPage.getByRole("button", { name: "Sign in", exact: true }).click();
-  await approvalPage.waitForURL(`${origin}/`);
-  await expect(approvalPage.getByLabel("Workspace")).toContainText("T07");
-  if (await approvalPage.getByLabel("Workspace").inputValue() !== workspace)
-    await approvalPage.getByLabel("Workspace").selectOption(workspace);
+  await selectBrowserWorkspace(approvalPage);
   async function reviewInBrowser(value) {
     const path = `/approvals/${value.id}`;
     await requesterApprovalPage.goto(path);
+    await selectBrowserWorkspace(requesterApprovalPage);
     await expect(requesterApprovalPage.getByTestId("approval-hash")).toHaveText(value.request_hash);
     await requesterApprovalPage.getByLabel("Decision reason").fill("T07 self-approval must fail");
     await requesterApprovalPage.getByRole("checkbox").check();
@@ -51,9 +61,9 @@ try {
     expect(response.request().postDataJSON().expected_request_hash).toBe(value.request_hash);
     const accepted = await response.json();
     expect(accepted.requester_id).not.toBe(accepted.approver_id);
-    await expect(approvalPage.getByTestId("approval-status")).toHaveText("approved");
+    await expect(approvalPage.getByTestId("approval-status")).toHaveText("Approved");
     await approvalPage.reload();
-    await expect(approvalPage.getByTestId("approval-status")).toHaveText("approved");
+    await expect(approvalPage.getByTestId("approval-status")).toHaveText("Approved");
     await expect(approvalPage.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
     observations.push({ name: "browser_bound_approval", approval_id: value.id, action: value.action, request_hash: value.request_hash, requester_id: accepted.requester_id, approver_id: accepted.approver_id, human_custody: "NOT_VERIFIED" });
     return value.id;
@@ -71,10 +81,9 @@ try {
   await page.getByLabel("Username", { exact: true }).fill("t07-requester");
   await page.getByLabel("Password", { exact: true }).fill(fs.readFileSync(`${work}/private/requester-password`, "utf8").trim());
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.waitForURL(`${origin}/`);
+  await selectBrowserWorkspace(page);
   await page.goto(`/nodes/${node}`);
   await expect(page.getByRole("heading", { name: "t07-native", level: 1, exact: true })).toBeVisible();
-  await expect(page.getByLabel("Workspace")).toContainText("T07");
   const denied = await context.request.get("/api/v1/nodes", { headers: { "X-Workspace-ID": "00000000-0000-7000-8000-000000000072" } });
   expect(denied.status()).toBe(403);
   const password = crypto.randomBytes(24).toString("hex");
@@ -88,7 +97,7 @@ try {
   const createResponse = await created;
   expect(createResponse.status()).toBe(202);
   const operation = await createResponse.json();
-  await expect(page.locator("strong.succeeded")).toBeVisible({ timeout: 120000 });
+  await expect(page.getByTestId("operation-state")).toHaveText("Succeeded", { timeout: 120000 });
   observations.push({ name: "browser_user_mutation", operation });
   await page.reload();
   await expect(page.getByText("t07-browser", { exact: true })).toBeVisible();
@@ -112,7 +121,7 @@ try {
   const reloadResponse = await reloaded;
   expect(reloadResponse.status()).toBe(202);
   const reload = await reloadResponse.json();
-  await expect(page.locator("strong.succeeded")).toBeVisible({ timeout: 120000 });
+  await expect(page.getByTestId("operation-state")).toHaveText("Succeeded", { timeout: 120000 });
   observations.push({ name: "browser_approved_reload", operation: reload });
   const reloadRequest = reloadResponse.request();
   const reloadHeaders = await reloadRequest.allHeaders();
@@ -130,31 +139,33 @@ try {
 
   const reference = JSON.parse(fs.readFileSync(`${work}/config-reference.json`, "utf8"));
   await page.getByTitle("Configuration plan", { exact: true }).click();
+  const configDialog = page.getByRole("dialog", { name: "Configuration plan", exact: true });
+  const configResult = configDialog.getByTestId("config-plan-result");
   await page.getByLabel("TCP port", { exact: true }).fill("44443");
   await page.getByLabel("IPv4 network (CIDR)", { exact: true }).fill("10.208.0.0/24");
   await page.getByLabel("Certificate reference", { exact: true }).fill(reference.id);
   await page.getByLabel("Private key reference", { exact: true }).fill(reference.id);
   await page.getByLabel("Reason", { exact: true }).fill("T07 browser complete configuration");
   const planning = page.waitForResponse(response => response.url().endsWith(`/nodes/${node}/config-plans`) && response.request().method() === "POST");
-  await page.locator(".config-plan-dialog").getByRole("button", { name: "Plan", exact: true }).click();
+  await configDialog.getByRole("button", { name: "Plan", exact: true }).click();
   const planResponse = await planning;
   expect(planResponse.status()).toBe(202);
   let plan = await planResponse.json();
-  await expect(page.locator(".config-plan-result .freshness-badge")).toHaveText("valid", { timeout: 120000 });
+  await expect(configResult.getByText("valid", { exact: true })).toBeVisible({ timeout: 120000 });
   plan = await (await context.request.get(`/api/v1/config-plans/${plan.id}`, { headers })).json();
   expect(plan.materialized_hash).toMatch(/^[0-9a-f]{64}$/);
   expect(plan.materialized_hash).not.toBe(plan.candidate_hash);
   expect(plan.warnings).toEqual([]);
   expect(plan.current_unchanged && plan.staging_cleaned).toBe(true);
-  await page.locator(".config-plan-dialog").evaluate(dialog => { dialog.scrollTop = 0; });
+  await configDialog.evaluate(dialog => { dialog.scrollTop = 0; });
   await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan.png` });
-  await page.locator(".config-plan-result").scrollIntoViewIfNeeded();
+  await configResult.scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-result.png` });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.locator(".config-plan-dialog").evaluate(dialog => { dialog.scrollTop = 0; });
+  await configDialog.evaluate(dialog => { dialog.scrollTop = 0; });
   await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-plan-mobile.png` });
-  await page.locator(".config-plan-result").scrollIntoViewIfNeeded();
+  await configResult.scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-config-result-mobile.png` });
   await page.setViewportSize({ width: 1280, height: 720 });
   const configApproval = await context.request.post("/api/v1/approval-requests", { headers, data: {
@@ -165,79 +176,83 @@ try {
   await page.getByLabel("Approval ID", { exact: true }).fill(configApprovalId);
   await page.locator("#config-apply-reason").fill("T07 browser exact materialization");
   const applying = page.waitForResponse(response => response.url().endsWith(`/config-plans/${plan.id}/apply`) && response.request().method() === "POST");
-  await page.locator(".config-plan-dialog").getByRole("button", { name: "Apply", exact: true }).click();
+  await configDialog.getByRole("button", { name: "Apply", exact: true }).click();
   const applyResponse = await applying;
   expect(applyResponse.status()).toBe(202);
   const configOperation = await applyResponse.json();
-  await expect(page.locator("strong.succeeded")).toBeVisible({ timeout: 120000 });
+  await expect(page.getByTestId("operation-state")).toHaveText("Succeeded", { timeout: 120000 });
   await expect.poll(async () => (await (await context.request.get(`/api/v1/nodes/${node}`, { headers })).json()).config_revision, { timeout: 120000 }).toBe(1);
   observations.push({ name: "browser_complete_config_apply", operation: configOperation, plan_id: plan.id, candidate_hash: plan.candidate_hash, materialized_hash: plan.materialized_hash });
   await page.reload();
 
-  await page.getByTitle("Certificate lifecycle", { exact: true }).click();
-  await page.getByLabel("Common name").fill("t07-browser-client");
-  await page.getByLabel("Reason", { exact: true }).fill("T07 browser CSR");
-  const csr = page.waitForResponse(response => response.url().endsWith(`/nodes/${node}/certificates`) && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Request CSR", exact: true }).click();
-  const csrResponse = await csr;
-  expect(csrResponse.status()).toBe(202);
-  const certificate = await csrResponse.json();
-  await expect(page.getByText("csr_ready", { exact: true })).toBeVisible({ timeout: 120000 });
-  observations.push({ name: "browser_certificate_csr", certificate_id: certificate.id, operation_id: certificate.operation_id });
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.reload();
-  await page.getByTitle("Certificate lifecycle", { exact: true }).click();
-  await expect(page.getByText("csr_ready", { exact: true })).toBeVisible();
-  await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-certificate.png`, fullPage: true });
-  await page.getByLabel("Approval ID").fill(await approval("certificate.issue", certificate));
-  await page.getByLabel("Reason", { exact: true }).fill("T07 browser issue");
-  const issuing = page.waitForResponse(response => response.url().endsWith(`/certificates/${certificate.id}:issue`));
-  await page.getByRole("button", { name: "Issue certificate", exact: true }).click();
-  const issueResponse = await issuing;
-  expect(issueResponse.status()).toBe(200);
-  let issued = await issueResponse.json();
-  await expect(page.getByText("issued", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Approval ID")).toBeVisible();
-  await expect.poll(async () => {
-    const current = await context.request.get(`/api/v1/certificates/${certificate.id}`, { headers });
-    expect(current.status()).toBe(200);
-    issued = await current.json();
-    return issued.state;
-  }, { timeout: 120000 }).toBe("expiring");
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.getByTitle("Certificate lifecycle", { exact: true }).click();
-  await expect(page.getByText("expiring", { exact: true })).toBeVisible();
-  const id = BigInt(Date.now()) << 80n | 7n << 76n | BigInt(`0x${crypto.randomBytes(2).toString("hex")}`) % 4096n << 64n | 2n << 62n | BigInt(`0x${crypto.randomBytes(8).toString("hex")}`) % (1n << 62n);
-  const artifact = id.toString(16).padStart(32, "0").replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
-  const reason = "T07 browser export";
-  await page.getByLabel("Approval ID").fill(await approval("certificate.private_key.export", issued, {
-    certificate: { expected_version: issued.version, purpose: "certificate_p12", artifact_request_id: artifact, reason },
-  }));
-  await page.getByLabel("Reason", { exact: true }).fill(reason);
-  const exporting = page.waitForResponse(response => response.url().endsWith(`/certificates/${certificate.id}:p12`));
-  await page.getByRole("button", { name: "Create P12", exact: true }).click();
-  const exportResponse = await exporting;
-  expect(exportResponse.status()).toBe(202);
-  const grant = await exportResponse.json();
-  fs.writeFileSync(`${work}/private/browser-p12-password`, grant.password, { mode: 0o600 });
-  fs.writeFileSync(`${work}/private/browser-p12-token`, grant.download_token, { mode: 0o600 });
-  await expect(page.getByRole("button", { name: "Download", exact: true })).toBeEnabled({ timeout: 120000 });
-  const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download", exact: true }).click();
-  await (await downloadPromise).saveAs(`${work}/private/browser.p12`);
-  execFileSync("openssl", ["pkcs12", "-in", `${work}/private/browser.p12`, "-passin", `file:${work}/private/browser-p12-password`, "-noout"], { stdio: "pipe" });
-  expect((await context.request.get(`/api/v1/artifacts/${grant.artifact_id}`, { headers: { ...headers, "X-Artifact-Token": grant.download_token } })).status()).toBe(403);
-  observations.push({ name: "browser_certificate_issue_export_one_use", certificate_id: issued.id, operation: grant.operation });
-  const revokeReason = "T07 browser revoke";
-  await page.getByLabel("Approval ID").fill(await approval("certificate.revoke", issued, { certificate: { expected_version: issued.version, reason: revokeReason } }));
-  await page.getByLabel("Reason", { exact: true }).fill(revokeReason);
-  const revoking = page.waitForResponse(response => response.url().endsWith(`/certificates/${certificate.id}:revoke`));
-  await page.getByRole("button", { name: "Revoke", exact: true }).click();
-  const revokeResponse = await revoking;
-  expect(revokeResponse.status()).toBe(202);
-  observations.push({ name: "browser_certificate_revoke", operation: await revokeResponse.json() });
-  await expect(page.getByText("revoked", { exact: true })).toBeVisible({ timeout: 120000 });
   observations.push({ name: "browser_login_workspace_forbidden_refresh", status: "PASS" });
+
+  if (profile === "extended") {
+    await page.getByTitle("Certificate lifecycle", { exact: true }).click();
+    await page.getByLabel("Common name").fill("t07-browser-client");
+    await page.getByLabel("Reason", { exact: true }).fill("T07 browser CSR");
+    const csr = page.waitForResponse(response => response.url().endsWith(`/nodes/${node}/certificates`) && response.request().method() === "POST");
+    await page.getByRole("button", { name: "Request CSR", exact: true }).click();
+    const csrResponse = await csr;
+    expect(csrResponse.status()).toBe(202);
+    const certificate = await csrResponse.json();
+    await expect(page.getByText("csr_ready", { exact: true })).toBeVisible({ timeout: 120000 });
+    observations.push({ name: "browser_certificate_csr", certificate_id: certificate.id, operation_id: certificate.operation_id });
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.reload();
+    await page.getByTitle("Certificate lifecycle", { exact: true }).click();
+    await expect(page.getByText("csr_ready", { exact: true })).toBeVisible();
+    await page.screenshot({ path: `${process.env.ARTIFACT_DIR}/browser-certificate.png`, fullPage: true });
+    await page.getByLabel("Approval ID").fill(await approval("certificate.issue", certificate));
+    await page.getByLabel("Reason", { exact: true }).fill("T07 browser issue");
+    const issuing = page.waitForResponse(response => response.url().endsWith(`/certificates/${certificate.id}:issue`));
+    await page.getByRole("button", { name: "Issue certificate", exact: true }).click();
+    const issueResponse = await issuing;
+    expect(issueResponse.status()).toBe(200);
+    let issued = await issueResponse.json();
+    await expect(page.getByText("issued", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Approval ID")).toBeVisible();
+    await expect.poll(async () => {
+      const current = await context.request.get(`/api/v1/certificates/${certificate.id}`, { headers });
+      expect(current.status()).toBe(200);
+      issued = await current.json();
+      return issued.state;
+    }, { timeout: 120000 }).toBe("expiring");
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByTitle("Certificate lifecycle", { exact: true }).click();
+    await expect(page.getByText("expiring", { exact: true })).toBeVisible();
+    const id = BigInt(Date.now()) << 80n | 7n << 76n | BigInt(`0x${crypto.randomBytes(2).toString("hex")}`) % 4096n << 64n | 2n << 62n | BigInt(`0x${crypto.randomBytes(8).toString("hex")}`) % (1n << 62n);
+    const artifact = id.toString(16).padStart(32, "0").replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
+    const reason = "T07 browser export";
+    await page.getByLabel("Approval ID").fill(await approval("certificate.private_key.export", issued, {
+      certificate: { expected_version: issued.version, purpose: "certificate_p12", artifact_request_id: artifact, reason },
+    }));
+    await page.getByLabel("Reason", { exact: true }).fill(reason);
+    const exporting = page.waitForResponse(response => response.url().endsWith(`/certificates/${certificate.id}:p12`));
+    await page.getByRole("button", { name: "Create P12", exact: true }).click();
+    const exportResponse = await exporting;
+    expect(exportResponse.status()).toBe(202);
+    const grant = await exportResponse.json();
+    fs.writeFileSync(`${work}/private/browser-p12-password`, grant.password, { mode: 0o600 });
+    fs.writeFileSync(`${work}/private/browser-p12-token`, grant.download_token, { mode: 0o600 });
+    await expect(page.getByRole("button", { name: "Download", exact: true })).toBeEnabled({ timeout: 120000 });
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download", exact: true }).click();
+    await (await downloadPromise).saveAs(`${work}/private/browser.p12`);
+    execFileSync("openssl", ["pkcs12", "-in", `${work}/private/browser.p12`, "-passin", `file:${work}/private/browser-p12-password`, "-noout"], { stdio: "pipe" });
+    expect((await context.request.get(`/api/v1/artifacts/${grant.artifact_id}`, { headers: { ...headers, "X-Artifact-Token": grant.download_token } })).status()).toBe(403);
+    observations.push({ name: "browser_certificate_issue_export_one_use", certificate_id: issued.id, operation: grant.operation });
+    const revokeReason = "T07 browser revoke";
+    await page.getByLabel("Approval ID").fill(await approval("certificate.revoke", issued, { certificate: { expected_version: issued.version, reason: revokeReason } }));
+    await page.getByLabel("Reason", { exact: true }).fill(revokeReason);
+    const revoking = page.waitForResponse(response => response.url().endsWith(`/certificates/${certificate.id}:revoke`));
+    await page.getByRole("button", { name: "Revoke", exact: true }).click();
+    const revokeResponse = await revoking;
+    expect(revokeResponse.status()).toBe(202);
+    observations.push({ name: "browser_certificate_revoke", operation: await revokeResponse.json() });
+    await expect(page.getByText("revoked", { exact: true })).toBeVisible({ timeout: 120000 });
+  }
+
 } finally {
   fs.writeFileSync(`${process.env.ARTIFACT_DIR}/browser-checkpoints.json`, JSON.stringify(observations));
   await browser.close();
