@@ -61,7 +61,7 @@ if check "${tmp}/bad.json" backend-mysql-full >/dev/null 2>&1; then
 fi
 # CI shards: one pattern partitions the full guard; each half still fails closed.
 shard_check() {
-  PR02_ENGINE=mysql jq -se --arg group backend-mysql-full --arg shard_mode "$2" --arg shard_pattern '^Test(MySQLCutover|MySQLArtifact)' \
+  PR02_ENGINE=mysql jq -se --arg group backend-mysql-full --arg shard_mode "$2" --arg shard_pattern '^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip)' \
     --rawfile manifest "${ROOT}/scripts/required-go-tests.txt" -f "${ROOT}/scripts/check-required-go-tests.jq" "$1"
 }
 full_required="$(check "${tmp}/mysql.json" backend-mysql-full | jq .required)"
@@ -69,7 +69,7 @@ run_required="$(shard_check "${tmp}/mysql.json" run | jq .required)"
 skip_required="$(shard_check "${tmp}/mysql.json" skip | jq .required)"
 ((run_required > 0 && skip_required > 0 && run_required + skip_required == full_required)) || {
   echo "MySQL shards do not partition the full guard: ${run_required}+${skip_required}!=${full_required}" >&2; exit 1; }
-jq -c 'select(.Test | startswith("TestMySQLCutover") or startswith("TestMySQLArtifact") | not)' "${tmp}/mysql.json" >"${tmp}/core.json"
+jq -c 'select(.Test | startswith("TestMySQLCutover") or startswith("TestMySQLArtifact") or . == "TestSnapshotDumpTableRoundtrip" | not)' "${tmp}/mysql.json" >"${tmp}/core.json"
 shard_check "${tmp}/core.json" skip >/dev/null
 if shard_check "${tmp}/core.json" run >/dev/null 2>&1; then echo 'cutover shard accepted missing crash recovery' >&2; exit 1; fi
 jq -c 'select(.Test != "TestRealTLS")' "${tmp}/core.json" >"${tmp}/bad.json"
@@ -313,8 +313,8 @@ for shard in mysql-cutover mysql-core services; do
   PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=full DATABASE_SHARD="${shard}" ENGINE=mysql \
     bash "${tmp}/wrapper/scripts/database-foundation-integration.sh" >/dev/null
 done
-grep -qx 'run=^Test(MySQLCutover|MySQLArtifact) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-cutover.route"
-grep -qx 'skip=^Test(MySQLCutover|MySQLArtifact) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-core.route"
+grep -qx 'run=^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-cutover.route"
+grep -qx 'skip=^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip) backend-mysql-full -race -timeout=60m ./internal/database/mysql' "${tmp}/shard-mysql-core.route"
 # Only the split package and the cheap per-runner configuration check repeat.
 { cat "${tmp}/current.route"; grep -E '^backend-mysql-full |^test -count=1 \./internal/platform/config ' "${tmp}/current.route"
   grep -E '^test -count=1 \./internal/platform/config ' "${tmp}/current.route"; } | sort >"${tmp}/expected.route"

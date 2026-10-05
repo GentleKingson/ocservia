@@ -119,8 +119,9 @@ if [[ "${scope}" == regression ]]; then
   done
 else
 echo "Full current database acceptance: ${ENGINE}${shard:+ shard=${shard}}"
-# Cutover/artifact crash boundaries take about half of the package.
-mysql_split='^Test(MySQLCutover|MySQLArtifact)'
+# Cutover/artifact crash boundaries take about half of the package; the snapshot
+# roundtrip rides with them to balance the core shard's runtime.
+mysql_split='^Test(MySQLCutover|MySQLArtifact|SnapshotDumpTableRoundtrip)'
 case "${shard}" in
   '') (cd "${ROOT}/control-plane" && bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql) ;;
   mysql-cutover) (cd "${ROOT}/control-plane" && REQUIRED_SHARD_RUN="${mysql_split}" bash "${ROOT}/scripts/required-go-tests.sh" backend-mysql-full -race -timeout=60m ./internal/database/mysql) ;;

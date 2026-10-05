@@ -247,6 +247,8 @@ jobs:
       - if: matrix.engine != 'postgres'
         run: bash scripts/database-foundation-integration.sh
       - name: Check current schema source and independent replay equivalence
+        # The check is engine-wide; one MySQL shard (the shortest) runs it.
+        if: ${{ !matrix.shard || matrix.shard == 'services' }}
         run: bash "scripts/database-${ENGINE}-snapshot.sh" check
       - name: Verify PostgreSQL 18 volume lifecycle
         if: matrix.engine == 'postgres'
