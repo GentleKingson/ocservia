@@ -401,11 +401,6 @@ async function submitRollout(): Promise<void> {
                         >{{ $t(agentVersionLabel(node)) }}</Badge
                       >
                     </div>
-                    <span
-                      v-if="node.osRelease"
-                      class="text-muted-foreground block text-xs"
-                      >{{ node.osRelease }}</span
-                    >
                   </TableCell>
                   <TableCell class="py-3">
                     <span class="inline-flex items-center gap-1.5">
