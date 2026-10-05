@@ -188,9 +188,15 @@ fi
 next_stage agent_package_build
 env -u BUILDX_BUILDER bash "${ROOT}/scripts/build-release-agent.sh" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 next_stage controller_image_build
-bash "${ROOT}/scripts/build-release-controller.sh" >"${ARTIFACT_DIR}/controller-build.log" 2>&1
+# DIAGNOSTIC ONLY (not for merge): mirror the BuildKit log into the job log.
+echo "::group::controller build $(date -u +%T)"
+bash "${ROOT}/scripts/build-release-controller.sh" 2>&1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%T)" "$line"; done | tee "${ARTIFACT_DIR}/controller-build.log"
+echo "::endgroup::"
+ls -l "$OUTPUT_DIR"
 for name in gateway control transport backup edge relay signer mysql_backup; do
+  load_start=$SECONDS
   docker load -i "$OUTPUT_DIR/$name-linux-$CONTROLLER_ARCH.tar"
+  echo "DIAG docker load ${name}: $((SECONDS - load_start))s"
 done
 export T07_SIGNER_IMAGE="ghcr.io/gentlekingson/ocservia/signer:$VERSION-linux-$CONTROLLER_ARCH"
 docker tag "ghcr.io/gentlekingson/ocservia/relay:$VERSION-linux-$CONTROLLER_ARCH" "${BUILDX_BUILDER}-relay"
