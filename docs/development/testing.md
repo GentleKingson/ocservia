@@ -19,7 +19,10 @@ git diff --check
 Also inspect changed links and anchors: `docs-check` is not a link checker and
 only checks tracked Markdown. New public files need separate inspection until
 they are included in the candidate index. Keep local-only material out of that
-index and preserve the user's staging state.
+index and preserve the user's staging state. The check covers line endings,
+nonempty tracked Markdown and selected bootstrap entrypoint requirements; it
+does not validate SQL, authentication modes or database support. Changed
+executable examples need focused validation in an authorized isolated environment.
 
 For first-time environment preparation, use the supported bootstrap profile
 for the selected check and host, with versions from `toolchains.lock`.
@@ -27,6 +30,11 @@ for the selected check and host, with versions from `toolchains.lock`.
 supported on every architecture. See the [Linux ARM64 dependencies and supported profiles](#linux-arm64-go-validation)
 before preparing a Linux ARM64 environment. Reuse a correctly prepared
 environment instead of reinstalling it for each change.
+A supported macOS arm64 or Linux x86-64 host can prepare the full profile with
+`make bootstrap`; host prerequisites include `curl`, `tar`, `unzip`, `xz`,
+Java 17, `jq` and ShellCheck. Runtime and generator versions come from
+[`toolchains.lock`](../../toolchains.lock), and bootstrap verifies downloads
+against [`scripts/checksums.txt`](../../scripts/checksums.txt).
 
 For module-local iteration, keep using `make test-go`, `make test-rust` or
 `make test-web`. `make test` intentionally runs all three modules; it is not
@@ -55,7 +63,7 @@ preceding duplicate `cargo check`.
 - Browser or runtime behavior: `make e2e`
 - Rust behavior or boundaries: `make rust-check`
 - Web behavior: `make web-check`
-- Real cross-VM behavior: follow [real E2E validation](real-e2e.md); module checks and browser fixtures are not substitutes
+- Real cross-VM behavior: follow [cross-VM enrollment validation](cross-vm-enrollment-validation.md); module checks and browser fixtures are not substitutes
 - Business checks on authorized disposable native runners: [Business Smoke and Integration](real-business-validation.md)
 - Release acceptance: use [Release Check](release-checks.md); selected single-node recovery checks are described in [Resilience](resilience.md)
 
@@ -200,8 +208,8 @@ that host Ruby, race or database prerequisites are available.
 
 ### Isolated ARM64 execution environment
 
-The following complete test environment was exercised on BuildServer. It has
-no Go of its own: it runs the **same native `.tools/go/bin/go`** installed above.
+The following isolated ARM64 test environment was validated with the native
+toolchain. It has no Go of its own: it runs the **same native `.tools/go/bin/go`** installed above.
 System packages are confined to the task image. The Debian base is digest-pinned;
 APT resolves its maintained Bookworm packages at build time. Retain the build
 log, resulting image ID and package versions with each validation record rather
@@ -275,10 +283,18 @@ run lacking database credentials.
 Each database CI job fetches the fixed release history and checks independent
 checkpoint/fresh equivalence. Full Basic CI additionally runs PostgreSQL physical
 and MySQL logical backup/restore, preserves receipts across restore and repeat
-migration, and verifies runtime read/DDL boundaries. Record all required results
-at the immutable final stacked head. Component workflow dispatches on an open
-stack do not qualify it as a main-branch Release Check. See
-[major cutover acceptance](database-major-cutover.md).
+migration, and verifies runtime read/DDL boundaries. PostgreSQL coverage retains
+cleanup rollback, concurrency and runtime permissions; MySQL covers all eight
+cleanup DDL interruption boundaries, exact repair, foreign replacement refusal
+and data rollback. Audit authenticity, checkpointed-tail transitions and
+compaction remain required business coverage after legacy migration removal.
+
+For a major database cutover, qualify the exact candidate with Full Basic CI,
+Security, Business integration with the production Signer and resilience, and
+build-only Release. Preserve run URLs and commit identities. Branch diagnostics
+do not replace main-only [Release Check](release-checks.md); publication requires
+separate operator confirmation. The [database migration contract](control-plane.md#current-sql-artifacts-and-bounded-upgrades)
+owns the supported checkpoint and receipt identities.
 
 ## Bundled PostgreSQL initialization
 

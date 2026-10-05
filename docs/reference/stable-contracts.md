@@ -34,10 +34,19 @@ are not current requirements. Existing published artifacts are unchanged.
 | Versions and durable state | Controller/transportd use one candidate source/release; Agent/privd/upgrader are one verified package. Cross-version execution has no compatibility guarantee. Preserve journals, root effect store plus HMAC/receipt keys, endpoint identity and revision/fence floors. | Independent Agent/privd swaps or numeric version classification as permission to dispatch. |
 | Database | [Migration contract](../development/control-plane.md): owner-only serialized migrations, restricted runtime role, execution receipts, known content integrity and actual SQL/dirty-error handling. PostgreSQL schema numbers are not MySQL migration revisions. | Generic down-migration rollback, automatic force-clean, cross-engine migration, or treating additive DDL as automatically backward compatible. |
 
-Generated code is disposable output of Proto/OpenAPI. Use the existing
-`scripts/check-breaking.sh`, `scripts/generate.sh` and
-`scripts/generated-clean.sh`; do not patch generated clients or relax the
-explicit historical security-migration allowlist. The breaking command compares
+## Schema sources and generation
+
+The canonical sources are [`openapi/openapi.yaml`](../../openapi/openapi.yaml)
+and the schemas under [`proto/`](../../proto/). `make generate` replaces the
+generated directories; do not edit generated clients or message types manually.
+Use [validation guidance](../development/testing.md) for toolchain preparation.
+Contract breaking and generated-clean checks are manual entrypoints, not Basic
+CI jobs; [GitHub Actions validation](../development/github-actions.md) owns the
+workflow scope.
+
+Use the existing `scripts/check-breaking.sh`, `scripts/generate.sh` and
+`scripts/generated-clean.sh`; preserve the explicit historical security-migration
+allowlist. The breaking command compares
 with `origin/main`, not with every shipped release. Release-level behavioral
 evidence remains necessary even when it passes.
 

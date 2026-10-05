@@ -1,4 +1,4 @@
-# Cross-VM real E2E validation
+# Cross-VM enrollment validation
 
 Cross-VM enrollment uses manual scripts and `deploy/real-e2e` fixtures;
 it is outside Basic CI and has no dedicated Actions workflow.

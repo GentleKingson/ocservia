@@ -3,7 +3,7 @@
 Use the [local rebind procedure](../how-to/rebind-controller.md) for the manual
 lifecycle. Retention runs independently under the safety conditions below.
 
-The identity crate now provides `Identity::stage_rebind`: it verifies the
+The identity crate provides `Identity::stage_rebind`: it verifies the
 expected source EndpointID and Controller pin, copies the existing endpoint
 key into a separate owner-only identity directory, and publishes that directory
 with a durable no-replace rename. It never changes the source pin. A partial
@@ -169,9 +169,9 @@ result. Audit cleanup must preserve authenticated chain verification.
 
 ## Acceptance evidence
 
-Each implementation PR supplies focused tests for its boundary. Final evidence
-must exercise the real enrollment, session and privileged-effect paths with
-two Controllers, including these cases:
+Use focused tests for each implementation boundary. Acceptance must exercise
+the real enrollment, session and privileged-effect paths with two Controllers,
+including these cases:
 
 | Case | Required outcome |
 | --- | --- |

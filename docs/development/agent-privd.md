@@ -114,75 +114,7 @@ signing until a fresh attested CSR is produced. Rollback must stop privileged
 dispatch, reconcile Unknown work, and restore the matched Controller, Agent,
 privd, root effect store, and key state. Never roll back only one peer.
 
-## Build and install
-
-```bash
-cd rust
-OCSERV_AGENT_RELEASE_VERSION=1.0.0 cargo build --locked --release \
-  --package ocservia-agent --package ocservia-privd --package ocservia-upgrader
-cd ..
-OUTPUT_DIR=dist \
-  VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 ./scripts/package-agent.sh
-EXPECTED_SHA256="$(awk '{print $1}' dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256)"
-VERIFIED_PACKAGE="$(sudo ./scripts/verify-agent-package.sh \
-  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz "${EXPECTED_SHA256}")"
-sudo "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
-```
-
-`PACKAGE_ARCH` selects the canonical package architecture, `amd64` or `arm64`;
-build the binaries natively on the matching host. Without `DESTDIR`, the
-verifier also refuses a package whose architecture does not match the local
-host (`x86_64` ↔ `amd64`, `aarch64` ↔ `arm64`) before anything is staged.
-
-The plain checksum is a transfer-corruption check. AgentUpgrade instead uses
-`package_sha256` from the already-authorized Controller command. The verifier
-is the only supported extraction path. It stages and verifies the
-exact archive below root-only `/var/lib/ocservia-upgrade/package-staging`; the
-installer refuses a source tree or an independently extracted download.
-
-`scripts/package-native-agent.sh` wraps the same archive into native
-installers without adding an install layout of its own:
-
-```bash
-OUTPUT_DIR=dist VERSION=1.0.0 PACKAGE_ARCH=amd64 \
-  SOURCE_DATE_EPOCH=1786147200 \
-  ./scripts/package-native-agent.sh
-```
-
-It requires the archive and plain checksum produced by `package-agent.sh`,
-and emits `ocservia-agent_<version>-1_amd64.deb` and
-`ocservia-agent-<version>-1.x86_64.rpm` (arm64 builds use `arm64` and
-`aarch64`). Both formats embed the archive, plain checksum, and
-`verify-agent-package.sh` under `/usr/share/ocservia-agent`.
-Installing embeds no layout decisions: the
-post-install scriptlet checks the host architecture, verifies the archive into
-trusted staging against its embedded plain checksum, and then runs the verified
-`install-agent.sh` or `upgrade-agent.sh`. No service is enabled or started
-automatically; `/etc/ocservia-agent/agent.env` must be provisioned first.
-Removing the package runs the verified `uninstall-agent.sh` and preserves
-identity, state, and configuration.
-
-Both DEB and RPM use package release `1`. DEB includes it as the `-1`
-Debian Version revision and, starting with new releases, explicitly in the
-asset filename; RPM keeps it in its separate Release field. The software
-version and archive names do not change. Published historical assets retain
-their original names.
-
-Before enabling the units, install the independently provisioned Controller
-command verification key and two distinct RSA private keys for user-password
-and P12-password unsealing. Edit `/etc/ocservia-agent/agent.env` with the
-Controller key path, controller EndpointID, node UUID, distinct sealing key
-IDs, and the lowercase SHA-256 of each public key's DER encoding:
-
-```bash
-sudo install -o root -g ocserv-agent -m 0640 \
-  controller-command-verification-key.pem \
-  /etc/ocservia-agent/controller-command-verification-key.pem
-sudo install -o root -g root -m 0600 user-password-seal-private.pem \
-  /etc/ocservia-agent/user-password-seal-private.pem
-sudo install -o root -g root -m 0600 p12-password-seal-private.pem \
-  /etc/ocservia-agent/p12-password-seal-private.pem
-```
+## Provisioned trust
 
 Both services refuse production startup without the pinned Ed25519 public key
 and exact purpose-separated sealing key configuration. Privd derives each RSA
@@ -196,36 +128,16 @@ Enrollment signs and persists both public-key descriptors. Later sessions and
 password operations fail closed if the advertised or selected key ID no longer
 matches that enrollment binding.
 
-Then enable the services:
+Privd publishes `/etc/ocserv/ocpasswd` as a one-link `root:root` mode `0600`
+regular file through descriptor-relative, no-follow operations. Unsafe existing
+ownership, modes, links or parent ancestry are rejected.
 
-```bash
-sudo systemctl enable --now ocservia-privd.service ocservia-agent.service
-systemctl status ocservia-privd.service ocservia-agent.service
-```
+## Package lifecycle
 
-The installer creates the locked `ocserv-agent` service account and preserves
-an existing enrollment configuration. Before changing any installed file,
-`upgrade-agent.sh` rejects legacy configuration that does not name a valid,
-safely provisioned Ed25519 Controller command verification key. After this
-preflight it keeps one matched snapshot of the previous binary pair, base
-systemd units, and production relay drop-in state under the root-only
-`/var/lib/ocservia-upgrade` hierarchy, outside privd's systemd-managed runtime
-state, before restarting the units. Privd publishes `/etc/ocserv/ocpasswd`
-as a one-link `root:root` mode `0600` regular file through descriptor-relative,
-no-follow operations and rejects unsafe legacy ownership, modes, links, or
-parent ancestry instead of inheriting them.
-
-## Rollback and removal
-
-Run `sudo /usr/libexec/ocservia/ocservia-agent-rollback` to roll back an
-upgrade. It validates and restores the Agent binary, privd binary, both base
-units, and the relay drop-in state from
-`/var/lib/ocservia-upgrade/upgrade-backup`, after verifying its root-only
-ancestry and trusted digest manifest. It then reloads systemd and starts privd
-before the Agent. Restoring either binary without its matched unit and peer
-binary is unsupported.
-
-`sudo ./scripts/uninstall-agent.sh` removes units and binaries but retains node
-identity, the Agent journal, and privd desired-effect evidence. Use
-`--purge-state` only after the node has been revoked, no Unknown command remains,
-and the retained identity and reconciliation evidence are no longer needed.
+[Agent package lifecycle](../operations/agent-lifecycle.md) owns native builds,
+verified staging, manual trust provisioning, upgrade snapshots and removal.
+Start with [Install a managed node](../getting-started/managed-node.md) for
+package-first setup and [Agent upgrade and rollback](../how-to/agent-lifecycle.md)
+for maintenance commands. Preserve the matched Agent/privd/upgrader package,
+Controller trust, endpoint identity, journals and root effect/key evidence;
+package replacement does not reconcile Unknown commands.

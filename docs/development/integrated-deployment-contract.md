@@ -8,7 +8,7 @@ default; there is no automatic cross-mode conversion or rollback.
 The [deployment procedure](../../deploy/production/integrated/README.md)
 owns configuration, network rendering and maintenance commands.
 [Stable contracts](../reference/stable-contracts.md) define support;
-this decision record does not establish runtime acceptance.
+this contract does not establish runtime acceptance.
 
 ## Network and trust
 
@@ -113,4 +113,4 @@ pending-state retry, same-mode rollback and refusal before side effects.
 independent approval, native effects and browser workflows; native product
 jobs cover both architectures. Existing database and backup/restore checks
 retain their owners. Missing proof blocks the corresponding claim; historical
-P0-P6 results remain in Git history, not current acceptance.
+results remain in Git history, not current acceptance.

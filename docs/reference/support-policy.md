@@ -81,7 +81,7 @@ a second support matrix.
 | Agent native packages | DEB on Ubuntu 24.04, RPM on Rocky 9, `amd64`/`arm64` | [Agent lifecycle](../operations/agent-lifecycle.md), [package validation](../development/release-checks.md) |
 | Databases | PostgreSQL 18.x bundled or external; MySQL 8.4 LTS external | [Database support](../operations/production-deployment.md#database-support) |
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` | See note below |
-| Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated relays](../how-to/dedicated-relays.md) |
+| Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated Relay](../how-to/dedicated-relay.md) |
 | Authentication | Local only, OIDC only, or Local + OIDC | [Authentication](../operations/authentication.md) |
 | Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; automated checks cover Chromium only | [Supported browsers](../development/web.md#supported-browsers) |
 
@@ -112,7 +112,7 @@ Three pairs are deliberately not conflated:
 1. **Single-relay recovery vs redundancy.** One dedicated Relay is supported.
    Its outage may interrupt management connections; recovery uses the original
    Relay, identity and command. Multiple Relay failover is outside support.
-   See [dedicated relays](../how-to/dedicated-relays.md).
+   See [dedicated Relay](../how-to/dedicated-relay.md).
 2. **Package installed vs really managed online.** A node with packages
    installed and services stopped is not fleet-managed. Online management
    requires enrollment, Controller approval, a started matched node, and an

@@ -36,9 +36,12 @@ Until that hosting has operational ownership and byte-verification evidence,
 the public Quick Start obtains the installer from a clean exact-release
 checkout; the installed native package has no runtime dependency on Git.
 
-Build the Agent and privd release binaries, then create a deterministic package:
+Build all three node binaries natively on the package's target architecture,
+then create a deterministic package. For a local development build:
 
 ```bash
+(cd rust && OCSERV_AGENT_RELEASE_VERSION=1.0.0 cargo build --locked --release \
+  --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
 OUTPUT_DIR=dist \
   VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
 # A plain checksum detects transfer corruption; it is not an authorization key.
@@ -72,7 +75,47 @@ records it as `arch=`. On a real host install (no `DESTDIR`) the verifier also
 rejects a foreign-architecture package — `x86_64` ↔ `amd64`, `aarch64` ↔
 `arm64` — before anything is staged.
 
+## Manual trust provisioning
+
+For the manual archive path, provision trust before service activation; the
+[managed-node installer](../getting-started/managed-node.md) owns package-first
+preparation. The following commands install existing, independently provisioned
+key material, not generated example keys.
+
+Before enabling the units, install the independently provisioned Controller
+command verification key and two distinct RSA private keys for user-password
+and P12-password unsealing. Edit `/etc/ocservia-agent/agent.env` with the
+Controller key path, controller EndpointID, node UUID, distinct sealing key
+IDs, and the lowercase SHA-256 of each public key's DER encoding:
+
+```bash
+sudo install -o root -g ocserv-agent -m 0640 \
+  controller-command-verification-key.pem \
+  /etc/ocservia-agent/controller-command-verification-key.pem
+sudo install -o root -g root -m 0600 user-password-seal-private.pem \
+  /etc/ocservia-agent/user-password-seal-private.pem
+sudo install -o root -g root -m 0600 p12-password-seal-private.pem \
+  /etc/ocservia-agent/p12-password-seal-private.pem
+```
+
+The [Agent/privd boundary](../development/agent-privd.md#provisioned-trust)
+defines startup verification and key separation. Finish
+[enrollment and independent approval](../how-to/enroll-node.md) before enabling
+the services.
+
 ## Native installer packages
+
+Build native packages from the archive and checksum created above:
+
+```bash
+OUTPUT_DIR=dist VERSION=1.0.0 PACKAGE_ARCH=amd64 \
+  SOURCE_DATE_EPOCH=1786147200 scripts/package-native-agent.sh
+```
+
+DEB and RPM use package release `1`; architecture names are `amd64`/`arm64`
+for DEB and `x86_64`/`aarch64` for RPM. Published historical asset names remain
+unchanged. See [release policy](../development/release-checks.md) for RC naming
+and native package validation.
 
 Each release publishes the archive and its plain `.sha256`, plus native DEB
 and RPM installers for both `amd64` and `arm64`. Controller assets include

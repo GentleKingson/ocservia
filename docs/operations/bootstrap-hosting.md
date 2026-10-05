@@ -57,9 +57,8 @@ not add an OpenSSL version requirement.
 
 Download Stage-0 locally, inspect it, and run it with the explicit version.
 Do not source the version from `latest`, a branch, or a commit. Stage-1 owns
-configuration, installation, enrollment and activation. During the release-policy
-migration, Stage-1 still enforces its existing package/lifecycle requirements
-until its consumer refactor lands; Stage-0 does not bypass those requirements.
+configuration, installation, enrollment and activation, including package and
+lifecycle validation. Stage-0 does not bypass those requirements.
 
 ## Intended entrypoints
 

@@ -78,7 +78,7 @@ explicitly planned [isolated restore](../operations/incident-recovery.md#databas
 ## Production Signer
 
 Signer is a separate Go module/process under the
-[Integrated custody boundary](integrated-deployment-adr.md#signer-contract),
+[Integrated custody boundary](integrated-deployment-contract.md#signer-contract),
 not a Controller command-signing provider. The Python business signer is a test fixture.
 
 ### Runtime contract
@@ -246,8 +246,8 @@ clearing state, changing CA, or an automatic image rollback.
 
 ### Focused verification
 
-Run only on BuildServer in an isolated copy with trusted ancestry and a private
-`TMPDIR`. Fixture CAs and node keys are generated for tests, never production.
+Run in an authorized isolated environment with the required Go/Rust toolchains,
+a checkout with trusted ancestry and a private `TMPDIR`. Fixture CAs and node keys are generated for tests, never production.
 
 ```sh
 cd signer

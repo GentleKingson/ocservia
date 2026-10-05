@@ -1,4 +1,4 @@
-# Configure dedicated relays
+# Configure a dedicated Relay
 
 Each supported deployment uses one dedicated HTTPS Relay with custom mode,
 authenticated token files and the existing identity/command security checks.

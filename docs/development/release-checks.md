@@ -53,32 +53,17 @@ upgrade package digests.
 
 ## Database checkpoint release boundary
 
-Phase A is complete. The real stable [v1.2.0 release](https://github.com/GentleKingson/ocservia/releases/tag/v1.2.0)
-was published on 2026-10-04 at 01:34:48 UTC from
-`169102557cd610847c9f6ac2083336cdcf82c483`; its
-[Release run](https://github.com/GentleKingson/ocservia/actions/runs/37167143839)
-succeeded and uploaded actual assets. Both engines record epoch 1 / revision 0:
+The sole previous database checkpoint is stable v1.2.0. Its fixed source commit,
+epoch/revision and schema receipts are defined in the
+[database migration contract](control-plane.md#current-sql-artifacts-and-bounded-upgrades).
+Earlier databases must first reach that checkpoint before moving to epoch 2;
+advancing main does not change the checkpoint.
 
-| Engine | Checkpoint schema receipt |
-| --- | --- |
-| PostgreSQL | `d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172` |
-| MySQL | `3dc39a92ff4b54bff922872fae296843cea8dea1f2d1b36b42d86c9069dcb450` |
-
-This release is the old major's bridge checkpoint, not the completed rebaseline.
-The next major's only previous-checkpoint window pins that tag, commit and those
-receipts. Do not replace the anchor with a newer main commit. Environments with
-pending old migrations must first upgrade using v1.2.0 before moving to epoch 2.
-
-Phase B proves the released checkpoint upgrade equivalent to fresh SQL before
-removing legacy migration/journal machinery. PostgreSQL PR07 and MySQL PR08
-provide the cutovers; PR09 supplies cross-backend acceptance. The open stack must
-pass full Basic CI, Security Checks, Native Business Diagnostics with production
-Signer and finite resilience, and both backup/restore jobs at its final head.
-Build-only Release validates packages without publishing. Release Check remains
-main-only: after separately authorized merges, qualify the exact final main SHA
-before a separately authorized major release. Do not bypass that guard or treat
-component dispatches as main qualification. See
-[major cutover acceptance](database-major-cutover.md).
+Major database changes require the [SQL artifact acceptance checks](testing.md#sql-artifact-acceptance),
+including checkpoint/fresh equivalence and both backup/restore paths. Build-only
+Release validates packages without publication. Qualify the exact merged main
+commit through Release Check before operator confirmation of a major release;
+branch diagnostics and historical release results do not replace that gate.
 
 ## Release notes and changelog
 

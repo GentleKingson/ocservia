@@ -64,7 +64,8 @@ top-level JSON `null`; the historical v1 float64 numeric rounding is
 deliberately preserved rather than re-signed. Audit append retains its
 per-workspace transaction lock; verification reads at repeatable read.
 
-## Local authentication core (P1)
+<a id="local-authentication-core-p1"></a>
+## Local authentication core
 
 The internal `auth.Service` can be constructed without an OIDC provider.
 Trusted Go callers may opt in with `auth.Config.LocalEnabled`, provision an
@@ -73,14 +74,12 @@ Provisioning grants no roles. Runtime configuration, HTTP login, Local-only
 production startup and user management use this core through the shared session
 and authorization stack.
 
-Migration 000031 stores passwords only in `local_credentials`, keyed by
+Passwords are stored only in `local_credentials`, keyed by
 `identity_id`. Local identities use issuer `local` and the normalized username
 as subject. Usernames are trimmed and lowercased, with a 128-byte input limit;
 the accepted alphabet is ASCII letters/digits plus `.`, `_`, and `-`, starting
 with a letter or digit. No email/name matching or OIDC account linking occurs.
-New passwords are not normalized and require at least 15 Unicode code points,
-at most 1024 UTF-8 bytes, and the embedded offline blocklist check. Every new
-hash passes `ValidateNewPassword` through `hashPassword`; future provisioning
+Every new hash passes `ValidateNewPassword` through `hashPassword`; future provisioning
 and self-service changes must reuse it. Historical 1..1024-byte credentials
 still verify unchanged. See the [Local password policy](../operations/authentication.md#local-new-password-policy).
 
@@ -94,9 +93,9 @@ write cost. Local login rechecks the credential and disabled state under lock
 before the shared session insert; session cookies, AEAD, authentication,
 logout, RBAC, approval, audit, and break-glass semantics remain unchanged.
 
-Local login requires the installed release's complete backend migration history.
-PostgreSQL introduced shared account failure backoff in migration `000033`;
-MySQL provides it through its own manifests and storage revisions.
+Local login requires the installed release's complete backend schema, including
+`local_auth_attempts` and its expiry index. The runtime needs only
+SELECT/INSERT/UPDATE/DELETE on that table, not Owner or TRUNCATE permissions.
 `AuthenticateLocal` reserves a database-backed single-flight lease before reading a
 credential or executing KDF, then completes only an observed incorrect password
 as a failure. Admission serializes capacity allocation in a short transaction;
@@ -107,7 +106,34 @@ so a stale completion cannot overwrite the next credential epoch's failures.
 See [Local account failure backoff](../operations/authentication.md#local-account-failure-backoff-r2)
 for parameters, expiry, capacity, response behavior and upgrade constraints.
 
-## Local initialization and lifecycle (R4)
+### Attempt completion and expiry
+
+Database and corrupt-hash errors are not password failures. A correct password
+for a disabled identity cannot create a session and is not counted as incorrect.
+Once an incorrect password is observed, completion uses a separate bounded
+context so client cancellation cannot erase it. Cancellation before verification
+releases the reservation without adding a failure. Process exit, ambiguous commit
+or unavailable completion leaves at most the lease duration before admission can
+recover; abandoned reservations are not silently classified as bad passwords.
+Expired lease holders cannot clear replacement state or create a session.
+
+Expiry is driven by the database clock. Admission deletes expired rows through
+the expiry index before allocating capacity. Rows expire when the observation
+window, cooldown and active lease no longer require them. Without login traffic,
+expired rows may remain physically present until the next admission, but the
+table remains bounded. Random usernames cannot evict live state: at capacity,
+new keys receive generic 503 while tracked keys retain their protection.
+Cleanup/admission/completion errors also fail closed with generic 503, never
+unlimited verification. PostgreSQL autovacuum handles its dead tuples; this is
+not a MySQL maintenance mechanism.
+
+Password reset and disable delete the account state in the existing credential,
+revocation and audit transaction. Rollback preserves it. Credential revalidation
+and lease-token matching prevent an older verified request from clearing failures
+or leases created after that transaction commits.
+
+<a id="local-initialization-and-lifecycle-r4"></a>
+## Local initialization and lifecycle
 
 Apply migrations first using the existing `--migrate-only` procedure. Select an
 existing workspace to own platform Local identity administration. Its UUIDv7 is
@@ -115,17 +141,8 @@ required explicitly: the repository has workspace-scoped RBAC, not global role
 bindings. Bootstrap records this choice permanently; API headers cannot select
 another workspace to obtain access to shared login identities.
 
-With the normal database, Local auth, session and audit configuration loaded:
-
-```sh
-export OCSERV_LOCAL_AUTH_ENABLED=true
-export OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin
-export OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID='<existing-workspace-uuidv7>'
-export OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password
-export OCSERV_LOCAL_BOOTSTRAP_APPROVER_USERNAME=initial-approver
-export OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/secrets/local-bootstrap-approver-password
-ocserv-control --bootstrap-local-admin
-```
+Use the [operator bootstrap procedure](../operations/authentication.md#bootstrap-the-first-local-admin)
+for backend-specific workspace setup, secret mounts and one-shot commands.
 
 Provision two different passwords separately using the deployment secret
 manager. The bootstrap reader uses the existing bounded Secret value format
@@ -148,7 +165,8 @@ identity or changing its password does not clear the marker. Normal startup does
 not read the bootstrap password file or synchronize credentials. Preserve the
 marker in backups; do not drop migrations or delete the marker to reset credentials.
 
-Migration 34 freezes the single-admin upgrade exception: the original bootstrap
+The stored bootstrap marker freezes the historical single-admin completion
+exception: the original bootstrap
 identity must still be an active Local workspace PlatformAdmin with its original
 bootstrap audit and no other historical elevated binding in that workspace.
 Only that state receives `completion_pending=true`; other existing states close
@@ -158,8 +176,9 @@ It verifies the current password with the existing account lease/backoff,
 rechecks credential/state under the initialization lock, then creates only the
 new SecurityAdmin and atomically records completion and audit. It cannot replace
 an existing account or password. New elevated grants permanently close pending
-completion. Normal startup never fills this state. Schema 34 deliberately fences
-older Controllers; stop old writers before migrating. Runtime is still not Owner
+completion. Normal startup never fills this state. Stop old writers before
+migrating; current startup validates SQL artifact
+provenance, not a minimum Controller schema version. Runtime is still not Owner
 and receives only lifecycle-column UPDATE privileges on the bootstrap marker,
 not DELETE or DDL. See the [executable operator steps](../operations/authentication.md).
 
@@ -226,7 +245,7 @@ surviving independently controlled accounts and approved resets, or the existing
 authorized [backend-specific recovery](../operations/incident-recovery.md#database-recovery);
 it never reopens Bootstrap.
 
-R4 follows OWASP's [least privilege and deny-by-default authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)
+Local identity administration follows OWASP's [least privilege and deny-by-default authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)
 and [current-password verification for password changes](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html).
 
 ## Break-glass

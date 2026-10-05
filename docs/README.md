@@ -15,7 +15,8 @@ This documentation defines the technical specifications and operational protocol
 
 - [Controller upgrade, rollback and uninstall](how-to/controller-lifecycle.md)
 - [Agent upgrade and rollback](how-to/agent-lifecycle.md)
-- [Configure dedicated relays](how-to/dedicated-relays.md)
+- [Configure a dedicated Relay](how-to/dedicated-relay.md)
+- [Rebind an Agent to another Controller](how-to/rebind-controller.md)
 - [Database backup and restore](operations/database-backup-restore.md)
 - [Recover from an incident](operations/incident-recovery.md)
 
@@ -36,14 +37,24 @@ This documentation defines the technical specifications and operational protocol
 
 - [Validate a change](development/testing.md)
 - [Control-plane development](development/control-plane.md)
-- [Contracts and toolchains](development/contracts.md)
+- [Schema sources and generation](reference/stable-contracts.md#schema-sources-and-generation)
 - [GitHub Actions validation](development/github-actions.md)
 - [Release policy and package validation](development/release-checks.md)
+- [Business Smoke and Integration](development/real-business-validation.md)
+- [Cross-VM enrollment validation](development/cross-vm-enrollment-validation.md)
+- [Single-instance resilience](development/resilience.md)
+- [Single dedicated Relay validation](development/single-relay-validation.md)
+- [Simulated-Agent resilience and capacity](development/p1-resilience-capacity.md)
+- [Database migration contract](development/control-plane.md#current-sql-artifacts-and-bounded-upgrades)
 
 ## Technical reference
 
+- [Consumer service boundaries](development/domain-service-boundaries.md)
+- [HTTP contracts](development/http-baseline.md)
+- [Integrated deployment contract](development/integrated-deployment-contract.md)
 - [Agent and privd boundary](development/agent-privd.md)
 - [Node enrollment and trust](development/enrollment.md)
+- [Controller rebind and retention](development/controller-rebind.md)
 - [Iroh transport](development/transportd.md)
 - [Certificates, secrets and Signer](development/certificates-and-signer.md)
 - [Identity, authorization, approval and audit](development/identity-authorization-audit.md)
@@ -59,7 +70,7 @@ This documentation defines the technical specifications and operational protocol
 - HTTP API: [OpenAPI schema](../openapi/openapi.yaml)
 - Protobuf contracts: [proto/](../proto/)
 - Generated Web client: [web/src/api/generated/](../web/src/api/generated/)
-- [Upstream provenance records](upstream/v4.9-post1.md)
+- Upstream provenance: [v4.9 post-release backport](upstream/v4.9-post1.md) and [restore semantics and Ocserv compatibility](upstream/v4.9-post2.md)
 
 The build system overwrites generated artifacts during `make generate`. Manual modifications to these files will be lost. For testing, the [validation guide](development/testing.md) indexes the specialized end-to-end, resilience, and capacity checks.
 
