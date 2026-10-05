@@ -32,5 +32,6 @@ release/commit, download its gzip list and license, decompress without editing
 entries, and update the version, source, count and SHA-256 above. Review license
 changes and list differences. Add concrete service-related whole candidates to
 the supplement as needed and bump its version. Run the auth policy and Local
-lifecycle tests on BuildServer, then ship the files with the normal binary build.
+lifecycle tests in an authorized isolated environment with the required
+dependencies, then ship the files with the normal binary build.
 Do not add a separate password service or periodic forced password changes.

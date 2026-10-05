@@ -208,8 +208,8 @@ that host Ruby, race or database prerequisites are available.
 
 ### Isolated ARM64 execution environment
 
-The following complete test environment was exercised on BuildServer. It has
-no Go of its own: it runs the **same native `.tools/go/bin/go`** installed above.
+The following isolated ARM64 test environment was validated with the native
+toolchain. It has no Go of its own: it runs the **same native `.tools/go/bin/go`** installed above.
 System packages are confined to the task image. The Debian base is digest-pinned;
 APT resolves its maintained Bookworm packages at build time. Retain the build
 log, resulting image ID and package versions with each validation record rather

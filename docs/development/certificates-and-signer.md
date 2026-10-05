@@ -246,8 +246,8 @@ clearing state, changing CA, or an automatic image rollback.
 
 ### Focused verification
 
-Run only on BuildServer in an isolated copy with trusted ancestry and a private
-`TMPDIR`. Fixture CAs and node keys are generated for tests, never production.
+Run in an authorized isolated environment with the required Go/Rust toolchains,
+a checkout with trusted ancestry and a private `TMPDIR`. Fixture CAs and node keys are generated for tests, never production.
 
 ```sh
 cd signer

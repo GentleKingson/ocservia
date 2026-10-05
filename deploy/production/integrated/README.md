@@ -148,8 +148,8 @@ streams; this is not proof of original-IP abuse controls behind Edge.
 
 ## Reproduce the bounded check
 
-Run locally only on BuildServer, in an isolated checkout. Development builds
-are allowed here; current publication qualification uses manual Release Check
+Run locally in an authorized isolated checkout with Docker and the required
+build dependencies. Development builds are allowed here; current publication qualification uses manual Release Check
 and freshly built local images on disposable native runners. NGINX 1.30.5 and Caddy 2.11.4 are digest-pinned; Relay uses the
 existing locked iroh-relay 1.2.0 build. No upstream Relay changes are made.
 
@@ -221,7 +221,7 @@ are retired.
 
 ## Historical P1 results and gates
 
-BuildServer ARM64 development verification on 2026-09-24 passed the merged port
+ARM64 development verification on 2026-09-24 passed the merged port
 set and mount paths, both TLS branches, two bridge client-IP propagation and
 spoof rejection, Controller Host/SNI negatives, static routing/no HTTP3,
 32 concurrent short SSE streams, changed-IP Gateway/Relay recreation and Edge
@@ -240,7 +240,7 @@ These failed attempts were not P1 passes. Check the final artifact for the
 exact candidate, image identities and added negative-case results.
 
 Public validation on 2026-09-25 (Hong Kong time) additionally exercised two
-GitHub-hosted sources against one BuildServer endpoint. The real-node run
+GitHub-hosted sources against one public test endpoint. The real-node run
 `p1public2f9sbng` used a signed test Agent package, one custom Relay URL, and
 namespace rules rejecting non-loopback IPv4 UDP and all IPv6 UDP on the Agent.
 The connection probe reported `Relay(https://relay.p1.test/)`; independently
@@ -257,7 +257,8 @@ no matching inbound UDP response. The cloud UDP rules/public NAT return path
 were not independently inspected, so that capture alone did not identify which
 cloud component dropped the traffic. After the operator confirmed opening the
 cloud ports, a focused same-host public retest at 2026-09-25 01:01 Hong Kong time
-passed: QAD returned `161.118.198.240:56303`, with a measured latency of 2.215397 ms.
+passed: QAD returned a public mapped endpoint, with a measured latency of
+2.215397 ms.
 Authenticated TCP and explicit wrong-token rejection passed again in that run.
 The original failed artifacts remain failures; the later public retest supplies
 the missing evidence. No private-route workaround was counted as a public pass.
@@ -299,7 +300,7 @@ squash merge. Squash identities are not the tested branch identities below.
 | `733d0716f9e8e7ccd8d95e8959759295aff50cd4` | [36212450801 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36212450801) | Build/scan/publication and ARM64 smoke PASS; AMD64 enrollment FAIL from structured logs on UUID stdout. Public attempt FAIL from fixture CA missing strict keyUsage. |
 | `82e9964118664633c5748de6bc72595627ad56f8` | [36213389600 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36213389600) | stderr logging fix and both private architecture scopes PASS; no new public run. |
 | `0c341e7cc3ac02bd5ff62973ac36adce275d63a4` | [36214198954 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36214198954) | Strict fixture CA and both private architecture scopes PASS; public configuration rollback FAIL because its test executable was on noexec `/run`. |
-| `144c1b71bfa92ef7eef9f7d94deda8120648d497` | [36216389171 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36216389171) | Fixed executable location; native builds/scans, AMD64 full private business and ARM64 smoke PASS. Separate BuildServer ARM64 complete public acceptance PASS, 2026-09-26 05:19:30 UTC. |
+| `144c1b71bfa92ef7eef9f7d94deda8120648d497` | [36216389171 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36216389171) | Fixed executable location; native builds/scans, AMD64 full private business and ARM64 smoke PASS. Separate ARM64 complete public acceptance PASS, 2026-09-26 05:19:30 UTC. |
 
 The last branch candidate used the signed 1.0.2 baseline above, actual
 first install/upgrade, tampered-signature rejection before stop, a real TCP443
@@ -310,7 +311,7 @@ approved operation had one journal execution and one privd receipt.
 
 [Public client run 36218732086 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36218732086)
 used two external sources, `172.214.44.1` and `4.246.151.208`, against the same
-BuildServer endpoint `161.118.198.240`. Controller audit correlation proved
+public test endpoint. Controller audit correlation proved
 their original IPs and rejected spoofed forwarding headers. The locked Relay
 probe passed authenticated TCP, explicit wrong-token denial and same-host
 public UDP7842 QAD with HTTPS fallback disabled. Authorized SSE ran 2160 seconds
@@ -330,7 +331,7 @@ attachments and their expired identities are not current publication criteria.
 
 ### Measured support and maintenance
 
-Run 36220524783 completed successfully on main. A fresh BuildServer isolated
+Run 36220524783 completed successfully on main. A fresh isolated
 ARM64 Docker/systemd deployment consumed only its Registry digests and signed
 native package, finishing at **2026-09-26 07:00:41 UTC**. It repeated the full
 public business and lifecycle checks above; no compilation, image build,
@@ -341,13 +342,13 @@ prebuilt locked Relay network probe was independently SHA-256 pinned.
 | --- | --- |
 | AMD64, Ubuntu 24.04 native Runner | PASS: build, smoke, scan, signed Registry pull, P3 installation, full Controller/Agent/privd, Local/OIDC, two-purpose sealing, P12/CRL, browser/config/VPN, offline queue and single-Relay recovery, recreation and short authorized SSE. Private network. |
 | ARM64, Ubuntu 24.04 native Runner | PASS: build, smoke, scan, clean signed Registry pull/install/start, entry/internal TLS, non-purging uninstall/start and identity preservation. |
-| ARM64, BuildServer disposable Debian 13/systemd | PASS: public full chain, same-host TCP/UDP, baseline install/upgrade/failure recovery/rollback/re-upgrade, established Agent reconnect, authorized SSE and documented maintenance below. |
+| ARM64, disposable Debian 13/systemd | PASS: public full chain, same-host TCP/UDP, baseline install/upgrade/failure recovery/rollback/re-upgrade, established Agent reconnect, authorized SSE and documented maintenance below. |
 | External public clients | [36225418379 / 1](https://github.com/GentleKingson/ocservia/actions/runs/36225418379) PASS: distinct sources `20.97.199.51` and `57.151.137.34`; both independently matched Controller auth audit source IP after maintenance, with spoofed forwarding headers ignored. |
 | Database/auth deployment adaptation | P3 focused rendering/preflight matrix PASS for bundled/external PostgreSQL, external MySQL/MariaDB and Local/OIDC/dual modes. This candidate's full real business used bundled PostgreSQL and Local + OIDC; it is not a new full MySQL/MariaDB business matrix. |
 
 The main public SSE sample ran 2161 seconds, with 215 heartbeats, two
 connections and a first application lifetime of 1800.000068 seconds. The
-same-host public QAD result was `161.118.198.240:44150`, not a private bridge
+same-host QAD result reported a public mapped endpoint, not a private bridge
 address. No direct Agent UDP path was counted as Relay business.
 
 The maintenance commands below were rehearsed in that clean deployment after

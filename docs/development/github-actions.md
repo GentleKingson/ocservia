@@ -116,7 +116,7 @@ Cache hits never bypass real database tests.
 The original independent entrypoints remain available, but are **not Full CI**:
 
 ```bash
-# On BuildServer; expensive opt-in checks:
+# In an authorized isolated environment with the required dependencies; expensive opt-in checks:
 DATABASE_TEST_SCOPE=full PG_MAJOR=all scripts/database-integration.sh
 DATABASE_TEST_SCOPE=full ENGINE=mysql bash scripts/database-foundation-integration.sh
 scripts/go-check.sh race
@@ -171,7 +171,8 @@ does not read workflow files or run live acceptance, and Basic CI does not call 
 
 ## Reproduction
 
-Run on `BuildServer` against the same candidate source:
+Run against the same candidate source in an authorized isolated environment
+with the dependencies described in [testing](testing.md):
 
 ```bash
 scripts/bootstrap.sh go-test
@@ -184,7 +185,7 @@ RUN_ID=local-mysql ARTIFACT_DIR="$PWD/.cache/recovery-mysql" ENGINE=mysql bash s
 With push/remote-run authorization, select the candidate branch in Actions or
 run `gh workflow run ci.yml --ref <candidate-branch> -f profile=full`.
 Use `profile=quick` for the other profile. Record the actual candidate SHA,
-cache state and job/step timings. Local BuildServer results are not GitHub CI
+cache state and job/step timings. Local validation results are not GitHub CI
 acceptance.
 
 ## Release workflow
