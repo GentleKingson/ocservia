@@ -95,7 +95,7 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 		}
 		id, err := initialize(ctx, cfg.LocalBootstrapUsername, cfg.LocalBootstrapPassword, workspaceID, cfg.LocalBootstrapApproverUsername, cfg.LocalBootstrapApproverPassword)
 		if err != nil {
-			if errors.Is(err, auth.ErrLocalWorkspaceMissing) {
+			if errors.Is(err, auth.ErrLocalWorkspaceMissing) || errors.Is(err, auth.ErrLocalInitialized) {
 				return nil, err
 			}
 			return nil, errors.New("Local administrator bootstrap rejected; check initialization state, workspace and credentials")

@@ -151,7 +151,8 @@ else
       install -o 65534 -g 65532 -m 0400 /dev/stdin "${secret_dir}/local-bootstrap-${account}-password"
   done
   trap 'rm -f -- "${secret_dir}"/local-bootstrap-{admin,approver}-password' EXIT
-  compose run --rm --no-deps -T \
+  status=0
+  output="$(compose run --rm --no-deps -T \
     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin \
     -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${workspace_id}" \
     -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password \
@@ -159,8 +160,16 @@ else
     -e OCSERV_LOCAL_BOOTSTRAP_APPROVER_PASSWORD_FILE=/run/secrets/local-bootstrap-approver-password \
     -v "${secret_dir}/local-bootstrap-admin-password:/run/secrets/local-bootstrap-password:ro" \
     -v "${secret_dir}/local-bootstrap-approver-password:/run/secrets/local-bootstrap-approver-password:ro" \
-    control-plane --bootstrap-local-admin ||
-    fail "Local bootstrap was rejected; if a previous run already completed it, the accounts in ${CREDENTIALS_DIR} are valid"
+    control-plane --bootstrap-local-admin)" || status=$?
+  printf '%s\n' "${output}"
+  if ((status != 0)); then
+    # Only this host's Quick run initializes Local authentication with the
+    # passwords kept above, so an initialized state means an earlier run
+    # committed before it could record completion.
+    jq -Rr 'fromjson? | .error // empty' <<<"${output}" | grep -qxF "Local authentication is already initialized" ||
+      fail "Local bootstrap was rejected"
+    note "Local authentication was already initialized by an earlier run"
+  fi
   : >"${CREDENTIALS_DIR}/complete"
 fi
 
