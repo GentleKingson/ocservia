@@ -137,7 +137,8 @@ business handling; excess returns 503. Header/read/write/idle timeouts are
 ### Quick install materials
 
 `deploy/production/quick-materials.sh` prepares a first integrated, bundled
-PostgreSQL, root-lifecycle installation. It runs as root before activation with
+PostgreSQL, root-lifecycle installation; `deploy/production/quick-install.sh`
+calls it. It runs as root before activation with
 `OCSERV_SECRET_DIR`, `OCSERV_SIGNER_SECRET_DIR` and `OCSERV_SIGNER_STATE_DIR`,
 and creates every missing Controller and Signer file with the ownership and
 modes `compose.sh` validates. It does not create Gateway or Relay TLS identities.

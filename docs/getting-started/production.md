@@ -125,6 +125,11 @@ Do not replace this flow with a manual `docker compose up -d`; that bypasses the
 
 This bootstrap requires an existing stable or RC Release and an exact version tag.
 
+For a new single-host Integrated Controller with ACME certificates, the
+[Quick mode](../operations/bootstrap-hosting.md#quick-mode) generates the
+configuration and protected material described above and creates the initial
+Local administrators.
+
 ## 5. Verify the deployment
 
 The install command must finish successfully. Then check the public readiness and version endpoints:

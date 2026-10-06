@@ -328,6 +328,12 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	if err := run(runtimeOptions, bootstrap, "--bootstrap-local-admin"); err != nil {
 		t.Fatal("runtime CLI bootstrap", err)
 	}
+	// A rerun reports the initialized state distinctly so installers can
+	// resume after an interruption between commit and their own marker.
+	if output, err := runOutput(runtimeOptions, bootstrap, "--bootstrap-local-admin"); err == nil ||
+		!bytes.Contains(output, []byte("Local authentication is already initialized")) {
+		t.Fatalf("repeat runtime CLI bootstrap: %v\n%s", err, output)
+	}
 	if !production && !smoke {
 		installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)
 	}
