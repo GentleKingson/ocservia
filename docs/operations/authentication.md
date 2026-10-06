@@ -225,7 +225,17 @@ operator-invoked **one-shot**, not part of normal install or restart.
 2. Select an existing management workspace UUIDv7. Bootstrap does not create a
    workspace. On a completely empty database, an authorized database operator
    must first provision one through the protected administrative connection.
-   Follow the matching [database preparation](#database-preparation) below;
+   The owner one-shot does this for either backend:
+
+   ```bash
+   deploy/production/compose.sh run --rm --no-deps migrate --provision-management-workspace
+   ```
+
+   It creates the `Administration` workspace (slug `administration`) with a
+   fresh UUIDv7 only when no workspace exists, returns the same workspace on
+   a rerun, and refuses when other workspaces exist without it. Its
+   `management workspace ready` log line carries `workspace_id`. Alternatively,
+   follow the matching [database preparation](#database-preparation) below;
    the PostgreSQL SQL is not portable to MySQL.
    Record that UUID: the Local identity management workspace is fixed at
    bootstrap, not selected later by an API header.
