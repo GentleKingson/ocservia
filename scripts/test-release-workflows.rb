@@ -95,8 +95,10 @@ require_check(jobs.fetch('main').fetch('steps').first.fetch('run') == 'test "$GI
 require_check(jobs.fetch('full-ci')['uses'] == './.github/workflows/ci.yml' && jobs.dig('full-ci','with','profile') == 'full', 'Full CI missing')
 require_check(jobs.fetch('security')['uses'] == './.github/workflows/security.yml', 'Security missing')
 require_check(jobs.fetch('business')['uses'] == './.github/workflows/release-business-diagnostic.yml' && jobs.dig('business','with') == {'version'=>'0.0.0','profile'=>'smoke','production_signer'=>true,'run-resilience'=>true}, 'Integrated Business Smoke and recovery must run')
+quick = jobs.fetch('quick')
+require_check(quick['needs'] == 'main' && quick['steps'].any? {|s| s.fetch('run','').include?('bash scripts/release-quick-acceptance.sh')}, 'Quick Install acceptance must run')
 result = jobs.fetch('result')
-require_check(result['if'] == 'always()' && result['needs'].sort == %w[business full-ci main security], 'Release Check result must handle every dependency')
+require_check(result['if'] == 'always()' && result['needs'].sort == %w[business full-ci main quick security], 'Release Check result must handle every dependency')
 command = result.fetch('steps').first.fetch('run')
 Dir.mktmpdir('release-check-') do |dir|
   results = result['needs'].to_h {|id| [id,{'result'=>'success'}]}

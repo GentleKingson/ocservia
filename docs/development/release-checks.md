@@ -8,6 +8,7 @@ PR -> Basic CI -> merge main
       - Full CI
       - Security
       - amd64 Business Smoke + four finite single-instance recoveries
+      - amd64 Quick Install against a Pebble ACME directory
    -> PASS -> operator version confirmation -> vX.Y.Z-rc.N or vX.Y.Z tag
    -> Release
       - amd64 build + Controller image security + install/image smoke
