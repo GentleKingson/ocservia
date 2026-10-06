@@ -238,6 +238,53 @@ expect_failure "${ROOT}/deploy/production/compose.sh" up --build
 "${owner[@]}" chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 "${owner[@]}" chmod 400 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
+# ACME mode needs no host TLS material; Gateway and Relay obtain their own.
+expect_failure env OCSERV_ACME_EMAIL=ops@example.com "${ROOT}/deploy/production/compose.sh" config --quiet
+for name in tls.crt tls.key; do
+  mv "${OCSERV_SECRET_DIR}/${name}" "${work}/controller-${name}"
+  mv "${OCSERV_RELAY_SECRET_DIR}/${name}" "${work}/relay-${name}"
+done
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+export OCSERV_TLS_MODE=acme
+expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_ACME_EMAIL='ops@example.com"' "${ROOT}/deploy/production/compose.sh" config --quiet
+export OCSERV_ACME_EMAIL=ops@example.com
+expect_failure env OCSERV_ACME_DIRECTORY_URL=http://acme.example.com/dir "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_DEPLOYMENT_MODE=standalone "${ROOT}/deploy/production/compose.sh" config --quiet
+"${ROOT}/deploy/production/compose.sh" config --format json >"${work}/acme.json"
+jq -e '
+  "https://acme-v02.api.letsencrypt.org/directory" as $letsencrypt |
+  ([.services.gateway, .services.relay | .secrets[]?.source]) == ["relay_access_token"] and
+  any(.services.gateway.volumes[]; .type == "volume" and .target == "/var/lib/caddy-acme") and
+  any(.services.gateway.volumes[]; .target == "/etc/caddy/Caddyfile" and (.source | endswith("/integrated/Caddyfile.acme"))) and
+  (.services.gateway.networks | has("acme-egress") and has("edge-gateway")) and
+  .services.gateway.environment.OCSERV_ACME_EMAIL == "ops@example.com" and
+  .services.gateway.environment.OCSERV_ACME_DIRECTORY_URL == $letsencrypt and
+  .services.relay.environment.IROH_RELAY_ACME_URL == $letsencrypt and
+  (.services.relay.environment | has("IROH_RELAY_ACME_CA") | not) and
+  ([.services.relay.volumes[] | [.type, .target]] == [["volume", "/var/lib/iroh-relay"]]) and
+  any(.services.relay.configs[]; .source == "relay_acme_config" and .target == "/etc/iroh-relay/relay.toml") and
+  (.configs.relay_acme_config.content | contains("hostname = [\"relay.example.com\"]") and
+    contains("contact = \"ops@example.com\"") and contains("cert_mode = \"LetsEncrypt\""))
+' "${work}/acme.json" >/dev/null
+printf 'test-only-ca\n' >"${work}/acme-ca.pem"
+chmod 0444 "${work}/acme-ca.pem"
+expect_failure env OCSERV_ACME_CA_FILE="${work}/acme-ca.pem" "${ROOT}/deploy/production/compose.sh" config --quiet
+OCSERV_ACME_DIRECTORY_URL=https://pebble.test:14000/dir OCSERV_ACME_CA_FILE="${work}/acme-ca.pem" \
+  "${ROOT}/deploy/production/compose.sh" config --format json |
+  jq -e '
+    .services.relay.environment.IROH_RELAY_ACME_URL == "https://pebble.test:14000/dir" and
+    .services.relay.environment.IROH_RELAY_ACME_CA == "/run/secrets/acme_ca" and
+    .services.gateway.environment.SSL_CERT_FILE == "/run/secrets/acme_ca" and
+    ([.services.gateway.secrets[].source] == ["acme_ca"])' >/dev/null
+chmod 0644 "${work}/acme-ca.pem"
+expect_failure env OCSERV_ACME_DIRECTORY_URL=https://pebble.test:14000/dir OCSERV_ACME_CA_FILE="${work}/acme-ca.pem" \
+  "${ROOT}/deploy/production/compose.sh" config --quiet
+unset OCSERV_TLS_MODE OCSERV_ACME_EMAIL
+for name in tls.crt tls.key; do
+  mv "${work}/controller-${name}" "${OCSERV_SECRET_DIR}/${name}"
+  mv "${work}/relay-${name}" "${OCSERV_RELAY_SECRET_DIR}/${name}"
+done
 # Ordinary partial Compose activation must not stop an unselected Signer.
 # Lifecycle transactions own its exclusive stop/inspect/restart sequence.
 mkdir -m 700 "${work}/bin" "${OCSERV_BACKUP_DIR}"

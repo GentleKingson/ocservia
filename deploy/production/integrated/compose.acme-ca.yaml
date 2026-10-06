@@ -1,0 +1,15 @@
+# Applied after compose.acme.yaml when OCSERV_ACME_CA_FILE names the CA of a
+# private ACME directory (OCSERV_ACME_DIRECTORY_URL), such as a test server.
+services:
+  gateway:
+    environment:
+      SSL_CERT_FILE: /run/secrets/acme_ca
+    secrets: [acme_ca]
+  relay:
+    environment:
+      IROH_RELAY_ACME_CA: /run/secrets/acme_ca
+    secrets: [acme_ca]
+
+secrets:
+  acme_ca:
+    file: ${OCSERV_ACME_CA_FILE:?set the ACME directory CA file}

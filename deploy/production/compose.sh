@@ -48,6 +48,36 @@ case "${deployment_mode}" in
     ;;
   *) echo "OCSERV_DEPLOYMENT_MODE must be standalone or integrated" >&2; exit 2 ;;
 esac
+tls_mode="${OCSERV_TLS_MODE:-manual}"
+acme_ca=false
+case "${deployment_mode}:${tls_mode}" in
+  *:manual)
+    if [[ -n "${OCSERV_ACME_EMAIL:-}${OCSERV_ACME_DIRECTORY_URL:-}${OCSERV_ACME_CA_FILE:-}" ]]; then
+      echo "ACME settings require OCSERV_TLS_MODE=acme" >&2
+      exit 2
+    fi
+    ;;
+  integrated:acme)
+    if [[ ! "${OCSERV_ACME_EMAIL:-}" =~ ^[A-Za-z0-9._%+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; then
+      echo "OCSERV_ACME_EMAIL must be a plain email address" >&2
+      exit 2
+    fi
+    if [[ -n "${OCSERV_ACME_DIRECTORY_URL:-}" && ! "${OCSERV_ACME_DIRECTORY_URL}" =~ ^https://[^[:space:]\"{}]+$ ]]; then
+      echo "OCSERV_ACME_DIRECTORY_URL must be an https URL" >&2
+      exit 2
+    fi
+    if [[ -n "${OCSERV_ACME_CA_FILE:-}" ]]; then
+      path="${OCSERV_ACME_CA_FILE}"
+      if [[ -z "${OCSERV_ACME_DIRECTORY_URL:-}" || "${path}" != /* || ! -f "${path}" || -L "${path}" || ! -s "${path}" \
+        || "$(stat -c '%u:%a:%h' "${path}")" != "$(id -u):444:1" ]]; then
+        echo "OCSERV_ACME_CA_FILE must be a nonempty launcher-owned mode-0444 single-link file for OCSERV_ACME_DIRECTORY_URL" >&2
+        exit 2
+      fi
+      acme_ca=true
+    fi
+    ;;
+  *) echo "OCSERV_TLS_MODE must be manual, or acme with Integrated" >&2; exit 2 ;;
+esac
 oidc_enabled=false
 if [[ -n "${OCSERV_OIDC_ISSUER:-}${OCSERV_OIDC_CLIENT_ID:-}${OCSERV_OIDC_REDIRECT_URL:-}" ]]; then
   oidc_enabled=true
@@ -117,8 +147,10 @@ while true; do
   [[ "${ancestor}" == "/" ]] && break
   ancestor="$(dirname -- "${ancestor}")"
 done
-general_secrets=(tls.crt tls.key database-owner-url database-app-url session-key \
-  audit-checkpoint-key certificate-signer-token)
+general_secrets=(database-owner-url database-app-url session-key audit-checkpoint-key certificate-signer-token)
+if [[ "${tls_mode}" == manual ]]; then
+  general_secrets+=(tls.crt tls.key)
+fi
 if [[ "${database_backend}:${database_deployment}" == postgres:bundled ]]; then
   general_secrets+=(postgres-owner-password postgres-app-password postgres-backup-password postgres.pgpass)
 elif [[ "${database_backend}" == postgres ]]; then
@@ -193,7 +225,9 @@ if [[ "${deployment_mode}" == integrated ]]; then
       ancestor="$(dirname -- "${ancestor}")"
     done
   done
-  for secret in tls.crt tls.key; do
+  relay_tls=(tls.crt tls.key)
+  [[ "${tls_mode}" == manual ]] || relay_tls=()
+  for secret in "${relay_tls[@]}"; do
     path="${OCSERV_RELAY_SECRET_DIR}/${secret}"
     [[ -s "${path}" && -f "${path}" && ! -L "${path}" \
       && "$(stat -c '%u:%a:%h' "${path}")" == "$(id -u):444:1" ]] || {
@@ -260,20 +294,28 @@ fi
 if [[ "${deployment_mode}" == integrated ]]; then
   compose+=(-f "${ROOT}/deploy/production/integrated/compose.signer.yaml"
     -f "${ROOT}/deploy/production/integrated/compose.yaml")
+  if [[ "${tls_mode}" == acme ]]; then
+    compose+=(-f "${ROOT}/deploy/production/integrated/compose.acme.yaml")
+  fi
+  if [[ "${acme_ca}" == true ]]; then
+    compose+=(-f "${ROOT}/deploy/production/integrated/compose.acme-ca.yaml")
+  fi
 fi
 if [[ "${otel_enabled}" == true || "${teardown}" == true ]]; then
   compose+=(--profile observability)
 fi
 if [[ "${deployment_mode}" == integrated ]]; then
   # Check the merged model, not individual overlays or Compose list-merge assumptions.
-  "${compose[@]}" config --format json | jq -e '
+  "${compose[@]}" config --format json | jq -e --arg tls_mode "${tls_mode}" '
     ([.services | to_entries[] | .key as $service | .value.ports[]? |
       [$service, .target, (.published | tostring), .protocol]] | sort) ==
       [["edge", 8443, "443", "tcp"], ["relay", 7842, "7842", "udp"]] and
     all(.services[]; (has("build") | not) and (.image | test("^[^\\s@]+(@sha256:[0-9a-f]{64}|:v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?)$"))) and
     (.networks.signer.internal == true) and
     (.services.signer.networks | keys == ["signer"]) and
-    (.services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_CA_FILE == "/run/secrets/certificate_signer_ca")
+    (.services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_CA_FILE == "/run/secrets/certificate_signer_ca") and
+    ($tls_mode == "manual" or ([.services.gateway, .services.relay | .secrets[]?.source |
+      select(test("tls_"))] == []))
   ' >/dev/null || { echo "Integrated rendered deployment contract rejected" >&2; exit 2; }
 fi
 if [[ "${prepare_transport_runtime}" == true ]]; then

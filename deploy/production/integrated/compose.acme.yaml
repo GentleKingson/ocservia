@@ -1,0 +1,61 @@
+# ACME overlay, applied after integrated/compose.yaml when OCSERV_TLS_MODE=acme.
+# Gateway and Relay obtain their own certificates with TLS-ALPN-01 through
+# Edge's SNI routing; no certificate or key is provisioned on the host.
+services:
+  gateway:
+    environment:
+      OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:?set the ACME contact email}
+      OCSERV_ACME_DIRECTORY_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+    secrets: !reset []
+    volumes: !override
+      - ./integrated/Caddyfile.acme:/etc/caddy/Caddyfile:ro
+      - ./integrated/site.caddy:/etc/caddy/site.caddy:ro
+      - gateway-acme:/var/lib/caddy-acme
+    networks:
+      acme-egress: {}
+
+  relay:
+    environment:
+      IROH_RELAY_ACME_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+    secrets: !override
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+    configs:
+      - source: relay_acme_config
+        target: /etc/iroh-relay/relay.toml
+    volumes: !override
+      - relay-acme:/var/lib/iroh-relay
+
+configs:
+  relay_acme_config:
+    content: |
+      enable_relay = true
+      http_bind_addr = "0.0.0.0:8080"
+      enable_quic_addr_discovery = true
+      enable_metrics = false
+      key_cache_capacity = 8192
+
+      [tls]
+      https_bind_addr = "0.0.0.0:8443"
+      quic_bind_addr = "0.0.0.0:7842"
+      cert_mode = "LetsEncrypt"
+      hostname = ["${OCSERV_RELAY_PUBLIC_HOST}"]
+      contact = "${OCSERV_ACME_EMAIL}"
+      cert_dir = "/var/lib/iroh-relay"
+
+      [limits.client.rx]
+      max_burst_bytes = 4194304
+      bytes_per_second = 2097152
+
+      [access]
+      shared_token = ["replaced-by-entrypoint"]
+
+volumes:
+  gateway-acme: {}
+  relay-acme: {}
+
+networks:
+  acme-egress: {}

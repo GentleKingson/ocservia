@@ -37,11 +37,12 @@ Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
 `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` and `OCSERV_CERTIFICATE_SIGNER_URL`:
 the launcher derives one Relay URL and `https://signer:9443/sign`. Conflicting
 values are rejected. Controller's trusted proxy must remain the Gateway's
-application `/32`, not Edge or an entire subnet. Certificates are provisioned
-externally; this installer does not request ACME certificates or generate CAs.
+application `/32`, not Edge or an entire subnet. By default (`OCSERV_TLS_MODE=manual`)
+certificates are provisioned externally; see [ACME certificates](#acme-certificates)
+for the alternative. The lifecycle does not generate CAs.
 
 The Relay secret directory is launcher-owned mode 0700 and contains nonempty
-single-link `tls.crt` and `tls.key`, launcher-owned mode 0444. Its access token
+single-link `tls.crt` and `tls.key` (manual mode only), launcher-owned mode 0444. Its access token
 is the existing Controller `relay-access-token`, not a second Relay token.
 Signer secret and state directories are UID:GID 65532:65532, mode 0700,
 canonical paths with protected ancestry. Signer requires `issuer-chain.pem`,
@@ -76,6 +77,32 @@ a separate reconciled operator action. There is no automatic cross-mode
 migration, automatic CRL distribution, HA or forced disconnection of existing
 VPN sessions.
 
+### ACME certificates
+
+`OCSERV_TLS_MODE=acme` (Integrated only) replaces both host certificate pairs:
+
+```dotenv
+OCSERV_TLS_MODE=acme
+OCSERV_ACME_EMAIL=ops@example.com
+```
+
+Gateway (Caddy) and Relay (iroh-relay) each obtain and renew a certificate for
+their own name from Let's Encrypt with TLS-ALPN-01. Edge already routes the
+validation connection by SNI, so port 443 stays the only TCP port; nothing
+listens on port 80. Both names must resolve to this host before installation.
+`tls.crt` and `tls.key` are then neither required in `OCSERV_SECRET_DIR` nor in
+`OCSERV_RELAY_SECRET_DIR`. Account keys and certificates live in the named
+volumes `gateway-acme` and `relay-acme`; keep them across upgrades to stay
+within issuance rate limits. Gateway joins an `acme-egress` network to reach
+the ACME directory, so unlike manual mode it has outbound access.
+
+`OCSERV_ACME_DIRECTORY_URL` selects another https ACME directory, and
+`OCSERV_ACME_CA_FILE` (launcher-owned mode 0444, requires the directory URL)
+names the CA that serves it, for a private ACME CA or a test server such as
+Pebble. The first installation records ACME in `deployment-profile.json`; the
+TLS mode cannot change afterwards, and releases without ACME refuse that
+profile instead of starting without certificates.
+
 ## CI and publication
 
 Manual [Release Check](../../../docs/development/release-checks.md) runs Full CI,
@@ -107,7 +134,8 @@ private `/tmp`. Internal ports 9443/9444 bind only loopback.
 Only Edge publishes TCP443 and Relay UDP7842. `!override` removes inherited
 Gateway ports, not an empty merge list. Compose >= 2.24.4 is required.
 Resolve all paths relative to `deploy/production/compose.yaml`, the first file;
-apply the Integrated overlay last, after the selected database/auth overlays.
+apply the Integrated overlay after the selected database/auth overlays, and
+only the ACME overlays after it.
 The launcher checks mode/image/hostname inputs and the merged published-port
 set, adds `compose.signer.yaml`, and preserves the standalone path.
 
