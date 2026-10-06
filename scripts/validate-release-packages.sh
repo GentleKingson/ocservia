@@ -14,11 +14,12 @@ require_asset() {
     exit 1
   }
 }
-for asset in controller-bootstrap.sh managed-node-bootstrap.sh controller-release-amd64.json controller-release-arm64.json controller-release.json; do
+for asset in install-controller controller-bootstrap.sh managed-node-bootstrap.sh controller-release-amd64.json controller-release-arm64.json controller-release.json; do
   require_asset "$asset"
 done
 cmp "$ASSET_DIR/controller-bootstrap.sh" "$ROOT/deploy/production/controller-bootstrap.sh"
 cmp "$ASSET_DIR/managed-node-bootstrap.sh" "$ROOT/deploy/managed-node/install.sh"
+"$ROOT/scripts/check-release-stage0.sh" "$ASSET_DIR/install-controller" "v$VERSION"
 for arch in amd64 arm64; do
   case "$arch" in amd64) rpm_arch=x86_64; elf_word=x86-64 ;; arm64) rpm_arch=aarch64; elf_word=aarch64 ;; esac
   archive="ocservia-agent-$VERSION-linux-$arch.tar.gz"
