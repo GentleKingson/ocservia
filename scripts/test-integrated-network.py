@@ -122,6 +122,7 @@ ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
             environment={"OCSERV_PUBLIC_HOST": "controller.p1.test", "OCSERV_EDGE_GATEWAY_IP": "198.18.91.2"},
             networks={"edge-gateway": {}, "application": {}},
             volumes=[f"{ROOT}/deploy/production/integrated/Caddyfile:/etc/caddy/Caddyfile:ro",
+                     f"{ROOT}/deploy/production/integrated/site.caddy:/etc/caddy/site.caddy:ro",
                      f"{work}/controller.crt:/run/secrets/tls_certificate:ro",
                      f"{work}/controller.key:/run/secrets/tls_private_key:ro",
                      f"{work}/index.html:/srv/index.html:ro"])

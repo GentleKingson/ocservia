@@ -9,7 +9,8 @@ FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 relay \
-    && useradd --system --uid 65532 --gid relay --home-dir /nonexistent --shell /usr/sbin/nologin relay
+    && useradd --system --uid 65532 --gid relay --home-dir /nonexistent --shell /usr/sbin/nologin relay \
+    && install -d -o relay -g relay -m 0700 /var/lib/iroh-relay
 COPY --from=build /usr/local/cargo/bin/iroh-relay /usr/local/bin/iroh-relay
 COPY deploy/production/relay-entrypoint.sh /usr/local/bin/relay-entrypoint
 COPY deploy/production/relay-healthcheck.sh /usr/local/bin/relay-healthcheck

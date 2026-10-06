@@ -12,6 +12,8 @@ COPY --from=web-build /src/web/dist /srv
 # The pinned upstream image runs as root and ships no caddy account, so the
 # runtime user referenced below must exist before it can resolve at start.
 RUN addgroup -S -g 65532 caddy && adduser -S -D -H -u 65532 -G caddy caddy
+# Integrated ACME storage; a new named volume copies this ownership.
+RUN install -d -o caddy -g caddy -m 0700 /var/lib/caddy-acme
 # Port 8443 needs no file capability; the upstream capability prevents exec
 # when production drops all capabilities.
 RUN setcap -r /usr/bin/caddy

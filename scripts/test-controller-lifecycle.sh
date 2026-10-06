@@ -1203,6 +1203,20 @@ if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external run_control
   echo "Integrated database switch was accepted" >&2; exit 1
 fi
 grep -Fq 'database deployment cannot change' "${integrated_state}/failure.log"
+jq -e 'has("tls_mode") | not' "${integrated_state}/deployment-profile.json" >/dev/null
+if OCSERV_TLS_MODE=acme run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
+  echo "Integrated TLS mode switch was accepted" >&2; exit 1
+fi
+grep -Fq 'TLS mode cannot change' "${integrated_state}/failure.log"
+acme_state="${fixture}/integrated-acme"
+mkdir -m 700 "${acme_state}"
+run_controller "${acme_state}" "${integrated_release}" env OCSERV_DEPLOYMENT_MODE=integrated OCSERV_TLS_MODE=acme \
+  OCSERV_SIGNER_STATE_DIR="${acme_state}"
+jq -e '.tls_mode == "acme"' "${acme_state}/deployment-profile.json" >/dev/null
+if OCSERV_TLS_MODE=manual run_controller_start "${acme_state}" >"${acme_state}/failure.log" 2>&1; then
+  echo "ACME TLS mode switch was accepted" >&2; exit 1
+fi
+grep -Fq 'TLS mode cannot change' "${acme_state}/failure.log"
 if MOCK_SIGNER_INSPECT_EXIT=1 run_controller_start "${integrated_state}" >"${integrated_state}/failure.log" 2>&1; then
   echo "missing Signer ledger was accepted on start" >&2; exit 1
 fi

@@ -248,25 +248,33 @@ map_manifest_images() {
   local manifest="$1"
   local mode="${OCSERV_DEPLOYMENT_MODE:-standalone}" profile="${STATE_ROOT}/deployment-profile.json"
   local backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
+  local tls_mode="${OCSERV_TLS_MODE:-manual}"
   if [[ -e "${profile}" || -L "${profile}" ]]; then
     validate_state_file_path "deployment profile" "${profile}"
-    jq -e 'keys == ["database_backend", "database_deployment", "deployment_mode"] and
+    # tls_mode is recorded only for ACME, so releases without ACME refuse it.
+    jq -e '(keys == ["database_backend", "database_deployment", "deployment_mode"] or
+        (keys == ["database_backend", "database_deployment", "deployment_mode", "tls_mode"] and
+          .deployment_mode == "integrated" and .tls_mode == "acme")) and
       (.deployment_mode | IN("standalone", "integrated")) and
       ([.database_backend, .database_deployment] | IN(["postgres", "bundled"], ["postgres", "external"], ["mysql", "external"]))' \
       "${profile}" >/dev/null || fail "invalid deployment profile"
     mode="$(jq -r '.deployment_mode' "${profile}")"
     backend="$(jq -r '.database_backend' "${profile}")"
     deployment="$(jq -r '.database_deployment' "${profile}")"
+    tls_mode="$(jq -r '.tls_mode // "manual"' "${profile}")"
     [[ "${OCSERV_DEPLOYMENT_MODE:-${mode}}" == "${mode}" ]] ||
       fail "deployment mode cannot change during an existing installation"
     [[ "${OCSERV_DATABASE_BACKEND:-${backend}}" == "${backend}" && "${OCSERV_DATABASE_DEPLOYMENT:-${deployment}}" == "${deployment}" ]] ||
       fail "database deployment cannot change during an existing installation"
+    [[ "${OCSERV_TLS_MODE:-${tls_mode}}" == "${tls_mode}" ]] ||
+      fail "TLS mode cannot change during an existing installation"
   elif [[ -e "${CURRENT_RELEASE}" && "${mode}" != standalone ]]; then
     fail "existing standalone installation cannot be switched to Integrated"
   fi
   case "${mode}" in standalone|integrated) ;; *) fail "invalid deployment mode" ;; esac
   export OCSERV_DEPLOYMENT_MODE="${mode}"
   export OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT="${deployment}"
+  export OCSERV_TLS_MODE="${tls_mode}"
   OCSERV_GATEWAY_IMAGE="$(jq -er -s '.[0].images.gateway' "${manifest}")"
   OCSERV_CONTROL_IMAGE="$(jq -er -s '.[0].images.control' "${manifest}")"
   OCSERV_TRANSPORT_IMAGE="$(jq -er -s '.[0].images.transport' "${manifest}")"
@@ -315,7 +323,8 @@ record_deployment_profile() {
   staged="$(mktemp "${STATE_ROOT}/.deployment-profile.XXXXXX")"
   jq -n --arg mode "${OCSERV_DEPLOYMENT_MODE}" --arg backend "${OCSERV_DATABASE_BACKEND}" \
     --arg deployment "${OCSERV_DATABASE_DEPLOYMENT}" \
-    '{deployment_mode:$mode, database_backend:$backend, database_deployment:$deployment}' >"${staged}"
+    --arg tls "${OCSERV_TLS_MODE}" '{deployment_mode:$mode, database_backend:$backend,
+      database_deployment:$deployment} + (if $tls == "acme" then {tls_mode:$tls} else {} end)' >"${staged}"
   mv -- "${staged}" "${STATE_ROOT}/deployment-profile.json"
 }
 
