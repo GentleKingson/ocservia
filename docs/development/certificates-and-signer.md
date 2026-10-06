@@ -134,6 +134,40 @@ the actual RSA-OAEP capacity (190 bytes for RSA-2048). At most 32 requests enter
 business handling; excess returns 503. Header/read/write/idle timeouts are
 5/10/15/30 seconds. Failures return fixed status text, not request content.
 
+### Quick install materials
+
+`deploy/production/quick-materials.sh` prepares a first integrated, bundled
+PostgreSQL, root-lifecycle installation. It runs as root before activation with
+`OCSERV_SECRET_DIR`, `OCSERV_SIGNER_SECRET_DIR` and `OCSERV_SIGNER_STATE_DIR`,
+and creates every missing Controller and Signer file with the ownership and
+modes `compose.sh` validates. It does not create Gateway or Relay TLS identities.
+
+- Random secrets are 32-byte hex values; the database DSNs and `postgres.pgpass`
+  are derived from the generated role passwords. The command-signing key and
+  the `controller-iroh.key` identity are separate Ed25519 keys.
+- The Signer HTTPS leaf (SAN `signer`, P-256, 5 years) comes from a one-shot TLS
+  CA whose private key is discarded; only `tls-ca.pem` is kept.
+- The offline root CA (P-256, 20 years, `pathlen:1`) is generated with its key
+  encrypted by the operator passphrase from `--root-ca-passphrase-file` or a
+  prompt; the plaintext key is never written. It signs the online issuing
+  intermediate (P-256, 5 years, `CA:TRUE, pathlen:0`, certificate and CRL
+  signing, SKI). `issuer-chain.pem` is the intermediate followed by the root.
+- `root-ca.crt`, `root-ca.key.enc` and `root-ca.sha256` are exported to
+  `/root/ocservia-root-ca-export` or `--root-ca-export-dir` before the issuer is
+  installed. Interactively, the operator copies them off the host and confirms
+  the last 8 fingerprint characters; the encrypted key is then deleted from the
+  host. `--non-interactive` records `root_ca_custody: delegated` and leaves
+  moving `root-ca.key.enc` off the host to the operator.
+
+Existing files are reused and a rerun finishes an interrupted run, including a
+prepared but unconfirmed root CA. On success, `quick-install.json` in the
+Controller secret directory records the custody, root fingerprint, the
+Controller endpoint ID and file SHA-256 digests, never secret values. After
+that record exists, or once a Signer ledger exists, the script never generates
+material again; a missing file fails closed. Signer `init` in the lifecycle
+remains the authority that validates the CA. Focused check:
+`scripts/test-controller-quick-materials.sh` (root or passwordless sudo).
+
 ### Policy and durable effects
 
 Policy `rsa-client-v1-24h` accepts signed RSA-2048/3072/4096 CSRs with exponent
