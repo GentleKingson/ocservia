@@ -205,7 +205,8 @@ beforeEach(() => {
     selectionError: "",
     userGroupState: [],
     select: vi.fn().mockResolvedValue(undefined),
-    connect: vi.fn().mockResolvedValue(undefined),
+    start: vi.fn(),
+    stop: vi.fn(),
     trackOperation: vi.fn().mockResolvedValue(undefined),
   });
   mocks.workspaceContext.mockReturnValue({ id: "workspace-a", generation: 1 });

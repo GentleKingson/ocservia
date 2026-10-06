@@ -15,6 +15,8 @@ import {
   rolloutTone,
 } from "../features/operations/state-tone";
 
+import { createForegroundRefresh } from "../shared/foreground-refresh";
+
 const route = useRoute();
 
 const rollout = ref<AgentRollout | undefined>(undefined);
@@ -25,7 +27,11 @@ const resuming = ref(false);
 const resumeError = ref("");
 
 const activeStates = new Set(["queued", "running", "paused"]);
-let pollTimer: ReturnType<typeof setInterval> | undefined;
+const foregroundRefresh = createForegroundRefresh(async () => {
+  if (rollout.value === undefined || activeStates.has(rollout.value.state)) {
+    await refresh();
+  }
+}, 2000);
 
 const exclusions = computed(() =>
   (rollout.value?.excluded ?? []).map((value: unknown) => {
@@ -111,18 +117,8 @@ async function resume(): Promise<void> {
   }
 }
 
-onMounted(() => {
-  void refresh();
-  pollTimer = setInterval(() => {
-    if (rollout.value === undefined || activeStates.has(rollout.value.state)) {
-      void refresh();
-    }
-  }, 2000);
-});
-
-onBeforeUnmount(() => {
-  if (pollTimer) clearInterval(pollTimer);
-});
+onMounted(() => foregroundRefresh.start());
+onBeforeUnmount(() => foregroundRefresh.stop());
 </script>
 
 <template>

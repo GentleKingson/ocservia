@@ -12,6 +12,9 @@ import {
   selectWorkspace,
 } from "./api/workspace";
 import { useReadinessStore } from "./shared/readiness";
+import { useFleetStore } from "./shared/fleet";
+
+import { createForegroundRefresh } from "./shared/foreground-refresh";
 
 const readiness = useReadinessStore();
 const router = useRouter();
@@ -21,7 +24,10 @@ const selectedWorkspaceId = ref("");
 // The shell stays hidden until the session is confirmed, so signed-out
 // visits go to the login page without rendering the console first.
 const authenticated = ref(false);
-let refreshTimer: ReturnType<typeof setInterval> | undefined;
+const foregroundRefresh = createForegroundRefresh(
+  () => readiness.refresh(),
+  () => (readiness.isReady ? 60_000 : 15_000),
+);
 let stopLoginWatch: (() => void) | undefined;
 
 onMounted(async () => {
@@ -29,10 +35,12 @@ onMounted(async () => {
   stopLoginWatch = watch(
     isLogin,
     async (login) => {
-      clearInterval(refreshTimer);
-      if (login) return;
-      void readiness.refresh();
-      refreshTimer = setInterval(() => void readiness.refresh(), 15_000);
+      foregroundRefresh.stop();
+      if (login) {
+        useFleetStore().disconnect();
+        return;
+      }
+      foregroundRefresh.start();
       try {
         workspaces.value = await listAuthorizedWorkspaces();
         authenticated.value = true;
@@ -53,7 +61,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   stopLoginWatch?.();
-  clearInterval(refreshTimer);
+  foregroundRefresh.stop();
 });
 
 async function changeWorkspace(workspaceId: string): Promise<void> {

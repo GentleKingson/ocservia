@@ -156,6 +156,22 @@ describe("controlled fleet operations", () => {
     expect(store.sessions).toEqual([]);
   });
 
+  it("keeps accepted operation tracking but stops detail reads after leaving the view", async () => {
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation).mockResolvedValue(operation("succeeded"));
+    const store = useFleetStore();
+    await store.select(node.id);
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(0);
+    store.stop();
+    expect(store.operationTracking).toBe(true);
+    await vi.advanceTimersByTimeAsync(750);
+    await completion;
+    expect(store.latestOperation?.state).toBe("succeeded");
+    expect(store.selected).toBeUndefined();
+    expect(getNode).toHaveBeenCalledTimes(1);
+  });
+
   it("retries a failed create at the current desired version", async () => {
     vi.mocked(createUser).mockResolvedValue(operation("succeeded"));
     const store = useFleetStore();

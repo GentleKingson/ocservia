@@ -196,6 +196,20 @@ direction, zero disabling the user and unlimited quota; expiry is UTC.
 <a id="overview"></a>
 ### Operations, approvals and audit
 
+Automatic snapshot refresh runs only while the document is visible and focused.
+Fleet closes its event stream and cancels snapshot reads on blur/hide, then
+rebuilds and reconnects immediately on return. With a healthy event stream,
+Fleet and overview supplement live updates every 60 seconds after the previous
+refresh completes; stream/read failures use 15 seconds. Readiness checks use
+60 seconds when healthy and 15 seconds after failure. Active rollout detail
+retains its 2-second interval. Successful reads clear the existing stale state.
+The shared `foreground-refresh.ts` scheduler merges event notifications and
+periodic polls into one timer per owner, never overlaps scheduled reads, and
+coalesces events during a read into one follow-up. Leaving a Fleet view stops
+its snapshot reads and clears detail selection; returning refreshes immediately.
+Accepted node-operation tracking remains independent and is not cancelled by
+focus changes or leaving the view.
+
 A plain operation's `unknown` is a warning and Fleet keeps polling it. Upgrade
 and rollout-node `unknown` are terminal failures. Tone helpers never decide
 polling. Rollout totals distinguish success, failure (including rolled back) and

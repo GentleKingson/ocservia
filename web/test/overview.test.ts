@@ -516,6 +516,22 @@ describe("operational overview", () => {
     overview.stop();
   });
 
+  it("follows stream health for 60-second supplementation and 15-second recovery", async () => {
+    const fleet = useFleetStore();
+    fleet.streamConnected = true;
+    const overview = useOverviewStore();
+    overview.start();
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(listOperations).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listOperations).toHaveBeenCalledTimes(2);
+    fleet.streamConnected = false;
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(listOperations).toHaveBeenCalledTimes(3);
+    overview.stop();
+  });
+
   it("stops refreshing and clears state when the overview unmounts", async () => {
     const overview = useOverviewStore();
     overview.start();

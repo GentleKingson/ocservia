@@ -54,7 +54,10 @@ test.beforeEach(async ({ page }) => {
       readonly readyState = 1;
       onerror = null;
       onmessage = null;
-      onopen = null;
+      onopen: (() => void) | null = null;
+      constructor() {
+        queueMicrotask(() => this.onopen?.());
+      }
       addEventListener(): void {}
       removeEventListener(): void {}
       close(): void {}
@@ -163,4 +166,88 @@ test("keeps wide tables inside their own scroll region", async ({ page }) => {
         document.documentElement.clientWidth,
     ),
   ).toBeLessThanOrEqual(0);
+});
+
+test("refreshes after focus returns and recovers from a failed snapshot", async ({
+  page,
+}) => {
+  let requests = 0;
+  let fail = false;
+  await page.route("**/api/v1/events?**", (route) =>
+    route.fulfill({ json: { items: [], page: { has_more: false } } }),
+  );
+  await page.route("**/api/v1/nodes?**", (route) => {
+    requests += 1;
+    return route.fulfill(
+      fail
+        ? { status: 503, json: { message: "temporarily unavailable" } }
+        : { json: { items: firstPage, page: { has_more: false } } },
+    );
+  });
+  await page.clock.install();
+  await page.goto("/nodes");
+  await expect(page.getByText("Showing 2 of 2 nodes")).toBeVisible();
+  fail = true;
+  await page.clock.runFor(60_000);
+  const stale = page.getByText(
+    "Refresh failed. Showing the last successful snapshot.",
+  );
+  await expect(stale).toBeVisible();
+  // Headless Chromium keeps every page focused; drive the browser events
+  // explicitly while exercising the real scheduler, requests and stale UI.
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => false,
+    });
+    window.dispatchEvent(new Event("blur"));
+  });
+  const pausedRequests = requests;
+  await page.clock.runFor(60_000);
+  expect(requests).toBe(pausedRequests);
+  fail = false;
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => true,
+    });
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(stale).toHaveCount(0);
+  expect(requests).toBe(pausedRequests + 1);
+  await page.clock.runFor(60_000);
+  await expect.poll(() => requests).toBe(pausedRequests + 2);
+});
+
+test("stops fleet reads after SPA navigation and refreshes immediately on return", async ({
+  page,
+  isMobile,
+}) => {
+  let requests = 0;
+  await page.route("**/api/v1/events?**", (route) =>
+    route.fulfill({ json: { items: [], page: { has_more: false } } }),
+  );
+  await page.route("**/api/v1/nodes?**", (route) => {
+    requests += 1;
+    return route.fulfill({
+      json: { items: firstPage, page: { has_more: false } },
+    });
+  });
+  await page.route("**/api/v1/version", (route) => route.fulfill({ json: {} }));
+  await page.clock.install();
+  await page.goto("/nodes");
+  await expect(page.getByText("Showing 2 of 2 nodes")).toBeVisible();
+  await page.clock.runFor(59_000);
+  expect(requests).toBe(1);
+  if (isMobile)
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await page.clock.runFor(120_000);
+  expect(requests).toBe(1);
+  if (isMobile)
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  await page.getByRole("link", { name: "Nodes", exact: true }).click();
+  await expect.poll(() => requests).toBe(2);
 });
