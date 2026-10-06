@@ -170,18 +170,19 @@ done
 
 # The curl mock answers the --check installer-presence probe from the
 # fixture origin's real git state (a release ships deploy/production/
-# install.sh exactly when the tagged tree has it) and delegates everything
-# else to the real curl.
+# install.sh or quick-install.sh exactly when the tagged tree has it) and
+# delegates everything else to the real curl.
 REAL_CURL="$(command -v curl)"
 cat >"${bin}/curl" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 for arg in "\$@"; do
   case "\${arg}" in
-    https://raw.githubusercontent.com/GentleKingson/ocservia/*/deploy/production/install.sh)
+    https://raw.githubusercontent.com/GentleKingson/ocservia/*/deploy/production/*.sh)
       probe_version="\${arg#https://raw.githubusercontent.com/GentleKingson/ocservia/}"
-      probe_version="\${probe_version%/deploy/production/install.sh}"
-      if "${REAL_GIT}" -C "${origin}" cat-file -e "\${probe_version}:deploy/production/install.sh" 2>/dev/null; then
+      probe_path="\${probe_version#*/}"
+      probe_version="\${probe_version%%/*}"
+      if "${REAL_GIT}" -C "${origin}" cat-file -e "\${probe_version}:\${probe_path}" 2>/dev/null; then
         exit 0
       fi
       echo "curl mock: 404 not found" >&2
@@ -585,4 +586,135 @@ git -C "${origin_work}" push -q "${origin}" v0.1.4-rc.1
 capture_from "${config}" --version v0.1.4-rc.1 --root-lifecycle
 assert_status 0 "an exact RC checkout must install"
 [[ "$(git -C "${source_root}/v0.1.4-rc.1" describe --tags --exact-match)" == v0.1.4-rc.1 ]] || die "wrong RC checkout"
+# Quick: v0.1.5 ships a mocked quick-install.sh that records its handoff.
+mkdir -p -- "${origin_work}/deploy/production"
+cat >"${origin_work}/deploy/production/quick-install.sh" <<'EOF'
+#!/usr/bin/env bash
+log="${BOOTSTRAP_TEST_INSTALL_LOG:?}"
+printf 'quick-args:%s\n' "$*" >>"${log}"
+printf 'quick-public-host:%s\n' "${OCSERV_PUBLIC_HOST:-<unset>}" >>"${log}"
+EOF
+chmod 0755 -- "${origin_work}/deploy/production/quick-install.sh"
+git -C "${origin_work}" add -A
+git -C "${origin_work}" commit -qm quick
+git -C "${origin_work}" tag v0.1.5
+git -C "${origin_work}" push -q "${origin}" v0.1.5
+
+# The preflight tools answer from fixture state: getent from ${dns}/<family>/
+# <name>, ip from QUICK_TEST_LOCAL_V4, and ss reports a listener when
+# ${fixture}/ss-tcp or ss-udp exists.
+for tool in awk sort tr grep cut; do
+  link_tool "${tool}"
+done
+dns="${fixture}/dns"
+cat >"${bin}/getent" <<EOF
+#!/usr/bin/env bash
+[[ -f "${dns}/\$1/\$2" ]] || exit 2
+while read -r address; do printf '%s STREAM %s\n' "\${address}" "\$2"; done <"${dns}/\$1/\$2"
+EOF
+cat >"${bin}/ip" <<'EOF'
+#!/usr/bin/env bash
+[[ "$2" != -4 || -z "${QUICK_TEST_LOCAL_V4:-}" ]] ||
+  printf '2: eth0    inet %s/24 brd 0.0.0.0 scope global eth0\n' "${QUICK_TEST_LOCAL_V4}"
+EOF
+cat >"${bin}/ss" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  -Hltn) [[ ! -e "${fixture}/ss-tcp" ]] || echo "LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*" ;;
+  -Hlun) [[ ! -e "${fixture}/ss-udp" ]] || echo "UNCONN 0 0 0.0.0.0:7842 0.0.0.0:*" ;;
+esac
+EOF
+chmod 0755 -- "${bin}/getent" "${bin}/ip" "${bin}/ss"
+
+set_dns() {
+  rm -rf -- "${dns}" "${fixture}/ss-tcp" "${fixture}/ss-udp"
+  mkdir -p -- "${dns}/ahostsv4" "${dns}/ahostsv6"
+  echo 203.0.113.10 >"${dns}/ahostsv4/vpn.example.test"
+  echo 203.0.113.10 >"${dns}/ahostsv4/relay.example.test"
+}
+quick=(--quick --controller-domain vpn.example.test --relay-domain relay.example.test --acme-email ops@example.test)
+
+reset_state
+set_dns
+capture --version v0.1.5 --quick
+assert_status 2 "--quick without the domains must be a usage error"
+capture --version v0.1.5 --controller-domain vpn.example.test
+assert_status 2 "Quick options without --quick must be a usage error"
+capture --version v0.1.5 "${quick[@]}" --relay-domain other.example.test
+assert_status 2 "a repeated Quick option must be a usage error"
+capture --version v0.1.5 --quick --controller-domain Vpn.example.test --relay-domain relay.example.test --acme-email ops@example.test
+assert_status 1 "an uppercase domain must fail"
+assert_output "lowercase DNS name"
+capture --version v0.1.5 --quick --controller-domain vpn.example.test --relay-domain vpn.example.test --acme-email ops@example.test
+assert_status 1 "equal domains must fail"
+assert_output "must differ"
+capture --version v0.1.5 --quick --controller-domain vpn.example.test --relay-domain relay.example.test --acme-email 'ops@bad host'
+assert_status 1 "an invalid email must fail"
+assert_output "plain email address"
+capture --version v0.1.5 "${quick[@]}" --root-ca-export-dir relative/dir
+assert_status 1 "a relative root CA path must fail"
+assert_output "must be absolute"
+assert_log_empty "${git_log}"
+echo "Quick usage and inputs are validated before any action"
+
+reset_state
+set_dns
+printf 'OCSERV_NOT_A_SETTING=x\n' >"${config}/install.env"
+capture_from "${config}" --version v0.1.5 "${quick[@]}" --check
+assert_status 0 "the Quick check must pass and ignore ./install.env"
+assert_output "lifecycle: root (explicit"
+assert_output "warning: vpn.example.test resolves to 203.0.113.10, which is not on this host"
+assert_output "DNS: vpn.example.test and relay.example.test resolve to 203.0.113.10"
+assert_output "ports: TCP443 and UDP7842 are free"
+assert_output "release installer: deploy/production/quick-install.sh is published for v0.1.5"
+[[ ! -e "${source_root}" ]] || die "the Quick check must not create the source root"
+EXTRA_ENV=(QUICK_TEST_LOCAL_V4=203.0.113.10)
+capture --version v0.1.5 "${quick[@]}" --check
+assert_status 0 "the Quick check with a local address must pass"
+if grep -q -- "warning:" <<<"${RUN_OUTPUT}"; then
+  die "a local A record must not warn"
+fi
+EXTRA_ENV=()
+capture --version v0.1.2 "${quick[@]}" --check
+assert_status 1 "a release without quick-install.sh must fail the Quick check"
+assert_output "does not appear to ship deploy/production/quick-install.sh"
+echo "the Quick check validates DNS, ports and the release read-only"
+
+quick_preflight_fails() {
+  local message="$1"
+  capture --version v0.1.5 "${quick[@]}"
+  assert_status 1 "the Quick preflight must fail: ${message}"
+  assert_output "${message}"
+  [[ ! -e "${source_root}" ]] || die "a failed Quick preflight must not create the source root"
+  assert_log_empty "${install_log}"
+}
+reset_state
+set_dns
+rm -f -- "${dns}/ahostsv4/relay.example.test"
+quick_preflight_fails "relay.example.test has no IPv4 address"
+set_dns
+echo 203.0.113.11 >"${dns}/ahostsv4/relay.example.test"
+quick_preflight_fails "must resolve to the same IPv4 addresses"
+set_dns
+echo 2001:db8::10 >"${dns}/ahostsv6/vpn.example.test"
+quick_preflight_fails "AAAA address 2001:db8::10, which is not on this host"
+set_dns
+: >"${fixture}/ss-tcp"
+quick_preflight_fails "TCP port 443 is already in use"
+set_dns
+: >"${fixture}/ss-udp"
+quick_preflight_fails "UDP port 7842 is already in use"
+echo "the Quick preflight fails closed before cloning"
+
+reset_state
+set_dns
+capture --version v0.1.5 "${quick[@]}" --root-ca-export-dir /media/offline
+assert_status 0 "the Quick handoff must succeed"
+assert_output "handing off to the Quick installer"
+assert_log_contains "${install_log}" "quick-args:--controller-domain vpn.example.test --relay-domain relay.example.test --acme-email ops@example.test --root-ca-export-dir /media/offline"
+assert_log_contains "${install_log}" "quick-public-host:<unset>"
+capture --version v0.1.2 "${quick[@]}"
+assert_status 1 "a release without quick-install.sh must be refused"
+assert_output "does not support --quick"
+echo "--quick hands off to the release's Quick installer"
 echo "Controller bootstrap tests passed"
