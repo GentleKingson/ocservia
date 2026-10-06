@@ -4,7 +4,8 @@ import type {
   PlatformEvent,
 } from "@ocservia/api-client";
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
+import { createForegroundRefresh } from "./foreground-refresh";
 
 import {
   getWorkspace,
@@ -14,6 +15,7 @@ import {
 } from "../api/workspace";
 import { listEvents, platformEventsEvent } from "../api/events";
 import { listOperations, operationSummary } from "../api/operations";
+import { useFleetStore } from "./fleet";
 
 export const recentOperationWindow = 20;
 export const recentEventLimit = 12;
@@ -21,6 +23,7 @@ const retainedEventLimit = 50;
 const platformRefreshDelay = 500;
 
 export const useOverviewStore = defineStore("overview", () => {
+  const fleet = useFleetStore();
   const operations = ref<Operation[]>([]);
   const events = ref<PlatformEvent[]>([]);
   const summary = ref<OperationSummary>({ active: 0, unknown: 0 });
@@ -37,7 +40,6 @@ export const useOverviewStore = defineStore("overview", () => {
   let eventsController: AbortController | undefined;
   let operationsSequence = 0;
   let eventsSequence = 0;
-  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let started = false;
 
   function isCurrent(
@@ -169,19 +171,37 @@ export const useOverviewStore = defineStore("overview", () => {
     }
   }
 
-  function refresh(): void {
-    void loadOperations();
-    void loadEvents();
+  async function refreshSnapshot(): Promise<void> {
+    await Promise.all([loadOperations(), loadEvents()]);
   }
 
+  function refresh(): void {
+    foregroundRefresh.request();
+  }
+
+  const foregroundRefresh = createForegroundRefresh(
+    refreshSnapshot,
+    () =>
+      fleet.streamConnected &&
+      !operationsUnavailable.value &&
+      !eventsUnavailable.value
+        ? 60_000
+        : 15_000,
+    () => {
+      operationsController?.abort();
+      eventsController?.abort();
+    },
+  );
+
+  watch(
+    () => fleet.streamConnected,
+    () => {
+      foregroundRefresh.reschedule();
+    },
+  );
+
   function schedulePlatformRefresh(): void {
-    // Fixed-window coalescing: a scheduled refresh is never postponed by
-    // later events, so a sustained event stream cannot starve the overview.
-    if (refreshTimer) return;
-    refreshTimer = setTimeout(() => {
-      refreshTimer = undefined;
-      refresh();
-    }, platformRefreshDelay);
+    foregroundRefresh.request(platformRefreshDelay);
   }
 
   function clearState(): void {
@@ -215,18 +235,19 @@ export const useOverviewStore = defineStore("overview", () => {
     window.addEventListener(workspaceChangedEvent, resetWorkspace);
     window.addEventListener(platformEventsEvent, schedulePlatformRefresh);
     clearState();
-    refresh();
+    foregroundRefresh.start();
   }
 
   function stop(): void {
     if (!started) return;
     started = false;
+    foregroundRefresh.stop();
     window.removeEventListener(workspaceChangedEvent, resetWorkspace);
     window.removeEventListener(platformEventsEvent, schedulePlatformRefresh);
-    clearTimeout(refreshTimer);
-    refreshTimer = undefined;
     clearState();
   }
+
+  onScopeDispose(stop);
 
   // Active/unknown totals come from the backend summary so they count the
   // whole workspace, not just the newest operations page.

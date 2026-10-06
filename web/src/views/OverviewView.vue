@@ -83,13 +83,13 @@ function timeLabel(value: Date | string): string {
     : value;
 }
 
-onMounted(async () => {
+onMounted(() => {
   overview.start();
-  if (!fleet.initialized) await fleet.rebuild();
-  if (fleet.initialized) void fleet.connect();
+  fleet.start();
 });
 onBeforeUnmount(() => {
   overview.stop();
+  fleet.stop();
 });
 </script>
 

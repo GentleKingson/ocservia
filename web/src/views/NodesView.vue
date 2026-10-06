@@ -2,7 +2,7 @@
 import { Ellipsis } from "@lucide/vue";
 import type { NodeObservedState } from "@ocservia/api-client";
 import { defaultWindow, useEventListener, useNow } from "@vueuse/core";
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
@@ -49,10 +49,8 @@ const router = useRouter();
 const { t, locale } = useI18n();
 const now = useNow({ interval: 30_000 });
 
-onMounted(async () => {
-  if (!fleet.initialized) await fleet.rebuild();
-  if (fleet.initialized) void fleet.connect();
-});
+onMounted(() => fleet.start());
+onBeforeUnmount(() => fleet.stop());
 
 // The URL query owns the list view state so refresh, history and returning
 // to the list restore it. Filtering reads the store only; it never writes.

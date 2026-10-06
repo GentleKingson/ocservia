@@ -72,6 +72,10 @@ const currentNode = computed<NodeObservedState | undefined>(() =>
 const detailLoading = ref(true);
 const detailState = ref<"loading" | "unavailable" | "not-found">("loading");
 let detailSequence = 0;
+watch(currentNode, (node) => {
+  // A foreground retry can recover the initial detail read without navigation.
+  if (node) detailState.value = "loading";
+});
 
 const pendingAction = ref<{
   kind: "disconnect" | "terminate" | "unban" | "reload" | "upgradeAgent";
@@ -202,8 +206,6 @@ async function selectRouteNode(): Promise<void> {
     detailState.value = "not-found";
     return;
   }
-  if (!fleet.initialized) await fleet.rebuild();
-  if (sequence !== detailSequence) return;
   await fleet.select(nodeId);
   if (sequence !== detailSequence) return;
   detailLoading.value = false;
@@ -215,28 +217,20 @@ async function selectRouteNode(): Promise<void> {
     fleet.selectionError === "notFound" ? "not-found" : "unavailable";
 }
 
-async function initialize(): Promise<void> {
-  const sequence = ++detailSequence;
-  detailLoading.value = true;
-  detailState.value = "loading";
-  if (!fleet.initialized) await fleet.rebuild();
-  if (sequence !== detailSequence) return;
-  if (fleet.initialized) void fleet.connect();
-  await selectRouteNode();
-}
-
 function refreshForWorkspace(): void {
   closeNodeDialogs();
-  void initialize();
+  void selectRouteNode();
 }
 
 onMounted(() => {
+  fleet.start();
   window.addEventListener(workspaceChangedEvent, refreshForWorkspace);
-  void initialize();
+  void selectRouteNode();
 });
 onBeforeUnmount(() => {
   closeNodeDialogs();
   detailSequence += 1;
+  fleet.stop();
   window.removeEventListener(workspaceChangedEvent, refreshForWorkspace);
 });
 watch(routeNodeId, () => void selectRouteNode(), { flush: "sync" });

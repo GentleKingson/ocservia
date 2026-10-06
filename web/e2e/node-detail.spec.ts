@@ -157,3 +157,32 @@ test("copies long identifiers from a directly opened detail", async ({
   await page.getByRole("link", { name: "Back to nodes" }).click();
   await expect(page).toHaveURL(/\/nodes$/);
 });
+
+test("recovers an initial detail failure and stops its reads after leaving", async ({
+  page,
+}) => {
+  let fail = true;
+  let reads = 0;
+  await page.route("**/api/v1/events?**", (route) =>
+    route.fulfill({ json: { items: [], page: { has_more: false } } }),
+  );
+  await page.route(`**/api/v1/nodes/${relayNode.id}`, (route) => {
+    reads += 1;
+    return route.fulfill(
+      fail ? { status: 503, json: {} } : { json: relayNode },
+    );
+  });
+  await page.clock.install();
+  await page.goto(`/nodes/${relayNode.id}`);
+  await expect(page.getByText("Node state is unavailable")).toBeVisible();
+  fail = false;
+  await page.clock.runFor(15_000);
+  await expect(page.getByTestId("node-detail-status")).toHaveText(
+    "Latest observation",
+  );
+  await page.getByRole("link", { name: "Back to nodes" }).click();
+  await expect(page).toHaveURL(/\/nodes$/);
+  const readsOnLeave = reads;
+  await page.clock.runFor(120_000);
+  expect(reads).toBe(readsOnLeave);
+});
