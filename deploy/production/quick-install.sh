@@ -13,7 +13,9 @@
 # Usage (normally through controller-bootstrap.sh --quick):
 #   quick-install.sh --controller-domain NAME --relay-domain NAME
 #     --acme-email ADDRESS [--root-ca-passphrase-file PATH]
-#     [--root-ca-export-dir PATH]
+#     [--root-ca-export-dir PATH] [--release-file PATH]
+# --release-file activates a local release manifest with controller.sh instead
+# of install.sh downloading the checkout tag's Release (release acceptance).
 # OCSERV_ACME_DIRECTORY_URL and OCSERV_ACME_CA_FILE select a private ACME
 # directory on the first run (test servers such as Pebble).
 set -euo pipefail
@@ -29,7 +31,7 @@ HEADER="# ocservia Quick install configuration (generated; keep unchanged)"
 fail() { echo "quick install: $*" >&2; exit 1; }
 note() { echo "quick install: $*"; }
 
-controller_domain="" relay_domain="" acme_email=""
+controller_domain="" relay_domain="" acme_email="" release_file=""
 materials_args=()
 original_args=("$@")
 while (($#)); do
@@ -40,12 +42,15 @@ while (($#)); do
     --acme-email) acme_email="$2" ;;
     --root-ca-passphrase-file) materials_args+=("$1" "$2" --non-interactive) ;;
     --root-ca-export-dir) materials_args+=("$1" "$2") ;;
+    --release-file) release_file="$2" ;;
     *) fail "unknown argument: $1" ;;
   esac
   shift 2
 done
 [[ -n "${controller_domain}" && -n "${relay_domain}" && -n "${acme_email}" ]] ||
   fail "--controller-domain, --relay-domain and --acme-email are required"
+[[ -z "${release_file}" || ("${release_file}" == /* && -f "${release_file}") ]] ||
+  fail "--release-file must be an absolute path to a release manifest"
 
 if ((EUID != 0)); then
   command -v sudo >/dev/null 2>&1 || fail "run as root or install sudo"
@@ -117,7 +122,11 @@ fi
 source "${ROOT}/deploy/lib/install-env.sh"
 install_env_load "${CONFIG}" "${config_keys[@]}"
 
-if [[ ! -e "${STATE_ROOT}/current-release.json" ]]; then
+if [[ -e "${STATE_ROOT}/current-release.json" ]]; then
+  :
+elif [[ -n "${release_file}" ]]; then
+  "${ROOT}/deploy/production/controller.sh" install --release-file "${release_file}"
+else
   (cd -- "${CONFIG_DIR}" && "${ROOT}/deploy/production/install.sh" --root-lifecycle)
 fi
 

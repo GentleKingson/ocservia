@@ -27,16 +27,33 @@ jobs:
       profile: smoke
       production_signer: true
       run-resilience: true
+  quick:
+    name: Quick Install (Pebble ACME, amd64)
+    needs: main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-cache-credentials
+      - name: Quick install, rerun, upgrade and rollback against Pebble
+        env:
+          VERSION: '0.0.0'
+        run: |
+          sudo --preserve-env=VERSION,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT \
+            --preserve-env=BUILD_CACHE_AVAILABLE,ACTIONS_RUNTIME_TOKEN,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL \
+            bash scripts/release-quick-acceptance.sh
   result:
     name: Release Check Result
-    needs: [main, full-ci, security, business]
+    needs: [main, full-ci, security, business, quick]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          if jq -e 'keys == ["business","full-ci","main","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
+          if jq -e 'keys == ["business","full-ci","main","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
             echo PASS >>"$GITHUB_STEP_SUMMARY"
           else
             echo FAIL >>"$GITHUB_STEP_SUMMARY"
