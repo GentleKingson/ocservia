@@ -141,6 +141,7 @@ onBeforeUnmount(() => {
       <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <MetricCard
           :title="$t('controlPlane')"
+          to="/settings"
           :icon="Server"
           value-testid="overview-control-plane"
           :value="
@@ -156,6 +157,7 @@ onBeforeUnmount(() => {
         />
         <MetricCard
           :title="$t('nodes')"
+          to="/nodes"
           :icon="Workflow"
           value-testid="overview-nodes"
           :value="sourceValue(fleetState, fleet.nodes.length)"
@@ -171,6 +173,7 @@ onBeforeUnmount(() => {
         </MetricCard>
         <MetricCard
           :title="$t('observedSessions')"
+          to="/nodes"
           :icon="Users"
           value-testid="overview-sessions"
           :value="sourceValue(fleetState, fleet.sessionCount)"
@@ -183,6 +186,7 @@ onBeforeUnmount(() => {
         />
         <MetricCard
           :title="$t('overviewActiveOperations')"
+          to="/operations"
           :icon="ListChecks"
           value-testid="overview-operations"
           :value="sourceValue(operationsState, overview.activeOperations)"
@@ -207,6 +211,7 @@ onBeforeUnmount(() => {
         </MetricCard>
         <MetricCard
           :title="$t('lastObservedDirectPaths')"
+          :to="{ path: '/nodes', query: { columns: 'path' } }"
           :icon="Radio"
           value-testid="overview-connectivity"
           :value="sourceValue(fleetState, fleet.direct)"
@@ -219,6 +224,7 @@ onBeforeUnmount(() => {
         </MetricCard>
         <MetricCard
           :title="$t('agentVersions')"
+          to="/nodes"
           :icon="PackageCheck"
           value-testid="overview-agent-versions"
           :value="sourceValue(fleetState, fleet.agentCurrent)"
