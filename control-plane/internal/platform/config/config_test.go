@@ -329,6 +329,24 @@ func TestMigrateOnlyAcceptsRuntimeRole(t *testing.T) {
 	}
 }
 
+func TestProvisionWorkspaceIsExclusiveOneShot(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		values := map[string]string{
+			"OCSERV_DATABASE_URL":          "postgres://owner@db/test",
+			"OCSERV_RUNTIME_DATABASE_ROLE": "ocservia_app",
+		}
+		value, ok := values[key]
+		return value, ok
+	}
+	config, err := Load([]string{"--provision-management-workspace"}, lookup)
+	if err != nil || !config.ProvisionWorkspace {
+		t.Fatalf("Load() = %+v, %v", config, err)
+	}
+	if _, err := Load([]string{"--provision-management-workspace", "--migrate-only"}, lookup); err == nil {
+		t.Fatal("Load() combined workspace provisioning with migration")
+	}
+}
+
 func TestRemovedSchemaCompatibilityFlagIsRejected(t *testing.T) {
 	lookup := func(key string) (string, bool) {
 		values := map[string]string{
