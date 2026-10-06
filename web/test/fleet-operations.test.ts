@@ -45,6 +45,13 @@ vi.mock("../src/api/nodes", () => ({
   listNodeSessions: vi.fn(),
   listNodes: vi.fn(),
 }));
+vi.mock("../src/api/events", () => ({
+  eventStreamPath: vi.fn(),
+  listEvents: vi
+    .fn()
+    .mockResolvedValue({ items: [], page: { hasMore: false } }),
+  platformEventsEvent: "ocservia:platform-events",
+}));
 vi.mock("../src/api/agents", () => ({
   upgradeNodeAgent: vi.fn(),
 }));
@@ -336,11 +343,13 @@ describe("controlled fleet operations", () => {
     const store = useFleetStore();
 
     const staleRebuild = store.rebuild();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(listNodes).toHaveBeenCalledTimes(1);
+    });
     const currentRebuild = store.rebuild();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(listNodes).toHaveBeenCalledTimes(2);
+    });
 
     second.resolve(nodePage(nodeB));
     await currentRebuild;

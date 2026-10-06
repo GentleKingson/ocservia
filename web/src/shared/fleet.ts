@@ -28,7 +28,11 @@ import {
   listNodeSessions,
   listNodeUserGroupState,
 } from "../api/nodes";
-import { eventStreamPath, platformEventsEvent } from "../api/events";
+import {
+  eventStreamPath,
+  listEvents,
+  platformEventsEvent,
+} from "../api/events";
 import { probeAuthentication } from "../api/platform";
 import { upgradeNodeAgent } from "../api/agents";
 import {
@@ -105,6 +109,10 @@ export const useFleetStore = defineStore("fleet", () => {
   // When the complete node snapshot was last replaced, for freshness labels.
   const snapshotAt = ref<Date>();
   let source: EventSource | undefined;
+  // Platform event the node snapshot already covers. The stream resumes after
+  // it; without a cursor the server replays the whole workspace history and
+  // every replayed page triggers another rebuild.
+  let eventCursor: string | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let connectSequence = 0;
   const controllers = new Set<AbortController>();
@@ -231,6 +239,16 @@ export const useFleetStore = defineStore("fleet", () => {
           isCurrent(context, controller),
         );
       if (!isLatestRebuild()) return;
+      // Read the cursor before the nodes so events racing the snapshot are
+      // still delivered. An open stream keeps the cursor current itself.
+      // A failed lookup falls back to a full replay rather than failing.
+      const snapshotCursor = source
+        ? undefined
+        : await listEvents(undefined, controller.signal, "desc").then(
+            (page) => page.items[0]?.id,
+            () => undefined,
+          );
+      if (!isLatestRebuild()) return;
       const rebuilt: NodeObservedState[] = [];
       let cursor: string | undefined;
       do {
@@ -241,6 +259,7 @@ export const useFleetStore = defineStore("fleet", () => {
       } while (cursor);
       if (!isLatestRebuild()) return;
       nodes.value = rebuilt;
+      if (!source) eventCursor = snapshotCursor;
       snapshotAt.value = new Date();
       initialized.value = true;
       if (selected.value && selectSequence === selectSequenceAtStart)
@@ -527,13 +546,13 @@ export const useFleetStore = defineStore("fleet", () => {
     let context: WorkspaceContext;
     try {
       context = await currentContext();
-      const stream = new EventSource(await eventStreamPath());
+      const stream = new EventSource(await eventStreamPath(eventCursor));
       if (sequence !== connectSequence || !isCurrent(context)) {
         stream.close();
         return;
       }
       source = stream;
-      stream.addEventListener("platform", () => {
+      stream.addEventListener("platform", (message) => {
         if (
           sequence !== connectSequence ||
           !isCurrent(context) ||
@@ -542,6 +561,8 @@ export const useFleetStore = defineStore("fleet", () => {
           stream.close();
           return;
         }
+        if (message instanceof MessageEvent && message.lastEventId)
+          eventCursor = message.lastEventId;
         clearTimeout(refreshTimer);
         refreshTimer = setTimeout(() => void rebuild(), 150);
         if (typeof window !== "undefined")
@@ -568,6 +589,7 @@ export const useFleetStore = defineStore("fleet", () => {
     connectSequence += 1;
     source?.close();
     source = undefined;
+    eventCursor = undefined;
     clearTimeout(refreshTimer);
     abortRequests();
   }
