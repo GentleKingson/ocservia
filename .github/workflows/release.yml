@@ -70,7 +70,7 @@ jobs:
         run: |
           scripts/bootstrap.sh npm-security
           source scripts/env.sh
-          scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR"
+          scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
           source_commit="$(git rev-parse HEAD)"
           for arch in amd64 arm64; do
             args=()
