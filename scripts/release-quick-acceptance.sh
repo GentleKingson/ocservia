@@ -146,13 +146,20 @@ pass "ACME certificates for both names verify against the directory root"
 
 stage=accounts
 login() {
-  local account="$1" status
-  rm -f -- "${work}/${account}.cookies"
-  status="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/${account}.txt" |
-    jq -Rc --arg username "initial-${account}" '{username: $username, password: .}' |
-    curl -sS -o /dev/null -w '%{http_code}' --cacert "${work}/acme-root.pem" -c "${work}/${account}.cookies" \
-      -H "Origin: https://${controller}" -H 'Content-Type: application/json' --data-binary @- \
-      "https://${controller}/api/v1/auth/login")"
+  local account="$1" status attempt retry
+  # Local login admits 5 attempts per source per minute; the stages log in
+  # more often than that, so wait out the window once.
+  for attempt in 1 2; do
+    rm -f -- "${work}/${account}.cookies"
+    status="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/${account}.txt" |
+      jq -Rc --arg username "initial-${account}" '{username: $username, password: .}' |
+      curl -sS -o /dev/null -w '%{http_code}' --cacert "${work}/acme-root.pem" -c "${work}/${account}.cookies" \
+        -D "${work}/login.headers" -H "Origin: https://${controller}" -H 'Content-Type: application/json' \
+        --data-binary @- "https://${controller}/api/v1/auth/login")"
+    [[ "${status}" == 429 && "${attempt}" == 1 ]] || break
+    retry="$(sed -n 's/^retry-after: *\([0-9]*\).*/\1/Ip' "${work}/login.headers")"
+    sleep "${retry:-60}"
+  done
   [[ "${status}" == 204 ]] && grep -qF __Host-ocservia_session "${work}/${account}.cookies"
 }
 accounts() {
