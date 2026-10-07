@@ -30,6 +30,7 @@ export BUILDX_BUILDER="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" OUTPUT_DIR=
 registry="${BUILDX_BUILDER}-registry" pebble="${BUILDX_BUILDER}-pebble"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
 controller="controller.${gateway}.sslip.io" relay="relay.${gateway}.sslip.io"
+host_trust=/usr/local/share/ca-certificates/ocservia-quick-acceptance-pebble.crt
 stage=build
 
 cleanup() {
@@ -46,6 +47,7 @@ cleanup() {
     done >&2
   fi
   docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1
+  rm -f -- "${host_trust}" && update-ca-certificates --fresh >/dev/null 2>&1
   rm -rf -- "${work}"
   exit "${code}"
 }
@@ -108,6 +110,11 @@ for _ in $(seq 30); do
   sleep 1
 done
 curl -fsS --cacert "${pebble_dir}/ca.pem" "https://${gateway}:14000/dir" >/dev/null
+# Pebble's issuing root stands in for a public CA: the install's release smoke
+# verifies the Controller against the host trust store.
+curl -fsS --cacert "${pebble_dir}/ca.pem" "https://${gateway}:15000/roots/0" >"${work}/acme-root.pem"
+install -m 0644 -- "${work}/acme-root.pem" "${host_trust}"
+update-ca-certificates >/dev/null
 
 stage=first_install
 passphrase="${work}/root-ca-passphrase" export_dir="${work}/root-ca-export"
@@ -120,7 +127,6 @@ OCSERV_ACME_DIRECTORY_URL="https://${gateway}:14000/dir" OCSERV_ACME_CA_FILE="${
 grep -qxF "Quick install complete: https://${controller}" "${work}/run-first.log"
 
 stage=certificates
-curl -fsS --cacert "${pebble_dir}/ca.pem" "https://${gateway}:15000/roots/0" >"${work}/acme-root.pem"
 tls_ready() { curl -sS -o /dev/null --max-time 5 --cacert "${work}/acme-root.pem" "https://$1/" 2>/dev/null; }
 for _ in $(seq 90); do
   tls_ready "${controller}" && tls_ready "${relay}" && break
