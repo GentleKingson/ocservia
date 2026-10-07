@@ -23,7 +23,9 @@ PEBBLE_IMAGE=ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a
 POSTGRES_IMAGE=docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
 OTEL_IMAGE=docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23
 CREDENTIALS_DIR=/root/ocservia-initial-credentials
-work="$(mktemp -d)"
+# controller.sh refuses a release file under a group/world-writable ancestor
+# such as /tmp, so the work directory lives under root-only /root.
+work="$(mktemp -d /root/quick-acceptance.XXXXXX)"
 export BUILDX_BUILDER="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" OUTPUT_DIR="${work}/products"
 registry="${BUILDX_BUILDER}-registry" pebble="${BUILDX_BUILDER}-pebble"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
