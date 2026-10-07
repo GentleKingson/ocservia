@@ -262,10 +262,13 @@ jq -e '
   .services.gateway.environment.OCSERV_ACME_DIRECTORY_URL == $letsencrypt and
   .services.relay.environment.IROH_RELAY_ACME_URL == $letsencrypt and
   (.services.relay.environment | has("IROH_RELAY_ACME_CA") | not) and
-  ([.services.relay.volumes[] | [.type, .target]] == [["volume", "/var/lib/iroh-relay"]]) and
-  any(.services.relay.configs[]; .source == "relay_acme_config" and .target == "/etc/iroh-relay/relay.toml") and
-  (.configs.relay_acme_config.content | contains("hostname = [\"relay.example.com\"]") and
-    contains("contact = \"ops@example.com\"") and contains("cert_mode = \"LetsEncrypt\""))
+  ([.services.relay.volumes[] | [.type, .target, .read_only]] ==
+    [["bind", "/etc/iroh-relay/relay.acme.toml", true], ["volume", "/var/lib/iroh-relay", null]]) and
+  (.services.relay | has("configs") | not) and
+  .services.relay.command == ["--config-path", "/tmp/relay.toml"] and
+  .services.relay.environment.OCSERV_RELAY_CONFIG_TEMPLATE == "/etc/iroh-relay/relay.acme.toml" and
+  .services.relay.environment.OCSERV_RELAY_PUBLIC_HOST == "relay.example.com" and
+  .services.relay.environment.OCSERV_ACME_EMAIL == "ops@example.com"
 ' "${work}/acme.json" >/dev/null
 printf 'test-only-ca\n' >"${work}/acme-ca.pem"
 chmod 0444 "${work}/acme-ca.pem"

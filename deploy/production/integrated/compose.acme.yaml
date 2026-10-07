@@ -17,41 +17,23 @@ services:
   relay:
     environment:
       IROH_RELAY_ACME_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      OCSERV_RELAY_CONFIG_TEMPLATE: /etc/iroh-relay/relay.acme.toml
+      OCSERV_RELAY_PUBLIC_HOST: ${OCSERV_RELAY_PUBLIC_HOST:?set Relay DNS name}
+      OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:?set the ACME contact email}
     secrets: !override
       - source: relay_access_token
         target: relay_access_token
         uid: "65532"
         gid: "65532"
         mode: 0400
-    configs:
-      - source: relay_acme_config
-        target: /etc/iroh-relay/relay.toml
+    # A read-only service cannot take inline Compose configs, so the entrypoint
+    # renders the template into the relay-owned tmpfs.
+    command: ["--config-path", "/tmp/relay.toml"]
+    tmpfs: !override
+      - /tmp:size=16m,mode=0700,uid=65532,gid=65532
     volumes: !override
+      - ./integrated/relay.acme.toml:/etc/iroh-relay/relay.acme.toml:ro
       - relay-acme:/var/lib/iroh-relay
-
-configs:
-  relay_acme_config:
-    content: |
-      enable_relay = true
-      http_bind_addr = "0.0.0.0:8080"
-      enable_quic_addr_discovery = true
-      enable_metrics = false
-      key_cache_capacity = 8192
-
-      [tls]
-      https_bind_addr = "0.0.0.0:8443"
-      quic_bind_addr = "0.0.0.0:7842"
-      cert_mode = "LetsEncrypt"
-      hostname = ["${OCSERV_RELAY_PUBLIC_HOST}"]
-      contact = "${OCSERV_ACME_EMAIL}"
-      cert_dir = "/var/lib/iroh-relay"
-
-      [limits.client.rx]
-      max_burst_bytes = 4194304
-      bytes_per_second = 2097152
-
-      [access]
-      shared_token = ["replaced-by-entrypoint"]
 
 volumes:
   gateway-acme: {}
