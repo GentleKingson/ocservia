@@ -1,5 +1,8 @@
 {
-  "language": "chinese",
+  "model": "claude-opus-5-5",
+  "effortLevel": "medium",
+  "autoCompactWindow": 272000,
+  "language": "simplified chinese",
   "attribution": {
     "commit": "",
     "pr": "",
