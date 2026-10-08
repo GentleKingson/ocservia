@@ -66,4 +66,7 @@ grep -q 'release-integrated-acceptance.py recovery' "${fixture}/extended-phases"
 python3 scripts/test-release-business-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-rust-cache.sh
+# Basic CI routes the Release Check-only Quick acceptance script here; its real
+# lifecycle runs only in Release Check, so at least keep it parseable.
+bash -n scripts/release-quick-acceptance.sh
 ruby scripts/test-release-workflows.rb
