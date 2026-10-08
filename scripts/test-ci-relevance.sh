@@ -52,7 +52,7 @@ while read -r path selected; do
           expect "${out}" ci_suites 'release' ;;
         .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
           expect "${out}" ci_suites guards ;;
-        .github/workflows/release*.yml)
+        .github/workflows/release*.yml|.github/release.yml|.github/release-notes/*.md)
           expect "${out}" ci_suites release ;;
       esac
     else
@@ -64,6 +64,14 @@ while read -r path selected; do
 done <<'CASES'
 README.md run_docs
 docs/development/testing.md run_docs
+CLAUDE.md run_docs
+.claude/agents/sonnet-implementer.md run_docs
+.claude/settings.json run_docs
+.claude/settings.local.json run_docs run_go run_rust run_web run_database run_ci_tools run_installers
+.claude/hooks/pre-tool.sh run_docs run_go run_rust run_web run_database run_ci_tools run_installers
+.github/release.yml run_ci_tools
+.github/release-notes/v9.9.9.md run_docs run_ci_tools
+.github/release-notes/v9.9.9.json run_docs run_go run_rust run_web run_database run_ci_tools run_installers
 web/src/App.vue run_web
 web/src/api/generated/index.ts run_web
 rust/crates/agent/src/lib.rs run_rust
@@ -170,4 +178,20 @@ out="${fixture}/unrelated.output"
 (cd "${fixture}" && bash "${SCRIPT}" pull_request "${base}" "$(git rev-parse HEAD)" "${out}")
 expect "${out}" reason merge_base_unresolvable
 for flag in "${flags[@]}"; do expect "${out}" "${flag}" true; done
+# Settings routed to Docs alone must still be rejected by docs-check when they
+# carry unaudited keys that run code or widen authority.
+docs="${fixture}/docs-check"
+mkdir -p "${docs}/scripts" "${docs}/.claude" "${docs}/docs/getting-started"
+cp "${ROOT}/scripts/docs-check.sh" "${ROOT}/scripts/env.sh" "${docs}/scripts/"
+printf '# Docs\n\ndocs/getting-started/production.md\n' >"${docs}/README.md"
+for page in production managed-node; do printf '# Page\n' >"${docs}/docs/getting-started/${page}.md"; done
+git -C "${docs}" init -q
+git -C "${docs}" add .
+cp "${ROOT}/.claude/settings.json" "${docs}/.claude/settings.json"
+bash "${docs}/scripts/docs-check.sh"
+for settings in '{"hooks":{}}' '{"env":{"A":"b"}}' '{"permissions":{"defaultMode":"bypassPermissions"}}' \
+  '{"permissions":{"allow":[1]}}' '{"model":"x"}{"model":"y"}' 'not json'; do
+  printf '%s\n' "${settings}" >"${docs}/.claude/settings.json"
+  if bash "${docs}/scripts/docs-check.sh" 2>/dev/null; then echo "docs-check accepted ${settings}" >&2; exit 1; fi
+done
 echo 'CI routing: domain isolation, exact installer/workflow contracts, Controller Quick, Full matrix and fallback passed'

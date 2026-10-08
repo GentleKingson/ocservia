@@ -17,6 +17,26 @@ while IFS= read -r file; do
   }
 done < <(git -C "${ROOT}" ls-files '*.md')
 
+# CI routes shared Claude Code settings here instead of the product suites, so
+# only the audited keys may pass. Hooks, status lines, helpers, env, MCP/plugins
+# and permission modes run code or widen authority: keep them unknown until reviewed.
+settings="${ROOT}/.claude/settings.json"
+if [[ -e "${settings}" ]] && ! jq -es '
+  def string_list: type == "array" and all(.[]; type == "string");
+  length == 1 and (.[0] | type == "object" and
+    (keys - ["attribution", "autoCompactWindow", "effortLevel", "language", "model", "permissions"] == []) and
+    all(.model, .effortLevel, .language; . == null or type == "string") and
+    (.autoCompactWindow == null or (.autoCompactWindow | type == "number")) and
+    (.attribution == null or (.attribution | type == "object" and
+      (keys - ["commit", "pr", "sessionUrl"] == []) and
+      all(.commit, .pr; . == null or type == "string") and
+      (.sessionUrl == null or (.sessionUrl | type == "boolean")))) and
+    (.permissions == null or (.permissions | type == "object" and
+      (keys - ["allow", "ask", "deny"] == []) and all(.[]; string_list))))' "${settings}" >/dev/null; then
+  echo "unaudited or invalid Claude Code settings: .claude/settings.json" >&2
+  exit 1
+fi
+
 require_text() {
   local file="$1" text="$2"
   grep -Fq -- "${text}" "${ROOT}/${file}" || {
