@@ -38,6 +38,13 @@
 #   ./controller-bootstrap.sh --version vX.Y.Z
 #   ./controller-bootstrap.sh --version vX.Y.Z --root-lifecycle
 #   ./controller-bootstrap.sh --version vX.Y.Z --check
+#   ./controller-bootstrap.sh --version vX.Y.Z --quick --controller-domain NAME \
+#     --relay-domain NAME --acme-email ADDRESS [--root-ca-passphrase-file PATH]
+#     [--root-ca-export-dir PATH] [--check]
+#
+# --quick ignores ./install.env, implies --root-lifecycle, checks DNS and the
+# public ports read-only, and hands off to the release's
+# deploy/production/quick-install.sh, which generates the configuration.
 #
 # The version must be an explicit exact vX.Y.Z release tag; latest,
 # branches, commits, and pre-releases are not accepted.
@@ -49,6 +56,11 @@ CONFIG_ROOT="${PWD}"
 VERSION=""
 ROOT_LIFECYCLE=false
 CHECK_ONLY=false
+QUICK=false
+CONTROLLER_DOMAIN=""
+RELAY_DOMAIN=""
+ACME_EMAIL=""
+QUICK_ARGS=()
 SOURCE_ROOT=""
 TARGET=""
 
@@ -71,6 +83,10 @@ INSTALL_ENV_NAMES=(
   OCSERV_DEPLOYMENT_MODE
   OCSERV_RELAY_PUBLIC_HOST
   OCSERV_RELAY_SECRET_DIR
+  OCSERV_TLS_MODE
+  OCSERV_ACME_EMAIL
+  OCSERV_ACME_DIRECTORY_URL
+  OCSERV_ACME_CA_FILE
   OCSERV_SIGNER_SECRET_DIR
   OCSERV_SIGNER_STATE_DIR
   OCSERV_EDGE_GATEWAY_IP
@@ -206,7 +222,19 @@ fail() {
 
 usage() {
   echo "usage: controller-bootstrap.sh --version vX.Y.Z [--root-lifecycle] [--check]" >&2
+  echo "       controller-bootstrap.sh --version vX.Y.Z --quick --controller-domain NAME --relay-domain NAME" >&2
+  echo "         --acme-email ADDRESS [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--root-lifecycle] [--check]" >&2
   exit 2
+}
+
+valid_domain() {
+  local name="$1" label
+  [[ ${#name} -le 253 && "${name}" == *.* && "${name}" =~ ^[a-z0-9.-]+$ ]] || return 1
+  local IFS=.
+  for label in ${name}; do
+    [[ "${label}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || return 1
+  done
+  [[ "${name}" != .* && "${name}" != *. && "${name}" != *..* ]]
 }
 
 version_seen=false
@@ -226,12 +254,47 @@ while (($# > 0)); do
       CHECK_ONLY=true
       shift
       ;;
+    --quick)
+      [[ "${QUICK}" == false ]] || usage
+      QUICK=true
+      shift
+      ;;
+    --controller-domain|--relay-domain|--acme-email|--root-ca-passphrase-file|--root-ca-export-dir)
+      (($# >= 2)) || usage
+      for quick_argument in ${QUICK_ARGS[@]+"${QUICK_ARGS[@]}"}; do
+        [[ "${quick_argument}" != "$1" ]] || usage
+      done
+      case "$1" in
+        --controller-domain) CONTROLLER_DOMAIN="$2" ;;
+        --relay-domain) RELAY_DOMAIN="$2" ;;
+        --acme-email) ACME_EMAIL="$2" ;;
+        --root-ca-passphrase-file|--root-ca-export-dir)
+          [[ "$2" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+            fail "root CA paths must be absolute and contain only letters, digits, '.', '_', '-' and '/'"
+          ;;
+      esac
+      QUICK_ARGS+=("$1" "$2")
+      shift 2
+      ;;
     *)
       usage
       ;;
   esac
 done
 [[ "${version_seen}" == true ]] || usage
+if [[ "${QUICK}" == true ]]; then
+  [[ -n "${CONTROLLER_DOMAIN}" && -n "${RELAY_DOMAIN}" && -n "${ACME_EMAIL}" ]] || usage
+  valid_domain "${CONTROLLER_DOMAIN}" || fail "--controller-domain must be a lowercase DNS name"
+  valid_domain "${RELAY_DOMAIN}" || fail "--relay-domain must be a lowercase DNS name"
+  [[ "${CONTROLLER_DOMAIN}" != "${RELAY_DOMAIN}" ]] || fail "the Controller and Relay domains must differ"
+  if [[ ${#ACME_EMAIL} -gt 254 || ! "${ACME_EMAIL}" =~ ^[A-Za-z0-9._%+-]+@(.+)$ ]] || ! valid_domain "${BASH_REMATCH[1]}"; then
+    fail "--acme-email must be a plain email address"
+  fi
+  # Integrated deployment requires the explicit root lifecycle.
+  ROOT_LIFECYCLE=true
+elif ((${#QUICK_ARGS[@]} > 0)); then
+  usage
+fi
 [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
   fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
 
@@ -269,7 +332,47 @@ validate_source_component() {
 # Explicit shell variables keep winning over the file, so install.env-aware
 # installers observe exactly the same effective values as before.
 load_config() {
+  # Quick generates its own configuration and never reads ./install.env.
+  [[ "${QUICK}" == false ]] || return 0
   install_env_load "${CONFIG_ROOT}/install.env" "${INSTALL_ENV_NAMES[@]}"
+}
+
+# Read-only Quick preflight. Both names must have the same IPv4 addresses;
+# an AAAA record that is not on this host fails, because ACME validation
+# prefers IPv6. A NAT or cloud public address cannot be proven locally, so an
+# IPv4 address missing from this host only warns. TCP443 and UDP7842 must be
+# free unless a Quick installation is being retried.
+quick_preflight() {
+  local name address tool v4="" first_v4="" ipv6 local_v4 local_v6
+  for tool in getent ip ss; do
+    command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required for the Quick preflight"
+  done
+  local_v4="$(ip -o -4 addr show | awk '{print $4}' | cut -d/ -f1)"
+  local_v6="$(ip -o -6 addr show | awk '{print $4}' | cut -d/ -f1)"
+  for name in "${CONTROLLER_DOMAIN}" "${RELAY_DOMAIN}"; do
+    v4="$(getent ahostsv4 "${name}" | awk '{print $1}' | sort -u | tr '\n' ' ')" || true
+    [[ -n "${v4}" ]] || fail "${name} has no IPv4 address; create its A record first"
+    [[ -z "${first_v4}" || "${v4}" == "${first_v4}" ]] ||
+      fail "${CONTROLLER_DOMAIN} (${first_v4% }) and ${name} (${v4% }) must resolve to the same IPv4 addresses"
+    first_v4="${v4}"
+    for address in ${v4}; do
+      grep -qxF -- "${address}" <<<"${local_v4}" ||
+        echo "warning: ${name} resolves to ${address}, which is not on this host; make sure it forwards TCP443 and UDP7842 here"
+    done
+    ipv6="$(getent ahostsv6 "${name}" | awk '{print $1}' | grep -v '^::ffff:' | sort -u)" || true
+    for address in ${ipv6}; do
+      grep -qxF -- "${address}" <<<"${local_v6}" ||
+        fail "${name} has the AAAA address ${address}, which is not on this host; remove the AAAA record or point it here"
+    done
+  done
+  echo "DNS: ${CONTROLLER_DOMAIN} and ${RELAY_DOMAIN} resolve to ${first_v4% }"
+  if [[ -e /etc/ocservia/install.env ]]; then
+    echo "ports: not checked; retrying the existing Quick installation"
+  else
+    [[ -z "$(ss -Hltn 'sport = :443')" ]] || fail "TCP port 443 is already in use"
+    [[ -z "$(ss -Hlun 'sport = :7842')" ]] || fail "UDP port 7842 is already in use"
+    echo "ports: TCP443 and UDP7842 are free; allow both in any cloud firewall"
+  fi
 }
 
 # Walk the source root path top-down. Existing components are validated
@@ -382,6 +485,8 @@ prepare_checkout() {
 check_release_installer() {
   [[ -x "${TARGET}/deploy/production/install.sh" && ! -L "${TARGET}/deploy/production/install.sh" ]] ||
     fail "release ${VERSION} at ${TARGET} does not ship the production installer (deploy/production/install.sh is missing or not executable); use a release that does"
+  [[ "${QUICK}" == false || ( -x "${TARGET}/deploy/production/quick-install.sh" && ! -L "${TARGET}/deploy/production/quick-install.sh" ) ]] ||
+    fail "release ${VERSION} at ${TARGET} does not support --quick (deploy/production/quick-install.sh is missing); use a release that does"
 }
 
 require_run_tools() {
@@ -399,14 +504,15 @@ require_run_tools() {
 # content answers that without cloning (the executed installer still comes
 # from the verified clone, never from this probe).
 check_release_installer_published() {
-  local url
+  local url path=deploy/production/install.sh
+  [[ "${QUICK}" == false ]] || path=deploy/production/quick-install.sh
   [[ "${REPOSITORY_URL}" == https://github.com/* ]] ||
     fail "cannot probe release content for repository ${REPOSITORY_URL}"
-  url="https://raw.githubusercontent.com/${REPOSITORY_URL#https://github.com/}/${VERSION}/deploy/production/install.sh"
+  url="https://raw.githubusercontent.com/${REPOSITORY_URL#https://github.com/}/${VERSION}/${path}"
   if ! curl -fsSLI -o /dev/null --proto '=https' --tlsv1.2 "${url}" 2>/dev/null; then
-    fail "release ${VERSION} does not appear to ship deploy/production/install.sh; this bootstrap hands off only to releases that do"
+    fail "release ${VERSION} does not appear to ship ${path}; this bootstrap hands off only to releases that do"
   fi
-  echo "release installer: deploy/production/install.sh is published for ${VERSION}"
+  echo "release installer: ${path} is published for ${VERSION}"
 }
 
 run_check() {
@@ -424,6 +530,7 @@ run_check() {
   echo "configuration directory: ${CONFIG_ROOT}"
   echo "source root: ${SOURCE_ROOT}"
   select_lifecycle
+  [[ "${QUICK}" == false ]] || quick_preflight
   tag_ref="$(git ls-remote "${REPOSITORY_URL}" "refs/tags/${VERSION}")"
   [[ -n "${tag_ref}" ]] ||
     fail "release tag ${VERSION} was not found on ${REPOSITORY_URL}; check the published releases"
@@ -434,6 +541,10 @@ run_check() {
 
 hand_off() {
   local installer="${TARGET}/deploy/production/install.sh"
+  if [[ "${QUICK}" == true ]]; then
+    echo "handing off to the Quick installer: ${TARGET}/deploy/production/quick-install.sh"
+    exec "${TARGET}/deploy/production/quick-install.sh" "${QUICK_ARGS[@]}"
+  fi
   if [[ "${ROOT_LIFECYCLE}" == true ]]; then
     # The installer performs its own controlled sudo re-exec for the root
     # lifecycle and resolves install.env from the invoking directory,
@@ -460,6 +571,7 @@ fi
 
 load_config
 select_lifecycle
+[[ "${QUICK}" == false ]] || quick_preflight
 walk_source_root true
 prepare_checkout
 check_release_installer

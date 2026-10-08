@@ -235,6 +235,79 @@ PATH="${fixture}/bin:${PATH}" TEST_EXEC_LOG="${fixture}/exec.log" "${fixture}/tr
 set -e
 [[ ! -s "${fixture}/exec.log" ]] || fail "a truncated Stage-0 script executed main"
 
+# Quick mode: the Git source has no default release, so --version is required.
+quick=(--quick --controller-domain vpn.example.com --relay-domain relay.example.com --acme-email ops@example.com)
+if run_installer "${CONTROLLER}" "${quick[@]}" >"${fixture}/output" 2>&1; then
+  fail "the unstamped Controller Stage-0 accepted --quick without --version"
+fi
+grep -q 'no default release' "${fixture}/output" || fail "missing default release diagnostic"
+[[ ! -s "${fixture}/exec.log" ]] || fail "unstamped quick mode reached Stage-1"
+
+run_installer "${CONTROLLER}" "${quick[@]}" --version v1.2.3 --check >"${fixture}/output" 2>&1
+[[ "$(<"${fixture}/args.log")" == $'--version\nv1.2.3\n--quick\n--controller-domain\nvpn.example.com\n--relay-domain\nrelay.example.com\n--acme-email\nops@example.com\n--check\n--root-lifecycle' ]] ||
+  fail "quick mode did not pass its arguments and the implied root lifecycle exactly"
+grep -qx 'install-controller: using release v1.2.3' "${fixture}/output" || fail "quick mode did not print the selected release"
+
+run_installer "${CONTROLLER}" --root-lifecycle "${quick[@]}" --version v1.2.3 \
+  --root-ca-passphrase-file /etc/ocservia/root-ca-passphrase --root-ca-export-dir /media/offline/ca >"${fixture}/output" 2>&1
+[[ "$(grep -cx -- --root-lifecycle "${fixture}/args.log")" == 1 ]] || fail "quick mode duplicated --root-lifecycle"
+grep -qx /etc/ocservia/root-ca-passphrase "${fixture}/args.log" || fail "passphrase file path was not passed"
+grep -qx /media/offline/ca "${fixture}/args.log" || fail "export directory was not passed"
+
+invalid_quick=(
+  "--quick --controller-domain vpn.example.com --relay-domain relay.example.com --version v1.2.3"
+  "--quick --controller-domain vpn.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain same.example.com --relay-domain same.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain VPN.example.com --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain localhost --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain -vpn.example.com --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain vpn..example.com --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain vpn.example.com. --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain v*.example.com --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --controller-domain vpn.example.com --relay-domain relay.example.com --acme-email not-an-email --version v1.2.3"
+  "--quick --controller-domain vpn.example.com --relay-domain relay.example.com --acme-email ops@example.com --version latest"
+  "--quick --controller-domain vpn.example.com --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3 --root-ca-export-dir relative/dir"
+  "--quick --controller-domain vpn.example.com --controller-domain vpn2.example.com --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--quick --quick --controller-domain vpn.example.com --relay-domain relay.example.com --acme-email ops@example.com --version v1.2.3"
+  "--version v1.2.3 --controller-domain vpn.example.com"
+  "--version v1.2.3 --root-ca-export-dir /media/offline/ca"
+)
+for args in "${invalid_quick[@]}"; do
+  # shellcheck disable=SC2086 # each fixture intentionally supplies several words
+  if run_installer "${CONTROLLER}" ${args} >"${fixture}/output" 2>&1; then
+    fail "Controller Stage-0 accepted invalid quick input: ${args}"
+  fi
+  [[ ! -s "${fixture}/exec.log" ]] || fail "invalid quick input reached Stage-1: ${args}"
+done
+if run_installer "${NODE}" --version v1.2.3 --quick >"${fixture}/output" 2>&1; then
+  fail "Node Stage-0 accepted --quick"
+fi
+
+# A released Stage-0 defaults to its own tag and otherwise equals the source.
+mkdir "${fixture}/stamped"
+"${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${fixture}/stamped" v4.5.6
+[[ -x "${fixture}/stamped/install-controller" ]] || fail "stamped Stage-0 is not executable"
+"${ROOT}/scripts/check-release-stage0.sh" "${fixture}/stamped/install-controller" v4.5.6
+if "${ROOT}/scripts/check-release-stage0.sh" "${fixture}/stamped/install-controller" v4.5.7 >/dev/null 2>&1; then
+  fail "stamped Stage-0 check accepted a different tag"
+fi
+cp -- "${fixture}/stamped/install-controller" "${fixture}/tampered"
+printf '# extra\n' >>"${fixture}/tampered"
+if "${ROOT}/scripts/check-release-stage0.sh" "${fixture}/tampered" v4.5.6 >/dev/null 2>&1; then
+  fail "stamped Stage-0 check accepted bytes beyond the default version"
+fi
+if "${ROOT}/scripts/prepare-bootstrap-release-assets.sh" "${fixture}/stamped" latest >/dev/null 2>&1; then
+  fail "release asset preparation accepted a non-release tag"
+fi
+run_installer "${fixture}/stamped/install-controller" "${quick[@]}" >"${fixture}/output" 2>&1
+grep -qx 'https://github.com/GentleKingson/ocservia/releases/download/v4.5.6/controller-bootstrap.sh' "${fixture}/downloads.log" ||
+  fail "stamped quick mode did not use its default release"
+run_installer "${fixture}/stamped/install-controller" "${quick[@]}" --version v4.5.7 >"${fixture}/output" 2>&1
+grep -q '/download/v4.5.7/' "${fixture}/downloads.log" || fail "explicit --version did not override the default release"
+if run_installer "${fixture}/stamped/install-controller" --root-lifecycle >"${fixture}/output" 2>&1; then
+  fail "stamped Stage-0 used its default release outside quick mode"
+fi
+
 for installer in "${CONTROLLER}" "${NODE}"; do
   [[ "$(tail -n 1 "${installer}")" == 'main "$@"' ]] || fail "main invocation is not the final line"
   if grep -Eq '(^|[^[:alnum:]_])(sudo|apt|apt-get|dnf|yum|rpm|dpkg|docker|systemctl|psql)([^[:alnum:]_]|$)' "${installer}"; then

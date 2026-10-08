@@ -2,5 +2,16 @@
   "model": "claude-opus-5-5",
   "effortLevel": "medium",
   "autoCompactWindow": 272000,
-  "language": "simplified chinese"
+  "language": "simplified chinese",
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git filter-branch:*)",
+      "Bash(git push --force-with-lease:*)"
+    ]
+  }
 }

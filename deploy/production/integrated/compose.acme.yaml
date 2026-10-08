@@ -1,0 +1,43 @@
+# ACME overlay, applied after integrated/compose.yaml when OCSERV_TLS_MODE=acme.
+# Gateway and Relay obtain their own certificates with TLS-ALPN-01 through
+# Edge's SNI routing; no certificate or key is provisioned on the host.
+services:
+  gateway:
+    environment:
+      OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:?set the ACME contact email}
+      OCSERV_ACME_DIRECTORY_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+    secrets: !reset []
+    volumes: !override
+      - ./integrated/Caddyfile.acme:/etc/caddy/Caddyfile:ro
+      - ./integrated/site.caddy:/etc/caddy/site.caddy:ro
+      - gateway-acme:/var/lib/caddy-acme
+    networks:
+      acme-egress: {}
+
+  relay:
+    environment:
+      IROH_RELAY_ACME_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      OCSERV_RELAY_CONFIG_TEMPLATE: /etc/iroh-relay/relay.acme.toml
+      OCSERV_RELAY_PUBLIC_HOST: ${OCSERV_RELAY_PUBLIC_HOST:?set Relay DNS name}
+      OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:?set the ACME contact email}
+    secrets: !override
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+    # A read-only service cannot take inline Compose configs, so the entrypoint
+    # renders the template into the relay-owned tmpfs.
+    command: ["--config-path", "/tmp/relay.toml"]
+    tmpfs: !override
+      - /tmp:size=16m,mode=0700,uid=65532,gid=65532
+    volumes: !override
+      - ./integrated/relay.acme.toml:/etc/iroh-relay/relay.acme.toml:ro
+      - relay-acme:/var/lib/iroh-relay
+
+volumes:
+  gateway-acme: {}
+  relay-acme: {}
+
+networks:
+  acme-egress: {}

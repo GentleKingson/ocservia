@@ -1,0 +1,35 @@
+{
+	admin off
+	# Certificates only; Edge owns port 443 and nothing listens for HTTP.
+	auto_https disable_redirects
+	https_port 8443
+	storage file_system /var/lib/caddy-acme
+	servers {
+		protocols h1 h2
+		strict_sni_host on
+		listener_wrappers {
+			proxy_protocol {
+				timeout 5s
+				allow {$OCSERV_EDGE_GATEWAY_IP:172.30.241.2}/32
+				fallback_policy reject
+			}
+			tls
+		}
+		timeouts {
+			read_header 5s
+			read_body 30s
+		}
+	}
+}
+
+{$OCSERV_PUBLIC_HOST}:8443 {
+	tls {
+		issuer acme {
+			dir {$OCSERV_ACME_DIRECTORY_URL}
+			email {$OCSERV_ACME_EMAIL}
+			# Edge forwards only TLS; validation uses TLS-ALPN-01 on this listener.
+			disable_http_challenge
+		}
+	}
+	import /etc/caddy/site.caddy
+}

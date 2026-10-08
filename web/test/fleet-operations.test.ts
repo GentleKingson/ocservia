@@ -45,6 +45,13 @@ vi.mock("../src/api/nodes", () => ({
   listNodeSessions: vi.fn(),
   listNodes: vi.fn(),
 }));
+vi.mock("../src/api/events", () => ({
+  eventStreamPath: vi.fn(),
+  listEvents: vi
+    .fn()
+    .mockResolvedValue({ items: [], page: { hasMore: false } }),
+  platformEventsEvent: "ocservia:platform-events",
+}));
 vi.mock("../src/api/agents", () => ({
   upgradeNodeAgent: vi.fn(),
 }));
@@ -147,6 +154,22 @@ describe("controlled fleet operations", () => {
     await completion;
     expect(store.latestOperation?.state).toBe("succeeded");
     expect(store.sessions).toEqual([]);
+  });
+
+  it("keeps accepted operation tracking but stops detail reads after leaving the view", async () => {
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation).mockResolvedValue(operation("succeeded"));
+    const store = useFleetStore();
+    await store.select(node.id);
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(0);
+    store.stop();
+    expect(store.operationTracking).toBe(true);
+    await vi.advanceTimersByTimeAsync(750);
+    await completion;
+    expect(store.latestOperation?.state).toBe("succeeded");
+    expect(store.selected).toBeUndefined();
+    expect(getNode).toHaveBeenCalledTimes(1);
   });
 
   it("retries a failed create at the current desired version", async () => {
@@ -336,11 +359,13 @@ describe("controlled fleet operations", () => {
     const store = useFleetStore();
 
     const staleRebuild = store.rebuild();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(listNodes).toHaveBeenCalledTimes(1);
+    });
     const currentRebuild = store.rebuild();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(listNodes).toHaveBeenCalledTimes(2);
+    });
 
     second.resolve(nodePage(nodeB));
     await currentRebuild;

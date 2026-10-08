@@ -163,7 +163,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		}
 		return env
 	}
-	run := func(options connection.Options, extra map[string]string, args ...string) error {
+	runOutput := func(options connection.Options, extra map[string]string, args ...string) ([]byte, error) {
 		t.Helper()
 		// Every invocation here is one-shot. Invalid role-only resources must
 		// never be constructed, even with the default all role and an endpoint.
@@ -181,7 +181,11 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		if _, statErr := os.Stat(oneShot["OCSERV_TRUST_SOCKET"]); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatal("one-shot command created a Trust socket", statErr)
 		}
-		if err != nil {
+		return output, err
+	}
+	run := func(options connection.Options, extra map[string]string, args ...string) error {
+		t.Helper()
+		if output, err := runOutput(options, extra, args...); err != nil {
 			return errors.New(string(output))
 		}
 		return nil
@@ -245,8 +249,37 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	if _, err := runtime.Store.Exec(ctx, `CREATE TABLE startup_forbidden(id int)`); !errors.Is(err, database.ErrPermission) {
 		t.Fatal("runtime DDL was not denied", err)
 	}
-	workspace, err := uuid.NewV7()
-	if err != nil {
+	// Smoke databases start empty, so the owner one-shot creates the
+	// management workspace and a rerun returns the same one.
+	provision := func() (id uuid.UUID, created bool) {
+		t.Helper()
+		output, err := runOutput(ownerOptions, nil, "--provision-management-workspace")
+		if err != nil {
+			t.Fatalf("provision management workspace: %v\n%s", err, output)
+		}
+		for _, line := range bytes.Split(output, []byte("\n")) {
+			var record struct {
+				Msg         string    `json:"msg"`
+				WorkspaceID uuid.UUID `json:"workspace_id"`
+				Created     bool      `json:"created"`
+			}
+			if json.Unmarshal(line, &record) == nil && record.Msg == "management workspace ready" {
+				return record.WorkspaceID, record.Created
+			}
+		}
+		t.Fatalf("workspace provisioning did not report the workspace:\n%s", output)
+		return
+	}
+	var workspace uuid.UUID
+	if smoke {
+		var created bool
+		if workspace, created = provision(); !created || workspace.Version() != 7 {
+			t.Fatal("first provisioning", workspace, created)
+		}
+		if again, created := provision(); again != workspace || created {
+			t.Fatal("repeat provisioning", again, created)
+		}
+	} else if workspace, err = uuid.NewV7(); err != nil {
 		t.Fatal(err)
 	}
 	at, _ := value.FromTime(time.Now().UTC())
@@ -260,10 +293,11 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	if runtimeOptions.Backend != "postgres" {
 		args = append(args, at)
 	}
-	if _, err := runtime.Store.Exec(ctx, query, args...); err != nil {
-		t.Fatal("seed workspace", err)
-	}
-	if smoke {
+	if !smoke {
+		if _, err := runtime.Store.Exec(ctx, query, args...); err != nil {
+			t.Fatal("seed workspace", err)
+		}
+	} else {
 		checkSmokeTransactions(t, ctx, runtime.Store, runtimeOptions.Backend, workspaceArg)
 		if err := run(ownerOptions, map[string]string{"OCSERV_RUNTIME_DATABASE_ROLE": account}, "--migrate-only"); err != nil {
 			t.Fatal("repeat migration with business data", err)
@@ -293,6 +327,12 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	}
 	if err := run(runtimeOptions, bootstrap, "--bootstrap-local-admin"); err != nil {
 		t.Fatal("runtime CLI bootstrap", err)
+	}
+	// A rerun reports the initialized state distinctly so installers can
+	// resume after an interruption between commit and their own marker.
+	if output, err := runOutput(runtimeOptions, bootstrap, "--bootstrap-local-admin"); err == nil ||
+		!bytes.Contains(output, []byte("Local authentication is already initialized")) {
+		t.Fatalf("repeat runtime CLI bootstrap: %v\n%s", err, output)
 	}
 	if !production && !smoke {
 		installSchedulerEvidence(t, ctx, owner, runtimeOptions.Backend, account)

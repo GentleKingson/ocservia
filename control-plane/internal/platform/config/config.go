@@ -38,6 +38,7 @@ type Config struct {
 	HistoryRetention         historyretention.Policy
 	Role                     Role
 	MigrateOnly              bool
+	ProvisionWorkspace       bool
 	BootstrapLocalAdmin      bool
 	LocalBootstrapUsername   string
 	LocalBootstrapPassword   string
@@ -332,6 +333,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	completeBootstrap := fs.Bool("complete-local-bootstrap", false, "complete an eligible pre-R4 Local initialization with an independent approver, then exit")
 	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
+	provisionWorkspace := fs.Bool("provision-management-workspace", false, "create the administration workspace on a database without workspaces, then exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, errors.New("invalid command-line flags")
 	}
@@ -370,6 +372,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	cfg.Role = Role(*role)
 	cfg.MigrateOnly = *migrateOnly
+	cfg.ProvisionWorkspace = *provisionWorkspace
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -384,6 +387,9 @@ func (c Config) Validate() error {
 	}
 	if (c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) && (!c.LocalAuthEnabled() || c.MigrateOnly || (c.BootstrapLocalAdmin && c.CompleteLocalBootstrap) || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "" || c.LocalBootstrapApproverUsername == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
+	}
+	if c.ProvisionWorkspace && (c.MigrateOnly || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap) {
+		return errors.New("workspace provisioning cannot be combined with other one-shot commands")
 	}
 	switch c.Role {
 	case RoleAPI, RoleWorker, RoleScheduler, RoleAll:
@@ -463,7 +469,7 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	oneShotDatabaseCommand := c.MigrateOnly || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap
+	oneShotDatabaseCommand := c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.CompleteLocalBootstrap
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}

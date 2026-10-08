@@ -5,9 +5,13 @@ The repository-owned Stage-0 sources are:
 - `deploy/bootstrap/install-controller`
 - `deploy/bootstrap/install-node`
 
-They are intended to be deployed byte-for-byte at
+They are intended to be deployed at
 `https://get.ocservia.example/install-controller` and
-`https://get.ocservia.example/install-node`. This repository does not contain
+`https://get.ocservia.example/install-node`. `install-node` is deployed
+byte-for-byte from Git. `install-controller` is deployed byte-for-byte from the
+`install-controller` asset of the latest stable Release: that asset equals the
+Git source except for its stamped default version (see
+[Quick mode](#quick-mode)). This repository does not contain
 the external static-hosting infrastructure, so it does not claim that those
 example endpoints are live.
 
@@ -21,14 +25,18 @@ not executable Stage-0 code.
 The deployment must be static HTTPS hosting with HSTS enabled. Both responses
 must use `Content-Type: text/plain`; they must not be templated per user,
 receive tokens in query parameters, contain secrets, or depend on server-side
-session state. The corresponding Git source file is the sole source of truth.
+session state. The Git source file, or for `install-controller` the stable
+Release asset built from it, is the sole source of truth. Never host an RC asset.
 
-After deployment, compare the served bytes with the expected source artifact:
+After deployment, compare the served bytes with the expected source artifact.
+`check-release-stage0.sh` first confirms that the downloaded Release asset
+differs from the Git source at that tag only in its default version:
 
 ```bash
+scripts/check-release-stage0.sh "$RELEASE_ASSETS/install-controller" vX.Y.Z
 scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install-controller \
-  deploy/bootstrap/install-controller
+  "$RELEASE_ASSETS/install-controller"
 scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install-node \
   deploy/bootstrap/install-node
@@ -56,7 +64,9 @@ trust; this path has no independent artifact authenticity claim. Stage-0 does
 not add an OpenSSL version requirement.
 
 Download Stage-0 locally, inspect it, and run it with the explicit version.
-Do not source the version from `latest`, a branch, or a commit. Stage-1 owns
+Do not source the version from `latest`, a branch, or a commit. The only
+default is the exact tag stamped into a Release's own `install-controller`
+asset, used by [Quick mode](#quick-mode). Stage-1 owns
 configuration, installation, enrollment and activation, including package and
 lifecycle validation. Stage-0 does not bypass those requirements.
 
@@ -91,8 +101,8 @@ empty-body, or truncated-body failure visible to automation:
 )
 ```
 
-Only `--root-lifecycle` and, for the Controller, `--check` are accepted beyond
-the required version. All configuration and protected material stay in the
+Only `--root-lifecycle` and, for the Controller, `--check` and the
+[Quick mode](#quick-mode) options are accepted beyond the required version. All configuration and protected material stay in the
 environment or protected paths for Stage-1; Stage-0 neither parses nor prints
 their contents. Managed-node automation may reach `PENDING_APPROVAL`, never
 Approval, and service activation remains deliberate.
@@ -103,3 +113,53 @@ protected lifecycle state. Managed-node upgrades and removal continue through
 the authorized upgrader or native package-manager contract. Long-lived settings
 belong in `install.env` or the installed service configuration, not in arguments
 that must be replayed through the convenience script.
+
+## Quick mode
+
+The Controller Stage-0 also accepts:
+
+```bash
+bash "$stage0" --quick \
+  --controller-domain vpn.example.com \
+  --relay-domain relay.example.com \
+  --acme-email ops@example.com \
+  [--version vX.Y.Z] [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--check]
+```
+
+Stage-0 only checks the shape of these values: two distinct lowercase DNS
+names, a plain email address and absolute root CA paths. It does not read the
+passphrase file or the export directory. `--quick` implies `--root-lifecycle`.
+Quick-only options are rejected without `--quick`, and the Node Stage-0 rejects
+them all.
+
+When `--version` is omitted, quick mode uses the `DEFAULT_VERSION` stamped into
+the Release asset by `scripts/prepare-bootstrap-release-assets.sh`. The Git
+source leaves it empty, so an unstamped copy requires `--version`. Stage-0
+prints the selected release before downloading Stage-1, and an explicit
+`--version` always takes precedence. Outside quick mode there is no default.
+Only releases whose Stage-1 implements quick mode accept these options; older
+Stage-1 assets reject them before making changes.
+
+Stage-1 (`controller-bootstrap.sh --quick`) ignores `./install.env` and runs a
+read-only preflight before cloning, also under `--check`:
+
+- Both names must resolve to the same IPv4 addresses. An address that is not
+  on this host only warns, because a NAT or cloud public address cannot be
+  proven locally. An AAAA record that is not on this host fails, because ACME
+  validation prefers IPv6.
+- TCP 443 and UDP 7842 must be free, unless `/etc/ocservia/install.env`
+  already exists from an interrupted Quick run. Cloud firewalls must allow both.
+
+It then hands off to the release's `deploy/production/quick-install.sh`. That
+script prepares the host, creates the protected material with
+`quick-materials.sh`, writes `/etc/ocservia/install.env` (Integrated, bundled
+PostgreSQL, ACME, Local authentication), runs `install.sh --root-lifecycle`,
+provisions the management workspace and creates the Local administrators
+`initial-admin` and `initial-approver`. Their passwords are only in the
+root-only files under `/root/ocservia-initial-credentials`; give the two
+accounts to different people and change both passwords after the first login.
+
+Rerunning the same command continues an interrupted installation. A
+configuration not generated by Quick, different domains or email, or an
+existing Controller deployment is refused; use the manual installation or
+`controller.sh upgrade` instead.

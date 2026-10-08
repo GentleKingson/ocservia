@@ -2,6 +2,10 @@
 # Stage-0 downloads one versioned Stage-1 asset over HTTPS.
 set -euo pipefail
 
+# Empty in the Git source. Release asset preparation stamps the release tag
+# here; only --quick may use it when --version is omitted.
+readonly DEFAULT_VERSION=""
+
 fail() {
   echo "install-controller: $1" >&2
   exit 1
@@ -9,7 +13,19 @@ fail() {
 
 usage() {
   echo "usage: install-controller --version vX.Y.Z [--root-lifecycle] [--check]" >&2
+  echo "       install-controller --quick --controller-domain NAME --relay-domain NAME --acme-email ADDRESS" >&2
+  echo "         [--version vX.Y.Z] [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--check]" >&2
   exit 2
+}
+
+valid_domain() {
+  local name="$1" label
+  [[ ${#name} -le 253 && "${name}" == *.* && "${name}" =~ ^[a-z0-9.-]+$ ]] || return 1
+  local IFS=.
+  for label in ${name}; do
+    [[ "${label}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || return 1
+  done
+  [[ "${name}" != .* && "${name}" != *. && "${name}" != *..* ]]
 }
 
 download() {
@@ -26,6 +42,8 @@ download() {
 
 main() {
   local version="" version_seen=false root_lifecycle=false check_only=false
+  local quick=false controller_domain="" relay_domain="" acme_email=""
+  local passphrase_file="" export_dir="" option
   local base asset url temporary cleanup_parent cleanup_directory command_name
   local -a stage1_args=()
 
@@ -51,9 +69,49 @@ main() {
         stage1_args+=(--check)
         shift
         ;;
+      --quick)
+        [[ "${quick}" == false ]] || usage
+        quick=true
+        stage1_args+=(--quick)
+        shift
+        ;;
+      --controller-domain|--relay-domain|--acme-email|--root-ca-passphrase-file|--root-ca-export-dir)
+        option="$1"
+        [[ $# -ge 2 && -n "$2" ]] || usage
+        case "${option}" in
+          --controller-domain) [[ -z "${controller_domain}" ]] || usage; controller_domain="$2" ;;
+          --relay-domain) [[ -z "${relay_domain}" ]] || usage; relay_domain="$2" ;;
+          --acme-email) [[ -z "${acme_email}" ]] || usage; acme_email="$2" ;;
+          --root-ca-passphrase-file) [[ -z "${passphrase_file}" ]] || usage; passphrase_file="$2" ;;
+          --root-ca-export-dir) [[ -z "${export_dir}" ]] || usage; export_dir="$2" ;;
+        esac
+        stage1_args+=("${option}" "$2")
+        shift 2
+        ;;
       *) usage ;;
     esac
   done
+  if [[ "${quick}" == true ]]; then
+    [[ -n "${controller_domain}" && -n "${relay_domain}" && -n "${acme_email}" ]] || usage
+    valid_domain "${controller_domain}" || fail "--controller-domain must be a lowercase DNS name"
+    valid_domain "${relay_domain}" || fail "--relay-domain must be a lowercase DNS name"
+    [[ "${controller_domain}" != "${relay_domain}" ]] || fail "the Controller and Relay domains must differ"
+    [[ ${#acme_email} -le 254 && "${acme_email}" =~ ^[A-Za-z0-9._%+-]+@[a-z0-9.-]+[.][a-z]+$ ]] ||
+      fail "--acme-email must be a plain email address"
+    for option in "${passphrase_file}" "${export_dir}"; do
+      [[ -z "${option}" || "${option}" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+        fail "root CA paths must be absolute and contain only letters, digits, '.', '_', '-' and '/'"
+    done
+    # Integrated deployment requires the explicit root lifecycle.
+    [[ "${root_lifecycle}" == true ]] || stage1_args+=(--root-lifecycle)
+    if [[ "${version_seen}" == false ]]; then
+      [[ -n "${DEFAULT_VERSION}" ]] || fail "this Stage-0 copy has no default release; pass --version vX.Y.Z"
+      version="${DEFAULT_VERSION}"
+      version_seen=true
+    fi
+  elif [[ -n "${controller_domain}${relay_domain}${acme_email}${passphrase_file}${export_dir}" ]]; then
+    usage
+  fi
   [[ "${version_seen}" == true ]] || usage
   [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
     fail "an exact vX.Y.Z or vX.Y.Z-rc.N release is required"
@@ -68,6 +126,7 @@ main() {
   trap 'rm -rf -- "${temporary}"' EXIT
   trap 'exit 1' HUP INT TERM
 
+  echo "install-controller: using release ${version}" >&2
   download "${url}/${asset}" "${temporary}/${asset}" || fail "Stage-1 download failed"
   [[ -s "${temporary}/${asset}" ]] || fail "Stage-1 download is empty"
 

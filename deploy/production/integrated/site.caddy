@@ -1,0 +1,31 @@
+# Shared Gateway site body, imported by Caddyfile and Caddyfile.acme.
+encode zstd gzip
+header {
+	Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	X-Content-Type-Options "nosniff"
+	X-Frame-Options "DENY"
+	Referrer-Policy "no-referrer"
+	-Server
+}
+route {
+	@wrongHost not host {$OCSERV_PUBLIC_HOST}
+	respond @wrongHost 421
+	@wrongPort expression `!({http.request.hostport}.lowerAscii() in ["{$OCSERV_PUBLIC_HOST}", "{$OCSERV_PUBLIC_HOST}:443"])`
+	respond @wrongPort 421
+	handle /api/* {
+		reverse_proxy control-plane:8080 {
+			header_up X-Ocservia-Client-IP {http.request.remote.host}
+		}
+	}
+	handle /healthz {
+		reverse_proxy control-plane:8080
+	}
+	handle /readyz {
+		reverse_proxy control-plane:8080
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

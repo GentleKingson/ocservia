@@ -39,7 +39,10 @@ Signer share the signing API token. Controller mounts Signer's public HTTPS CA
 bundle, with SAN `signer`; node sealing private keys remain root-only on nodes.
 Database, audit, session, command-signing and transport keys remain separate.
 No Gateway, Signer, database, Controller HTTP or observability host port is added.
-Certificates are externally provisioned; HTTP-01 issuance is not implied.
+Certificates are externally provisioned, or with `OCSERV_TLS_MODE=acme` obtained
+by Gateway and Relay themselves through TLS-ALPN-01 over Edge's SNI routing
+([ACME certificates](../../deploy/production/integrated/README.md#acme-certificates));
+HTTP-01 is never used.
 
 ## Signer contract
 

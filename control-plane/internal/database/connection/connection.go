@@ -13,8 +13,13 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/mysql"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrUnmanagedWorkspaces means workspaces exist but none is the provisioned
+// management workspace; the operator must select one explicitly.
+var ErrUnmanagedWorkspaces = errors.New("workspaces exist without the administration workspace; select the management workspace explicitly")
 
 type Options struct {
 	Backend, Environment, URL, CAFile string
@@ -125,6 +130,51 @@ func (c *Connection) GrantRuntimePrivileges(ctx context.Context, account string)
 		return migrations.GrantRuntimePrivileges(ctx, c.pg, account)
 	}
 	return c.mysql.GrantRuntimePrivileges(ctx, account)
+}
+
+// ProvisionManagementWorkspace returns the "administration" workspace, creating
+// it only on a database that has no workspace yet. The slug is unique, so a
+// concurrent run fails instead of creating a second workspace.
+func (c *Connection) ProvisionManagementWorkspace(ctx context.Context) (id uuid.UUID, created bool, err error) {
+	insert := `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Administration','administration',$2,$2)`
+	if c.mysql != nil {
+		insert = `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES(?,'Administration','administration',?,?)`
+	}
+	err = database.Within(ctx, c.Store, database.DefaultIsolation, func(tx database.Tx) error {
+		find := `SELECT id FROM workspaces WHERE slug='administration'`
+		var err error
+		if c.mysql != nil {
+			var raw []byte
+			if err = tx.QueryRow(ctx, find).Scan(&raw); err == nil {
+				id, err = uuid.FromBytes(raw)
+				return err
+			}
+		} else if err = tx.QueryRow(ctx, find).Scan(&id); err == nil {
+			return nil
+		}
+		if !errors.Is(err, database.ErrNotFound) {
+			return err
+		}
+		var existing int64
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM workspaces`).Scan(&existing); err != nil {
+			return err
+		}
+		if existing != 0 {
+			return ErrUnmanagedWorkspaces
+		}
+		at, err := database.WallTime(ctx, tx)
+		if err != nil {
+			return err
+		}
+		id, created = uuid.Must(uuid.NewV7()), true
+		if c.mysql != nil {
+			_, err = tx.Exec(ctx, insert, mysql.UUIDBytes(id), at, at)
+		} else {
+			_, err = tx.Exec(ctx, insert, id, at)
+		}
+		return err
+	})
+	return id, created, err
 }
 
 // ValidateRuntime runs before starting any role's listeners or background work.

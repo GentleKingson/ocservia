@@ -28,7 +28,11 @@ import {
   listNodeSessions,
   listNodeUserGroupState,
 } from "../api/nodes";
-import { eventStreamPath, platformEventsEvent } from "../api/events";
+import {
+  eventStreamPath,
+  listEvents,
+  platformEventsEvent,
+} from "../api/events";
 import { probeAuthentication } from "../api/platform";
 import { upgradeNodeAgent } from "../api/agents";
 import {
@@ -38,6 +42,8 @@ import {
   rotateUserPassword,
   applyGroup,
 } from "../api/users";
+
+import { createForegroundRefresh, isPageActive } from "./foreground-refresh";
 
 const terminalStates = new Set([
   "succeeded",
@@ -105,7 +111,13 @@ export const useFleetStore = defineStore("fleet", () => {
   // When the complete node snapshot was last replaced, for freshness labels.
   const snapshotAt = ref<Date>();
   let source: EventSource | undefined;
-  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  // Platform event the node snapshot already covers. The stream resumes after
+  // it; without a cursor the server replays the whole workspace history and
+  // every replayed page triggers another rebuild.
+  let eventCursor: string | undefined;
+  const streamConnected = ref(false);
+  let reading = false;
+  let selectionTarget: string | undefined;
   let connectSequence = 0;
   const controllers = new Set<AbortController>();
   let rebuildController: AbortController | undefined;
@@ -214,6 +226,7 @@ export const useFleetStore = defineStore("fleet", () => {
   );
 
   async function rebuild(): Promise<void> {
+    if (!isPageActive()) return;
     cancelRequest(rebuildController);
     const controller = trackRequest();
     rebuildController = controller;
@@ -231,6 +244,16 @@ export const useFleetStore = defineStore("fleet", () => {
           isCurrent(context, controller),
         );
       if (!isLatestRebuild()) return;
+      // Read the cursor before the nodes so events racing the snapshot are
+      // still delivered. An open stream keeps the cursor current itself.
+      // A failed lookup falls back to a full replay rather than failing.
+      const snapshotCursor = source
+        ? undefined
+        : await listEvents(undefined, controller.signal, "desc").then(
+            (page) => page.items[0]?.id,
+            () => undefined,
+          );
+      if (!isLatestRebuild()) return;
       const rebuilt: NodeObservedState[] = [];
       let cursor: string | undefined;
       do {
@@ -241,10 +264,11 @@ export const useFleetStore = defineStore("fleet", () => {
       } while (cursor);
       if (!isLatestRebuild()) return;
       nodes.value = rebuilt;
+      if (!source) eventCursor = snapshotCursor;
       snapshotAt.value = new Date();
       initialized.value = true;
-      if (selected.value && selectSequence === selectSequenceAtStart)
-        await select(selected.value.id);
+      if (selectionTarget && selectSequence === selectSequenceAtStart)
+        await select(selectionTarget);
       if (!isLatestRebuild()) return;
       unavailable.value = false;
     } catch {
@@ -265,6 +289,7 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function select(nodeId: string): Promise<void> {
+    selectionTarget = nodeId;
     if (selected.value && selected.value.id !== nodeId) {
       cancelRequest(operationController);
       operationController = undefined;
@@ -334,6 +359,7 @@ export const useFleetStore = defineStore("fleet", () => {
       if (selectController === controller) {
         selectController = undefined;
         selecting.value = false;
+        foregroundRefresh.reschedule();
       }
     }
   }
@@ -520,20 +546,87 @@ export const useFleetStore = defineStore("fleet", () => {
     );
   }
 
+  function pauseRefresh(): void {
+    connectSequence += 1;
+    source?.close();
+    source = undefined;
+    streamConnected.value = false;
+    // Suspend snapshot reads only; accepted operations keep their own tracking.
+    cancelRequest(rebuildController);
+    cancelRequest(selectController);
+  }
+
+  const foregroundRefresh = createForegroundRefresh(
+    async () => {
+      const sequence = connectSequence;
+      if (!loading.value || rebuildController?.signal.aborted) await rebuild();
+      if (sequence === connectSequence && isPageActive() && !source)
+        await connect();
+    },
+    () =>
+      streamConnected.value &&
+      !unavailable.value &&
+      selectionError.value !== "unavailable"
+        ? 60_000
+        : 15_000,
+    pauseRefresh,
+  );
+
+  function start(): void {
+    reading = true;
+    foregroundRefresh.start();
+  }
+
+  // Leaving a view stops its reads, but does not cancel accepted mutations.
+  function stop(): void {
+    reading = false;
+    foregroundRefresh.stop();
+    selectSequence += 1;
+    selectionTarget = undefined;
+    selected.value = undefined;
+    sessions.value = [];
+    ipBans.value = [];
+    userGroupState.value = [];
+    selecting.value = false;
+    selectionError.value = "";
+  }
+
   async function connect(): Promise<void> {
+    reading = true;
+    foregroundRefresh.start(false);
+    if (!isPageActive()) return;
     const sequence = ++connectSequence;
     source?.close();
     source = undefined;
+    streamConnected.value = false;
     let context: WorkspaceContext;
     try {
       context = await currentContext();
-      const stream = new EventSource(await eventStreamPath());
+      const path = await eventStreamPath(eventCursor);
+      if (
+        sequence !== connectSequence ||
+        !isCurrent(context) ||
+        !isPageActive()
+      )
+        return;
+      const stream = new EventSource(path);
       if (sequence !== connectSequence || !isCurrent(context)) {
         stream.close();
         return;
       }
       source = stream;
-      stream.addEventListener("platform", () => {
+      stream.onopen = () => {
+        if (
+          sequence !== connectSequence ||
+          !isCurrent(context) ||
+          source !== stream
+        )
+          return;
+        streamConnected.value = true;
+        if (unavailable.value) foregroundRefresh.request();
+        else foregroundRefresh.reschedule();
+      };
+      stream.addEventListener("platform", (message) => {
         if (
           sequence !== connectSequence ||
           !isCurrent(context) ||
@@ -542,8 +635,9 @@ export const useFleetStore = defineStore("fleet", () => {
           stream.close();
           return;
         }
-        clearTimeout(refreshTimer);
-        refreshTimer = setTimeout(() => void rebuild(), 150);
+        if (message instanceof MessageEvent && message.lastEventId)
+          eventCursor = message.lastEventId;
+        foregroundRefresh.request(150);
         if (typeof window !== "undefined")
           window.dispatchEvent(new Event(platformEventsEvent));
       });
@@ -556,7 +650,11 @@ export const useFleetStore = defineStore("fleet", () => {
           stream.close();
           return;
         }
+        stream.close();
+        source = undefined;
+        streamConnected.value = false;
         unavailable.value = true;
+        foregroundRefresh.reschedule();
         void probeAuthentication().catch(() => undefined);
       };
     } catch {
@@ -565,13 +663,16 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   function disconnect(): void {
+    stop();
     connectSequence += 1;
     source?.close();
     source = undefined;
-    clearTimeout(refreshTimer);
+    eventCursor = undefined;
+    streamConnected.value = false;
     abortRequests();
   }
   function resetWorkspace(): void {
+    const wasReading = reading;
     disconnect();
     nodes.value = [];
     snapshotAt.value = undefined;
@@ -587,7 +688,7 @@ export const useFleetStore = defineStore("fleet", () => {
     initialized.value = false;
     selecting.value = false;
     selectionError.value = "";
-    void rebuild().then(() => connect());
+    if (wasReading) start();
   }
   if (typeof window !== "undefined") {
     window.addEventListener(workspaceChangedEvent, resetWorkspace);
@@ -622,6 +723,9 @@ export const useFleetStore = defineStore("fleet", () => {
     agentAhead,
     agentUnknown,
     rebuild,
+    start,
+    stop,
+    streamConnected,
     select,
     connect,
     disconnect,

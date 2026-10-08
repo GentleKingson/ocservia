@@ -36,6 +36,7 @@ services:
       OCSERV_EDGE_GATEWAY_IP: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
     volumes:
       - ./integrated/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./integrated/site.caddy:/etc/caddy/site.caddy:ro
     networks: !override
       edge-gateway: {}
       application:
