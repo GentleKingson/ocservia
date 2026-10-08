@@ -52,7 +52,7 @@ while read -r path selected; do
           expect "${out}" ci_suites 'release' ;;
         .github/workflows/ci.yml|.github/workflows/security.yml|scripts/ci-relevance.sh)
           expect "${out}" ci_suites guards ;;
-        .github/workflows/release*.yml|.github/release.yml|.github/release-notes/*.md)
+        .github/workflows/release*.yml|.github/release.yml|.github/release-notes/*.md|scripts/release-quick-acceptance.sh)
           expect "${out}" ci_suites release ;;
       esac
     else
@@ -132,7 +132,7 @@ scripts/build-release-controller.sh run_ci_tools run_installers run_controller_c
 rust/transportd.Dockerfile run_ci_tools run_controller_cache
 signer/Dockerfile run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
 .dockerignore run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
-scripts/release-quick-acceptance.sh run_ci_tools run_installers
+scripts/release-quick-acceptance.sh run_ci_tools
 deploy/production/quick-install.sh run_ci_tools run_installers
 rust/agent-build.Dockerfile run_ci_tools
 CASES

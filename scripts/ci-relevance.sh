@@ -59,6 +59,9 @@ classify_path() {
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile)
       tools_suite release ;;
     rust/*|scripts/rust-check.sh) run_rust=true ;;
+    # Run only by Release Check; no installer contract executes it, while
+    # test-release-workflows.rb (release suite) asserts that Release Check calls it.
+    scripts/release-quick-acceptance.sh) tools_suite release ;;
     deploy/managed-node/install.sh|deploy/production/install.sh|deploy/production/controller-bootstrap.sh|\
     deploy/lib/install-env.sh|deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|scripts/prepare-bootstrap-release-assets.sh|\
