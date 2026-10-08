@@ -74,6 +74,12 @@ classify_path() {
     deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*mysql*|scripts/*postgres*|\
     scripts/i18-*-backup-restore-smoke.sh)
       run_go=true; run_database=true ;;
+    # test-release-workflows.rb (release suite) reads the Release notes config and bridge.
+    .github/release.yml) tools_suite release ;;
+    .github/release-notes/*.md) run_docs=true; tools_suite release ;;
+    # Shared Claude Code settings never reach CI or images; docs-check enforces its audited keys.
+    # Other non-Markdown .claude/ files (hooks, local settings) stay unknown and fail closed.
+    .claude/settings.json) run_docs=true ;;
     docs/*.md|*.md|LICENSE|LICENSE.*) run_docs=true ;;
     control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*|go.work*)
       run_go=true; run_database=true ;;
