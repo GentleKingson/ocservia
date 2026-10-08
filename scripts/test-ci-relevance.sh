@@ -81,6 +81,10 @@ control-plane/internal/api/routes.go run_go run_database run_controller_cache
 control-plane/migrations/000036.up.sql run_go run_database run_controller_cache
 scripts/database-foundation-integration.sh run_go run_database
 scripts/go-check.sh run_go
+signer/http.go run_go run_controller_cache
+signer/store_test.go run_go run_controller_cache
+signer/go.sum run_go run_controller_cache
+signer/notes.txt run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
 scripts/web-check.sh run_web
 deploy/managed-node/install.sh run_installers
 deploy/production/install.sh run_installers

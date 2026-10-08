@@ -20,7 +20,7 @@ identity="$(
     sha256sum toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh \
       scripts/ci-go-cache-key.sh scripts/go-check.sh scripts/required-go-tests.sh \
       scripts/database-integration.sh scripts/database-foundation-integration.sh \
-      go.work go.work.sum control-plane/go.mod control-plane/go.sum
+      go.work go.work.sum control-plane/go.mod control-plane/go.sum signer/go.mod signer/go.sum
   } | sha256sum
 )"
 printf 'identity=%s\n' "${identity%% *}"

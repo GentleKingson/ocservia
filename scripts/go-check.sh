@@ -27,10 +27,17 @@ if [[ "${MODE}" != standard ]]; then
   require_go_race
 fi
 
-GO_MODULES=(control-plane)
+GO_MODULES=(control-plane signer)
+
+# The signer store refuses state under a group/world-writable ancestor such as
+# the default /tmp, so Go tests get a private temporary directory in the checkout.
+mkdir -p "${ROOT}/.cache"
+GO_TEST_TMPDIR="$(mktemp -d "${ROOT}/.cache/go-test-tmp.XXXXXX")"
+trap 'rm -rf -- "${GO_TEST_TMPDIR}"' EXIT
+export TMPDIR="${GO_TEST_TMPDIR}"
 
 if [[ "${MODE}" != "race" ]]; then
-  test -z "$(gofmt -l "${ROOT}/control-plane")"
+  test -z "$(gofmt -l "${GO_MODULES[@]/#/${ROOT}/}")"
   for module in "${GO_MODULES[@]}"; do
     (cd "${ROOT}/${module}" && go vet ./...)
     (cd "${ROOT}/${module}" && go test -count=1 ./...)
