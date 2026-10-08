@@ -147,7 +147,7 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
     end
     File.write(path, stub)
   end
-  %w[bin control-plane].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
+  %w[bin control-plane signer].each { |path| FileUtils.mkdir_p(File.join(work, path)) }
   %w[go gofmt].each do |name|
     path = File.join(work, "bin", name)
     File.write(path, "#!/usr/bin/env bash\nprintf '%s|%s|%s\\n' \"${0##*/}\" \"${PWD}\" \"$*\" >> \"${CI_TRACE}\"\n")
@@ -198,6 +198,8 @@ Dir.mktmpdir("ci-entrypoints-") do |tmp|
       routing.fetch("run_go") == "true" && File.readlines(trace).any? { |line| line.match?(/^go(fmt)?\|/) }
     run.call(env, "bash", "-eo", "pipefail", "-c", standard.fetch("run"), chdir: work) if routing.fetch("run_go") == "true"
     calls = File.readlines(trace, chomp: true)
+    reject("#{name} skipped a Go workspace module") if routing.fetch("run_go") == "true" &&
+      !%w[control-plane signer].all? { |mod| calls.include?("go|#{File.join(work, mod)}|test -count=1 ./...") }
     reject("#{name} retained retired G6 contract checks") unless calls.grep(/^test-g6-/).empty?
     reject("#{name} lost shared tooling checks") unless
       %w[test-build-cache-credentials.sh test-buildx-cache-fallback.sh test-secret-scan-config.sh].all? { |test| calls.count(test) == 1 }
@@ -291,5 +293,13 @@ done
 
 if "${ROOT}/scripts/go-check.sh" unsupported >/dev/null 2>&1; then
   echo "go-check.sh accepted an unsupported execution mode" >&2
+  exit 1
+fi
+
+# Every go.work module must reach gofmt, vet and the unit/race tests in go-check.sh.
+workspace_modules="$(sed -n 's#^[[:space:]]*\./\([^[:space:]]*\)$#\1#p' "${ROOT}/go.work" | sort)"
+checked_modules="$(sed -n 's/^GO_MODULES=(\(.*\))$/\1/p' "${ROOT}/scripts/go-check.sh" | tr ' ' '\n' | sort)"
+if [[ -z "${workspace_modules}" || "${workspace_modules}" != "${checked_modules}" ]]; then
+  echo "go-check.sh GO_MODULES must match the go.work modules" >&2
   exit 1
 fi

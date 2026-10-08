@@ -87,6 +87,9 @@ classify_path() {
     control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*|go.work*)
       run_go=true; run_database=true ;;
     control-plane/*|scripts/go-check.sh) run_go=true ;;
+    # Independent module: imports no control-plane package, uses no SQL backend, and
+    # go-check.sh tests it. Other signer/ files stay unknown and fail closed.
+    signer/*.go|signer/go.mod|signer/go.sum) run_go=true ;;
     .github/workflows/ci.yml)
       tools_suite guards ;;
     .github/workflows/security.yml) tools_suite guards ;;
