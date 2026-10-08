@@ -91,6 +91,7 @@ summary = result.fetch("steps").first.fetch("run")
     flags = worker_flags.to_h { |id, flag| [flag, selected.include?(id).to_s] }
     flags["run_ci_tools"] = selected.include?("ci_tools").to_s
     flags["run_installers"] = selected.include?("installers").to_s
+    flags["run_controller_cache"] = (selected.include?("web") || selected.include?("installers")).to_s
     selected = selected.dup
     selected << "go" if flags["run_ci_tools"] == "true"
     selected << "rust" if flags["run_installers"] == "true"
@@ -110,6 +111,9 @@ summary = result.fetch("steps").first.fetch("run")
     end
     needs["ci-relevance"]["outputs"].delete("run_database")
     reject("summary accepted missing routing") if check.call(needs)
+    needs["ci-relevance"]["outputs"]["run_database"] = flags["run_database"]
+    needs["ci-relevance"]["outputs"].delete("run_controller_cache")
+    reject("summary accepted missing Controller cache routing") if check.call(needs)
   end
 end
 
