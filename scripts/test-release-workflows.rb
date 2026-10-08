@@ -62,7 +62,7 @@ products.fetch('jobs').each do |name,job|
 end
 controller = products.fetch('jobs').fetch('build-controller-images')
 writer = load_workflow('ci').fetch('jobs').fetch('controller-cache')
-require_check(writer['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/main'", 'Controller cache writes must only run on trusted main pushes')
+require_check(writer['needs'] == 'ci-relevance' && writer['if'] == "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-relevance.outputs.run_controller_cache == 'true'", 'Controller cache writes must only run on trusted main pushes with Controller image inputs changed')
 require_check(writer.dig('strategy','matrix','arch') == %w[amd64 arm64] && writer['runs-on'].include?('ubuntu-24.04-arm'), 'main cache writer must cover both native architectures')
 require_check(!writer.key?('permissions') && !writer.key?('environment') && !writer.key?('continue-on-error'), 'cache writer must retain read-only authority and propagate export failures')
 require_check(writer.dig('concurrency','group') == 'controller-cache-${{ matrix.arch }}' && writer.dig('concurrency','cancel-in-progress') == false, 'cache writers must be serialized per architecture')

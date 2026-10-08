@@ -16,7 +16,7 @@ case "${profile}" in
 esac
 database_scope=smoke
 if [[ "${profile}" == full ]]; then database_scope=full; fi
-flags=(run_docs run_go run_rust run_web run_database run_ci_tools run_installers)
+flags=(run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache)
 for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
 changed=()
@@ -94,6 +94,22 @@ classify_path() {
     deploy/real-e2e/*|scripts/real-e2e-*|scripts/test-real-e2e-*|scripts/p1-*|scripts/test-p1-*|scripts/security-acceptance-*)
       tools_suite release ;;
     *) fail_closed "unknown_path:${path}" ;;
+  esac
+  # Mirrors the COPY sources of the Dockerfiles built by build-release-controller.sh
+  # (build context is the repository root) and the builder/cache machinery itself.
+  case "${path}" in
+    web/*|control-plane/*|signer/*|THIRD_PARTY_NOTICES.md|\
+    rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/vendor/*|rust/crates/*|\
+    rust/transportd.Dockerfile|\
+    deploy/production/Caddyfile|deploy/production/*.Dockerfile|deploy/production/backup-entrypoint.sh|\
+    deploy/production/relay-entrypoint.sh|deploy/production/relay-healthcheck.sh|\
+    deploy/production/relay.Cargo.lock|deploy/production/transportd-relays.sh|\
+    deploy/production/integrated/*|deploy/prepare-transport-runtime.sh|\
+    scripts/postgres-backup.sh|scripts/mysql-server-check.sh|scripts/mysql-backup.sh|\
+    scripts/mysql-restore-verify.sh|scripts/build-relay.sh|scripts/checksums.txt|toolchains.lock|\
+    .dockerignore|scripts/build-release-controller.sh|scripts/buildx-cache.sh|\
+    .github/actions/build-cache-credentials/*|.github/workflows/ci.yml)
+      run_controller_cache=true ;;
   esac
 }
 

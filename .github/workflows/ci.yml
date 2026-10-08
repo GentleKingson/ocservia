@@ -42,6 +42,7 @@ jobs:
       run_rust: ${{ steps.relevance.outputs.run_rust }}
       run_web: ${{ steps.relevance.outputs.run_web }}
       run_database: ${{ steps.relevance.outputs.run_database }}
+      run_controller_cache: ${{ steps.relevance.outputs.run_controller_cache }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -293,7 +294,8 @@ jobs:
 
   controller-cache:
     name: Refresh Controller cache (${{ matrix.arch }})
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci-relevance
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-relevance.outputs.run_controller_cache == 'true'
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     strategy:
@@ -335,7 +337,7 @@ jobs:
             . as $results | .["ci-relevance"].outputs as $routing |
             .["ci-relevance"].result == "success" and
             ($routing.profile == "quick" or $routing.profile == "full") and
-            all(["run_docs", "run_go", "run_rust", "run_web", "run_database", "run_ci_tools", "run_installers"][];
+            all(["run_docs", "run_go", "run_rust", "run_web", "run_database", "run_ci_tools", "run_installers", "run_controller_cache"][];
               $routing[.] == "true" or $routing[.] == "false") and
             (if $routing.profile == "full" then
               all(["run_docs", "run_go", "run_rust", "run_web", "run_database"][]; $routing[.] == "true")
