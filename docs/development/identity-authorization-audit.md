@@ -3,9 +3,10 @@
 Production API access supports Local only, OIDC only, and Local + OIDC.
 When OIDC is enabled, it uses Authorization Code flow with PKCE S256.
 Configure an HTTPS issuer, exact HTTPS callback URL and client credentials for
-OIDC; its redirect origin must match `OCSERV_PUBLIC_ORIGIN`. All modes require a
-32-byte session encryption key, a 32-byte audit checkpoint key, and an
-independent 32-byte audit event authentication key with a stable key ID. The browser
+OIDC; in production its redirect origin must match `OCSERV_PUBLIC_ORIGIN`. Every
+production mode requires a 32-byte session encryption key, a 32-byte audit
+checkpoint key, and an independent 32-byte audit event authentication key with
+a stable key ID. The browser
 receives only Secure, HttpOnly, SameSite session cookies; OIDC tokens are not
 stored in browser storage. Existing sessions remain usable during a temporary
 identity-provider outage, while new SSO logins fail closed. Local login remains
@@ -29,21 +30,37 @@ The symmetric key values contain 64 lowercase hexadecimal characters. The
 event key file must be a process-owned, single-link regular file with mode
 `0400` or `0600` below root- or process-owned non-writable ancestry. Production startup
 fails when both Local and OIDC are disabled, OIDC is incomplete, or a required
-session/audit key is absent. Development bearer
-authentication remains limited to a non-production deployment.
+session/audit key is absent.
+
+Development authentication is not a production mode. `OCSERV_DEV_AUTH` makes
+every request the development principal and is accepted only with
+`environment=development` and a loopback HTTP address; `OCSERV_DEV_AUTH_TOKEN`
+(at least 32 characters, sent as `Authorization: Bearer`) is accepted only with
+`environment=development`. The development principal has no identity row or
+role binding. Route-level RBAC is skipped for it (the event stream still needs a
+valid workspace), `/local-users` and `/auth/change-password` reject it, and it
+cannot create or decide approvals because those require a requester or approver
+identity. Browser-hidden buttons are never authorization evidence; the backend
+checks above are the only boundary.
 
 Authorization combines a subject, workspace, resource type, resource ID, and
 action. The baseline roles are Viewer, Operator, UserManager, ConfigManager,
 Auditor, SecurityAdmin, and PlatformAdmin. Collection requests carry
-`X-Workspace-ID`; object routes independently resolve the object's workspace so
-changing an ID cannot cross an authorization boundary.
+`X-Workspace-ID`; when it is omitted, the principal's single authorized
+workspace is used and zero or several candidates are refused. Object routes
+independently resolve the object's workspace so changing an ID cannot cross an
+authorization boundary.
 
-Node activation, node revocation, and service reload require an approved
-request. Create the request first, have a different authorized principal approve
-it, then submit the mutation with `X-Approval-ID`. Approval records are scoped
-to one requester, action, workspace, resource, and expiry; they are consumed in
-the business transaction and cannot be replayed. PlatformAdmin does not bypass
-this requirement.
+Node activation (`node.approve`), node revocation (`node.revoke`), service
+reload, configuration apply, certificate issue/revoke/private-key export, Agent
+upgrade and rollout, batch user disable, elevated role bindings and Local
+password reset (`local_user.reset-password`) require an approved request. Create
+the request first, have a different authorized principal approve it, then submit
+the mutation with `X-Approval-ID`. Approval records are scoped to one requester,
+action, workspace, resource, content hash and expiry; they are consumed in the
+business transaction and cannot be replayed. PlatformAdmin does not bypass this
+requirement. The approver must hold SecurityAdmin or PlatformAdmin covering every
+authority resource, bound no later than the request's authority snapshot.
 
 Audit intents commit with business writes. Agent terminal results append a
 separate event. Every new row authenticates its canonical event hash with a
@@ -79,8 +96,9 @@ Passwords are stored only in `local_credentials`, keyed by
 as subject. Usernames are trimmed and lowercased, with a 128-byte input limit;
 the accepted alphabet is ASCII letters/digits plus `.`, `_`, and `-`, starting
 with a letter or digit. No email/name matching or OIDC account linking occurs.
-Every new hash passes `ValidateNewPassword` through `hashPassword`; future provisioning
-and self-service changes must reuse it. Historical 1..1024-byte credentials
+Every new hash passes `ValidateNewPassword` through `hashPassword`: provisioning,
+bootstrap, administrator reset and self-service change all use it, and any new
+password-setting path must too. Historical 1..1024-byte credentials
 still verify unchanged. See the [Local password policy](../operations/authentication.md#local-new-password-policy).
 
 Hashes use `golang.org/x/crypto/argon2` Argon2id v19, independent 16-byte random
@@ -252,6 +270,9 @@ and [current-password verification for password changes](https://cheatsheetserie
 
 Local auth is not a replacement for this independent emergency offline access
 mechanism. Its rotation, alert, audit and short-session requirements are unchanged.
+
+Break-glass passes RBAC route checks but has no role bindings, so it cannot
+supply the independent approver authority an approval requires.
 
 Break-glass is disabled unless `OCSERV_BREAK_GLASS_ENABLED=true` and
 `OCSERV_BREAK_GLASS_TOKEN_SHA256` contains the SHA-256 digest of a high-entropy

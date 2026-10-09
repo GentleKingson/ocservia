@@ -5,8 +5,9 @@ it is outside Basic CI and has no dedicated Actions workflow.
 
 Use two distinct Linux VMs with different boot IDs, the same repository commit,
 and Internet access to Iroh's default relay discovery. The Controller needs
-Docker Compose; the managed node needs the repository's Rust toolchain. Both
-need the shell utilities used by the scripts, including jq. This profile starts
+Docker Compose; the managed node needs the repository's Rust toolchain and
+OpenSSL. Both need Linux (the scripts read `/proc/sys/kernel/random/boot_id`)
+and the shell utilities used by the scripts, including jq. This profile starts
 real PostgreSQL, Control Plane, and transportd processes and builds the real Agent.
 
 ## Manual execution
@@ -18,7 +19,9 @@ all phases, including cleanup. `ARTIFACT_DIR` optionally overrides the default
 diagnostics directory under `RUNNER_TEMP`.
 
 1. On the Controller, run `scripts/real-e2e-controller.sh start`. On the node,
-   run `scripts/bootstrap.sh native`, source `scripts/env.sh`, and run
+   run `scripts/bootstrap.sh native` (not supported on Linux ARM64; see
+[Linux ARM64 dependencies](testing.md#linux-arm64-go-validation)), source
+`scripts/env.sh`, and run
    `scripts/real-e2e-node.sh build`.
 2. Securely copy the Controller's
    `${RUNNER_TEMP}/ocservia-real-e2e-controller-${RUN_ID}/outbox/controller-ready`
@@ -62,3 +65,7 @@ For a syntax-only check in the authorized validation environment:
 ```bash
 make real-e2e-check
 ```
+
+It runs `bash -n` on `real-e2e-controller.sh`, `real-e2e-node.sh` and
+`real-e2e-artifact.sh` only. It starts no VM, container or Agent, does not run
+`scripts/test-real-e2e-artifact.sh`, and is not evidence that enrollment works.

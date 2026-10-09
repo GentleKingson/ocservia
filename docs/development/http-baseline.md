@@ -8,9 +8,13 @@ or split domain transactions.
 ## Assembly and lifecycle
 
 `api.NewServer(HTTPConfig, backend, build, logger, Modules, Authorization)`
-constructs the complete server. Deployment uses `newHTTPServer`;
-`NewBackend` is a compatibility constructor with default SSE settings and
-disabled optional modules, not a server completed through business setters.
+constructs the server from validated inputs. Deployment uses `newHTTPServer`,
+which builds those inputs and, after `NewServer` and before listening, calls the
+`Enable*` setters (operations, release catalog, user state, privd attestation,
+enrollment, owner fencing, local slice) and `SetLocalSimulatorEnabled` for
+features that are not `Modules` fields. `NewBackend` is a compatibility
+constructor with default SSE settings and disabled optional modules, not a
+server completed through those setters.
 Non-API roles return before authentication or HTTP construction.
 
 Assembly configures shared domain services, authentication, RBAC, approvals,
@@ -113,8 +117,9 @@ The domain interprets validity/expiry and returns the candidate hash and safe
 summary. Missing service/wrong resource type returns `400 invalid-request`;
 read or invalid/expired Plan returns `409 config-plan-not-ready` before
 foreign-workspace `400 invalid-request` and node-RBAC `403 forbidden`.
-`config_plan_summary` retains `node_id`, `expected_revision`, `candidate_hash`,
-`current_hash`, `diff_redacted` and `expires_at`. Detail/decision checks cover
+`config_plan_summary` retains `plan_id`, `node_id`, `expected_revision`,
+`candidate_hash`, `materialized_hash`, `current_hash`, `diff_redacted` and
+`expires_at`. Detail/decision checks cover
 all saved authority resources before legacy fallback.
 
 ## User policy and batches

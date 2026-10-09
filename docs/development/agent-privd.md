@@ -2,12 +2,13 @@
 
 The node runtime is split into an unprivileged `ocservia-agent` and a small
 root `ocservia-privd`. The Agent owns network connectivity and local SQLite
-state. Privd has no TCP listener. It accepts seven unauthenticated local reads on
-`/run/ocserv-platform/privd.sock`: service status, Ocserv version, sessions, IP
-bans, the fingerprint of `/etc/ocserv/ocserv.conf`, and hash-free users and
-groups derived from the fixed Ocserv password file. Desired-effect observation
-requires the original signed command, as do all configuration, certificate,
-session, IP, service, password, and group operations.
+state. Privd has no TCP listener. It accepts eight local reads without a signed
+command on `/run/ocserv-platform/privd.sock`: service status, Ocserv version,
+sessions, IP bans, the fingerprint of `/etc/ocserv/ocserv.conf`, hash-free users
+and groups derived from the fixed Ocserv password file, and the recent durable
+Agent-upgrade results, which privd signs as an attested proof. Desired-effect
+observation requires the original signed command, as do all configuration,
+certificate, session, IP, service, password, group and upgrade operations.
 
 Privd verifies the Unix peer UID before decoding a request, but UID admission is
 only the first layer. Every privileged request carries the original
@@ -40,10 +41,14 @@ The unit grants write access only to this state directory and the fixed Ocserv
 directory. Keep the generated HMAC key and database together during backup,
 restore, and binary rollback.
 
-Every successful privileged terminal response also carries
-`PrivdResultReceiptV1`, signed with a per-node Ed25519 key stored only in the
-root-owned mode-`0700` privd state directory as a mode-`0600` single-link
-regular file. Creation is random, create-new, file-fsynced, atomically renamed,
+Every terminal privileged response also carries `PrivdResultReceiptV1`: a
+success, or a terminal rejection whose error code is `privd_rejected` or
+`capacity_exceeded`. Other errors, such as an unavailable adapter, carry no
+receipt and are not terminal. For `agent.upgrade` the success is only
+"scheduled"; the upgrader's later durable result is read through the attested
+upgrade-result read above. The receipt is signed with a per-node Ed25519 key
+stored only in the root-owned mode-`0700` privd state directory as a mode-`0600`
+single-link regular file. Creation is random, create-new, file-fsynced, atomically renamed,
 and parent-fsynced; unsafe owner, mode, length, type, link, or symlink state
 stops privd. The canonical receipt is independent of Protobuf encoding and
 binds node, command, operation, idempotency key, semantic hash, command/result
@@ -56,9 +61,10 @@ The Agent treats proof as opaque. Its journal commits result and proof in one
 SQLite transaction and replays the stored bytes. Missing or malformed proof
 becomes Unknown. Transportd enforces only bounded shape/version and forwards it
 unchanged. Controller reconstructs the canonical transcript and accepts a
-privileged success only against an independently registered active key for that
-node. Failure emits audit and security-alert records and enters reconciliation;
-it cannot advance desired state.
+privileged terminal result (success or rejection) only when its claims match the
+command and its key is an independently registered, active, in-window key for
+that node. Failure emits audit and security-alert records and enters
+reconciliation; it cannot advance desired state.
 
 Reconciliation first asks privd for the exact authenticated effect record. A
 matching root record returns its original result bytes, receipt, and signature;

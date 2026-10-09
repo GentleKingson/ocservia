@@ -55,10 +55,10 @@ Runtime metrics expose active and unhealthy watcher counts, query volume, and
 backoff. Readiness fails while any active watcher is recovering from a durable
 event-table query failure, then returns healthy after cursor catch-up succeeds.
 The bounded series are `sse_active_streams`,
-`sse_admission_rejections_total`, `sse_watchers`,
-`sse_slow_consumer_disconnects_total`, and
+`sse_rejected_streams`, `sse_watchers`, `sse_unhealthy_watchers`,
+`sse_sql_queries`, `sse_slow_consumer_disconnects`, and
 `sse_database_backoff_seconds`; identity, session, workspace, and operation
-values never become metric labels.
+values never become metric keys or labels.
 
 The simulator is disabled unless `OCSERV_LOCAL_SIMULATOR=true`, is rejected in
 production, and only accepts the typed `SimulationProbe` payload. Configure its
@@ -95,29 +95,38 @@ when developing those identity-bound high-risk workflows.
 Database migrations run as a separate one-shot process using `--migrate-only`,
 an owner connection in `OCSERV_DATABASE_URL`, and the unprivileged role named
 by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives
-only the runtime role credentials. Migration execution serializes schema
-changes, validates known applied content, and grants the runtime
-role ordinary data access while keeping audit events read/append-only.
-PostgreSQL grants `SELECT`/`INSERT`; MySQL additionally grants a narrow
-column UPDATE privilege for locking reads, while immutable triggers reject
-actual updates. PostgreSQL uses an advisory lock and transactional SQL migrations.
-MySQL uses a dedicated connection's `GET_LOCK` and durable, verified step
-progress because DDL can implicitly commit. Both engines refuse unknown epochs,
-revisions, checksums, schema drift and nonempty databases without supported
-provenance before mutation. Interrupted MySQL execution requires explicit repair
-with the exact original artifact; neither engine automatically force-cleans or
-downgrades. Uncertain lock release discards the connection.
+only the runtime role credentials. The one-shot run migrates, verifies audit
+event authentication, then grants the runtime role ordinary data access;
+that order is why a failed migration never reaches the grant step. Migration
+execution serializes schema changes and validates known applied content. Runtime
+access to audit events is read/append, plus authenticated aged detail
+compaction through dedicated routines. Both engines grant `SELECT`/`INSERT` and a
+column-level `UPDATE(event_hash)`, which locking reads require; immutable
+triggers reject actual updates. PostgreSQL uses an advisory lock and transactional
+SQL migrations. MySQL uses a dedicated connection's `GET_LOCK` and durable,
+verified step progress because DDL can implicitly commit. Both engines refuse
+unknown epochs, revisions, checksums, schema drift and nonempty databases
+without supported provenance before mutating schema. Interrupted MySQL execution
+requires explicit repair with the exact original artifact; the Controller's own
+migration run never passes a repair checksum, and neither engine automatically
+force-cleans or downgrades. Uncertain lock release discards the connection.
 
 ### Current SQL artifacts and bounded upgrades
 
-Each engine has exactly two active SQL files: `schema.sql` and `upgrade.sql`.
+Each engine has exactly two active SQL files: `schema.sql` and `upgrade.sql`;
+their [artifact format](../../control-plane/internal/database/schemaartifact/README.md)
+defines markers, receipts and checksums.
 PostgreSQL stores them in `control-plane/migrations/`; MySQL in
 `control-plane/internal/database/mysql/mysql/`. `schema_revisions` is the only
 migration journal. There are no numbered SQL/JSON migrations or snapshot
 descriptors. Schema identity is the epoch, revision and raw artifact checksums,
 not an old migration filename counter or Controller compatibility range.
+The [support policy](../reference/support-policy.md) removed software-version
+admission; it did not remove this schema-source admission, which still rejects
+unknown epochs, revisions and checksums.
 
-Only a genuinely empty database executes `schema.sql`. Existing databases must
+Only a genuinely empty database executes `schema.sql`; initialization is never
+a way to overwrite, adopt or clean an existing database. Existing databases must
 match the current epoch's known receipt history or the sole previous checkpoint:
 `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0.
 That immutable release remains the anchor when main advances. Earlier databases
@@ -129,16 +138,25 @@ must first upgrade with v1.2.0; a major candidate cannot replay removed history.
 | MySQL 8.4 LTS | `3dc39a92ff4b54bff922872fae296843cea8dea1f2d1b36b42d86c9069dcb450` | Epoch 2 / revision 1 |
 
 Fresh and checkpoint-upgraded databases must have equivalent business schema,
-mandatory seeds and runtime ACLs. Their execution receipts record different
-valid paths: fresh initialization records its actual schema steps; a MySQL
-checkpoint upgrade records the transition and eight cleanup steps. Do not
-rewrite either history to make the receipts identical.
+mandatory seeds and runtime ACLs; equivalence is not identical receipts. Their
+execution receipts differ by engine and path. MySQL fresh initialization records
+one epoch-2 / revision-1 receipt from the actual `schema.sql` steps, while a
+MySQL checkpoint upgrade retains the epoch-1 receipt and adds the epoch-2
+transition plus eight cleanup steps as revision 1. PostgreSQL's cleanup removes
+the epoch-1 receipt in the same transaction, so a PostgreSQL upgrade ends with a
+single epoch-2 / revision-0 receipt (the baseline checksum), the same shape a
+fresh install records. Do not rewrite either history to make receipts match.
 
-PostgreSQL installs or transitions in one transaction. Its transition verifies
-the new schema, writes the verified epoch-2 baseline, executes legacy metadata
-cleanup from `upgrade.sql`, then validates the full result before committing.
-MySQL verifies its epoch-2 transition before running eight cleanup DROP steps as
-revision 1. Each DDL step records same-row progress and validates the actual
+PostgreSQL installs or transitions in one transaction; each later forward
+revision commits in its own. Its transition first checks the old schema against the
+pinned checkpoint fingerprint, verifies the new schema, writes the verified epoch-2
+baseline, executes legacy metadata cleanup from `upgrade.sql` (dropping
+`schema_migrations` and `schema_snapshot_origin` and deleting the epoch-1
+receipt; the `controller_schema_compatibility` table is left in place and no
+non-test Go code reads it), then validates the full result before committing. A
+failure rolls that transaction back. MySQL verifies its epoch-2 transition
+before running eight cleanup DROP steps as revision 1, with no transaction
+spanning them. Each DDL step records same-row progress and validates the actual
 before/after object definition; data work and progress commit together. Recovery
 requires the matching SQL checksum and refuses foreign or partial definitions.
 
@@ -164,9 +182,13 @@ deterministic seed values are compared exactly. See
 [SQL artifact acceptance](testing.md#sql-artifact-acceptance) for required
 failure, repair and backup/restore coverage.
 
-Readiness checks current core reads, permissions and event-stream health, not
-migration history or Controller schema ranges. Current startup also validates
-the actual telemetry objects and runtime privileges it needs.
+Readiness runs a zero-row read of core tables (workspaces, nodes, operations) and
+checks event-stream health; it does not read `schema_revisions`. Normal
+Controller startup (without `--migrate-only`) verifies audit authenticity and
+validates the telemetry objects and runtime privileges it needs, but does not
+re-check receipts, checksums or schema drift. A passing `/readyz` is therefore
+not evidence of schema identity; that admission happens only in the owner
+migration run (or the test/development-only `ocserv-db-foundation` tool).
 
 Business stores share transaction ownership, atomic audit/business writes,
 bounded cleanup and fencing semantics through `internal/database`. PostgreSQL
@@ -214,9 +236,11 @@ for a current workspace example.
 
 An additive migration is not a cross-version safety guarantee. Do not rewrite
 published migration SQL or discard data to make a target start. Execution
-receipts are not a backup. Use [backend-specific recovery](../operations/incident-recovery.md#database-recovery):
+receipts are not a backup, and a backup file is not a verified restore. Use
+[backend-specific recovery](../operations/incident-recovery.md#database-recovery):
 PostgreSQL verified backup and isolated restore or MySQL logical restore, not
-equivalent HA/PITR guarantees.
+equivalent HA/PITR guarantees. See
+[schema provenance after restore](../operations/database-backup-restore.md#schema-provenance-after-restore).
 
 `make e2e` runs manual browser-to-simulator validation outside Basic CI.
 It retains Playwright reports/traces/screenshots/videos, test results and
@@ -224,7 +248,8 @@ Compose diagnostics locally, with no workflow upload. Containers, networks and
 volumes are scoped to `COMPOSE_PROJECT` and removed on success, failure or interruption.
 
 For a disposable development stack with no data to preserve, recreate the
-database from the current schema with:
+database from the current schema with (set the same `OCSERV_DATABASE_BACKEND`
+you started with, because it selects the Compose file):
 
 ```bash
 deploy/compose/compose.sh down --volumes

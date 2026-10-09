@@ -4,7 +4,7 @@
 
 Users and groups are scoped to a node. The control plane records desired state, accepts mutations as asynchronous operations, and keeps agent observations separate. API consumers must display the returned convergence value rather than treating `202 Accepted` as remote success.
 
-Mutations require `Idempotency-Key`, an expected desired version in `If-Match` or the request body, and a reason. Use `revision-0` only when creating a new user or group. Superseding is limited to complete substitutes: group apply replaces an older group apply, password rotation replaces an older password rotation, and enable/disable replace an older queued enable/disable. Create and cross-kind password/lock operations retain their execution order because later commands do not carry the missing password or lock intent.
+Mutations require `Idempotency-Key`, an expected desired version in `If-Match` or the request body, and a reason. Use `revision-0` only when creating a new user or group. A new mutation of the same kind supersedes an older command for the same resource only while that command is still `queued` and holds no node command lease: group apply replaces a queued group apply, password rotation a queued password rotation, disable a queued disable and enable a queued enable. Create never supersedes. While a different kind is queued, or the current revision is dispatched, accepted, running, unknown or superseded, the API returns `409 desired-revision-pending`. After a failed, expired, rolled-back or safely rejected revision, only a same-kind replacement is accepted; another kind returns `409 desired-revision-recovery-required`. Mixed kinds are not merged because a later command does not carry the missing password or lock intent.
 
 Password endpoints accept only a versioned `SealedSecretV1` with the
 `user_password` purpose, the enrolled user-password key ID, and an
@@ -42,8 +42,8 @@ Quota values use integer bytes up to JavaScript's safe integer maximum
 (`9007199254740991`). A policy selects receive, transmit, or combined
 traffic and either a UTC calendar-month or lifetime period. Monthly counters
 start at `00:00:00Z` on the first day of the month. `none` always has a zero
-limit. Expiry is an exact RFC 3339 UTC instant; offset timestamps and fractional
-seconds are rejected so operators and schedulers share one boundary.
+limit. Expiry is an RFC 3339 UTC timestamp ending in `Z`; the parsed instant
+must be a whole second so operators and schedulers share one boundary.
 
 Session telemetry is converted from monotonic per-session counters into durable
 monthly and lifetime usage. Replayed observations contribute no additional
@@ -56,9 +56,12 @@ replays the scan with stable idempotency keys. Quota or expiry enforcement
 creates the existing typed `user_disable` desired-state operation; it never
 executes local commands. Node write serialization remains in the command worker.
 Unknown outcomes are reconciled by the ordinary command path.
-At a new UTC calendar month, only users disabled by an earlier enforcement of
-the same policy are re-enabled, with another stable operation. Expired users and
-users disabled for another reason are not re-enabled.
+At a new UTC calendar month, a user is re-enabled with another stable operation
+only when the policy is monthly and unexpired, an earlier month's quota
+enforcement for the same policy version disabled the user (and the user is still
+at that disabled version, or that enforcement is still pending), and usage in the
+new month is below the quota. Expired users and users disabled for another reason
+are not re-enabled.
 
 User batches contain a parent and bounded item list. Each item is independently
 authorized and, when allowed, receives a distinct child operation and command.

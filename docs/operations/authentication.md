@@ -6,6 +6,10 @@ not mandatory when Local authentication is enabled. Use the normal
 [production secret permissions](production-deployment.md#production-secrets)
 for all three modes; these examples replace only the authentication section of
 `install.env`, not the database, TLS, relay, signer, backup or release settings.
+They apply to a manual installation, in Standalone or Integrated and with any
+supported database. Quick (`controller-bootstrap.sh --quick`) always configures
+**Local only** and ignores `./install.env`; it also creates the first two Local
+administrators itself, so use a manual installation for OIDC.
 
 ## Choose a mode
 
@@ -20,7 +24,8 @@ OCSERV_SESSION_TTL=8h
 Leave `OCSERV_OIDC_ISSUER`, `OCSERV_OIDC_CLIENT_ID` and
 `OCSERV_OIDC_REDIRECT_URL` unset or empty, including in the invoking shell.
 No OIDC client secret file is needed or mounted. The login page shows username
-and password. Create the first Local admin using the one-shot procedure below.
+and password. In a manual installation, create the first Local admin using the
+one-shot procedure below.
 
 ### OIDC only
 
@@ -49,7 +54,8 @@ OCSERV_OIDC_CLIENT_ID=ocservia
 OCSERV_OIDC_REDIRECT_URL=https://controller.example.com/api/v1/auth/callback
 ```
 
-Provision `oidc-client-secret` and bootstrap the first Local admin. The same
+Provision `oidc-client-secret` and bootstrap the first Local admin (manual
+installation). The same
 login page offers both the username/password form and **Sign in with SSO**.
 
 ## Configuration and secrets
@@ -82,8 +88,9 @@ and `compose.sh` commands require the same effective exported configuration;
 they do not load `install.env` themselves. Keep the selected image
 settings from the validated deployment configuration for direct `compose.sh` commands.
 
-`compose.sh` automatically adds `compose.oidc.yaml` when any OIDC setting is
-nonempty, checks the OIDC secret permissions only in that case, and passes the
+`compose.sh` automatically adds `compose.oidc.yaml` when `OCSERV_OIDC_ISSUER`,
+`OCSERV_OIDC_CLIENT_ID` or `OCSERV_OIDC_REDIRECT_URL` is nonempty, checks the
+OIDC secret permissions only in that case, and passes the
 same authentication settings to migrations and the Controller. Use this launcher
 rather than starting the base YAML alone. PostgreSQL credential rotation also
 retains the OIDC overlay when recreating the Controller. Rollback resolves the
@@ -211,8 +218,17 @@ with independent subject-ownership evidence and explicit migration approval.
 
 ## Bootstrap the first Local admin
 
-There is **no default administrator password**. Bootstrap is a separate,
-operator-invoked **one-shot**, not part of normal install or restart.
+There is **no default administrator password**. In a manual installation,
+bootstrap is a separate, operator-invoked **one-shot**, not part of normal
+install or restart. A Quick installation runs the equivalent steps itself
+(`quick-install.sh`): it provisions the management workspace with the owner
+one-shot below, generates two random passwords, and creates `initial-admin`
+(PlatformAdmin) and `initial-approver` (SecurityAdmin) with
+`--bootstrap-local-admin`. Their passwords exist only in root-only files under
+`/root/ocservia-initial-credentials`; give the accounts to different responsible
+people and change both passwords after first login (nothing forces it). A rerun
+accepts an already-initialized state. Do not repeat the procedure below on a
+Quick host.
 
 1. Complete the pinned Controller installation with Local enabled and a
    [supported database deployment](production-deployment.md#database-support).
@@ -221,7 +237,8 @@ operator-invoked **one-shot**, not part of normal install or restart.
    Confirm the guarded installation's migration process exited successfully
    (`database migrations complete`) and the Controller is ready.
    Use the installed release checkout and its effective exported production
-   settings and verified image digests for the commands below.
+   settings and verified image digests for the commands below. In Integrated
+   mode `compose.sh` must run as root, with the same Integrated settings.
 2. Select an existing management workspace UUIDv7. Bootstrap does not create a
    workspace. On a completely empty database, an authorized database operator
    must first provision one through the protected administrative connection.
@@ -505,7 +522,10 @@ Local login separately allows 5 requests per source per minute, 120 total
 requests per minute and 4 concurrent requests per API process. These limits
 apply even to correct passwords; account backoff below is a separate boundary.
 
-The shipped Caddy overwrites `X-Ocservia-Client-IP` with its direct peer address.
+The shipped Caddy overwrites `X-Ocservia-Client-IP` with the client address it
+sees: its direct TCP peer in Standalone, or in Integrated the client address in
+the PROXY metadata that Edge sends (accepted only from Edge's dedicated address;
+see the [Integrated contract](../development/integrated-deployment-contract.md#network-and-trust)).
 The API accepts this single IP only from configured trusted peers; it ignores
 client-supplied `X-Forwarded-For`. Do not trust the entire shared application
 network or publish the Controller's port.

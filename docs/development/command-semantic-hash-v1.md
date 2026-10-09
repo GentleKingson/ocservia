@@ -77,7 +77,8 @@ The trailing NUL is part of the hashed bytes.
 ### `payload_kind`
 
 `payload_kind` reuses the existing Protobuf oneof field number of the command
-payload. The current schema uses:
+payload. The payloads specified in this document, which are also the only ones
+in the shared v1 fixture, are:
 
 | Payload | Field number |
 |---|---:|
@@ -88,6 +89,14 @@ payload. The current schema uses:
 | `SyntheticEcho` | 108 |
 | `SessionTerminate` | 112 |
 | `IpBanRemove` | 113 |
+
+The schema has further side-effecting payloads (`UserCreate` 101, `UserDisable`
+102, `ConfigApply` 104, `UserPasswordRotate` 114, `GroupApply` 115, `UserEnable`
+116, `CertificateCsr` 117, `CertificateP12` 118, `CertificateRevoke` 119 and
+`AgentUpgrade` 128). Their canonical encodings are defined by the Go
+`semanticpayload` package and the Rust `command-authorization` crate, not by
+this document. `CompleteConfigPlan` 129 and `CompleteConfigApply` 130 exist
+only under v2. `SimulationProbe` 106 is not hashable.
 
 These field numbers are reserved forever. When a payload type is removed, its
 field number stays reserved so old wire data is never reinterpreted as a new
@@ -140,9 +149,10 @@ canonical_payload = candidate_hash
 `candidate_hash` is exactly 32 bytes and is independently verified against the
 bounded candidate before validation. The candidate is immutable for that hash;
 delivery metadata and the temporary fixed staging filename are excluded.
-V1 does not include the ConfigPlan expected desired-state revision. Controllers
-using signed session authority emit semantic hash v2 instead; v1 remains frozen
-for validation of existing durable command history.
+V1 does not include the ConfigPlan expected desired-state revision. The
+Controller now signs every command with semantic hash v2 instead; v1 remains
+frozen, and the Agent, privd and Controller result path still accept it for
+existing durable command history and older commands.
 
 ### IpBanRemove
 
@@ -185,6 +195,8 @@ delivery_mode
 semantic_hash_version
 semantic_payload_sha256
 authorization
+connection_fence
+fence_binding
 ```
 
 - `CommandAuthorizationV1` independently signs the command and operation

@@ -14,12 +14,18 @@ Controller locks the certificate row and rechecks exact CSR digest,
 receipt-bound request/version, node, approval hash, and non-revoked key. P12 and
 certificate-key revocation use the same terminal-result attestation rule.
 
+This page covers certificates requested for managed nodes and the sealing of
+their secrets. It does not cover the Controller's own HTTPS certificate (manual
+files, or ACME in Integrated mode), which the Signer neither issues nor serves.
+
 Configure the external HTTPS service with
 `OCSERV_CERTIFICATE_SIGNER_URL`, `OCSERV_CERTIFICATE_SIGNER_TOKEN`, and
 `OCSERV_CERTIFICATE_SIGNER_TIMEOUT`. The service must make signing and
 revocation idempotent by certificate ID and provide node-targeted secret
-sealing. An unavailable signer leaves the certificate request recoverable and
-returns a service-unavailable problem response.
+sealing. If the signer is unavailable, issuance moves the certificate to
+`signer_unavailable`, resumable by retrying with the same approval, and
+revocation to `revocation_unknown`, which a retry may revoke again; both return
+a service-unavailable problem response and neither is treated as success.
 
 For a private Signer trust chain, set `OCSERV_CERTIFICATE_SIGNER_CA_FILE` to
 the public PEM CA bundle. It affects only this client, never the process-wide
@@ -27,7 +33,7 @@ trust store. Without it, external HTTPS trust is unchanged. The bundled
 implementation, controlled public-key transfer and offline recovery procedures
 are described in [Production Signer](#production-signer).
 
-The `/seal` request includes `X-Ocservia-Node-ID` and the exact
+The `/sign/seal` request includes `X-Ocservia-Node-ID` and the exact
 `X-Ocservia-Seal-Purpose` (`user_password` or
 `certificate_p12_password`). Its response must echo `version: 1`, the exact
 purpose, the enrolled purpose-specific `key_id`, and the base64 ciphertext.
@@ -68,8 +74,9 @@ records the new external version and appends an authenticated audit event; it
 does not copy the value into the control plane.
 
 Certificate expiry enters `expiring` thirty days before `not_after` and emits a
-high-severity alert. Revocation is sent idempotently to the external signer and
-then removes only the UUID-derived node-local key. Before database recovery,
+high-severity alert. Revocation is sent idempotently to the external signer
+first; once it succeeds, the operation is released to remove only the
+UUID-derived node-local key. Before database recovery,
 stop certificate and artifact creation and reconcile all nonterminal
 certificate commands. Preserve terminal command history and root effect evidence.
 The current tree provides no database down migrations; use a forward fix or an
@@ -80,6 +87,28 @@ explicitly planned [isolated restore](../operations/incident-recovery.md#databas
 Signer is a separate Go module/process under the
 [Integrated custody boundary](integrated-deployment-contract.md#signer-contract),
 not a Controller command-signing provider. The Python business signer is a test fixture.
+
+Key holders and permissions:
+
+- The offline root CA key is never mounted on Signer; Quick install exports it
+  encrypted for operator custody.
+- Signer alone holds the online issuing intermediate key, its HTTPS private key
+  and the bbolt ledger (issued certificates, node sealing-key bindings, audit).
+  It never receives Controller database credentials.
+- Controller holds neither a CA key nor a node key. It holds only the shared
+  Bearer token and the public HTTPS CA bundle, and calls Signer with
+  `certificates.HTTPSigner`.
+- Each node keeps its certificate private key and its two sealing private keys
+  (`user_password`, `certificate_p12_password`) root-only and sends only public
+  material; Signer seals secrets to the imported public keys.
+
+Write path: Controller (approval and privd receipt checks) -> authenticated
+HTTPS `POST /sign` or `/sign/revoke` -> Signer commits to the ledger -> reply.
+Recovery is coupled: restoring the ledger without the matching issuer CA, or
+without reconciling Controller certificate state and later issuance, revocation,
+imports and disables, is not a consistent recovery point (see
+[State and recovery](#state-and-recovery)). A committed revocation is a ledger
+and CRL fact only; it does not disconnect existing VPN sessions.
 
 ### Runtime contract
 
@@ -247,7 +276,8 @@ return 403. The two purposes cannot share a key or descriptor.
 
 ### State and recovery
 
-State version is 1, fixed to [bbolt v1.4.3](https://github.com/etcd-io/bbolt/releases/tag/v1.4.3),
+State version is 1, stored with bbolt (version in
+[`signer/go.mod`](../../signer/go.mod)),
 with an exclusive process lock and transaction-consistent snapshots.
 Default synchronous commits remain enabled. Local storage must honor fsync;
 network filesystems, multiple replicas and HA are unsupported.
@@ -331,8 +361,8 @@ of an unrevoked control certificate. This proves the explicit operator refresh
 path, not scheduled distribution, online OCSP or termination of existing VPN
 sessions. Raw keys, credentials and login cookies remain private to the runner.
 
-`registry-pulls.jsonl`, `crl-acceptance.json` and the existing API, root-receipt,
-browser and business evidence are retained as sanitized Actions artifacts.
+`crl-acceptance.json` and the existing API, root-receipt, browser and business
+evidence are retained in the sanitized `business-*` Actions artifact.
 Missing files or failed assertions block acceptance and merge. A PR opened
 while validation is running is not evidence of acceptance.
 
@@ -341,7 +371,7 @@ while validation is running is not evidence of acceptance.
 
 The authenticated `POST /sign/public-key` accepts only `node_id` and
 `purpose=user_password`. It reads the enabled durable binding established by
-`import-binding`, and returns its workspace, node, endpoint, version, key ID,
+`import`, and returns its workspace, node, endpoint, version, key ID,
 SHA-256 fingerprint and RSA SPKI DER (standard base64). It uses the existing
 Bearer authentication, admission limits and JSON bounds. Disabled or missing
 bindings are rejected, including after restart; no private keys are returned.

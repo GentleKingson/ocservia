@@ -78,7 +78,7 @@ pub mod privd_request {
         UserEnableRequest, UserSecretRequest,
     };
 
-    /// Read-only operation allowlist.
+    /// Fixed operation allowlist.
     #[derive(Clone, PartialEq, Eq, Oneof)]
     pub enum Operation {
         /// Read the fixed ocserv systemd unit state.

@@ -204,6 +204,8 @@ mkdir -p "${docs}/scripts" "${docs}/.claude" "${docs}/docs/getting-started"
 cp "${ROOT}/scripts/docs-check.sh" "${ROOT}/scripts/env.sh" "${docs}/scripts/"
 printf '# Docs\n\ndocs/getting-started/production.md\n' >"${docs}/README.md"
 for page in production managed-node; do printf '# Page\n' >"${docs}/docs/getting-started/${page}.md"; done
+printf '# Rules\n\n[Install](docs/getting-started/production.md#page)\n' >"${docs}/AGENTS.md"
+printf '# Claude\n\n@AGENTS.md\n' >"${docs}/CLAUDE.md"
 git -C "${docs}" init -q
 git -C "${docs}" add .
 cp "${ROOT}/.claude/settings.json" "${docs}/.claude/settings.json"
@@ -222,5 +224,17 @@ for settings in '{"hooks":{}}' '{"env":{"A":"b"}}' '{"permissions":{"defaultMode
   '{"permissions":{"allow":["WebFetch"]}}'; do
   printf '%s\n' "${settings}" >"${docs}/.claude/settings.json"
   if bash "${docs}/scripts/docs-check.sh" 2>/dev/null; then echo "docs-check accepted ${settings}" >&2; exit 1; fi
+done
+# CLAUDE.md must import AGENTS.md outside code, and AGENTS.md links must resolve.
+cp "${ROOT}/.claude/settings.json" "${docs}/.claude/settings.json"
+# shellcheck disable=SC2016 # Markdown fences are literal fixture text.
+for claude in '# Claude\n\nRules live in AGENTS.md.\n' '# Claude\n\n```\n@AGENTS.md\n```\n'; do
+  printf '%b' "${claude}" >"${docs}/CLAUDE.md"
+  if bash "${docs}/scripts/docs-check.sh" 2>/dev/null; then echo "docs-check accepted CLAUDE.md without an import" >&2; exit 1; fi
+done
+printf '# Claude\n\n@AGENTS.md\n' >"${docs}/CLAUDE.md"
+for link in docs/missing.md docs/getting-started/production.md#missing; do
+  printf '# Rules\n\n[Broken](%s)\n' "${link}" >"${docs}/AGENTS.md"
+  if bash "${docs}/scripts/docs-check.sh" 2>/dev/null; then echo "docs-check accepted AGENTS.md link ${link}" >&2; exit 1; fi
 done
 echo 'CI routing: domain isolation, exact installer/workflow contracts, Controller Quick, Full matrix and fallback passed'

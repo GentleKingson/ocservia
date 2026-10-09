@@ -86,13 +86,13 @@ These steps require a separately approved migration; login never performs them.
 
 ## Transport and credentials
 
-For a single-relay outage, restore that relay at the same address with the same certificate and credentials, then verify fresh Agent heartbeats and reconciled command results. This restores the original path, not standby failover. Do not switch production to public relays, reset identities, or re-enroll nodes. Direct connectivity can mask an outage in a relay test.
+Only one dedicated Relay is supported (a nonempty `RELAY_URL_B`/`OCSERV_RELAY_URL_B` is rejected), so there is no second Relay to fail over to. For a Relay outage, restore that Relay at the same address with the same certificate and credentials, then verify fresh Agent heartbeats and reconciled command results. This restores the original path, not standby failover; until then nodes behind it cannot be managed. Do not switch production to public relays, reset identities, or re-enroll nodes. Direct connectivity can mask an outage in a relay test.
 
-For Controller endpoint-key recovery, restore the encrypted offline backup to the configured secret path as UID 65532 with mode `0400`, then derive and compare the Controller EndpointID before starting transportd. Never silently generate a replacement key. If the backup or its identity check fails, keep transport offline, revoke trust in the old EndpointID, generate a new protected key, and re-enroll every node through the normal approval path. Record both EndpointIDs and the trust transition in the incident record.
+For Controller endpoint-key recovery, restore the encrypted offline backup to the configured secret path (`controller-iroh.key` in `OCSERV_SECRET_DIR`) as `65532:65532` with mode `0400`, then derive and compare the Controller EndpointID before starting transportd. Never silently generate a replacement key. If the backup or its identity check fails, keep transport offline, revoke trust in the old EndpointID, generate a new protected key, and re-enroll every node through the normal approval path. Record both EndpointIDs and the trust transition in the incident record.
 
 ### PostgreSQL credential rotation
 
-Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:
+This applies to the bundled PostgreSQL deployment only; external PostgreSQL and MySQL credentials are rotated at their own database. Replacing `postgres-app-password`, `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` by itself does **not** rotate the password verifier already stored by PostgreSQL. The script runs `docker compose` directly against `deploy/production/compose.yaml` (or the file named by `OCSERV_ROTATION_COMPOSE_FILE`), not through `compose.sh`, and expects that file to define the `postgres` and backup services. Rehearse it on a non-production copy first, and stop, preserving its output, if it reports an unknown or missing service or fails its first credential verification; do not retry blindly. To rotate both runtime roles, prepare two single-link, launcher-owned mode-`0400` or `0600` password files in a launcher-owned mode-`0700` directory outside `OCSERV_SECRET_DIR`, then run:
 
 ```bash
 export OCSERV_NEW_POSTGRES_APP_PASSWORD_FILE=/protected/new-app-password
@@ -111,7 +111,10 @@ Stop new writes and reconcile every Unknown operation. Use the guarded
 actual protocol, configuration and persistent-state requirements. Version order,
 schema ranges and descriptor equality are not admission gates in v1.1.0 and do
 not provide a safety guarantee. Controller rollback
-does not run a down migration or restore a database. If same-target upgrade
+changes only the installed package (images and Compose project): it does not
+run a down migration or restore a database. Agent rollback likewise restores
+only Agent-side files and does not touch the Controller. Neither is a substitute
+for the other or for database recovery. If same-target upgrade
 recovery and explicit rollback cannot restore service, use database recovery below.
 Record the exact release, source SHA, migration, backup and audit checkpoint.
 

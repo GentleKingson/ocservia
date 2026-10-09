@@ -12,7 +12,15 @@ Run the read-only configuration check:
 deploy/production/compose.sh config --quiet
 ```
 
-Check that all six image variables are full SHA-256 digests, the protected
+This check validates only the environment you export; it does not read the
+release manifest or install state, and it changes nothing. Check that the
+six image variables (`OCSERV_GATEWAY_IMAGE`, `OCSERV_CONTROL_IMAGE`,
+`OCSERV_TRANSPORT_IMAGE`, `OCSERV_BACKUP_IMAGE`, `OCSERV_POSTGRES_IMAGE`,
+`OCSERV_OTEL_IMAGE`; plus `OCSERV_EDGE_IMAGE`, `OCSERV_RELAY_IMAGE` and
+`OCSERV_SIGNER_IMAGE` for Integrated, and `OCSERV_DATABASE_BACKUP_IMAGE` for
+MySQL) are each exported as a version-tagged (`:vX.Y.Z` or `:vX.Y.Z-rc.N`) or
+`@sha256:` reference, taking the values from the release manifest in use,
+not an unreviewed tag. Check the protected
 secret directory and backup directory meet their ownership/mode contracts, and
 the required PKI, Controller EndpointID, and relay settings are present.
 Check authentication against the selected
@@ -55,26 +63,36 @@ lifecycle validation or overwrite confirmed/pending state.
 
 ## Agent cannot enroll
 
-Use a fresh token, confirm the expected EndpointID is the one printed from the
-same persistent identity directory, and ensure the Controller EndpointID pin
-has not changed. A pending node must be approved before it can use a normal
-mutation-capable session.
+Confirm the expected EndpointID is the one printed from the same persistent
+identity directory, and that the Controller EndpointID and Relay URL pins have
+not changed. Tokens are single-purpose: after a failed or unknown enrollment
+response, first query the Controller by that EndpointID (see
+[Enroll a node](enroll-node.md)) before requesting a new token; a new token
+alone does not prove the earlier attempt failed. Enrollment only creates a
+pending node: it must be approved by a different authorized principal before it
+can use a normal mutation-capable session, and a locally `ENROLLED_LOCAL` or
+active service is not evidence of that.
 
 ## Agent will not start after an upgrade
 
 Check `/etc/ocservia-agent/agent.env`, the independently provisioned command
-verification key, and the two distinct sealing keys. If the installed pair
+verification key, the two distinct sealing keys, `relays.env` (a literal HTTPS
+`RELAY_URL_A`; a nonempty `RELAY_URL_B` is rejected) and the relay access token
+and CA files it references; `journalctl -u ocservia-privd -u ocservia-agent`
+shows which one failed. A failed upgrade that stopped before changing files
+needs only the reported prerequisite fixed. If the installed pair
 must be restored, use [Agent rollback](agent-lifecycle.md#rollback); do not copy binaries
 from an unverified directory.
 
 ## Relay is unavailable
 
-With one relay, restore the same address, certificate and credentials and
-verify fresh heartbeats and command results. Communication that depends on
-that relay is interrupted until recovery; this is not standby failover.
-With two, keep the healthy relay configured, repair the failed relay, and
-verify both URLs independently. Check DNS, HTTPS egress and authenticated
-relay connections: a healthy container or local socket is not that evidence.
+Only one dedicated Relay is supported (a nonempty `RELAY_URL_B` is rejected), so
+restore the same address, certificate and credentials and verify fresh
+heartbeats and command results. Communication that depends on that Relay is
+interrupted until recovery; there is no standby failover or second Relay to
+fall back to, and rebuilding the Relay host is original-Relay recovery, not
+redundancy. Check DNS, HTTPS egress and authenticated relay connections: a
+healthy container or local socket is not that evidence.
 Do not fall back to a public relay or
 replace the Controller or Agent identity key.
 

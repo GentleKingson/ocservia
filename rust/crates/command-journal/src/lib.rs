@@ -59,7 +59,7 @@ pub struct CommandRecord {
     pub idempotency_key: [u8; 16],
     pub command_id: [u8; 16],
     pub payload_sha256: [u8; 32],
-    /// Algorithm version that produced `payload_sha256` (0 = legacy, 1 = v1 canonical).
+    /// Algorithm version that produced `payload_sha256` (0 = legacy, 1 = v1, 2 = v2 canonical).
     pub payload_hash_version: i32,
     pub state: CommandState,
     pub result: Option<Vec<u8>>,

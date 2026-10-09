@@ -33,7 +33,7 @@ create or recover only the same pending node; it cannot approve the node.
 Package installation, enrollment, approval and service activation retain their
 existing authority boundaries.
 Until that hosting has operational ownership and byte-verification evidence,
-the public Quick Start obtains the installer from a clean exact-release
+the public first-install guide obtains the installer from a clean exact-release
 checkout; the installed native package has no runtime dependency on Git.
 
 Build all three node binaries natively on the package's target architecture,
@@ -129,10 +129,18 @@ verifier under `/usr/share/ocservia-agent`.
 Their scriptlets contain no layout logic: `postinst` refuses a host-architecture
 mismatch, verifies the archive into trusted staging, and runs the verified
 `install-agent.sh` (fresh host) or `upgrade-agent.sh` (existing installation).
-Installing or upgrading never enables or starts a service — provision
+The packages depend on `openssl`, `python3` and `util-linux`. Installing or
+upgrading never enables or starts the Agent or privd units — provision
 `/etc/ocservia-agent/agent.env` and the keys first, then enable both units
-manually. Package removal runs the verified `uninstall-agent.sh`, preserving
-identity, state, and configuration by default.
+manually. The independent history-retention timer is the exception: install
+enables it, and starts it unless an install is still unfinished. An upgrade or
+an identical-package retry runs `systemctl try-restart` on `ocservia-privd` and
+`ocservia-agent`, so units that are already running are restarted and stopped
+units stay stopped. Package removal (`dpkg -r`, `rpm -e`) runs the verified
+`uninstall-agent.sh`, which disables and stops the Agent, privd and retention
+timer and removes the binaries and units, preserving identity, state, and
+configuration. Neither `dpkg --purge` nor the package manager triggers the
+state purge; only `uninstall-agent.sh --purge-state` does (below).
 
 A production managed node requests the relay contract before invoking the
 package manager by creating `/etc/ocservia/agent-install-production-relays`
@@ -215,7 +223,11 @@ previous release's security properties, so use it only for a controlled
 recovery window and return to a fixed release promptly. `uninstall-agent.sh` preserves
 identity and journal by default;
 `--purge-state` is irreversible and is appropriate only after revoking the node
-identity and preserving required audit material.
+identity and preserving required audit material. It deletes the Agent and
+privd state directories, `/var/lib/ocservia-upgrade` (including the rollback
+snapshot, so no rollback is possible afterwards), and `/etc/ocservia-agent`
+(`agent.env`, keys, relay token), then removes the `ocserv-agent` user and group.
+The node's Controller record is not changed: revoke it there separately.
 
 Current snapshots contain 13 fixed records. Existing 8- and 9-record snapshots
 remain readable with `ocservia-agent-rollback --verify-only`, but lack prior
@@ -257,7 +269,10 @@ another account allowed to stat the state directory):
 sudo -u ocserv-agent bash scripts/check-agent-storage.sh /var/lib/ocservia-agent/agent.db
 ```
 
-Use the actual path when `--journal` overrides the default. The probe reports
+Use the actual path when `--journal` overrides the default. When an active
+Controller binding is present (for example after a rebind), the Agent's journal
+is `/var/lib/ocservia-agent/bindings/<node-id>/agent.db`, not the default path;
+monitor that file instead. The probe reports
 the database, WAL and SHM logical sizes, their combined allocated bytes, and
 filesystem available bytes/inodes. It does not open SQLite, checkpoint, truncate,
 or delete anything. Missing or unreadable state is UNKNOWN, not healthy.
@@ -318,7 +333,10 @@ authority for this command family.
 The runner resolves packages only from the fixed local spool
 `/var/lib/ocservia-upgrade/package-spool` — the operator or provisioning
 pipeline places `ocservia-agent-<version>-linux-<arch>.tar.gz` there before
-issuing the upgrade. There is no URL fetch and no caller-selected path. The
+issuing the upgrade. The archive must be a non-empty regular file (not a
+symlink, single link, within the runner's size bound) owned by the runner's
+user (root) and not group- or world-writable; otherwise the upgrade fails with
+unsafe spool metadata. There is no URL fetch and no caller-selected path. The
 runner requires the spool archive digest to equal `package_sha256` in the
 already-authorized command's durable intent. It passes that exact digest to
 `/usr/libexec/ocservia/ocservia-agent-verify`, which freezes the archive in
@@ -338,8 +356,8 @@ the rolled-back release, and restores or removes the upgrader binary, the
 `ocservia-upgrader@.service` unit, and the installed verifier exactly as
 recorded in the matched snapshot (`.previous` restored, `.absent` removed). The
 same three files are installed by `install-agent.sh`, carried in every
-package, and removed by `uninstall-agent.sh`, so all six native package formats
-ship the durable runner.
+package, and removed by `uninstall-agent.sh`, so every native DEB and RPM
+package (`amd64` and `arm64`) ships the durable runner.
 
 Command protocol `1.1` is fail closed: provision the Controller command
 verification public key before upgrading the Agent and privd pair. Both
@@ -357,8 +375,13 @@ The console exposes one reconciled upgrade per node:
 Operator role) accepts only a target version, an approval ID, and a reason.
 Callers never supply a URL, path, or package digest. The Controller resolves
 the digest from its operator-provisioned release catalog, configured
-with `OCSERV_AGENT_RELEASE_MANIFEST` (default
-`/etc/ocservia/agent-releases.json`):
+with `OCSERV_AGENT_RELEASE_MANIFEST` (an absolute path; there is no default
+path). The request must carry an `Idempotency-Key` header. When the variable is
+unset, the Controller starts without a catalog and the agent-upgrade and
+agent-rollout endpoints answer `503`. The shipped production Compose neither
+sets nor mounts this variable, so Controller-driven AgentUpgrade and rollouts
+need a deployment-specific override that mounts the file read-only into the
+control-plane container. Catalog format:
 
 ```json
 {
@@ -373,8 +396,8 @@ with `OCSERV_AGENT_RELEASE_MANIFEST` (default
 ```
 
 The manifest is the only digest source for this workflow. It must contain
-between 1 and 512 unique `(version, architecture)` releases; a missing,
-unreadable, malformed, or ambiguous file fails Controller startup. There is no
+between 1 and 512 unique `(version, architecture)` releases; once the variable is set, a
+missing, unreadable, malformed, or ambiguous file fails Controller startup. There is no
 GitHub or registry synchronization: preparing an upgrade means placing the
 archive in each node's local spool and adding its exact digest
 to this file. Under the v1.1.0 policy reset, an explicit trusted target is
@@ -405,8 +428,9 @@ online with a fresh observation of the target agent version together with the
 upgrader's terminal local result. An explicit local failure closes the
 operation as `failed`, a matched rollback as `rolled_back`, and an operation
 that is still unresolved after the bounded reconciliation window
-(`OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT`, default 30 minutes, accepted
-range 1 minute to 24 hours at startup) closes conservatively as `unknown`
+(`OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT`, default 30 minutes when unset,
+accepted range 1 minute to 24 hours at startup; the shipped production
+Compose does not forward it, so the default applies unless overridden) closes conservatively as `unknown`
 with its command marked expired so nothing is retried blind. Only one upgrade
 may be active per node; a second attempt fails with a conflict until the
 previous operation is terminal. Every terminal outcome appends an audit
@@ -444,10 +468,15 @@ itself. Set it in the Controller section of `install.env` or export it in
 the invoking shell before the production installer/bootstrap. The resolved
 value is forwarded through the root lifecycle to the migrate and control-plane
 containers. An explicitly empty export overrides the file and clears the
-recommendation. Recreate the control-plane through the documented Controller
-upgrade procedure after changing this setting on an existing installation
-(see [production deployment](production-deployment.md)). Export the value in
-that lifecycle invocation too: `controller.sh` does not load `install.env`.
+recommendation. After changing this setting on an existing installation,
+recreate the control-plane through the documented Controller lifecycle (see
+[production deployment](production-deployment.md)): `controller.sh start`
+re-applies the current release's Compose project with the exported
+environment, while `controller.sh upgrade` is for moving to a different
+release file. Export the value in that lifecycle invocation too: `controller.sh`
+does not load `install.env`. Confirm the new recommendation in Settings
+afterwards; a Compose recreate that did not receive the export silently keeps
+or clears the previous value.
 Without a recommendation, observed versions remain visible and cannot be
 compared to a target. Invalid nonempty SemVer values are rejected by Controller
 configuration validation.

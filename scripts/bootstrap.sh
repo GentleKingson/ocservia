@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|package-tools|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|secret-scan|go-test|go-quality|go-security|go-rust-integration|native|native-packages|package-tools|image-security|rust-basic|rust-validation|rust-security|web|npm-security|security]" >&2
   exit 2
 fi
 

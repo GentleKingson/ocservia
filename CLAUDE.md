@@ -1,6 +1,10 @@
 # CLAUDE.md
 
-Project rules live in AGENTS.md. Claude-specific workflow:
+Project rules live in AGENTS.md and are imported here:
+
+@AGENTS.md
+
+Claude-specific workflow:
 
 - Main agent (Opus) reads the real code, makes architecture decisions, splits work and defines acceptance criteria. Simple tasks: do them directly.
 - Delegate only bounded, worthwhile implementation work to `sonnet-implementer`, with a complete contract: goal, files/scope, constraints, acceptance criteria, verification to run.

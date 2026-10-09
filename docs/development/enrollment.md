@@ -6,15 +6,21 @@ Enrollment is explicit and does not activate a node. The normal bootstrap path
 uses a node bootstrap token created with `POST /api/v1/node-bootstrap-tokens`.
 It has an `obt1_` prefix, is stored only as a SHA-256 digest, and is not bound
 to an EndpointID until a valid endpoint possession proof reaches the
-Controller. The binding, pending node, sealing keys, capabilities, and token
-consumption commit in one transaction. A consumed token can only be replayed
-by that same EndpointID and returns the same pending node ID; another endpoint
-is rejected. Bootstrap tokens never approve or activate a node.
+Controller. If the request sets the optional `expected_endpoint_id`, the
+Controller rejects any other endpoint before consuming the token. The binding,
+pending node, sealing keys, capabilities, token consumption and audit event
+commit in one transaction. A Controller refuses an EndpointID it already stores
+in any state, so a bootstrap token cannot enroll an endpoint that this
+Controller has bound, revoked or not. A consumed token can only be replayed by
+that same EndpointID, while its node is still `PENDING_APPROVAL`, and returns
+the same pending node ID even after the token's expiry; another endpoint, or a
+replay after approval, is rejected. Bootstrap tokens never approve or activate
+a node.
 
 Bootstrap possession authorizes only creation or recovery of the bound
 `PENDING_APPROVAL` record. `node.approve` requires an authenticated requester,
 a content-bound approval request, a different authorized approver, and a later
-activation request carrying that approval. Service enablement remains a
+activation request carrying that approval in `X-Approval-ID`. Service enablement remains a
 separate host action after Controller approval; successful bootstrap enrollment
 alone grants neither active capabilities nor a mutation-capable Agent session.
 
@@ -36,8 +42,8 @@ prints the same EndpointID; a substituted controller pin is rejected.
 
 An authenticated operator then creates a token with
 `POST /api/v1/enrollment-tokens`, passing that value as
-`expected_endpoint_id`. Every token must name the expected 32-byte EndpointID;
-unbound production tokens are rejected. The response is marked
+`expected_endpoint_id`. Every legacy token must name the expected 32-byte
+EndpointID; a missing or malformed value is rejected. The response is marked
 `Cache-Control: no-store` and returns the plaintext token once; only its
 SHA-256 digest is stored. Tokens expire after at most 15 minutes.
 
@@ -73,11 +79,21 @@ the Agent, or a root-owned group-readable file for the Agent group. Enrollment
 prints the pending UUIDv7 node ID. It does not create a mutation-capable Agent
 session.
 
-Approve the node with `POST /api/v1/nodes/{node_id}/approval`, including a
-non-empty reason, policy, labels, and the allowed capability set. Revoke it with
-`POST /api/v1/nodes/{node_id}/revocation`. Revocation is retained in the
-database, rejects later handshakes, and asks the transport to close the current
-connection. The database transaction also creates durable convergence work.
+Approve the node with `POST /api/v1/nodes/{node_id}/approval` and an
+`X-Approval-ID` naming an approved `node.approve` request. The request hash
+covers the node ID, EndpointID, node version, policy, labels and capability
+set, so the body must repeat exactly that content with a non-empty reason. The
+capability set must be non-empty and a subset of what the Agent advertised at
+enrollment. Only a pending node is activated; repeating the exact request on an
+already activated node validates the consumed approval and changes nothing.
+Revoke a node with `POST /api/v1/nodes/{node_id}/revocation`, an
+`X-Approval-ID` naming an approved `node.revoke` request, and a reason; this is
+allowed from any non-revoked state, including `PENDING_APPROVAL`. Revocation is
+retained in the database, rejects later handshakes, and asks the transport to
+close the current connection. The database transaction also creates durable
+convergence work, so a `503` from the approval or revocation endpoint after the
+database commit means transport synchronization is pending, not that the change
+was rolled back.
 The worker retries an exact revision until transportd reports `applied` with
 the same retained state and revision; a stale or rejected result remains
 pending. Revocation closes the connection only after that exact tombstone was
@@ -101,7 +117,9 @@ connection. Handshake protocol `1.1` signs the negotiated subset, EndpointID,
 node ID, authorization revision, and expiry in `SessionGrantV1`; protocol `1.0`
 is limited to approved read-only capabilities.
 
-Enable the trust service on worker or all roles by setting both:
+Setting `OCSERV_CONTROLLER_ENDPOINT_ID` enables the enrollment endpoints (they
+answer `404` otherwise) and, on worker or all roles, the trust service on
+`OCSERV_TRUST_SOCKET`, which defaults to the value below:
 
 ```text
 OCSERV_CONTROLLER_ENDPOINT_ID=<64 lowercase hex characters>

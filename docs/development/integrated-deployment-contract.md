@@ -39,10 +39,11 @@ Signer share the signing API token. Controller mounts Signer's public HTTPS CA
 bundle, with SAN `signer`; node sealing private keys remain root-only on nodes.
 Database, audit, session, command-signing and transport keys remain separate.
 No Gateway, Signer, database, Controller HTTP or observability host port is added.
-Certificates are externally provisioned, or with `OCSERV_TLS_MODE=acme` obtained
+Certificates are externally provisioned (`OCSERV_TLS_MODE=manual`, the default), or with `OCSERV_TLS_MODE=acme` obtained
 by Gateway and Relay themselves through TLS-ALPN-01 over Edge's SNI routing
 ([ACME certificates](../../deploy/production/integrated/README.md#acme-certificates));
-HTTP-01 is never used.
+HTTP-01 is never used. ACME exists only in Integrated; `compose.sh` rejects it
+for Standalone, and the TLS mode cannot change after first installation.
 
 ## Signer contract
 
@@ -62,7 +63,15 @@ sessions. CRL refresh and Signer binding disable remain explicit operator work.
 ## Configuration and delivery
 
 Reuse `install.sh`, `controller.sh` and `compose.sh`. Protected
-`install.env` is allowlisted data, never sourced shell. Mode/backend/deployment
+`install.env` is allowlisted data, never sourced shell. Integrated requires the
+explicit root lifecycle, two distinct DNS names and Compose >= 2.24.4. A manual
+installation supplies every Controller, Relay (manual TLS) and Signer file
+itself; the lifecycle never generates CAs or Signer material. Quick is a preset
+over the same installer for a new host (Integrated, bundled PostgreSQL, ACME,
+Local authentication): `quick-materials.sh` generates the protected material,
+including the Signer's offline root CA, issuing intermediate and HTTPS identity,
+and the Local administrators are created at the end. Quick does not alter this
+contract. Mode/backend/deployment (and ACME)
 are bound in `deployment-profile.json` across pending/current/previous activation.
 Conflicting changes fail before stopping services. Retries never replace trust
 material or initialize a missing existing Signer ledger.

@@ -3,7 +3,9 @@
 Use the packaged `ocservia-agent-rebind` command locally as root. This is a
 maintenance operation; it preserves the Agent endpoint key, ocserv users,
 configuration, certificates, sealing keys and historical recovery databases.
-It does not copy Controller data or grant node approval.
+It does not copy or migrate Controller data (the target sees a new pending node
+with no history from the old one), is not high availability or failover, and
+does not grant node approval.
 
 Install a release containing the rebind CLI, Agent, privd and upgrader together.
 The host requires Python 3, OpenSSL and util-linux. Use the packaged systemd
@@ -21,15 +23,20 @@ The initial `agent.env` must retain its independently verified
 rebound nodes; use the native package lifecycle for subsequent upgrades.
 
 1. If the old Controller is available, revoke its node using the normal
-   independently approved [node revocation flow](enroll-node.md). If it is
-   permanently unavailable, record that fact with `--source-disposition
-   unreachable`; contacting it is not a prerequisite.
+   independently approved [node revocation flow](enroll-node.md#revoke-a-node).
+   If it is permanently unavailable, record that fact with `--source-disposition
+   unreachable`; contacting it is not a prerequisite. The CLI records the
+   disposition you declare and does not verify it.
 2. Create a short-lived bootstrap token on the new Controller through
    `POST /api/v1/node-bootstrap-tokens`, setting `expected_endpoint_id` to the
    existing Agent EndpointID. The Controller checks this binding before consuming
    the token. Rebind
    uses the existing possession proof and recoverable `obt1_` token protocol;
-   it does not reuse the old Controller's NodeID.
+   the CLI accepts no other token type and does not reuse the old Controller's
+   NodeID. The target must be a different Controller with a different command
+   key, its `environment` must equal the token's, and its database must not
+   already store this EndpointID in any state: a Controller that has held the
+   endpoint (even revoked) refuses the enrollment.
 3. Prepare and enroll, supplying a reason and the source disposition:
 
    ```sh
@@ -43,10 +50,15 @@ rebound nodes; use the native package lifecycle for subsequent upgrades.
    ```
 
    Add `--dry-run` to validate prerequisites without enrollment or authority
-   publication. Preparation prints a local operation UUID before contacting the
-   Controller. It then prints `ENROLLED_LOCAL` and the new pending NodeID.
-4. Complete the existing [approval and activation procedure](enroll-node.md)
-   on the target, including its required privd attestation registration. Bootstrap
+   publication. Preparation prints `PREPARED` with a local operation UUID before
+   contacting the Controller. It then prints `ENROLLED_LOCAL` and the new
+   pending NodeID.
+4. Complete the existing [approval and activation procedure](enroll-node.md#approve-the-node)
+   on the target. Commit's session verification needs the node to be active.
+   Privileged mutations additionally need the node's privd attestation key
+   registered and `privd_result_attestation_v1` approved
+   ([production deployment](../operations/production-deployment.md)); until then
+   the node stays readable but privileged mutations fail closed. Bootstrap
    possession does not authorize approval. Do not approve an enrollment whose
    response is still unknown locally; recover it first.
 5. Commit the confirmed operation:
@@ -56,9 +68,10 @@ rebound nodes; use the native package lifecycle for subsequent upgrades.
    ```
 
 Commit stops Agent, privd and existing upgrade runners, publishes one root-owned
-authority record, and starts privd before Agent. It verifies the new Controller's
-signed session grant independently through privd before recording `VERIFIED`
-and sealing the source binding. The selector covers the Controller endpoint,
+authority record, and starts privd before Agent. It waits up to about a minute
+for the new Controller's signed session grant and verifies it independently
+through privd before recording `VERIFIED` and marking the source binding sealed
+in the operation record (source files stay in place). The selector covers the Controller endpoint,
 command key, new NodeID and all derived durable namespaces. An old Controller
 returning later does not regain authority.
 
@@ -85,9 +98,10 @@ and rollback share the lifecycle lock, and refuse binaries that cannot enforce
 an existing binding.
 
 Local operation records live under `/var/lib/ocservia-rebind/<operation-uuid>`.
-Keep these records and the source databases for recovery. Pending/running/Unknown
-commands, prepared privileged effects, incomplete upgrades or unreadable evidence
-quarantine target mutations. Read-only operation and new authority verification
+Keep these records and the source databases for recovery. Unfinished commands in the
+Agent journal (or a missing journal), prepared privileged effects, incomplete
+upgrades or unreadable evidence, found when commit publishes the binding,
+quarantine target privileged mutations; the CLI has no command to clear that. Read-only operation and new authority verification
 remain possible. Preserve and reconcile those records; changing their age or
 deleting a database must never be used to clear quarantine.
 

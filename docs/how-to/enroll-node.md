@@ -13,13 +13,18 @@ authorized principal.
 
 - The Agent package is installed on the node.
 - You know the Controller EndpointID and the target workspace UUIDv7.
-- Two distinct sealing private keys are provisioned on the node, and you have
-  their key IDs and public-key SHA-256 descriptors.
+- For the installer path, the installer generates any missing sealing keys. For
+  the advanced path, two distinct sealing private keys are provisioned on the
+  node, and you have their key IDs and public-key SHA-256 descriptors.
 - For production, the dedicated relay drop-in and launcher are installed,
-  `RELAY_URL_A` is exported, `RELAY_URL_B` is omitted or empty, and
-  `/etc/ocservia-agent/relay-access-token` is provisioned.
+  `RELAY_URL_A` is exported, `RELAY_URL_B` is omitted or empty (the installer
+  rejects a non-empty value; only one dedicated Relay is supported), and
+  the relay access token is provisioned at
+  `/etc/ocservia-agent/relay-access-token` (the installer installs it from
+  `RELAY_ACCESS_TOKEN_SOURCE`).
 - You have an authenticated requester API client with permission to create a
-  node bootstrap token and request node approval.
+  node bootstrap token and request node approval (SecurityAdmin or
+  PlatformAdmin).
 - A different authorized principal is available to independently approve the
   node approval request.
 
@@ -29,6 +34,7 @@ authorized principal.
 
    ```http
    POST /api/v1/node-bootstrap-tokens
+   X-Workspace-ID: <workspace-uuidv7>
    Content-Type: application/json
 
    {
@@ -39,9 +45,13 @@ authorized principal.
    }
    ```
 
-   The plaintext `obt1_` token is returned once and expires within 15 minutes.
-   Place it in a protected file; do not put it in a URL, command argument, log,
-   or shared shell history.
+   `workspace_id` must be a workspace the caller is authorized for; the header
+   may be omitted only when the caller has exactly one. The plaintext `obt1_`
+   token is returned once and expires within 15 minutes (`ttl_seconds` may only
+   shorten this). An optional `expected_endpoint_id` pre-binds the token; the
+   Controller then rejects any other endpoint before consuming it. Place the
+   token in a protected file; do not put it in a URL, command argument, log, or
+   shared shell history.
 
 2. Give Stage-1 the protected source path and run the pinned installer. It
    prepares the identity, enrolls immediately, deletes the plaintext source
@@ -52,6 +62,10 @@ authorized principal.
    export BOOTSTRAP_TOKEN_SOURCE=/protected/node-bootstrap-token
    ./install.sh --version vX.Y.Z
    ```
+
+   The source must be a non-empty, non-symlink regular file without group or
+   other access. The installer also needs the Controller, Relay and command-key
+   inputs listed in [Install a managed node](../getting-started/managed-node.md).
 
    Record the printed UUIDv7 node ID and continue at [Approve the
    node](#approve-the-node).
@@ -79,6 +93,7 @@ provided.
 
    ```http
    POST /api/v1/enrollment-tokens
+   X-Workspace-ID: <workspace-uuidv7>
    Content-Type: application/json
 
    {
@@ -91,7 +106,8 @@ provided.
    ```
 
    The plaintext token is returned once and expires within 15 minutes. Do not
-   put it in a URL, log, or shared shell history.
+   put it in a URL, log, or shared shell history. The same workspace rule as
+   step 1 applies.
 
 3. Copy the token to a root-owned file readable by the Agent group:
 
@@ -193,19 +209,65 @@ provided.
 
 ## Verify
 
-The API response should report `status: active`. The node should then appear
+The API response should report `status: active`. A `503` "Trust update pending"
+response means the database approval committed but transport synchronization
+has not completed; repeat the identical request with the same `X-Approval-ID`
+(it is idempotent once activated) or wait for convergence, and do not create a
+second approval. The node should then appear
 online with a fresh observation in the Controller inventory after its Agent
 service starts — enable both services as in step 4 of [Install a managed
 node](../getting-started/managed-node.md#4-approve-and-start-services); the
 bootstrap and this enrollment never start or enable a service themselves.
 
+## Revoke a node
+
+Revocation needs the same independent approval as activation and works from any
+non-revoked state, including a pending node. Rebind uses it for an available
+source Controller.
+
+1. As the requester (a principal holding `node.revoke`, such as SecurityAdmin or
+   PlatformAdmin), create a content-bound request:
+
+   ```http
+   POST /api/v1/approval-requests
+   X-Workspace-ID: <workspace-uuidv7>
+   Content-Type: application/json
+
+   {
+     "action": "node.revoke",
+     "resource_type": "node",
+     "resource_id": "<node-uuidv7>",
+     "reason": "Revoke managed node",
+     "ttl_seconds": 600
+   }
+   ```
+
+2. Have a different SecurityAdmin or PlatformAdmin approve the returned
+   request hash, as in step 6 above.
+3. As the requester, submit the revocation with the approved request ID:
+
+   ```http
+   POST /api/v1/nodes/<node-uuidv7>/revocation
+   X-Approval-ID: <approved-request-uuidv7>
+   Content-Type: application/json
+
+   {"reason": "Revoke managed node"}
+   ```
+
+   The response reports `status: revoked`. A `503` "Revocation committed"
+   response means the node is revoked in the database and transport
+   disconnect synchronization is still pending; the trust convergence worker
+   retries it.
+
 ## Troubleshooting
 
-- A token is one-time and short-lived. Create a new token instead of reusing a
-  failed or expired one.
+- A token is one-time and short-lived. For a confirmed rejection or expiry,
+  create a new token; a lost response needs the replay procedure below first.
 - If the Controller committed bootstrap enrollment but the response was lost,
   retry with the same token and the same persistent EndpointID. That exact
-  replay returns the same pending node; a different EndpointID is rejected.
+  replay returns the same pending node while the node is still pending; a
+  different EndpointID, or a replay after approval, is rejected. A Controller
+  also refuses any bootstrap enrollment for an EndpointID it already stores.
 - The expected EndpointID, Controller EndpointID, and identity directory must
   match. A changed controller pin or replaced identity directory is a new
   trust decision.

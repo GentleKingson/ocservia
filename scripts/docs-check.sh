@@ -57,6 +57,25 @@ reject_text() {
   fi
 }
 
+# Agent entry: CLAUDE.md must import AGENTS.md as a body line (Claude Code only
+# loads imports outside code), and AGENTS.md navigation targets must exist.
+[[ -s "${ROOT}/AGENTS.md" ]] || { echo "AGENTS.md is missing or empty" >&2; exit 1; }
+if [[ -e "${ROOT}/CLAUDE.md" ]] && ! awk '/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+  !fence && $0 == "@AGENTS.md" { found = 1 } END { exit !found }' "${ROOT}/CLAUDE.md"; then
+  echo "CLAUDE.md must import AGENTS.md with an @AGENTS.md body line" >&2
+  exit 1
+fi
+# ponytail: inline relative links and ASCII GitHub heading slugs only (no
+# duplicate-heading suffixes); use a Markdown parser if AGENTS.md needs more.
+while IFS= read -r link; do
+  path="${link%%#*}" anchor=""
+  [[ "${link}" != *#* ]] || anchor="${link#*#}"
+  [[ -f "${ROOT}/${path}" ]] || { echo "AGENTS.md links to a missing file: ${link}" >&2; exit 1; }
+  [[ -z "${anchor}" ]] || awk -v want="${anchor}" '/^#+ / { h = tolower($0); sub(/^#+ /, "", h)
+    gsub(/[^a-z0-9 -]/, "", h); gsub(/ /, "-", h); if (h == want) found = 1 } END { exit !found }' \
+    "${ROOT}/${path}" || { echo "AGENTS.md links to a missing heading: ${link}" >&2; exit 1; }
+done < <(grep -oE '\]\([^)]+\)' "${ROOT}/AGENTS.md" | sed -E 's/^\]\((.*)\)$/\1/' | grep -vE '^[a-z]+:' || true)
+
 require_text README.md 'docs/getting-started/production.md'
 reject_text README.md '| bash -s'
 reject_text docs/getting-started/production.md '| bash -s'

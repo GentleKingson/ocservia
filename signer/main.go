@@ -27,7 +27,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("expected serve, init, import, disable, backup, inspect, crl or health")
+		return errors.New("expected serve, init, import, disable, backup, restore, inspect, crl or health")
 	}
 	command := os.Args[1]
 	f := flag.NewFlagSet("ocserv-signer", flag.ContinueOnError)

@@ -4,39 +4,57 @@ ocservia provides a control plane for OpenConnect (ocserv) VPN gateways. The gat
 
 ## Purpose and constraints
 
-Operators need to verify node trust and reachability, push configurations without interactive host access, and trace commands when their outcomes are ambiguous. High-risk changes require multi-party approval. During disaster recovery, node identities and the logs of state transitions must remain intact.
+Operators need to verify node trust and reachability, push configurations without interactive host access, and trace commands when their outcomes are ambiguous. High-risk changes require independent approval by a second authenticated principal. During disaster recovery, node identities and the logs of state transitions must remain intact.
 
-The supported production topology uses one Controller instance, a relational database, and an isolated Relay intermediary that services multiple Agents. These components can run on distinct hosts. High-availability setups like multi-master Controller clusters, redundant Relays, or automated database failovers are outside the [supported scope](reference/support-policy.md#deployment-capability-distinctions). Internal lease coordination and service modularity do not change this boundary.
+The supported production topology uses one Controller instance, a relational database, and one dedicated Relay that serves multiple Agents (a non-empty second Relay URL is rejected). Certificate issuance uses a separate Signer service. These components can run on distinct hosts; Integrated mode puts the Controller, Relay and Signer on one host. High-availability setups like multi-master Controller clusters, redundant Relays, or automated database failovers are outside the [supported scope](reference/support-policy.md#deployment-capability-distinctions). Internal lease coordination and service modularity do not change this boundary.
 
-The system isolates the data plane: client VPN sessions terminate at the ocserv instances and never transit the Controller or Relay. If the control or relay infrastructure goes down, administrative tools fail but active tunnels keep running. However, local node crashes or flawed ocserv daemon reloads still disrupt traffic. A deployment requires pre-provisioned cryptographic credentials, functional DNS and TLS, and a certified database instance. Certificate management requires a Signer service, and single sign-on workflows need an OpenID Connect (OIDC) identity provider.
+The system separates the data plane from the control plane: client VPN sessions terminate at the ocserv instances and payload never transits the Controller, transportd or Relay. Loss of the control plane stops administration, validation and new commands; it is not in the tunnel payload path, but local node crashes or flawed ocserv reloads still disrupt traffic. A deployment requires pre-provisioned cryptographic credentials, functional DNS and TLS, and a certified database instance. Certificate management requires a Signer service, and single sign-on workflows need an OpenID Connect (OIDC) identity provider.
 
 ## High-level view
 
 ```mermaid
 flowchart LR
-    Operator["Operator browser"] -->|HTTPS| Controller["Controller Web/API"]
+    Operator["Operator browser"] -->|HTTPS| Gateway["Gateway: Web bundle and /api proxy"]
+    Gateway --> Controller["Go Controller"]
     Controller --> Database[("Supported database and backups")]
-    Controller --> Services["Login, certificate, and monitoring services"]
-    Controller <-->|Dedicated relays| Node["Managed node services"]
-    Node --> Helper["Local privileged helper"]
-    Helper --> Ocserv["Local ocserv server"]
+    Controller -->|HTTPS| Signer["Signer"]
+    Controller <-->|gRPC over UDS| Transportd["transportd"]
+    Transportd <-->|"Iroh, direct or via the one Relay"| Agent["Agent"]
+    Agent -->|UDS| Privd["privd"]
+    Privd --> Ocserv["Local ocserv server"]
 ```
 
 ## Main pieces
 
 | Piece | Runs on | What it does |
 | --- | --- | --- |
-| Controller Web/API | Controller server | Hosts the administrative web interface, HTTP API, task scheduler, audit subsystem, node directory, and command dispatch pipeline. |
-| transportd | Controller side | Terminates Iroh overlay connections and exposes an IPC interface over a local gRPC Unix domain socket to the Go Controller. It operates without database credentials, relying on a trust socket for Controller-managed session authorization. |
+| Gateway | Controller server | Terminates Controller TLS, serves the static Web bundle and proxies `/api` to the Controller. Integrated mode adds an SNI-routing Edge in front of it. |
+| Go Controller | Controller server | Serves the HTTP API and runs the outbox worker, scheduler, audit subsystem, node directory and command dispatch pipeline, selected by `--role`. |
+| transportd | Controller side | Terminates Iroh overlay connections and exposes an IPC interface over a local gRPC Unix domain socket to the Go Controller. It operates without database credentials, relying on a trust socket served by the Controller for session authorization. |
 | Supported database | Controller side | Persists control-plane state, task queues, and recovery journals. PostgreSQL is the reference backend. |
-| Dedicated relays | Operator-managed relay hosts | Route encrypted control-plane traffic between Controller and Agents across network boundaries. |
+| Dedicated Relay | Operator-managed relay host (one) | Forwards encrypted control-plane traffic between Controller and Agents across network boundaries. Production supports one Relay, not a redundant set. |
+| Signer | Separate service (bundled in Integrated mode) | Issues and revokes node client certificates and seals secrets to node public keys. See [Production Signer](development/certificates-and-signer.md#production-signer). |
 | Managed node service | Each ocserv server | Connects to the Controller, streams telemetry and heartbeats, accepts validated commands, and logs execution status. |
 | Local privileged helper | Each ocserv server | Runs a fixed set of ocserv lifecycle routines that require root privileges. |
 | Upgrader | Each managed node | Manages package installation and binary updates independently of the Agent execution loop. |
 | ocserv | Each VPN server | The underlying OpenConnect VPN daemon handling client encapsulation and cryptographic tunneling. |
-| External services | Operator environment | Provide external infrastructure for federated authentication, X.509 certificates, telemetry collection, secret storage, and backups. |
+| External services | Operator environment | Provide external infrastructure for federated authentication, telemetry collection, secret storage, and backups. |
 
-At runtime, the Go control plane communicates with `transportd` through a local Unix domain socket. `transportd` and remote `Agent` daemons exchange versioned Protocol Buffer payloads over an Iroh peer-to-peer overlay. On the nodes, the `Agent` delegates privileged actions to `privd` via a dedicated Unix domain socket. All sockets enforce strict peer UID validation. Intermediate Relay nodes forward encrypted packets without acquiring control-plane authority. For wire protocols and process isolation semantics, see [transport](development/transportd.md) and [Agent/privd](development/agent-privd.md).
+Ownership, secrets, interfaces and failure impact by process:
+
+| Process | Storage and secrets | Interfaces | If it stops |
+| --- | --- | --- | --- |
+| Gateway | Controller TLS key; no business state | TCP 443 to browsers; HTTP to the Controller | Web and API unreachable; Controller state and nodes unaffected. |
+| Go Controller (`--role=all`, single instance in production) | Authority for trust, operations, outbox and audit in the database; holds the command-signing key, session and audit keys, database application credential and Signer token | HTTP behind Gateway; client of the transportd socket; serves the trust socket; HTTPS to Signer | No validation, durable writes or dispatch; queued operations wait in the outbox. |
+| Database | The only durable Controller state | Controller only | Same as Controller; restore per [database recovery](operations/incident-recovery.md#database-recovery). |
+| transportd | Iroh endpoint key, Relay token and Controller command verification key; no database credentials | gRPC `TransportService` on a Unix socket; calls the trust socket; Iroh to Agents | Dispatch and result ingestion stop; outcomes may become `unknown` and are reconciled. |
+| Signer | Issuing intermediate key, HTTPS key and the durable certificate ledger | HTTPS `:9443`, on an internal network reachable by the Controller in Integrated mode | Certificate issuance, revocation and secret sealing fail; other operations continue. |
+| Relay | Relay TLS key and the shared token; no control-plane authority | HTTPS and UDP 7842 | Relay-dependent paths are interrupted; existing direct paths may continue. VPN payload is not carried by it. |
+| Agent | Local SQLite journal; Controller verification key | Outbound Iroh; Unix socket to privd | No commands or telemetry for that node; the journal must survive restarts. |
+| privd | Root effect store, attestation key, Controller keyring and the two sealing private keys | `/run/ocserv-platform/privd.sock`, no TCP listener | Privileged commands fail or stay indeterminate. |
+| upgrader | Runs as the one-shot `ocservia-upgrader@<operation>.service` started by privd | systemd | Upgrade does not progress; see [Agent lifecycle](operations/agent-lifecycle.md). |
+
+At runtime, the Go control plane communicates with `transportd` through a local Unix domain socket. `transportd` and remote `Agent` daemons exchange versioned Protocol Buffer payloads over an Iroh overlay, directly or through the Relay. On the nodes, the `Agent` delegates privileged actions to `privd` via a dedicated Unix domain socket. The transportd control and trust sockets and the privd socket each check the peer UID and socket ownership. Intermediate Relay nodes forward encrypted packets without acquiring control-plane authority. In development, `transportd-stub` and `OCSERV_LOCAL_SIMULATOR` (forbidden in production) replace the Iroh path; production uses Iroh. For wire protocols and process isolation semantics, see [transport](development/transportd.md) and [Agent/privd](development/agent-privd.md).
 
 ## How deployment fits together
 
@@ -65,7 +83,7 @@ Command processing decouples request ingestion from remote execution:
 1. Ingestion and transactional staging: The API handler maps the request to the domain service. Inside an isolated database transaction, the service verifies node state and operator permissions, then commits the operation intent, payload, transactional outbox record, and audit entry. This transactional acceptance logs the intent; it does not mean the node has executed it.
 2. Outbox dispatch: An asynchronous worker locks and claims pending outbox tasks in batches, then invokes `transportd`. Dispatch occurs across an active session under the transport session identity. Network transmission updates the dispatch tracking but does not confirm the operation succeeded.
 3. Node admission and idempotency: The `Agent` validates the payload and writes the command identifier to an embedded SQLite journal before running it. If a command with the same identifier and semantic hash arrives again, `Agent` skips execution and replays the cached result. Any payload mismatch under an existing identifier results in immediate rejection.
-4. Privileged execution and settlement: For mutating operations, `Agent` transitions the task state to `running` before invoking `privd` over local IPC. `privd` validates the parameters against fixed authorization rules and issues signed execution receipts upon completion. `Agent` writes the terminal status to disk before returning an acknowledgment. The Controller ingests this confirmation, making the outcome available to API queries and Server-Sent Event (SSE) streams.
+4. Privileged execution and settlement: For mutating operations, `Agent` transitions the task state to `running` before invoking `privd` over local IPC. `privd` validates the parameters against fixed authorization rules and issues signed execution receipts upon completion. `Agent` writes the terminal status to disk before returning an acknowledgment. The Controller worker receives the result through the transportd event stream (`localslice.Service.Ingest`, which also ingests telemetry) and commits it, making the outcome available to API queries and Server-Sent Event (SSE) streams.
 
 This lifecycle runs across the [operation service](../control-plane/internal/operations/service.go), the [outbox worker](../control-plane/internal/operations/worker.go), and the [Agent execution path](../rust/crates/agent/src/main.rs). The [delivery and recovery contract](development/command-reliability.md) governs idempotency, result verification, and conflict reconciliation. Because local database commits, network transit, and daemon side-effects lack a unified distributed transaction coordinator, communication failures or crashes may leave operations in an `unknown` state. Automated recovery procedures must reconcile ambiguous executions against node receipts before retrying; daemon status queries alone cannot confirm whether a transient reload completed.
 
@@ -89,7 +107,7 @@ System recovery prioritizes the immutability of command logs, local journal entr
 
 ## Design tradeoffs and capacity
 
-The Controller uses a modular monolithic architecture where domain services coordinate within shared database transactions. This guarantees atomic consistency between domain entity mutations and audit logging without distributed coordination overhead. Splitting these packages into microservices would require external distributed transaction management, which the system does not currently need. The [assembly code](../control-plane/internal/platform/app/app.go) selectively enables API, background worker, or scheduler roles, all of which run from one binary.
+The Controller uses a modular monolithic architecture where domain services coordinate within shared database transactions. This guarantees atomic consistency between domain entity mutations and audit logging without distributed coordination overhead. Splitting these packages into microservices would require external distributed transaction management, which the system does not currently need. The [assembly code](../control-plane/internal/platform/app/app.go) (`Run`, then `runRoles`) selectively enables the API, worker and scheduler roles (`--role=api|worker|scheduler|all`) from one binary; production runs one `all` instance. The scheduler takes a database leader lease and ticks every 30 seconds. On SIGINT/SIGTERM or the first role failure, the lifecycle stops admission and SSE, shuts down the trust socket, then waits for tasks within `OCSERV_SHUTDOWN_TIMEOUT`.
 
 The database-backed outbox pattern couples intent capture with pending delivery in a single transactional write, avoiding a separate message broker. As a result, task leasing, operational history, and primary business writes compete for the same database resources. Background polling loops ensure progress even if in-memory notification channels fail. While local `Agent` journaling mitigates redelivery issues, operations terminating in ambiguous states still require active reconciliation.
 
@@ -101,10 +119,10 @@ Before modifying concurrency parameters or adding infrastructure, operators shou
 
 ## Safety model
 
-- Production deployments use immutable, verified release versions.
-- Controller and node binaries require cryptographic signature and checksum validation before activation.
+- Production deployments use immutable, version-tagged or digest-pinned releases.
+- Node packages are checked against an expected SHA-256 digest from the operator or an already-authorized Controller command before activation; a plain checksum detects corruption and is not an authorization key.
 - Cryptographic material, including private keys, TLS certificates, relay tokens, and administrative credentials, is provisioned through isolated, out-of-band channels.
-- High-risk mutating operations enforce two-person authorization, requiring independent review from a secondary operator.
+- High-risk mutating operations require approval from an independently authenticated principal bound to the exact request; self-approval is rejected. This does not attest that two different people control the principals ([approval principal boundary](reference/stable-contracts.md#approval-principal-boundary)).
 - Audit records commit within the same database transaction as the changes they document.
 - Formal disaster recovery procedures and verified rollback paths are prerequisites for production deployment.
 

@@ -2,7 +2,8 @@
 
 Start with [Validate a change](testing.md).
 
-One `.github/workflows/ci.yml` runs on PRs, main pushes and manual dispatch.
+One `.github/workflows/ci.yml` runs on PRs, main pushes and manual dispatch;
+manual Release Check also calls it as `full-ci` with `profile: full`.
 Automatic runs use **Quick**. Manual dispatch accepts `quick|full`, defaulting
 to **Full**. Full means **current-candidate checks on all supported units**,
 not comprehensive acceptance. Product database support has not changed.
@@ -17,11 +18,11 @@ Full has a separate concurrency group and cannot cancel Quick.
 
 | Job | Retained checks |
 | --- | --- |
-| docs | Line endings, nonempty Markdown and bootstrap/policy text; no general link check |
-| go | gofmt, vet and ordinary fast tests in both Go modules; no full-package race |
-| rust | Format, clippy and workspace tests |
-| web | Format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
-| database-smoke | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance (MySQL as three parallel `DATABASE_SHARD` legs: `mysql-cutover`, `mysql-core`, `services`); both check current snapshot equivalence (MySQL Full: once, in `services`) |
+| docs | `scripts/docs-check.sh` only: CRLF, non-empty Markdown, audited Claude settings keys, a few bootstrap/`AGENTS.md` text and link rules (details in [testing](testing.md)); no general link, anchor, SQL or support-fact check, and no `policy-check` |
+| go | `go-check.sh standard`: gofmt, vet and `go test -count=1` without race in both `control-plane` and `signer`. The same job also runs the selected CI guard and release self-test suites when routing sets `run_ci_tools` |
+| rust | `rust-check.sh`: format, Clippy and workspace tests, only when routing sets `run_rust`. The same job also runs the installer and Relay-launcher self-tests when routing sets `run_installers`, in which case `rust-check.sh` does not run unless Rust is also selected |
+| web | `web-check.sh basic`: format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
+| database-smoke | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance (MySQL as three parallel `DATABASE_SHARD` legs: `mysql-cutover`, `mysql-core`, `services`); both first enforce the SQL artifact window and both check current snapshot equivalence (MySQL Full: once, in `services`). The job keeps this name in Full |
 | database-recovery-full | PostgreSQL physical and MySQL logical backup/restore, including snapshot provenance, Full only |
 | Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
 
@@ -60,9 +61,14 @@ only in Full (`backend-mysql-full`, `mysql-cutover` shard); PRs changing MySQL
 `schema.sql`, `upgrade.sql` or the migration runner should run a candidate Full
 before merge. Quick PostgreSQL still runs `postgres-snapshot`.
 
-CI router/wrapper/bootstrap self-tests run only for their implementation or
-shared CI/toolchain changes. Installer self-tests run only for installer
-changes. Manual dispatch does not add these unrelated self-tests.
+CI router/wrapper/bootstrap self-tests (`guards`: `test-ci-relevance.sh`,
+`test-required-go-tests.sh`, `test-bootstrap-profiles.sh`) run only for their
+implementation or shared CI/toolchain changes. The `release` suite (release,
+Controller manifest/smoke/image-security, Stage-0 installer, build-cache and
+secret-scan-config self-tests, selected by `ci-tools-check.sh`) runs only for
+release or cache-contract paths. Installer self-tests run only for installer
+changes. Unknown and shared-contract paths enable all of them. Manual dispatch
+does not add these unrelated self-tests.
 No role lifecycle matrix, restart, outbox/fencing/disconnect, exhaustive
 authentication/API/policy suite, checksum/drift/invalid-configuration matrix,
 or deep historical repair suite is moved from Quick into Full.
@@ -71,43 +77,69 @@ or deep historical repair suite is moved from Quick into Full.
 
 | File | Trigger / purpose |
 | --- | --- |
-| `ci.yml` | PR/main Quick; manual Quick/Full key checks |
-| `security.yml` | Weekly/manual checks and reusable release prerequisite |
-| `release-check.yml` | Manual main Full CI, Security, Integrated Business Smoke + single-instance recovery, Quick Install (Pebble ACME) |
+| `ci.yml` | PR/main Quick; manual Quick/Full key checks; called by Release Check as Full |
+| `security.yml` | Weekly/manual scans; reusable, and called by Release Check (not by `release.yml`) |
+| `release-check.yml` | Manual main Full CI, Security, Integrated Business Smoke + single-instance recovery, Quick Install (Pebble ACME, amd64) |
 | `release.yml` | Tag build/image-security/smoke/publish; manual build-only dry-run |
-| `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics |
+| `release-upgrade.yml` | Manual local Business smoke or Integration diagnostics (workflow name Release Diagnostics) |
+| `release-products.yml`, `release-business-diagnostic.yml` | Reusable build/smoke (called by `release.yml`) and native Business probe (called by Release Check and `release-upgrade.yml`); not triggered directly |
+| `integrated-network.yml` | Manual or candidate-branch Integrated Network prototype (isolated network or public-fixture probe); not part of Basic CI or Release Check |
+| `strip-claude-footer.yml` | PR-body housekeeping only; no validation |
 
 ## Independent security checks
 
 `security.yml` runs weekly on Monday at 03:23 UTC, on manual dispatch, and
 from manual Release Check on main. It reuses pinned
 bootstrap profiles to run the full-history `scripts/security-check.sh`
-(including its Gitleaks rule regression check), `govulncheck` for both Go
-modules, `cargo audit` and `cargo deny check advisories` for the Rust workspace,
-and `npm audit` for both npm lockfiles, including development dependencies.
+(including its Gitleaks rule regression check), `govulncheck ./...` run from
+`control-plane` (the separate `signer` Go module is not scanned by this
+workflow), `cargo audit` for `rust/Cargo.lock` and
+`deploy/production/relay.Cargo.lock` plus `cargo deny check advisories` for the
+Rust workspace, and `npm audit --package-lock-only` for the single
+`web/package-lock.json`, including development dependencies.
 The four scan jobs are read-only and need no production secrets. A failure
-blocks release publishing; it does not expand Basic CI or enable live security
+fails Security and so the Release Check result; `release.yml` neither calls nor
+checks Security, so tag publication is gated only by the operator confirming a
+passing Release Check. Security does not expand Basic CI or enable live security
 acceptance. A successful scan covers these tools and their current databases,
 not every possible vulnerability or the state of a deployed service.
 
 ## Path routing
 
-`scripts/ci-relevance.sh` uses directory rules, not function dependency analysis:
+`scripts/ci-relevance.sh` uses first-match path rules, not function dependency
+analysis; the script and `scripts/test-ci-relevance.sh` are authoritative and
+this table is a summary. Specific executable and configuration rules precede
+the generic Markdown rule, so Markdown under `web/`, `rust/` and the `deploy/`
+trees (compose, database-e2e, test-fixtures, production, managed-node, package,
+systemd, bootstrap), or under `proto/` and `openapi/`, is claimed by those
+rules and can run web, Rust, database, installer or all suites instead of
+`docs`. Markdown elsewhere (including under `control-plane/` and `docs/`)
+selects `docs` only.
 
-| Paths | Quick checks |
+| Paths (first match wins) | Quick checks |
 | --- | --- |
-| Documentation / Markdown | docs only |
-| Web (including its generated client) | web only |
-| Rust | rust only |
-| Controller commands, internal modules, storage, API, migrations, Go locks | go + core database smoke |
-| Other Go sources / harness | go |
-| Installer implementation/tests | rust + installer self-tests |
-| Shared contracts, CI/toolchain infrastructure or unknown paths | all Quick checks |
+| Other Markdown, `LICENSE*`, `.claude/settings.json` | docs |
+| `web/*`, `scripts/web-check.sh` | web |
+| `rust/*` (Dockerfiles aside), `scripts/rust-check.sh` | rust |
+| `control-plane/{cmd,migrations,internal}/*`, Go locks and `go.work*`, `deploy/compose`, `deploy/database-e2e`, database/MySQL/PostgreSQL scripts | go + database smoke on both engines |
+| Other `control-plane/*`, `scripts/go-check.sh`, `signer/*.go`, `signer/go.mod`, `signer/go.sum` | go |
+| Installer implementation/tests (list in the script) | installer self-tests in the `rust` job; `rust-check.sh` runs only if Rust is also selected |
+| Release, package, Controller and Agent-upgrade scripts, release workflows, `deploy/{package,systemd,bootstrap,managed-node,production}` | release contract suite + installer self-tests |
+| Manual-acceptance harness files (`deploy/real-e2e`, `scripts/real-e2e-*`, `scripts/p1-*`, `scripts/security-acceptance-*`) | release contract suite (names matching earlier rules, such as `*controller*`, also select installers); the harnesses themselves are not run |
+| `ci.yml`, `security.yml`, `scripts/ci-*`, `test-ci-*`, required-test selectors, bootstrap tests | CI guard suite |
+| `proto/*`, `openapi/*`, `control-plane/gen/*`, `scripts/bootstrap.sh`, `env.sh`, `checksums.txt`, `toolchains.lock` | all Basic flags and both CI suites at Quick scope |
+| Any other path (for example non-Go `signer/` files, `.dockerignore`) | all Basic flags and both CI suites at Quick scope |
 
 Mixed changes take the union. PRs use `base...head`; pushes use `before..head`.
-Deletions/renames retain both affected paths. Invalid/empty/unresolvable diffs
-fall back to Quick, never Full. Manual Full selects all basic domains and all
-four database units. Manual Quick selects all domains but only its two units.
+Deletions/renames retain both affected paths. Invalid, empty, unresolvable or
+unsupported-event diffs and unknown paths fail closed by enabling every Basic
+flag, but the profile stays Quick (smoke database scope); routing never
+upgrades Quick to Full. Manual dispatch ignores paths: docs, go, rust, web and
+database always run, with no CI-suite, installer or Controller-cache flags.
+Manual Full selects four database matrix legs (PostgreSQL plus three MySQL
+shards) and the Full-only `database-recovery-full` job; manual Quick selects
+only two (PostgreSQL and one MySQL leg). Controller cache refresh runs on main
+pushes only, when `run_controller_cache` is set.
 
 ## Go caches
 
@@ -150,7 +182,8 @@ does not change branch protection.
 ## Separate acceptance
 
 Selected single-node recovery runs in Business Smoke or Integration with
-`run-resilience=true`. The old G6 workflows and evidence framework are retired.
+`run-resilience=true`; Release Check runs it in Smoke with the production
+Signer, on one Controller, one database and one dedicated Relay. The old G6 workflows and evidence framework are retired.
 Runtime/security/capacity acceptance and cross-VM enrollment retain their
 existing manual entry points.
 
@@ -179,7 +212,11 @@ does not read workflow files or run live acceptance, and Basic CI does not call 
 ## Reproduction
 
 Run against the same candidate source in an authorized isolated environment
-with the dependencies described in [testing](testing.md):
+with the dependencies described in [testing](testing.md). These commands
+reproduce only the Go, Quick database smoke and MySQL recovery steps (the last
+is a Full-only job); they omit docs, Rust, Web, the SQL artifact-window and
+snapshot-check steps, the PostgreSQL volume-layout check and the Full database
+scope:
 
 ```bash
 scripts/bootstrap.sh go-test

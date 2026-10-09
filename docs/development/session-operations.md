@@ -11,7 +11,8 @@ Service reload is a high-risk action. It also requires a matching, unexpired
 approval created by the requester and granted by a different authorized
 principal; the mutation supplies that record in `X-Approval-ID`.
 
-Clients submit a reason, a unique `Idempotency-Key`, and the node revision in
+Clients submit a reason, a unique `Idempotency-Key`, an optional `ttl_seconds` (1 to 300,
+default 60), and the node revision in
 `If-Match` or `expected_version`. Session requests must also carry the boot ID
 returned by the node API. The API returns `202 Accepted` with an asynchronous
 Operation. Callers must display its persisted state and must not treat queueing
@@ -46,7 +47,8 @@ so duplicate and uncertain outcomes remain reconcilable. The current tree
 provides no database down migrations; use a forward fix or an explicitly planned
 [isolated restore](../operations/incident-recovery.md#database-recovery).
 
-Basic CI's `go` and `rust` jobs run the ordinary Go and Rust test suites.
+Basic CI's `go` and `rust` jobs run the ordinary Go and Rust test suites when
+the CI relevance gate selects them.
 They do not run the separate Agent and transport boundary scripts.
 `scripts/i11-session-operations.sh` remains the manual focused validation
 entry point, outside Basic CI.

@@ -2,6 +2,9 @@
 
 Each supported deployment uses one dedicated HTTPS Relay with custom mode,
 authenticated token files and the existing identity/command security checks.
+This page covers the Standalone Relay host. Integrated runs the Relay on the
+Controller host and derives its URL from `OCSERV_RELAY_PUBLIC_HOST`; see the
+[Integrated lifecycle configuration](../../deploy/production/integrated/README.md#lifecycle-configuration).
 Public/default relays are never a production fallback. Normal direct
 connectivity remains available; a recovery test must prove dependence on the Relay.
 
@@ -74,9 +77,11 @@ There is no Relay-list hot reload. Check the actual old release requirements
 before rollback; see [Agent rollback](agent-lifecycle.md#rollback) and
 [Controller rollback](controller-lifecycle.md#rollback).
 
-The relay is an independent service, not embedded in the Controller. Sharing
-a host is not validated here: both default deployments claim TCP 443 on all
-addresses, so installing both unchanged on one IP is not a supported recipe.
+The Standalone Relay is an independent service, not embedded in the
+Controller. Placing a Standalone Relay and Controller on one host is not
+validated: both default deployments claim TCP 443 on all addresses, so
+installing both unchanged on one IP is not a supported recipe. Use Integrated
+for a single host.
 
 ## Troubleshooting
 

@@ -2,11 +2,15 @@
 
 Business Smoke exercises the real Controller, native systemd Agent/privd/ocserv,
 Local requester/approver browser login, Workspace selection, user creation,
-approval/reload and approved ConfigPlan apply, OpenConnect VPN,
-production Signer sealing and internal TLS on disposable amd64 runners.
+approval/reload and approved ConfigPlan apply and OpenConnect VPN on one
+disposable amd64 runner with one Controller and one dedicated Relay. Production
+Signer sealing and internal TLS are exercised when `production_signer=true`
+(the Release Check and `release-upgrade.yml` default); `false` selects the
+standalone topology without them.
 Manual integration adds OIDC, PKI/P12/revoke (including browser checks), rollback
-and deep recovery. Smoke retains a separate API-created VPN user to verify
-production Signer password sealing. Its configuration is applied once through
+and deep recovery. Smoke retains a separate API-created VPN user; with
+`production_signer=true`, it also verifies production Signer password sealing.
+Its configuration is applied once through
 the browser and checked against the operation receipts and native file hash
 before VPN and recovery checks. Both profiles require `real_browser_subset`;
 missing browser checkpoints fail acceptance.
@@ -19,9 +23,9 @@ native package acceptance nor HA.
 
 The Business driver builds its own native packages and images, uses a loopback
 test registry, and runs `controller.sh install --release-file` with ordinary
-JSON configuration. Integrated configuration upgrade/rollback exercises digest
-and version-tag references to the same locally built images; it does not test
-historical binary compatibility. Native scriptlets verify the embedded archive
+JSON configuration. In the extended profile with the production Signer, Integrated configuration
+upgrade/rollback exercises digest and version-tag references to the same locally
+built images; it does not test historical binary compatibility. Native scriptlets verify the embedded archive
 checksum in root-owned staging. Managed-node preparation and final
 `SERVICES_ACTIVE` convergence use the shipped installer.
 After the approved positive ConfigPlan apply, each profile establishes
@@ -94,7 +98,8 @@ reconciliation and the existing explicit safe retry after proven effect absence.
 
 `result.json` records `resilience_requested`, `resilience_result` and actual
 scenario checkpoints. A selected recovery run requires exactly one PASS for
-Controller stack (including transport), Agent/privd stack, PostgreSQL and Relay. Missing fields/checkpoints, cancellation, failure and unexpected
+Controller stack (in Smoke, including transport), Agent/privd stack, bundled
+PostgreSQL and Relay; there is no MySQL recovery scenario. Missing fields/checkpoints, cancellation, failure and unexpected
 skip block acceptance. Unselected recovery is explicitly SKIPPED.
 
 Sanitized diagnostics retain environment inventory, timings and exit status
