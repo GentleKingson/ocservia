@@ -53,6 +53,13 @@ Basic CI has no per-subtest inventory, cumulative JSONL or matrix success
 outputs. The old manifest/checker remains only for independent manual deep
 acceptance callers; its redundant ordinary-unit inventory has been removed.
 
+Quick MySQL runs only `TestDatabaseCoreSmoke`, `TestDatabaseInitializationSmoke`,
+the enrollment restart check and the separate `database-mysql-snapshot.sh check`
+checkpoint equivalence step. The 14 `mysql-snapshot` crash/rejection cases run
+only in Full (`backend-mysql-full`, `mysql-cutover` shard); PRs changing MySQL
+`schema.sql`, `upgrade.sql` or the migration runner should run a candidate Full
+before merge. Quick PostgreSQL still runs `postgres-snapshot`.
+
 CI router/wrapper/bootstrap self-tests run only for their implementation or
 shared CI/toolchain changes. Installer self-tests run only for installer
 changes. Manual dispatch does not add these unrelated self-tests.
@@ -127,7 +134,7 @@ The database scripts default to current-candidate `full` when invoked without a
 scope. Historical database upgrade matrices and the MySQL history shard have
 been removed; current initialization, content integrity and interrupted-SQL
 recovery remain in the full suite. `regression` remains manual-only. Normal CI
-explicitly passes `smoke` for both Quick and Full.
+passes `smoke` for Quick and `full` for Full.
 Browser checks require Playwright Chromium installed separately. Disaster
 recovery, complex races and fault injection remain in their existing manual
 deep scripts; no scheduled workflow was added.
