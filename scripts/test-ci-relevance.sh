@@ -207,8 +207,18 @@ git -C "${docs}" init -q
 git -C "${docs}" add .
 cp "${ROOT}/.claude/settings.json" "${docs}/.claude/settings.json"
 bash "${docs}/scripts/docs-check.sh"
+# Narrowing rules stay free-form; an empty allow list grants nothing.
+printf '%s\n' '{"permissions":{"allow":[],"ask":["Bash(git rebase:*)"],"deny":["Bash(git push --force:*)"]}}' \
+  >"${docs}/.claude/settings.json"
+bash "${docs}/scripts/docs-check.sh"
+# Every allow rule must match the reviewed list exactly, so structurally valid
+# but unreviewed grants (history rewrites, wildcards, other tools) fail.
 for settings in '{"hooks":{}}' '{"env":{"A":"b"}}' '{"permissions":{"defaultMode":"bypassPermissions"}}' \
-  '{"permissions":{"allow":[1]}}' '{"model":"x"}{"model":"y"}' 'not json'; do
+  '{"permissions":{"allow":[1]}}' '{"model":"x"}{"model":"y"}' 'not json' \
+  '{"permissions":{"allow":["Bash(git filter-branch:*)"]}}' \
+  '{"permissions":{"allow":["Bash(git push --force-with-lease:*)"]}}' \
+  '{"permissions":{"allow":["Bash(*)"]}}' '{"permissions":{"allow":["Bash"]}}' \
+  '{"permissions":{"allow":["WebFetch"]}}'; do
   printf '%s\n' "${settings}" >"${docs}/.claude/settings.json"
   if bash "${docs}/scripts/docs-check.sh" 2>/dev/null; then echo "docs-check accepted ${settings}" >&2; exit 1; fi
 done
