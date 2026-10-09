@@ -105,7 +105,6 @@ if [[ "${scope}" == smoke ]]; then
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
   bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/mysql TestDatabaseInitializationSmoke
   bash "${ROOT}/scripts/test-enrollment-restart.sh" "${NAME}"
-  bash "${ROOT}/scripts/required-go-tests.sh" mysql-snapshot --select -race -timeout=15m
   exit 0
 fi
 if [[ "${shard}" != mysql-* ]]; then

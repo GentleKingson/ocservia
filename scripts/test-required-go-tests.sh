@@ -329,17 +329,29 @@ for bad in 'smoke unknown-shard' 'smoke services'; do
   fi
 done
 echo 'Full current database routing passed'
-for script in database-foundation-integration.sh database-postgres-smoke.sh; do
+# Exact, ordered smoke routes per backend: a missing, duplicated, replaced or
+# extra entry fails. MySQL Quick leaves the mysql-snapshot crash/rejection
+# suite to Full (backend-mysql-full, checked above); the separate
+# database-mysql-snapshot.sh step still checks checkpoint equivalence.
+printf '%s\n' '--smoke ./internal/platform/app TestDatabaseCoreSmoke' \
+  '--smoke ./internal/database/mysql TestDatabaseInitializationSmoke' \
+  'backend-enrollment-restart' >"${tmp}/expected-mysql-smoke.route"
+printf '%s\n' '--smoke ./internal/platform/app TestDatabaseCoreSmoke' \
+  '--smoke ./migrations TestDatabaseInitializationSmoke' \
+  'backend-enrollment-restart' \
+  'postgres-snapshot --select -race -timeout=10m' >"${tmp}/expected-postgres-smoke.route"
+for pair in database-foundation-integration.sh:mysql database-postgres-smoke.sh:postgres; do
+  script="${pair%%:*}" backend="${pair##*:}"
   export ROUTE_LOG="${tmp}/${script}.route"
   PATH="${tmp}/wrapper/bin:${PATH}" DATABASE_TEST_SCOPE=smoke ENGINE=mysql PG_MAJOR=18 \
     bash "${tmp}/wrapper/scripts/${script}" >/dev/null
-  test "$(wc -l <"${ROUTE_LOG}")" -eq 4
-  grep -q '^--smoke ./internal/platform/app TestDatabaseCoreSmoke$' "${ROUTE_LOG}"
-  grep -Eq '^--smoke ./(internal/database/mysql|migrations) TestDatabaseInitializationSmoke$' "${ROUTE_LOG}"
-  grep -q '^backend-enrollment-restart$' "${ROUTE_LOG}"
+  cmp -s "${tmp}/expected-${backend}-smoke.route" "${ROUTE_LOG}" || {
+    diff "${tmp}/expected-${backend}-smoke.route" "${ROUTE_LOG}" >&2
+    echo "${backend} smoke route changed" >&2; exit 1; }
 done
-  # The existing restart proof is required in each current smoke container.
-  # Its route is checked above alongside the two scoped database entries.
+if grep -q 'mysql-snapshot' "${tmp}/database-foundation-integration.sh.route"; then
+  echo 'MySQL Quick smoke still runs the Full-only mysql-snapshot suite' >&2; exit 1
+fi
 echo 'Current smoke includes core, initialization and restart checks'
 
 # Basic CI has one explicit entry, not the deep acceptance manifest above.
