@@ -30,7 +30,8 @@ while read -r path selected; do
   git -C "${fixture}" checkout -q --detach "${base}"
   mkdir -p "${fixture}/$(dirname "${path}")"
   printf 'change\n' >"${fixture}/${path}"
-  git -C "${fixture}" add -- "${path}"
+  # -f: a user's global excludes (e.g. .claude/settings.local.json) must not drop fixture paths.
+  git -C "${fixture}" add -f -- "${path}"
   git -C "${fixture}" commit -qm change
   head="$(git -C "${fixture}" rev-parse HEAD)"
   for event in pull_request push; do
