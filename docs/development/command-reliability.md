@@ -2,8 +2,12 @@
 
 ## Controller delivery
 
-The side-effect-free synthetic command path validates durable delivery without
-real node mutations.
+Controller-issued commands share one delivery path: Operations
+`CreateSynthetic` (despite its name, also used by the configuration,
+certificate and Agent-upgrade services) or the user/group service signs and
+queues the typed command, the outbox worker dispatches it through transportd,
+and the Agent journal and privd record the effect. The side-effect-free
+synthetic command route below exercises that path without real node mutations.
 
 Clients queue a typed `noop` or `echo` command with
 `POST /api/v1/nodes/{node_id}/synthetic-commands`. Every request must include an
@@ -14,12 +18,22 @@ returns the original operation; reusing it with different input returns an RFC
 9457 conflict.
 
 The operation intent, typed Protobuf command, outbox event, and audit intent are
-committed in one database transaction through backend-owned stores. Workers claim available outbox rows
-with `FOR UPDATE SKIP LOCKED`, acquire one bounded lease per node, commit the
-claim, and only then call transportd. A successful transport acknowledgement is
-recorded after the network call. An expired claim is either redelivered or,
-after the bounded attempt limit, retained as `unknown`; it is never guessed to
-have failed or succeeded.
+committed in one database transaction through backend-owned stores. The signed
+envelope's command idempotency key is the operation ID, not the HTTP
+`Idempotency-Key`, which only deduplicates the API request. Workers claim
+available outbox rows with `FOR UPDATE SKIP LOCKED`, acquire one bounded lease
+per node, commit the claim, and only then call transportd.
+
+A transport acknowledgement means only that the frame was written to the Agent
+stream; it is recorded after the network call and is neither execution nor a
+result. The Agent result returns asynchronously. A send error releases the claim
+and retries the same signed envelope after one second; the Agent journal replays
+rather than re-executes an exact duplicate. A claim that expires while sending is
+`unknown` because the write may or may not have happened. It is never guessed to
+have failed or succeeded, is not resent for execution, and receives a
+Controller-re-signed `RECONCILE_ONLY` follow-up that only observes the Agent
+journal, up to the bounded attempt limit. A reconciliation that proves the
+effect absent permits a Controller-signed `RETRY_IF_EFFECT_ABSENT` command.
 
 When a commit acknowledgement is uncertain, services perform a bounded readback
 of the original immutable intent, the exact attempt/lease or completed attempt,
@@ -31,16 +45,20 @@ idempotent without requiring an Agent result to have arrived already.
 Operation state is available through REST and the resumable
 `/api/v1/operations/{operation_id}/events` SSE stream. Queue health is exposed
 at `/api/v1/operations/queue-metrics`, including unpublished count, oldest age,
-queue depth, and unknown count. Where used, PostgreSQL notifications are wakeups only;
-polling remains the recovery mechanism.
+queue depth, and unknown count. The worker polls the outbox every 200 ms and
+reaps expired leases every second. The PostgreSQL backend also emits
+`pg_notify` hints on enqueue, but nothing listens for them; polling is the only
+dispatch and recovery mechanism.
 
 ## Agent journal
 
 The Agent stores command acceptance and terminal results in its owner-controlled
 SQLite database. Each side effect is bound to one idempotency key, one command
-ID, and one semantic payload hash. The key and command ID are independently
+ID, and one semantic payload hash and hash version (the Controller currently
+issues v2; the Agent accepts v1 and v2). The key and command ID are independently
 unique. Only an exact match replays a stored result; either identity being
-reused for another command is rejected before execution.
+reused for another command, or the same command with a different hash version,
+is rejected before execution.
 
 A command is validated and durably accepted before its typed effect runs.
 Synthetic effects, their execution counter, and the terminal result are

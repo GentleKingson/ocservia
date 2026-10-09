@@ -1,5 +1,5 @@
-# Prototype overlay, applied LAST with deploy/production/compose.yaml first.
-# Requires Compose >= 2.24.4 (!override); lifecycle admission belongs to P3.
+# Integrated overlay, applied LAST with deploy/production/compose.yaml first.
+# Requires Compose >= 2.24.4 (!override); controller.sh owns lifecycle admission.
 services:
   edge:
     image: ${OCSERV_EDGE_IMAGE:?set a digest-pinned Edge image}

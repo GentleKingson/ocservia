@@ -112,9 +112,13 @@ matches Tailwind CSS v4's baseline (cascade layers, `@property`,
 `color-mix()`), and `vite.config.ts` sets the same `build.target`. Change both
 together; do not lower the range without a reviewed compatibility plan.
 
-Automated browser checks run only on Playwright Chromium, including its
-iPhone 13 emulation. Safari and Firefox are supported targets but are not
-covered by CI; record manual results for UI changes that depend on them.
+The support range is a policy, not a test matrix. The Playwright specs and the
+authentication browser runner use Chromium only (desktop Chrome and an iPhone
+13 emulation that is forced to Chromium). Basic CI runs no browser at all: its
+`web` job runs `scripts/web-check.sh basic`. Playwright specs run through
+`npm run test:e2e` or `make e2e`; `scripts/web-check.sh full` runs the separate
+authentication browser runner. Safari and Firefox are supported targets with no automated
+coverage; record manual results for UI changes that depend on them.
 
 ### Component sources
 
@@ -319,7 +323,8 @@ according to [Validate a change](testing.md). Paths in the table are relative to
 
 `scripts/web-check.sh basic` runs generated-client build, formatting, lint,
 typecheck, unit tests, production build and generated-auth checks. Its `full`
-mode adds the focused authentication browser runner. This runner and stubbed
+mode adds the focused authentication browser runner (`test/run-auth-browser.mjs`)
+but not the Playwright specs, which need `npm run test:e2e` or `make e2e`. This runner and stubbed
 browser specs do not validate a live Controller, database recovery or installation.
 Specs requiring the development simulator (`local-slice` and the first two
 `overview` tests) need a running backend; report missing coverage as not run.

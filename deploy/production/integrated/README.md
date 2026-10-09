@@ -16,7 +16,16 @@ Do not bypass the deployment-configuration checks in `controller.sh` for deploym
 Use the existing bootstrap, `install.sh`, `controller.sh` and `compose.sh`,
 not a second installer. Standalone remains the default. Integrated requires a
 v2 platform manifest, Compose >= 2.24.4, and these additional `install.env`
-settings alongside the normal database, authentication and Controller Secrets:
+settings alongside the normal database, authentication and Controller Secrets.
+This section is the **manual** path: you write `install.env` and prepare every
+file below. Quick (`controller-bootstrap.sh --quick`, see [Quick
+mode](../../../docs/operations/bootstrap-hosting.md#quick-mode)) is a preset
+over the same installer for a new host: it generates this configuration in
+`/etc/ocservia/install.env` (Integrated, bundled PostgreSQL, ACME, Local
+authentication) and the protected Controller and Signer material (see [Quick
+install materials](../../../docs/development/certificates-and-signer.md#quick-install-materials)),
+so only the manual path needs the file preparation described here. Manual
+installs may use any supported database and login mode, and either TLS mode.
 
 ```dotenv
 OCSERV_DEPLOYMENT_MODE=integrated
@@ -36,10 +45,15 @@ rejected before host bootstrap; standalone launcher behavior is unchanged.
 Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
 `OCSERV_RELAY_URL_A`, `OCSERV_RELAY_URL_B` and `OCSERV_CERTIFICATE_SIGNER_URL`:
 the launcher derives one Relay URL and `https://signer:9443/sign`. Conflicting
-values are rejected. Controller's trusted proxy must remain the Gateway's
+values are rejected, and `OCSERV_RELAY_URL_B` must be empty: exactly one Relay is
+supported, not a redundant pair. Controller's trusted proxy must remain the Gateway's
 application `/32`, not Edge or an entire subnet. By default (`OCSERV_TLS_MODE=manual`)
 certificates are provisioned externally; see [ACME certificates](#acme-certificates)
-for the alternative. The lifecycle does not generate CAs.
+for the alternative. In a manual installation the operator supplies the Signer's
+CA chain, issuing key and TLS identity: neither the lifecycle nor `compose.sh`
+generates CAs. Only Quick generates them (`quick-materials.sh`: offline root CA,
+online issuing intermediate and Signer HTTPS identity); it creates no Gateway or
+Relay TLS identity either, ACME obtains those.
 
 The Relay secret directory is launcher-owned mode 0700 and contains nonempty
 single-link `tls.crt` and `tls.key` (manual mode only), launcher-owned mode 0444. Its access token
@@ -79,7 +93,8 @@ VPN sessions.
 
 ### ACME certificates
 
-`OCSERV_TLS_MODE=acme` (Integrated only) replaces both host certificate pairs:
+`OCSERV_TLS_MODE=acme` (Integrated only; `compose.sh` rejects it in Standalone,
+and Quick always uses it) replaces both host certificate pairs:
 
 ```dotenv
 OCSERV_TLS_MODE=acme
@@ -87,11 +102,12 @@ OCSERV_ACME_EMAIL=ops@example.com
 ```
 
 Gateway (Caddy) and Relay (iroh-relay) each obtain and renew a certificate for
-their own name from Let's Encrypt with TLS-ALPN-01. Edge already routes the
+their own name from Let's Encrypt (the default directory) with TLS-ALPN-01. Edge already routes the
 validation connection by SNI, so port 443 stays the only TCP port; nothing
 listens on port 80. Both names must resolve to this host before installation.
 `tls.crt` and `tls.key` are then neither required in `OCSERV_SECRET_DIR` nor in
-`OCSERV_RELAY_SECRET_DIR`. Account keys and certificates live in the named
+`OCSERV_RELAY_SECRET_DIR`; the Relay secret directory itself must still exist
+(it may be empty) with the same ownership and mode. Account keys and certificates live in the named
 volumes `gateway-acme` and `relay-acme`; keep them across upgrades to stay
 within issuance rate limits. Gateway joins an `acme-egress` network to reach
 the ACME directory, so unlike manual mode it has outbound access.
@@ -106,8 +122,9 @@ profile instead of starting without certificates.
 ## CI and publication
 
 Manual [Release Check](../../../docs/development/release-checks.md) runs Full CI,
-Security and amd64 Integrated Business Smoke with four finite single-instance
-recoveries on merged main. Business uses fresh local builds and a loopback
+Security, amd64 Integrated Business Smoke with four finite single-instance
+recoveries, and amd64 Quick Install against a Pebble ACME directory on merged
+main. Business uses fresh local builds and a loopback
 registry on disposable amd64 runners;
 it does not publish GHCR images. The operator confirms the version after PASS.
 Its tag then triggers fresh native builds, exact Controller image security scans,
@@ -402,9 +419,13 @@ an online production target, public IPv6 or public CA/ACME issuance, 35-minute
 completely idle Edge timeout, HA, long-duration load, automatic CRL delivery,
 or forced disconnection of existing VPN sessions. Distinct requester/approver
 principals were real, but do not prove two independently responsible humans.
+Integrated ACME (`OCSERV_TLS_MODE=acme`) and Quick postdate this run and were
+not part of it; Release Check now exercises Quick against a Pebble test ACME
+directory, which is not public CA issuance.
 Image scans retain the three explicitly approved Oracle FIPS-channel false
-positive entries in [the existing exemption file](../image-scan-exemptions.json),
-with review deadline `2026-10-26`; other findings remain gated.
+positive entries for the `mysql_backup` image in [the existing exemption file](../image-scan-exemptions.json),
+each with review deadline `2026-10-26` (an expired entry fails the gate again);
+other findings remain gated.
 Subsequent documentation-only changes do not retest or relabel this source.
 
 ## Operator lifecycle and maintenance
@@ -413,7 +434,9 @@ Choose `standalone` for separately operated Relay/Signer endpoints, or
 `integrated` for this single-host topology. Integrated is not HA. Use the
 [pinned release installation](../../../docs/getting-started/production.md)
 with `--version vX.Y.Z --root-lifecycle` only after that exact stable or RC Release
-exists. For authorized nonproduction diagnostics, use the matching source
+exists; on a new host, `--quick` (which implies `--root-lifecycle`) is the
+alternative preset, available only in a Release that ships
+`deploy/production/quick-install.sh`. For authorized nonproduction diagnostics, use the matching source
 checkout and ordinary platform configuration with `controller.sh` instead.
 
 `install.env` is data parsed by the installer's strict allowlist, not a shell

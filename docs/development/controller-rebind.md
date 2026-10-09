@@ -5,8 +5,8 @@ lifecycle. Retention runs independently under the safety conditions below.
 
 The identity crate provides `Identity::stage_rebind`: it verifies the
 expected source EndpointID and Controller pin, copies the existing endpoint
-key into a separate owner-only identity directory, and publishes that directory
-with a durable no-replace rename. It never changes the source pin. A partial
+key into a separate owner-only identity directory pinned to the target
+Controller, and publishes that directory with a durable no-replace rename. It never changes the source pin. A partial
 staging directory is evidence of an incomplete preparation and is refused on
 retry. This primitive is not an activation API; the privileged binding lifecycle
 and operational CLI must still enforce the complete transition below.
@@ -33,7 +33,9 @@ they must not install a binary which ignores this authority boundary.
 Rebind is an explicit privileged operation on the managed node. It transfers
 the node's sole Controller authority without rotating its endpoint private key
 or resetting ocserv users, configuration, certificates, or sealing keys. It
-does not migrate Controller databases or discover, fail over to, or implicitly
+does not migrate Controller databases, users, telemetry or approvals, so the
+target Controller sees a new pending node with no history from the source. It
+is not high availability: it does not discover, fail over to, or implicitly
 trust another Controller. Ordinary identity provisioning continues to reject
 Controller endpoint substitution.
 
@@ -51,8 +53,12 @@ The operation has one durable identity and records its expected source binding
 and explicitly pinned target. Concurrent rebind, upgrade and rollback operations
 must be excluded. The stages are:
 
-1. Preflight identity, independently provisioned target trust, file ownership,
-   available storage, service configuration and outstanding privileged work.
+1. Preflight identity, independently provisioned target trust, file ownership
+   and service configuration, including the single dedicated Relay: a non-empty
+   `RELAY_URL_B` in `relays.env` is rejected before enrollment, operation
+   creation or service shutdown. The CLI does not check free storage. Outstanding
+   privileged work does not block the transfer; commit classifies it and, when
+   any is unresolved, publishes the binding with mutations quarantined.
 2. Stage the target without changing the active binding. Enroll using the same
    Agent endpoint private key and existing possession-proof protocol.
 3. Verify the response's Controller endpoint, pending result and new NodeID.
@@ -60,27 +66,32 @@ must be excluded. The stages are:
 4. Quiesce both services and any privileged upgrade runner; commit one durable
    binding selector covering all authority and state paths. A crash must load
    either a complete source or a complete target, never a mixture.
-5. Start privd then Agent, verify an authenticated target session, and seal the
-   source binding. Record completion durably.
+5. Start privd then Agent, verify an authenticated target session, and mark the
+   source binding sealed in the operation record (source files are not changed).
+   Record completion durably.
 
 Network failure, rejected token or target pin, invalid command key, response
 loss or staging failure must leave the source binding intact. A committed
 target whose restart or session verification fails remains recoverable and
 fails closed; recovery must not silently reactivate the source Controller.
 After target commands can have executed, returning to the source is another
-explicit transfer, not filesystem rollback. Preserve the failed transition's
-evidence and expose the next recovery action.
+explicit transfer, not filesystem rollback. The CLI refuses a target Controller
+or command key equal to the current one, and a Controller refuses bootstrap
+enrollment of an EndpointID it already stores in any state, so a Controller
+that has held this endpoint cannot currently be a rebind target. Preserve the
+failed transition's evidence and expose the next recovery action.
 
-Prefer existing `obt1_` bootstrap enrollment for retry: the Controller binds a
-consumed token to its endpoint and returns that same pending node on a valid
-retry. Persist the target and token identity before the first request; an
+The rebind CLI accepts only an `obt1_` bootstrap token, whose retry is
+recoverable: the Controller binds a consumed token to its endpoint and returns
+that same pending node on a valid retry while the node is still pending. Persist the target and token identity before the first request; an
 unknown response never authorizes issuing another token or creating another
 node. Legacy endpoint-bound enrollment tokens remain single-use; response loss
 requires authenticated inventory recovery. Neither flow grants approval.
 
 When source administration is available, use the normal approved node
 revocation operation and its existing trust convergence. Source availability
-is not required for the local transfer. An unreachable source cannot be
+is not required for the local transfer, and the CLI records the declared source
+disposition (`revoked` or `unreachable`) without verifying it. An unreachable source cannot be
 updated; its history remains there. Once switched, local enforcement rejects
 source sessions and signed commands even if that Controller returns.
 
@@ -94,8 +105,13 @@ become target authority.
 
 Namespace isolation alone is insufficient for uncertain external effects:
 an old Unknown or prepared privileged effect can refer to the same ocserv
-resource. Preserve the evidence and fail closed on conflicting writes until
-explicit reconciliation establishes the outcome. Do not relabel old evidence
+resource. Preserve the evidence and fail closed until explicit reconciliation
+establishes the outcome: when the commit-time check finds unresolved source
+evidence (including a missing or unreadable Agent journal or an unreadable
+privileged-effect store), the binding is published with mutations quarantined
+and privd refuses to prepare new authorized privileged effects under it. The CLI
+provides no command that clears this flag, and read-only operation remains
+available. Do not relabel old evidence
 as a new Controller's command or infer completion from service health.
 
 ## Independent retention

@@ -1,16 +1,22 @@
 # Controller command authorization v1
 
 Command protocol `1.1` requires every command accepted by an Agent to carry an
-Ed25519 authorization issued by the Controller. `transportd` only validates the
-bounded Protobuf wire schema and relays the original bytes. It does not receive
-a Controller signing key and cannot mint or alter an executable command.
+Ed25519 authorization issued by the Controller. `transportd` validates the
+bounded Protobuf wire schema, the negotiated session mode, capability, revision
+and expiry, and (using only Controller public keys) the owner-fence carriers,
+then relays the command bytes. It does not receive a Controller signing key and
+cannot mint or alter an executable command. Authorization of the command itself
+remains with the Agent and privd.
 
 The Controller signs only after RBAC, approval consumption, operation identity,
 required capability, revision, delivery mode, and the semantic payload hash are
-final. The Agent and privd independently pin Controller public keys. The Agent
-verifies before writing its command journal; privd verifies the original proof
-again before reserving or executing a root effect. There is no unsigned
-mutation compatibility path at either boundary.
+final. The Controller currently signs semantic hash v2 for every command; the
+Agent, privd and the Controller result path also accept v1. The Agent and privd
+independently pin Controller public keys. The Agent verifies before writing its
+command journal; privd verifies the original proof again before reserving or
+executing a root effect. There is no unsigned mutation compatibility path at
+either boundary. The proof authorizes one command; it does not report that the
+command was dispatched, executed or confirmed.
 
 ## Key identity
 
@@ -75,6 +81,13 @@ UUID identities, semantic hash version, and recomputed semantic hash. It then
 reconstructs the canonical authorization input, selects the pinned key by
 `key_id`, and performs strict Ed25519 verification. Any failure occurs before a
 journal write and before a privileged request.
+
+In a mutation-capable `1.1` session the Agent first requires the
+Controller-signed `ConnectionFenceV2` and `FenceBindingV2` that the Controller
+attaches at dispatch time; they are not part of `CommandAuthorizationV1` or the
+semantic hash. A command from an owner epoch below the Agent's durable floor is
+answered with a rejected `stale_owner_epoch` result and never executes. privd
+does not consume these carriers.
 
 The local RPC carries the original signed `CommandEnvelope`, not a second set
 of Agent-selected mutation arguments. Privd pins its own node ID and keyring,

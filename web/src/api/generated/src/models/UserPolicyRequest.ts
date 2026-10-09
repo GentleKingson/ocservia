@@ -38,7 +38,7 @@ export interface UserPolicyRequest {
    */
   quotaBytes: number;
   /**
-   * Exact instant in UTC; offsets and fractional seconds are rejected.
+   * RFC 3339 UTC timestamp ending in Z; the parsed instant must have zero nanoseconds.
    * @type {Date}
    * @memberof UserPolicyRequest
    */

@@ -5,7 +5,8 @@ use LF endings and end with LF. It does not split on SQL semicolons or interpret
 SQL syntax. SQL outside a step, malformed/reserved markers, duplicate headers,
 unknown fields, and unmatched boundaries are errors.
 
-Every artifact starts with these headers (each exactly once):
+A schema artifact starts with these headers (each exactly once; an upgrade
+artifact omits `revision`, see below):
 
 ```sql
 -- ocservia:artifact=schema

@@ -1,9 +1,11 @@
 # Telemetry and read-only fleet views
 
-The unprivileged Agent sends read-only observations to the control-plane API
-and Web application. It emits a bounded telemetry
-batch every 30 seconds on a dedicated Iroh unidirectional stream. A node is
-shown offline after its latest heartbeat is more than 90 seconds old.
+The unprivileged Agent sends read-only observations to the Controller. It emits
+a bounded telemetry batch every 30 seconds on a dedicated Iroh unidirectional
+stream; the Web application reads the stored result through the HTTP API. A node
+is shown offline after its latest heartbeat is more than 90 seconds old, or has
+never sent one. The API derives this freshness (`fresh`, `stale`, `never`) at
+read time; scheduler maintenance separately persists the offline transition.
 
 ## Data classes and limits
 
@@ -40,9 +42,13 @@ cannot silently block later events from other nodes.
 
 Current state is available from `GET /api/v1/nodes`,
 `GET /api/v1/nodes/{node_id}`, and the node `sessions` resource. Bounded
-history queries use the node `telemetry` resource with a metric, resolution,
-and optional RFC 3339 start time. SSE is only an invalidation signal: clients
-rebuild authoritative state through REST after connecting or reconnecting.
+history queries use the node `telemetry` resource with a required metric, a
+`raw`, `5m` (default) or `1h` resolution, and an optional RFC 3339 `since`
+(default 24 hours ago); at most 2,000 points, oldest first from `since`, are returned. SSE is only an
+invalidation signal: clients rebuild authoritative state through REST after
+connecting or reconnecting, and a reconnect may pass the last event ID as a
+cursor that must still be visible in the authorized scope (otherwise 400
+`invalid-cursor`).
 
 ## Upgrade and rollback
 

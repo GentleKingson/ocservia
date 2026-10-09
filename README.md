@@ -33,7 +33,7 @@ The node agent runs as an unprivileged process. A dedicated daemon (`privd`) han
 
 ### Sensitive changes require independent approval
 
-Two people must approve sensitive changes using separate credentials and active sessions, preventing self-approval. Both authorizations are cryptographically bound to the command payload.
+Sensitive changes require independently authenticated requester and approver principals with separate credentials and sessions; self-approval is rejected. Approval binds the reviewed content, and the Controller signs the resulting command. This does not establish that two different people control the credentials.
 
 <a id="-architecture-at-a-glance"></a>
 ## Architecture
@@ -107,9 +107,9 @@ $EDITOR install.env
 ../ocservia-vX.Y.Z/deploy/production/controller-bootstrap.sh --version vX.Y.Z
 ```
 
-The Controller supports local credentials, OpenID Connect (OIDC), or both. When you first deploy locally, you must create an admin account using a single-use bootstrap token. See [Production authentication](docs/operations/authentication.md) for details.
+The Controller supports local credentials, OpenID Connect (OIDC), or both. There is no default administrator: with Local login enabled, a manual installation creates the first admin with a separate one-shot bootstrap command. See [Production authentication](docs/operations/authentication.md) for details.
 
-Standalone configurations run the Relay and Signer services on separate hosts. You can also run them on the Controller host, which requires extra configuration and permissions. Provision your secrets according to [Deploy the Controller](docs/getting-started/production.md) before bootstrapping.
+Standalone configurations (the default) run the Relay and Signer services on separate hosts. Integrated mode runs them on the Controller host, which requires extra configuration and the root lifecycle. Provision your secrets according to [Deploy the Controller](docs/getting-started/production.md) before bootstrapping. On main, a Quick preset can generate the configuration, material and initial Local administrators for a new Integrated host; no published release contains it yet (see [Deploy the Controller](docs/getting-started/production.md#quick-mode-on-main)).
 
 ### 2. Install a managed node
 
@@ -128,7 +128,7 @@ $EDITOR install.env
 
 If you run the script without an enrollment token, it outputs `ENROLLMENT_READY`. If you provide a token, the state changes to `ENROLLED_LOCAL`. This registers the node locally but does not grant network access. To finish onboarding, approve the node in the Controller interface, start the daemon processes, and check for incoming telemetry.
 
-The installer does not auto-approve nodes or start daemons. See [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a node](docs/how-to/enroll-node.md) for the full workflow.
+The installer does not auto-approve nodes or initially start Agent/privd. The package lifecycle enables the retention timer and may restart existing services during an upgrade. See [Install a managed node](docs/getting-started/managed-node.md) and [Enroll a node](docs/how-to/enroll-node.md) for the full workflow.
 
 <a id="-documentation"></a>
 ## Documentation
@@ -161,7 +161,7 @@ Pin production deployments to official [published releases](https://github.com/G
 
 ## Security
 
-Administrative commands require cryptographic authorization. Root execution on the node is restricted to a fixed set of operations. Sensitive changes require multi-party approval, replay protection, a command ledger, and signed receipts. If a command leaves the system in an ambiguous state, it blocks conflicting changes until the state is reconciled.
+Administrative commands require cryptographic authorization. Root execution on the node is restricted to a fixed set of operations. Sensitive changes require independent approval, replay protection, a command ledger, and signed receipts. An uncertain command remains Unknown until exact durable evidence establishes its outcome; operators must pause conflicting changes during reconciliation. See the [recovery boundary](docs/reference/stable-contracts.md#matched-release-recovery-boundary).
 
 Please report vulnerabilities privately following [SECURITY.md](SECURITY.md).
 

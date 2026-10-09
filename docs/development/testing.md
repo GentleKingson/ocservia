@@ -16,12 +16,21 @@ make policy-check
 git diff --check
 ```
 
-Also inspect changed links and anchors: `docs-check` is not a link checker and
-only checks tracked Markdown. New public files need separate inspection until
-they are included in the candidate index. Keep local-only material out of that
-index and preserve the user's staging state. The check covers line endings,
-nonempty tracked Markdown and selected bootstrap entrypoint requirements; it
-does not validate SQL, authentication modes or database support. Changed
+Also inspect changed links and anchors: `docs-check` is not a link checker.
+New public files need separate inspection until they are included in the
+candidate index. Keep local-only material out of that index and preserve the
+user's staging state. `scripts/docs-check.sh` inspects tracked files only. It
+rejects CRLF in `*.md`, `*.yaml`/`*.yml`, `*.proto`, `*.go`, `*.rs` and `*.ts`;
+requires every tracked Markdown file to be non-empty; limits shared
+`.claude/settings.json` to audited keys and an empty reviewed `allow` list; and
+checks a few bootstrap text rules (the README reference to
+`docs/getting-started/production.md` and no `| bash -s` in three entry pages).
+It also checks the agent entry: `AGENTS.md` exists, `CLAUDE.md` imports it, and
+only `AGENTS.md`'s own relative links and heading anchors resolve. It does not
+verify links or anchors in any other file, nor SQL, authentication modes,
+database support or any other prose fact. `make policy-check` only rejects tracked local
+implementation-control paths and disclosures. The CI `docs` job runs
+`docs-check.sh` alone, not `policy-check` or `git diff --check`. Changed
 executable examples need focused validation in an authorized isolated environment.
 
 For first-time environment preparation, use the supported bootstrap profile
@@ -37,32 +46,48 @@ Java 17, `jq` and ShellCheck. Runtime and generator versions come from
 against [`scripts/checksums.txt`](../../scripts/checksums.txt).
 
 For module-local iteration, keep using `make test-go`, `make test-rust` or
-`make test-web`. `make test` intentionally runs all three modules; it is not
-the shortest feedback loop for a one-module edit.
+`make test-web`. `make test-go` runs `go test ./...` only in `control-plane`:
+it does not enter the `signer` module and adds no `gofmt`, `go vet`, `-count=1`
+or race run. `make go-check` (`scripts/go-check.sh`, default mode `full`)
+covers both `control-plane` and `signer`: `gofmt`, `go vet`, `go test -count=1`
+and, outside `standard`, `go test -race`, under a private `TMPDIR` in
+`.cache/` because the signer store rejects state under a group/world-writable
+ancestor such as `/tmp`. Basic CI runs `go-check.sh standard` (no race).
+`make test` (`scripts/test.sh`) runs the `control-plane` Go tests, the Rust
+workspace tests and Web `npm test`; it has no signer, lint or race coverage and
+is not the shortest feedback loop for a one-module edit.
 
 ## Choose a broader check when needed
 
 Use `make verify` for a complete baseline when the change needs cross-module
 validation, not as the default first step for ordinary edits.
 
-`make verify` runs `scripts/lint.sh common` for shared repository/protocol
-checks, then the existing Go/Rust/Web checks. Equivalent vet, Clippy and Web
-format/lint/type checks run once. Standalone `make lint` still performs all
-lint checks. Rust Clippy covers the same workspace/targets/features without a
-preceding duplicate `cargo check`.
+`make verify` (`scripts/verify.sh`) runs `scripts/lint.sh common` (ShellCheck,
+Buf, OpenAPI lint, `check-public-repository.sh`, `docs-check.sh`), the Buf
+breaking check, `go-check.sh` (full, both Go modules), `rust-check.sh`, the
+transport and Agent boundary checks, `web-check.sh` (full), the public-repository
+policy and toolchain-consistency self-tests, `security-check.sh` (Gitleaks),
+`license-check.sh`, the generated-code checks and the P1 harness bounds
+self-test. Equivalent vet, Clippy and Web format/lint/type checks run once.
+Standalone `make lint` still performs all lint checks, but its `go vet` covers
+`control-plane` only. `make verify` does not start databases, `make integration`,
+`make e2e`, the CI router/selector/bootstrap self-tests, installer or release
+self-tests, or any manual acceptance, and it is not Basic CI.
 
 `scripts/web-check.sh` builds the generated client once, then uses
 `npm --ignore-scripts run lint` and `npx --no-install vue-tsc --noEmit` from
 `web`. The hook override applies only to that explicit lint command. Independent
 `npm run lint` and `npm run typecheck` still prepare their generated client.
+`make web-check` runs mode `full`, which adds the browser authentication run
+(`web/test/run-auth-browser.mjs`, needs Playwright Chromium); CI runs `basic`.
 
-- Quick database feedback: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`
-- Supported database units: PostgreSQL 18.x and MySQL 8.4 LTS. Quick CI selects smoke; Full CI selects `DATABASE_TEST_SCOPE=full`. Both check current schema source, independent replay equivalence and required lifecycle cases.
-- Full database migrations and failure scenarios: `make database-integration`, or use the backend script with `DATABASE_TEST_SCOPE=full`
-- Go and transport local integration: `make integration`
-- Browser or runtime behavior: `make e2e`
-- Rust behavior or boundaries: `make rust-check`
-- Web behavior: `make web-check`
+- Quick database feedback: `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh` and `DATABASE_TEST_SCOPE=smoke ENGINE=mysql bash scripts/database-foundation-integration.sh`. PostgreSQL smoke runs `TestDatabaseCoreSmoke`, `TestDatabaseInitializationSmoke`, the enrollment restart check and the `postgres-snapshot` inventory. MySQL smoke runs the same first three but not the `mysql-snapshot` inventory.
+- Supported database units: PostgreSQL 18.x and MySQL 8.4 LTS. Quick CI selects smoke; Full CI selects `DATABASE_TEST_SCOPE=full` (MySQL as three `DATABASE_SHARD` legs). Both also run `database-artifact-policy.sh` and `database-<engine>-snapshot.sh check` (current SQL against the fixed v1.2.0 checkpoint). The local smoke commands above do not run those two steps. Quick MySQL is not evidence for the MySQL crash/rejection cases; those run only in Full.
+- Full database migrations and failure scenarios: `make database-integration` runs `scripts/database-integration.sh`, which is PostgreSQL only (`PG_MAJOR=all` and `18` both select 18). MySQL needs its own backend script: `DATABASE_TEST_SCOPE=full ENGINE=mysql bash scripts/database-foundation-integration.sh`.
+- Go and transport local integration: `make integration` runs `scripts/local-slice-integration.sh`: the `control-plane` binary against a PostgreSQL container and the Rust `ocservia-transportd-stub` over local sockets. No MySQL, real `transportd`, Agent, Relay or native node is involved.
+- Browser or runtime behavior: `make e2e` runs `scripts/e2e.sh`: Docker Compose with PostgreSQL, `transportd-stub`, the Controller and Web, then the Playwright `e2e` service. It is not a native-node or MySQL check.
+- Rust behavior or boundaries: `make rust-check` (`cargo fmt --check`, Clippy with `-D warnings`, workspace tests)
+- Web behavior: `make web-check` (full mode, includes the browser run)
 - Real cross-VM behavior: follow [cross-VM enrollment validation](cross-vm-enrollment-validation.md); module checks and browser fixtures are not substitutes
 - Business checks on authorized disposable native runners: [Business Smoke and Integration](real-business-validation.md)
 - Release acceptance: use [Release Check](release-checks.md); selected single-node recovery checks are described in [Resilience](resilience.md)
@@ -155,9 +180,9 @@ the additional dependencies for the entrypoint being used:
 | `test-bootstrap-profiles.sh` | Ruby, tar, gzip, a SHA-256 utility and jq; disposable platform/preflight fixtures run only for CI/tooling changes |
 | `docs-check.sh` | Git and `jq`; no toolchain or platform self-tests |
 | `go-check.sh race` (also the race part of `full`) | `CGO_ENABLED=1`, a C compiler selected by `go env CC`, linker and C development headers; no Docker requirement |
-| `database-integration.sh` smoke | Go, jq, setsid, Docker CLI and daemon; no race/compiler probe |
-| `database-integration.sh` manual regression/full | Also needs race prerequisites, Ruby, Python 3, curl, sha256sum; legacy full also needs patch |
-| `database-foundation-integration.sh` | Go, jq, setsid, Python 3, OpenSSL with `req -addext`, Docker CLI and daemon; only manual regression/full need race prerequisites, legacy full diagnostics also use timeout |
+| `database-integration.sh` smoke (delegates to `database-postgres-smoke.sh`) | Go, jq, setsid, Python 3, Docker CLI and daemon, and the race prerequisites (cgo, C compiler) |
+| `database-integration.sh` manual regression/full | The smoke set plus Ruby, curl, sha256sum |
+| `database-foundation-integration.sh` (MySQL) | Go, jq, setsid, Python 3, OpenSSL with `req -addext`, Docker CLI and daemon and the race prerequisites in every scope; full scope also needs `timeout` |
 
 Missing commands, inaccessible Docker, disabled cgo and a compiler unable to
 compile/link fail with a nonzero status before expensive tests or database
@@ -209,7 +234,8 @@ that host Ruby, race or database prerequisites are available.
 ### Isolated ARM64 execution environment
 
 The following isolated ARM64 test environment was validated with the native
-toolchain. It has no Go of its own: it runs the **same native `.tools/go/bin/go`** installed above.
+toolchain when it was written; rerun it for each candidate and keep that
+candidate's own evidence. It has no Go of its own: it runs the **same native `.tools/go/bin/go`** installed above.
 System packages are confined to the task image. The Debian base is digest-pinned;
 APT resolves its maintained Bookworm packages at build time. Retain the build
 log, resulting image ID and package versions with each validation record rather
@@ -272,7 +298,11 @@ v1.2.0, not the current main branch.
 
 The `postgres-snapshot` and `mysql-snapshot` inventories in
 `scripts/required-go-tests.txt` require real database execution, final pass and
-zero skips. They cover checkpoint/fresh schema, ACL and seed equivalence, current
+zero skips. `postgres-snapshot` runs in PostgreSQL smoke and Full; `mysql-snapshot`
+is part of `backend-mysql-full` and therefore runs only in Full (the
+`mysql-cutover` shard), not in Quick MySQL smoke, so a change to MySQL
+`schema.sql`, `upgrade.sql` or the migration runner needs a Full run before it
+is trusted. They cover checkpoint/fresh schema, ACL and seed equivalence, current
 forward upgrades, unknown/altered databases with zero mutation, raw checksum
 mutation, PostgreSQL rollback/locking, and MySQL subprocess kill/recovery at
 fresh, transition and cleanup boundaries. The full MySQL inventory includes
@@ -281,13 +311,17 @@ telemetry, transaction and permission behavior. Do not replace them with a test
 run lacking database credentials.
 
 Each database CI job fetches the fixed release history and checks independent
-checkpoint/fresh equivalence. Full Basic CI additionally runs PostgreSQL physical
-and MySQL logical backup/restore, preserves receipts across restore and repeat
-migration, and verifies runtime read/DDL boundaries. PostgreSQL coverage retains
-cleanup rollback, concurrency and runtime permissions; MySQL covers all eight
-cleanup DDL interruption boundaries, exact repair, foreign replacement refusal
-and data rollback. Audit authenticity, checkpointed-tail transitions and
-compaction remain required business coverage after legacy migration removal.
+checkpoint/fresh equivalence with `database-<engine>-snapshot.sh check` (in Full,
+MySQL runs it once, in the `services` shard). Full Basic CI additionally runs
+PostgreSQL physical (external PostgreSQL) and MySQL logical backup/restore
+(`i18-external-postgres-backup-restore-smoke.sh`,
+`i18-mysql-backup-restore-smoke.sh`), preserves receipts across restore and
+repeat migration, and checks the restored PostgreSQL runtime read and owner-DDL
+boundary. PostgreSQL coverage retains cleanup rollback, concurrency and runtime
+permissions; in Full, MySQL covers every cleanup DDL interruption boundary,
+exact repair, foreign replacement refusal and data rollback. Audit authenticity,
+checkpointed-tail transitions and compaction remain required business coverage
+after legacy migration removal.
 
 For a major database cutover, qualify the exact candidate with Full Basic CI,
 Security, Business integration with the production Signer and resilience, and

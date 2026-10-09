@@ -2,8 +2,12 @@
 
 `bash scripts/build-relay.sh <install-root> [release|debug]` builds the unmodified
 crates.io `iroh-relay` CLI. `toolchains.lock` selects the Relay version, while
-`scripts/checksums.txt` pins the archive before extraction. Production Docker
-and the isolated recovery builder share this entry point.
+`scripts/checksums.txt` pins the archive before extraction. "Standalone" here
+means the stand-alone `iroh-relay` binary, not the Standalone deployment mode.
+The production Relay image build (`deploy/production/relay.Dockerfile`, which the
+Integrated Relay service reuses) uses this entry point. It builds the Relay binary
+only; exactly one Relay is supported per deployment, see
+[dedicated Relay](../../docs/how-to/dedicated-relay.md).
 
 For 1.2.0, the archive SHA-256 is
 `beb2294a9749d6a25fd7cd8bcf0fccd932f20716d4f967d85d3f23c7135ae6a2`.

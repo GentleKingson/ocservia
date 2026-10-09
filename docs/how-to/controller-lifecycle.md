@@ -14,8 +14,14 @@ retain their behavior. See [support policy](../reference/support-policy.md).
 Before upgrading, confirm current health, a fresh restorable backup, target
 persistent-state requirements and the
 [backend recovery procedure](../operations/incident-recovery.md#database-recovery).
-Use a clean checkout at the target `source_commit` and a protected release
-bundle matching the Docker daemon architecture.
+The lifecycle itself only checks that the database backup service (and, for
+bundled PostgreSQL, PostgreSQL) is running and healthy; it does not check that
+a recent backup exists or can be restored, so verify that yourself first.
+Use a clean checkout (no staged, unstaged or untracked changes) from a Git
+clone, and a protected release bundle matching the Docker daemon architecture.
+If the checkout is not already at the target `source_commit`, the lifecycle
+needs that commit to be present locally and keeps a separate clean clone of it
+under the protected state root.
 
 ```bash
 deploy/production/controller.sh upgrade \
@@ -23,7 +29,11 @@ deploy/production/controller.sh upgrade \
 ```
 
 The current release remains running during target validation and pending-state
-recording. Use the manifest's images, not caller-selected tags.
+recording. Use the manifest's images, not caller-selected tags. Re-running with
+a release file identical to the current one is a no-op. Once image pull and
+activation begin, containers may be partly replaced even if the command then
+fails: the confirmed release state stays unchanged, but the running services
+are not guaranteed to match it (see [Verify and recover](#verify-and-recover)).
 
 ### Runtime database grants
 
@@ -53,9 +63,17 @@ permission/storage failures. This does not promise historical full-table cleanup
 
 ## Rollback
 
+This rolls back the Controller package (images and Compose project) only. It is
+not a database restore and never downgrades the schema: after an upgrade that
+applied forward migrations, the previous images run against the already-migrated
+database and may not work with it. Restoring data is the separate
+[database restore](../operations/incident-recovery.md#database-recovery).
+
 Stop new writes as the incident requires and reconcile every Unknown operation.
 Assess current/previous database, configuration and backup risks. The protected
-`previous-release.json` and its exact source commit must be available.
+`previous-release.json` and its exact source commit must be available; a fresh
+install has no previous release, and rollback refuses to run without one. The
+same database and backup health check as upgrade applies first.
 
 ```bash
 deploy/production/controller.sh rollback
@@ -67,7 +85,9 @@ retained in a clean checkout under the protected state root so bind-mounted
 files remain available. Missing source, dirty checkout, invalid platform and
 actual configuration/runtime failures remain errors.
 
-An identical target is a no-op; matching version strings alone do not establish
+A successful rollback makes the old release current and the replaced release
+`previous`, so running it again returns to the newer release. An identical
+target is a no-op; matching version strings alone do not establish
 artifact identity. The target Compose graph runs forward initialization where
 required. It never reverses migrations, restores a database, resets Signer
 identity or converts legacy networks.
@@ -78,7 +98,9 @@ After upgrade or rollback, require the lifecycle smoke check to pass. Check
 `/api/v1/readyz`, expected version/source at `/api/v1/version`, authenticated
 application reads and the node inventory.
 
-Failure preserves confirmed state and `pending-release.json` evidence.
+Failure preserves confirmed state and `pending-release.json` evidence. After a
+failed activation, treat the running containers as unconfirmed (possibly a mix
+of old and new images) until a retry or recovery passes the smoke check.
 Correct the cause and retry the identical target; do not use `install` on an
 existing deployment, delete pending state or force old images into it.
 
@@ -101,6 +123,8 @@ deploy/production/controller.sh uninstall
 
 This removes containers and project networks, retaining bundled database,
 transport/trust volumes, external databases, lifecycle state, backups and secrets.
+The Controller is offline, and nodes lose their Controller connection, until
+`start`.
 Restart the same confirmed release with:
 
 ```bash
@@ -115,8 +139,14 @@ Only when local deletion is intentional:
 deploy/production/controller.sh uninstall --purge-data
 ```
 
-This removes production project volumes and local lifecycle state, not external
-databases, protected secrets, off-host backups, source or unrelated volumes.
+This removes production project volumes (including bundled database data,
+which cannot be recovered afterwards unless an off-host backup exists) and the
+lifecycle state files (`current-release.json`, `previous-release.json`,
+`pending-release.json` and the deployment profile), not external
+databases, protected secrets, off-host backups, source (including retained
+source clones under the state root) or unrelated volumes. If volume removal
+fails, the purge is partial and the lifecycle state is kept; if only the state
+cleanup fails, the command reports the residual paths and exits non-zero.
 It is neither secure erase nor restore. Integrated mode refuses this operation;
 Signer/identity disposal requires separate reconciliation.
 

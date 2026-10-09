@@ -54,7 +54,9 @@
 # --enrollment-token-file), and the Controller's possession-proof enrollment
 # contract remain the authorities. It never approves a node, never creates or
 # auto-approves an approval request, never places Controller administrator
-# credentials on the node, and never enables or starts a service.
+# credentials on the node, and never initially enables or starts Agent/privd.
+# The package lifecycle enables/starts the retention timer and may restart
+# already-running Agent/privd during an upgrade.
 #
 # Native package first: the default install path is the release .deb on the
 # Debian family and the release .rpm on Rocky Linux 9. The archive
@@ -1031,7 +1033,7 @@ services_enabled_and_active() {
   # Read-only observation, the only post-activation signal available without
   # Controller credentials: it proves the operator completed the deliberate
   # enable step, not Controller-side approval or an accepted session. The
-  # queries never mutate anything; the bootstrap still never enables, starts,
+  # queries never mutate anything; this observation never enables, starts,
   # stops, or masks a service.
   local unit
   for unit in ocservia-privd.service ocservia-agent.service; do
@@ -1052,7 +1054,7 @@ print_enrolled_local() {
   echo "NODE_ID: ${1}"
   echo "SERVICES: ${2:-NOT_OBSERVED}"
   print_controller_unobserved "${1}"
-  echo "next: verify approval in the Controller (docs/how-to/enroll-node.md#approve-the-node), then deliberately enable ocservia-privd.service and ocservia-agent.service; the bootstrap never starts or enables a service"
+  echo "next: verify approval in the Controller (docs/how-to/enroll-node.md#approve-the-node), then deliberately enable ocservia-privd.service and ocservia-agent.service; the bootstrap never initially starts or enables Agent/privd"
 }
 
 print_services_active() {

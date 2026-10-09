@@ -9,7 +9,9 @@ Release version examples also accept an exact `vX.Y.Z-rc.N` candidate tag
 > contracts.
 
 After its external endpoint is deployed and verified, the operator-hosted thin
-first-install chain preserves the existing lifecycle authorities:
+first-install chain for a **manual** installation (the operator prepares
+`install.env` and all protected material) preserves the existing lifecycle
+authorities:
 
 ```text
 Stage-0 -> exact vX.Y.Z Stage-1 -> install.env -> durable clean checkout
@@ -24,7 +26,49 @@ configuration and protected local state before activation.
 `install.env` stays in the operator's configuration directory, separate from
 the durable release checkout.
 Until that hosting has operational ownership and byte-verification evidence,
-the public Quick Start obtains Stage-1 from a clean exact-release checkout.
+the public first-install guide obtains Stage-1 from a clean exact-release checkout.
+
+**Quick** (`controller-bootstrap.sh --quick`, a Release that ships
+`deploy/production/quick-install.sh` is required) is a preset over this same
+installer, not a second one. It ignores `./install.env`, implies
+`--root-lifecycle`, and runs a read-only preflight first: both names resolve to
+the same IPv4 addresses, any AAAA record is on this host, TCP 443 and UDP 7842
+are free (unless retrying an interrupted Quick run), and `getent`, `ip` and `ss`
+exist. `quick-install.sh` then prepares the
+host, generates the protected material with `quick-materials.sh`, writes
+`/etc/ocservia/install.env` (Integrated, bundled PostgreSQL, ACME, Local
+authentication), runs `install.sh --root-lifecycle`, provisions the management
+workspace and creates the Local administrators `initial-admin` and
+`initial-approver`. It only installs a new host and refuses an existing
+deployment, a `/etc/ocservia/install.env` it did not generate, or different
+domains or email on a rerun. Later `controller.sh` and
+`compose.sh` commands do not read that file; export the same effective
+settings, as for any other installation. See [Quick
+mode](bootstrap-hosting.md#quick-mode) and [Quick install
+materials](../development/certificates-and-signer.md#quick-install-materials).
+Every other combination below uses the manual path.
+
+## Deployment combinations
+
+| Choice | Standalone (default) | Integrated |
+| --- | --- | --- |
+| Install path | Manual only | Manual, or Quick (new host) |
+| Lifecycle user | Launcher with Docker access, or `--root-lifecycle` | Root: `--root-lifecycle`; `compose.sh` rejects non-root |
+| Manifest / Compose | v1 or v2 manifest; `docker compose up --wait` | v2 manifest only; Compose >= 2.24.4 |
+| DNS names | Controller name | Two distinct lowercase names: `OCSERV_PUBLIC_HOST`, `OCSERV_RELAY_PUBLIC_HOST` |
+| Controller / Relay TLS | `tls.crt` and `tls.key` in `OCSERV_SECRET_DIR`; ACME is not supported | Manual: those files in `OCSERV_SECRET_DIR` and `OCSERV_RELAY_SECRET_DIR`; or `OCSERV_TLS_MODE=acme` with `OCSERV_ACME_EMAIL` (Quick always uses ACME) |
+| Relay | Operator-run HTTPS Relay: `OCSERV_RELAY_URL_A` required | Bundled single Relay; URL derived from `OCSERV_RELAY_PUBLIC_HOST` |
+| Signer | External HTTPS endpoint in `OCSERV_CERTIFICATE_SIGNER_URL` plus `certificate-signer-token` | Bundled Signer at `https://signer:9443/sign`; manual: operator-prepared Signer files; Quick: generated |
+| Published ports | TCP 443 | TCP 443 (Edge) and UDP 7842 (Relay) |
+| `uninstall --purge-data` | Supported | Refused |
+
+In both modes exactly one dedicated Relay is supported and
+`OCSERV_RELAY_URL_B` must be empty. The database (bundled or external
+PostgreSQL 18, or external MySQL 8.4 LTS) and the login mode (Local only, OIDC
+only, or Local + OIDC) are independent of the mode for a manual installation;
+Quick fixes bundled PostgreSQL and Local only. Mode, database and TLS mode are
+recorded in `deployment-profile.json` at first install and cannot change in an
+existing installation.
 
 ## Database support
 
@@ -94,7 +138,8 @@ claim applies to MySQL.
 For Local only, OIDC only, or Local + OIDC configuration, login behavior and
 one-shot first-admin creation, follow [Production authentication](authentication.md).
 OIDC is optional when Local is enabled; `compose.sh` selects the OIDC overlay
-only when configured. All modes retain protected session-key file input.
+only when configured. All modes retain protected session-key file input. A
+manual installation may use any of the three modes; Quick configures Local only.
 
 ## Optional observability
 
@@ -141,8 +186,13 @@ File-backed Compose secrets are bind mounts, so host ownership matters even when
 the descriptor declares a target owner. `audit-event-key` is an independent
 32-byte key encoded as lowercase hex; never reuse the audit checkpoint key.
 `OCSERV_AUDIT_EVENT_KEY_ID` is its stable, non-secret identifier stored with events.
-Integrated Relay and Signer files have additional
-[secret/state requirements](../../deploy/production/integrated/README.md).
+`tls.crt` and `tls.key` are required here only with `OCSERV_TLS_MODE=manual`
+(the default); Integrated ACME omits them. Integrated Relay and Signer files have additional
+[secret/state requirements](../../deploy/production/integrated/README.md#lifecycle-configuration).
+
+This table is what a manual installation must prepare. Quick generates the
+Controller files above with these owners and modes, except the TLS pair that
+ACME obtains, and the Signer files. Quick configures neither OIDC nor OTEL.
 
 For a private Relay CA, provision the public PEM bundle as
 `${OCSERV_SECRET_DIR}/relay-ca.pem`: a nonempty one-link `root:root` regular
@@ -156,7 +206,8 @@ for enrollment and the Agent service; do not patch launchers or rendered
 descriptors. Rotation/removal is an explicit operator trust change, not an
 automatic install/upgrade action.
 
-Generate the command key pair outside the checkout. Put the private key in
+For a manual installation, generate the command key pair outside the checkout
+(Quick generates it). Put the private key in
 `OCSERV_SECRET_DIR` and its Ed25519 SPKI public key in
 `controller-command-verification-key.pem` in the same directory. The public key
 must be a one-link regular file owned by `0:65532`, mode `0440`; transportd mounts
@@ -215,8 +266,9 @@ server architecture and fails closed when the manifest platform does not match
 the Docker host platform, so install the manifest variant that matches the
 host.
 
-The architecture-specific `controller-release.json` is ordinary deployment
-configuration. Download it over HTTPS and keep it in a protected directory.
+The architecture-specific manifest (`controller-release-<arch>.json`; `install.sh`
+downloads the one matching the host into `release-bundles/<tag>/` under the state
+root) is ordinary deployment configuration. Download it over HTTPS and keep it in a protected directory.
 The lifecycle validates its JSON structure, architecture, source checkout and
 image mapping before Compose config, pull or activation. It requires no release
 public key, signature, signed checksum manifest or provenance evidence. Local
@@ -252,8 +304,10 @@ mode `0700`. Bootstrap can also create `OCSERV_BACKUP_DIR` as `999:999 0700`.
 Incorrect existing ownership or modes are reported, not repaired. Secrets,
 trust material and host security maintenance remain operator-provisioned.
 
-The installer loads `install.env`; explicit exported settings override it,
-including empty values. Subsequent lifecycle and Compose commands need the same
+For a manual installation the installer loads `./install.env` from its working
+directory; explicit exported settings override it,
+including empty values. (Quick ignores `./install.env` and writes its own
+`/etc/ocservia/install.env`.) Subsequent lifecycle and Compose commands need the same
 effective exported environment; they do not reload that file. Lifecycle commands
 restore image settings from their selected manifest. See the complete
 [first-install procedure](../getting-started/production.md) for configuration,
@@ -379,21 +433,27 @@ export OCSERV_RELAY_URL_B=
 ```
 
 A is required; B must be absent or empty. Nonempty B is rejected before install
-or process execution. These values can be set in `install.env` without editing
-release files. Integrated mode derives its Relay URL from its public host; use
+or process execution (`install.sh`, `compose.sh` and the transportd wrapper all
+check it). Exactly one dedicated Relay is supported: B is not optional
+redundancy, and no Relay failover is provided. Recovering from a Relay loss means
+restoring that original Relay with its address and trust material, not switching
+to another one. These values can be set in `install.env` without editing
+release files. Integrated mode derives its Relay URL from its public host (a
+conflicting A, or any nonempty B, is rejected); use
 [its configuration contract](../../deploy/production/integrated/README.md#lifecycle-configuration)
 instead of overriding standalone Relay settings. For an existing A/B deployment, deliberately clear B on both
 Controller and Agents while preserving identity and trust material, then
 restart and verify A-only traffic. See [dedicated Relay configuration](../how-to/dedicated-relay.md).
 
-In standalone mode, only transportd joins the non-internal `relay-egress` network for
-DNS and outbound HTTPS to independently deployed relays. The application,
-database and observability networks remain internal; this adds no published
-Controller ports. The existing socket healthcheck does not establish relay
+Only transportd joins the non-internal `relay-egress` network, for DNS and
+outbound HTTPS to the Relay by its HTTPS name: an independently deployed Relay in
+Standalone, the same-host Relay through its public name in Integrated. The
+application, database and observability networks remain internal; this adds no
+published Controller ports. The existing socket healthcheck does not establish relay
 reachability. Validate TLS, token-authenticated relay traffic and fresh Agent
 observations separately. Normal production direct connectivity is unchanged.
 
-The control plane runs `--role=all`. Terminate public TLS at the gateway and use an HTTPS certificate signer. Set `OCSERV_PUBLIC_ORIGIN` to the public HTTPS origin. When OIDC is enabled, configure its redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback`; its origin must match `OCSERV_PUBLIC_ORIGIN`.
+The control plane runs `--role=all`. Public TLS terminates at the gateway (behind Edge in Integrated); use an HTTPS certificate signer (the external endpoint in Standalone, the bundled Signer in Integrated). Set `OCSERV_PUBLIC_ORIGIN` to the public HTTPS origin. When OIDC is enabled, configure its redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback`; its origin must match `OCSERV_PUBLIC_ORIGIN`.
 
 <a id="authentication-request-budgets"></a>
 ### Gateway addressing and proxy trust
@@ -417,6 +477,7 @@ and distinct from the network's bridge gateway. The default trusted `/32`
 automatically follows `OCSERV_GATEWAY_APPLICATION_IP`. An explicit
 `OCSERV_AUTH_TRUSTED_PROXY_CIDRS` overrides that default and must be updated
 when the chosen static IP changes; an explicitly empty value trusts no proxy.
+Integrated rejects any value other than the gateway's own `/32`.
 
 Legacy application-network detection and automatic conversion have been removed.
 Changing an existing network layout requires an explicit operator redeployment;

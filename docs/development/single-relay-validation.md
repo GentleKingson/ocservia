@@ -19,8 +19,9 @@ The Relay filter covers URL parsing, normalized duplicates, forbidden URLs,
 token files and the unchanged default/disabled behavior in the transport library.
 Its multi-member tests and the fenced supervisor test exercise retained generic
 library behavior; supported installation and launch entrypoints admit one Relay.
-These tests do not certify a multiple-Relay deployment or failover. Public-Relay
-tests remain ignored; they are not evidence for an authenticated dedicated deployment.
+These tests do not certify a multiple-Relay deployment or failover. Checks over
+public Relay discovery, such as [cross-VM enrollment](cross-vm-enrollment-validation.md),
+are not evidence for an authenticated dedicated deployment.
 
 Use a disposable Linux container with Bash, Node, sudo, jq and Python for the
 installer contracts. Run installers as a non-root account with passwordless
@@ -39,7 +40,9 @@ docker run --rm -v "$PWD:/source:ro" node:24.18.0-bookworm \
 inside that disposable container only. `test-relay-systemd.sh` must run as root
 inside a separate disposable systemd container. It verifies actual unit argv,
 service UID/GID, signal delivery and exit status for unset, empty and present B.
-Do not run either fixture on an installed node.
+Do not run either fixture on an installed node. Basic CI runs the installer and
+launcher scripts above (not `test-relay-systemd.sh`, which has no CI entry) only
+when its installer flag is set, by installer paths or an unknown path; see [GitHub Actions validation](github-actions.md#path-routing).
 
 For Compose, set unique `RUN_ID`, `ARTIFACT_DIR` and a private, owner-controlled
 `RUNNER_TEMP`, then run:
@@ -60,7 +63,7 @@ The database support matrix remains unchanged.
 
 ## Network Probe
 
-Build the current transportd runtime image including its new launcher, and use
+Build the current transportd runtime image including its Relay launcher, and use
 the real authenticated iroh-relay image built by `deploy/production/relay.Dockerfile`. On the disposable test host:
 
 ```sh
@@ -91,7 +94,10 @@ recovery. Use the existing Release Diagnostics workflow with
 `run-resilience=true`; see [Resilience](resilience.md) and
 [Business validation](real-business-validation.md).
 
-The sole-Relay scenario proves dependency on that Relay, waits until the old
+Smoke's sole-Relay recovery (R4) stops and restarts that Relay, then requires a
+fresh Agent session, an authorized reload and VPN traffic. The manual
+integration profile adds the offline-queue scenario: it proves dependency on that
+Relay, waits until the old
 owner lease is invalid, and verifies that the approved offline command has no
 published outbox entry, sent attempt, Agent journal entry or root effect.
 Restoring the same Relay must complete the same operation with one journal

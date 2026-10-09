@@ -15,7 +15,7 @@ Git source except for its stamped default version (see
 the external static-hosting infrastructure, so it does not claim that those
 example endpoints are live.
 
-The Quick Start also expects the repository's `install.env.example` to be
+The public first-install guide also expects the repository's `install.env.example` to be
 served byte-for-byte at
 `https://get.ocservia.example/install.env.example`. It is configuration input,
 not executable Stage-0 code.
@@ -138,7 +138,8 @@ source leaves it empty, so an unstamped copy requires `--version`. Stage-0
 prints the selected release before downloading Stage-1, and an explicit
 `--version` always takes precedence. Outside quick mode there is no default.
 Only releases whose Stage-1 implements quick mode accept these options; older
-Stage-1 assets reject them before making changes.
+Stage-1 assets reject them before making changes. Quick mode is on main only:
+Releases up to v1.2.0 do not contain `deploy/production/quick-install.sh`.
 
 Stage-1 (`controller-bootstrap.sh --quick`) ignores `./install.env` and runs a
 read-only preflight before cloning, also under `--check`:

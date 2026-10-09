@@ -87,6 +87,18 @@ revision, and expiry before opening a stream. Artifact paths apply the same
 session-mode fence. A higher authoritative trust revision closes a connection
 retaining an older session grant.
 
+`SendCommand` returns once the command frame is written to the Agent stream and
+the stream is finished. That is neither Agent acceptance nor execution: the Agent
+result is read in the background and delivered later as a `command_result`
+event. A stream that ends, times out or returns an invalid frame before a
+terminal event is published as `unknown`, never as a failure, and is not safe to
+resend as a new command; the Controller reconciles it. When
+`--controller-verification-key-file` (at most eight) is set, transportd also
+verifies the Controller-signed owner-fence carriers on command, artifact and
+trust-update flows. Once a node has a registered fence these are required;
+`--require-fencing` additionally rejects nodes that never registered one, and
+requires at least one verification key.
+
 Trust updates report `applied`, `stale`, or `rejected` together with the exact
 retained state and revision. Revoked EndpointIDs remain tombstoned with their
 original node binding: neither a stale nor a higher-revision ordinary Active
@@ -95,9 +107,12 @@ the exact authoritative transition advances the retained state.
 
 Iroh is pinned to `1.2.0` in `Cargo.toml`; the workspace carries a provenance-bound
 patch of that exact crates.io release, and `Cargo.lock` pins the complete resolved
-graph. Supported Agent and transportd launchers admit one dedicated Relay.
-The retained generic transport library and its tests opt into persistent connections to every member only for a
-custom dedicated relay set containing at least two relays. One preferred relay
+graph. Supported Agent and transportd launchers admit exactly one dedicated
+Relay (the Agent and transportd `--relay-url` parsers themselves accept one to
+eight, so only the launchers enforce the product limit). The retained generic
+transport library and its tests, which are not a supported configuration, opt
+into persistent connections to every member only for a custom dedicated relay
+set containing at least two relays. One preferred relay
 remains the sole published home address, while already-authenticated standby
 connections allow an incoming Agent to reach the same live Controller endpoint
 after the home relay fails. Endpoints using default, disabled, or a
@@ -106,10 +121,11 @@ still require direct, relay, ALPN rejection, path-event, shutdown,
 dependency, audit, and license tests because transport and relay internals may
 change without affecting the Go contract.
 
-The standalone `iroh-relay` binary is separately pinned by `iroh` in
+The [standalone `iroh-relay` build](../../deploy/production/relay-build.md) is separately pinned by `iroh` in
 `toolchains.lock`. `scripts/build-relay.sh` verifies its registry archive and
 builds the unchanged upstream CLI with `deploy/production/relay.Cargo.lock`.
-Both production images and recovery builds use this entry point. The Rust image
+The production Relay image (`deploy/production/relay.Dockerfile`) uses this entry
+point. The Rust image
 tag is the compiler version, not an endpoint or Relay protocol version. Do not
 replace this with `cargo install --version`: upstream Relay 1.2.0's archive lock
 still has rustls 0.23.41, while the reviewed build lock uses 0.23.45.

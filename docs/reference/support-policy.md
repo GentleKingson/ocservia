@@ -14,9 +14,9 @@ published tags, artifacts and release history are unchanged.
 admission, historical migration compatibility probes, legacy deployment
 auto-conversion, and historical release compatibility matrices and gates.
 This includes the public `--schema-compatibility-check` CLI and the readiness
-response's `schema_version` field. Readiness checks current core table reads,
-database permissions and event-stream health, not migration history or a
-Controller schema range. There is no
+response's `schema_version` field. Readiness checks zero-row reads of current
+core tables and event-stream health, not migration history or a Controller
+schema range. There is no
 minimum source or rollback version, fixed upgrade source, version allowlist,
 force/skip switch, or replacement capability/schema-number version fence.
 Install, upgrade and rollback remain explicit operations on verified targets;
@@ -33,9 +33,21 @@ service/database readiness remain required. Removing historical deployment
 conversion must also remove its automatic network/configuration/data changes,
 not leave destructive actions behind without their former guards.
 
+This reset removed software-version admission only. It did not remove database
+schema-source admission: the owner migration run still refuses unknown schema
+epochs, revisions and checksums, schema drift, and a nonempty database without
+a trusted receipt. The sole previous database checkpoint is the fixed v1.2.0
+release, defined in the
+[database migration contract](../development/control-plane.md#current-sql-artifacts-and-bounded-upgrades);
+it is an immutable schema source, not a minimum Controller or Agent version, and
+it does not move when main advances. Empty-database initialization is not a way
+to overwrite an existing database, and fresh and checkpoint-upgraded databases
+must be schema-equivalent without having identical receipts.
+
 Acceptance covers the current candidate on the supported architectures,
 deployment modes and database products, with security, integration and resilience
-checks. It does not certify historical upgrade/downgrade/migration paths.
+checks. It does not certify historical upgrade/downgrade/migration paths beyond
+the one bounded v1.2.0 database transition that the migration contract defines.
 Cross-version operations may fail or damage state; absence of a compatibility
 rejection is not a safety guarantee. Never automatically reverse database
 migrations, reset identities or overwrite persistent state. Existing installed
@@ -65,9 +77,10 @@ explicitly selected version tag.
 [Release Check](../development/release-checks.md) validates current products.
 Dispatch remains a non-publishing dry-run; tag-triggered publication builds
 and smoke-tests products before publishing through the protected environment.
-Explicit lifecycle
+Explicit software lifecycle
 operations use verified targets, not a minimum source version or a bridge
-release. Package-manager behavior is not overridden. Unknown outcomes require
+release; this does not apply to database schema admission, which is described
+above. Package-manager behavior is not overridden. Unknown outcomes require
 [incident recovery](../operations/incident-recovery.md), not blind replay.
 
 ## Supported platforms
@@ -122,7 +135,9 @@ Three pairs are deliberately not conflated:
 3. **Backup created vs backup restorable.** Producing a backup artifact
    (PostgreSQL base backup, MySQL logical dump) is a scheduled
    operation; **restore is a separate, separately validated procedure**.
-   PostgreSQL backups retain their required WAL and verification; isolated
+   A backup file existing, or a backup job succeeding, is not a verified
+   restore, and a restore verifier passing is not schema admission (the owner
+   migration run does that). PostgreSQL backups retain their required WAL and verification; isolated
    restore is separate from HA/PITR readiness. MySQL restore uses a new isolated
    server with the restore verifier, and redirecting a live Controller is a
    guarded manual cutover. See

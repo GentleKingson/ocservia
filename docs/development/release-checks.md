@@ -19,7 +19,9 @@ PR -> Basic CI -> merge main
 `Basic CI Result` remains the required PR check. Release Check is a manual
 `workflow_dispatch` on merged `main`; every required job must succeed. Failure,
 cancellation, or an unexpected skip cannot report PASS. Each invocation runs the
-checks anew. There is no inherited acceptance or candidate nomination.
+checks anew. There is no inherited acceptance or candidate nomination. "Full CI"
+is the Basic CI Full profile (current-candidate checks, see
+[Basic CI](github-actions.md)), not comprehensive acceptance.
 
 After Release Check passes, the operator confirms the version and creates the
 version tag. CI qualification belongs to that operator process. The tag workflow
@@ -137,11 +139,11 @@ all product and asset jobs must pass and Publish must be skipped.
 | Behavior | Owner |
 | --- | --- |
 | Native online node, browser login/Workspace/user creation/approval/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | amd64 Integrated Business Smoke |
-| Controller/transport, Agent/privd, database and sole Relay recovery | Business Smoke with `run-resilience=true` |
+| Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (no Business-level MySQL recovery) | Business Smoke with `run-resilience=true` |
 | OIDC positive/negative paths; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects | Manual integration |
 | DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products |
-| Source/dependency vulnerabilities and repository secrets | Security |
+| Source/dependency vulnerabilities and repository secrets, within the [tool scope](github-actions.md#independent-security-checks) (Go advisories cover `control-plane` only) | Security |
 | Tagged-source build and GitHub/GHCR publication | Release |
 
 Business builds local products and installs from a loopback registry on
@@ -173,8 +175,10 @@ gh workflow run release.yml --ref main -f version=0.0.0
 
 Both native Agent and Controller build/security/smoke legs and asset preparation
 must pass; Publish must be skipped. Focused checks use
-`scripts/test-release-upgrade.sh`, package/installer tests, relevant
-ShellCheck/actionlint and [documentation checks](testing.md). Cover authorized
+`scripts/test-release-upgrade.sh` (which runs `scripts/test-release-workflows.rb`),
+package/installer tests, ShellCheck (`scripts/lint.sh`), any workflow linter you
+install yourself (the repository does not provision actionlint) and
+[documentation checks](testing.md). Cover authorized
 AgentUpgrade digest success/refusal and Stage-0 download/checksum failures when
 changing those paths. Do not publish or deploy production during validation.
 

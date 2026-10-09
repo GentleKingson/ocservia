@@ -21,13 +21,15 @@ there is no separate G6 workflow or evidence framework.
 | --- | --- | --- |
 | R1 Controller stack | Business Smoke with `run-resilience` | Restart Controller and transport together; both ready, fresh Agent session and new authorized business succeeds. |
 | R2 Agent stack | Same smoke environment | One systemd restart transaction for privd and its dependent Agent; both active, fresh session and unchanged identity. |
-| R3 Database interruption | Same smoke environment | Stop PostgreSQL, require database-unavailable readiness, start it, recover readiness and Agent connectivity, then complete normal business. No outage mutation. |
+| R3 Database interruption | Same smoke environment | Stop the bundled PostgreSQL container, require database-unavailable readiness, start it, recover readiness and Agent connectivity, then complete normal business. No outage mutation. MySQL and external databases have no Business-level recovery check. |
 | R4 Sole Relay interruption | Same smoke environment | Stop the only Relay, observe Agent offline with direct UDP blocked, restart Relay, acquire a fresh session and recover authorized business and VPN traffic. |
 
-Manual integration retains the deeper restart/persistence, outage mutation,
-unsent queue, idempotent replay, exact reload and API/DB/journal/root-receipt
-checks. These are not required by Release Smoke. Full CI retains its existing
-PostgreSQL/MySQL database smoke and isolated recovery owners.
+Manual integration (the extended Business profile) replaces R1 to R4 with deeper
+variants (separate Controller and transport restarts, outage mutation, unsent
+queue, idempotent replay, exact reload and API/DB/journal/root-receipt checks).
+These are not required by Release Smoke. Full CI separately runs the Full
+database scope and the PostgreSQL and MySQL backup/restore smoke; those are
+database-level checks, not Controller, Agent or Relay recovery.
 
 Use the Business job status and actual recovery checkpoints in `result.json`.
 Sanitized failure diagnostics use seven-day Actions artifacts. Selected checks must actually finish successfully;

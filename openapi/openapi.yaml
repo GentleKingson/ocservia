@@ -2508,7 +2508,7 @@ components:
           description: Integer bytes; none requires zero.
         expires_at:
           allOf: [{ $ref: "#/components/schemas/UtcDateTime" }]
-          description: Exact instant in UTC; offsets and fractional seconds are rejected.
+          description: RFC 3339 UTC timestamp ending in Z; the parsed instant must have zero nanoseconds.
         expected_version: { type: integer, format: int64, minimum: 0 }
         reason: { type: string, minLength: 1, maxLength: 512 }
     UserPolicy:

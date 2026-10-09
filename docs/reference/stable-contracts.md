@@ -37,8 +37,15 @@ are not current requirements. Existing published artifacts are unchanged.
 ## Schema sources and generation
 
 The canonical sources are [`openapi/openapi.yaml`](../../openapi/openapi.yaml)
-and the schemas under [`proto/`](../../proto/). `make generate` replaces the
-generated directories; do not edit generated clients or message types manually.
+and the schemas under [`proto/`](../../proto/); field, endpoint and message
+lists live there, not in these documents. `make generate`
+(`scripts/generate.sh`) replaces the Go code in `control-plane/gen/proto`, the
+Rust bindings in `rust/crates/contracts/src/generated` and the TypeScript client
+in `web/src/api/generated`; do not edit those directories manually. The
+Agent/privd local protocol is not generated from `proto/`: its hand-written
+messages live in `rust/crates/agent-protocol`.
+The [TypeScript template override](../../openapi/templates/typescript-fetch/README.md)
+documents the local `oneOf` map conversion fix.
 Use [validation guidance](../development/testing.md) for toolchain preparation.
 Contract breaking and generated-clean checks are manual entrypoints, not Basic
 CI jobs; [GitHub Actions validation](../development/github-actions.md) owns the
