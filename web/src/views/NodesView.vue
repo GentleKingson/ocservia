@@ -110,6 +110,9 @@ const rolloutError = ref("");
 let rolloutSubmission = 0;
 // Bumped on every open; closing the dialog gives up the automatic navigation.
 let rolloutOpening = 0;
+// Set when a create may have succeeded without a response; unlike a definite
+// failure, that warning survives reopening the dialog.
+let rolloutUnconfirmed = false;
 
 const selectedNodes = computed(() =>
   fleet.nodes.filter(
@@ -157,12 +160,12 @@ useEventListener(defaultWindow, workspaceChangedEvent, () => {
   rolloutDialog.value = false;
   rolloutStarting.value = false;
   rolloutError.value = "";
+  rolloutUnconfirmed = false;
 });
 
-// An earlier outcome stays visible on reopen, so an unconfirmed start is not
-// silently forgotten; the next submit clears it.
 function openRolloutDialog(): void {
   rolloutOpening += 1;
+  if (!rolloutUnconfirmed) rolloutError.value = "";
   rolloutDialog.value = true;
 }
 
@@ -181,6 +184,8 @@ async function submitRollout(): Promise<void> {
   };
   rolloutStarting.value = true;
   rolloutError.value = "";
+  rolloutUnconfirmed = false;
+  let createdId: string | undefined;
   try {
     const rollout = await createAgentRollout(
       rolloutTarget.value,
@@ -195,20 +200,25 @@ async function submitRollout(): Promise<void> {
     selected.value = [];
     rolloutReason.value = "";
     rolloutApprovalId.value = "";
-    await router.push({
-      name: "rollout-detail",
-      params: { rolloutId: rollout.id },
-    });
+    createdId = rollout.id;
   } catch (cause) {
     if (!owned()) return;
     // A lost POST response may still have created the rollout; never resend.
-    rolloutError.value =
-      cause instanceof ResponseError
-        ? cause.message
-        : t("rolloutStartUnconfirmed");
+    const definite = cause instanceof ResponseError;
+    rolloutUnconfirmed = !definite;
+    rolloutError.value = definite
+      ? cause.message
+      : t("rolloutStartUnconfirmed");
   } finally {
     if (ticket === rolloutSubmission) rolloutStarting.value = false;
   }
+  // Outside the create's error handling: the rollout is confirmed even if
+  // navigation fails.
+  if (createdId)
+    await router.push({
+      name: "rollout-detail",
+      params: { rolloutId: createdId },
+    });
 }
 </script>
 

@@ -206,3 +206,25 @@ it("shows an unconfirmed start from a closed dialog when it reopens", async () =
   expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
   expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
 });
+
+it("clears a definite failure when the dialog reopens", async () => {
+  mocks.createAgentRollout.mockRejectedValue(
+    new ResponseError(new Response("{}", { status: 409 }), "conflict"),
+  );
+  const view = await mount();
+  await view.submitRollout();
+  view.rolloutDialog = false;
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("");
+});
+
+it("does not report a navigation failure as an unconfirmed create", async () => {
+  mocks.createAgentRollout.mockResolvedValue({ id: "rollout-a" });
+  mocks.push.mockRejectedValue(new Error("navigation"));
+  const view = await mount();
+  await expect(view.submitRollout()).rejects.toThrow("navigation");
+  expect(view.rolloutError).toBe("");
+  expect(view.rolloutStarting).toBe(false);
+  expect(view.rolloutDialog).toBe(false);
+  expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
+});
