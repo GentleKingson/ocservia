@@ -418,7 +418,10 @@ export const i18n = createI18n({
       batchSize: "Batch size",
       startRollout: "Start rollout",
       rolloutStarting: "Starting rollout…",
-      rolloutStartFailed: "Rollout start failed",
+      rolloutStartUnconfirmed:
+        "Rollout start was not confirmed. Check Agent rollouts in Operations before starting another.",
+      rolloutResumeUnconfirmed:
+        "Resume was not confirmed. Wait for the refreshed rollout state before resuming again.",
       rolloutUnavailable: "Rollout state is unavailable",
       rolloutNotFound: "Rollout not found in this workspace",
       rolloutTarget: "Target",

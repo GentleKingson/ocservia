@@ -1,10 +1,21 @@
 <script setup lang="ts">
 import { ArrowLeft } from "@lucide/vue";
-import type { AgentRollout, AgentRolloutNode } from "@ocservia/api-client";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  ResponseError,
+  type AgentRollout,
+  type AgentRolloutNode,
+} from "@ocservia/api-client";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
 import { getAgentRollout, resumeAgentRollout } from "../api/agents";
+import {
+  getWorkspace,
+  workspaceChangedEvent,
+  workspaceContext,
+  type WorkspaceContext,
+} from "../api/workspace";
 import DataState from "../components/common/DataState.vue";
 import PageHeader from "../components/common/PageHeader.vue";
 import SectionCard from "../components/common/SectionCard.vue";
@@ -18,6 +29,7 @@ import {
 import { createForegroundRefresh } from "../shared/foreground-refresh";
 
 const route = useRoute();
+const { t } = useI18n();
 
 const rollout = ref<AgentRollout | undefined>(undefined);
 const loading = ref(true);
@@ -25,6 +37,11 @@ const unavailable = ref(false);
 const notFound = ref(false);
 const resuming = ref(false);
 const resumeError = ref("");
+// Set after an unconfirmed resume until a fresh read shows the server state.
+const resumeBlocked = ref(false);
+let controller: AbortController | undefined;
+let sequence = 0;
+let loadedContext: WorkspaceContext | undefined;
 
 const activeStates = new Set(["queued", "running", "paused"]);
 const foregroundRefresh = createForegroundRefresh(async () => {
@@ -88,37 +105,120 @@ const remaining = computed(
     ).length,
 );
 
+// Every read and resume belongs to one route rollout in one workspace
+// generation; a newer ticket makes all older results inert.
+function invalidate(): void {
+  sequence += 1;
+  controller?.abort();
+  controller = undefined;
+}
+
+function current(context: WorkspaceContext, ticket: number): boolean {
+  const workspace = workspaceContext();
+  return (
+    sequence === ticket &&
+    workspace.id === context.id &&
+    workspace.generation === context.generation
+  );
+}
+
+// A different rollout or workspace never shows the previous resource or its
+// resume action, and the terminal-state cache starts empty.
+function reset(): void {
+  invalidate();
+  rollout.value = undefined;
+  loadedContext = undefined;
+  loading.value = true;
+  unavailable.value = false;
+  notFound.value = false;
+  resuming.value = false;
+  resumeError.value = "";
+  resumeBlocked.value = false;
+}
+
+// Reads directly so the new resource never waits behind an older read.
+function reload(): void {
+  reset();
+  void refresh();
+}
+
 async function refresh(): Promise<void> {
+  // A read started before the resume response could restore the old state.
+  if (resuming.value) return;
   const rolloutId = String(route.params.rolloutId ?? "");
   if (!rolloutId) return;
+  invalidate();
+  const ticket = sequence;
+  const request = new AbortController();
+  controller = request;
   try {
-    rollout.value = await getAgentRollout(rolloutId);
+    await getWorkspace();
+    if (ticket !== sequence) return;
+    const context = workspaceContext();
+    const value = await getAgentRollout(rolloutId, request.signal);
+    if (!current(context, ticket)) return;
+    if (value.id !== rolloutId || value.workspaceId !== context.id)
+      throw new Error("rollout outside the requested workspace");
+    loadedContext = context;
+    rollout.value = value;
     unavailable.value = false;
     notFound.value = false;
+    resumeBlocked.value = false;
   } catch (cause) {
-    const status = (cause as { status?: number }).status;
-    if (status === 404) notFound.value = true;
-    else unavailable.value = true;
+    if (ticket !== sequence || request.signal.aborted) return;
+    notFound.value =
+      cause instanceof ResponseError && cause.response.status === 404;
+    unavailable.value = !notFound.value;
   } finally {
-    loading.value = false;
+    if (ticket === sequence) {
+      controller = undefined;
+      loading.value = false;
+    }
   }
 }
 
 async function resume(): Promise<void> {
-  if (!rollout.value || resuming.value) return;
+  const value = rollout.value;
+  const context = loadedContext;
+  if (!value || !context || resuming.value || resumeBlocked.value) return;
+  invalidate();
+  const ticket = sequence;
+  if (!current(context, ticket)) return;
   resuming.value = true;
   resumeError.value = "";
   try {
-    rollout.value = await resumeAgentRollout(rollout.value.id);
+    const result = await resumeAgentRollout(value.id);
+    if (!current(context, ticket)) return;
+    if (result.id !== value.id || result.workspaceId !== context.id)
+      throw new Error(t("rolloutResumeUnconfirmed"));
+    rollout.value = result;
   } catch (cause) {
-    resumeError.value = cause instanceof Error ? cause.message : String(cause);
-  } finally {
+    if (!current(context, ticket)) return;
+    // A lost POST response is not permission to send the resume again; only
+    // a fresh read of the server state re-enables the action.
+    resumeBlocked.value = true;
+    resumeError.value =
+      cause instanceof ResponseError
+        ? cause.message
+        : t("rolloutResumeUnconfirmed");
     resuming.value = false;
+    foregroundRefresh.request();
+  } finally {
+    // The next scheduled read follows a confirmed resume.
+    if (ticket === sequence) resuming.value = false;
   }
 }
 
-onMounted(() => foregroundRefresh.start());
-onBeforeUnmount(() => foregroundRefresh.stop());
+watch(() => route.params.rolloutId, reload);
+onMounted(() => {
+  window.addEventListener(workspaceChangedEvent, reload);
+  foregroundRefresh.start();
+});
+onBeforeUnmount(() => {
+  window.removeEventListener(workspaceChangedEvent, reload);
+  foregroundRefresh.stop();
+  invalidate();
+});
 </script>
 
 <template>
@@ -228,7 +328,11 @@ onBeforeUnmount(() => foregroundRefresh.stop());
             >{{ $t("pauseCode") }}: <code>{{ rollout.pauseCode }}</code></small
           >
         </div>
-        <Button type="button" :disabled="resuming" @click="resume">
+        <Button
+          type="button"
+          :disabled="resuming || resumeBlocked"
+          @click="resume"
+        >
           {{ $t("resumeRollout") }}
         </Button>
       </div>

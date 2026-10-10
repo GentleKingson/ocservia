@@ -265,3 +265,52 @@ test("pauses on a failed node and resumes only the failed node", async ({
   await expect(page.getByTestId("rollout-state")).toHaveText("Running");
   expect(resumed).toBe(true);
 });
+
+test("shows not found for a real 404 rollout response", async ({ page }) => {
+  await page.route(`**/api/v1/agent-rollouts/${rolloutId}`, (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: "{}",
+    }),
+  );
+  await page.goto(`/rollouts/${rolloutId}`);
+  await expect(
+    page.getByText("Rollout not found in this workspace"),
+  ).toBeVisible();
+});
+
+test("reads the next rollout after a terminal one on the same route", async ({
+  page,
+}) => {
+  const nextRolloutId = "019fc0a4-6d92-765c-a8a1-4af556614ee9";
+  await page.route(`**/api/v1/agent-rollouts/${rolloutId}`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(
+        rollout("succeeded", [node(canaryNodeId, 0, 0, "succeeded")]),
+      ),
+    }),
+  );
+  await page.route(`**/api/v1/agent-rollouts/${nextRolloutId}`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...rollout("paused", [node(canaryNodeId, 0, 0, "failed")]),
+        id: nextRolloutId,
+      }),
+    }),
+  );
+  await page.goto(`/rollouts/${rolloutId}`);
+  await expect(page.getByTestId("rollout-state")).toHaveText("Succeeded");
+  await page.evaluate((id) => {
+    history.pushState({}, "", `/rollouts/${id}`);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, nextRolloutId);
+  await expect(page.getByTestId("rollout-state")).toHaveText("Paused");
+  await expect(
+    page.getByRole("button", { name: "Resume rollout" }),
+  ).toBeEnabled();
+});

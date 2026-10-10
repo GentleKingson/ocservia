@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { Ellipsis } from "@lucide/vue";
-import type { NodeObservedState } from "@ocservia/api-client";
+import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
 import { defaultWindow, useEventListener, useNow } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
 import { createAgentRollout } from "../api/agents";
-import { workspaceChangedEvent } from "../api/workspace";
+import { workspaceChangedEvent, workspaceContext } from "../api/workspace";
 import DataState from "../components/common/DataState.vue";
 import FormField from "../components/common/FormField.vue";
 import OperationDialog from "../components/common/OperationDialog.vue";
@@ -50,7 +50,10 @@ const { t, locale } = useI18n();
 const now = useNow({ interval: 30_000 });
 
 onMounted(() => fleet.start());
-onBeforeUnmount(() => fleet.stop());
+onBeforeUnmount(() => {
+  fleet.stop();
+  rolloutSubmission += 1;
+});
 
 // The URL query owns the list view state so refresh, history and returning
 // to the list restore it. Filtering reads the store only; it never writes.
@@ -102,6 +105,9 @@ const rolloutReason = ref("");
 const rolloutApprovalId = ref("");
 const rolloutStarting = ref(false);
 const rolloutError = ref("");
+// Bumped when the page or workspace changes; an accepted create keeps running
+// server-side, but its late response no longer owns this page.
+let rolloutSubmission = 0;
 
 const selectedNodes = computed(() =>
   fleet.nodes.filter(
@@ -144,8 +150,11 @@ const hiddenSelectedCount = computed(() => {
 
 // Selections never carry over into another workspace.
 useEventListener(defaultWindow, workspaceChangedEvent, () => {
+  rolloutSubmission += 1;
   selected.value = [];
   rolloutDialog.value = false;
+  rolloutStarting.value = false;
+  rolloutError.value = "";
 });
 
 function openRolloutDialog(): void {
@@ -155,6 +164,16 @@ function openRolloutDialog(): void {
 
 async function submitRollout(): Promise<void> {
   if (rolloutStarting.value || !rolloutTarget.value) return;
+  const ticket = ++rolloutSubmission;
+  const context = workspaceContext();
+  const owned = () => {
+    const workspace = workspaceContext();
+    return (
+      ticket === rolloutSubmission &&
+      workspace.id === context.id &&
+      workspace.generation === context.generation
+    );
+  };
   rolloutStarting.value = true;
   rolloutError.value = "";
   try {
@@ -165,6 +184,7 @@ async function submitRollout(): Promise<void> {
       rolloutReason.value.trim(),
       rolloutApprovalId.value.trim(),
     );
+    if (!owned()) return;
     rolloutDialog.value = false;
     selected.value = [];
     rolloutReason.value = "";
@@ -174,10 +194,14 @@ async function submitRollout(): Promise<void> {
       params: { rolloutId: rollout.id },
     });
   } catch (cause) {
+    if (!owned()) return;
+    // A lost POST response may still have created the rollout; never resend.
     rolloutError.value =
-      cause instanceof Error ? cause.message : t("rolloutStartFailed");
+      cause instanceof ResponseError
+        ? cause.message
+        : t("rolloutStartUnconfirmed");
   } finally {
-    rolloutStarting.value = false;
+    if (ticket === rolloutSubmission) rolloutStarting.value = false;
   }
 }
 </script>
