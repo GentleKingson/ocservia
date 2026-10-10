@@ -42,6 +42,7 @@ import DataState from "../components/common/DataState.vue";
 import FormField from "../components/common/FormField.vue";
 import OperationDialog from "../components/common/OperationDialog.vue";
 import SectionCard from "../components/common/SectionCard.vue";
+import StatusBadge from "../components/common/StatusBadge.vue";
 import NodeDetailHeader from "../components/nodes/NodeDetailHeader.vue";
 import NodeDetailNav from "../components/nodes/NodeDetailNav.vue";
 import NodeDetailSkeleton from "../components/nodes/NodeDetailSkeleton.vue";
@@ -52,6 +53,7 @@ import {
   resourceStatusKey,
 } from "../shared/desired-recovery";
 import { useFleetStore } from "../shared/fleet";
+import { operationTone } from "../features/operations/state-tone";
 import { operationStatusKey } from "../shared/operation-status";
 import { workspaceChangedEvent } from "../api/workspace";
 import {
@@ -470,12 +472,6 @@ async function submitPolicy(): Promise<void> {
     if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
   }
 }
-function operationTone(state: string): string {
-  if (state === "succeeded") return "text-success";
-  return ["failed", "unknown", "expired", "drifted"].includes(state)
-    ? "text-destructive"
-    : "";
-}
 function convergenceTone(key: string): string {
   if (key === "convergence_converged") return "text-success";
   return key === "convergence_drifted"
@@ -572,11 +568,11 @@ function convergenceTone(key: string): string {
             <span class="text-muted-foreground">{{
               $t("latestOperation")
             }}</span>
-            <strong
-              :class="operationTone(fleet.latestOperation.state)"
+            <StatusBadge
+              :tone="operationTone(fleet.latestOperation)"
+              :label="$t(operationStatusKey(fleet.latestOperation))"
               data-testid="operation-state"
-              >{{ $t(operationStatusKey(fleet.latestOperation)) }}</strong
-            >
+            />
             <code
               v-if="fleet.latestOperation.agentUpgradeTargetVersion"
               class="text-xs"
