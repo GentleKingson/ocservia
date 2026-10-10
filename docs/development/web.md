@@ -79,7 +79,10 @@ Workspace discovery is cached and coalesced; selection accepts authorized IDs
 only and increments a generation on change. Async consumers must fence results
 by both Workspace ID and generation, including a switch away and back to the
 same ID. The independent authentication probe must not change that authority.
-Login return paths are validated internal paths and consumed once. SSE stores
+Login return paths are validated internal paths and consumed once. The
+remembered Workspace ID and login return path are optional `sessionStorage`
+preferences: storage failures mean no preference and never block login,
+Workspace selection or change events. SSE stores
 own their subscriptions, timers and cancellation; importing an API starts none.
 
 <a id="verification"></a>
