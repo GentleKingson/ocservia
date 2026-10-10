@@ -473,6 +473,9 @@ func (c Config) Validate() error {
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}
+	if c.Environment == "production" && !oneShotDatabaseCommand && c.ControllerEndpointID == "" {
+		return errors.New("OCSERV_CONTROLLER_ENDPOINT_ID is required in production")
+	}
 	if c.Environment == "production" && !oneShotDatabaseCommand && (!c.TransportIdentitySet || c.TransportUID == uint32(os.Geteuid())) {
 		return errors.New("production transport UDS requires an explicit, distinct transport UID/GID")
 	}

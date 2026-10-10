@@ -33,6 +33,7 @@ func TestProductionAuthenticationConfiguration(t *testing.T) {
 					"OCSERV_AUDIT_EVENT_KEY_ID":       "audit-v1",
 					"OCSERV_AUDIT_EVENT_KEY_FILE":     keyPath,
 					"OCSERV_COMMAND_SIGNING_KEY_FILE": "/run/secrets/command-key",
+					"OCSERV_CONTROLLER_ENDPOINT_ID":   strings.Repeat("ab", 32),
 					"OCSERV_TRANSPORT_UID":            strconv.Itoa(os.Geteuid() + 1),
 					"OCSERV_TRANSPORT_GID":            strconv.Itoa(os.Getegid()),
 				}
