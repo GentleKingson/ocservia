@@ -14,6 +14,25 @@ export interface WorkspaceContext {
   generation: number;
 }
 
+// The remembered ID is only a preference among server-authorized Workspaces;
+// storage failures mean "no preference" and never block selection or events.
+function rememberedWorkspaceID(): string | null {
+  try {
+    return sessionStorage.getItem(workspaceKey);
+  } catch {
+    return null;
+  }
+}
+
+function rememberWorkspace(workspaceId: string | undefined): void {
+  try {
+    if (workspaceId) sessionStorage.setItem(workspaceKey, workspaceId);
+    else sessionStorage.removeItem(workspaceKey);
+  } catch {
+    // The in-memory selection stays authoritative for this page.
+  }
+}
+
 function setSelectedWorkspace(workspace: Workspace | undefined): void {
   if (selectedWorkspace?.id !== workspace?.id) workspaceGeneration += 1;
   selectedWorkspace = workspace;
@@ -31,14 +50,12 @@ export async function listAuthorizedWorkspaces(
     .listAuthorizedWorkspaces()
     .then((page) => {
       authorizedWorkspaces = page.items;
-      const remembered = sessionStorage.getItem(workspaceKey);
+      const remembered = rememberedWorkspaceID();
       setSelectedWorkspace(
         page.items.find((workspace) => workspace.id === remembered) ??
           page.items[0],
       );
-      if (selectedWorkspace)
-        sessionStorage.setItem(workspaceKey, selectedWorkspace.id);
-      else sessionStorage.removeItem(workspaceKey);
+      rememberWorkspace(selectedWorkspace?.id);
       return page.items;
     })
     .finally(() => {
@@ -62,7 +79,7 @@ export async function selectWorkspace(workspaceId: string): Promise<Workspace> {
   if (!workspace) throw new Error("Workspace is not authorized");
   if (selectedWorkspace?.id === workspace.id) return workspace;
   setSelectedWorkspace(workspace);
-  sessionStorage.setItem(workspaceKey, workspace.id);
+  rememberWorkspace(workspace.id);
   window.dispatchEvent(
     new CustomEvent(workspaceChangedEvent, { detail: workspace.id }),
   );

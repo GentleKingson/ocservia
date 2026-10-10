@@ -31,7 +31,9 @@ export default defineConfig({
   },
   server: {
     allowedHosts: ["web"],
-    host: "0.0.0.0",
+    // Loopback by default; the container (web/Dockerfile) passes --host 0.0.0.0
+    // and Compose publishes it on host loopback only.
+    host: "127.0.0.1",
     port: 4173,
     proxy: {
       "/api": {

@@ -55,4 +55,9 @@ describe("development auth build boundary", () => {
       headers: { Authorization: `Bearer ${token}` },
     });
   });
+
+  it("listens on loopback for a direct development server", async () => {
+    const config = await resolveConfig({ root, configFile }, "serve");
+    expect(config.server.host).toBe("127.0.0.1");
+  });
 });

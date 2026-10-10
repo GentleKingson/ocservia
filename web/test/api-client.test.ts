@@ -292,6 +292,82 @@ describe("Workspace authority and events", () => {
   );
 });
 
+// Storage can be disabled, full, or throw from the global getter itself.
+function breakStorage(mode: "getter" | "getItem" | "setItem" | "removeItem") {
+  if (mode === "getter") {
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("denied", "SecurityError");
+      },
+    });
+    return;
+  }
+  const fail = () => {
+    throw new DOMException("denied", "SecurityError");
+  };
+  vi.stubGlobal("sessionStorage", {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+    [mode]: fail,
+  });
+}
+
+describe.each(["getter", "getItem", "setItem", "removeItem"] as const)(
+  "optional browser storage failing at %s",
+  (mode) => {
+    beforeEach(() => {
+      breakStorage(mode);
+    });
+
+    it("still redirects once and returns the original 401", async () => {
+      const api = await loadAPI();
+      fetchMock.mockImplementation(() => Promise.resolve(json({}, 401)));
+      await expect(api.getNode("node-a")).rejects.toMatchObject({
+        response: { status: 401 },
+      });
+      await expect(api.getVersion()).rejects.toMatchObject({
+        response: { status: 401 },
+      });
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(() => api.consumeLoginReturnPath()).not.toThrow();
+    });
+
+    it("selects only authorized Workspaces and keeps events in step", async () => {
+      const api = await loadAPI();
+      const changed = vi.fn<(event: Event) => void>();
+      browser.addEventListener(api.workspaceChangedEvent, changed);
+      expect((await api.getWorkspace()).id).toBe(alpha.id);
+      expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
+      await api.selectWorkspace(beta.id);
+      expect(api.workspaceContext()).toEqual({ id: beta.id, generation: 2 });
+      await api.selectWorkspace(alpha.id);
+      expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 3 });
+      expect(changed).toHaveBeenCalledTimes(2);
+      await expect(api.selectWorkspace("unauthorized")).rejects.toThrow(
+        "Workspace is not authorized",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps discovery failures and empty lists as failures", async () => {
+      const api = await loadAPI();
+      fetchMock.mockResolvedValueOnce(json({}, 403));
+      await expect(api.getWorkspace()).rejects.toMatchObject({
+        response: { status: 403 },
+      });
+      fetchMock.mockResolvedValueOnce(json({ items: [] }));
+      await expect(api.getWorkspace()).rejects.toThrow(
+        "No authorized workspace is available",
+      );
+      await expect(api.listAuthorizedWorkspaces(true)).resolves.toHaveLength(2);
+      expect((await api.getWorkspace()).id).toBe(alpha.id);
+    });
+  },
+);
+
 describe("domain request contracts", () => {
   it("preserves desired mutation fences, unique idempotency keys, body and AbortSignal", async () => {
     const api = await loadAPI();

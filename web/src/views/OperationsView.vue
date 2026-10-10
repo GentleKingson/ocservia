@@ -43,16 +43,30 @@ const hasMore = ref(false);
 const nextCursor = ref<string>();
 let requestController: AbortController | undefined;
 let detailController: AbortController | undefined;
+let rolloutController: AbortController | undefined;
 let requestSequence = 0;
 let detailSequence = 0;
+let rolloutSequence = 0;
+
+function invalidateDetail(): void {
+  detailController?.abort();
+  detailController = undefined;
+  detailSequence += 1;
+  detailLoading.value = false;
+}
+
+function invalidateRollouts(): void {
+  rolloutController?.abort();
+  rolloutController = undefined;
+  rolloutSequence += 1;
+}
 
 function cancelRequests(): void {
   requestController?.abort();
-  detailController?.abort();
   requestController = undefined;
-  detailController = undefined;
   requestSequence += 1;
-  detailSequence += 1;
+  invalidateDetail();
+  invalidateRollouts();
 }
 
 async function loadOperations(reset = true): Promise<void> {
@@ -133,26 +147,50 @@ async function inspectOperation(operationId: string): Promise<void> {
 }
 
 async function loadRollouts(): Promise<void> {
+  invalidateRollouts();
+  const controller = new AbortController();
+  rolloutController = controller;
+  const sequence = rolloutSequence;
   try {
-    const page = await listAgentRollouts(10);
+    await getWorkspace();
+    if (sequence !== rolloutSequence) return;
+    const context = workspaceContext();
+    const page = await listAgentRollouts(10, controller.signal);
+    const current = workspaceContext();
+    if (
+      sequence !== rolloutSequence ||
+      current.id !== context.id ||
+      current.generation !== context.generation
+    )
+      return;
     rollouts.value = page.rollouts;
     rolloutsUnavailable.value = false;
   } catch {
+    if (controller.signal.aborted || sequence !== rolloutSequence) return;
     rollouts.value = [];
     rolloutsUnavailable.value = true;
+  } finally {
+    if (rolloutController === controller) rolloutController = undefined;
   }
 }
 
-function refreshForWorkspace(): void {
-  detailState.value = { error: "" };
+function refresh(): void {
   void loadOperations();
   void loadRollouts();
+}
+
+// Rows and details from the previous workspace disappear before new reads.
+function refreshForWorkspace(): void {
+  invalidateDetail();
+  detailState.value = { error: "" };
+  rollouts.value = [];
+  rolloutsUnavailable.value = false;
+  refresh();
 }
 
 onMounted(() => {
   window.addEventListener(workspaceChangedEvent, refreshForWorkspace);
-  void loadOperations();
-  void loadRollouts();
+  refresh();
 });
 onBeforeUnmount(() => {
   window.removeEventListener(workspaceChangedEvent, refreshForWorkspace);
@@ -171,7 +209,7 @@ onBeforeUnmount(() => {
           :disabled="loading"
           :title="$t('refresh')"
           :aria-label="$t('refresh')"
-          @click="loadOperations()"
+          @click="refresh()"
         >
           <RefreshCw aria-hidden="true" />
         </Button>

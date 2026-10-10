@@ -12,6 +12,8 @@
 - `npm run dev` (the `web` service of the [local stack](../getting-started/local-development.md)
   on port `4173`) proxies `/api` to `VITE_API_TARGET` and, when
   `VITE_DEV_AUTH_TOKEN` is set, adds that bearer token to proxied requests.
+  A direct `npm run dev` listens on `127.0.0.1` only; the container passes
+  `--host 0.0.0.0` and Compose publishes the port on host loopback.
   [`vite.config.ts`](../../web/vite.config.ts) refuses `vite build` while the
   token is set. Production serves the built bundle from the Gateway, whose
   [Caddyfile](../../deploy/production/Caddyfile) proxies `/api/*`; it is not the
@@ -77,7 +79,10 @@ Workspace discovery is cached and coalesced; selection accepts authorized IDs
 only and increments a generation on change. Async consumers must fence results
 by both Workspace ID and generation, including a switch away and back to the
 same ID. The independent authentication probe must not change that authority.
-Login return paths are validated internal paths and consumed once. SSE stores
+Login return paths are validated internal paths and consumed once. The
+remembered Workspace ID and login return path are optional `sessionStorage`
+preferences: storage failures mean no preference and never block login,
+Workspace selection or change events. SSE stores
 own their subscriptions, timers and cancellation; importing an API starts none.
 
 <a id="verification"></a>
@@ -236,7 +241,12 @@ focus changes or leaving the view.
 A plain operation's `unknown` is a warning and Fleet keeps polling it. Upgrade
 and rollout-node `unknown` are terminal failures. Tone helpers never decide
 polling. Rollout totals distinguish success, failure (including rolled back) and
-unknown, and leaving rollout detail stops its polling. See
+unknown, and leaving rollout detail stops its polling. Rollout reads, resume
+and create results are fenced by route rollout, Workspace ID and generation; a
+route or Workspace change clears the shown rollout and its resume action before
+reading again. A read in flight when resume starts is dropped, and a resume or
+create without a confirmed response is never resent automatically. Closing the
+create dialog gives up the automatic navigation, not the submitted request. See
 [`fleet.ts`](../../web/src/shared/fleet.ts) and
 [`state-tone.ts`](../../web/src/features/operations/state-tone.ts).
 
@@ -335,7 +345,7 @@ according to [Validate a change](testing.md). Paths in the table are relative to
 | --- | --- |
 | API adapters, session or Workspace | `test/api-client.test.ts`, generated-auth serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
 | Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-config-plan.test.ts`, `test/node-workflows.test.ts`; browser specs `e2e/config-plan.spec.ts`, `e2e/certificate-lifecycle.spec.ts`, `e2e/node-forms.spec.ts` on desktop/mobile |
-| Operations/rollouts | `test/operation-state-tone.test.ts`; browser specs `e2e/operations.spec.ts`, `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume |
+| Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser specs `e2e/operations.spec.ts`, `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume |
 | Approvals, audit, overview | Corresponding view/unit tests and browser specs `e2e/approval-queue.spec.ts`, `e2e/approvals-audit.spec.ts`, `e2e/overview.spec.ts`; verify permission, stale/empty states and Workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
 | ESLint configuration | `npm run lint` and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |

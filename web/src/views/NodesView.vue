@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { Ellipsis } from "@lucide/vue";
-import type { NodeObservedState } from "@ocservia/api-client";
+import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
 import { defaultWindow, useEventListener, useNow } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
 import { createAgentRollout } from "../api/agents";
-import { workspaceChangedEvent } from "../api/workspace";
+import { workspaceChangedEvent, workspaceContext } from "../api/workspace";
 import DataState from "../components/common/DataState.vue";
 import FormField from "../components/common/FormField.vue";
 import OperationDialog from "../components/common/OperationDialog.vue";
@@ -50,7 +50,10 @@ const { t, locale } = useI18n();
 const now = useNow({ interval: 30_000 });
 
 onMounted(() => fleet.start());
-onBeforeUnmount(() => fleet.stop());
+onBeforeUnmount(() => {
+  fleet.stop();
+  rolloutSubmission += 1;
+});
 
 // The URL query owns the list view state so refresh, history and returning
 // to the list restore it. Filtering reads the store only; it never writes.
@@ -102,6 +105,14 @@ const rolloutReason = ref("");
 const rolloutApprovalId = ref("");
 const rolloutStarting = ref(false);
 const rolloutError = ref("");
+// Bumped when the page or workspace changes; an accepted create keeps running
+// server-side, but its late response no longer owns this page.
+let rolloutSubmission = 0;
+// Bumped on every open; closing the dialog gives up the automatic navigation.
+let rolloutOpening = 0;
+// Set when a create may have succeeded without a response; unlike a definite
+// failure, that warning survives reopening the dialog.
+let rolloutUnconfirmed = false;
 
 const selectedNodes = computed(() =>
   fleet.nodes.filter(
@@ -144,19 +155,37 @@ const hiddenSelectedCount = computed(() => {
 
 // Selections never carry over into another workspace.
 useEventListener(defaultWindow, workspaceChangedEvent, () => {
+  rolloutSubmission += 1;
   selected.value = [];
   rolloutDialog.value = false;
+  rolloutStarting.value = false;
+  rolloutError.value = "";
+  rolloutUnconfirmed = false;
 });
 
 function openRolloutDialog(): void {
-  rolloutError.value = "";
+  rolloutOpening += 1;
+  if (!rolloutUnconfirmed) rolloutError.value = "";
   rolloutDialog.value = true;
 }
 
 async function submitRollout(): Promise<void> {
   if (rolloutStarting.value || !rolloutTarget.value) return;
+  const ticket = ++rolloutSubmission;
+  const opening = rolloutOpening;
+  const context = workspaceContext();
+  const owned = () => {
+    const workspace = workspaceContext();
+    return (
+      ticket === rolloutSubmission &&
+      workspace.id === context.id &&
+      workspace.generation === context.generation
+    );
+  };
   rolloutStarting.value = true;
   rolloutError.value = "";
+  rolloutUnconfirmed = false;
+  let createdId: string | undefined;
   try {
     const rollout = await createAgentRollout(
       rolloutTarget.value,
@@ -165,20 +194,31 @@ async function submitRollout(): Promise<void> {
       rolloutReason.value.trim(),
       rolloutApprovalId.value.trim(),
     );
+    // Closing the dialog abandons only the navigation, never the request.
+    if (!owned() || !rolloutDialog.value || opening !== rolloutOpening) return;
     rolloutDialog.value = false;
     selected.value = [];
     rolloutReason.value = "";
     rolloutApprovalId.value = "";
+    createdId = rollout.id;
+  } catch (cause) {
+    if (!owned()) return;
+    // A lost POST response may still have created the rollout; never resend.
+    const definite = cause instanceof ResponseError;
+    rolloutUnconfirmed = !definite;
+    rolloutError.value = definite
+      ? cause.message
+      : t("rolloutStartUnconfirmed");
+  } finally {
+    if (ticket === rolloutSubmission) rolloutStarting.value = false;
+  }
+  // Outside the create's error handling: the rollout is confirmed even if
+  // navigation fails.
+  if (createdId)
     await router.push({
       name: "rollout-detail",
-      params: { rolloutId: rollout.id },
+      params: { rolloutId: createdId },
     });
-  } catch (cause) {
-    rolloutError.value =
-      cause instanceof Error ? cause.message : t("rolloutStartFailed");
-  } finally {
-    rolloutStarting.value = false;
-  }
 }
 </script>
 
