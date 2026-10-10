@@ -22,15 +22,15 @@ lifecycle_files=(
   'deploy/systemd/ocservia-agent-retention.timer:usr/lib/systemd/system/ocservia-agent-retention.timer:644'
 )
 package() {
-  local version="$1" binary archive entry source destination mode
+  local version="$1" binding_version="${2:-1}" binary archive entry source destination mode
   for entry in "${lifecycle_files[@]}"; do
     IFS=: read -r source destination mode <<<"${entry}"
     printf '\n# lifecycle fixture %s\n' "${version}" >>"${work}/source/${source}"
   done
   for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
     # shellcheck disable=SC2016 # Expanded by the installed fixture executable.
-    printf '#!/bin/sh\nif [ "${1:-}" = --binding-version ]; then echo 1; else echo "%s %s"; fi\n' \
-      "${binary}" "${version}" >"${work}/source/rust/target/release/${binary}"
+    printf '#!/bin/sh\nif [ "${1:-}" = --binding-version ]; then echo %s; else echo "%s %s"; fi\n' \
+      "${binding_version}" "${binary}" "${version}" >"${work}/source/rust/target/release/${binary}"
     chmod 755 "${work}/source/rust/target/release/${binary}"
   done
   VERSION="${version}" bash "${work}/source/scripts/package-agent.sh" >/dev/null
@@ -47,6 +47,7 @@ assert_lifecycle_matches() {
 }
 old="$(package 1.0.0)"
 new="$(package 1.0.1)"
+unbound="$(package 0.9.0 0)"
 "${old}/scripts/install-agent.sh"
 config="${DESTDIR}/etc/ocservia-agent"
 install -o root -g 61000 -m 640 "${work}/public.pem" "${config}/command.pem"
@@ -65,8 +66,37 @@ EOF
 chown root:61000 "${config}/agent.env"
 chmod 640 "${config}/agent.env"
 printf 'ocservia-binding-v1\n018f0c2e-7b1a-7c3d-8e9f-0123456789ab\n%s\n%s\n%s\nclear\n' \
-  "$(printf '11%.0s' {1..32})" "$(printf '22%.0s' {1..32})" "$(printf '33%.0s' {1..32})" >"${config}/active-binding"
-chmod 640 "${config}/active-binding"
+  "$(printf '11%.0s' {1..32})" "$(printf '22%.0s' {1..32})" "$(printf '33%.0s' {1..32})" >"${work}/active-binding"
+# A rebind can publish the binding and release the lifecycle lock just before
+# an upgrade acquires it. This flock shim publishes at exactly that point; the
+# binding-support check must observe it and refuse before any modification.
+mkdir "${work}/race"
+cat >"${work}/race/flock" <<EOF
+#!/bin/bash
+[[ -e "${config}/active-binding" ]] || install -o root -g 61000 -m 640 "${work}/active-binding" "${config}/active-binding"
+exec $(command -v flock) "\$@"
+EOF
+chmod 755 "${work}/race/flock"
+record_unbound() {
+  # Taking the (empty) lifecycle lock is the only permitted trace.
+  local -a skip=(! -path "${config}/active-binding" ! -path "${DESTDIR}/var/lib/ocservia-upgrade/.binding-lifecycle.lock")
+  find "${DESTDIR}" "${skip[@]}" -printf '%y %p %u:%g:%m:%n %l\n' | sort
+  find "${DESTDIR}" -type f "${skip[@]}" -exec sha256sum {} + | sort
+}
+# Without a binding, binaries lacking binding support remain installable.
+"${unbound}/scripts/upgrade-agent.sh"
+cmp "${unbound}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia/ocservia-agent"
+"${unbound}/scripts/rollback-agent.sh"
+cmp "${old}/rust/target/release/ocservia-agent" "${DESTDIR}/usr/libexec/ocservia/ocservia-agent"
+record_unbound >"${work}/before-race"
+if PATH="${work}/race:${PATH}" "${unbound}/scripts/upgrade-agent.sh" >"${work}/race.log" 2>&1; then
+  echo 'upgrade installed binaries that cannot enforce a binding published before its lock' >&2; exit 1
+fi
+grep -F 'target ocservia-agent does not support the committed Controller binding' "${work}/race.log"
+record_unbound >"${work}/after-race"
+cmp "${work}/before-race" "${work}/after-race"
+cmp "${work}/active-binding" "${config}/active-binding"
+echo 'Binding published before the lifecycle lock blocks an incompatible upgrade'
 printf 'identity and command evidence must survive\n' >"${DESTDIR}/var/lib/ocservia-agent/identity/evidence"
 sha256sum "${config}/active-binding" "${DESTDIR}/var/lib/ocservia-agent/identity/evidence" >"${work}/binding-evidence"
 # A different installed unit layout must not trigger re-enrollment or purge
