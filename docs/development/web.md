@@ -1,5 +1,24 @@
 # Web boundaries and node workflows
 
+## Startup, routing and development server
+
+- [`main.ts`](../../web/src/main.ts) installs Pinia, the router and i18n, then
+  mounts only after `router.isReady()`, so `/login` never renders the shell.
+- [`shared/routes.ts`](../../web/src/shared/routes.ts) declares the console
+  routes. The `/dev` simulator route is registered only on a development
+  runtime; production navigation never registers it.
+- [`App.vue`](../../web/src/App.vue) runs Workspace discovery, the readiness
+  refresh and the one-time login return described below.
+- `npm run dev` (the `web` service of the [local stack](../getting-started/local-development.md)
+  on port `4173`) proxies `/api` to `VITE_API_TARGET` and, when
+  `VITE_DEV_AUTH_TOKEN` is set, adds that bearer token to proxied requests.
+  [`vite.config.ts`](../../web/vite.config.ts) refuses `vite build` while the
+  token is set. Production serves the built bundle from the Gateway, whose
+  [Caddyfile](../../deploy/production/Caddyfile) proxies `/api/*`; it is not the
+  Vite proxy.
+- Use the Node and npm versions in [`toolchains.lock`](../../toolchains.lock)
+  and `npm ci` in `web/`. Checks are listed in [Validation](#validation).
+
 ## API boundaries
 
 The handwritten Web API layer uses the generated local `@ocservia/api-client`
