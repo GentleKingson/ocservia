@@ -1,6 +1,7 @@
 import type { ArtifactGrant } from "@ocservia/api-client";
 import { shallowReactive } from "vue";
 import type { WorkspaceContext } from "../api/workspace";
+import { abortableDelay } from "../shared/abortable-delay";
 
 export interface NodeWorkflowContext {
   nodeId: string;
@@ -45,20 +46,7 @@ export function createNodeWorkflow(
 }
 
 export function waitForNodePoll(signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(finish, 500);
-    function finish(): void {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    }
-    function abort(): void {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
-      reject(new DOMException("Node workflow polling aborted", "AbortError"));
-    }
-    if (signal.aborted) abort();
-    else signal.addEventListener("abort", abort, { once: true });
-  });
+  return abortableDelay(500, signal, "Node workflow polling aborted");
 }
 
 interface Receipt {

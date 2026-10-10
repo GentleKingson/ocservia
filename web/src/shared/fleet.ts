@@ -43,6 +43,7 @@ import {
   applyGroup,
 } from "../api/users";
 
+import { abortableDelay } from "./abortable-delay";
 import { createForegroundRefresh, isPageActive } from "./foreground-refresh";
 
 const terminalStates = new Set([
@@ -65,23 +66,6 @@ function pollDelay(state: Operation["state"], recoveryAttempt: number): number {
       Math.min(recoveryAttempt, recoveryPollDelays.length - 1)
     ] ?? 5_000
   );
-}
-
-function waitForPoll(delay: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(finish, delay);
-    function finish(): void {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    }
-    function abort(): void {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
-      reject(new DOMException("Operation polling aborted", "AbortError"));
-    }
-    if (signal.aborted) abort();
-    else signal.addEventListener("abort", abort, { once: true });
-  });
 }
 
 function responseStatus(error: unknown): number | undefined {
@@ -393,9 +377,10 @@ export const useFleetStore = defineStore("fleet", () => {
       let recoveryAttempt = 0;
       while (!terminal.has(currentOperation.state)) {
         const recovering = currentOperation.state === "unknown";
-        await waitForPoll(
+        await abortableDelay(
           pollDelay(currentOperation.state, recoveryAttempt),
           controller.signal,
+          "Operation polling aborted",
         );
         if (!isLatestOperation()) return;
         currentOperation = await getOperation(
