@@ -89,18 +89,19 @@ This lifecycle runs across the [operation service](../control-plane/internal/ope
 
 ### Code path of a controlled node operation
 
-The service reload action shows the source owner at each hop. Other controlled
-node operations share the Controller half; their node-side handlers differ.
+This traces `service:reload` only. Other controlled operations may reuse the
+operation outbox and the Agent external-command path, but their HTTP handlers,
+authorization and transaction checks are defined at their own entry points.
 
 | Hop | Entry point | Owner and boundary |
 | --- | --- | --- |
 | Browser | [`NodeDetailView.vue`](../web/src/views/NodeDetailView.vue) → [`shared/fleet.ts`](../web/src/shared/fleet.ts) `reloadService` → [`api/operations.ts`](../web/src/api/operations.ts) `reloadService` → generated client → [`api/transport.ts`](../web/src/api/transport.ts) | Fleet store owns tracking; the adapter supplies `Idempotency-Key`, `If-Match` and approval headers. Hidden buttons are not authorization. |
-| HTTP | [`api/routes.go`](../control-plane/internal/api/routes.go) `POST /api/v1/nodes/{node_id}/service:reload` → [`requireOperationAuth`](../control-plane/internal/api/authorization.go) → [`createControlledCommand`](../control-plane/internal/api/operations.go) | Authentication, browser-origin check and route RBAC, then request validation; returns `202` with the operation, not an execution result. |
+| HTTP | [`api/routes.go`](../control-plane/internal/api/routes.go) `POST /api/v1/nodes/{node_id}/service:reload` → [`requireOperationAuth`](../control-plane/internal/api/authorization.go) → [`createControlledCommand`](../control-plane/internal/api/operations.go) | Authentication, then `validateBrowserMutation` (unsafe methods from non-development principals must carry the trusted browser `Origin`), then route RBAC and request validation; returns `202` with the operation, not an execution result. |
 | Acceptance | [`operations.Service.CreateSynthetic`](../control-plane/internal/operations/service.go) | One database transaction checks the expected node version, consumes the bound approval and stages operation, outbox and audit. |
-| Dispatch | [`operations.Worker.dispatch`](../control-plane/internal/operations/worker.go) → [`Service.Claim`](../control-plane/internal/operations/dispatch.go) → `dispatchFenced` → [`transportclient`](../control-plane/internal/transportclient/) | Claims up to 16 jobs and sends them serially under the owner fence; `MarkSentWithEnvelope` records transmission only. |
+| Dispatch | [`operations.Worker.dispatch`](../control-plane/internal/operations/worker.go) → [`Service.Claim`](../control-plane/internal/operations/dispatch.go) → `dispatchFenced` → [`transportclient`](../control-plane/internal/transportclient/) | Claims up to 16 jobs and sends them serially. The command carries an owner fence when the worker has an owner-session manager, which [`startWorker`](../control-plane/internal/platform/app/worker.go) creates only when `OCSERV_CONTROLLER_ENDPOINT_ID` is set (production Compose requires it); the simulator-only path sends unfenced. `MarkSentWithEnvelope` records transmission only. |
 | Transport | [`transportd`](../rust/crates/transportd/src/lib.rs) `send_command` | Unprivileged; forwards over the authorized Iroh session. |
-| Node | [`agent`](../rust/crates/agent/src/lib.rs) `CommandExecutor` → [`command-journal`](../rust/crates/command-journal/src/lib.rs) `accept_command` → `PrivdClient` → [`privd`](../rust/crates/privd/src/lib.rs) `dispatch_attested` | The journal records acceptance before execution; privd runs the fixed action and signs the receipt. |
-| Result | [`localslice.Worker`](../control-plane/internal/localslice/) → [`Service.Ingest`](../control-plane/internal/localslice/ingress.go) | Validates each transport event and commits its result or telemetry in one transaction; ambiguous outcomes are reconciled per [command reliability](development/command-reliability.md). |
+| Node | [`agent` `execute_external_command`](../rust/crates/agent/src/main.rs) → [`CommandExecutor::prepare_external`](../rust/crates/agent/src/lib.rs) → [`command-journal`](../rust/crates/command-journal/src/lib.rs) `accept_command` → `PrivdClient` → [`privd`](../rust/crates/privd/src/lib.rs) `dispatch_attested` | The journal records `Accepted`, then `Running`, before privd runs the fixed action and signs a receipt. A result is terminal only with a well-formed privd receipt; a missing receipt, unclassified privd error or privd transport failure is recorded as `Unknown`. A replayed command in a non-terminal state also becomes `Unknown` instead of re-executing. |
+| Result | [`localslice.Worker`](../control-plane/internal/localslice/) → [`Service.Ingest`](../control-plane/internal/localslice/ingress.go) | Validates each transport event and commits its result or telemetry in one transaction. On owner reconnect, [`RecoverAmbiguousDispatched`](../control-plane/internal/operations/recovery.go) re-signs ambiguous commands as `RECONCILE_ONLY`; see [command reliability](development/command-reliability.md). |
 
 Privileged execution on managed nodes is restricted to a set of pre-compiled subroutines. The system disallows arbitrary binaries, parameterized shell strings, dynamic service identifiers, or unconstrained file paths.
 
@@ -165,8 +166,10 @@ implementation and compatibility details.
 
 ### Source dependency view
 
-Arrows point from importer to imported code. This is not the process graph in
-[High-level view](#high-level-view).
+Arrows point from importer to imported code. The view shows representative
+main edges, not every import (for example, several views import API adapters
+directly). It is not the process graph in [High-level view](#high-level-view),
+and package separation is not a runtime security check.
 
 ```mermaid
 flowchart LR
