@@ -245,7 +245,8 @@ unknown, and leaving rollout detail stops its polling. Rollout reads, resume
 and create results are fenced by route rollout, Workspace ID and generation; a
 route or Workspace change clears the shown rollout and its resume action before
 reading again. A read in flight when resume starts is dropped, and a resume or
-create without a confirmed response is never resent automatically. See
+create without a confirmed response is never resent automatically. Closing the
+create dialog gives up the automatic navigation, not the submitted request. See
 [`fleet.ts`](../../web/src/shared/fleet.ts) and
 [`state-tone.ts`](../../web/src/features/operations/state-tone.ts).
 

@@ -63,6 +63,7 @@ interface View {
   rolloutApprovalId: string;
   rolloutStarting: boolean;
   rolloutError: string;
+  openRolloutDialog(): void;
   submitRollout(): Promise<void>;
 }
 
@@ -159,4 +160,49 @@ it("shows a definite server rejection as such", async () => {
   const view = await mount();
   await view.submitRollout();
   expect(view.rolloutError).toBe("conflict");
+});
+
+it("gives up navigation when the dialog closes, keeping the request", async () => {
+  const resolve = created();
+  const view = await mount();
+  const submit = view.submitRollout();
+  view.rolloutDialog = false;
+  resolve("rollout-a");
+  await submit;
+  expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
+  expect(mocks.push).not.toHaveBeenCalled();
+  expect(view.rolloutReason).toBe("first");
+  expect(view.rolloutStarting).toBe(false);
+});
+
+it("keeps a reopened dialog's input when the earlier create lands", async () => {
+  const resolve = created();
+  const view = await mount();
+  const submit = view.submitRollout();
+  view.rolloutDialog = false;
+  view.openRolloutDialog();
+  expect(view.rolloutStarting).toBe(true);
+  view.rolloutReason = "second";
+  resolve("rollout-a");
+  await submit;
+  expect(mocks.push).not.toHaveBeenCalled();
+  expect(view.rolloutDialog).toBe(true);
+  expect(view.rolloutReason).toBe("second");
+});
+
+it("shows an unconfirmed start from a closed dialog when it reopens", async () => {
+  let reject!: (cause: unknown) => void;
+  mocks.createAgentRollout.mockReturnValue(
+    new Promise((_, fail) => {
+      reject = fail;
+    }),
+  );
+  const view = await mount();
+  const submit = view.submitRollout();
+  view.rolloutDialog = false;
+  reject(new TypeError("network"));
+  await submit;
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
+  expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
 });

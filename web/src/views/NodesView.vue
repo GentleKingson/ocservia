@@ -108,6 +108,8 @@ const rolloutError = ref("");
 // Bumped when the page or workspace changes; an accepted create keeps running
 // server-side, but its late response no longer owns this page.
 let rolloutSubmission = 0;
+// Bumped on every open; closing the dialog gives up the automatic navigation.
+let rolloutOpening = 0;
 
 const selectedNodes = computed(() =>
   fleet.nodes.filter(
@@ -157,14 +159,17 @@ useEventListener(defaultWindow, workspaceChangedEvent, () => {
   rolloutError.value = "";
 });
 
+// An earlier outcome stays visible on reopen, so an unconfirmed start is not
+// silently forgotten; the next submit clears it.
 function openRolloutDialog(): void {
-  rolloutError.value = "";
+  rolloutOpening += 1;
   rolloutDialog.value = true;
 }
 
 async function submitRollout(): Promise<void> {
   if (rolloutStarting.value || !rolloutTarget.value) return;
   const ticket = ++rolloutSubmission;
+  const opening = rolloutOpening;
   const context = workspaceContext();
   const owned = () => {
     const workspace = workspaceContext();
@@ -184,7 +189,8 @@ async function submitRollout(): Promise<void> {
       rolloutReason.value.trim(),
       rolloutApprovalId.value.trim(),
     );
-    if (!owned()) return;
+    // Closing the dialog abandons only the navigation, never the request.
+    if (!owned() || !rolloutDialog.value || opening !== rolloutOpening) return;
     rolloutDialog.value = false;
     selected.value = [];
     rolloutReason.value = "";
