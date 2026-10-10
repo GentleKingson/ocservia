@@ -11,8 +11,9 @@ import ApprovalsView from "../views/ApprovalsView.vue";
 import AuditView from "../views/AuditView.vue";
 
 // The development simulator stays reachable only on development runtimes
-// (vite dev server or a build with a development auth token); production
-// navigation never registers the route.
+// (the vite dev server); production navigation never registers the route.
+// vite.config.ts refuses builds with VITE_DEV_AUTH_TOKEN, so the token term
+// only applies where a runtime sets it without DEV (see test/router.test.ts).
 export const developmentRuntime =
   import.meta.env.DEV || Boolean(import.meta.env.VITE_DEV_AUTH_TOKEN);
 
