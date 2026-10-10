@@ -316,12 +316,6 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 validate_verified_package_source
-if [[ -e "${DESTDIR}${SYSCONFDIR}/ocservia-agent/active-binding" || -L "${DESTDIR}${SYSCONFDIR}/ocservia-agent/active-binding" ]]; then
-  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
-    [[ "$("${ROOT}/rust/target/release/${binary}" --binding-version)" == 1 ]] ||
-      upgrade_preflight_error "target ${binary} does not support the committed Controller binding"
-  done
-fi
 
 if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" || "${DESTDIR}" == */ ) ]] || \
   [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${PRIVD_STATE_DIR}" != /* || "${UPGRADE_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
@@ -361,6 +355,13 @@ ensure_root_private_directory "${DESTDIR}${UPGRADE_STATE_DIR}"
 [[ ! -L "${DESTDIR}${UPGRADE_STATE_DIR}/.binding-lifecycle.lock" ]] || installed_pair_preflight_error "unsafe lifecycle lock"
 exec 9>"${DESTDIR}${UPGRADE_STATE_DIR}/.binding-lifecycle.lock"
 flock -n 9 || installed_pair_preflight_error "another binding/package lifecycle operation is active"
+# Check under the lock: a rebind may publish the binding until it is released.
+if [[ -e "${DESTDIR}${SYSCONFDIR}/ocservia-agent/active-binding" || -L "${DESTDIR}${SYSCONFDIR}/ocservia-agent/active-binding" ]]; then
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    [[ "$("${ROOT}/rust/target/release/${binary}" --binding-version)" == 1 ]] ||
+      upgrade_preflight_error "target ${binary} does not support the committed Controller binding"
+  done
+fi
 
 installed_agent="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 installed_privd="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
