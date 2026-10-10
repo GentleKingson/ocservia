@@ -152,6 +152,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 			values["OCSERV_AUDIT_EVENT_KEY_FILE"] = auditEventKeyFile
 			values["OCSERV_PUBLIC_ORIGIN"] = "https://controller.example.test"
 			values["OCSERV_COMMAND_SIGNING_KEY_FILE"] = commandSigningKeyFile
+			values["OCSERV_CONTROLLER_ENDPOINT_ID"] = strings.Repeat("ab", 32)
 			values["OCSERV_TRANSPORT_UID"] = strconv.Itoa(os.Geteuid() + 1)
 			values["OCSERV_TRANSPORT_GID"] = strconv.Itoa(os.Getegid())
 		}

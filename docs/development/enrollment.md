@@ -119,7 +119,8 @@ is limited to approved read-only capabilities.
 
 Setting `OCSERV_CONTROLLER_ENDPOINT_ID` enables the enrollment endpoints (they
 answer `404` otherwise) and, on worker or all roles, the trust service on
-`OCSERV_TRUST_SOCKET`, which defaults to the value below:
+`OCSERV_TRUST_SOCKET`, which defaults to the value below. Production rejects a
+missing EndpointID except for one-shot database commands:
 
 ```text
 OCSERV_CONTROLLER_ENDPOINT_ID=<64 lowercase hex characters>

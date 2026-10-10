@@ -449,8 +449,17 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 		t.Fatalf("relative production command key error = %v", err)
 	}
 	cfg.CommandSigningKeyFile = "/run/secrets/controller_command_signing_key"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "OCSERV_CONTROLLER_ENDPOINT_ID") {
+		t.Fatalf("missing production Controller endpoint ID error = %v", err)
+	}
+	oneShot := cfg
+	oneShot.MigrateOnly, oneShot.RuntimeDBRole = true, "ocservia_app"
+	if err := oneShot.Validate(); err != nil {
+		t.Fatalf("one-shot production command required a Controller endpoint ID: %v", err)
+	}
+	cfg.ControllerEndpointID = strings.Repeat("ab", 32)
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("absolute production command key rejected: %v", err)
+		t.Fatalf("complete production configuration rejected: %v", err)
 	}
 }
 
