@@ -87,6 +87,21 @@ Command processing decouples request ingestion from remote execution:
 
 This lifecycle runs across the [operation service](../control-plane/internal/operations/service.go), the [outbox worker](../control-plane/internal/operations/worker.go), and the [Agent execution path](../rust/crates/agent/src/main.rs). The [delivery and recovery contract](development/command-reliability.md) governs idempotency, result verification, and conflict reconciliation. Because local database commits, network transit, and daemon side-effects lack a unified distributed transaction coordinator, communication failures or crashes may leave operations in an `unknown` state. Automated recovery procedures must reconcile ambiguous executions against node receipts before retrying; daemon status queries alone cannot confirm whether a transient reload completed.
 
+### Code path of a controlled node operation
+
+The service reload action shows the source owner at each hop. Other controlled
+node operations share the Controller half; their node-side handlers differ.
+
+| Hop | Entry point | Owner and boundary |
+| --- | --- | --- |
+| Browser | [`NodeDetailView.vue`](../web/src/views/NodeDetailView.vue) → [`shared/fleet.ts`](../web/src/shared/fleet.ts) `reloadService` → [`api/operations.ts`](../web/src/api/operations.ts) `reloadService` → generated client → [`api/transport.ts`](../web/src/api/transport.ts) | Fleet store owns tracking; the adapter supplies `Idempotency-Key`, `If-Match` and approval headers. Hidden buttons are not authorization. |
+| HTTP | [`api/routes.go`](../control-plane/internal/api/routes.go) `POST /api/v1/nodes/{node_id}/service:reload` → [`requireOperationAuth`](../control-plane/internal/api/authorization.go) → [`createControlledCommand`](../control-plane/internal/api/operations.go) | Authentication, browser-origin check and route RBAC, then request validation; returns `202` with the operation, not an execution result. |
+| Acceptance | [`operations.Service.CreateSynthetic`](../control-plane/internal/operations/service.go) | One database transaction checks the expected node version, consumes the bound approval and stages operation, outbox and audit. |
+| Dispatch | [`operations.Worker.dispatch`](../control-plane/internal/operations/worker.go) → [`Service.Claim`](../control-plane/internal/operations/dispatch.go) → `dispatchFenced` → [`transportclient`](../control-plane/internal/transportclient/) | Claims up to 16 jobs and sends them serially under the owner fence; `MarkSentWithEnvelope` records transmission only. |
+| Transport | [`transportd`](../rust/crates/transportd/src/lib.rs) `send_command` | Unprivileged; forwards over the authorized Iroh session. |
+| Node | [`agent`](../rust/crates/agent/src/lib.rs) `CommandExecutor` → [`command-journal`](../rust/crates/command-journal/src/lib.rs) `accept_command` → `PrivdClient` → [`privd`](../rust/crates/privd/src/lib.rs) `dispatch_attested` | The journal records acceptance before execution; privd runs the fixed action and signs the receipt. |
+| Result | [`localslice.Worker`](../control-plane/internal/localslice/) → [`Service.Ingest`](../control-plane/internal/localslice/ingress.go) | Validates each transport event and commits its result or telemetry in one transaction; ambiguous outcomes are reconciled per [command reliability](development/command-reliability.md). |
+
 Privileged execution on managed nodes is restricted to a set of pre-compiled subroutines. The system disallows arbitrary binaries, parameterized shell strings, dynamic service identifiers, or unconstrained file paths.
 
 Node enrollment operates via an isolated protocol. An ephemeral pre-shared token links a node's persistent `EndpointID` with a pending inventory entry. An administrator approves the registration, which lets the local `Agent` negotiate an authenticated transport session. Package deployment and service initiation do not grant connectivity before this handshake. For specifications, see [enrollment](how-to/enroll-node.md) and the [Controller service](../control-plane/internal/enrollment/service.go).
@@ -147,6 +162,42 @@ implementation and compatibility details.
 | Protocols and generated code | Protocol Buffers and OpenAPI definitions serve as normative schema contracts. IPC boundaries and cryptographic signatures enforce explicit, versioned serialization; raw protobuf byte streams must not be used as cryptographic signing inputs. Generated artifacts stay segregated from domain logic. | [Schema sources and generation](reference/stable-contracts.md#schema-sources-and-generation), [Agent/privd protocol](development/agent-privd.md), [command authorization](development/command-authorization-v1.md), [semantic hash v2](development/command-semantic-hash-v2.md) |
 | Deployment | Operational deployments use versioned binaries, out-of-band cryptographic material, and existing lifecycle scripts. Do not introduce custom deployment frameworks. | [Production deployment](operations/production-deployment.md), [Controller upgrade](how-to/controller-lifecycle.md#upgrade), [Agent lifecycle](operations/agent-lifecycle.md) |
 | Validation | Verification relies on targeted test coverage that validates behavioral invariants and contract guarantees. | [Validate a change](development/testing.md) |
+
+### Source dependency view
+
+Arrows point from importer to imported code. This is not the process graph in
+[High-level view](#high-level-view).
+
+```mermaid
+flowchart LR
+    subgraph Web["web/src"]
+        Views["views"] --> Features["features, shared stores"]
+        Features --> Adapters["api/*.ts adapters"]
+        Adapters --> Generated["api/generated client"]
+    end
+    subgraph Go["control-plane"]
+        Cmd["cmd/ocserv-control"] --> App["internal/platform/app"]
+        App --> HTTP["internal/api"]
+        App --> Domain["domain packages"]
+        HTTP --> Domain
+        Domain --> DB["internal/database interfaces"]
+        App --> Drivers["database/postgres, mysql, connection"]
+        Drivers --> DB
+    end
+    subgraph Rust["rust/crates"]
+        Agent["agent"] --> Journal["command-journal"]
+        Agent --> RustContracts["contracts, command-authorization"]
+        Transportd["transportd"] --> RustContracts
+        Privd["privd"] --> Adapter["ocserv-adapter"]
+        Privd --> Upgrader["upgrader library"]
+        Privd --> RustContracts
+    end
+```
+
+Signer is a separate Go module (`signer/`, see `go.work`) and is reached only
+over HTTPS. `privd` links the upgrader library to schedule the separate
+`ocservia-upgrader@` unit; `agent` uses `transportd` only as a dev-dependency
+for tests. Cargo manifests are the authority for crate dependencies.
 
 The architectural diagrams show runtime interactions, which differ from source-level import hierarchies. Process composition, inter-process communication, and adapter binding are orthogonal concerns. The existing structure is normative; modifications require new architectural views only when clarifying novel trust or isolation boundaries.
 
