@@ -12,6 +12,8 @@
 - `npm run dev` (the `web` service of the [local stack](../getting-started/local-development.md)
   on port `4173`) proxies `/api` to `VITE_API_TARGET` and, when
   `VITE_DEV_AUTH_TOKEN` is set, adds that bearer token to proxied requests.
+  A direct `npm run dev` listens on `127.0.0.1` only; the container passes
+  `--host 0.0.0.0` and Compose publishes the port on host loopback.
   [`vite.config.ts`](../../web/vite.config.ts) refuses `vite build` while the
   token is set. Production serves the built bundle from the Gateway, whose
   [Caddyfile](../../deploy/production/Caddyfile) proxies `/api/*`; it is not the
