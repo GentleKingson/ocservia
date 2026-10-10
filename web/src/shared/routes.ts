@@ -1,14 +1,12 @@
-import type { RouteRecordRaw } from "vue-router";
+import {
+  START_LOCATION,
+  type RouteLocationNormalized,
+  type RouteRecordRaw,
+} from "vue-router";
 
-import NodeDetailView from "../views/NodeDetailView.vue";
-import NodesView from "../views/NodesView.vue";
-import OperationsView from "../views/OperationsView.vue";
+// The default landing page stays in the entry chunk; other pages load on
+// first visit.
 import OverviewView from "../views/OverviewView.vue";
-import RolloutDetailView from "../views/RolloutDetailView.vue";
-import SettingsView from "../views/SettingsView.vue";
-import ApprovalsView from "../views/ApprovalsView.vue";
-
-import AuditView from "../views/AuditView.vue";
 
 // The development simulator stays reachable only on development runtimes
 // (the vite dev server); production navigation never registers the route.
@@ -24,25 +22,41 @@ export const routeRecords: RouteRecordRaw[] = [
     component: () => import("../views/LoginView.vue"),
   },
   { path: "/", name: "overview", component: OverviewView },
-  { path: "/nodes", name: "nodes", component: NodesView },
+  {
+    path: "/nodes",
+    name: "nodes",
+    component: () => import("../views/NodesView.vue"),
+  },
   {
     path: "/nodes/:nodeId",
     name: "node-detail",
-    component: NodeDetailView,
+    component: () => import("../views/NodeDetailView.vue"),
   },
-  { path: "/operations", name: "operations", component: OperationsView },
+  {
+    path: "/operations",
+    name: "operations",
+    component: () => import("../views/OperationsView.vue"),
+  },
   {
     path: "/approvals/:approvalId?",
     name: "approvals",
-    component: ApprovalsView,
+    component: () => import("../views/ApprovalsView.vue"),
   },
   {
     path: "/rollouts/:rolloutId",
     name: "rollout-detail",
-    component: RolloutDetailView,
+    component: () => import("../views/RolloutDetailView.vue"),
   },
-  { path: "/audit", name: "audit", component: AuditView },
-  { path: "/settings", name: "settings", component: SettingsView },
+  {
+    path: "/audit",
+    name: "audit",
+    component: () => import("../views/AuditView.vue"),
+  },
+  {
+    path: "/settings",
+    name: "settings",
+    component: () => import("../views/SettingsView.vue"),
+  },
   ...(developmentRuntime
     ? [
         {
@@ -53,3 +67,17 @@ export const routeRecords: RouteRecordRaw[] = [
       ]
     : []),
 ];
+
+// A redeploy replaces the hashed page chunks (the gateway answers a missing
+// asset with index.html), so a tab opened before it cannot load a page it has
+// not visited yet. Load that one navigation from the server instead of
+// aborting it silently. The initial navigation already came from the server,
+// so it is never retried and a missing chunk cannot reload in a loop.
+export function loadFailedNavigation(
+  _error: unknown,
+  to: RouteLocationNormalized,
+  from: RouteLocationNormalized,
+): void {
+  if (from === START_LOCATION) return;
+  window.location.assign(to.fullPath);
+}

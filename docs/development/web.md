@@ -6,7 +6,11 @@
   mounts only after `router.isReady()`, so `/login` never renders the shell.
 - [`shared/routes.ts`](../../web/src/shared/routes.ts) declares the console
   routes. The `/dev` simulator route is registered only on a development
-  runtime; production navigation never registers it.
+  runtime; production navigation never registers it. Overview, the default
+  landing page, is in the entry chunk; other pages load on first visit. A
+  redeploy removes the old page chunks, so when an open tab cannot load one,
+  the router loads that navigation's URL from the server instead; the initial
+  navigation is never retried.
 - [`App.vue`](../../web/src/App.vue) runs Workspace discovery, the readiness
   refresh and the one-time login return described below.
 - `npm run dev` (the `web` service of the [local stack](../getting-started/local-development.md)
