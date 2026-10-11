@@ -49,7 +49,9 @@ const router = useRouter();
 const { t, locale } = useI18n();
 const now = useNow({ interval: 30_000 });
 
-onMounted(() => fleet.start());
+onMounted(() => {
+  fleet.start();
+});
 onBeforeUnmount(() => {
   fleet.stop();
   rolloutSubmission += 1;

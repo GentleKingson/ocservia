@@ -67,6 +67,11 @@ modules also cannot import features. Generated sources are excluded. This is
 not a transitive dependency or runtime ownership check and does not cover
 constructed/dynamic imports or every Vue SFC.
 
+The same configuration lints `src/**/*.vue` with eslint-plugin-vue's essential
+rules (invalid directives, prop mutation, `v-if` with `v-for`, missing keys) and
+passes `<script lang="ts">` to the typed TypeScript parser. Only the
+`components/ui` shadcn-vue primitives keep single-word component names.
+
 Keep the `@/` mapping to `web/src` identical in TypeScript and Vite configuration.
 Features receive context and tracking callbacks from the page; they may use Vue,
 generated types, domain APIs and `features/node-workflow.ts`. API transport may
@@ -358,7 +363,7 @@ according to [Validate a change](testing.md). Paths in the table are relative to
 | Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser specs `e2e/operations.spec.ts`, `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume |
 | Approvals, audit, overview | Corresponding view/unit tests and browser specs `e2e/approval-queue.spec.ts`, `e2e/approvals-audit.spec.ts`, `e2e/overview.spec.ts`; verify permission, stale/empty states and Workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
-| ESLint configuration | `npm run lint` and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
+| ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
 
 `scripts/web-check.sh basic` runs generated-client build, formatting, lint,
 typecheck, unit tests, production build and generated-auth checks. Its `full`
