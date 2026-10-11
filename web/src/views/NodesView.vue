@@ -185,7 +185,7 @@ async function submitRollout(): Promise<void> {
     );
   };
   rolloutStarting.value = true;
-  rolloutError.value = "";
+  if (!rolloutUnconfirmed) rolloutError.value = "";
   let createdId: string | undefined;
   try {
     const rollout = await createAgentRollout(

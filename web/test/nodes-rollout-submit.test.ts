@@ -249,6 +249,23 @@ it("keeps an unconfirmed start visible when an explicit retry is rejected", asyn
   expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
 });
 
+it("keeps an unconfirmed start visible while an explicit retry is pending", async () => {
+  mocks.createAgentRollout.mockRejectedValueOnce(new TypeError("network"));
+  const view = await mount();
+  await view.submitRollout();
+  const resolve = created();
+  const retry = view.submitRollout();
+  expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
+  view.rolloutDialog = false;
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
+  resolve("rollout-b");
+  await retry;
+  expect(mocks.createAgentRollout).toHaveBeenCalledTimes(2);
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("");
+});
+
 it("settles an unconfirmed start once a later create is confirmed", async () => {
   mocks.createAgentRollout.mockRejectedValueOnce(new TypeError("network"));
   mocks.createAgentRollout.mockResolvedValueOnce({ id: "rollout-b" });
