@@ -1,7 +1,16 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const betaId = "019fc0a4-6d92-765c-a8a1-4af556614cc2";
+
+// WebKit cannot fulfill a 3xx in Playwright, so a simulated redirect is a
+// page that replaces itself with the next location.
+function redirect(route: Route, location: string): Promise<void> {
+  return route.fulfill({
+    contentType: "text/html",
+    body: `<script>location.replace(${JSON.stringify(location)})</script>`,
+  });
+}
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/auth/methods", (route) =>
@@ -89,16 +98,13 @@ test("fresh OIDC login returns to the requested console route", async ({
     });
   });
   await page.route("**/api/v1/auth/login", (route) =>
-    route.fulfill({ status: 302, headers: { location: "/fake-idp" } }),
+    redirect(route, "/fake-idp"),
   );
   await page.route("**/fake-idp", (route) =>
-    route.fulfill({
-      status: 302,
-      headers: { location: "/api/v1/auth/callback?state=test&code=test" },
-    }),
+    redirect(route, "/api/v1/auth/callback?state=test&code=test"),
   );
   await page.route("**/api/v1/auth/callback?**", (route) =>
-    route.fulfill({ status: 302, headers: { location: "/" } }),
+    redirect(route, "/"),
   );
   await page.route("**/api/v1/nodes?**", (route) =>
     route.fulfill({
@@ -226,16 +232,13 @@ test("an expired SSE session starts OIDC login and restores the console", async 
   await page.route("**/api/v1/auth/login", (route) => {
     authenticated = true;
     logins += 1;
-    return route.fulfill({ status: 302, headers: { location: "/fake-idp" } });
+    return redirect(route, "/fake-idp");
   });
   await page.route("**/fake-idp", (route) =>
-    route.fulfill({
-      status: 302,
-      headers: { location: "/api/v1/auth/callback?state=test&code=test" },
-    }),
+    redirect(route, "/api/v1/auth/callback?state=test&code=test"),
   );
   await page.route("**/api/v1/auth/callback?**", (route) =>
-    route.fulfill({ status: 302, headers: { location: "/" } }),
+    redirect(route, "/"),
   );
   await page.route("**/api/v1/nodes?**", (route) =>
     route.fulfill({
