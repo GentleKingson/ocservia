@@ -182,11 +182,23 @@ it("shows a definite server rejection by its Problem type", async () => {
       }),
     ),
   );
+  mocks.createAgentRollout.mockRejectedValueOnce(
+    rejection(
+      JSON.stringify({
+        type: "https://ocservia.dev/problems/invalid-request",
+        title: "Request is invalid",
+        status: 400,
+      }),
+      400,
+    ),
+  );
   const view = await mount();
   await view.submitRollout();
   expect(view.rolloutError).toBe("rolloutApprovalRejected");
   await view.submitRollout();
   expect(view.rolloutError).toBe("rolloutNoEligibleNodes");
+  await view.submitRollout();
+  expect(view.rolloutError).toBe("rolloutRequestInvalid");
 });
 
 it("never shows server text for an unknown or unreadable Problem", async () => {
@@ -202,11 +214,14 @@ it("never shows server text for an unknown or unreadable Problem", async () => {
     ),
   );
   mocks.createAgentRollout.mockRejectedValueOnce(rejection("not json"));
+  mocks.createAgentRollout.mockRejectedValueOnce(
+    rejection(JSON.stringify({ type: "toString", title: "x", status: 409 })),
+  );
   const view = await mount();
-  await view.submitRollout();
-  expect(view.rolloutError).toBe("rolloutStartRejected");
-  await view.submitRollout();
-  expect(view.rolloutError).toBe("rolloutStartRejected");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await view.submitRollout();
+    expect(view.rolloutError).toBe("rolloutStartRejected");
+  }
 });
 
 it("drops a rejection whose Problem arrives after the workspace changes", async () => {

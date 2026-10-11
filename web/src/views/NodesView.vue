@@ -167,11 +167,14 @@ useEventListener(defaultWindow, workspaceChangedEvent, () => {
 
 // Only the stable Problem type selects a local message; server text is never
 // shown. Unknown or unreadable bodies fall back to a generic rejection.
-const rolloutRejections: Record<string, string> = {
-  "https://ocservia.dev/problems/approval-required": "rolloutApprovalRejected",
-  "https://ocservia.dev/problems/no-eligible-nodes": "rolloutNoEligibleNodes",
-  "https://ocservia.dev/problems/invalid-request": "rolloutRequestInvalid",
-};
+const rolloutRejections = new Map([
+  [
+    "https://ocservia.dev/problems/approval-required",
+    "rolloutApprovalRejected",
+  ],
+  ["https://ocservia.dev/problems/no-eligible-nodes", "rolloutNoEligibleNodes"],
+  ["https://ocservia.dev/problems/invalid-request", "rolloutRequestInvalid"],
+]);
 async function problemType(error: ResponseError): Promise<string> {
   try {
     const problem: unknown = await error.response.json();
@@ -238,7 +241,7 @@ async function submitRollout(): Promise<void> {
     if (ticket === rolloutSubmission) rolloutStarting.value = false;
   }
   if (rejected) {
-    const key = rolloutRejections[await problemType(rejected)];
+    const key = rolloutRejections.get(await problemType(rejected));
     // The body is read after the request settled; a newer submit, Workspace
     // or dialog owns the message by then.
     if (owned() && opening === rolloutOpening)
