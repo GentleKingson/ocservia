@@ -153,13 +153,84 @@ it("reports a lost create response as unconfirmed without resending", async () =
   expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
 });
 
-it("shows a definite server rejection as such", async () => {
-  mocks.createAgentRollout.mockRejectedValue(
-    new ResponseError(new Response("{}", { status: 409 }), "conflict"),
+function rejection(body: string, status = 409) {
+  return new ResponseError(
+    new Response(body, {
+      status,
+      headers: { "Content-Type": "application/problem+json" },
+    }),
+    "Response returned an error code",
+  );
+}
+
+it("shows a definite server rejection by its Problem type", async () => {
+  mocks.createAgentRollout.mockRejectedValueOnce(
+    rejection(
+      JSON.stringify({
+        type: "https://ocservia.dev/problems/approval-required",
+        title: "Approval required",
+        status: 409,
+      }),
+    ),
+  );
+  mocks.createAgentRollout.mockRejectedValueOnce(
+    rejection(
+      JSON.stringify({
+        type: "https://ocservia.dev/problems/no-eligible-nodes",
+        title: "No eligible nodes",
+        status: 409,
+      }),
+    ),
   );
   const view = await mount();
   await view.submitRollout();
-  expect(view.rolloutError).toBe("conflict");
+  expect(view.rolloutError).toBe("rolloutApprovalRejected");
+  await view.submitRollout();
+  expect(view.rolloutError).toBe("rolloutNoEligibleNodes");
+});
+
+it("never shows server text for an unknown or unreadable Problem", async () => {
+  mocks.createAgentRollout.mockRejectedValueOnce(
+    rejection(
+      JSON.stringify({
+        type: "https://ocservia.dev/problems/service-unavailable",
+        title: "Service is unavailable",
+        detail: "internal detail",
+        status: 503,
+      }),
+      503,
+    ),
+  );
+  mocks.createAgentRollout.mockRejectedValueOnce(rejection("not json"));
+  const view = await mount();
+  await view.submitRollout();
+  expect(view.rolloutError).toBe("rolloutStartRejected");
+  await view.submitRollout();
+  expect(view.rolloutError).toBe("rolloutStartRejected");
+});
+
+it("drops a rejection whose Problem arrives after the workspace changes", async () => {
+  let body!: (value: unknown) => void;
+  const response = {
+    status: 409,
+    json: () =>
+      new Promise((done) => {
+        body = done;
+      }),
+  } as unknown as Response;
+  mocks.createAgentRollout.mockRejectedValue(
+    new ResponseError(response, "Response returned an error code"),
+  );
+  const view = await mount();
+  const submit = view.submitRollout();
+  await vi.waitFor(() => {
+    expect(body).toBeDefined();
+  });
+  workspace = { id: "workspace-b", generation: 2 };
+  window.dispatchEvent(new Event("workspace"));
+  body({ type: "https://ocservia.dev/problems/approval-required" });
+  await submit;
+  expect(view.rolloutError).toBe("");
 });
 
 it("gives up navigation when the dialog closes, keeping the request", async () => {
