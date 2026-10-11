@@ -226,6 +226,8 @@ certutil() { :; }
             {'name': 'browser_login_workspace_forbidden_refresh', 'status': 'PASS'},
             {'name': 'browser_bound_approval', 'action': 'service.reload'},
             {'name': 'browser_bound_approval', 'action': 'config.apply'},
+            {'name': 'browser_csp', 'flow_violations': 0, 'flow_console_reports': 0, 'flow_page_errors': 0,
+             'control': ['script-src-elem/report', 'img-src/report']},
         ]
         certificate_entries = [
             {'name': name, 'operation_id': 'operation'} for name in
@@ -257,6 +259,10 @@ certutil() { :; }
         invalid_entries += [browser_entries[:i] + browser_entries[i + 1:] for i in range(len(browser_entries))]
         invalid_entries += [[{**entry, 'operation': {}} if entry['name'] == 'browser_user_mutation' else entry
                              for entry in browser_entries]]
+        # A Report-Only violation, or a collector that missed the control, fails.
+        for change in ({'flow_violations': 1}, {'flow_console_reports': 1}, {'control': ['img-src/report']}):
+            invalid_entries += [[{**entry, **change} if entry['name'] == 'browser_csp' else entry
+                                 for entry in browser_entries]]
         for entries in invalid_entries:
             browser_file.write_text(json.dumps(entries))
             with patch.dict(os.environ, env), patch.object(business, 'api', side_effect=api), \

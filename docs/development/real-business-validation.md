@@ -13,7 +13,12 @@ and deep recovery. Smoke retains a separate API-created VPN user; with
 Its configuration is applied once through
 the browser and checked against the operation receipts and native file hash
 before VPN and recovery checks. Both profiles require `real_browser_subset`;
-missing browser checkpoints fail acceptance.
+missing browser checkpoints fail acceptance. The browser subset also collects
+Content Security Policy violations in the page (the gateway policy is
+Report-Only and has no report endpoint) and writes them to `browser-csp.json`
+without URL queries. Any violation or console CSP report outside the final
+deliberate control fails acceptance, as does a control that the collector
+misses.
 No production binary, service, Relay or VPN is mocked. Use
 [Release policy](release-checks.md) for dispatch commands, topology selection,
 coverage ownership and publication gates; Business alone establishes neither
