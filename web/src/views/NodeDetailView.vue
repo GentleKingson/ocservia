@@ -6,15 +6,10 @@ import {
   Download,
   FileCheck2,
   KeyRound,
-  ListPlus,
   LogOut,
   Power,
   Server,
   ShieldOff,
-  SlidersHorizontal,
-  UserCheck,
-  UserPlus,
-  UserX,
 } from "@lucide/vue";
 import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
 import { useEventListener } from "@vueuse/core";
@@ -38,15 +33,12 @@ import OperationDialog from "../components/common/OperationDialog.vue";
 import SectionCard from "../components/common/SectionCard.vue";
 import StatusBadge from "../components/common/StatusBadge.vue";
 import NodeDetailHeader from "../components/nodes/NodeDetailHeader.vue";
+import NodeDetailUsersGroupsSection from "../components/nodes/NodeDetailUsersGroupsSection.vue";
 import NodeDetailNav from "../components/nodes/NodeDetailNav.vue";
 import NodeDetailSkeleton from "../components/nodes/NodeDetailSkeleton.vue";
 import NodeObservedDetails from "../components/nodes/NodeObservedDetails.vue";
 import NodeStatusSummary from "../components/nodes/NodeStatusSummary.vue";
 import UserPolicyDialog from "../components/nodes/UserPolicyDialog.vue";
-import {
-  recoveryDialogKind,
-  resourceStatusKey,
-} from "../shared/desired-recovery";
 import { useFleetStore } from "../shared/fleet";
 import { operationTone } from "../features/operations/state-tone";
 import { operationStatusKey } from "../shared/operation-status";
@@ -78,7 +70,6 @@ const pendingAction = ref<{
 }>();
 const reason = ref("");
 const approvalId = ref("");
-const stateTab = ref<"users" | "groups">("users");
 const desiredDialog = ref<{
   kind: "create" | "disable" | "enable" | "rotate" | "group";
   name: string;
@@ -236,6 +227,12 @@ function actionExplanation(action: string): string {
     ? ""
     : t("action_" + (availability?.reason ?? "unknown"));
 }
+function actionState(action: string) {
+  return {
+    allowed: actionAvailable(action),
+    explanation: actionExplanation(action),
+  };
+}
 
 function openAction(
   kind: "disconnect" | "terminate" | "unban" | "reload" | "upgradeAgent",
@@ -387,12 +384,6 @@ async function submitDesired(): Promise<void> {
 
 function openPolicy(username: string): void {
   if (currentNode.value) policyDialog.value = { username };
-}
-function convergenceTone(key: string): string {
-  if (key === "convergence_converged") return "text-success";
-  return key === "convergence_drifted"
-    ? "text-destructive"
-    : "text-muted-foreground";
 }
 </script>
 
@@ -597,296 +588,15 @@ function convergenceTone(key: string): string {
         </div>
       </SectionCard>
 
-      <SectionCard id="node-users-groups" :title="$t('usersAndGroups')">
-        <template #actions>
-          <div
-            class="bg-muted inline-flex gap-0.5 rounded-md p-0.5"
-            role="group"
-            :aria-label="$t('usersAndGroups')"
-          >
-            <Button
-              type="button"
-              size="sm"
-              :variant="stateTab === 'users' ? 'outline' : 'ghost'"
-              :aria-pressed="stateTab === 'users'"
-              @click="stateTab = 'users'"
-            >
-              {{ $t("users") }}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              :variant="stateTab === 'groups' ? 'outline' : 'ghost'"
-              :aria-pressed="stateTab === 'groups'"
-              @click="stateTab = 'groups'"
-            >
-              {{ $t("groups") }}
-            </Button>
-          </div>
-          <Button
-            v-if="stateTab === 'users'"
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            :disabled="operationBusy || !actionAvailable('user.manage')"
-            :title="actionExplanation('user.manage') || $t('createUser')"
-            :aria-label="$t('createUser')"
-            @click="openDesired('create')"
-          >
-            <UserPlus aria-hidden="true" />
-          </Button>
-          <Button
-            v-else
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            :disabled="operationBusy || !actionAvailable('group.manage')"
-            :title="actionExplanation('group.manage') || $t('applyGroup')"
-            :aria-label="$t('applyGroup')"
-            @click="openDesired('group')"
-          >
-            <ListPlus aria-hidden="true" />
-          </Button>
-        </template>
-        <p
-          v-if="
-            !actionAvailable(
-              stateTab === 'users' ? 'user.manage' : 'group.manage',
-            )
-          "
-          class="text-muted-foreground m-0 text-xs"
-        >
-          {{
-            actionExplanation(
-              stateTab === "users" ? "user.manage" : "group.manage",
-            )
-          }}
-        </p>
-        <template v-if="stateTab === 'users'">
-          <ul v-if="usersState.length" class="m-0 grid list-none p-0">
-            <li
-              v-for="item in usersState"
-              :key="item.name"
-              class="border-border flex flex-wrap items-center justify-between gap-2 border-b py-1.5 last:border-b-0"
-            >
-              <span class="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-                <strong class="break-words">{{ item.name }}</strong>
-                <Badge
-                  variant="outline"
-                  :class="convergenceTone(resourceStatusKey(item))"
-                  >{{ $t(resourceStatusKey(item)) }}</Badge
-                >
-                <Badge
-                  v-if="item.recoveryRequired && !item.recoveryMutationKind"
-                  variant="outline"
-                  class="text-destructive"
-                  >{{ $t("manualReconciliationRequired") }}</Badge
-                >
-              </span>
-              <span class="flex shrink-0 gap-1">
-                <Button
-                  v-if="item.desiredVersion"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  :disabled="operationBusy || !item.desiredVersion"
-                  :title="$t('quotaAndExpiry')"
-                  :aria-label="$t('quotaAndExpiry')"
-                  @click="openPolicy(item.name)"
-                >
-                  <SlidersHorizontal aria-hidden="true" />
-                </Button>
-                <Button
-                  v-if="recoveryDialogKind(item) === 'create'"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  :disabled="
-                    operationBusy ||
-                    !actionAvailable('user.manage') ||
-                    !item.desiredVersion
-                  "
-                  :title="$t('retryCreateUser')"
-                  :aria-label="$t('retryCreateUser')"
-                  @click="
-                    openDesired('create', item.name, item.desiredVersion ?? 0)
-                  "
-                >
-                  <UserPlus aria-hidden="true" />
-                </Button>
-                <Button
-                  v-else-if="recoveryDialogKind(item) === 'rotate'"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  :disabled="
-                    operationBusy ||
-                    !actionAvailable('user.manage') ||
-                    !item.desiredVersion
-                  "
-                  :title="$t('retryRotatePassword')"
-                  :aria-label="$t('retryRotatePassword')"
-                  @click="
-                    openDesired('rotate', item.name, item.desiredVersion ?? 0)
-                  "
-                >
-                  <KeyRound aria-hidden="true" />
-                </Button>
-                <Button
-                  v-else-if="recoveryDialogKind(item) === 'disable'"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  class="text-destructive hover:text-destructive"
-                  :disabled="
-                    operationBusy ||
-                    !actionAvailable('user.manage') ||
-                    !item.desiredVersion
-                  "
-                  :title="$t('retryDisableUser')"
-                  :aria-label="$t('retryDisableUser')"
-                  @click="
-                    openDesired('disable', item.name, item.desiredVersion ?? 0)
-                  "
-                >
-                  <UserX aria-hidden="true" />
-                </Button>
-                <Button
-                  v-else-if="recoveryDialogKind(item) === 'enable'"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  :disabled="
-                    operationBusy ||
-                    !actionAvailable('user.manage') ||
-                    !item.desiredVersion
-                  "
-                  :title="$t('retryEnableUser')"
-                  :aria-label="$t('retryEnableUser')"
-                  @click="
-                    openDesired('enable', item.name, item.desiredVersion ?? 0)
-                  "
-                >
-                  <UserCheck aria-hidden="true" />
-                </Button>
-                <Button
-                  v-if="!item.recoveryRequired"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  :disabled="
-                    operationBusy ||
-                    !actionAvailable('user.manage') ||
-                    !item.desiredVersion
-                  "
-                  :title="$t('rotatePassword')"
-                  :aria-label="$t('rotatePassword')"
-                  @click="
-                    openDesired('rotate', item.name, item.desiredVersion ?? 0)
-                  "
-                >
-                  <KeyRound aria-hidden="true" />
-                </Button>
-                <Button
-                  v-if="!item.recoveryRequired && item.desiredEnabled === false"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  :disabled="
-                    operationBusy ||
-                    !actionAvailable('user.manage') ||
-                    !item.desiredVersion
-                  "
-                  :title="$t('enableUser')"
-                  :aria-label="$t('enableUser')"
-                  @click="
-                    openDesired('enable', item.name, item.desiredVersion ?? 0)
-                  "
-                >
-                  <UserCheck aria-hidden="true" />
-                </Button>
-                <Button
-                  v-else-if="!item.recoveryRequired"
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  class="text-destructive hover:text-destructive"
-                  :disabled="
-                    operationBusy ||
-                    !actionAvailable('user.manage') ||
-                    !item.desiredVersion
-                  "
-                  :title="$t('disableUser')"
-                  :aria-label="$t('disableUser')"
-                  @click="
-                    openDesired('disable', item.name, item.desiredVersion ?? 0)
-                  "
-                >
-                  <UserX aria-hidden="true" />
-                </Button>
-              </span>
-            </li>
-          </ul>
-          <p v-else class="text-muted-foreground m-0 text-sm">
-            {{ $t("noUsers") }}
-          </p>
-        </template>
-        <template v-else>
-          <ul v-if="groupsState.length" class="m-0 grid list-none p-0">
-            <li
-              v-for="item in groupsState"
-              :key="item.name"
-              class="border-border flex flex-wrap items-center justify-between gap-2 border-b py-1.5 last:border-b-0"
-            >
-              <span class="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-                <strong class="break-words">{{ item.name }}</strong>
-                <Badge
-                  variant="outline"
-                  :class="convergenceTone(resourceStatusKey(item))"
-                  >{{ $t(resourceStatusKey(item)) }}</Badge
-                >
-                <Badge
-                  v-if="item.recoveryRequired && !item.recoveryMutationKind"
-                  variant="outline"
-                  class="text-destructive"
-                  >{{ $t("manualReconciliationRequired") }}</Badge
-                >
-              </span>
-              <Button
-                v-if="recoveryDialogKind(item) === 'group'"
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                :disabled="operationBusy || !actionAvailable('group.manage')"
-                :title="$t('retryApplyGroup')"
-                :aria-label="$t('retryApplyGroup')"
-                @click="
-                  openDesired('group', item.name, item.desiredVersion ?? 0)
-                "
-              >
-                <ListPlus aria-hidden="true" />
-              </Button>
-              <Button
-                v-else-if="!item.recoveryRequired"
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                :disabled="operationBusy || !actionAvailable('group.manage')"
-                :title="$t('applyGroup')"
-                :aria-label="$t('applyGroup')"
-                @click="
-                  openDesired('group', item.name, item.desiredVersion ?? 0)
-                "
-              >
-                <ListPlus aria-hidden="true" />
-              </Button>
-            </li>
-          </ul>
-          <p v-else class="text-muted-foreground m-0 text-sm">
-            {{ $t("noGroups") }}
-          </p>
-        </template>
-      </SectionCard>
+      <NodeDetailUsersGroupsSection
+        :users="usersState"
+        :groups="groupsState"
+        :busy="operationBusy"
+        :user-action="actionState('user.manage')"
+        :group-action="actionState('group.manage')"
+        @desired="openDesired"
+        @policy="openPolicy"
+      />
 
       <SectionCard id="node-configuration" :title="$t('configurationSection')">
         <div class="flex flex-wrap items-center justify-between gap-3">

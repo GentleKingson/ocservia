@@ -18,9 +18,20 @@ const savedPolicy = {
   convergence: "converged",
 };
 
+const alice = {
+  kind: "user",
+  name: "alice",
+  desired_enabled: true,
+  desired_version: 4,
+  desired_revision: 4,
+  convergence: "converged",
+  recovery_required: false,
+};
+
 async function openNode(
   page: Page,
   effectiveActions: Record<string, unknown>,
+  userGroupState: unknown[] = [alice],
 ): Promise<Request[]> {
   const node = {
     id: nodeId,
@@ -71,19 +82,7 @@ async function openNode(
   );
   await page.route(`**/api/v1/nodes/${nodeId}/user-group-state`, (route) =>
     route.fulfill({
-      json: {
-        items: [
-          {
-            kind: "user",
-            name: "alice",
-            desired_enabled: true,
-            desired_version: 4,
-            desired_revision: 4,
-            convergence: "converged",
-            recovery_required: false,
-          },
-        ],
-      },
+      json: { items: userGroupState },
     }),
   );
   await page.goto(`/nodes/${nodeId}`);
@@ -115,6 +114,61 @@ test("explains denied and unknown permissions on disabled controls", async ({
     "Action availability has not been read. Refresh the node details.",
   );
   expect(writes).toHaveLength(0);
+});
+
+test("opens user and group forms for the row that was chosen", async ({
+  page,
+}) => {
+  const writes = await openNode(
+    page,
+    {
+      "user.manage": { allowed: true, reason: "available" },
+      "group.manage": { allowed: true, reason: "available" },
+    },
+    [
+      {
+        ...alice,
+        name: "carol",
+        desired_enabled: false,
+        desired_version: 3,
+        desired_revision: 3,
+      },
+      {
+        kind: "group",
+        name: "ops",
+        desired_version: 5,
+        desired_revision: 5,
+        desired_members: ["bob", "alice"],
+        convergence: "drifted",
+        recovery_required: true,
+        recovery_mutation_kind: "group_apply",
+      },
+    ],
+  );
+  await page.route(`**/api/v1/nodes/${nodeId}/**`, (route) =>
+    route.request().method() === "GET" ? route.fallback() : route.abort(),
+  );
+  const dialog = page.getByRole("dialog");
+
+  await page.getByRole("button", { name: "Enable user" }).click();
+  await expect(dialog).toContainText("carol");
+  await dialog.getByLabel("Reason", { exact: true }).fill("re-enable");
+  await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0]?.url()).toContain("/users/carol:enable");
+  expect(writes[0]?.headers()["if-match"]).toBe('"revision-3"');
+
+  await page.getByRole("button", { name: "Groups" }).click();
+  await page.getByRole("button", { name: "Retry group apply" }).click();
+  await expect(dialog.getByLabel("Group", { exact: true })).toHaveValue("ops");
+  await expect(dialog.getByLabel("Members", { exact: true })).toHaveValue(
+    "bob, alice",
+  );
+  await dialog.getByLabel("Reason", { exact: true }).fill("retry");
+  await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect.poll(() => writes.length).toBe(2);
+  expect(writes[1]?.url()).toContain("/groups/ops");
+  expect(writes[1]?.headers()["if-match"]).toBe('"revision-5"');
 });
 
 test("closes a form with Escape or Cancel without writing", async ({
