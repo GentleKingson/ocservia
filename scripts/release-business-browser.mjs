@@ -14,26 +14,28 @@ const browser = await chromium.launch({ headless: true });
 const observations = [];
 // The gateway CSP is Report-Only with no report endpoint, so violations are
 // collected in the page. Uploaded diagnostics keep no URL query or fragment.
-const csp = { phase: "flow", violations: [], console: [], page_errors: [] };
+// Each context reports under a fixed phase, so a late business violation can
+// never be counted as part of the control.
+const csp = { violations: [], console: [], page_errors: [] };
 const redact = (text) => String(text).replace(/([a-z]+:\/\/[^\s?#'"]*)[?#][^\s'"]*/gi, "$1").slice(0, 300);
-async function collectCsp(browserContext) {
-  await browserContext.exposeBinding("__ocserviaCsp", (_source, violation) => csp.violations.push({ phase: csp.phase, ...violation }));
+async function collectCsp(browserContext, phase) {
+  await browserContext.exposeBinding("__ocserviaCsp", (_source, violation) => csp.violations.push({ phase, ...violation }));
   await browserContext.addInitScript(() => {
     document.addEventListener("securitypolicyviolation", (event) => window.__ocserviaCsp({
       directive: event.effectiveDirective, disposition: event.disposition, blocked: event.blockedURI, source: event.sourceFile, line: event.lineNumber,
     }));
   });
   browserContext.on("console", (message) => {
-    if (/content.security.policy/i.test(message.text())) csp.console.push({ phase: csp.phase, type: message.type(), text: redact(message.text()) });
+    if (/content.security.policy/i.test(message.text())) csp.console.push({ phase, type: message.type(), text: redact(message.text()) });
   });
-  browserContext.on("weberror", (error) => csp.page_errors.push({ phase: csp.phase, message: redact(error.error().message) }));
+  browserContext.on("weberror", (error) => csp.page_errors.push({ phase, message: redact(error.error().message) }));
 }
 try {
   const origin = process.env.OCSERV_CONTROLLER_PUBLIC_URL || "https://localhost";
   const context = await browser.newContext({ baseURL: origin, locale: "en-US" });
   const approver = await browser.newContext({ baseURL: origin, locale: "en-US" });
-  await collectCsp(context);
-  await collectCsp(approver);
+  await collectCsp(context, "flow");
+  await collectCsp(approver, "flow");
   const page = await context.newPage();
   const approvalPage = await approver.newPage();
   const requesterApprovalPage = await context.newPage();
@@ -271,10 +273,13 @@ try {
     await expect(page.getByText("revoked", { exact: true })).toBeVisible({ timeout: 120000 });
   }
 
-  // Positive control: a deliberate image and inline script must be observed,
-  // proving that zero violations above is a real result.
-  csp.phase = "control";
-  await page.evaluate(() => {
+  // Positive control in its own context: a deliberate image and inline script
+  // must be observed, proving that zero business violations is a real result.
+  const controlContext = await browser.newContext({ baseURL: origin, locale: "en-US" });
+  await collectCsp(controlContext, "control");
+  const controlPage = await controlContext.newPage();
+  await controlPage.goto("/login");
+  await controlPage.evaluate(() => {
     const image = new Image();
     image.src = "https://csp-control.invalid/pixel.png";
     document.body.append(image);
@@ -284,6 +289,8 @@ try {
   });
   const control = () => csp.violations.filter(violation => violation.phase === "control");
   await expect.poll(() => ["img-src", "script-src-elem"].every(directive => control().some(violation => violation.directive === directive))).toBe(true);
+  // Closed contexts report nothing more, so the counts below are final.
+  await Promise.all([context.close(), approver.close(), controlContext.close()]);
   const flow = (list) => list.filter(entry => entry.phase === "flow").length;
   observations.push({ name: "browser_csp", flow_violations: flow(csp.violations), flow_console_reports: flow(csp.console),
     flow_page_errors: flow(csp.page_errors), control: control().map(violation => `${violation.directive}/${violation.disposition}`) });

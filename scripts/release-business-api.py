@@ -708,7 +708,8 @@ def browser_verify():
     assert next(entry for entry in entries if entry['name'] == 'browser_login_workspace_forbidden_refresh')['status'] == 'PASS'
     csp = next(entry for entry in entries if entry['name'] == 'browser_csp')
     assert csp['flow_violations'] == 0 and csp['flow_console_reports'] == 0, 'browser CSP violation: see browser-csp.json'
-    assert {'img-src', 'script-src-elem'} <= {item.split('/')[0] for item in csp['control']}, 'browser CSP control not observed'
+    assert sorted(item.split('/')[0] for item in csp['control']) == ['img-src', 'script-src-elem'], \
+        'browser CSP control not observed exactly'
     operation_checks = {'browser_user_mutation', 'browser_approved_reload', 'browser_complete_config_apply',
                         'browser_certificate_csr', 'browser_certificate_issue_export_one_use', 'browser_certificate_revoke'}
     for entry in entries:

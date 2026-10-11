@@ -260,7 +260,8 @@ certutil() { :; }
         invalid_entries += [[{**entry, 'operation': {}} if entry['name'] == 'browser_user_mutation' else entry
                              for entry in browser_entries]]
         # A Report-Only violation, or a collector that missed the control, fails.
-        for change in ({'flow_violations': 1}, {'flow_console_reports': 1}, {'control': ['img-src/report']}):
+        for change in ({'flow_violations': 1}, {'flow_console_reports': 1}, {'control': ['img-src/report']},
+                       {'control': ['script-src-elem/report', 'img-src/report', 'img-src/report']}):
             invalid_entries += [[{**entry, **change} if entry['name'] == 'browser_csp' else entry
                                  for entry in browser_entries]]
         for entries in invalid_entries:
