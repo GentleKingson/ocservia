@@ -165,6 +165,30 @@ useEventListener(defaultWindow, workspaceChangedEvent, () => {
   rolloutUnconfirmed = false;
 });
 
+// Only the stable Problem type selects a local message; server text is never
+// shown. Unknown or unreadable bodies fall back to a generic rejection.
+const rolloutRejections = new Map([
+  [
+    "https://ocservia.dev/problems/approval-required",
+    "rolloutApprovalRejected",
+  ],
+  ["https://ocservia.dev/problems/no-eligible-nodes", "rolloutNoEligibleNodes"],
+  ["https://ocservia.dev/problems/invalid-request", "rolloutRequestInvalid"],
+]);
+async function problemType(error: ResponseError): Promise<string> {
+  try {
+    const problem: unknown = await error.response.json();
+    return typeof problem === "object" &&
+      problem !== null &&
+      "type" in problem &&
+      typeof problem.type === "string"
+      ? problem.type
+      : "";
+  } catch {
+    return "";
+  }
+}
+
 function openRolloutDialog(): void {
   rolloutOpening += 1;
   if (!rolloutUnconfirmed) rolloutError.value = "";
@@ -187,6 +211,7 @@ async function submitRollout(): Promise<void> {
   rolloutStarting.value = true;
   if (!rolloutUnconfirmed) rolloutError.value = "";
   let createdId: string | undefined;
+  let rejected: ResponseError | undefined;
   try {
     const rollout = await createAgentRollout(
       rolloutTarget.value,
@@ -210,12 +235,17 @@ async function submitRollout(): Promise<void> {
     // Until a create is confirmed, a definite rejection of an explicit retry
     // (e.g. the approval it consumed) does not settle that earlier start.
     rolloutUnconfirmed ||= !(cause instanceof ResponseError);
-    rolloutError.value =
-      !rolloutUnconfirmed && cause instanceof ResponseError
-        ? cause.message
-        : t("rolloutStartUnconfirmed");
+    if (!rolloutUnconfirmed && cause instanceof ResponseError) rejected = cause;
+    else rolloutError.value = t("rolloutStartUnconfirmed");
   } finally {
     if (ticket === rolloutSubmission) rolloutStarting.value = false;
+  }
+  if (rejected) {
+    const key = rolloutRejections.get(await problemType(rejected));
+    // The body is read after the request settled; a newer submit, Workspace
+    // or dialog owns the message by then.
+    if (owned() && opening === rolloutOpening)
+      rolloutError.value = t(key ?? "rolloutStartRejected");
   }
   // Outside the create's error handling: the rollout is confirmed even if
   // navigation fails.

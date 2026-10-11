@@ -424,6 +424,12 @@ export const i18n = createI18n({
       rolloutStarting: "Starting rollout…",
       rolloutStartUnconfirmed:
         "Rollout start was not confirmed. Check Agent rollouts in Operations before starting another.",
+      rolloutStartRejected: "Rollout start was rejected.",
+      rolloutApprovalRejected:
+        "The approval is expired, already used, or does not match this rollout.",
+      rolloutNoEligibleNodes:
+        "None of the selected nodes can be upgraded to this version.",
+      rolloutRequestInvalid: "The rollout request is invalid.",
       rolloutResumeUnconfirmed:
         "Resume was not confirmed. Wait for the refreshed rollout state before resuming again.",
       rolloutUnavailable: "Rollout state is unavailable",
