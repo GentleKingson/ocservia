@@ -423,7 +423,6 @@ describe("node workflow context isolation", () => {
   });
 
   it("invalidates a same-tick A to B to A navigation and removes its workspace listener", async () => {
-    const remove = vi.spyOn(window, "removeEventListener");
     const view = await mount();
     await view.openConfigPlan();
     const old = deferred<ConfigPlan>();
@@ -444,10 +443,6 @@ describe("node workflow context isolation", () => {
     );
     expect(view.configPlan?.id).toBe(plan.id);
     unmount?.();
-    expect(remove).toHaveBeenCalledWith(
-      workspaceChangedEvent,
-      expect.any(Function),
-    );
     const calls = (mocks.fleet.select as ReturnType<typeof vi.fn>).mock.calls
       .length;
     window.dispatchEvent(new Event(workspaceChangedEvent));

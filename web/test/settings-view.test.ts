@@ -109,3 +109,15 @@ it("discards a delayed response after a workspace refresh", async () => {
   expect(view.workspace?.id).toBe("workspace-b");
   expect(view.loading).toBe(false);
 });
+it("reloads once per workspace change and stops after unmount", async () => {
+  await mount();
+  expect(mocks.getWorkspace).toHaveBeenCalledTimes(1);
+  window.dispatchEvent(new Event("workspace"));
+  await flush();
+  expect(mocks.getWorkspace).toHaveBeenCalledTimes(2);
+  unmount?.();
+  unmount = undefined;
+  window.dispatchEvent(new Event("workspace"));
+  await flush();
+  expect(mocks.getWorkspace).toHaveBeenCalledTimes(2);
+});

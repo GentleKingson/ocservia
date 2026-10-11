@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { RefreshCw } from "@lucide/vue";
 import type { AgentRollout, Operation } from "@ocservia/api-client";
+import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -188,12 +189,11 @@ function refreshForWorkspace(): void {
   refresh();
 }
 
+useEventListener(window, workspaceChangedEvent, refreshForWorkspace);
 onMounted(() => {
-  window.addEventListener(workspaceChangedEvent, refreshForWorkspace);
   refresh();
 });
 onBeforeUnmount(() => {
-  window.removeEventListener(workspaceChangedEvent, refreshForWorkspace);
   cancelRequests();
 });
 </script>

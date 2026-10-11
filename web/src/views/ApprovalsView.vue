@@ -5,6 +5,7 @@ import {
   ResponseError,
   type Approval,
 } from "@ocservia/api-client";
+import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
@@ -301,12 +302,11 @@ watch(
     void loadApproval();
   },
 );
+useEventListener(window, workspaceChangedEvent, refreshWorkspace);
 onMounted(() => {
-  window.addEventListener(workspaceChangedEvent, refreshWorkspace);
   refresh();
 });
 onBeforeUnmount(() => {
-  window.removeEventListener(workspaceChangedEvent, refreshWorkspace);
   invalidateQueue();
   invalidate();
 });

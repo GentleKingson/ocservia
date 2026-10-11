@@ -17,6 +17,7 @@ import {
   UserX,
 } from "@lucide/vue";
 import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
+import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
@@ -192,16 +193,15 @@ function refreshForWorkspace(): void {
   void selectRouteNode();
 }
 
+useEventListener(window, workspaceChangedEvent, refreshForWorkspace);
 onMounted(() => {
   fleet.start();
-  window.addEventListener(workspaceChangedEvent, refreshForWorkspace);
   void selectRouteNode();
 });
 onBeforeUnmount(() => {
   closeNodeDialogs();
   detailSequence += 1;
   fleet.stop();
-  window.removeEventListener(workspaceChangedEvent, refreshForWorkspace);
 });
 watch(routeNodeId, () => void selectRouteNode(), { flush: "sync" });
 
