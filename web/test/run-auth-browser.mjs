@@ -92,6 +92,16 @@ try {
   const result = JSON.parse(await readFile(report, "utf8"));
   const specs = (suites) =>
     suites.flatMap((suite) => [...suite.specs, ...specs(suite.suites ?? [])]);
+  // The JSON report is deleted below, so every failure prints its errors
+  // before the first assertion stops the run.
+  for (const spec of specs(result.suites))
+    for (const test of spec.tests)
+      for (const { status, errors } of test.results)
+        if (status !== "passed" && status !== "skipped")
+          for (const error of errors ?? [])
+            console.error(
+              `[${test.projectName}] ${spec.title}\n${error.stack ?? error.message ?? ""}`,
+            );
   let passed = 0;
   const declaredSkips = [];
   const requiredProjects = new Map();

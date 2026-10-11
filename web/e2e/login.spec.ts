@@ -1,4 +1,13 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
+
+// WebKit cannot fulfill a 3xx in Playwright, so a simulated redirect is a
+// page that replaces itself with the next location.
+function redirect(route: Route, location: string): Promise<void> {
+  return route.fulfill({
+    contentType: "text/html",
+    body: `<script>location.replace(${JSON.stringify(location)})</script>`,
+  });
+}
 
 async function methods(
   page: Page,
@@ -140,7 +149,7 @@ test("OIDC return followed by 401 stops automatic login and permits manual retry
   await page.route("**/api/v1/auth/login", (route) => {
     starts += 1;
     return starts < 3
-      ? route.fulfill({ status: 302, headers: { Location: "/" } })
+      ? redirect(route, "/")
       : route.fulfill({ contentType: "text/html", body: "Loop safety stop" });
   });
   await page.goto("/nodes?filter=login#latest");
@@ -237,7 +246,7 @@ test("callback rejection is terminal and revisiting login offers manual retry", 
       });
     }
     authenticated = true;
-    return route.fulfill({ status: 302, headers: { Location: "/" } });
+    return redirect(route, "/");
   });
   const rejected = page.waitForResponse("**/api/v1/auth/callback?**");
   await page.goto("/nodes?filter=login#latest");
@@ -259,7 +268,7 @@ test("callback rejection is terminal and revisiting login offers manual retry", 
 
   const accepted = page.waitForResponse("**/api/v1/auth/callback?**");
   await retry.click();
-  expect((await accepted).status()).toBe(302);
+  expect((await accepted).status()).toBe(200);
   await expect(page).toHaveURL(/\/nodes\?filter=login#latest$/);
   await expect(page.getByTestId("workspace")).toContainText("Alpha");
   expect(starts).toBe(2);
