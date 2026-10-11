@@ -1,4 +1,5 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
+import { expect, test } from "./csp";
 
 // WebKit cannot fulfill a 3xx in Playwright, so a simulated redirect is a
 // page that replaces itself with the next location.

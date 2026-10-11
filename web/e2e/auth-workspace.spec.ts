@@ -1,4 +1,5 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const betaId = "019fc0a4-6d92-765c-a8a1-4af556614cc2";

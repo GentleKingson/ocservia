@@ -383,7 +383,12 @@ shell-navigation specs. `npm run test:e2e` runs all four projects; select one
 with `--project`. The runner accepts the same selection, for example
 `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`,
 and fails when a selected browser is missing. Report a project whose engine is
-not installed as not run. Playwright WebKit and Firefox builds are not the
+not installed as not run. `--gateway` (Docker required) serves `dist/` through
+the pinned production Caddy with `deploy/production/Caddyfile` over HTTPS
+instead of Vite preview. The cross-engine specs import `e2e/csp.ts`, which
+fails a test on any `securitypolicyviolation`. Because the policy is
+Report-Only and has no report endpoint, `csp-control.spec.ts` must also observe
+a deliberate violation in every selected project. Playwright WebKit and Firefox builds are not the
 minimum supported Safari 16.4 or Firefox 128 releases.
 
 For shared UI changes, record in the PR:

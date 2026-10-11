@@ -1,4 +1,5 @@
-import { expect, test, type Route } from "@playwright/test";
+import type { Route } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614ee1";
 const canaryNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ee2";
