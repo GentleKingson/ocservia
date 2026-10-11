@@ -16,17 +16,24 @@ import {
 import AppSidebar from "./AppSidebar.vue";
 import { isCurrentSection, navigationLinks } from "./navigation";
 
-defineProps<{
+const props = defineProps<{
   workspaces: Workspace[];
+  workspaceId: string;
   readiness: "loading" | "ready" | "unavailable";
 }>();
-const selectedWorkspaceId = defineModel<string>("workspaceId", {
-  required: true,
-});
 const emit = defineEmits<{
   changeWorkspace: [workspaceId: string];
   navigated: [];
 }>();
+
+// App owns the selection: the select keeps showing it until App confirms the
+// requested Workspace, so a rejected change leaves the current one displayed.
+function requestWorkspace(event: Event): void {
+  const select = event.target as HTMLSelectElement;
+  const workspaceId = select.value;
+  select.value = props.workspaceId;
+  emit("changeWorkspace", workspaceId);
+}
 
 const route = useRoute();
 const navigationOpen = ref(false);
@@ -104,11 +111,9 @@ function restoreFocus(event: Event): void {
         </label>
         <select
           id="workspace-select"
-          v-model="selectedWorkspaceId"
+          :value="workspaceId"
           class="border-input bg-background text-foreground focus-visible:outline-ring h-9 w-48 min-w-0 rounded-md border px-2 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-1"
-          @change="
-            emit('changeWorkspace', ($event.target as HTMLSelectElement).value)
-          "
+          @change="requestWorkspace"
         >
           <option
             v-for="workspace in workspaces"
