@@ -228,3 +228,63 @@ it("does not report a navigation failure as an unconfirmed create", async () => 
   expect(view.rolloutDialog).toBe(false);
   expect(mocks.createAgentRollout).toHaveBeenCalledTimes(1);
 });
+
+// The first POST may have created the rollout and consumed the approval, so a
+// definite rejection of an explicit retry does not settle the earlier start.
+it("keeps an unconfirmed start visible when an explicit retry is rejected", async () => {
+  mocks.createAgentRollout.mockRejectedValueOnce(new TypeError("network"));
+  mocks.createAgentRollout.mockRejectedValueOnce(
+    new ResponseError(
+      new Response("{}", { status: 409 }),
+      "Response returned an error code",
+    ),
+  );
+  const view = await mount();
+  await view.submitRollout();
+  await view.submitRollout();
+  expect(mocks.createAgentRollout).toHaveBeenCalledTimes(2);
+  expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
+  view.rolloutDialog = false;
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
+});
+
+it("keeps an unconfirmed start visible while an explicit retry is pending", async () => {
+  mocks.createAgentRollout.mockRejectedValueOnce(new TypeError("network"));
+  const view = await mount();
+  await view.submitRollout();
+  const resolve = created();
+  const retry = view.submitRollout();
+  expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
+  view.rolloutDialog = false;
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("rolloutStartUnconfirmed");
+  resolve("rollout-b");
+  await retry;
+  expect(mocks.createAgentRollout).toHaveBeenCalledTimes(2);
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("");
+});
+
+it("settles an unconfirmed start once a later create is confirmed", async () => {
+  mocks.createAgentRollout.mockRejectedValueOnce(new TypeError("network"));
+  mocks.createAgentRollout.mockResolvedValueOnce({ id: "rollout-b" });
+  const view = await mount();
+  await view.submitRollout();
+  await view.submitRollout();
+  expect(mocks.push).toHaveBeenCalledWith({
+    name: "rollout-detail",
+    params: { rolloutId: "rollout-b" },
+  });
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("");
+});
+
+it("drops an unconfirmed start when the workspace changes", async () => {
+  mocks.createAgentRollout.mockRejectedValue(new TypeError("network"));
+  const view = await mount();
+  await view.submitRollout();
+  window.dispatchEvent(new Event("workspace"));
+  view.openRolloutDialog();
+  expect(view.rolloutError).toBe("");
+});
