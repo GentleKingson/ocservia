@@ -40,6 +40,9 @@ describe("operation state tones", () => {
     for (const state of ["failed", "expired", "drifted"] as const)
       expect(operationTone(operation(state))).toBe("danger");
     expect(operationTone(operation("rolled_back"))).toBe("warning");
+    expect(operationTone(operation("future_state" as Operation["state"]))).toBe(
+      "neutral",
+    );
   });
 
   it("maps every rollout and rollout node state", () => {

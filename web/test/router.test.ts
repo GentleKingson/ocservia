@@ -5,11 +5,12 @@ import {
 } from "vue-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { routeRecords } from "../src/shared/routes";
+import { loadFailedNavigation, routeRecords } from "../src/shared/routes";
 
 describe("web information architecture routes", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     vi.resetModules();
   });
 
@@ -79,5 +80,30 @@ describe("web information architecture routes", () => {
     expect(
       developmentRoutes.find((route) => route.name === "development"),
     ).toMatchObject({ path: "/dev" });
+  });
+
+  it("loads a page whose chunk is gone from the server, except on the initial navigation", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("window", { location: { assign } });
+    const missingChunk = () =>
+      Promise.reject(
+        new TypeError("Failed to fetch dynamically imported module"),
+      );
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", component: {} },
+        { path: "/missing/:id", component: missingChunk },
+      ],
+    });
+    router.onError(loadFailedNavigation);
+
+    await expect(router.push("/missing/a?tab=x")).rejects.toThrow(TypeError);
+    expect(assign).not.toHaveBeenCalled();
+
+    await router.push("/");
+    await expect(router.push("/missing/b?tab=y")).rejects.toThrow(TypeError);
+    expect(assign).toHaveBeenCalledExactlyOnceWith("/missing/b?tab=y");
+    expect(router.currentRoute.value.fullPath).toBe("/");
   });
 });
