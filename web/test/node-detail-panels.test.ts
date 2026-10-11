@@ -1,4 +1,7 @@
-import type { NodeObservedState } from "@ocservia/api-client";
+import type {
+  NodeObservedState,
+  UserGroupResourceState,
+} from "@ocservia/api-client";
 import { createSSRApp, h } from "vue";
 import { renderToString } from "vue/server-renderer";
 import { expect, it, vi } from "vitest";
@@ -6,6 +9,7 @@ import { expect, it, vi } from "vitest";
 vi.mock("vue-i18n", () => ({
   useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
 }));
+import NodeDetailUsersGroupsSection from "../src/components/nodes/NodeDetailUsersGroupsSection.vue";
 import NodeObservedDetails from "../src/components/nodes/NodeObservedDetails.vue";
 import NodeStatusSummary from "../src/components/nodes/NodeStatusSummary.vue";
 
@@ -50,4 +54,57 @@ it("offers copy for long identity values", async () => {
   expect(details).toContain("b".repeat(64));
   expect(details).toContain("break-all");
   expect(details.match(/copyValue/g)?.length).toBe(4); // aria-label + title ×2
+});
+
+it("disables user actions and explains why when user.manage is denied", async () => {
+  const users = [
+    {
+      kind: "user",
+      name: "alice",
+      desiredEnabled: true,
+      desiredVersion: 4,
+      convergence: "converged",
+      recoveryRequired: false,
+    },
+    {
+      kind: "user",
+      name: "bob",
+      desiredVersion: 2,
+      convergence: "drifted",
+      recoveryRequired: true,
+      recoveryMutationKind: "user_password_rotate",
+    },
+  ] as UserGroupResourceState[];
+  const section = (allowed: boolean, busy = false) =>
+    render(NodeDetailUsersGroupsSection, {
+      users,
+      groups: [],
+      busy,
+      userAction: { allowed, explanation: allowed ? "" : "action_forbidden" },
+      groupAction: { allowed: true, explanation: "" },
+    });
+  const disabledLabels = (html: string) =>
+    [...html.matchAll(/<button[^>]*>/g)]
+      .map((match) => match[0])
+      .filter((tag) => / disabled[ >=]/.test(tag))
+      .map((tag) => /aria-label="([^"]*)"/.exec(tag)?.[1]);
+
+  const denied = await section(false);
+  expect(denied).toContain("action_forbidden");
+  // Everything that writes a user is disabled; quota needs only a version.
+  expect(disabledLabels(denied).sort()).toEqual([
+    "createUser",
+    "disableUser",
+    "retryRotatePassword",
+    "rotatePassword",
+  ]);
+
+  const allowed = await section(true);
+  expect(allowed).not.toContain("action_forbidden");
+  expect(disabledLabels(allowed)).toEqual([]);
+  // The recovery row offers only its retry, not the routine actions.
+  expect(allowed.match(/aria-label="rotatePassword"/g)).toHaveLength(1);
+
+  const busy = await section(true, true);
+  expect(disabledLabels(busy)).toHaveLength(6);
 });
