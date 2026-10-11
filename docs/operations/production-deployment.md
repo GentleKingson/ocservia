@@ -455,6 +455,21 @@ observations separately. Normal production direct connectivity is unchanged.
 
 The control plane runs `--role=all`. Public TLS terminates at the gateway (behind Edge in Integrated); use an HTTPS certificate signer (the external endpoint in Standalone, the bundled Signer in Integrated). Set `OCSERV_PUBLIC_ORIGIN` to the public HTTPS origin. When OIDC is enabled, configure its redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback`; its origin must match `OCSERV_PUBLIC_ORIGIN`.
 
+### Gateway response headers
+
+Both gateway configurations, [`Caddyfile`](../../deploy/production/Caddyfile)
+(Standalone) and [`integrated/site.caddy`](../../deploy/production/integrated/site.caddy)
+(Integrated), send HSTS, `nosniff`, `X-Frame-Options: DENY` and
+`Referrer-Policy: no-referrer` on every response, and the same Content Security
+Policy in **Report-Only** mode: `default-src 'self'; object-src 'none'; base-uri
+'none'; frame-ancestors 'none'; form-action 'self'`. Report-Only blocks nothing
+and names no report endpoint; violations appear only in the browser console.
+Keep the two policies identical. Before switching the header to
+`Content-Security-Policy`, run the browser specs against both gateways over HTTPS
+in Chromium, Firefox and WebKit with no violations; if enforcement breaks a page,
+return only this header to Report-Only and keep the other headers. No reported
+violation covers only the exercised paths and is not proof of the absence of XSS.
+
 <a id="authentication-request-budgets"></a>
 ### Gateway addressing and proxy trust
 

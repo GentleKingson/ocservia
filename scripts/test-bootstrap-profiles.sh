@@ -32,7 +32,7 @@ end
 
 worker_flags = {
   "docs" => "run_docs", "go" => "run_go", "rust" => "run_rust",
-  "web" => "run_web", "database-smoke" => "run_database"
+  "web" => "run_web", "web-browser" => "run_web_browser", "database-smoke" => "run_database"
 }
 reject("Basic CI triggers drifted") unless workflow.fetch(true).keys.sort == %w[pull_request push workflow_call workflow_dispatch]
 reject("reusable Basic CI must require an explicit profile") unless

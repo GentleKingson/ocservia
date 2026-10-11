@@ -12,11 +12,14 @@ defineProps<{
 
 // Return to the list view the user came from, keeping its filters, when the
 // previous history entry is the Nodes list.
-const back = typeof window === "undefined" ? undefined : window.history.state;
+const state: unknown =
+  typeof window === "undefined" ? undefined : window.history.state;
+const back =
+  typeof state === "object" && state !== null && "back" in state
+    ? state.back
+    : undefined;
 const backTo =
-  typeof back?.back === "string" && /^\/nodes(?:\?|$)/.test(back.back)
-    ? back.back
-    : "/nodes";
+  typeof back === "string" && /^\/nodes(?:\?|$)/.test(back) ? back : "/nodes";
 
 const tones = {
   ok: ["text-success", "bg-success"],

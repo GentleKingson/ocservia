@@ -1,4 +1,5 @@
 import eslint from "@eslint/js";
+import pluginVue from "eslint-plugin-vue";
 import tseslint from "typescript-eslint";
 
 // Match relative imports at any depth and the `@/` source alias.
@@ -12,6 +13,7 @@ const pageOwnedImports = {
 export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
+  ...pluginVue.configs["flat/essential"],
   {
     files: [
       "src/**/*.ts",
@@ -25,6 +27,29 @@ export default tseslint.config(
         tsconfigRootDir: import.meta.dirname,
       },
     },
+  },
+  {
+    // The Vue parser owns the template; <script lang="ts"> goes to the
+    // TypeScript parser with the same project service as .ts sources.
+    files: ["src/**/*.vue"],
+    languageOptions: {
+      parserOptions: {
+        parser: tseslint.parser,
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+        extraFileExtensions: [".vue"],
+      },
+    },
+  },
+  {
+    // Type checking (vue-tsc) owns undefined names, as for .ts sources.
+    ...tseslint.configs.eslintRecommended,
+    files: ["src/**/*.vue"],
+  },
+  {
+    // shadcn-vue primitives keep their upstream single-word names.
+    files: ["src/components/ui/**/*.vue"],
+    rules: { "vue/multi-word-component-names": "off" },
   },
   {
     files: ["test/**/*.mjs"],

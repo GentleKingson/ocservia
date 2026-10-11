@@ -96,7 +96,7 @@ const rows = computed(() => {
       // records shift positions. The list contract leaves items untyped: a
       // missing or repeated id keeps the row visible under a positional key.
       const id = typeof item.id === "string" ? item.id : "";
-      const key = id && !seen.has(id) ? `id:${id}` : `row:${index}`;
+      const key = id && !seen.has(id) ? `id:${id}` : `row:${String(index)}`;
       seen.add(id);
       return { item, key };
     })
@@ -123,9 +123,10 @@ function toggle(key: string): void {
     : [...expanded.value, key];
 }
 function resultLabel(item: AuditItem): string {
-  return resultOptions.includes(item.result)
-    ? t(`auditResult_${item.result}`)
-    : text(item.result);
+  const result: unknown = item.result;
+  return typeof result === "string" && resultOptions.includes(result)
+    ? t(`auditResult_${result}`)
+    : text(result);
 }
 const detailFields = [
   ["auditActorType", "actor_type"],

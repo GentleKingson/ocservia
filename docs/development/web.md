@@ -67,6 +67,11 @@ modules also cannot import features. Generated sources are excluded. This is
 not a transitive dependency or runtime ownership check and does not cover
 constructed/dynamic imports or every Vue SFC.
 
+The same configuration lints `src/**/*.vue` with eslint-plugin-vue's essential
+rules (invalid directives, prop mutation, `v-if` with `v-for`, missing keys) and
+passes `<script lang="ts">` to the typed TypeScript parser. Only the
+`components/ui` shadcn-vue primitives keep single-word component names.
+
 Keep the `@/` mapping to `web/src` identical in TypeScript and Vite configuration.
 Features receive context and tracking callbacks from the page; they may use Vue,
 generated types, domain APIs and `features/node-workflow.ts`. API transport may
@@ -144,13 +149,14 @@ matches Tailwind CSS v4's baseline (cascade layers, `@property`,
 `color-mix()`), and `vite.config.ts` sets the same `build.target`. Change both
 together; do not lower the range without a reviewed compatibility plan.
 
-The support range is a policy, not a test matrix. The Playwright specs and the
-authentication browser runner use Chromium only (desktop Chrome and an iPhone
-13 emulation that is forced to Chromium). Basic CI runs no browser at all: its
-`web` job runs `scripts/web-check.sh basic`. Playwright specs run through
-`npm run test:e2e` or `make e2e`; `scripts/web-check.sh full` runs the separate
-authentication browser runner. Safari and Firefox are supported targets with no automated
-coverage; record manual results for UI changes that depend on them.
+The support range is a policy, not a test matrix. Basic CI's `web` job runs
+`scripts/web-check.sh basic` and no browser. The separate `web-browser` job runs
+only for its routed paths ([GitHub Actions](github-actions.md#path-routing)):
+Quick runs the Chromium `desktop` project, Full adds the `firefox` and `webkit`
+projects (see [Validation](#validation)). The `mobile` project is Chromium
+emulation. Playwright's Firefox and WebKit builds are not the minimum Safari
+16.4 or Firefox 128 releases; record manual results for UI changes that depend
+on those browsers.
 
 ### Component sources
 
@@ -358,7 +364,7 @@ according to [Validate a change](testing.md). Paths in the table are relative to
 | Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser specs `e2e/operations.spec.ts`, `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume |
 | Approvals, audit, overview | Corresponding view/unit tests and browser specs `e2e/approval-queue.spec.ts`, `e2e/approvals-audit.spec.ts`, `e2e/overview.spec.ts`; verify permission, stale/empty states and Workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
-| ESLint configuration | `npm run lint` and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
+| ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
 
 `scripts/web-check.sh basic` runs generated-client build, formatting, lint,
 typecheck, unit tests, production build and generated-auth checks. Its `full`
@@ -369,6 +375,16 @@ Specs requiring the development simulator (`local-slice` and the first two
 `overview` tests) need a running backend; report missing coverage as not run.
 For a separately served production build, set `PLAYWRIGHT_BASE_URL` before
 running focused Playwright specs.
+
+Playwright projects name their engine: `desktop` is Chromium, `mobile` is the
+iPhone 13 viewport emulated in Chromium (not Safari coverage), and `firefox` and
+`webkit` run only the login/Workspace, rollout, node-form, password-dialog and
+shell-navigation specs. `npm run test:e2e` runs all four projects; select one
+with `--project`. The runner accepts the same selection, for example
+`node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`,
+and fails when a selected browser is missing. Report a project whose engine is
+not installed as not run. Playwright WebKit and Firefox builds are not the
+minimum supported Safari 16.4 or Firefox 128 releases.
 
 For shared UI changes, record in the PR:
 

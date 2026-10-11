@@ -8,6 +8,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { preview } from "vite";
 
+// Usage: node test/run-auth-browser.mjs [--project=NAME]... [SPEC]...
+// Projects default to desktop; extra specs run beside the authentication specs.
+// Every required test must pass in every selected project; a missing browser
+// fails the run instead of being reported as passed.
+const args = process.argv.slice(2);
+const projects = args
+  .filter((arg) => arg.startsWith("--project="))
+  .map((arg) => arg.slice("--project=".length));
+if (projects.length === 0) projects.push("desktop");
+const extraSpecs = args.filter((arg) => !arg.startsWith("--project="));
 // These existing browser regressions are not selected by `vitest run test`.
 const required = new Set([
   "local-only login restores return path and initializes the shell without storing passwords",
@@ -55,9 +65,10 @@ try {
         "test",
         "login.spec.ts",
         "auth-workspace.spec.ts",
-        "--project=desktop",
+        ...extraSpecs,
+        ...projects.map((project) => `--project=${project}`),
         "--reporter=json",
-        "--global-timeout=180000",
+        `--global-timeout=${String(180_000 * projects.length * (1 + extraSpecs.length))}`,
       ],
       {
         detached: true,
@@ -81,18 +92,47 @@ try {
   const result = JSON.parse(await readFile(report, "utf8"));
   const specs = (suites) =>
     suites.flatMap((suite) => [...suite.specs, ...specs(suite.suites ?? [])]);
+  let passed = 0;
+  const declaredSkips = [];
+  const requiredProjects = new Map();
   for (const spec of specs(result.suites)) {
     assert.ok(spec.tests.length > 0, `not run: ${spec.title}`);
     for (const test of spec.tests) {
-      assert.equal(test.results.length, 1, `not run once: ${spec.title}`);
-      assert.equal(test.results[0].status, "passed", spec.title);
-      assert.equal(test.status, "expected", spec.title);
+      const name = `[${test.projectName}] ${spec.title}`;
+      assert.equal(test.results.length, 1, `not run once: ${name}`);
+      // Only a spec's own conditional test.skip (e.g. mobile-only navigation)
+      // may skip, and never an authentication regression.
+      if (
+        test.expectedStatus === "skipped" &&
+        test.annotations.some(({ type }) => type === "skip") &&
+        !required.has(spec.title)
+      ) {
+        assert.equal(test.status, "skipped", name);
+        declaredSkips.push(name);
+        continue;
+      }
+      assert.equal(test.results[0].status, "passed", name);
+      assert.equal(test.status, "expected", name);
+      passed += 1;
     }
-    required.delete(spec.title);
+    if (required.has(spec.title)) {
+      const ran = requiredProjects.get(spec.title) ?? [];
+      ran.push(...spec.tests.map((test) => test.projectName));
+      requiredProjects.set(spec.title, ran);
+    }
   }
-  assert.deepEqual([...required], [], "missing authentication browser tests");
+  for (const title of required) {
+    assert.deepEqual(
+      (requiredProjects.get(title) ?? []).sort(),
+      [...projects].sort(),
+      `authentication browser test not run once per project: ${title}`,
+    );
+  }
   assert.equal(status, 0, JSON.stringify(result.errors));
-  console.log("Authentication browser regressions: 12 passed, 0 skipped");
+  console.log(
+    `Browser regressions (${projects.join(", ")}): ${String(passed)} passed, ` +
+      `${String(declaredSkips.length)} declared skips${declaredSkips.length ? `: ${declaredSkips.join("; ")}` : ""}`,
+  );
 } finally {
   if (child?.pid) {
     const exited = new Promise((resolve) => child.once("close", resolve));
