@@ -5,6 +5,7 @@ import {
   type AgentRollout,
   type AgentRolloutNode,
 } from "@ocservia/api-client";
+import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
@@ -210,12 +211,11 @@ async function resume(): Promise<void> {
 }
 
 watch(() => route.params.rolloutId, reload);
+useEventListener(window, workspaceChangedEvent, reload);
 onMounted(() => {
-  window.addEventListener(workspaceChangedEvent, reload);
   foregroundRefresh.start();
 });
 onBeforeUnmount(() => {
-  window.removeEventListener(workspaceChangedEvent, reload);
   foregroundRefresh.stop();
   invalidate();
 });

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ChevronRight, RefreshCw } from "@lucide/vue";
 import { ResponseError, type AuditEventPage } from "@ocservia/api-client";
+import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { listAuditEvents } from "../api/events";
@@ -137,14 +138,13 @@ const detailFields = [
   ["auditEventHash", "event_hash"],
   ["auditPreviousHash", "previous_event_hash"],
 ] as const;
+useEventListener(window, workspaceChangedEvent, workspaceChanged);
 onMounted(() => {
-  window.addEventListener(workspaceChangedEvent, workspaceChanged);
   void refresh();
 });
 onBeforeUnmount(() => {
   sequence += 1;
   controller?.abort();
-  window.removeEventListener(workspaceChangedEvent, workspaceChanged);
 });
 </script>
 

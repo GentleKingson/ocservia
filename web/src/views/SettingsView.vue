@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { CheckCircle2, CircleAlert } from "@lucide/vue";
 import type { BuildInfo, Workspace } from "@ocservia/api-client";
+import { useEventListener } from "@vueuse/core";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
 import DataState from "../components/common/DataState.vue";
@@ -48,13 +49,12 @@ function refreshForWorkspace(): void {
   void loadWorkspace();
 }
 
+useEventListener(window, workspaceChangedEvent, refreshForWorkspace);
 onMounted(() => {
-  window.addEventListener(workspaceChangedEvent, refreshForWorkspace);
   void loadWorkspace();
 });
 onBeforeUnmount(() => {
   loadSequence++;
-  window.removeEventListener(workspaceChangedEvent, refreshForWorkspace);
 });
 </script>
 
