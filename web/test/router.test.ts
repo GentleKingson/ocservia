@@ -5,7 +5,7 @@ import {
 } from "vue-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadFailedNavigation, routeRecords } from "../src/shared/routes";
+import { routeRecords } from "../src/shared/routes";
 
 describe("web information architecture routes", () => {
   afterEach(() => {
@@ -82,28 +82,90 @@ describe("web information architecture routes", () => {
     ).toMatchObject({ path: "/dev" });
   });
 
-  it("loads a page whose chunk is gone from the server, except on the initial navigation", async () => {
-    const assign = vi.fn();
-    vi.stubGlobal("window", { location: { assign } });
-    const missingChunk = () =>
-      Promise.reject(
-        new TypeError("Failed to fetch dynamically imported module"),
+  describe("failed page chunks", () => {
+    function failingChunk(reportedByVite: boolean) {
+      return () => {
+        const error = new TypeError(
+          "Failed to fetch dynamically imported module",
+        );
+        if (reportedByVite) {
+          // What Vite's preload helper does before rethrowing.
+          const event = new Event("vite:preloadError", { cancelable: true });
+          Object.assign(event, { payload: error });
+          window.dispatchEvent(event);
+        }
+        return Promise.reject(error);
+      };
+    }
+
+    async function setup(reportedByVite = true) {
+      const assign = vi.fn();
+      vi.stubGlobal(
+        "window",
+        Object.assign(new EventTarget(), { location: { assign } }),
       );
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: "/", component: {} },
-        { path: "/missing/:id", component: missingChunk },
-      ],
+      const { installNavigationRecovery, reloadableNavigation } =
+        await import("../src/shared/routes");
+      reloadableNavigation.value = undefined;
+      let loads = 0;
+      const page = failingChunk(reportedByVite);
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          { path: "/", component: {} },
+          { path: "/other", component: {} },
+          {
+            path: "/page/:id",
+            component: () => (++loads > 1 ? Promise.resolve({}) : page()),
+          },
+        ],
+      });
+      installNavigationRecovery(router);
+      return { assign, reloadableNavigation, router };
+    }
+
+    it("keeps the current page and offers a reload, never reloading itself", async () => {
+      const { assign, reloadableNavigation, router } = await setup();
+      await router.push("/");
+
+      await expect(router.push("/page/a?tab=x")).rejects.toThrow(TypeError);
+      expect(router.currentRoute.value.fullPath).toBe("/");
+      expect(reloadableNavigation.value).toBe("/page/a?tab=x");
+      expect(assign).not.toHaveBeenCalled();
+
+      // A later successful load of the page clears the offer.
+      await router.push("/page/a?tab=x");
+      expect(router.currentRoute.value.fullPath).toBe("/page/a?tab=x");
+      expect(reloadableNavigation.value).toBeUndefined();
     });
-    router.onError(loadFailedNavigation);
 
-    await expect(router.push("/missing/a?tab=x")).rejects.toThrow(TypeError);
-    expect(assign).not.toHaveBeenCalled();
+    it("never reloads on a failed initial navigation", async () => {
+      const { assign, reloadableNavigation, router } = await setup();
 
-    await router.push("/");
-    await expect(router.push("/missing/b?tab=y")).rejects.toThrow(TypeError);
-    expect(assign).toHaveBeenCalledExactlyOnceWith("/missing/b?tab=y");
-    expect(router.currentRoute.value.fullPath).toBe("/");
+      await expect(router.push("/page/a")).rejects.toThrow(TypeError);
+      expect(assign).not.toHaveBeenCalled();
+      expect(reloadableNavigation.value).toBe("/page/a");
+    });
+
+    it("leaves other navigation errors to the console", async () => {
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { assign, reloadableNavigation, router } = await setup(false);
+      await router.push("/");
+
+      await expect(router.push("/page/a")).rejects.toThrow(TypeError);
+      expect(reloadableNavigation.value).toBeUndefined();
+      expect(error).toHaveBeenCalledWith(expect.any(TypeError));
+      expect(assign).not.toHaveBeenCalled();
+      error.mockRestore();
+    });
+
+    it("drops the offer after the user navigates elsewhere", async () => {
+      const { reloadableNavigation, router } = await setup();
+      await router.push("/");
+      await expect(router.push("/page/a")).rejects.toThrow(TypeError);
+
+      await router.push("/other");
+      expect(reloadableNavigation.value).toBeUndefined();
+    });
   });
 });

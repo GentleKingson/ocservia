@@ -25,6 +25,14 @@ route {
 	}
 	handle {
 		root * /srv
+		# Revalidate every HTML response (including the try_files fallback) so a
+		# redeploy is seen at once: the page names its build's hashed assets.
+		header {
+			match {
+				header Content-Type text/html*
+			}
+			Cache-Control "no-cache"
+		}
 		try_files {path} /index.html
 		file_server
 	}

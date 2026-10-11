@@ -7,10 +7,13 @@
 - [`shared/routes.ts`](../../web/src/shared/routes.ts) declares the console
   routes. The `/dev` simulator route is registered only on a development
   runtime; production navigation never registers it. Overview, the default
-  landing page, is in the entry chunk; other pages load on first visit. A
-  redeploy removes the old page chunks, so when an open tab cannot load one,
-  the router loads that navigation's URL from the server instead; the initial
-  navigation is never retried.
+  landing page, is in the entry chunk; other pages load on first visit. When
+  a page chunk fails to load (a redeploy removed it, or the network failed),
+  the current page and its unsaved input stay and the console offers a reload;
+  nothing reloads automatically. Only chunk failures reported by Vite's
+  `vite:preloadError` are handled; other router errors go to the console. The
+  Gateway sends HTML with `Cache-Control: no-cache`, so a new page load sees
+  the current build.
 - [`App.vue`](../../web/src/App.vue) runs Workspace discovery, the readiness
   refresh and the one-time login return described below.
 - `npm run dev` (the `web` service of the [local stack](../getting-started/local-development.md)
