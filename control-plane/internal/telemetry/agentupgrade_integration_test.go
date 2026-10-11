@@ -100,6 +100,14 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	if !node.AgentUpgradeEligible {
 		t.Fatalf("fully eligible node reports ineligible: %#v", node)
 	}
+	// The fleet list is what the rolling-upgrade selection reads.
+	listed, _, err := service.ListNodesInWorkspace(ctx, workspaceID, uuid.Nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || !listed[0].AgentUpgradeEligible {
+		t.Fatalf("fully eligible node is not eligible in the node list: %#v", listed)
+	}
 	var encoded struct {
 		AgentUpgradeEligible bool `json:"agent_upgrade_eligible"`
 	}
