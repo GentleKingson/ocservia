@@ -697,7 +697,7 @@ def browser_verify():
     entries = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
     required = {'browser_user_mutation', 'browser_approved_reload',
                 'browser_consumed_approval_cannot_authorize_new_operation',
-                'browser_complete_config_apply', 'browser_login_workspace_forbidden_refresh'}
+                'browser_complete_config_apply', 'browser_login_workspace_forbidden_refresh', 'browser_csp'}
     if os.environ.get('BUSINESS_PROFILE', 'smoke') == 'extended':
         required |= {'browser_certificate_csr', 'browser_certificate_issue_export_one_use',
                      'browser_certificate_revoke'}
@@ -706,6 +706,10 @@ def browser_verify():
     approvals = {entry['action'] for entry in entries if entry['name'] == 'browser_bound_approval'}
     assert {'service.reload', 'config.apply'} <= approvals, 'missing browser approval'
     assert next(entry for entry in entries if entry['name'] == 'browser_login_workspace_forbidden_refresh')['status'] == 'PASS'
+    csp = next(entry for entry in entries if entry['name'] == 'browser_csp')
+    assert csp['flow_violations'] == 0 and csp['flow_console_reports'] == 0, 'browser CSP violation: see browser-csp.json'
+    assert sorted(item.split('/')[0] for item in csp['control']) == ['img-src', 'script-src-elem'], \
+        'browser CSP control not observed exactly'
     operation_checks = {'browser_user_mutation', 'browser_approved_reload', 'browser_complete_config_apply',
                         'browser_certificate_csr', 'browser_certificate_issue_export_one_use', 'browser_certificate_revoke'}
     for entry in entries:
