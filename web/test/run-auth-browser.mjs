@@ -111,6 +111,11 @@ try {
         declaredSkips.push(name);
         continue;
       }
+      // The JSON report is deleted below, so a failure prints its own errors.
+      if (test.results[0].status !== "passed") {
+        for (const error of test.results[0].errors ?? [])
+          console.error(`${name}\n${error.stack ?? error.message ?? ""}`);
+      }
       assert.equal(test.results[0].status, "passed", name);
       assert.equal(test.status, "expected", name);
       passed += 1;
