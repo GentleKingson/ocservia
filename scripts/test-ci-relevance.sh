@@ -75,7 +75,11 @@ CLAUDE.md run_docs
 .github/release-notes/v9.9.9.json run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 web/src/App.vue run_web run_web_browser run_controller_cache
 web/src/api/generated/index.ts run_web run_web_browser run_controller_cache
-web/src/views/NodesView.vue run_web run_controller_cache
+web/src/views/NodesView.vue run_web run_web_browser run_controller_cache
+web/src/components/nodes/NodeDetailHeader.vue run_web run_web_browser run_controller_cache
+web/src/features/configuration/useNodeConfiguration.ts run_web run_web_browser run_controller_cache
+web/src/features/user-password.ts run_web run_web_browser run_controller_cache
+web/src/views/AuditView.vue run_web run_controller_cache
 web/e2e/login.spec.ts run_web run_web_browser run_controller_cache
 rust/crates/agent/src/lib.rs run_rust run_controller_cache
 control-plane/internal/platform/app/run.go run_go run_database run_controller_cache

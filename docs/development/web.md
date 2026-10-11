@@ -149,13 +149,14 @@ matches Tailwind CSS v4's baseline (cascade layers, `@property`,
 `color-mix()`), and `vite.config.ts` sets the same `build.target`. Change both
 together; do not lower the range without a reviewed compatibility plan.
 
-The support range is a policy, not a test matrix. The Playwright specs and the
-authentication browser runner use Chromium only (desktop Chrome and an iPhone
-13 emulation that is forced to Chromium). Basic CI runs no browser at all: its
-`web` job runs `scripts/web-check.sh basic`. Playwright specs run through
-`npm run test:e2e` or `make e2e`; `scripts/web-check.sh full` runs the separate
-authentication browser runner. Safari and Firefox are supported targets with no automated
-coverage; record manual results for UI changes that depend on them.
+The support range is a policy, not a test matrix. Basic CI's `web` job runs
+`scripts/web-check.sh basic` and no browser. The separate `web-browser` job runs
+only for its routed paths ([GitHub Actions](github-actions.md#path-routing)):
+Quick runs the Chromium `desktop` project, Full adds the `firefox` and `webkit`
+projects (see [Validation](#validation)). The `mobile` project is Chromium
+emulation. Playwright's Firefox and WebKit builds are not the minimum Safari
+16.4 or Firefox 128 releases; record manual results for UI changes that depend
+on those browsers.
 
 ### Component sources
 

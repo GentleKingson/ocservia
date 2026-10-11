@@ -120,7 +120,7 @@ selects `docs` only.
 | Paths (first match wins) | Quick checks |
 | --- | --- |
 | Other Markdown, `LICENSE*`, `.claude/settings.json` | docs |
-| `web/*`, `scripts/web-check.sh` | web; also web-browser for `web/src/{api,shared,components/ui,components/layout,features/operations}/*`, `App.vue`, `main.*`, login/operations/rollout views, `web/e2e/*`, Playwright/Vite config, `index.html`, the browser runner and npm manifests |
+| `web/*`, `scripts/web-check.sh` | web; also web-browser for `web/src/{api,shared,components/ui,components/layout,features/operations}/*`, `App.vue`, `main.*`, login/operations/rollout/nodes/node-detail views, `components/{common,nodes}`, configuration/certificate features, `node-workflow.ts`, `user-password.ts`, the user-policy adapter and `upstream/UserPolicyFields.vue`, `web/e2e/*`, Playwright/Vite config, `index.html`, the browser runner and npm manifests |
 | `rust/*` (Dockerfiles aside), `scripts/rust-check.sh` | rust |
 | `control-plane/{cmd,migrations,internal}/*`, Go locks and `go.work*`, `deploy/compose`, `deploy/database-e2e`, database/MySQL/PostgreSQL scripts | go + database smoke on both engines |
 | Other `control-plane/*`, `scripts/go-check.sh`, `signer/*.go`, `signer/go.mod`, `signer/go.sum` | go |

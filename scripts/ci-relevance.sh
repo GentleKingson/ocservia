@@ -123,6 +123,10 @@ classify_path() {
     web/src/api/*|web/src/shared/*|web/src/App.vue|web/src/main.ts|web/src/main.css|web/index.html|\
     web/src/components/ui/*|web/src/components/layout/*|web/src/features/operations/*|\
     web/src/views/LoginView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
+    web/src/views/NodesView.vue|web/src/views/NodeDetailView.vue|web/src/components/common/*|\
+    web/src/components/nodes/*|web/src/features/configuration/*|web/src/features/certificates/*|\
+    web/src/features/node-workflow.ts|web/src/features/user-password.ts|web/src/adapters/user-policy.ts|\
+    web/src/upstream/UserPolicyFields.vue|\
     web/e2e/*|web/playwright.config.ts|web/test/run-auth-browser.mjs|web/vite.config.ts|\
     web/package.json|web/package-lock.json)
       run_web_browser=true ;;
