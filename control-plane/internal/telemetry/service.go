@@ -644,6 +644,7 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 	for _, v := range stored {
 		node := readNode(v, s.now())
 		s.applyAgentVersionState(&node)
+		s.applyAgentUpgradeEligibility(ctx, &node)
 		result = append(result, node)
 	}
 	hasMore := len(result) > limit

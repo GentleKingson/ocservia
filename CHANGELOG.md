@@ -32,6 +32,11 @@ compatibility-policy reset in v1.1.0 described below.
   `/var/lib/postgresql`; legacy layouts are refused before initialization.
   Changing a MariaDB backend setting does not convert its database to MySQL.
 
+### Fixed
+
+- The node list now reports rolling-upgrade eligibility, so eligible nodes can
+  be selected for an Agent rollout in the console.
+
 ## [1.1.0]
 
 ### Breaking Policy Change

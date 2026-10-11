@@ -52,6 +52,8 @@ for BUSINESS_PROFILE in smoke extended; do
     record() { :; }
     # shellcheck disable=SC2317
     python3() { printf '%s\n' "$*"; }
+    # shellcheck disable=SC2317
+    bash() { printf 'bash %s\n' "$*"; }
     # shellcheck disable=SC1090
     source <(sed -n '/^next_stage business_vpn/,$p' scripts/release-business-probe.sh)
   ) >"${fixture}/${BUSINESS_PROFILE}-phases"
@@ -63,6 +65,8 @@ for phase in configuration vpn_after_rollback business; do
   grep -q "release-business-api.py ${phase}$" "${fixture}/extended-phases"
 done
 grep -q 'release-integrated-acceptance.py recovery' "${fixture}/extended-phases"
+# The rollout replaces the Agent, so it must be the extended profile's last phase.
+[[ "$(tail -n 1 "${fixture}/extended-phases")" == "bash ${ROOT}/scripts/release-business-rollout.sh" ]]
 python3 scripts/test-release-business-smoke.py
 node scripts/test-release-upgrade.mjs
 bash scripts/test-release-rust-cache.sh

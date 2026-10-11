@@ -693,6 +693,13 @@ def deep_resilience():
     check_confirmed(operations, config_hash)
 
 
+def assert_browser_csp(entries, evidence):
+    csp = next(entry for entry in entries if entry['name'] == 'browser_csp')
+    assert csp['flow_violations'] == 0 and csp['flow_console_reports'] == 0, 'browser CSP violation: see ' + evidence
+    assert sorted(csp['control']) == ['img-src/enforce', 'script-src-elem/enforce'], \
+        'browser CSP control not enforced and observed exactly'
+
+
 def browser_verify():
     entries = json.loads((EVIDENCE / 'browser-checkpoints.json').read_text())
     required = {'browser_user_mutation', 'browser_approved_reload',
@@ -706,10 +713,7 @@ def browser_verify():
     approvals = {entry['action'] for entry in entries if entry['name'] == 'browser_bound_approval'}
     assert {'service.reload', 'config.apply'} <= approvals, 'missing browser approval'
     assert next(entry for entry in entries if entry['name'] == 'browser_login_workspace_forbidden_refresh')['status'] == 'PASS'
-    csp = next(entry for entry in entries if entry['name'] == 'browser_csp')
-    assert csp['flow_violations'] == 0 and csp['flow_console_reports'] == 0, 'browser CSP violation: see browser-csp.json'
-    assert sorted(csp['control']) == ['img-src/enforce', 'script-src-elem/enforce'], \
-        'browser CSP control not enforced and observed exactly'
+    assert_browser_csp(entries, 'browser-csp.json')
     operation_checks = {'browser_user_mutation', 'browser_approved_reload', 'browser_complete_config_apply',
                         'browser_certificate_csr', 'browser_certificate_issue_export_one_use', 'browser_certificate_revoke'}
     for entry in entries:
@@ -733,6 +737,37 @@ def browser_verify():
         (WORK / 'smoke-applied.json').write_text(json.dumps({
             'operation_id': operation_id, 'materialized_hash': applied['materialized_hash']}))
     record('browser_operations_durable_cross_check')
+
+
+def rollout_ready():
+    # The Controller was recreated with the release catalog: restore the test CA
+    # trust and wait until the node is offered for the rolling upgrade.
+    wait_for('Controller readiness', ready)
+    trust_controller()
+    node = os.environ['T07_NODE']
+    wait_for('rollout-eligible node', lambda: api('nodes/' + node).get('agent_upgrade_eligible') is True, seconds=300)
+    assert api('nodes/' + node)['recommended_agent_version'] == os.environ['ROLLOUT_VERSION']
+
+
+def rollout_verify():
+    entries = json.loads((EVIDENCE / 'browser-rollout-checkpoints.json').read_text())
+    for name in ('browser_bound_approval', 'browser_agent_rollout', 'browser_csp'):
+        assert sum(entry['name'] == name for entry in entries) == 1, 'missing or duplicate rollout checkpoint: ' + name
+    assert next(entry for entry in entries if entry['name'] == 'browser_bound_approval')['action'] == 'agent.rollout'
+    assert_browser_csp(entries, 'browser-rollout-csp.json')
+    node, target = os.environ['T07_NODE'], os.environ['ROLLOUT_VERSION']
+    created = next(entry for entry in entries if entry['name'] == 'browser_agent_rollout')['rollout']
+    rollout = api('agent-rollouts/' + created['id'])
+    assert rollout['state'] == 'succeeded' and rollout['target_version'] == target
+    assert rollout['stop_on_failure'] is True and rollout['approval_id'] == created['approval_id']
+    assert [(item['node_id'], item['batch'], item['state']) for item in rollout['nodes']] == [(node, 0, 'succeeded')]
+    assert api('approval-requests/' + created['approval_id'])['status'] == 'consumed'
+    wait_for('upgraded Agent online', lambda: (value if (value := api('nodes/' + node))['connection_state'] == 'online'
+                                                and value['agent_version'] == target else None))
+    for binary in ('ocservia-agent', 'ocservia-privd', 'ocservia-upgrader'):
+        assert run('/usr/libexec/ocservia/' + binary, '--version').split() == [binary, target]
+    record('agent_rollout_canary_succeeded', rollout_id=rollout['id'], operation_id=rollout['nodes'][0].get('operation_id'),
+           from_version=os.environ['VERSION'], target_version=target)
 
 
 def completed(operation):
@@ -1034,7 +1069,7 @@ def vpn_smoke(phase, relay_recovery=False):
 if __name__ == '__main__':
     phase = sys.argv[1]
     if phase not in ('local', 'oidc', 'transport_ready', 'trust_controller', 'token', 'approve', 'certificate', 'config_prepare', 'configuration',
-                     'browser_prepare', 'browser_verify', 'business', 'smoke_user',
+                     'browser_prepare', 'browser_verify', 'business', 'smoke_user', 'rollout_ready', 'rollout_verify',
                      'vpn_after_config_apply', 'vpn_after_rollback', 'resilience'):
         raise SystemExit('unknown phase')
     if phase.startswith('vpn_'):

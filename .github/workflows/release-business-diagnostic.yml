@@ -99,7 +99,7 @@ jobs:
             (if $profile == "smoke" then
               (["real_browser_subset", "approved_config_apply_and_vpn_user", "real_vpn_after_config_apply"] - .passed_checkpoints | length) == 0
              else
-              (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset", "real_vpn_business_and_recovery"] - .passed_checkpoints | length) == 0
+              (["real_external_oidc", "real_certificate_lifecycle", "real_browser_subset", "real_vpn_business_and_recovery", "real_browser_agent_rollout"] - .passed_checkpoints | length) == 0
              end)' "$DIAGNOSTICS/result.json" >/dev/null
           if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true ]]; then
             grep -Fx integrated_entry_and_internal_tls "$DIAGNOSTICS/checkpoints.txt"
