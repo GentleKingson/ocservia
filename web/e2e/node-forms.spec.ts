@@ -1,4 +1,5 @@
-import { expect, test, type Page, type Request } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614ea1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614ea2";

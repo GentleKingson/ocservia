@@ -213,6 +213,9 @@ jobs:
       # Quick runs Chromium; Full adds the Firefox and WebKit key-spec projects.
       BROWSER_PROJECTS: ${{ needs.ci-relevance.outputs.profile == 'full' && 'desktop firefox webkit' || 'desktop' }}
       BROWSER_ENGINES: ${{ needs.ci-relevance.outputs.profile == 'full' && 'chromium firefox webkit' || 'chromium' }}
+      # Full also serves the build through the production Caddy and Caddyfile,
+      # where the cross-engine specs fail on any Report-Only CSP violation.
+      BROWSER_GATEWAY: ${{ needs.ci-relevance.outputs.profile == 'full' && '--gateway' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -244,6 +247,7 @@ jobs:
           npm run build
           args=()
           for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
+          if [[ -n "${BROWSER_GATEWAY}" ]]; then args+=("${BROWSER_GATEWAY}"); fi
           node test/run-auth-browser.mjs agent-rollout.spec.ts node-forms.spec.ts \
             user-password.spec.ts shell-navigation.spec.ts "${args[@]}"
 

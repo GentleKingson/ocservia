@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./csp";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614cc3";

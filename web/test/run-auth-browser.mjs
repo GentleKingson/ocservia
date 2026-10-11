@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
 import console from "node:console";
 import process from "node:process";
-import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { openSync, closeSync } from "node:fs";
+import { request } from "node:https";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { preview } from "vite";
 
-// Usage: node test/run-auth-browser.mjs [--project=NAME]... [SPEC]...
+// Usage: node test/run-auth-browser.mjs [--gateway] [--project=NAME]... [SPEC]...
 // Projects default to desktop; extra specs run beside the authentication specs.
+// --gateway serves the build (dist/) through the pinned production Caddy and
+// the repository Caddyfile over HTTPS instead of Vite preview, so its headers
+// (including the Report-Only CSP) apply; it needs Docker.
 // Every required test must pass in every selected project; a missing browser
 // fails the run instead of being reported as passed.
 const args = process.argv.slice(2);
@@ -17,7 +22,11 @@ const projects = args
   .filter((arg) => arg.startsWith("--project="))
   .map((arg) => arg.slice("--project=".length));
 if (projects.length === 0) projects.push("desktop");
-const extraSpecs = args.filter((arg) => !arg.startsWith("--project="));
+const gateway = args.includes("--gateway");
+const extraSpecs = args.filter(
+  (arg) => !arg.startsWith("--project=") && arg !== "--gateway",
+);
+if (gateway) extraSpecs.push("csp-control.spec.ts");
 // These existing browser regressions are not selected by `vitest run test`.
 const required = new Set([
   "local-only login restores return path and initializes the shell without storing passwords",
@@ -33,9 +42,97 @@ const required = new Set([
   "a late response from the previous workspace cannot overwrite the current view",
   "rapid workspace changes leave only the final workspace stream active",
 ]);
+if (gateway)
+  required.add("gateway Report-Only CSP violations are observable in the page");
 const directory = await mkdtemp(join(tmpdir(), "ocservia-auth-browser-"));
 let server;
 let child;
+const gatewayName = `ocservia-browser-gateway-${String(process.pid)}`;
+const docker = (...command) =>
+  execFileSync("docker", command, { encoding: "utf8" }).trim();
+const get = (url) =>
+  new Promise((done, fail) => {
+    request(url, { rejectUnauthorized: false }, (response) => {
+      response.resume();
+      done(response.statusCode);
+    })
+      .on("error", fail)
+      .end();
+  });
+
+// Production gateway image and Caddyfile; /api/* reaches a stub that answers
+// 404 like Vite preview, so only the specs' own route mocks serve the API.
+async function startGateway() {
+  const root = resolve("..");
+  const caddy = (
+    await readFile(join(root, "deploy/production/gateway.Dockerfile"), "utf8")
+  ).match(/^FROM (caddy:\S+)$/m)[1];
+  execFileSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=localhost",
+      "-keyout",
+      join(directory, "tls.key"),
+      "-out",
+      join(directory, "tls.crt"),
+    ],
+    { stdio: "ignore" },
+  );
+  await chmod(directory, 0o755);
+  await chmod(join(directory, "tls.key"), 0o444);
+  docker("network", "create", gatewayName);
+  docker(
+    "run",
+    "-d",
+    "--name",
+    `${gatewayName}-upstream`,
+    "--network",
+    gatewayName,
+    "--network-alias",
+    "control-plane",
+    caddy,
+    "caddy",
+    "respond",
+    "--listen",
+    ":8080",
+    "--status",
+    "404",
+  );
+  docker(
+    "run",
+    "-d",
+    "--name",
+    gatewayName,
+    "--network",
+    gatewayName,
+    "-p",
+    "127.0.0.1::8443",
+    "-v",
+    `${join(root, "deploy/production/Caddyfile")}:/etc/caddy/Caddyfile:ro`,
+    "-v",
+    `${resolve("dist")}:/srv:ro`,
+    "-v",
+    `${join(directory, "tls.crt")}:/run/secrets/tls_certificate:ro`,
+    "-v",
+    `${join(directory, "tls.key")}:/run/secrets/tls_private_key:ro`,
+    caddy,
+  );
+  const port = docker("port", gatewayName, "8443/tcp").split(":").at(-1);
+  const origin = `https://127.0.0.1:${port}`;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if ((await get(`${origin}/`).catch(() => 0)) === 200) return origin;
+    await delay(500);
+  }
+  throw new Error(`gateway did not serve ${origin}/`);
+}
 let interrupted = false;
 const stop = () => {
   interrupted = true;
@@ -50,10 +147,16 @@ const stop = () => {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 try {
-  server = await preview({
-    configFile: false,
-    preview: { host: "127.0.0.1", port: 0 },
-  });
+  let baseURL;
+  if (gateway) {
+    baseURL = await startGateway();
+  } else {
+    server = await preview({
+      configFile: false,
+      preview: { host: "127.0.0.1", port: 0 },
+    });
+    baseURL = `http://127.0.0.1:${server.httpServer.address().port}`;
+  }
   assert.ok(!interrupted, "browser acceptance interrupted");
   const report = join(directory, "results.json");
   const fd = openSync(report, "w");
@@ -75,7 +178,8 @@ try {
         stdio: ["ignore", fd, "inherit"],
         env: {
           ...process.env,
-          PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${server.httpServer.address().port}`,
+          PLAYWRIGHT_BASE_URL: baseURL,
+          PLAYWRIGHT_GATEWAY: gateway ? "1" : "",
           PLAYWRIGHT_OUTPUT_DIR: join(directory, "test-results"),
         },
       },
@@ -140,7 +244,7 @@ try {
   }
   assert.equal(status, 0, JSON.stringify(result.errors));
   console.log(
-    `Browser regressions (${projects.join(", ")}): ${String(passed)} passed, ` +
+    `Browser regressions (${projects.join(", ")}${gateway ? ", gateway" : ""}): ${String(passed)} passed, ` +
       `${String(declaredSkips.length)} declared skips${declaredSkips.length ? `: ${declaredSkips.join("; ")}` : ""}`,
   );
 } finally {
@@ -152,6 +256,13 @@ try {
   if (server) {
     server.httpServer.closeAllConnections();
     await new Promise((resolve) => server.httpServer.close(resolve));
+  }
+  if (gateway) {
+    for (const command of [
+      ["rm", "-f", gatewayName, `${gatewayName}-upstream`],
+      ["network", "rm", gatewayName],
+    ])
+      spawnSync("docker", command, { stdio: "ignore" });
   }
   await rm(directory, { recursive: true, force: true });
   process.off("SIGINT", stop);
