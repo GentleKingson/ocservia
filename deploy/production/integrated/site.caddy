@@ -5,7 +5,7 @@ header {
 	X-Content-Type-Options "nosniff"
 	X-Frame-Options "DENY"
 	Referrer-Policy "no-referrer"
-	Content-Security-Policy-Report-Only "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	Content-Security-Policy "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 	-Server
 }
 # A handler error (such as an unreachable control plane) is written without
@@ -16,7 +16,7 @@ handle_errors {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
-		Content-Security-Policy-Report-Only "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 		-Server
 	}
 }

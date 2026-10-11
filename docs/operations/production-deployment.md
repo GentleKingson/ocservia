@@ -460,19 +460,18 @@ The control plane runs `--role=all`. Public TLS terminates at the gateway (behin
 Both gateway configurations, [`Caddyfile`](../../deploy/production/Caddyfile)
 (Standalone) and [`integrated/site.caddy`](../../deploy/production/integrated/site.caddy)
 (Integrated), send HSTS, `nosniff`, `X-Frame-Options: DENY` and
-`Referrer-Policy: no-referrer` on every response, and the same Content Security
-Policy in **Report-Only** mode: `default-src 'self'; object-src 'none'; base-uri
-'none'; frame-ancestors 'none'; form-action 'self'`. Report-Only blocks nothing
-and names no report endpoint; violations appear only in the browser console.
+`Referrer-Policy: no-referrer` on every response, and the same enforced
+`Content-Security-Policy`: `default-src 'self'; object-src 'none'; base-uri
+'none'; frame-ancestors 'none'; form-action 'self'`. It names no report
+endpoint; blocked loads appear only in the browser console.
 Responses Caddy writes for a handler error, such as a 502 when the control plane
 is unreachable, skip the site's deferred `header` block, so each file repeats it
 in `handle_errors`. Keep all four header blocks identical;
 [`test-controller-gateway-headers.py`](../../scripts/test-controller-gateway-headers.py)
-checks static and 502 responses in both configurations. Before switching the header to
-`Content-Security-Policy`, run the browser specs against both gateways over HTTPS
-in Chromium, Firefox and WebKit with no violations; if enforcement breaks a page,
-return only this header to Report-Only and keep the other headers. No reported
-violation covers only the exercised paths and is not proof of the absence of XSS.
+checks static and 502 responses in both configurations. If enforcement breaks a
+page, roll back by renaming only this header to `Content-Security-Policy-Report-Only`
+in all four blocks and keep the other headers. The browser specs observe no
+violation only on the exercised paths; that is not proof of the absence of XSS.
 
 <a id="authentication-request-budgets"></a>
 ### Gateway addressing and proxy trust

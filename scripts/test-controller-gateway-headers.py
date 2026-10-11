@@ -23,8 +23,8 @@ EXPECTED = {
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
     "referrer-policy": "no-referrer",
-    "content-security-policy-report-only": "default-src 'self'; object-src 'none'; base-uri 'none'; "
-                                           "frame-ancestors 'none'; form-action 'self'",
+    "content-security-policy": "default-src 'self'; object-src 'none'; base-uri 'none'; "
+                               "frame-ancestors 'none'; form-action 'self'",
 }
 
 
@@ -98,7 +98,7 @@ def main():
                 assert got == status, (mode, path, got)
                 for header, value in EXPECTED.items():
                     assert headers.get(header) == [value], (mode, path, header, headers.get(header))
-                assert "content-security-policy" not in headers, (mode, path)
+                assert "content-security-policy-report-only" not in headers, (mode, path)
                 assert "server" not in headers, (mode, path, headers.get("server"))
             print(f"PASS {mode}: security headers on static, fallback and 502 responses")
     finally:

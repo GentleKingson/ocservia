@@ -12,7 +12,7 @@ const profile = process.env.BUSINESS_PROFILE ?? "extended";
 if (!["smoke", "extended"].includes(profile)) throw new Error(`Unknown business profile: ${profile}`);
 const browser = await chromium.launch({ headless: true });
 const observations = [];
-// The gateway CSP is Report-Only with no report endpoint, so violations are
+// The gateway CSP is enforced with no report endpoint, so violations are
 // collected in the page. Uploaded diagnostics keep no URL query or fragment.
 // Each context reports under a fixed phase, so a late business violation can
 // never be counted as part of the control.

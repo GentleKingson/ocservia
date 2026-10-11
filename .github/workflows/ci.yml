@@ -215,7 +215,7 @@ jobs:
       BROWSER_ENGINES: ${{ needs.ci-relevance.outputs.profile == 'full' && 'chromium firefox webkit' || 'chromium' }}
       # Full also serves the build through the production Standalone gateway and
       # then the Integrated Edge and gateway, where the cross-engine specs fail
-      # on any Report-Only CSP violation.
+      # on any CSP violation.
       BROWSER_GATEWAYS: ${{ needs.ci-relevance.outputs.profile == 'full' && 'standalone integrated' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

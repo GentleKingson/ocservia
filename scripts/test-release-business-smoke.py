@@ -227,7 +227,7 @@ certutil() { :; }
             {'name': 'browser_bound_approval', 'action': 'service.reload'},
             {'name': 'browser_bound_approval', 'action': 'config.apply'},
             {'name': 'browser_csp', 'flow_violations': 0, 'flow_console_reports': 0, 'flow_page_errors': 0,
-             'control': ['script-src-elem/report', 'img-src/report']},
+             'control': ['script-src-elem/enforce', 'img-src/enforce']},
         ]
         certificate_entries = [
             {'name': name, 'operation_id': 'operation'} for name in
@@ -259,9 +259,11 @@ certutil() { :; }
         invalid_entries += [browser_entries[:i] + browser_entries[i + 1:] for i in range(len(browser_entries))]
         invalid_entries += [[{**entry, 'operation': {}} if entry['name'] == 'browser_user_mutation' else entry
                              for entry in browser_entries]]
-        # A Report-Only violation, or a collector that missed the control, fails.
-        for change in ({'flow_violations': 1}, {'flow_console_reports': 1}, {'control': ['img-src/report']},
-                       {'control': ['script-src-elem/report', 'img-src/report', 'img-src/report']}):
+        # A flow violation, a collector that missed the control, or a control
+        # that was only reported rather than enforced fails.
+        for change in ({'flow_violations': 1}, {'flow_console_reports': 1}, {'control': ['img-src/enforce']},
+                       {'control': ['script-src-elem/enforce', 'img-src/enforce', 'img-src/enforce']},
+                       {'control': ['script-src-elem/report', 'img-src/report']}):
             invalid_entries += [[{**entry, **change} if entry['name'] == 'browser_csp' else entry
                                  for entry in browser_entries]]
         for entries in invalid_entries:
