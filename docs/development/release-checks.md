@@ -140,7 +140,7 @@ all product and asset jobs must pass and Publish must be skipped.
 | --- | --- |
 | Native online node, browser login/Workspace/user creation/approval/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | amd64 Integrated Business Smoke |
 | Controller/transport, Agent/privd, bundled PostgreSQL and sole Relay recovery (no Business-level MySQL recovery) | Business Smoke with `run-resilience=true` |
-| OIDC positive/negative paths; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects | Manual integration |
+| OIDC positive/negative paths; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Manual integration |
 | DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](github-actions.md#independent-security-checks) (Go advisories cover `control-plane` only) | Security |
