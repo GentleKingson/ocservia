@@ -3,6 +3,7 @@ import { ResponseError, type Workspace } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
+import { Button } from "@/components/ui/button";
 import AppHeader from "./components/layout/AppHeader.vue";
 import AppSidebar from "./components/layout/AppSidebar.vue";
 import { consumeLoginReturnPath } from "./shared/session";
@@ -13,6 +14,7 @@ import {
 } from "./api/workspace";
 import { useReadinessStore } from "./shared/readiness";
 import { useFleetStore } from "./shared/fleet";
+import { reloadableNavigation } from "./shared/routes";
 
 import { createForegroundRefresh } from "./shared/foreground-refresh";
 
@@ -68,6 +70,12 @@ async function changeWorkspace(workspaceId: string): Promise<void> {
   selectedWorkspaceId.value = (await selectWorkspace(workspaceId)).id;
 }
 
+// An explicit choice: loading from the server discards unsaved input.
+function reloadNavigation(): void {
+  if (reloadableNavigation.value)
+    window.location.assign(reloadableNavigation.value);
+}
+
 const mainContent = ref<HTMLElement>();
 function focusMainContent(): void {
   mainContent.value?.focus();
@@ -75,6 +83,24 @@ function focusMainContent(): void {
 </script>
 
 <template>
+  <div
+    v-if="reloadableNavigation"
+    role="alert"
+    class="bg-background fixed inset-x-4 bottom-4 z-50 flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm shadow-md md:left-auto md:max-w-md"
+    data-testid="navigation-reload"
+  >
+    <p class="m-0 min-w-0 flex-1">{{ $t("pageLoadFailed") }}</p>
+    <Button type="button" size="sm" @click="reloadNavigation">{{
+      $t("reloadPage")
+    }}</Button>
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      @click="reloadableNavigation = undefined"
+      >{{ $t("dismiss") }}</Button
+    >
+  </div>
   <RouterView v-if="isLogin" />
   <div
     v-else-if="authenticated"

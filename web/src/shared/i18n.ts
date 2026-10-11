@@ -120,6 +120,10 @@ export const i18n = createI18n({
       closeNavigation: "Close navigation",
       navigationDescription: "Pages in this console",
       skipToContent: "Skip to main content",
+      pageLoadFailed:
+        "This page could not be loaded. The console may have been updated. Reloading discards unsaved changes on the current page.",
+      reloadPage: "Reload page",
+      dismiss: "Dismiss",
       fleetStatus: "Fleet status",
       observedSessions: "Observed sessions",
       overviewActiveOperations: "Active operations",

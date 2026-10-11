@@ -1,8 +1,5 @@
-import {
-  START_LOCATION,
-  type RouteLocationNormalized,
-  type RouteRecordRaw,
-} from "vue-router";
+import { ref } from "vue";
+import type { RouteRecordRaw, Router } from "vue-router";
 
 // The default landing page stays in the entry chunk; other pages load on
 // first visit.
@@ -68,16 +65,39 @@ export const routeRecords: RouteRecordRaw[] = [
     : []),
 ];
 
-// A redeploy replaces the hashed page chunks (the gateway answers a missing
-// asset with index.html), so a tab opened before it cannot load a page it has
-// not visited yet. Load that one navigation from the server instead of
-// aborting it silently. The initial navigation already came from the server,
-// so it is never retried and a missing chunk cannot reload in a loop.
-export function loadFailedNavigation(
-  _error: unknown,
-  to: RouteLocationNormalized,
-  from: RouteLocationNormalized,
-): void {
-  if (from === START_LOCATION) return;
-  window.location.assign(to.fullPath);
+// A page chunk fails to load after a redeploy removed it (the gateway answers
+// a missing asset with index.html) or on a network failure. Vite reports each
+// failed chunk with vite:preloadError before the router sees the same error,
+// so only those errors are handled here. The current page and any unsaved
+// input stay; the user chooses whether to load the page from the server.
+export const reloadableNavigation = ref<string>();
+
+export function installNavigationRecovery(router: Router): void {
+  const chunkErrors = new WeakSet<object>();
+  window.addEventListener("vite:preloadError", (event) => {
+    const error: unknown = (event as Event & { payload?: unknown }).payload;
+    if (typeof error === "object" && error !== null) chunkErrors.add(error);
+  });
+  router.onError((error: unknown, to) => {
+    if (typeof error === "object" && error !== null && chunkErrors.has(error))
+      reloadableNavigation.value = to.fullPath;
+    // Vue Router logs only while no error handler is registered.
+    else console.error(error);
+  });
+  router.afterEach((_to, _from, failure) => {
+    if (!failure) reloadableNavigation.value = undefined;
+  });
+}
+
+// Mounts after the initial navigation so the shell never renders for /login.
+// When that navigation's chunk failed, it mounts anyway so the reload offer
+// shows instead of a blank page; App waits on isReady(), which stays pending,
+// so neither the shell nor a page renders and nothing is requested.
+export function mountAfterInitialNavigation(
+  router: Router,
+  mount: () => void,
+): Promise<void> {
+  return router.isReady().then(mount, () => {
+    if (reloadableNavigation.value) mount();
+  });
 }
