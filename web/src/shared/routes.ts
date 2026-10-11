@@ -88,3 +88,16 @@ export function installNavigationRecovery(router: Router): void {
     if (!failure) reloadableNavigation.value = undefined;
   });
 }
+
+// Mounts after the initial navigation so the shell never renders for /login.
+// When that navigation's chunk failed, it mounts anyway so the reload offer
+// shows instead of a blank page; App waits on isReady(), which stays pending,
+// so neither the shell nor a page renders and nothing is requested.
+export function mountAfterInitialNavigation(
+  router: Router,
+  mount: () => void,
+): Promise<void> {
+  return router.isReady().then(mount, () => {
+    if (reloadableNavigation.value) mount();
+  });
+}

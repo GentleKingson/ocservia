@@ -10,10 +10,11 @@
   landing page, is in the entry chunk; other pages load on first visit. When
   a page chunk fails to load (a redeploy removed it, or the network failed),
   the current page and its unsaved input stay and the console offers a reload;
-  nothing reloads automatically. Only chunk failures reported by Vite's
-  `vite:preloadError` are handled; other router errors go to the console. The
-  Gateway sends HTML with `Cache-Control: no-cache`, so a new page load sees
-  the current build.
+  nothing reloads automatically. If the initial navigation's chunk fails, the
+  app still mounts to show only that offer, without the shell or any request.
+  Only chunk failures reported by Vite's `vite:preloadError` are handled;
+  other router errors go to the console. The Gateway sends HTML with
+  `Cache-Control: no-cache`, so a new page load sees the current build.
 - [`App.vue`](../../web/src/App.vue) runs Workspace discovery, the readiness
   refresh and the one-time login return described below.
 - `npm run dev` (the `web` service of the [local stack](../getting-started/local-development.md)

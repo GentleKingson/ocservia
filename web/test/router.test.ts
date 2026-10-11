@@ -159,6 +159,44 @@ describe("web information architecture routes", () => {
       error.mockRestore();
     });
 
+    it("mounts after a failed initial chunk so the offer can render", async () => {
+      const { router } = await setup();
+      const { mountAfterInitialNavigation } =
+        await import("../src/shared/routes");
+      const mount = vi.fn();
+      const mounted = mountAfterInitialNavigation(router, mount);
+
+      await expect(router.push("/page/a")).rejects.toThrow(TypeError);
+      await mounted;
+      expect(mount).toHaveBeenCalledOnce();
+    });
+
+    it("mounts once after a successful initial navigation", async () => {
+      const { router } = await setup();
+      const { mountAfterInitialNavigation } =
+        await import("../src/shared/routes");
+      const mount = vi.fn();
+      const mounted = mountAfterInitialNavigation(router, mount);
+
+      await router.push("/");
+      await mounted;
+      expect(mount).toHaveBeenCalledOnce();
+    });
+
+    it("does not mount after a failed initial navigation that is not a chunk", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { router } = await setup(false);
+      const { mountAfterInitialNavigation } =
+        await import("../src/shared/routes");
+      const mount = vi.fn();
+      const mounted = mountAfterInitialNavigation(router, mount);
+
+      await expect(router.push("/page/a")).rejects.toThrow(TypeError);
+      await mounted;
+      expect(mount).not.toHaveBeenCalled();
+      vi.mocked(console.error).mockRestore();
+    });
+
     it("drops the offer after the user navigates elsewhere", async () => {
       const { reloadableNavigation, router } = await setup();
       await router.push("/");
