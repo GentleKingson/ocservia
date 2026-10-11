@@ -22,6 +22,7 @@ Full has a separate concurrency group and cannot cancel Quick.
 | go | `go-check.sh standard`: gofmt, vet and `go test -count=1` without race in both `control-plane` and `signer`. The same job also runs the selected CI guard and release self-test suites when routing sets `run_ci_tools` |
 | rust | `rust-check.sh`: format, Clippy and workspace tests, only when routing sets `run_rust`. The same job also runs the installer and Relay-launcher self-tests when routing sets `run_installers`, in which case `rust-check.sh` does not run unless Rust is also selected |
 | web | `web-check.sh basic`: format, lint, types, unit tests, build and generated-client authentication; no browser installation/regression |
+| web-browser | Only when routing sets `run_web_browser`: installs Playwright engines and runs `web/test/run-auth-browser.mjs` with the authentication, rollout, form/dialog, password and shell-navigation specs against the stubbed production build. Quick runs the Chromium `desktop` project; Full adds the `firefox` and `webkit` projects. A missing browser or non-declared skip fails the job |
 | database-smoke | PostgreSQL 18.x and MySQL 8.4 LTS; Quick runs smoke, Full runs full database acceptance (MySQL as three parallel `DATABASE_SHARD` legs: `mysql-cutover`, `mysql-core`, `services`); both first enforce the SQL artifact window and both check current snapshot equivalence (MySQL Full: once, in `services`). The job keeps this name in Full |
 | database-recovery-full | PostgreSQL physical and MySQL logical backup/restore, including snapshot provenance, Full only |
 | Basic CI Result | Always checks routing and selected job results; required missing/skipped/failed/cancelled jobs fail |
@@ -119,7 +120,7 @@ selects `docs` only.
 | Paths (first match wins) | Quick checks |
 | --- | --- |
 | Other Markdown, `LICENSE*`, `.claude/settings.json` | docs |
-| `web/*`, `scripts/web-check.sh` | web |
+| `web/*`, `scripts/web-check.sh` | web; also web-browser for `web/src/{api,shared,components/ui,components/layout,features/operations}/*`, `App.vue`, `main.*`, login/operations/rollout views, `web/e2e/*`, Playwright/Vite config, `index.html`, the browser runner and npm manifests |
 | `rust/*` (Dockerfiles aside), `scripts/rust-check.sh` | rust |
 | `control-plane/{cmd,migrations,internal}/*`, Go locks and `go.work*`, `deploy/compose`, `deploy/database-e2e`, database/MySQL/PostgreSQL scripts | go + database smoke on both engines |
 | Other `control-plane/*`, `scripts/go-check.sh`, `signer/*.go`, `signer/go.mod`, `signer/go.sum` | go |
@@ -134,8 +135,9 @@ Mixed changes take the union. PRs use `base...head`; pushes use `before..head`.
 Deletions/renames retain both affected paths. Invalid, empty, unresolvable or
 unsupported-event diffs and unknown paths fail closed by enabling every Basic
 flag, but the profile stays Quick (smoke database scope); routing never
-upgrades Quick to Full. Manual dispatch ignores paths: docs, go, rust, web and
-database always run, with no CI-suite, installer or Controller-cache flags.
+upgrades Quick to Full. Manual dispatch ignores paths: docs, go, rust, web,
+web-browser and database always run, with no CI-suite, installer or
+Controller-cache flags.
 Manual Full selects four database matrix legs (PostgreSQL plus three MySQL
 shards) and the Full-only `database-recovery-full` job; manual Quick selects
 only two (PostgreSQL and one MySQL leg). Controller cache refresh runs on main
@@ -167,7 +169,8 @@ scope. Historical database upgrade matrices and the MySQL history shard have
 been removed; current initialization, content integrity and interrupted-SQL
 recovery remain in the full suite. `regression` remains manual-only. Normal CI
 passes `smoke` for Quick and `full` for Full.
-Browser checks require Playwright Chromium installed separately. Disaster
+Browser checks require Playwright Chromium installed separately; the
+`firefox`/`webkit` projects need those engines too. Disaster
 recovery, complex races and fault injection remain in their existing manual
 deep scripts; no scheduled workflow was added.
 

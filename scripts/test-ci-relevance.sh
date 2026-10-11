@@ -9,7 +9,7 @@ git -C "${fixture}" config user.name test
 git -C "${fixture}" config user.email test@example.invalid
 git -C "${fixture}" commit --allow-empty -qm base
 base="$(git -C "${fixture}" rev-parse HEAD)"
-flags=(run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache)
+flags=(run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache)
 expect() {
   local out=$1 key=$2 value=$3
   grep -Fxq "${key}=${value}" "${out}" || { cat "${out}" >&2; echo "expected ${key}=${value}" >&2; exit 1; }
@@ -68,13 +68,15 @@ docs/development/testing.md run_docs
 CLAUDE.md run_docs
 .claude/agents/sonnet-implementer.md run_docs
 .claude/settings.json run_docs
-.claude/settings.local.json run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
-.claude/hooks/pre-tool.sh run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
+.claude/settings.local.json run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
+.claude/hooks/pre-tool.sh run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 .github/release.yml run_ci_tools
 .github/release-notes/v9.9.9.md run_docs run_ci_tools
-.github/release-notes/v9.9.9.json run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
-web/src/App.vue run_web run_controller_cache
-web/src/api/generated/index.ts run_web run_controller_cache
+.github/release-notes/v9.9.9.json run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
+web/src/App.vue run_web run_web_browser run_controller_cache
+web/src/api/generated/index.ts run_web run_web_browser run_controller_cache
+web/src/views/NodesView.vue run_web run_controller_cache
+web/e2e/login.spec.ts run_web run_web_browser run_controller_cache
 rust/crates/agent/src/lib.rs run_rust run_controller_cache
 control-plane/internal/platform/app/run.go run_go run_database run_controller_cache
 control-plane/internal/database/mysql/backend.go run_go run_database run_controller_cache
@@ -85,7 +87,7 @@ scripts/go-check.sh run_go
 signer/http.go run_go run_controller_cache
 signer/store_test.go run_go run_controller_cache
 signer/go.sum run_go run_controller_cache
-signer/notes.txt run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
+signer/notes.txt run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 scripts/web-check.sh run_web
 deploy/managed-node/install.sh run_installers
 deploy/production/install.sh run_installers
@@ -118,7 +120,7 @@ scripts/uninstall-agent.sh run_ci_tools run_installers
 .github/workflows/security.yml run_ci_tools
 scripts/ci-relevance.sh run_ci_tools
 scripts/ci-tools-check.sh run_ci_tools
-scripts/bootstrap.sh run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
+scripts/bootstrap.sh run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 scripts/buildx-cache.sh run_ci_tools run_controller_cache
 .github/actions/build-cache-credentials/index.js run_ci_tools run_controller_cache
 deploy/test-fixtures/relay.toml run_go run_database run_ci_tools
@@ -126,7 +128,7 @@ deploy/test-fixtures/scheduler-maintenance.sql run_go run_database run_ci_tools
 rust/test-runtime.Dockerfile run_go run_database run_ci_tools
 scripts/secret-scan.toml run_ci_tools
 deploy/package/nfpm.yaml run_ci_tools run_installers
-unclassified.conf run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
+unclassified.conf run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 THIRD_PARTY_NOTICES.md run_docs run_controller_cache
 deploy/production/relay.Dockerfile run_ci_tools run_installers run_controller_cache
 deploy/production/integrated/nginx.conf.template run_ci_tools run_installers run_controller_cache
@@ -135,8 +137,8 @@ scripts/mysql-backup.sh run_go run_database run_controller_cache
 scripts/build-relay.sh run_rust run_ci_tools run_controller_cache
 scripts/build-release-controller.sh run_ci_tools run_installers run_controller_cache
 rust/transportd.Dockerfile run_ci_tools run_controller_cache
-signer/Dockerfile run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
-.dockerignore run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache
+signer/Dockerfile run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
+.dockerignore run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 scripts/release-quick-acceptance.sh run_ci_tools
 deploy/production/quick-install.sh run_ci_tools run_installers
 rust/agent-build.Dockerfile run_ci_tools
@@ -144,7 +146,7 @@ CASES
 for profile in quick full; do
   out="${fixture}/dispatch-${profile}.output"
   (cd "${fixture}" && bash "${SCRIPT}" workflow_dispatch invalid invalid "${out}" "${profile}")
-  for flag in run_docs run_go run_rust run_web run_database; do expect "${out}" "${flag}" true; done
+  for flag in run_docs run_go run_rust run_web run_web_browser run_database; do expect "${out}" "${flag}" true; done
   expect "${out}" run_ci_tools false
   expect "${out}" run_installers false
   expect "${out}" run_controller_cache false

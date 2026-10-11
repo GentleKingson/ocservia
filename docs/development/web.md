@@ -375,6 +375,16 @@ Specs requiring the development simulator (`local-slice` and the first two
 For a separately served production build, set `PLAYWRIGHT_BASE_URL` before
 running focused Playwright specs.
 
+Playwright projects name their engine: `desktop` is Chromium, `mobile` is the
+iPhone 13 viewport emulated in Chromium (not Safari coverage), and `firefox` and
+`webkit` run only the login/Workspace, rollout, node-form, password-dialog and
+shell-navigation specs. `npm run test:e2e` runs all four projects; select one
+with `--project`. The runner accepts the same selection, for example
+`node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`,
+and fails when a selected browser is missing. Report a project whose engine is
+not installed as not run. Playwright WebKit and Firefox builds are not the
+minimum supported Safari 16.4 or Firefox 128 releases.
+
 For shared UI changes, record in the PR:
 
 - Before/after screenshots with identical fixtures at 1440 px and 390 px for

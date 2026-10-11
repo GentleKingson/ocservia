@@ -16,7 +16,7 @@ case "${profile}" in
 esac
 database_scope=smoke
 if [[ "${profile}" == full ]]; then database_scope=full; fi
-flags=(run_docs run_go run_rust run_web run_database run_ci_tools run_installers run_controller_cache)
+flags=(run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache)
 for flag in "${flags[@]}"; do printf -v "${flag}" false; done
 reason=recognized_paths
 changed=()
@@ -117,13 +117,23 @@ classify_path() {
     .github/actions/build-cache-credentials/*|.github/workflows/ci.yml)
       run_controller_cache=true ;;
   esac
+  # Session/Workspace, routing, rollout and shared UI paths also run the stubbed
+  # browser regressions (docs/development/web.md#validation).
+  case "${path}" in
+    web/src/api/*|web/src/shared/*|web/src/App.vue|web/src/main.ts|web/src/main.css|web/index.html|\
+    web/src/components/ui/*|web/src/components/layout/*|web/src/features/operations/*|\
+    web/src/views/LoginView.vue|web/src/views/OperationsView.vue|web/src/views/RolloutDetailView.vue|\
+    web/e2e/*|web/playwright.config.ts|web/test/run-auth-browser.mjs|web/vite.config.ts|\
+    web/package.json|web/package-lock.json)
+      run_web_browser=true ;;
+  esac
 }
 
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$1^{commit}" 2>/dev/null; }
 
 if [[ "${event}" == workflow_dispatch ]]; then
   reason=workflow_dispatch_basic_checks
-  for flag in run_docs run_go run_rust run_web run_database; do printf -v "${flag}" true; done
+  for flag in run_docs run_go run_rust run_web run_web_browser run_database; do printf -v "${flag}" true; done
 elif [[ "${event}" != pull_request && "${event}" != push ]]; then
   fail_closed "unsupported_event:${event}"
 elif ! [[ "${base_sha}" =~ ^[0-9a-f]{40}$ && "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then
