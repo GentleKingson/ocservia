@@ -27,13 +27,6 @@ import { formatTimestamp } from "../shared/timestamp";
 import { workspaceContext } from "../api/workspace";
 import { useNodeConfiguration } from "../features/configuration/useNodeConfiguration";
 import { useNodeCertificates } from "../features/certificates/useNodeCertificates";
-import {
-  loadUserPolicy,
-  policyToForm,
-  saveUserPolicy,
-  type UserPolicyForm,
-} from "../adapters/user-policy";
-import UserPolicyFields from "../upstream/UserPolicyFields.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +41,7 @@ import NodeDetailNav from "../components/nodes/NodeDetailNav.vue";
 import NodeDetailSkeleton from "../components/nodes/NodeDetailSkeleton.vue";
 import NodeObservedDetails from "../components/nodes/NodeObservedDetails.vue";
 import NodeStatusSummary from "../components/nodes/NodeStatusSummary.vue";
+import UserPolicyDialog from "../components/nodes/UserPolicyDialog.vue";
 import {
   recoveryDialogKind,
   resourceStatusKey,
@@ -56,10 +50,7 @@ import { useFleetStore } from "../shared/fleet";
 import { operationTone } from "../features/operations/state-tone";
 import { operationStatusKey } from "../shared/operation-status";
 import { workspaceChangedEvent } from "../api/workspace";
-import {
-  createNodeWorkflow,
-  type NodeWorkflowContext,
-} from "../features/node-workflow";
+import { createNodeWorkflow } from "../features/node-workflow";
 
 const route = useRoute();
 const fleet = useFleetStore();
@@ -99,10 +90,6 @@ const desiredError = ref("");
 const groupMembers = ref("");
 const desiredReason = ref("");
 const policyDialog = ref<{ username: string }>();
-const policyForm = ref<UserPolicyForm>(policyToForm());
-const policyReason = ref("");
-const policyLoading = ref(false);
-const policyError = ref("");
 const readReady = computed(
   () => !detailLoading.value && !fleet.selecting && !fleet.selectionError,
 );
@@ -170,25 +157,6 @@ const groupsState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "group"),
 );
 const operationBusy = computed(() => fleet.operationTracking);
-const policyWorkflow = createNodeWorkflow(
-  () => currentNode.value?.id,
-  () => Boolean(policyDialog.value),
-  workspaceContext,
-);
-let policyContext: NodeWorkflowContext | undefined;
-
-watch(
-  policyDialog,
-  (dialog) => {
-    if (dialog) return;
-    policyWorkflow.cancel();
-    policyContext = undefined;
-    policyError.value = "";
-    policyLoading.value = false;
-  },
-  { flush: "sync" },
-);
-
 function closeNodeDialogs(): void {
   desiredDialog.value = undefined;
   pendingAction.value = undefined;
@@ -417,60 +385,8 @@ async function submitDesired(): Promise<void> {
   }
 }
 
-async function openPolicy(username: string): Promise<void> {
-  const nodeId = currentNode.value?.id;
-  if (!nodeId) return;
-  policyDialog.value = { username };
-  const context = policyWorkflow.begin(nodeId);
-  policyContext = context;
-  policyForm.value = policyToForm();
-  policyReason.value = "";
-  policyError.value = "";
-  policyLoading.value = true;
-  try {
-    const loaded = await loadUserPolicy(nodeId, username, context.signal);
-    if (policyWorkflow.isCurrent(context)) policyForm.value = loaded;
-  } catch (error) {
-    if (!policyWorkflow.isCurrent(context)) return;
-    policyError.value =
-      error instanceof Error ? error.message : t("policyLoadFailed");
-  } finally {
-    if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
-  }
-}
-
-async function submitPolicy(): Promise<void> {
-  const nodeId = currentNode.value?.id;
-  const context = policyContext;
-  if (
-    !nodeId ||
-    !context ||
-    !policyWorkflow.isCurrent(context) ||
-    policyLoading.value ||
-    !policyDialog.value ||
-    !policyReason.value.trim()
-  )
-    return;
-  const username = policyDialog.value.username;
-  policyLoading.value = true;
-  policyError.value = "";
-  try {
-    const saved = await saveUserPolicy(
-      nodeId,
-      username,
-      policyForm.value,
-      policyReason.value.trim(),
-    );
-    if (!policyWorkflow.isCurrent(context)) return;
-    policyForm.value = saved;
-    policyDialog.value = undefined;
-  } catch (error) {
-    if (!policyWorkflow.isCurrent(context)) return;
-    policyError.value =
-      error instanceof Error ? error.message : t("policyUpdateFailed");
-  } finally {
-    if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
-  }
+function openPolicy(username: string): void {
+  if (currentNode.value) policyDialog.value = { username };
 }
 function convergenceTone(key: string): string {
   if (key === "convergence_converged") return "text-success";
@@ -1359,29 +1275,13 @@ function convergenceTone(key: string): string {
       </template>
     </OperationDialog>
 
-    <OperationDialog
+    <UserPolicyDialog
       v-if="policyDialog"
-      :title="$t('quotaAndExpiry')"
-      :subject="policyDialog.username"
-      :error="policyError"
+      :key="policyDialog.username"
+      :node-id="currentNode?.id"
+      :username="policyDialog.username"
       @close="policyDialog = undefined"
-      @submit="submitPolicy"
-    >
-      <UserPolicyFields v-model="policyForm" />
-      <FormField id="policy-reason" :label="$t('reason')">
-        <Textarea
-          id="policy-reason"
-          v-model="policyReason"
-          maxlength="512"
-          required
-        />
-      </FormField>
-      <template #footer>
-        <Button type="submit" :disabled="policyLoading || !policyReason.trim()">
-          {{ $t("confirm") }}
-        </Button>
-      </template>
-    </OperationDialog>
+    />
 
     <OperationDialog
       v-if="configDialog"

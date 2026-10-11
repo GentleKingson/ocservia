@@ -117,10 +117,6 @@ interface View {
   certificateReason: string;
   certificateApproval: string;
   policyDialog: { username: string } | undefined;
-  policyLoading: boolean;
-  policyError: string;
-  policyForm: { version: number };
-  policyReason: string;
   openConfigPlan(): Promise<void>;
   submitConfigPlan(): Promise<void>;
   submitConfigApply(): Promise<void>;
@@ -130,8 +126,7 @@ interface View {
   createP12(): Promise<void>;
   downloadP12(): Promise<void>;
   revokeCurrentCertificate(): Promise<void>;
-  openPolicy(username: string): Promise<void>;
-  submitPolicy(): Promise<void>;
+  openPolicy(username: string): void;
 }
 
 function deferred<T>() {
@@ -825,31 +820,15 @@ describe("node workflow context isolation", () => {
     },
   );
 
-  it("guards policy success, errors and finally by dialog generation", async () => {
+  it("opens the policy dialog only for the current node and closes it on context change", async () => {
     const view = await mount();
-    const old = deferred<undefined>();
-    const fresh = deferred<undefined>();
-    mocks.getUserPolicy
-      .mockReturnValueOnce(old.promise)
-      .mockReturnValueOnce(fresh.promise);
-    const first = view.openPolicy("alice");
-    view.policyDialog = undefined;
-    await nextTick();
-    const second = view.openPolicy("alice");
-    old.reject(new Error("old policy"));
-    await first;
-    expect(view.policyLoading).toBe(true);
-    expect(view.policyError).toBe("");
-    fresh.resolve(undefined);
-    await second;
-    const saved = deferred<undefined>();
-    mocks.setUserPolicy.mockReturnValueOnce(saved.promise);
-    view.policyReason = "save";
-    const pending = view.submitPolicy();
-    await view.openPolicy("bob");
-    saved.resolve(undefined);
-    await pending;
-    expect(view.policyDialog).toEqual({ username: "bob" });
+    view.openPolicy("alice");
+    expect(view.policyDialog).toEqual({ username: "alice" });
+    await changeContext(view, "node");
+    expect(view.policyDialog).toBeUndefined();
+    mocks.fleet.selected = undefined;
+    view.openPolicy("bob");
+    expect(view.policyDialog).toBeUndefined();
   });
 });
 
