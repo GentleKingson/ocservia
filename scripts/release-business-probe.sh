@@ -583,4 +583,10 @@ if [[ "$PRODUCTION_SIGNER_ACCEPTANCE" == true && "$BUSINESS_PROFILE" == extended
   python3 "$ROOT/scripts/release-integrated-acceptance.py" recovery
   record integrated_recreation_and_authorized_sse
 fi
+if [[ "$BUSINESS_PROFILE" == extended ]]; then
+  # Last stage: the rollout replaces the Agent, so no later check may assume VERSION.
+  next_stage agent_rollout
+  bash "${ROOT}/scripts/release-business-rollout.sh"
+  record real_browser_agent_rollout
+fi
 next_stage complete

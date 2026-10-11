@@ -315,6 +315,58 @@ certutil() { :; }
             record.assert_not_called()
             assert not applied_file.exists()
 
+        # The rollout counts only when the canary succeeded under the bound
+        # approval and the node and installed binaries report the target.
+        rollout_env = {**env, 'BUSINESS_PROFILE': 'extended', 'VERSION': '0.0.0', 'ROLLOUT_VERSION': '0.0.1'}
+        rollout_file = work / 'evidence/browser-rollout-checkpoints.json'
+        rollout_entries = [
+            {'name': 'browser_bound_approval', 'action': 'agent.rollout'},
+            {'name': 'browser_agent_rollout', 'rollout': {'id': 'rollout', 'approval_id': 'approval', 'target_version': '0.0.1'}},
+            {'name': 'browser_csp', 'flow_violations': 0, 'flow_console_reports': 0, 'flow_page_errors': 0,
+             'control': ['script-src-elem/report', 'img-src/report']},
+        ]
+        rollout_state = {'agent-rollouts/rollout': {
+                             'id': 'rollout', 'state': 'succeeded', 'target_version': '0.0.1', 'stop_on_failure': True,
+                             'approval_id': 'approval',
+                             'nodes': [{'node_id': 'node', 'batch': 0, 'state': 'succeeded', 'operation_id': 'upgrade'}]},
+                         'approval-requests/approval': {'status': 'consumed'},
+                         'nodes/node': {'connection_state': 'online', 'agent_version': '0.0.1'}}
+        binaries = lambda path, _flag: f'{path.rsplit("/", 1)[1]} 0.0.1\n'
+        rollout_file.write_text(json.dumps(rollout_entries))
+        with patch.dict(os.environ, rollout_env), patch.object(business, 'api', side_effect=rollout_state.__getitem__), \
+                patch.object(business, 'run', side_effect=binaries), patch.object(business, 'record') as record:
+            business.rollout_verify()
+            assert record.call_args.args[0] == 'agent_rollout_canary_succeeded'
+        bad_rollouts = [
+            ('approval', [{**rollout_entries[0], 'action': 'service.reload'}, *rollout_entries[1:]], {}),
+            ('csp', [*rollout_entries[:2], {**rollout_entries[2], 'flow_violations': 1}], {}),
+            ('paused', rollout_entries, {'agent-rollouts/rollout': {**rollout_state['agent-rollouts/rollout'], 'state': 'paused'}}),
+            ('approval not consumed', rollout_entries, {'approval-requests/approval': {'status': 'approved'}}),
+        ]
+        for label, entries, overrides in bad_rollouts:
+            rollout_file.write_text(json.dumps(entries))
+            with patch.dict(os.environ, rollout_env), \
+                    patch.object(business, 'api', side_effect={**rollout_state, **overrides}.__getitem__), \
+                    patch.object(business, 'run', side_effect=binaries), patch.object(business, 'record') as record:
+                try:
+                    business.rollout_verify()
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError('rollout accepted: ' + label)
+                record.assert_not_called()
+        rollout_file.write_text(json.dumps(rollout_entries))
+        with patch.dict(os.environ, rollout_env), patch.object(business, 'api', side_effect=rollout_state.__getitem__), \
+                patch.object(business, 'run', side_effect=lambda path, _flag: f'{path.rsplit("/", 1)[1]} 0.0.0\n'), \
+                patch.object(business, 'record') as record:
+            try:
+                business.rollout_verify()
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError('rollout accepted with old installed binaries')
+            record.assert_not_called()
+
         with patch.dict(os.environ, {**env, 'PRODUCTION_SIGNER_ACCEPTANCE': 'true'}), \
                 patch.object(business, 'run', return_value='{"ciphertext":"sealed"}') as signer, \
                 patch.object(business, 'api', side_effect=api) as requests, \

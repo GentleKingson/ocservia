@@ -38,7 +38,14 @@ an OpenConnect tunnel and passes real ICMP traffic. Manual integration then appl
 revision whose reload is deliberately rejected, verifies automatic exact-byte
 rollback, and establishes a new OpenConnect tunnel with ICMP traffic. This is
 an **automatic rollback of a failed apply**, not an operator-initiated rollback
-of the successful revision. `timings.json` records per-stage wall-clock seconds;
+of the successful revision. As its final stage, manual integration builds the next
+patch version of the Agent package, places it in the node's root-owned upgrade
+spool, and recreates only the Controller with a diagnostics-only Compose override
+that mounts a release catalog (the shipped launcher mounts none). The browser
+then starts and approves a one-node canary rollout to that version; acceptance
+requires the rollout to succeed, the approval to be consumed, the installed
+binaries and the observed Agent to report the target, and no CSP violation.
+`timings.json` records per-stage wall-clock seconds;
 sanitized diagnostics retain the actual environment and execution outcome. No
 runtime target is currently a release contract.
 
