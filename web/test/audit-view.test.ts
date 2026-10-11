@@ -146,10 +146,30 @@ it("filters only the loaded slice and resets expansion on workspace change", asy
   await flush();
   expect(view.rows).toEqual([]);
   expect(mocks.listAuditEvents).toHaveBeenCalledTimes(1);
-  view.toggle("audit-a0");
-  view.toggle("audit-b1");
-  view.toggle("audit-a0");
-  expect(view.expanded).toEqual(["audit-b1"]);
+  view.toggle("id:audit-a");
+  view.toggle("id:audit-b");
+  view.toggle("id:audit-a");
+  expect(view.expanded).toEqual(["id:audit-b"]);
   window.dispatchEvent(new Event("workspace"));
   expect(view.expanded).toEqual([]);
+});
+it("keeps expansion on the same event across refreshes and keeps unkeyed rows", async () => {
+  const newer = { id: "audit-new", action: "node.update" };
+  mocks.listAuditEvents.mockResolvedValue({ items: [record] });
+  const view = await mount();
+  view.toggle("id:audit-a");
+  mocks.listAuditEvents.mockResolvedValue({
+    items: [newer, record, { action: "no.id" }, { ...record, action: "dup" }],
+  });
+  await view.refresh();
+  await flush();
+  expect(view.rows.map((row) => row.key)).toEqual([
+    "id:audit-new",
+    "id:audit-a",
+    "row:2",
+    "row:3",
+  ]);
+  expect(view.rows.filter((row) => view.expanded.includes(row.key))).toEqual([
+    { item: record, key: "id:audit-a" },
+  ]);
 });

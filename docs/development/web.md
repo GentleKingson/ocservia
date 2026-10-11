@@ -275,8 +275,9 @@ UI regression checks are listed under [Validation](#validation).
 ## Node detail workflows
 
 NodeDetail composes configuration and certificate workflows during setup.
-User-policy mapping lives in `adapters/user-policy.ts`; other desired-state
-and controlled-action handlers remain in the page.
+The quota-and-expiry dialog is `components/nodes/UserPolicyDialog.vue` and its
+mapping lives in `adapters/user-policy.ts`; other desired-state and
+controlled-action handlers remain in the page.
 
 ### Boundaries
 
@@ -287,6 +288,7 @@ Paths below are relative to `web/src`.
 | `views/NodeDetailView.vue`                       | Route ID, Fleet selection, authorized-read readiness, Workspace listener, closing dialogs on navigation, and template composition  |
 | `features/configuration/useNodeConfiguration.ts` | Configuration form, captured revision, Plan/Apply requests, Plan polling, receipt recovery, errors/loading and dialog cancellation |
 | `features/certificates/useNodeCertificates.ts`   | Certificate form, CSR polling, issue/P12/download/revoke requests, receipt/grant recovery, errors/loading and dialog cancellation  |
+| `components/nodes/UserPolicyDialog.vue`          | Quota/expiry form, policy read on mount, save, errors/loading; unmounting detaches late responses but does not undo a sent save    |
 | `features/node-workflow.ts`                      | Existing shared context fence, cancellable wait, pending-mutation tickets, identifier receipts and expiring in-memory grants       |
 | `shared/fleet.ts`                                | Shared operation tracking and telemetry; feature disposal does not stop Fleet tracking                                             |
 | `api/workspace.ts`                               | Sole Workspace authority; features receive its context getter, not a second Workspace store                                        |

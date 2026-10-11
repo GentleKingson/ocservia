@@ -89,8 +89,17 @@ const expanded = ref<string[]>([]);
 // page or query the server.
 const rows = computed(() => {
   const query = search.value.trim().toLowerCase();
+  const seen = new Set<string>();
   return items.value
-    .map((item, index) => ({ item, key: text(item.id) + index }))
+    .map((item, index) => {
+      // Server ids are primary keys, so expansion follows the event when newer
+      // records shift positions. The list contract leaves items untyped: a
+      // missing or repeated id keeps the row visible under a positional key.
+      const id = typeof item.id === "string" ? item.id : "";
+      const key = id && !seen.has(id) ? `id:${id}` : `row:${index}`;
+      seen.add(id);
+      return { item, key };
+    })
     .filter(
       ({ item }) =>
         (!resultFilter.value || item.result === resultFilter.value) &&
