@@ -464,7 +464,11 @@ Both gateway configurations, [`Caddyfile`](../../deploy/production/Caddyfile)
 Policy in **Report-Only** mode: `default-src 'self'; object-src 'none'; base-uri
 'none'; frame-ancestors 'none'; form-action 'self'`. Report-Only blocks nothing
 and names no report endpoint; violations appear only in the browser console.
-Keep the two policies identical. Before switching the header to
+Responses Caddy writes for a handler error, such as a 502 when the control plane
+is unreachable, skip the site's deferred `header` block, so each file repeats it
+in `handle_errors`. Keep all four header blocks identical;
+[`test-controller-gateway-headers.py`](../../scripts/test-controller-gateway-headers.py)
+checks static and 502 responses in both configurations. Before switching the header to
 `Content-Security-Policy`, run the browser specs against both gateways over HTTPS
 in Chromium, Firefox and WebKit with no violations; if enforcement breaks a page,
 return only this header to Report-Only and keep the other headers. No reported
