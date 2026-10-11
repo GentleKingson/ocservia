@@ -119,7 +119,7 @@ function focusMainContent(): void {
       class="bg-background min-h-screen min-w-0 md:m-2 md:ml-0 md:min-h-[calc(100vh-1rem)] md:rounded-xl md:shadow-sm"
     >
       <AppHeader
-        v-model:workspace-id="selectedWorkspaceId"
+        :workspace-id="selectedWorkspaceId"
         :workspaces="workspaces"
         :readiness="readiness.state"
         @change-workspace="changeWorkspace"
