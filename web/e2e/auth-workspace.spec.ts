@@ -258,6 +258,19 @@ test("an expired SSE session starts OIDC login and restores the console", async 
     )
     .toBeNull();
   expect(logins).toBe(1);
+  // The stream opens after the first snapshot read, not with the heading.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __eventSources: Array<{ closed: boolean }>;
+            }
+          ).__eventSources.filter((source) => !source.closed).length,
+      ),
+    )
+    .toBe(1);
   authenticated = false;
   await page.evaluate(() => {
     const sources = (
