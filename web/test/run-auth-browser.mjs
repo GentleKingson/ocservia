@@ -10,11 +10,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { preview } from "vite";
 
-// Usage: node test/run-auth-browser.mjs [--gateway] [--project=NAME]... [SPEC]...
+// Usage: node test/run-auth-browser.mjs [--gateway[=standalone|integrated]]
+//   [--project=NAME]... [SPEC]...
 // Projects default to desktop; extra specs run beside the authentication specs.
 // --gateway serves the build (dist/) through the pinned production Caddy and
 // the repository Caddyfile over HTTPS instead of Vite preview, so its headers
 // (including the Report-Only CSP) apply; it needs Docker.
+// --gateway=integrated instead puts the Integrated Edge (NGINX SNI routing with
+// PROXY protocol) in front of the Integrated Caddyfile, published on
+// 127.0.0.1:443 as https://controller.localhost, so that port must be free.
 // Every required test must pass in every selected project; a missing browser
 // fails the run instead of being reported as passed.
 const args = process.argv.slice(2);
@@ -22,9 +26,13 @@ const projects = args
   .filter((arg) => arg.startsWith("--project="))
   .map((arg) => arg.slice("--project=".length));
 if (projects.length === 0) projects.push("desktop");
-const gateway = args.includes("--gateway");
+const gatewayArg = args.find(
+  (arg) => arg === "--gateway" || arg.startsWith("--gateway="),
+);
+const gateway = gatewayArg?.split("=")[1] ?? (gatewayArg ? "standalone" : "");
+assert.ok(["", "standalone", "integrated"].includes(gateway), gatewayArg);
 const extraSpecs = args.filter(
-  (arg) => !arg.startsWith("--project=") && arg !== "--gateway",
+  (arg) => !arg.startsWith("--project=") && arg !== gatewayArg,
 );
 if (gateway) extraSpecs.push("csp-control.spec.ts");
 // These existing browser regressions are not selected by `vitest run test`.
@@ -50,23 +58,39 @@ let child;
 const gatewayName = `ocservia-browser-gateway-${String(process.pid)}`;
 const docker = (...command) =>
   execFileSync("docker", command, { encoding: "utf8" }).trim();
+// Every gateway origin is loopback; resolving it here does not depend on the
+// host resolving *.localhost the way the browsers do.
+const loopback = (_hostname, options, callback) =>
+  options.all
+    ? callback(null, [{ address: "127.0.0.1", family: 4 }])
+    : callback(null, "127.0.0.1", 4);
 const get = (url) =>
   new Promise((done, fail) => {
-    request(url, { rejectUnauthorized: false }, (response) => {
-      response.resume();
-      done(response.statusCode);
-    })
+    request(
+      url,
+      { rejectUnauthorized: false, lookup: loopback },
+      (response) => {
+        response.resume();
+        done(response.statusCode);
+      },
+    )
       .on("error", fail)
       .end();
   });
 
 // Production gateway image and Caddyfile; /api/* reaches a stub that answers
 // 404 like Vite preview, so only the specs' own route mocks serve the API.
+// Integrated adds the Edge image's NGINX with the repository template and
+// entrypoint; Caddy accepts PROXY protocol only from Edge's fixed address.
 async function startGateway() {
   const root = resolve("..");
-  const caddy = (
-    await readFile(join(root, "deploy/production/gateway.Dockerfile"), "utf8")
-  ).match(/^FROM (caddy:\S+)$/m)[1];
+  const image = async (dockerfile, name) =>
+    (await readFile(join(root, "deploy/production", dockerfile), "utf8")).match(
+      new RegExp(`^FROM (${name}:\\S+)$`, "m"),
+    )[1];
+  const caddy = await image("gateway.Dockerfile", "caddy");
+  const integrated = gateway === "integrated";
+  const host = integrated ? "controller.localhost" : "localhost";
   execFileSync(
     "openssl",
     [
@@ -78,7 +102,9 @@ async function startGateway() {
       "-days",
       "1",
       "-subj",
-      "/CN=localhost",
+      `/CN=${host}`,
+      "-addext",
+      `subjectAltName=DNS:${host}`,
       "-keyout",
       join(directory, "tls.key"),
       "-out",
@@ -88,7 +114,16 @@ async function startGateway() {
   );
   await chmod(directory, 0o755);
   await chmod(join(directory, "tls.key"), 0o444);
-  docker("network", "create", gatewayName);
+  const edgeIP = "198.18.95.2";
+  docker(
+    "network",
+    "create",
+    // Dynamic addresses stay above Edge's fixed one.
+    ...(integrated
+      ? ["--subnet", "198.18.95.0/24", "--ip-range", "198.18.95.128/25"]
+      : []),
+    gatewayName,
+  );
   docker(
     "run",
     "-d",
@@ -106,6 +141,25 @@ async function startGateway() {
     "--status",
     "404",
   );
+  const config = integrated
+    ? [
+        "--network-alias",
+        "gateway",
+        "-e",
+        `OCSERV_PUBLIC_HOST=${host}`,
+        "-e",
+        `OCSERV_EDGE_GATEWAY_IP=${edgeIP}`,
+        "-v",
+        `${join(root, "deploy/production/integrated/Caddyfile")}:/etc/caddy/Caddyfile:ro`,
+        "-v",
+        `${join(root, "deploy/production/integrated/site.caddy")}:/etc/caddy/site.caddy:ro`,
+      ]
+    : [
+        "-p",
+        "127.0.0.1::8443",
+        "-v",
+        `${join(root, "deploy/production/Caddyfile")}:/etc/caddy/Caddyfile:ro`,
+      ];
   docker(
     "run",
     "-d",
@@ -113,10 +167,7 @@ async function startGateway() {
     gatewayName,
     "--network",
     gatewayName,
-    "-p",
-    "127.0.0.1::8443",
-    "-v",
-    `${join(root, "deploy/production/Caddyfile")}:/etc/caddy/Caddyfile:ro`,
+    ...config,
     "-v",
     `${resolve("dist")}:/srv:ro`,
     "-v",
@@ -125,8 +176,42 @@ async function startGateway() {
     `${join(directory, "tls.key")}:/run/secrets/tls_private_key:ro`,
     caddy,
   );
-  const port = docker("port", gatewayName, "8443/tcp").split(":").at(-1);
-  const origin = `https://127.0.0.1:${port}`;
+  let origin;
+  if (integrated) {
+    docker(
+      "run",
+      "-d",
+      "--name",
+      `${gatewayName}-edge`,
+      "--network",
+      gatewayName,
+      "--ip",
+      edgeIP,
+      "--user",
+      "65532:65532",
+      "--read-only",
+      "--tmpfs",
+      "/tmp:size=8m,mode=0700,uid=65532,gid=65532",
+      "-p",
+      "127.0.0.1:443:8443",
+      "-e",
+      `OCSERV_PUBLIC_HOST=${host}`,
+      "-e",
+      "OCSERV_RELAY_PUBLIC_HOST=relay.localhost",
+      "-v",
+      `${join(root, "deploy/production/integrated/nginx.conf.template")}:/etc/nginx/ocservia.conf.template:ro`,
+      "-v",
+      `${join(root, "deploy/production/integrated/edge-entrypoint.sh")}:/usr/local/bin/ocservia-edge:ro`,
+      "--entrypoint",
+      "/bin/sh",
+      await image("edge.Dockerfile", "nginx"),
+      "/usr/local/bin/ocservia-edge",
+    );
+    origin = `https://${host}`;
+  } else {
+    const port = docker("port", gatewayName, "8443/tcp").split(":").at(-1);
+    origin = `https://127.0.0.1:${port}`;
+  }
   for (let attempt = 0; attempt < 60; attempt += 1) {
     if ((await get(`${origin}/`).catch(() => 0)) === 200) return origin;
     await delay(500);
@@ -244,7 +329,7 @@ try {
   }
   assert.equal(status, 0, JSON.stringify(result.errors));
   console.log(
-    `Browser regressions (${projects.join(", ")}${gateway ? ", gateway" : ""}): ${String(passed)} passed, ` +
+    `Browser regressions (${projects.join(", ")}${gateway ? `, ${gateway} gateway` : ""}): ${String(passed)} passed, ` +
       `${String(declaredSkips.length)} declared skips${declaredSkips.length ? `: ${declaredSkips.join("; ")}` : ""}`,
   );
 } finally {
@@ -259,7 +344,13 @@ try {
   }
   if (gateway) {
     for (const command of [
-      ["rm", "-f", gatewayName, `${gatewayName}-upstream`],
+      [
+        "rm",
+        "-f",
+        `${gatewayName}-edge`,
+        gatewayName,
+        `${gatewayName}-upstream`,
+      ],
       ["network", "rm", gatewayName],
     ])
       spawnSync("docker", command, { stdio: "ignore" });

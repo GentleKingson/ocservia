@@ -385,7 +385,11 @@ with `--project`. The runner accepts the same selection, for example
 and fails when a selected browser is missing. Report a project whose engine is
 not installed as not run. `--gateway` (Docker required) serves `dist/` through
 the pinned production Caddy with `deploy/production/Caddyfile` over HTTPS
-instead of Vite preview. The cross-engine specs import `e2e/csp.ts`, which
+instead of Vite preview; `--gateway=integrated` instead runs the Integrated
+Edge (`edge.Dockerfile` base image with `deploy/production/integrated`'s NGINX
+template and entrypoint) in front of the Integrated Caddyfile, published at
+`https://controller.localhost` on `127.0.0.1:443`, so Caddy only sees requests
+through Edge's SNI routing and PROXY protocol. The cross-engine specs import `e2e/csp.ts`, which
 fails a test on any `securitypolicyviolation`. Because the policy is
 Report-Only and has no report endpoint, `csp-control.spec.ts` must also observe
 a deliberate violation in every selected project. Playwright WebKit and Firefox builds are not the

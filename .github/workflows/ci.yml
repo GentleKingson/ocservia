@@ -213,9 +213,10 @@ jobs:
       # Quick runs Chromium; Full adds the Firefox and WebKit key-spec projects.
       BROWSER_PROJECTS: ${{ needs.ci-relevance.outputs.profile == 'full' && 'desktop firefox webkit' || 'desktop' }}
       BROWSER_ENGINES: ${{ needs.ci-relevance.outputs.profile == 'full' && 'chromium firefox webkit' || 'chromium' }}
-      # Full also serves the build through the production Caddy and Caddyfile,
-      # where the cross-engine specs fail on any Report-Only CSP violation.
-      BROWSER_GATEWAY: ${{ needs.ci-relevance.outputs.profile == 'full' && '--gateway' || '' }}
+      # Full also serves the build through the production Standalone gateway and
+      # then the Integrated Edge and gateway, where the cross-engine specs fail
+      # on any Report-Only CSP violation.
+      BROWSER_GATEWAYS: ${{ needs.ci-relevance.outputs.profile == 'full' && 'standalone integrated' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -247,9 +248,13 @@ jobs:
           npm run build
           args=()
           for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
-          if [[ -n "${BROWSER_GATEWAY}" ]]; then args+=("${BROWSER_GATEWAY}"); fi
-          node test/run-auth-browser.mjs agent-rollout.spec.ts node-forms.spec.ts \
-            user-password.spec.ts shell-navigation.spec.ts "${args[@]}"
+          specs=(agent-rollout.spec.ts node-forms.spec.ts user-password.spec.ts shell-navigation.spec.ts)
+          if [[ -z "${BROWSER_GATEWAYS}" ]]; then
+            node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}"
+          fi
+          for gateway in ${BROWSER_GATEWAYS}; do
+            node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}" "--gateway=${gateway}"
+          done
 
   database-smoke:
     needs: ci-relevance
