@@ -186,7 +186,6 @@ async function submitRollout(): Promise<void> {
   };
   rolloutStarting.value = true;
   rolloutError.value = "";
-  rolloutUnconfirmed = false;
   let createdId: string | undefined;
   try {
     const rollout = await createAgentRollout(
@@ -197,7 +196,9 @@ async function submitRollout(): Promise<void> {
       rolloutApprovalId.value.trim(),
     );
     // Closing the dialog abandons only the navigation, never the request.
-    if (!owned() || !rolloutDialog.value || opening !== rolloutOpening) return;
+    if (!owned()) return;
+    rolloutUnconfirmed = false;
+    if (!rolloutDialog.value || opening !== rolloutOpening) return;
     rolloutDialog.value = false;
     selected.value = [];
     rolloutReason.value = "";
@@ -206,11 +207,13 @@ async function submitRollout(): Promise<void> {
   } catch (cause) {
     if (!owned()) return;
     // A lost POST response may still have created the rollout; never resend.
-    const definite = cause instanceof ResponseError;
-    rolloutUnconfirmed = !definite;
-    rolloutError.value = definite
-      ? cause.message
-      : t("rolloutStartUnconfirmed");
+    // Until a create is confirmed, a definite rejection of an explicit retry
+    // (e.g. the approval it consumed) does not settle that earlier start.
+    rolloutUnconfirmed ||= !(cause instanceof ResponseError);
+    rolloutError.value =
+      !rolloutUnconfirmed && cause instanceof ResponseError
+        ? cause.message
+        : t("rolloutStartUnconfirmed");
   } finally {
     if (ticket === rolloutSubmission) rolloutStarting.value = false;
   }
