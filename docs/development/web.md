@@ -391,8 +391,8 @@ template and entrypoint) in front of the Integrated Caddyfile, published at
 `https://controller.localhost` on `127.0.0.1:443`, so Caddy only sees requests
 through Edge's SNI routing and PROXY protocol. The cross-engine specs import `e2e/csp.ts`, which
 fails a test on any `securitypolicyviolation`. Because the policy is
-Report-Only and has no report endpoint, `csp-control.spec.ts` must also observe
-a deliberate violation in every selected project. Playwright WebKit and Firefox builds are not the
+enforced and has no report endpoint, `csp-control.spec.ts` must also observe
+a deliberate violation blocked with `disposition=enforce` in every selected project. Playwright WebKit and Firefox builds are not the
 minimum supported Safari 16.4 or Firefox 128 releases.
 
 For shared UI changes, record in the PR:

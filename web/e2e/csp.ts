@@ -4,7 +4,7 @@ export { expect };
 
 type CspReporter = { __ocserviaCsp: (violation: string) => void };
 
-// The gateway CSP is Report-Only and has no report endpoint, so every test
+// The gateway CSP is enforced and has no report endpoint, so every test
 // collects violations in its own pages and fails on any. Without the gateway
 // (Vite preview) no policy is sent; the control spec proves collection there.
 export const test = base.extend<{ cspViolations: string[] }>({

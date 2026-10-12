@@ -696,8 +696,8 @@ def deep_resilience():
 def assert_browser_csp(entries, evidence):
     csp = next(entry for entry in entries if entry['name'] == 'browser_csp')
     assert csp['flow_violations'] == 0 and csp['flow_console_reports'] == 0, 'browser CSP violation: see ' + evidence
-    assert sorted(item.split('/')[0] for item in csp['control']) == ['img-src', 'script-src-elem'], \
-        'browser CSP control not observed exactly'
+    assert sorted(csp['control']) == ['img-src/enforce', 'script-src-elem/enforce'], \
+        'browser CSP control not enforced and observed exactly'
 
 
 def browser_verify():

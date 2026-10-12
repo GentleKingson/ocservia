@@ -15,7 +15,7 @@ import { preview } from "vite";
 // Projects default to desktop; extra specs run beside the authentication specs.
 // --gateway serves the build (dist/) through the pinned production Caddy and
 // the repository Caddyfile over HTTPS instead of Vite preview, so its headers
-// (including the Report-Only CSP) apply; it needs Docker.
+// (including the enforced CSP) apply; it needs Docker.
 // --gateway=integrated instead puts the Integrated Edge (NGINX SNI routing with
 // PROXY protocol) in front of the Integrated Caddyfile, published on
 // 127.0.0.1:443 as https://controller.localhost, so that port must be free.
@@ -51,7 +51,7 @@ const required = new Set([
   "rapid workspace changes leave only the final workspace stream active",
 ]);
 if (gateway)
-  required.add("gateway Report-Only CSP violations are observable in the page");
+  required.add("gateway CSP blocks violations observably in the page");
 const directory = await mkdtemp(join(tmpdir(), "ocservia-auth-browser-"));
 let server;
 let child;

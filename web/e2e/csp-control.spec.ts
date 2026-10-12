@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 type CspReporter = { __ocserviaCsp: (violation: string) => void };
 
-test("gateway Report-Only CSP violations are observable in the page", async ({
+test("gateway CSP blocks violations observably in the page", async ({
   context,
   page,
 }) => {
@@ -22,10 +22,10 @@ test("gateway Report-Only CSP violations are observable in the page", async ({
     });
   });
   const response = await page.goto("/");
+  expect(response?.headers()["content-security-policy"]).toBeTruthy();
   expect(
     response?.headers()["content-security-policy-report-only"],
-  ).toBeTruthy();
-  expect(response?.headers()["content-security-policy"]).toBeUndefined();
+  ).toBeUndefined();
   await page.evaluate(() => {
     const image = new Image();
     image.src = "https://csp-control.invalid/pixel.png";
@@ -36,5 +36,8 @@ test("gateway Report-Only CSP violations are observable in the page", async ({
   });
   await expect
     .poll(() => [...violations].sort())
-    .toEqual(["img-src/report", "script-src-elem/report"]);
+    .toEqual(["img-src/enforce", "script-src-elem/enforce"]);
+  expect(
+    await page.evaluate(() => document.body.dataset.cspControl),
+  ).toBeUndefined();
 });
