@@ -1,0 +1,85 @@
+# Temporary evidence-only workflow for PR #451; removed before merge.
+name: PR 451 native arm64 validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/tmp-pr451-arm64-native.yml
+
+permissions:
+  contents: read
+
+jobs:
+  arm64:
+    name: Native arm64 build and go version -m
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Host
+        run: |
+          set -euo pipefail
+          echo "candidate_sha=${CANDIDATE_SHA}"
+          git rev-parse HEAD
+          uname -a
+          test "$(uname -m)" = aarch64
+      - name: Bootstrap pinned Go and run standard checks natively
+        run: |
+          set -euo pipefail
+          scripts/bootstrap.sh go-test
+          source scripts/env.sh
+          go version
+          test "$(go env GOVERSION)" = go1.26.9
+          test "$(go env GOARCH)" = arm64
+          test "$(go env GOTOOLCHAIN)" = local
+          scripts/go-check.sh standard
+          GOWORK=off scripts/go-check.sh standard
+      - name: Build images natively (no push)
+        run: |
+          set -euo pipefail
+          docker build --pull -f control-plane/Dockerfile \
+            --build-arg VERSION=security-validation --build-arg "COMMIT=${CANDIDATE_SHA}" \
+            -t pr451-control:arm64 .
+          docker build --pull -f deploy/production/signer.Dockerfile -t pr451-signer:arm64 .
+          docker build --pull -f deploy/database-e2e/Dockerfile --target workflow-tools \
+            -t pr451-workflow-tools:arm64 .
+          for image in pr451-control:arm64 pr451-signer:arm64 pr451-workflow-tools:arm64; do
+            echo "${image} $(docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Id}}' "${image}")"
+            test "$(docker image inspect --format '{{.Architecture}}' "${image}")" = arm64
+          done
+      - name: Verify binaries with go version -m
+        run: |
+          set -euo pipefail
+          source scripts/env.sh
+          out="${RUNNER_TEMP}/bin"
+          mkdir -p "${out}"
+          control="$(docker create pr451-control:arm64)"
+          docker cp "${control}:/usr/local/bin/ocserv-control" "${out}/ocserv-control"
+          docker cp "${control}:/usr/local/bin/ocserv-sealing-export" "${out}/ocserv-sealing-export"
+          signer="$(docker create pr451-signer:arm64)"
+          docker cp "${signer}:/ocserv-signer" "${out}/ocserv-signer"
+          for bin in ocserv-control ocserv-sealing-export ocserv-signer; do
+            echo "=== ${bin}"
+            go version -m "${out}/${bin}" | tee "${out}/${bin}.buildinfo"
+            grep -qE ': go1\.26\.9$' "${out}/${bin}.buildinfo"
+            grep -qE '^\s+build\s+GOARCH=arm64$' "${out}/${bin}.buildinfo"
+          done
+          for bin in ocserv-control ocserv-sealing-export; do
+            grep -qE '^\s+dep\s+golang\.org/x/net\s+v0\.60\.0\s' "${out}/${bin}.buildinfo"
+          done
+          if grep -q 'golang.org/x/net' "${out}/ocserv-signer.buildinfo"; then exit 1; fi
+          echo "=== workflow-tools"
+          docker run --rm --entrypoint /usr/local/go/bin/go pr451-workflow-tools:arm64 version | tee "${out}/workflow-tools.go-version"
+          grep -qx 'go version go1.26.9 linux/arm64' "${out}/workflow-tools.go-version"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: pr451-arm64-native-${{ github.run_id }}
+          path: ${{ runner.temp }}/bin/*.buildinfo
+          retention-days: 14
+          if-no-files-found: warn
