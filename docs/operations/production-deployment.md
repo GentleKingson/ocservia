@@ -469,8 +469,13 @@ is unreachable, skip the site's deferred `header` block, so each file repeats it
 in `handle_errors`. Keep all four header blocks identical;
 [`test-controller-gateway-headers.py`](../../scripts/test-controller-gateway-headers.py)
 checks static and 502 responses in both configurations. If enforcement breaks a
-page, roll back by renaming only this header to `Content-Security-Policy-Report-Only`
-in all four blocks and keep the other headers. The browser specs observe no
+page, roll back at release level: the gateway files are part of the release (the
+Standalone Caddyfile is built into the gateway image; Integrated mounts them from
+the release checkout, which the lifecycle requires to be clean), so do not edit an
+installed copy. Either run the [Controller rollback](../how-to/controller-lifecycle.md#rollback)
+to a previous Report-Only release, or upgrade to a release built from a commit that
+renames only this header to `Content-Security-Policy-Report-Only` in all four
+blocks and keeps the other headers. The browser specs observe no
 violation only on the exercised paths; that is not proof of the absence of XSS.
 
 <a id="authentication-request-budgets"></a>
