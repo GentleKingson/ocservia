@@ -85,7 +85,6 @@ export const useFleetStore = defineStore("fleet", () => {
   const ipBans = ref<NodeIpBan[]>([]);
   const userGroupState = ref<UserGroupResourceState[]>([]);
   const latestOperation = ref<Operation>();
-  const activeOperation = ref<Operation>();
   const operationTracking = ref(false);
   const operationError = ref("");
   const loading = ref(false);
@@ -135,7 +134,6 @@ export const useFleetStore = defineStore("fleet", () => {
     selectController = undefined;
     operationController = undefined;
     selecting.value = false;
-    activeOperation.value = undefined;
     operationTracking.value = false;
     rebuildSequence += 1;
     selectSequence += 1;
@@ -276,7 +274,6 @@ export const useFleetStore = defineStore("fleet", () => {
     if (selected.value && selected.value.id !== nodeId) {
       cancelRequest(operationController);
       operationController = undefined;
-      activeOperation.value = undefined;
       operationTracking.value = false;
       operationSequence += 1;
       selected.value = undefined;
@@ -372,7 +369,6 @@ export const useFleetStore = defineStore("fleet", () => {
       let currentOperation = await create(node, controller.signal);
       if (!isLatestOperation()) return;
       latestOperation.value = currentOperation;
-      activeOperation.value = currentOperation;
       let recoveryAttempt = 0;
       while (!terminal.has(currentOperation.state)) {
         const recovering = currentOperation.state === "unknown";
@@ -388,7 +384,6 @@ export const useFleetStore = defineStore("fleet", () => {
         );
         if (!isLatestOperation()) return;
         latestOperation.value = currentOperation;
-        activeOperation.value = currentOperation;
         recoveryAttempt = recovering ? recoveryAttempt + 1 : 0;
       }
       if (
@@ -407,7 +402,6 @@ export const useFleetStore = defineStore("fleet", () => {
       releaseRequest(controller);
       if (operationController === controller) {
         operationController = undefined;
-        activeOperation.value = undefined;
         operationTracking.value = false;
       }
     }
@@ -417,7 +411,6 @@ export const useFleetStore = defineStore("fleet", () => {
     if (!operationController) return;
     cancelRequest(operationController);
     operationController = undefined;
-    activeOperation.value = undefined;
     operationTracking.value = false;
     operationSequence += 1;
   }
@@ -665,7 +658,6 @@ export const useFleetStore = defineStore("fleet", () => {
     ipBans.value = [];
     userGroupState.value = [];
     latestOperation.value = undefined;
-    activeOperation.value = undefined;
     operationTracking.value = false;
     operationError.value = "";
     loading.value = false;
@@ -688,7 +680,6 @@ export const useFleetStore = defineStore("fleet", () => {
     ipBans,
     userGroupState,
     latestOperation,
-    activeOperation,
     operationTracking,
     operationError,
     loading,
