@@ -5,6 +5,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="${ROOT}/deploy/managed-node/install.sh"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
 VERSION="${TEST_RELEASE_VERSION:-0.2.1}"
+scope="${1:-full}"
+case "${scope}" in
+  full|release-contracts) [[ $# -le 1 ]] ;;
+  *) echo 'usage: test-managed-node-install.sh [full|release-contracts]' >&2; exit 2 ;;
+esac
 MOCK_NODE_ID="018f1e11-2222-7333-8444-555555555555"
 
 # The installer fixture asserts file modes with GNU stat and creates runtime command
@@ -38,6 +43,13 @@ fixture="$(mktemp -d "${HOME}/.ocservia-managed-node-test.XXXXXX")"
 can_root() {
   ((EUID == 0)) || sudo -n true >/dev/null 2>&1
 }
+
+# The reduced release run must exercise native version convergence and digest
+# checks, not report success after skipping the privileged scenarios.
+if [[ "${scope}" == release-contracts ]] && ! can_root; then
+  echo 'Release contracts require root or passwordless sudo' >&2
+  exit 1
+fi
 
 as_root() {
   if ((EUID == 0)); then
@@ -1196,6 +1208,14 @@ assert_status 0 "RPM rerun must converge"
 assert_output "already installed; skipping the release download"
 [[ "$(grep -c -- '-ivh' "${rpm_log}")" == "${rpm_calls}" ]] || die "RPM rerun reinstalled package"
 [[ "$(wc -l <"${curl_log}" | tr -d ' ')" == "${curl_calls}" ]] || die "RPM rerun downloaded package"
+
+# Keep the original version/pin, platform, rejection, digest and DEB/RPM rerun
+# scenarios above for RC too. The remaining identity, enrollment, credential and
+# sudo allowlist contracts are version-independent and run in the full suite.
+if [[ "${scope}" == release-contracts ]]; then
+  echo "Managed node release contracts passed (${VERSION})"
+  exit 0
+fi
 
 # 12. a rerun converges: the installed package is reused, not reinstalled,
 # and the release is not downloaded again.
