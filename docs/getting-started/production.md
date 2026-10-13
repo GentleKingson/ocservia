@@ -131,7 +131,9 @@ Do not replace this flow with a manual `docker compose up -d`; that bypasses the
 
 This bootstrap requires an existing stable or RC Release and an exact version tag.
 
-### Quick mode on main
+<a id="quick-mode-on-main"></a>
+
+### Quick mode
 
 `controller-bootstrap.sh --quick` is a preset over the same installer, not a
 second installer, and only for a new host: Integrated, bundled PostgreSQL,
@@ -140,8 +142,8 @@ generates the configuration in `/etc/ocservia/install.env` and the protected
 material described above, and creates the two Local administrators
 `initial-admin` and `initial-approver`. Other combinations (Standalone,
 external or MySQL databases, OIDC, manual TLS) use the manual path above.
-Quick is on main only: Releases up to v1.2.0 do not contain
-`deploy/production/quick-install.sh`, and their bootstrap refuses `--quick`.
+Choose a stable or RC Release that ships `deploy/production/quick-install.sh`.
+Releases up to v1.2.0 do not contain it, and their bootstrap refuses `--quick`.
 Prerequisites, preflight and rerun rules are in
 [Quick mode](../operations/bootstrap-hosting.md#quick-mode).
 

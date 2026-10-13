@@ -109,7 +109,7 @@ $EDITOR install.env
 
 The Controller supports local credentials, OpenID Connect (OIDC), or both. There is no default administrator: with Local login enabled, a manual installation creates the first admin with a separate one-shot bootstrap command. See [Production authentication](docs/operations/authentication.md) for details.
 
-Standalone configurations (the default) run the Relay and Signer services on separate hosts. Integrated mode runs them on the Controller host, which requires extra configuration and the root lifecycle. Provision your secrets according to [Deploy the Controller](docs/getting-started/production.md) before bootstrapping. On main, a Quick preset can generate the configuration, material and initial Local administrators for a new Integrated host; no published release contains it yet (see [Deploy the Controller](docs/getting-started/production.md#quick-mode-on-main)).
+Standalone configurations (the default) run the Relay and Signer services on separate hosts. Integrated mode runs them on the Controller host, which requires extra configuration and the root lifecycle. Provision your secrets according to [Deploy the Controller](docs/getting-started/production.md) before bootstrapping. A Quick preset can generate the configuration, material and initial Local administrators for a new Integrated host when the selected stable or RC Release ships Quick mode; Releases up to v1.2.0 do not (see [Deploy the Controller](docs/getting-started/production.md#quick-mode)).
 
 ### 2. Install a managed node
 
