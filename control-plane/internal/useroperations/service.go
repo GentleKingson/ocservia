@@ -19,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
@@ -222,7 +223,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		return Policy{}, false, err
 	}
 	after, _ := json.Marshal(map[string]any{"quota_period": request.QuotaPeriod, "quota_direction": request.QuotaDirection, "quota_bytes": request.QuotaBytes, "expires_at": request.ExpiresAt, "version": nextVersion})
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.policy.set", ResourceType: "user_policy", ResourceID: mutationID, NodeID: &request.NodeID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, AfterSummary: after, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.policy.set", ResourceType: "user_policy", ResourceID: mutationID, NodeID: &request.NodeID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, AfterSummary: after, At: now}); err != nil {
 		return Policy{}, false, err
 	}
 	if err := commit(ctx, tx); err != nil {
@@ -371,7 +372,7 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 		}
 	}
 	auditSummary, _ := json.Marshal(map[string]any{"request_hash": hex.EncodeToString(hash[:]), "items": request.Items})
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.batch.create", ResourceType: "batch_operation", ResourceID: id, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, AfterSummary: auditSummary, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.batch.create", ResourceType: "batch_operation", ResourceID: id, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Batch{}, false, err
 	}
 	if err := commit(ctx, tx); err != nil {
@@ -724,7 +725,7 @@ func RecordUsageTx(ctx context.Context, tx database.Tx, nodeID uuid.UUID, sample
 }
 
 func validatePolicyRequest(request PolicyRequest) error {
-	if request.NodeID == uuid.Nil || !namePattern.MatchString(request.Username) || request.ExpectedVersion < 0 || request.QuotaBytes < 0 || request.QuotaBytes > MaxSafeQuotaBytes || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || !validTraceparent(request.Traceparent) {
+	if request.NodeID == uuid.Nil || !namePattern.MatchString(request.Username) || request.ExpectedVersion < 0 || request.QuotaBytes < 0 || request.QuotaBytes > MaxSafeQuotaBytes || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || tracecontext.TraceID(request.Traceparent) == "" {
 		return ErrInvalidRequest
 	}
 	if !slices.Contains([]string{"none", "monthly", "lifetime"}, request.QuotaPeriod) || !slices.Contains([]string{"rx", "tx", "rxtx"}, request.QuotaDirection) || (request.QuotaPeriod == "none") != (request.QuotaBytes == 0) {
@@ -740,7 +741,7 @@ func validatePolicyRequest(request PolicyRequest) error {
 }
 
 func validateBatchRequest(request BatchRequest) error {
-	if request.ID == uuid.Nil || request.ID.Version() != 7 || request.WorkspaceID == uuid.Nil || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || !validTraceparent(request.Traceparent) || ValidateBatchItems(request.Items) != nil {
+	if request.ID == uuid.Nil || request.ID.Version() != 7 || request.WorkspaceID == uuid.Nil || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || tracecontext.TraceID(request.Traceparent) == "" || ValidateBatchItems(request.Items) != nil {
 		return ErrInvalidRequest
 	}
 	if hasDisable(request.Items) && (request.ActorIdentityID == uuid.Nil || request.ApprovalID == uuid.Nil) {
@@ -839,23 +840,6 @@ func derefUUID(id *uuid.UUID) uuid.UUID {
 		return uuid.Nil
 	}
 	return *id
-}
-
-func traceID(value string) string { return value[3:35] }
-
-func validTraceparent(value string) bool {
-	parts := strings.Split(value, "-")
-	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
-		return false
-	}
-	for _, part := range parts[1:] {
-		for _, c := range part {
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-				return false
-			}
-		}
-	}
-	return parts[1] != strings.Repeat("0", 32) && parts[2] != strings.Repeat("0", 16)
 }
 
 func rollback(tx database.Tx) {

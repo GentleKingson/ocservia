@@ -26,6 +26,7 @@ import (
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -491,7 +492,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	}
 	if err := intentStore.InsertIntent(ctx, operationstore.QueuedIntent{
 		ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID,
-		RequestID: request.RequestID, TraceID: traceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey,
+		RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey,
 		RequestHash: hash[:], ExpiresAt: expiry, CreatedAt: created,
 	}); err != nil {
 		return Operation{}, false, fmt.Errorf("insert operation intent: %w", err)
@@ -591,7 +592,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		}
 		auditSummary, _ = json.Marshal(summary)
 	}
-	if err := audit.AppendChainTx(ctx, commonTx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, commonTx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -691,7 +692,7 @@ func (s *Service) Expire(ctx context.Context) error {
 }
 
 func validateCreate(r CreateRequest) error {
-	if r.NodeID == uuid.Nil || r.NodeID.Version() != 7 || r.ExpectedVersion < 1 || r.RequestID == "" || !validTraceparent(r.Traceparent) || r.TTL < time.Second || r.TTL > 24*time.Hour {
+	if r.NodeID == uuid.Nil || r.NodeID.Version() != 7 || r.ExpectedVersion < 1 || r.RequestID == "" || tracecontext.TraceID(r.Traceparent) == "" || r.TTL < time.Second || r.TTL > 24*time.Hour {
 		return ErrInvalidRequest
 	}
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
@@ -1135,7 +1136,6 @@ func twoIDs() (uuid.UUID, uuid.UUID, error) {
 	b, err := uuid.NewV7()
 	return a, b, err
 }
-func traceID(value string) string { return value[3:35] }
 func nullableUUID(id uuid.UUID) any {
 	if id == uuid.Nil {
 		return nil
@@ -1148,18 +1148,4 @@ func optionalUUID(id uuid.UUID) *uuid.UUID {
 		return nil
 	}
 	return &id
-}
-func validTraceparent(value string) bool {
-	parts := strings.Split(value, "-")
-	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
-		return false
-	}
-	for _, p := range parts[1:] {
-		for _, c := range p {
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-				return false
-			}
-		}
-	}
-	return parts[1] != "00000000000000000000000000000000" && parts[2] != "0000000000000000"
 }

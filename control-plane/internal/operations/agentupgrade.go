@@ -18,6 +18,7 @@ import (
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 )
 
@@ -611,7 +612,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 		EventID: auditID, WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID,
 		SessionID: &request.ActorSessionID, Action: "agent.rollout", ResourceType: "agent_rollout",
 		ResourceID: rolloutID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID,
-		TraceID: traceID(request.Traceparent), Reason: reason, Result: "intent", AfterSummary: summary, At: now,
+		TraceID: tracecontext.TraceID(request.Traceparent), Reason: reason, Result: "intent", AfterSummary: summary, At: now,
 	}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("append agent rollout audit: %w", err)
 	}
@@ -666,7 +667,7 @@ func (s *Service) ResumeAgentRollout(ctx context.Context, rolloutID uuid.UUID, a
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{
 		EventID: auditID, WorkspaceID: rollout.WorkspaceID, ActorType: "user", ActorID: actorID,
 		SessionID: &actorSessionID, Action: "agent.rollout", ResourceType: "agent_rollout",
-		ResourceID: rollout.ID, RequestID: requestID, TraceID: traceID(traceparent),
+		ResourceID: rollout.ID, RequestID: requestID, TraceID: tracecontext.TraceID(traceparent),
 		AfterSummary: summary, At: now,
 	}); err != nil {
 		return AgentRollout{}, fmt.Errorf("append agent rollout resume audit: %w", err)

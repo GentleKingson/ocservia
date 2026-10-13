@@ -445,36 +445,3 @@ func connectedOwnerTerm(event *transportv1.TransportEvent) ([16]byte, bool, erro
 	copy(fixed[:], connection)
 	return fixed, true, nil
 }
-
-func validTraceparent(value string) bool {
-	parts := [4]string{}
-	count := 0
-	var start int
-	for index := 0; index <= len(value); index++ {
-		if index == len(value) || value[index] == '-' {
-			if count >= len(parts) {
-				return false
-			}
-			parts[count] = value[start:index]
-			count++
-			start = index + 1
-		}
-	}
-	if count != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
-		return false
-	}
-	for _, part := range parts {
-		for index := range len(part) {
-			character := part[index]
-			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-				return false
-			}
-		}
-		if len(part)%2 != 0 {
-			return false
-		}
-	}
-	return parts[1] != "00000000000000000000000000000000" && parts[2] != "0000000000000000"
-}
-
-func traceID(traceparent string) string { return traceparent[3:35] }

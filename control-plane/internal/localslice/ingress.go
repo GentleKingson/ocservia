@@ -15,6 +15,7 @@ import (
 	transportstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -136,7 +137,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 	if len(event.GetEndpointId()) != 32 {
 		return workspaceID, false, invalidEvent("invalid_endpoint_id", "transport event endpoint_id must be 32 bytes")
 	}
-	if !validTraceparent(event.GetTraceparent()) {
+	if tracecontext.TraceID(event.GetTraceparent()) == "" {
 		return workspaceID, false, invalidEvent("invalid_traceparent", "transport event traceparent is invalid")
 	}
 	if len(event.GetPayload()) > 1<<20 {
