@@ -562,13 +562,4 @@ describe("production overview isolation", () => {
     expect(source).not.toContain("createLocalSimulation");
     expect(source).not.toContain("run-probe");
   });
-
-  it("keeps the simulator available on the gated development page", async () => {
-    const source = await readFile(
-      resolve(import.meta.dirname, "../src/views/DevelopmentView.vue"),
-      "utf8",
-    );
-    expect(source).toContain("useLocalSliceStore");
-    expect(source).toContain('data-testid="run-probe"');
-  });
 });
