@@ -233,11 +233,24 @@ for arch in amd64 arm64; do
       GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
       bash "${ROOT}/scripts/build-release-controller.sh" "${args[@]}"
     [[ "$(grep -c '^buildx build ' "$log")" == 8 ]]
-    grep -q -- '--no-cache-filter runtime-base' "$log"
     for name in gateway control transport backup edge relay signer mysql_backup; do
       line="$(grep -- "--tag ghcr.io/gentlekingson/ocservia/${name}:" "$log")"
       [[ "$line" == *"--cache-from type=gha,scope=controller-v1-${name}-linux-${arch},"* ]]
       [[ "$line" == *"--platform linux/${arch}"* ]]
+      case "$name" in
+        control|transport) runtime_stage=runtime-base ;;
+        relay) runtime_stage=relay-runtime ;;
+        signer) runtime_stage= ;;
+        *) runtime_stage=runtime ;;
+      esac
+      if [[ -n "$runtime_stage" ]]; then
+        [[ "$line" == *"--no-cache-filter $runtime_stage"* ]] || {
+          echo "$name must refresh its OS package layer on $arch ($mode)" >&2
+          exit 1
+        }
+      else
+        [[ "$line" != *--no-cache-filter* ]]
+      fi
       if [[ "$mode" == product ]]; then
         [[ "$line" != *--cache-to* && "$line" == *"--output type=docker,dest="* ]]
         test -s "${test_dir}/images/${name}-linux-${arch}.tar"
