@@ -1,14 +1,18 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-
 import type { NodeObservedState } from "@ocservia/api-client";
 import { createPinia, setActivePinia } from "pinia";
+import { createSSRApp, h, type Component } from "vue";
+import { renderToString } from "vue/server-renderer";
+import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getWorkspace, workspaceContext } from "../src/api/workspace";
 import { listNodes } from "../src/api/nodes";
 import { agentVersionLabel } from "../src/shared/agent-version";
 import { useFleetStore } from "../src/shared/fleet";
+import { i18n } from "../src/shared/i18n";
+import NodeObservedDetails from "../src/components/nodes/NodeObservedDetails.vue";
+import NodesView from "../src/views/NodesView.vue";
+import OverviewView from "../src/views/OverviewView.vue";
 
 vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
@@ -100,53 +104,69 @@ describe("fleet agent version intelligence", () => {
 });
 
 describe("version intelligence presentation", () => {
-  it("renders server-derived version badges on the fleet list", async () => {
-    const source = await readFile(
-      resolve(import.meta.dirname, "../src/views/NodesView.vue"),
-      "utf8",
+  const current = {
+    ...versionNode("current", "current", "0.1.0"),
+    recommendedAgentVersion: "0.2.0",
+  };
+  const update = {
+    ...versionNode("update", "upgrade_available", "0.1.0"),
+    recommendedAgentVersion: "0.2.0",
+    osRelease: "Debian 12",
+  };
+  const ahead = {
+    ...versionNode("ahead", "ahead", "0.3.0"),
+    recommendedAgentVersion: "0.2.0",
+  };
+  const nodes = [current, update, ahead, versionNode("unknown")];
+
+  async function render(component: Component, props = {}) {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useFleetStore().$patch({ nodes, initialized: true });
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", component: {} },
+        { path: "/nodes/:nodeId", name: "node-detail", component: {} },
+      ],
+    });
+    await router.push("/");
+    const app = createSSRApp({ render: () => h(component, props) });
+    app.use(pinia).use(router).use(i18n);
+    return renderToString(app);
+  }
+
+  it("renders the server's version states, even when versions suggest otherwise", async () => {
+    const html = await render(NodesView);
+    const badges = html.match(
+      /data-testid="agent-version-state"[^>]*>[\s\S]*?<\/span>/g,
     );
-    expect(source).toContain("agentVersionState");
-    expect(source).toContain('data-testid="agent-version-state"');
-    expect(source).not.toContain("semver");
+    expect(badges).toHaveLength(4);
+    for (const label of [
+      "Current",
+      "Update available",
+      "Ahead",
+      "No version observation",
+    ]) {
+      expect(badges).toEqual(
+        expect.arrayContaining([expect.stringContaining(label)]),
+      );
+    }
   });
 
-  it("shows observed, recommended, and state on node detail", async () => {
-    const source = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../src/components/nodes/NodeObservedDetails.vue",
-      ),
-      "utf8",
-    );
-    expect(source).toContain("recommendedAgentVersion");
-    expect(source).toContain('$t("versionState")');
-    expect(source).toContain('$t("osRelease")');
-    expect(source).not.toContain("semver");
+  it("renders observed and recommended versions and the server state on node detail", async () => {
+    const html = await render(NodeObservedDetails, { node: update });
+    expect(html).toContain("Update available");
+    expect(html).toContain("Recommended Agent version");
+    expect(html).toContain("0.1.0");
+    expect(html).toContain("0.2.0");
+    expect(html).toContain("Debian 12");
   });
 
-  it("summarizes version states on the overview dashboard", async () => {
-    const source = await readFile(
-      resolve(import.meta.dirname, "../src/views/OverviewView.vue"),
-      "utf8",
-    );
-    expect(source).toContain('value-testid="overview-agent-versions"');
-    expect(source).toContain("agentUpdateAvailable");
-    expect(source).toContain("agentAhead");
-    expect(source).toContain("agentUnknown");
-  });
-
-  it("labels version states through the i18n layer", async () => {
-    const source = await readFile(
-      resolve(import.meta.dirname, "../src/shared/i18n.ts"),
-      "utf8",
-    );
-    expect(source).toContain('upgrade_available: "Update available"');
-    expect(source).toContain('current: "Current"');
-    expect(source).toContain('ahead: "Ahead"');
-    expect(source).toContain('unsupported: "Unsupported"');
-    expect(source).toContain(
-      'recommendedAgentVersion: "Recommended Agent version"',
-    );
+  it("renders every version bucket on the overview", async () => {
+    const html = await render(OverviewView);
+    expect(html).toMatch(/data-testid="overview-agent-versions"[^>]*>1</);
+    expect(html).toContain("1 Update available · 1 Ahead · 1 Unknown");
   });
 });
 
