@@ -2,6 +2,7 @@ require 'yaml'
 require 'json'
 require 'tmpdir'
 require 'open3'
+# Release notes: owner attribution is cosmetic, and cleanup must be idempotent.
 def load_workflow(name)
   YAML.safe_load(File.read(".github/workflows/#{name}.yml"), aliases: true)
 end
@@ -22,6 +23,16 @@ require_check(publish['if'] == "github.event_name == 'push'" && publish['environ
 require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write'}, 'publishing permissions changed')
 require_check(publish['needs'].sort == %w[assets build-amd64 build-arm64 prepare], 'publishing must wait for both native build/smoke legs and assets')
 require_check(publish['steps'].any? {|s| s.fetch('run','').match?(/gh release create[^\n]*--generate-notes/)}, 'Release must retain native generated notes')
+publish_body = publish['steps'].find {|step| step['name'] == 'Publish version images and Release assets'}.fetch('run')
+require_check(publish_body.include?('scripts/strip-release-owner-attribution.py') && publish_body.include?('gh release edit "v$VERSION" --notes-file "$notes_after"'), 'release notes owner cleanup missing')
+filter = File.expand_path('scripts/strip-release-owner-attribution.py')
+original = "## What's Changed\\n* Fix A by @GentleKingson in https://github.com/GentleKingson/ocservia/pull/123\\n* Fix B by @Other in https://github.com/GentleKingson/ocservia/pull/456\\n**Full Changelog**: https://github.com/GentleKingson/ocservia/compare/a...b\\nBy @GentleKingson: documentation\\n"
+expected = original.sub('Fix A by @GentleKingson in', 'Fix A in')
+first, err, status = Open3.capture3('python3', filter, stdin_data: original)
+require_check(status.success? && first == expected, "release note owner filter broke content: #{err}")
+second, _, status = Open3.capture3('python3', filter, stdin_data: first)
+require_check(status.success? && second == first, 'release note cleanup must be idempotent')
+
 changelog = YAML.safe_load(File.read('.github/release.yml')).fetch('changelog')
 require_check(changelog.dig('exclude','labels') == ['release/internal'], 'internal-only PRs must be excluded from release notes')
 categories = changelog.fetch('categories')
@@ -178,6 +189,7 @@ Dir.mktmpdir('release-rc-') do |dir|
       'release view')
         if [[ "$*" == *isDraft* ]]; then echo "${PREVIOUS_RC_VALID:-true}"
         elif [[ "$*" == *isPrerelease* ]]; then echo "$IS_PRERELEASE"
+        elif [[ "$*" == *--json\\ body* ]]; then printf '%s\\n' "${NOTES_BODY:-}"
         else exit 1
         fi ;;
       'api repos/test/repo/releases/latest') echo v1.1.0 ;;
@@ -185,6 +197,7 @@ Dir.mktmpdir('release-rc-') do |dir|
         [[ "$*" == *'Accept: application/vnd.github.raw+json'* && "${BRIDGE_FAILURE:-false}" != true ]] || exit 1
         cat "$BRIDGE_FILE" ;;
       'release create') printf '%s\0' "$@" >"$CREATE_ARGS" ;;
+      'release edit') cp "$5" "$RUNNER_TEMP/edited-notes" ;;
       'release upload') ;;
       *) exit 2 ;;
     esac
