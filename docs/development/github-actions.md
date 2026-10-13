@@ -93,8 +93,7 @@ or deep historical repair suite is moved from Quick into Full.
 from manual Release Check on main. It reuses pinned
 bootstrap profiles to run the full-history `scripts/security-check.sh`
 (including its Gitleaks rule regression check), `govulncheck ./...` run from
-`control-plane` (the separate `signer` Go module is not scanned by this
-workflow), `cargo audit` for `rust/Cargo.lock` and
+each Go module (`control-plane` and `signer`), `cargo audit` for `rust/Cargo.lock` and
 `deploy/production/relay.Cargo.lock` plus `cargo deny check advisories` for the
 Rust workspace, and `npm audit --package-lock-only` for the single
 `web/package-lock.json`, including development dependencies.
