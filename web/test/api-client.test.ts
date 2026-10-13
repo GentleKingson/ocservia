@@ -195,6 +195,45 @@ describe("Workspace authority and events", () => {
     expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
   });
 
+  it.each([
+    [undefined, 0, undefined, 0, true],
+    ["", 0, "", 0, true],
+    [undefined, 0, "workspace-a", 0, false],
+    ["workspace-a", 1, "workspace-b", 1, false],
+    ["workspace-a", 1, "workspace-a", 1, true],
+    ["workspace-a", 1, "workspace-a", 3, false],
+    [undefined, 0, undefined, 2, false],
+  ] as const)(
+    "compares Workspace contexts (%s/%s, %s/%s)",
+    async (aId, aGeneration, bId, bGeneration, matches) => {
+      const api = await loadAPI();
+      const a = { id: aId, generation: aGeneration };
+      const b = { id: bId, generation: bGeneration };
+      expect(api.sameWorkspaceContext(a, b)).toBe(matches);
+      expect(api.sameWorkspaceContext(b, a)).toBe(matches);
+      expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an earlier context after selecting A → B → A", async () => {
+    const api = await loadAPI();
+    await api.selectWorkspace(alpha.id);
+    const firstA = api.workspaceContext();
+    await api.selectWorkspace(beta.id);
+    expect(api.sameWorkspaceContext(firstA, api.workspaceContext())).toBe(
+      false,
+    );
+    await api.selectWorkspace(alpha.id);
+    const returnedA = api.workspaceContext();
+    expect(returnedA.id).toBe(firstA.id);
+    expect(returnedA.generation).toBeGreaterThan(firstA.generation);
+    expect(api.sameWorkspaceContext(firstA, returnedA)).toBe(false);
+    expect(api.sameWorkspaceContext(returnedA, api.workspaceContext())).toBe(
+      true,
+    );
+  });
+
   it("coalesces discovery, remembers selection and advances generation only on changes", async () => {
     storage.set("ocservia.workspace-id", beta.id);
     const api = await loadAPI();

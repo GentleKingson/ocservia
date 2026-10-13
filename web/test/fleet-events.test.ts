@@ -21,7 +21,8 @@ vi.mock("../src/api/events", () => ({
   listEvents: vi.fn(),
   platformEventsEvent: "ocservia:platform-events",
 }));
-vi.mock("../src/api/workspace", () => ({
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
   workspaceChangedEvent: "ocservia:workspace-changed",

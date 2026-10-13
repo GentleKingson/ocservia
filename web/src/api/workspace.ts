@@ -14,6 +14,15 @@ export interface WorkspaceContext {
   generation: number;
 }
 
+// Equality alone is not authorization: an unselected development context can
+// match, and request owners must still check their abort signal and sequence.
+export function sameWorkspaceContext(
+  a: WorkspaceContext,
+  b: WorkspaceContext,
+): boolean {
+  return a.id === b.id && a.generation === b.generation;
+}
+
 // The remembered ID is only a preference among server-authorized Workspaces;
 // storage failures mean "no preference" and never block selection or events.
 function rememberedWorkspaceID(): string | null {

@@ -16,7 +16,8 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../src/api/agents", () => mocks);
 vi.mock("../src/api/operations", () => mocks);
-vi.mock("../src/api/workspace", () => ({
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
   ...mocks,
   workspaceChangedEvent: "workspace",
 }));

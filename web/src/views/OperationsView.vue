@@ -8,6 +8,7 @@ import { useI18n } from "vue-i18n";
 import { getOperation, listOperations } from "../api/operations";
 import {
   getWorkspace,
+  sameWorkspaceContext,
   workspaceChangedEvent,
   workspaceContext,
 } from "../api/workspace";
@@ -89,12 +90,10 @@ async function loadOperations(reset = true): Promise<void> {
       reset ? undefined : nextCursor.value,
       controller.signal,
     );
-    const current = workspaceContext();
     if (
       controller.signal.aborted ||
       sequence !== requestSequence ||
-      current.id !== context.id ||
-      current.generation !== context.generation
+      !sameWorkspaceContext(workspaceContext(), context)
     )
       return;
     operations.value = reset
@@ -127,12 +126,10 @@ async function inspectOperation(operationId: string): Promise<void> {
     await getWorkspace();
     const context = workspaceContext();
     const operation = await getOperation(operationId, controller.signal);
-    const current = workspaceContext();
     if (
       controller.signal.aborted ||
       sequence !== detailSequence ||
-      current.id !== context.id ||
-      current.generation !== context.generation
+      !sameWorkspaceContext(workspaceContext(), context)
     )
       return;
     detailState.value = { selected: operation, error: "" };
@@ -157,11 +154,9 @@ async function loadRollouts(): Promise<void> {
     if (sequence !== rolloutSequence) return;
     const context = workspaceContext();
     const page = await listAgentRollouts(10, controller.signal);
-    const current = workspaceContext();
     if (
       sequence !== rolloutSequence ||
-      current.id !== context.id ||
-      current.generation !== context.generation
+      !sameWorkspaceContext(workspaceContext(), context)
     )
       return;
     rollouts.value = page.rollouts;

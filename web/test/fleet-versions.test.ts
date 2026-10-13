@@ -10,7 +10,8 @@ import { listNodes } from "../src/api/nodes";
 import { agentVersionLabel } from "../src/shared/agent-version";
 import { useFleetStore } from "../src/shared/fleet";
 
-vi.mock("../src/api/workspace", () => ({
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
 }));

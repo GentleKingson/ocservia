@@ -15,6 +15,7 @@ import {
 import { eventStreamPath, listEvents } from "../api/events";
 import {
   getWorkspace,
+  sameWorkspaceContext,
   listAuthorizedWorkspaces,
   workspaceContext,
   workspaceChangedEvent,
@@ -107,11 +108,9 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     context: WorkspaceContext,
     controller?: AbortController,
   ): boolean {
-    const current = workspaceContext();
     return (
       !controller?.signal.aborted &&
-      current.id === context.id &&
-      current.generation === context.generation
+      sameWorkspaceContext(workspaceContext(), context)
     );
   }
 
