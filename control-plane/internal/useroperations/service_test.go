@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 )
 
@@ -75,7 +76,7 @@ func TestStableSchedulerIdentityAndBatchLimit(t *testing.T) {
 	if second := stableKey("policy", "node", "alice", "2", "quota", "2026-08-01T00:00:00Z"); first != second {
 		t.Fatal("scheduler idempotency key changed")
 	}
-	if len(first) > 128 || !validTraceparent(stableTraceparent(first)) {
+	if len(first) > 128 || tracecontext.TraceID(stableTraceparent(first)) == "" {
 		t.Fatalf("invalid stable identities key=%q trace=%q", first, stableTraceparent(first))
 	}
 	request := BatchRequest{ID: uuid.Must(uuid.NewV7()), WorkspaceID: uuid.Must(uuid.NewV7()), ActorID: "operator", Reason: "ticket", RequestID: "request", Traceparent: testTraceparent, IdempotencyKey: "batch"}

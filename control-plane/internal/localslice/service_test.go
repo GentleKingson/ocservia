@@ -17,6 +17,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -161,7 +162,7 @@ func TestOperationJSONOmitsAbsentIdentifiers(t *testing.T) {
 
 func TestValidTraceparent(t *testing.T) {
 	valid := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-	if !validTraceparent(valid) {
+	if tracecontext.TraceID(valid) == "" {
 		t.Fatal("validTraceparent rejected a valid value")
 	}
 	for _, value := range []string{
@@ -171,7 +172,7 @@ func TestValidTraceparent(t *testing.T) {
 		"00-0123456789abcdef0123456789abcdef-0123456789abcdef-zz",
 		"00-0123456789ABCDEF0123456789abcdef-0123456789abcdef-01",
 	} {
-		if validTraceparent(value) {
+		if tracecontext.TraceID(value) != "" {
 			t.Fatalf("validTraceparent accepted %q", value)
 		}
 	}

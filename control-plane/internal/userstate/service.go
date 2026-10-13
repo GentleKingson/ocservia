@@ -23,6 +23,7 @@ import (
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationdata "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/userstate/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -232,13 +233,13 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
-	if err := operations.InsertIntent(ctx, operationdata.QueuedIntent{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey, RequestHash: hash[:], ExpiresAt: expiry, CreatedAt: created}); err != nil {
+	if err := operations.InsertIntent(ctx, operationdata.QueuedIntent{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey, RequestHash: hash[:], ExpiresAt: expiry, CreatedAt: created}); err != nil {
 		return operationstore.Operation{}, false, fmt.Errorf("insert user operation: %w", err)
 	}
 	if err := operations.EnqueueCommand(ctx, operationdata.QueuedCommand{ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, OutboxID: outboxID, EventID: eventID, PayloadType: string(request.Kind), IdempotencyKey: request.IdempotencyKey, Traceparent: request.Traceparent, Envelope: envelope, ExpectedVersion: commandExpectedRevision, ExpiresAt: expiry, CreatedAt: created, AvailableAt: created, ResourceType: &resourceType, ResourceKey: &request.Name}); err != nil {
 		return operationstore.Operation{}, false, fmt.Errorf("insert user command: %w", err)
 	}
-	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
+	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
 		return operationstore.Operation{}, false, fmt.Errorf("append desired state audit intent: %w", err)
 	}
 	if err := commitFenced(ctx, tx); err != nil {
@@ -292,7 +293,7 @@ func nonstandardDimensions(a value.TextArray) []value.Dimension {
 }
 
 func validateMutation(request MutationRequest) error {
-	if request.NodeID == uuid.Nil || !namePattern.MatchString(request.Name) || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || request.ExpectedVersion < 0 || request.TTL < time.Second || request.TTL > 24*time.Hour || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || !validTraceparent(request.Traceparent) {
+	if request.NodeID == uuid.Nil || !namePattern.MatchString(request.Name) || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || request.ExpectedVersion < 0 || request.TTL < time.Second || request.TTL > 24*time.Hour || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || tracecontext.TraceID(request.Traceparent) == "" {
 		return ErrInvalidRequest
 	}
 	if request.Kind == UserCreate || request.Kind == UserPasswordRotate {
@@ -578,21 +579,7 @@ func optionalUUID(id uuid.UUID) *uuid.UUID {
 	}
 	return &id
 }
-func traceID(value string) string { return value[3:35] }
-func validTraceparent(value string) bool {
-	parts := strings.Split(value, "-")
-	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
-		return false
-	}
-	for _, part := range parts[1:] {
-		for _, c := range part {
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-				return false
-			}
-		}
-	}
-	return parts[1] != "00000000000000000000000000000000" && parts[2] != "0000000000000000"
-}
+
 func rollback(tx database.Tx) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

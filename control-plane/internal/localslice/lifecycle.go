@@ -11,6 +11,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	localstore "github.com/GentleKingson/ocservia/control-plane/internal/localslice/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/tracecontext"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
@@ -23,7 +24,7 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 	if err != nil {
 		return Operation{}, err
 	}
-	if requestID == "" || !validTraceparent(traceparent) {
+	if requestID == "" || tracecontext.TraceID(traceparent) == "" {
 		return Operation{}, fmt.Errorf("%w: request correlation is required", ErrInvalidScenario)
 	}
 	now := s.now()
@@ -53,10 +54,10 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 		if err != nil {
 			return fmt.Errorf("ensure simulator workspace: %w", err)
 		}
-		if err := store.InsertSimulation(ctx, localstore.Simulation{WorkspaceID: workspace, NodeID: node, OperationID: operation, CommandID: command, Endpoint: endpoint[:], Envelope: envelope, RequestID: requestID, TraceID: traceID(traceparent), Traceparent: traceparent, At: at, ExpiresAt: expires}); err != nil {
+		if err := store.InsertSimulation(ctx, localstore.Simulation{WorkspaceID: workspace, NodeID: node, OperationID: operation, CommandID: command, Endpoint: endpoint[:], Envelope: envelope, RequestID: requestID, TraceID: tracecontext.TraceID(traceparent), Traceparent: traceparent, At: at, ExpiresAt: expires}); err != nil {
 			return fmt.Errorf("insert simulator intent: %w", err)
 		}
-		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspace, ActorType: "development_stub", ActorID: "developer", Action: "simulation.probe", ResourceType: "operation", ResourceID: operation, RequestID: requestID, TraceID: traceID(traceparent), Reason: "I03 local side-effect-free slice", At: now})
+		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspace, ActorType: "development_stub", ActorID: "developer", Action: "simulation.probe", ResourceType: "operation", ResourceID: operation, RequestID: requestID, TraceID: tracecontext.TraceID(traceparent), Reason: "I03 local side-effect-free slice", At: now})
 	})
 	if err != nil {
 		return Operation{}, fmt.Errorf("create local simulation: %w", err)
