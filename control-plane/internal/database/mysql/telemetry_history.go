@@ -195,16 +195,4 @@ func (s *TelemetryHistoryStore) MaintainBatch(ctx context.Context, now time.Time
 	return true, nil
 }
 
-func telemetryAggregateSQL(source string, width int64) string {
-	return fmt.Sprintf(`SELECT node_id,metric,CASE WHEN sampled_at IN (%d,%d) THEN sampled_at ELSE FLOOR(CAST(sampled_at AS DECIMAL(20,0))/%d)*%d END AS bucket_at,COUNT(*) AS sample_count,MIN(value) AS min_value,MAX(value) AS max_value,AVG(value) AS avg_value FROM (%s) AS samples GROUP BY node_id,metric,bucket_at`, value.NegativeInfinity, value.PositiveInfinity, width, width, source)
-}
-
-func telemetryMergeSQL(table, aggregate string) []string {
-	match := `r.node_id=a.node_id AND BINARY r.metric=BINARY a.metric AND r.bucket_at=a.bucket_at`
-	return []string{
-		`UPDATE ` + table + ` r JOIN (` + aggregate + `) a ON ` + match + ` SET r.sample_count=a.sample_count,r.min_value=a.min_value,r.max_value=a.max_value,r.avg_value=a.avg_value WHERE NOT (r.sample_count <=> a.sample_count AND r.min_value <=> a.min_value AND r.max_value <=> a.max_value AND r.avg_value <=> a.avg_value)`,
-		`INSERT INTO ` + table + `(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT a.node_id,a.metric,a.bucket_at,a.sample_count,a.min_value,a.max_value,a.avg_value FROM (` + aggregate + `) a LEFT JOIN ` + table + ` r ON ` + match + ` WHERE r.exact_row_id IS NULL`,
-	}
-}
-
 var _ telemetryhistory.Store = (*TelemetryHistoryStore)(nil)

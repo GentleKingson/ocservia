@@ -1136,13 +1136,6 @@ func twoIDs() (uuid.UUID, uuid.UUID, error) {
 	b, err := uuid.NewV7()
 	return a, b, err
 }
-func nullableUUID(id uuid.UUID) any {
-	if id == uuid.Nil {
-		return nil
-	}
-	return id
-}
-
 func optionalUUID(id uuid.UUID) *uuid.UUID {
 	if id == uuid.Nil {
 		return nil
