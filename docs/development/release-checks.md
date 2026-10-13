@@ -143,7 +143,7 @@ all product and asset jobs must pass and Publish must be skipped.
 | OIDC positive/negative paths; CSR, issue, one-use P12, revoke and persistence (including browser checks); offline queue and exact root effects; one-node browser canary rollout to a locally built next Agent version | Manual integration |
 | DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on amd64/arm64 | Native package build/install smoke |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products |
-| Source/dependency vulnerabilities and repository secrets, within the [tool scope](github-actions.md#independent-security-checks) (Go advisories cover `control-plane` only) | Security |
+| Source/dependency vulnerabilities and repository secrets, within the [tool scope](github-actions.md#independent-security-checks) (Go advisories cover `control-plane` and `signer`) | Security |
 | Tagged-source build and GitHub/GHCR publication | Release |
 
 Business builds local products and installs from a loopback registry on

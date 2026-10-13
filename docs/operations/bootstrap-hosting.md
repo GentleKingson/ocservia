@@ -138,8 +138,8 @@ source leaves it empty, so an unstamped copy requires `--version`. Stage-0
 prints the selected release before downloading Stage-1, and an explicit
 `--version` always takes precedence. Outside quick mode there is no default.
 Only releases whose Stage-1 implements quick mode accept these options; older
-Stage-1 assets reject them before making changes. Quick mode is on main only:
-Releases up to v1.2.0 do not contain `deploy/production/quick-install.sh`.
+Stage-1 assets reject them before making changes. Choose a stable or RC Release
+that ships `deploy/production/quick-install.sh`; Releases up to v1.2.0 do not.
 
 Stage-1 (`controller-bootstrap.sh --quick`) ignores `./install.env` and runs a
 read-only preflight before cloning, also under `--check`:

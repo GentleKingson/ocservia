@@ -20,6 +20,47 @@ compatibility-policy reset in v1.1.0 described below.
 
 ## Unreleased
 
+### Highlights
+
+- Rebuild the Vue 3 console with shadcn-vue and Tailwind CSS v4, including
+  filtered node tables, configuration dialogs, approvals and rollout views.
+- Add Quick installation for a new Integrated host with bundled PostgreSQL,
+  ACME TLS, generated protected material and separate initial Local admin
+  and approver accounts. Manual installation remains available.
+- Add Integrated ACME for distinct Controller and Relay DNS names.
+
+### Breaking changes and upgrade notes
+
+- Move database artifacts to epoch 2: PostgreSQL revision 0 and MySQL
+  revision 1. The sole previous checkpoint is
+  `v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483`, epoch 1 / revision 0.
+  Earlier databases must reach that checkpoint first; the new binary cannot
+  replay the removed migration history. Retain a verified backup and the
+  existing audit keys before upgrading. There is no reverse SQL migration or
+  general historical binary rollback guarantee. See the
+  [database migration contract](docs/development/control-plane.md#current-sql-artifacts-and-bounded-upgrades).
+- Require `OCSERV_CONTROLLER_ENDPOINT_ID` for normal production Controller
+  startup; database-only one-shot commands remain exempt.
+
+### Security
+
+- Enforce Content Security Policy in Standalone and Integrated gateways,
+  including gateway error responses.
+- Update Go to 1.26.9, Controller `x/net` to v0.60.0 and affected Vue,
+  source-map and Vite dependencies for published advisories. Go vulnerability
+  scanning now covers both Controller and Signer modules.
+
+### Fixed
+
+- The node list now reports rolling-upgrade eligibility, so eligible nodes can
+  be selected for an Agent rollout in the console.
+- Fence asynchronous rollout state across Workspace changes and retain an
+  unconfirmed rollout start after a rejected retry.
+- Recover console refresh after sleep and offer a reload when a page chunk
+  cannot load, preserving unsaved input until the operator chooses to reload.
+
+## [1.2.0](https://github.com/GentleKingson/ocservia/releases/tag/v1.2.0)
+
 ### Database support and initialization
 
 - Support PostgreSQL 18.x and MySQL 8.4 LTS only; retire PostgreSQL 17 and
@@ -31,11 +72,6 @@ compatibility-policy reset in v1.1.0 described below.
   Controller can connect. PostgreSQL 18 uses the parent volume mount at
   `/var/lib/postgresql`; legacy layouts are refused before initialization.
   Changing a MariaDB backend setting does not convert its database to MySQL.
-
-### Fixed
-
-- The node list now reports rolling-upgrade eligibility, so eligible nodes can
-  be selected for an Agent rollout in the console.
 
 ## [1.1.0]
 
