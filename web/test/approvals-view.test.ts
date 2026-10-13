@@ -12,7 +12,8 @@ const mocks = vi.hoisted(() => ({
   route: { params: { approvalId: "approval-a" } },
 }));
 vi.mock("../src/api/approvals", () => mocks);
-vi.mock("../src/api/workspace", () => ({
+vi.mock("../src/api/workspace", async (original) => ({
+  ...(await original<typeof import("../src/api/workspace")>()),
   ...mocks,
   workspaceChangedEvent: "workspace",
 }));
@@ -298,6 +299,28 @@ describe("pending approval queue", () => {
     expect(view.queue).toEqual([]);
     expect(view.queueError).toBe("approvalQueueUnavailable");
   });
+  it.each(["workspace-b", "workspace-a"])(
+    "drops a delayed queue response when only the context fence changes to %s",
+    async (id) => {
+      let resolveOld!: (value: object) => void;
+      mocks.listPendingApprovals.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveOld = resolve;
+          }),
+      );
+      const view = await mount();
+      // No event/abort or new ticket: the context predicate itself must fence
+      // the old response, including returning to the same ID at generation 3.
+      mocks.workspaceContext.mockReturnValue({ id, generation: 3 });
+      resolveOld({ items: [pending], page: { hasMore: false } });
+      await flush();
+      expect(view.queue).toEqual([]);
+      expect(view.queueInitialized).toBe(false);
+      expect(view.queueError).toBe("");
+    },
+  );
+
   it("drops delayed queue responses after a workspace switch", async () => {
     let resolveOld!: (value: object) => void;
     mocks.listPendingApprovals.mockImplementationOnce(

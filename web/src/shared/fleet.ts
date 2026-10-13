@@ -17,6 +17,7 @@ import {
 } from "../api/operations";
 import {
   getWorkspace,
+  sameWorkspaceContext,
   workspaceContext,
   workspaceChangedEvent,
   type WorkspaceContext,
@@ -145,11 +146,9 @@ export const useFleetStore = defineStore("fleet", () => {
     context: WorkspaceContext,
     controller?: AbortController,
   ): boolean {
-    const current = workspaceContext();
     return (
       !controller?.signal.aborted &&
-      current.id === context.id &&
-      current.generation === context.generation
+      sameWorkspaceContext(workspaceContext(), context)
     );
   }
 

@@ -9,6 +9,7 @@ import { createForegroundRefresh } from "./foreground-refresh";
 
 import {
   getWorkspace,
+  sameWorkspaceContext,
   workspaceContext,
   workspaceChangedEvent,
   type WorkspaceContext,
@@ -48,12 +49,10 @@ export const useOverviewStore = defineStore("overview", () => {
     sequence: number,
     current: number,
   ): boolean {
-    const now = workspaceContext();
     return (
       !controller.signal.aborted &&
       current === sequence &&
-      now.id === context.id &&
-      now.generation === context.generation
+      sameWorkspaceContext(workspaceContext(), context)
     );
   }
 

@@ -13,6 +13,7 @@ import { useRoute } from "vue-router";
 import { getAgentRollout, resumeAgentRollout } from "../api/agents";
 import {
   getWorkspace,
+  sameWorkspaceContext,
   workspaceChangedEvent,
   workspaceContext,
   type WorkspaceContext,
@@ -115,11 +116,8 @@ function invalidate(): void {
 }
 
 function current(context: WorkspaceContext, ticket: number): boolean {
-  const workspace = workspaceContext();
   return (
-    sequence === ticket &&
-    workspace.id === context.id &&
-    workspace.generation === context.generation
+    sequence === ticket && sameWorkspaceContext(workspaceContext(), context)
   );
 }
 
