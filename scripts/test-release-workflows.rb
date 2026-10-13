@@ -26,7 +26,7 @@ require_check(publish['steps'].any? {|s| s.fetch('run','').match?(/gh release cr
 publish_body = publish['steps'].find {|step| step['name'] == 'Publish version images and Release assets'}.fetch('run')
 require_check(publish_body.include?('scripts/strip-release-owner-attribution.py') && publish_body.include?('gh release edit "v$VERSION" --notes-file "$notes_after"'), 'release notes owner cleanup missing')
 filter = File.expand_path('scripts/strip-release-owner-attribution.py')
-original = "## What's Changed\\n* Fix A by @GentleKingson in https://github.com/GentleKingson/ocservia/pull/123\\n* Fix B by @Other in https://github.com/GentleKingson/ocservia/pull/456\\n**Full Changelog**: https://github.com/GentleKingson/ocservia/compare/a...b\\nBy @GentleKingson: documentation\\n"
+original = "## What's Changed\n* Fix A by @GentleKingson in https://github.com/GentleKingson/ocservia/pull/123\n* Fix B by @Other in https://github.com/GentleKingson/ocservia/pull/456\n**Full Changelog**: https://github.com/GentleKingson/ocservia/compare/a...b\nBy @GentleKingson: documentation\n"
 expected = original.sub('Fix A by @GentleKingson in', 'Fix A in')
 first, err, status = Open3.capture3('python3', filter, stdin_data: original)
 require_check(status.success? && first == expected, "release note owner filter broke content: #{err}")
