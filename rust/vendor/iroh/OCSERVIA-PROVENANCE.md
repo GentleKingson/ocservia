@@ -94,5 +94,7 @@ The focused names are `concurrent_relay_status_transitions_preserve_every_actor`
 `persistent_relay_retry_sleep_stays_inside_recovery_budget`,
 `test_prio_inbox_answered_during_backoff`, and
 `close_all_active_relays_survives_a_cancelled_task`. These tests are not
-currently invoked by `scripts/rust-check.sh`; do not infer their execution from
-a green workspace-only Rust job.
+invoked by `scripts/rust-check.sh` or Quick CI; the Full profile of
+`.github/workflows/ci.yml` (also run by Release Check) runs all seven by exact
+name and fails unless all seven ran. Do not infer their execution from a green
+Quick Rust job.

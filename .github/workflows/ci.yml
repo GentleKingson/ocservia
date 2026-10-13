@@ -154,6 +154,24 @@ jobs:
         run: scripts/bootstrap.sh rust-basic
       - if: needs.ci-relevance.outputs.run_rust == 'true'
         run: scripts/rust-check.sh
+      - name: Vendored iroh patch regressions (Full)
+        # Archive lock graph, not production evidence; see rust/vendor/iroh/OCSERVIA-PROVENANCE.md.
+        if: needs.ci-relevance.outputs.profile == 'full' && needs.ci-relevance.outputs.run_rust == 'true'
+        run: |
+          source scripts/env.sh
+          cd rust
+          cargo test --locked --manifest-path vendor/iroh/Cargo.toml \
+            --no-default-features --features metrics,tls-ring --lib -- --exact \
+            socket::transports::relay::actor::tests::concurrent_relay_status_transitions_preserve_every_actor \
+            socket::transports::relay::actor::tests::datagrams_for_disconnected_relays_are_dropped_not_queued \
+            socket::remote_map::remote_state::tests::relay_paths_offered_only_for_connected_relays \
+            socket::transports::relay::actor::tests::home_relay_failover_only_picks_connected_configured_standbys \
+            socket::transports::relay::actor::tests::persistent_relay_retry_sleep_stays_inside_recovery_budget \
+            socket::transports::relay::actor::tests::test_prio_inbox_answered_during_backoff \
+            socket::transports::relay::actor::tests::close_all_active_relays_survives_a_cancelled_task \
+            | tee "${RUNNER_TEMP}/iroh-vendor-tests.log"
+          # A renamed test would otherwise match nothing and still pass.
+          grep -q '^test result: ok. 7 passed;' "${RUNNER_TEMP}/iroh-vendor-tests.log"
       - name: Relay launcher and installer contracts
         if: needs.ci-relevance.outputs.run_installers == 'true'
         run: |
