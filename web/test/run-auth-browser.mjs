@@ -86,7 +86,7 @@ async function startGateway() {
   const root = resolve("..");
   const image = async (dockerfile, name) =>
     (await readFile(join(root, "deploy/production", dockerfile), "utf8")).match(
-      new RegExp(`^FROM (${name}:\\S+)$`, "m"),
+      new RegExp(`^FROM (${name}:\\S+)(?: AS \\S+)?$`, "m"),
     )[1];
   const caddy = await image("gateway.Dockerfile", "caddy");
   const integrated = gateway === "integrated";
