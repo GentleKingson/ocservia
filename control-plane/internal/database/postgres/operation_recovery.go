@@ -17,27 +17,14 @@ func (s operationStore) ReconnectAuthority(ctx context.Context, node, connection
 }
 
 func (s operationStore) AmbiguousDispatches(ctx context.Context, node uuid.UUID, limit int) ([]uuid.UUID, error) {
-	rows, err := s.Query(ctx, `SELECT command.id FROM commands AS command JOIN operations AS operation ON operation.id=command.operation_id
+	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT command.id FROM commands AS command JOIN operations AS operation ON operation.id=command.operation_id
 		JOIN outbox_events AS outbox ON outbox.command_id=command.id
 		WHERE command.node_id=$1 AND command.state IN ('dispatched','accepted','running','unknown')
 		AND operation.state IN ('dispatched','accepted','running','unknown')
 		AND NOT (command.payload_type='agent_upgrade' AND EXISTS(SELECT 1 FROM agent_command_results AS result WHERE result.command_id=command.id AND result.state='succeeded' AND result.receipt_verification_status='verified'))
 		AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
-		ORDER BY command.created_at,command.id LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`, node, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result = append(result, id)
-	}
-	return result, rows.Err()
+		ORDER BY command.created_at,command.id LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`, node, limit))
 }
 
 func (s operationStore) LockAmbiguousDispatch(ctx context.Context, command, node uuid.UUID) (v operationstore.AmbiguousDispatch, err error) {

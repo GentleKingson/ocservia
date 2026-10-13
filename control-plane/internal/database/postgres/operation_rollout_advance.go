@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
@@ -18,20 +19,7 @@ func (s operationStore) ResumeRollout(ctx context.Context, id uuid.UUID, batch i
 }
 
 func (s operationStore) ActiveRollouts(ctx context.Context, limit int) ([]uuid.UUID, error) {
-	rows, err := s.Query(ctx, `SELECT id FROM agent_rollouts WHERE state IN ('queued','running') ORDER BY created_at LIMIT $1`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := []uuid.UUID{}
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		values = append(values, id)
-	}
-	return values, rows.Err()
+	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT id FROM agent_rollouts WHERE state IN ('queued','running') ORDER BY created_at LIMIT $1`, limit))
 }
 
 func (s operationStore) SetRolloutState(ctx context.Context, id uuid.UUID, state, code string, at value.Timestamp) error {

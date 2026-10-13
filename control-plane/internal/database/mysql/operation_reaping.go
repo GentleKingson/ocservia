@@ -16,28 +16,12 @@ func (s operationStore) RecoveryClock(ctx context.Context) (at value.Timestamp, 
 	return
 }
 
-func reapingCommandIDs(rows database.Rows, err error) ([]uuid.UUID, error) {
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
 func (s operationStore) ExpiredApplyCommands(ctx context.Context) ([]operationstore.RecoveryCommand, error) {
 	at, err := database.TransactionTime(ctx, s.Tx)
 	if err != nil {
 		return nil, err
 	}
-	ids, err := reapingCommandIDs(s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(
+	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(
 		SELECT 1 FROM commands c JOIN config_apply_operations a ON a.operation_id=c.operation_id
 		WHERE c.id=o.command_id AND c.state IN ('dispatched','accepted','running') AND a.state IN ('dispatched','accepted','running') AND c.expires_at<=?)
 		ORDER BY o.command_id FOR UPDATE SKIP LOCKED`, at))
@@ -69,7 +53,7 @@ const reapingSendingJoins = ` JOIN operations p ON p.id=c.operation_id
 	JOIN command_attempts a ON a.command_id=c.id AND a.outbox_event_id=o.id AND a.worker_id=l.worker_id AND a.attempt_number=o.attempts`
 
 func (s operationStore) ExpiredSendingCommands(ctx context.Context, limit int) ([]uuid.UUID, error) {
-	return reapingCommandIDs(s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(SELECT 1 FROM commands c`+reapingSendingJoins+`
+	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(SELECT 1 FROM commands c`+reapingSendingJoins+`
 		WHERE c.id=o.command_id AND `+reapingSendingPredicate+`)
 		ORDER BY (SELECT l.leased_until FROM node_command_leases l WHERE l.command_id=o.command_id),o.command_id LIMIT ? FOR UPDATE SKIP LOCKED`, limit))
 }
@@ -90,7 +74,7 @@ const reapingSentPredicate = `c.state IN ('dispatched','accepted','running') AND
 	AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)`
 
 func (s operationStore) StaleSentCommands(ctx context.Context, timeout time.Duration, limit int) ([]uuid.UUID, error) {
-	return reapingCommandIDs(s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(SELECT 1 FROM commands c`+reapingSentJoins+`
+	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(SELECT 1 FROM commands c`+reapingSentJoins+`
 		WHERE c.id=o.command_id AND `+reapingSentPredicate+` AND a.finished_at<=TIMESTAMPDIFF(MICROSECOND,'2000-01-01',CURRENT_TIMESTAMP(6))-?)
 		ORDER BY (SELECT a.finished_at FROM command_attempts a WHERE a.command_id=o.command_id ORDER BY a.attempt_number DESC LIMIT 1),o.command_id LIMIT ? FOR UPDATE SKIP LOCKED`, timeout.Microseconds(), limit))
 }
@@ -109,7 +93,7 @@ const reapingContinuationPredicate = `c.state='unknown' AND p.state='unknown' AN
 	AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)`
 
 func (s operationStore) StaleReconciliations(ctx context.Context, maxAttempts int, timeout time.Duration, limit int) ([]operationstore.RecoveryCommand, error) {
-	ids, err := reapingCommandIDs(s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(SELECT 1 FROM commands c`+reapingSentJoins+`
+	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(SELECT 1 FROM commands c`+reapingSentJoins+`
 		WHERE c.id=o.command_id AND `+reapingContinuationPredicate+`)
 		ORDER BY (SELECT a.finished_at FROM command_attempts a WHERE a.command_id=o.command_id ORDER BY a.attempt_number DESC LIMIT 1),o.command_id LIMIT ? FOR UPDATE SKIP LOCKED`, maxAttempts, timeout.Microseconds(), limit))
 	if err != nil {

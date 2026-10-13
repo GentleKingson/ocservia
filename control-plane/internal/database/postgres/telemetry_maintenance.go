@@ -4,24 +4,12 @@ import (
 	"context"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
 
 func (s telemetryWriteStore) LockOfflineCandidates(ctx context.Context, before time.Time) ([]uuid.UUID, error) {
-	rows, err := s.tx.Query(ctx, `SELECT n.id FROM nodes n JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.status='active' AND o.last_heartbeat_at < $1 FOR UPDATE OF n SKIP LOCKED`, before)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var nodes []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, id)
-	}
-	return nodes, rows.Err()
+	return database.CollectColumn[uuid.UUID](s.tx.Query(ctx, `SELECT n.id FROM nodes n JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.status='active' AND o.last_heartbeat_at < $1 FOR UPDATE OF n SKIP LOCKED`, before))
 }
 
 func (s telemetryWriteStore) MarkOffline(ctx context.Context, node, event uuid.UUID, now time.Time, traceparent string) error {

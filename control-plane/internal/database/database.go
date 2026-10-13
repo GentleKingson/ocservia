@@ -45,6 +45,24 @@ type Rows interface {
 	Close()
 }
 
+// CollectColumn scans every row of a single-column result into a slice and
+// closes rows. Pass a Query call directly so its error is returned first.
+func CollectColumn[T any](rows Rows, err error) ([]T, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var values []T
+	for rows.Next() {
+		var value T
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
 // Store executes backend-owned SQL. Business modules use domain-specific
 // stores instead; SQL dialects are not translated by this interface.
 type Store interface {
