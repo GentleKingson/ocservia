@@ -104,6 +104,10 @@ classify_path() {
   # Mirrors the COPY sources of the Dockerfiles built by build-release-controller.sh
   # (build context is the repository root) and the builder/cache machinery itself.
   case "${path}" in
+    # Go builds exclude these files; current embeds name only SQL/password data.
+    # Keep their Go/DB checks above, but avoid refreshing eight production images
+    # on both architectures. A mixed production change still selects the cache.
+    control-plane/*_test.go|signer/*_test.go) ;;
     web/*|control-plane/*|signer/*|THIRD_PARTY_NOTICES.md|\
     rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/vendor/*|rust/crates/*|\
     rust/transportd.Dockerfile|\

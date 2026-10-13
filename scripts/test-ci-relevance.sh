@@ -85,11 +85,15 @@ rust/crates/agent/src/lib.rs run_rust run_controller_cache
 control-plane/internal/platform/app/run.go run_go run_database run_controller_cache
 control-plane/internal/database/mysql/backend.go run_go run_database run_controller_cache
 control-plane/internal/api/routes.go run_go run_database run_controller_cache
+control-plane/internal/api/node_boundary_test.go run_go run_database
+control-plane/migrations/cutover_test.go run_go run_database
+control-plane/Dockerfile run_go run_controller_cache
+control-plane/internal/auth/password_blocklist/common-passwords.txt run_go run_database run_controller_cache
 control-plane/migrations/000036.up.sql run_go run_database run_controller_cache
 scripts/database-foundation-integration.sh run_go run_database
 scripts/go-check.sh run_go
 signer/http.go run_go run_controller_cache
-signer/store_test.go run_go run_controller_cache
+signer/store_test.go run_go
 signer/go.sum run_go run_controller_cache
 signer/notes.txt run_docs run_go run_rust run_web run_web_browser run_database run_ci_tools run_installers run_controller_cache
 scripts/web-check.sh run_web
