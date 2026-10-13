@@ -42,8 +42,14 @@ build_image() {
     args+=(--output "type=docker,dest=${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar")
   fi
   if [[ "${name}" == control ]]; then
-    args+=(--build-arg "VERSION=${VERSION}" --build-arg "COMMIT=${SOURCE_COMMIT}" --no-cache-filter runtime-base)
+    args+=(--build-arg "VERSION=${VERSION}" --build-arg "COMMIT=${SOURCE_COMMIT}")
   fi
+  # A fixed base digest and restored compiler cache must not freeze OS updates.
+  case "${name}" in
+    control|transport) args+=(--no-cache-filter runtime-base) ;;
+    relay) args+=(--no-cache-filter relay-runtime) ;;
+    gateway|backup|edge|mysql_backup) args+=(--no-cache-filter runtime) ;;
+  esac
   # Keep compiler/dependency layers only for the expensive native builds.
   case "${name}" in control|transport|relay|signer) cache_mode=max ;; esac
   # Release and Business restore only; main CI refreshes both native arches.

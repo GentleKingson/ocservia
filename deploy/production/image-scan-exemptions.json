@@ -4,19 +4,19 @@
     {
       "image": "mysql_backup",
       "package": "openssl",
-      "installed_version": "1:3.5.8-1.0.1.el9_8",
+      "installed_version": "1:3.5.8-2.0.1.el9_8",
       "vulnerability_id": "ELSA-2026-50075",
       "base_image": "mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d",
-      "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50075.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-1473.html fixes the same 12 CVEs in 1:3.5.1-7.0.1.el9_7; installed non-FIPS 1:3.5.8-1.0.1.el9_8 includes those fixes. Both native reports and vendor records independently reviewed. Other advisories remain gated.",
+      "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50075.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-1473.html fixes the same 12 CVEs in 1:3.5.1-7.0.1.el9_7; installed non-FIPS 1:3.5.8-2.0.1.el9_8 includes those fixes and https://linux.oracle.com/errata/ELSA-2026-77396.html. Vendor CVE lists and the installed RPM changelog reviewed. Other advisories remain gated.",
       "review_by": "2026-10-26"
     },
     {
       "image": "mysql_backup",
       "package": "openssl-libs",
-      "installed_version": "1:3.5.8-1.0.1.el9_8",
+      "installed_version": "1:3.5.8-2.0.1.el9_8",
       "vulnerability_id": "ELSA-2026-50075",
       "base_image": "mysql:8.4.11@sha256:0744ee5ef89ce6ccfa13de3e579fe6b9e27f93dd70da9c06d2c908b1b193fb8d",
-      "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50075.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-1473.html fixes the same 12 CVEs in 1:3.5.1-7.0.1.el9_7; installed non-FIPS 1:3.5.8-1.0.1.el9_8 includes those fixes. Both native reports and vendor records independently reviewed. Other advisories remain gated.",
+      "reason": "Reviewed cross-channel false positive: https://linux.oracle.com/errata/ELSA-2026-50075.html uses epoch 10 for FIPS packages. Ordinary BaseOS https://linux.oracle.com/errata/ELSA-2026-1473.html fixes the same 12 CVEs in 1:3.5.1-7.0.1.el9_7; installed non-FIPS 1:3.5.8-2.0.1.el9_8 includes those fixes and https://linux.oracle.com/errata/ELSA-2026-77396.html. Vendor CVE lists and the installed RPM changelog reviewed. Other advisories remain gated.",
       "review_by": "2026-10-26"
     },
     {
