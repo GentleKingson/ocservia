@@ -25,6 +25,7 @@ jobs:
             profile: go-security
             command: |
               (cd control-plane && govulncheck ./...)
+              (cd signer && govulncheck ./...)
           - name: Rust advisories
             profile: rust-security
             command: |
