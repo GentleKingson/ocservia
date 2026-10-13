@@ -16,24 +16,10 @@ func (s operationStore) ExpireQueued(ctx context.Context) error {
 	// Claim and result ingestion serialize on the durable outbox row. Recheck
 	// the command and its lease after obtaining that lock, not from a stale
 	// candidate snapshot. A lease is never cleared by ordinary TTL expiry.
-	rows, err := s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(
+	commands, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE EXISTS(
 		SELECT 1 FROM commands c WHERE c.id=o.command_id AND c.state='queued' AND c.expires_at<=?
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id))
-		ORDER BY o.id FOR UPDATE SKIP LOCKED`, now)
-	if err != nil {
-		return err
-	}
-	var commands []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		commands = append(commands, id)
-	}
-	err = rows.Err()
-	rows.Close()
+		ORDER BY o.id FOR UPDATE SKIP LOCKED`, now))
 	if err != nil {
 		return err
 	}

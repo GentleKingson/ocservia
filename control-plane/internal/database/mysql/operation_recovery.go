@@ -25,26 +25,13 @@ func (s operationStore) ReconnectAuthority(ctx context.Context, node, connection
 func (s operationStore) AmbiguousDispatches(ctx context.Context, node uuid.UUID, limit int) ([]uuid.UUID, error) {
 	// Lock only outbox rows. In particular, do not take command locks ahead
 	// of the outbox locks held by concurrent result ingestion.
-	rows, err := s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE o.published_at IS NOT NULL AND o.locked_by IS NULL
+	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE o.published_at IS NOT NULL AND o.locked_by IS NULL
 		AND EXISTS(SELECT 1 FROM commands c JOIN operations p ON p.id=c.operation_id
 		 WHERE c.id=o.command_id AND c.node_id=? AND c.state IN ('dispatched','accepted','running','unknown')
 		 AND p.state IN ('dispatched','accepted','running','unknown')
 		 AND NOT(c.payload_type='agent_upgrade' AND EXISTS(SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id AND r.state='succeeded' AND r.receipt_verification_status='verified'))
 		 AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id))
-		ORDER BY (SELECT c.created_at FROM commands c WHERE c.id=o.command_id),o.command_id LIMIT ? FOR UPDATE SKIP LOCKED`, UUIDBytes(node), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		result = append(result, id)
-	}
-	return result, rows.Err()
+		ORDER BY (SELECT c.created_at FROM commands c WHERE c.id=o.command_id),o.command_id LIMIT ? FOR UPDATE SKIP LOCKED`, UUIDBytes(node), limit))
 }
 
 func (s operationStore) LockAmbiguousDispatch(ctx context.Context, command, node uuid.UUID) (v operationstore.AmbiguousDispatch, err error) {

@@ -16,24 +16,8 @@ func (s operationStore) RecoveryClock(ctx context.Context) (at value.Timestamp, 
 	return
 }
 
-func reapingCommandIDs(rows database.Rows, err error) ([]uuid.UUID, error) {
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
 func (s operationStore) ExpiredApplyCommands(ctx context.Context) ([]operationstore.RecoveryCommand, error) {
-	ids, err := reapingCommandIDs(s.Query(ctx, `SELECT c.id FROM outbox_events o JOIN commands c ON c.id=o.command_id
+	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id FROM outbox_events o JOIN commands c ON c.id=o.command_id
 		JOIN config_apply_operations a ON a.operation_id=c.operation_id
 		WHERE c.state IN ('dispatched','accepted','running') AND a.state IN ('dispatched','accepted','running') AND c.expires_at<=now()
 		ORDER BY c.id FOR UPDATE OF o SKIP LOCKED`))
@@ -65,7 +49,7 @@ const reapingSendingFrom = ` FROM commands c JOIN operations p ON p.id=c.operati
 	AND o.published_at IS NULL AND o.locked_by=l.worker_id`
 
 func (s operationStore) ExpiredSendingCommands(ctx context.Context, limit int) ([]uuid.UUID, error) {
-	return reapingCommandIDs(s.Query(ctx, `SELECT c.id`+reapingSendingFrom+` ORDER BY l.leased_until,c.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED`, limit))
+	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id`+reapingSendingFrom+` ORDER BY l.leased_until,c.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED`, limit))
 }
 
 func (s operationStore) LockExpiredSendingCommand(ctx context.Context, id uuid.UUID) (v operationstore.RecoveryCommand, err error) {
@@ -83,7 +67,7 @@ const reapingSentFrom = ` FROM commands c JOIN operations p ON p.id=c.operation_
 	AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)`
 
 func (s operationStore) StaleSentCommands(ctx context.Context, timeout time.Duration, limit int) ([]uuid.UUID, error) {
-	return reapingCommandIDs(s.Query(ctx, `SELECT c.id`+reapingSentFrom+` AND a.finished_at<=clock_timestamp()-$1::interval ORDER BY a.finished_at,c.id LIMIT $2 FOR UPDATE OF o SKIP LOCKED`, timeout.String(), limit))
+	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id`+reapingSentFrom+` AND a.finished_at<=clock_timestamp()-$1::interval ORDER BY a.finished_at,c.id LIMIT $2 FOR UPDATE OF o SKIP LOCKED`, timeout.String(), limit))
 }
 
 func (s operationStore) LockStaleSentCommand(ctx context.Context, id uuid.UUID, timeout time.Duration) (v operationstore.RecoveryCommand, err error) {

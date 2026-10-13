@@ -10,23 +10,9 @@ import (
 )
 
 func (s operationStore) SupersedePending(ctx context.Context, node uuid.UUID, payload string, at value.Timestamp) error {
-	rows, err := s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE o.locked_by IS NULL AND EXISTS(
+	commands, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE o.locked_by IS NULL AND EXISTS(
 		SELECT 1 FROM commands c WHERE c.id=o.command_id AND c.node_id=? AND BINARY c.payload_type=? AND c.state='queued'
-		AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)) ORDER BY o.id FOR UPDATE`, UUIDBytes(node), payload)
-	if err != nil {
-		return err
-	}
-	var commands []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		commands = append(commands, id)
-	}
-	err = rows.Err()
-	rows.Close()
+		AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)) ORDER BY o.id FOR UPDATE`, UUIDBytes(node), payload))
 	if err != nil {
 		return err
 	}

@@ -173,21 +173,7 @@ func (s localSliceStore) ExpireJobs(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rows, err := s.Query(ctx, `SELECT o.id FROM operations o WHERE o.state NOT IN ('succeeded','failed','expired','rolled_back','superseded') AND EXISTS(SELECT 1 FROM local_slice_jobs j WHERE j.operation_id=o.id AND j.dispatched_at IS NULL AND j.expires_at<=?) FOR UPDATE`, at)
-	if err != nil {
-		return err
-	}
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	err = rows.Err()
-	rows.Close()
+	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.id FROM operations o WHERE o.state NOT IN ('succeeded','failed','expired','rolled_back','superseded') AND EXISTS(SELECT 1 FROM local_slice_jobs j WHERE j.operation_id=o.id AND j.dispatched_at IS NULL AND j.expires_at<=?) FOR UPDATE`, at))
 	if err != nil {
 		return err
 	}

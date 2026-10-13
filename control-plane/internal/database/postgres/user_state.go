@@ -79,21 +79,7 @@ func (s userStateStore) WriteDesired(ctx context.Context, v userstore.Desired) e
 func (s userStateStore) SupersedePending(ctx context.Context, node uuid.UUID, resource, key, kind string, expected int64, at value.Timestamp) (bool, error) {
 	// Dispatch also locks outbox before command. Recheck eligibility after the
 	// outbox lock so a concurrent claim cannot be superseded while in flight.
-	rows, err := s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE o.locked_by IS NULL AND EXISTS(SELECT 1 FROM commands c WHERE c.id=o.command_id AND c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.payload_type=$4 AND c.expected_version=$5 AND c.state='queued' AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)) ORDER BY o.id FOR UPDATE`, node, resource, key, kind, expected)
-	if err != nil {
-		return false, err
-	}
-	var commands []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return false, err
-		}
-		commands = append(commands, id)
-	}
-	err = rows.Err()
-	rows.Close()
+	commands, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o WHERE o.locked_by IS NULL AND EXISTS(SELECT 1 FROM commands c WHERE c.id=o.command_id AND c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.payload_type=$4 AND c.expected_version=$5 AND c.state='queued' AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)) ORDER BY o.id FOR UPDATE`, node, resource, key, kind, expected))
 	if err != nil {
 		return false, err
 	}
