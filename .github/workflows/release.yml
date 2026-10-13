@@ -106,6 +106,7 @@ jobs:
       contents: write
       packages: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7
         with:
           pattern: controller-images-*-${{ github.run_id }}-${{ github.run_attempt }}
@@ -162,6 +163,14 @@ jobs:
               flags+=(--prerelease --latest=false)
             fi
             gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
+          fi
+          # Preserve GitHub's category, PR and comparison output; drop repeated owner attribution only.
+          notes_before="$RUNNER_TEMP/release-notes-before.md"
+          notes_after="$RUNNER_TEMP/release-notes-after.md"
+          gh release view "v$VERSION" --json body --jq '.body' >"$notes_before"
+          python3 scripts/strip-release-owner-attribution.py <"$notes_before" >"$notes_after"
+          if ! cmp -s "$notes_before" "$notes_after"; then
+            gh release edit "v$VERSION" --notes-file "$notes_after"
           fi
           gh release upload "v$VERSION" "$RUNNER_TEMP/assets/"* --clobber
           [[ "$(gh release view "v$VERSION" --json isPrerelease --jq '.isPrerelease')" == "$IS_PRERELEASE" ]]

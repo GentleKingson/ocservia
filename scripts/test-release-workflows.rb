@@ -2,6 +2,7 @@ require 'yaml'
 require 'json'
 require 'tmpdir'
 require 'open3'
+# Release notes: owner attribution is cosmetic, and cleanup must be idempotent.
 def load_workflow(name)
   YAML.safe_load(File.read(".github/workflows/#{name}.yml"), aliases: true)
 end
@@ -22,6 +23,17 @@ require_check(publish['if'] == "github.event_name == 'push'" && publish['environ
 require_check(publish['permissions'] == {'contents'=>'write','packages'=>'write'}, 'publishing permissions changed')
 require_check(publish['needs'].sort == %w[assets build-amd64 build-arm64 prepare], 'publishing must wait for both native build/smoke legs and assets')
 require_check(publish['steps'].any? {|s| s.fetch('run','').match?(/gh release create[^\n]*--generate-notes/)}, 'Release must retain native generated notes')
+publish_body = publish['steps'].find {|step| step['name'] == 'Publish version images and Release assets'}.fetch('run')
+require_check(publish_body.include?('scripts/strip-release-owner-attribution.py') && publish_body.include?('gh release edit "v$VERSION" --notes-file "$notes_after"'), 'release notes owner cleanup missing')
+require_check(publish['steps'].first.fetch('uses', '').start_with?('actions/checkout@'), 'publication must check out the release notes filter')
+filter = File.expand_path('scripts/strip-release-owner-attribution.py')
+original = "## What's Changed\n* Fix A by @GentleKingson in https://github.com/GentleKingson/ocservia/pull/123\n* Fix B by @Other in https://github.com/GentleKingson/ocservia/pull/456\n**Full Changelog**: https://github.com/GentleKingson/ocservia/compare/a...b\nBy @GentleKingson: documentation\n"
+expected = original.sub('Fix A by @GentleKingson in', 'Fix A in')
+first, err, status = Open3.capture3('python3', filter, stdin_data: original)
+require_check(status.success? && first == expected, "release note owner filter broke content: #{err}")
+second, _, status = Open3.capture3('python3', filter, stdin_data: first)
+require_check(status.success? && second == first, 'release note cleanup must be idempotent')
+
 changelog = YAML.safe_load(File.read('.github/release.yml')).fetch('changelog')
 require_check(changelog.dig('exclude','labels') == ['release/internal'], 'internal-only PRs must be excluded from release notes')
 categories = changelog.fetch('categories')
@@ -176,8 +188,10 @@ Dir.mktmpdir('release-rc-') do |dir|
     case "$1 $2" in
       'release list') echo "${STABLE_BASE-v1.1.0}" ;;
       'release view')
-        if [[ "$*" == *isDraft* ]]; then echo "${PREVIOUS_RC_VALID:-true}"
+        if [[ "$#" == 3 ]]; then [[ "${RELEASE_EXISTS:-false}" == true ]]
+        elif [[ "$*" == *isDraft* ]]; then echo "${PREVIOUS_RC_VALID:-true}"
         elif [[ "$*" == *isPrerelease* ]]; then echo "$IS_PRERELEASE"
+        elif [[ "$*" == *'--json body'* ]]; then printf '%s\n' "${NOTES_BODY:-}"
         else exit 1
         fi ;;
       'api repos/test/repo/releases/latest') echo v1.1.0 ;;
@@ -185,6 +199,7 @@ Dir.mktmpdir('release-rc-') do |dir|
         [[ "$*" == *'Accept: application/vnd.github.raw+json'* && "${BRIDGE_FAILURE:-false}" != true ]] || exit 1
         cat "$BRIDGE_FILE" ;;
       'release create') printf '%s\0' "$@" >"$CREATE_ARGS" ;;
+      'release edit') cp "$5" "$RUNNER_TEMP/edited-notes" ;;
       'release upload') ;;
       *) exit 2 ;;
     esac
@@ -211,6 +226,19 @@ Dir.mktmpdir('release-rc-') do |dir|
       require_check(!File.read("#{dir}/calls").include?('/contents/'), 'other bases must not fetch the history bridge')
     end
     require_check(create.include?('--prerelease') == version.include?('-rc.') && create.include?('--latest=false') == version.include?('-rc.'), 'wrong publication flags')
+  end
+  [false, true].each do |exists|
+    [original, expected].each do |body|
+      File.write("#{dir}/calls", '')
+      current = env.merge('VERSION'=>'1.3.0', 'IS_PRERELEASE'=>'false', 'NOTES_BASE'=>'v1.2.3', 'RELEASE_EXISTS'=>exists.to_s, 'NOTES_BODY'=>body)
+      _, err, status = Open3.capture3(current, 'bash', '-euo', 'pipefail', '-c', publication)
+      require_check(status.success?, "notes cleanup publication failed: #{err}")
+      calls = File.read("#{dir}/calls")
+      require_check(calls.include?('release create ') == !exists, 'reruns must preserve the existing Release')
+      require_check(calls.include?('release edit ') == (body != expected), 'only matching owner entries should trigger an edit')
+      require_check(File.read("#{dir}/edited-notes") == expected + "\n", 'publication changed other release notes') if body != expected
+      require_check(calls.include?('release upload v1.3.0 '), 'notes cleanup must retain asset uploads')
+    end
   end
   File.write("#{dir}/calls", '')
   failed=env.merge('VERSION'=>'1.2.3-rc.1','IS_PRERELEASE'=>'true','NOTES_BASE'=>'v1.1.0','BRIDGE_FAILURE'=>'true')
