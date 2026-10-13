@@ -152,8 +152,6 @@ func (s telemetryWriteStore) Activate(ctx context.Context, node uuid.UUID, obser
 		return err
 	}
 	_, err = s.tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,?),version=version+1 WHERE id=? AND status='offline'`, at, UUIDBytes(node))
-	// The PostgreSQL NOTIFY wakeup is not a durable write. MySQL transport
-	// polling is a separate, still-unported Controller integration boundary.
 	return err
 }
 func (s telemetryWriteStore) InsertUpgrade(ctx context.Context, node uuid.UUID, r telemetrywrite.Upgrade) error {

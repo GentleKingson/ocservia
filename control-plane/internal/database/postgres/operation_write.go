@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
-	"github.com/google/uuid"
 )
 
 func (s operationStore) InsertIntent(ctx context.Context, v operationstore.QueuedIntent) error {
@@ -24,10 +23,5 @@ func (s operationStore) EnqueueCommand(ctx context.Context, v operationstore.Que
 		return fmt.Errorf("insert outbox event: %w", err)
 	}
 	_, err := s.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES($1,$2,'queued',$3)`, v.EventID, v.OperationID, v.CreatedAt)
-	return err
-}
-
-func (s operationStore) NotifyOutbox(ctx context.Context, id uuid.UUID) error {
-	_, err := s.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, id.String())
 	return err
 }

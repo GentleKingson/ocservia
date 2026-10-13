@@ -13,11 +13,13 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetrywrite"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -254,6 +256,88 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			t.Fatal("duplicate projection")
 		}
 	})
+}
+
+func TestOutboxReleaseBackendIntegration(t *testing.T) {
+	for _, source := range []string{"certificate-release", "node-activation"} {
+		t.Run(source, func(t *testing.T) {
+			f := newOutboxFixture(t)
+			ctx := t.Context()
+			service := operations.NewBackend(f.backend, 1, f.signer)
+			node := f.node(t)
+			created, _, err := service.CreateSynthetic(ctx, outboxRequest(node))
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := uuid.MustParse(created.ID)
+			if source == "certificate-release" {
+				f.exec(t, `UPDATE outbox_events SET available_at=$1`, `UPDATE outbox_events SET available_at=?`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity})
+			} else {
+				f.exec(t, `UPDATE nodes SET status='offline' WHERE id=$1`, `UPDATE nodes SET status='offline' WHERE id=?`, node)
+			}
+			assertUnclaimed := func() {
+				t.Helper()
+				if jobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute); err != nil || len(jobs) != 0 {
+					t.Fatal("unexpected dispatch", jobs, err)
+				}
+			}
+			change := func(tx database.Tx) error {
+				if source == "certificate-release" {
+					store, err := certificatestore.FromTransaction(tx)
+					if err != nil {
+						return err
+					}
+					// Missing operations retain the zero-row no-op behavior.
+					if err := store.ReleaseOperation(ctx, uuid.Must(uuid.NewV7())); err != nil {
+						return err
+					}
+					return store.ReleaseOperation(ctx, id)
+				}
+				store, err := telemetrywrite.From(tx)
+				if err != nil {
+					return err
+				}
+				return store.Activate(ctx, node, time.Now().UTC())
+			}
+			assertUnclaimed()
+			rejected := errors.New("rollback release")
+			if err := database.Within(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
+				if err := change(tx); err != nil {
+					return err
+				}
+				return rejected
+			}); !errors.Is(err, rejected) {
+				t.Fatal(err)
+			}
+			assertUnclaimed()
+			if err := database.Within(ctx, f.backend, database.ReadCommitted, change); err != nil {
+				t.Fatal(err)
+			}
+			d := claimOutbox(t, service)
+			if d.OperationID != id {
+				t.Fatal("released wrong operation", d)
+			}
+			if err := service.MarkSent(ctx, d); err != nil {
+				t.Fatal(err)
+			}
+			// Repeated release/activation must not revive a published command.
+			if err := database.Within(ctx, f.backend, database.ReadCommitted, change); err != nil {
+				t.Fatal(err)
+			}
+			assertUnclaimed()
+			// Store errors propagate from a closed transaction.
+			tx, err := f.backend.Begin(ctx, database.ReadCommitted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := change(tx); err == nil {
+				t.Fatal("closed transaction accepted")
+			}
+		})
+	}
 }
 
 type outboxSender func(context.Context, []byte, []byte) error

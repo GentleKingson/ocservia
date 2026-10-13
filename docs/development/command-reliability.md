@@ -46,9 +46,8 @@ Operation state is available through REST and the resumable
 `/api/v1/operations/{operation_id}/events` SSE stream. Queue health is exposed
 at `/api/v1/operations/queue-metrics`, including unpublished count, oldest age,
 queue depth, and unknown count. The worker polls the outbox every 200 ms and
-reaps expired leases every second. The PostgreSQL backend also emits
-`pg_notify` hints on enqueue, but nothing listens for them; polling is the only
-dispatch and recovery mechanism.
+reaps expired leases every second. Polling is the only dispatch and recovery
+mechanism for both database backends.
 
 ## Agent journal
 

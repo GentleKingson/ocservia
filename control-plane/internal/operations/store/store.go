@@ -139,7 +139,6 @@ type Store interface {
 	UpgradeProgress(context.Context, UpgradeTransition) error
 	InsertIntent(context.Context, QueuedIntent) error
 	EnqueueCommand(context.Context, QueuedCommand) error
-	NotifyOutbox(context.Context, uuid.UUID) error
 	ExpireQueued(context.Context) error
 	SupersedePending(context.Context, uuid.UUID, string, value.Timestamp) error
 	Get(context.Context, uuid.UUID) (Operation, error)

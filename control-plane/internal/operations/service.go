@@ -594,9 +594,6 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	if err := audit.AppendChainTx(ctx, commonTx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
 	}
-	if err := intentStore.NotifyOutbox(ctx, outboxID); err != nil {
-		return Operation{}, false, fmt.Errorf("notify outbox worker: %w", err)
-	}
 	if err := tx.Commit(ctx); err != nil {
 		// The commit acknowledgement may have been lost. Resolve only this
 		// operation's immutable idempotency record; never create another intent.
