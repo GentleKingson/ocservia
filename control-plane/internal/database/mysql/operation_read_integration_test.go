@@ -208,9 +208,6 @@ func TestRealOperationIntentTransaction(t *testing.T) {
 			if err := store.EnqueueCommand(ctx, operationstore.QueuedCommand{ID: command, OperationID: id, WorkspaceID: workspace, NodeID: node, OutboxID: outbox, EventID: event, PayloadType: "synthetic_noop", Envelope: []byte("x"), IdempotencyKey: id.String(), ExpectedVersion: 1, Traceparent: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01", CreatedAt: negative, ExpiresAt: positive, AvailableAt: positive}); err != nil {
 				return err
 			}
-			if err := store.NotifyOutbox(ctx, outbox); err != nil {
-				return err
-			}
 			if !commit {
 				return rejected
 			}

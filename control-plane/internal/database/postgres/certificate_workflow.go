@@ -2,11 +2,9 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -29,15 +27,7 @@ func (s certificateStore) RevocationUnknown(ctx context.Context, id uuid.UUID, a
 }
 
 func (s certificateStore) ReleaseOperation(ctx context.Context, id uuid.UUID) error {
-	var outbox uuid.UUID
-	err := s.QueryRow(ctx, `UPDATE outbox_events SET available_at=now() WHERE command_id=(SELECT command_id FROM operations WHERE id=$1) AND published_at IS NULL RETURNING id`, id).Scan(&outbox)
-	if errors.Is(err, database.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	_, err = s.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, outbox.String())
+	_, err := s.Exec(ctx, `UPDATE outbox_events SET available_at=now() WHERE command_id=(SELECT command_id FROM operations WHERE id=$1) AND published_at IS NULL`, id)
 	return err
 }
 

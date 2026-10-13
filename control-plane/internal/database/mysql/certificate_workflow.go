@@ -41,8 +41,6 @@ func (s certificateStore) RevocationUnknown(ctx context.Context, id uuid.UUID, a
 }
 
 func (s certificateStore) ReleaseOperation(ctx context.Context, id uuid.UUID) error {
-	// The operation dispatcher must poll this durable row; pg_notify is only
-	// a PostgreSQL latency hint, not delivery authority.
 	now, err := database.TransactionTime(ctx, s.Tx)
 	if err != nil {
 		return err

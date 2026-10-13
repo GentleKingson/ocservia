@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
-	"github.com/google/uuid"
 )
 
 func (s operationStore) InsertIntent(ctx context.Context, v operationstore.QueuedIntent) error {
@@ -25,9 +24,4 @@ func (s operationStore) EnqueueCommand(ctx context.Context, v operationstore.Que
 	}
 	_, err := s.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES(?,?,'queued',?)`, UUIDBytes(v.EventID), UUIDBytes(v.OperationID), v.CreatedAt)
 	return err
-}
-
-func (s operationStore) NotifyOutbox(context.Context, uuid.UUID) error {
-	// Durable polling, not a notification, is the dispatch authority.
-	return nil
 }

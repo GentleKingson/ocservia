@@ -105,12 +105,10 @@ func (s telemetryWriteStore) ReplaceUsers(ctx context.Context, node uuid.UUID, o
 	return nil
 }
 func (s telemetryWriteStore) Activate(ctx context.Context, node uuid.UUID, observed time.Time) error {
-	if _, err := s.tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,$2),version=version+1 WHERE id=$1 AND status='offline'`, node, observed); err != nil {
-		return err
-	}
-	_, err := s.tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, node.String())
+	_, err := s.tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,$2),version=version+1 WHERE id=$1 AND status='offline'`, node, observed)
 	return err
 }
+
 func (s telemetryWriteStore) InsertUpgrade(ctx context.Context, node uuid.UUID, r telemetrywrite.Upgrade) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at,privileged_result_proof)
  SELECT $1,$2,$3,$4,$5,$6,now(),$7

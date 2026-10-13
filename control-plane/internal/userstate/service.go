@@ -241,9 +241,6 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
 		return operationstore.Operation{}, false, fmt.Errorf("append desired state audit intent: %w", err)
 	}
-	if err := operations.NotifyOutbox(ctx, outboxID); err != nil {
-		return operationstore.Operation{}, false, err
-	}
 	if err := commitFenced(ctx, tx); err != nil {
 		return operationstore.Operation{}, false, err
 	}
