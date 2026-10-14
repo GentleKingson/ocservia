@@ -838,16 +838,16 @@ def revocation():
     record('revocation_unauthorized_and_unapproved_rejected', approval_id=decision)
     started = int(time.time())
     # 200 means the revoked trust and the connection close were both applied in
-    # the request. A 503 leaves them to the background worker, which cannot reach
-    # a node whose owner session already ended, so it never stands in for them.
+    # the request. A 503 leaves them to the background worker, which never counts
+    # lost ownership as delivery, so it never stands in for them.
     api(path, body, headers={'X-Approval-ID': decision})
     assert api('approval-requests/' + decision)['status'] == 'consumed'
     status, revision = sql(f"SELECT status||'|'||authorization_revision FROM nodes WHERE id='{node}';").split('|')
     assert status == 'revoked'
     assert sql(f"SELECT state FROM node_endpoint_keys WHERE node_id='{node}';") == 'revoked'
     assert api(prefix)['trust_status'] == 'revoked'
-    # The durable revoked intent stays queued for any later owner session.
-    assert sql("SELECT desired_state='revoked' AND close_required FROM node_trust_convergence "
+    # The request settled exactly this revoked intent with its fenced update and close.
+    assert sql("SELECT desired_state='revoked' AND update_applied AND close_required AND close_applied FROM node_trust_convergence "
                f"WHERE node_id='{node}' AND revision={int(revision)};") == 't'
     wait_for('revoked owner lease invalidation', lambda: sql(
         "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "

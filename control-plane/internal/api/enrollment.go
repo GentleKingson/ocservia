@@ -190,6 +190,13 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 				return s.transport.CloseNode(ctx, trust.NodeID[:], "node revoked", binding)
 			})
 	}
+	if syncErr == nil {
+		// Only this request's fenced successes settle the queued intent; a
+		// failed close stays with the worker.
+		if _, err := s.enrollment.RecordRevocationSynchronized(r.Context(), trust, body.Reason, closeErr == nil); err != nil {
+			s.logger.WarnContext(r.Context(), "record synchronous revocation convergence", "error", err)
+		}
+	}
 	if syncErr != nil || closeErr != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Revocation committed", "the node is revoked but transport disconnect synchronization is pending")
 		return
