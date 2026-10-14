@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Focused checks for Business Smoke and manual integration."""
+import hashlib
 import importlib.util
 import json
 import os
@@ -390,6 +391,38 @@ certutil() { :; }
             assert all('--user=t07-smoke' in call.args[0] for call in popen.call_args_list)
             assert [call.args[0] for call in record.call_args_list] == [
                 'real_vpn_after_config_apply', 'real_vpn_after_rollback']
+
+        # The bootstrap source is protected and consumed by the installer; the
+        # private copy only feeds redaction. Binding evidence must be exact.
+        token = 'obt1_' + 'A' * 43
+        with patch.dict(os.environ, env), \
+                patch.object(business, 'api', return_value={'id': 'token-id', 'token': token}) as requests, \
+                patch.object(business, 'sql', return_value='t'), patch.object(business, 'record') as record:
+            business.bootstrap_token()
+            assert 'expected_endpoint_id' not in requests.call_args.args[1]
+            source = work / 'bootstrap/node-bootstrap-token'
+            assert source.read_text() == token and source.stat().st_mode & 0o777 == 0o600
+            assert (work / 'private/bootstrap-token').read_text() == token
+            record.assert_called_once_with('bootstrap_token_created_unbound', token_id='token-id')
+        binding = {'token_hash': hashlib.sha256(token.encode()).hexdigest(), 'bound_endpoint': 'e' * 64,
+                   'unbound_at_creation': True, 'consumed_node_id': 'node', 'consumed': True}
+        verify_env = {**env, 'T07_ENDPOINT': 'e' * 64}
+        for label, row, status in [('accepted', binding, 'pending'),
+                                   ('other endpoint', {**binding, 'bound_endpoint': 'f' * 64}, 'pending'),
+                                   ('unconsumed', {**binding, 'consumed': False}, 'pending'),
+                                   ('created bound', {**binding, 'unbound_at_creation': False}, 'pending'),
+                                   ('active', binding, 'active')]:
+            with patch.dict(os.environ, verify_env), \
+                    patch.object(business, 'sql', side_effect=[json.dumps(row), status, 'e' * 64]), \
+                    patch.object(business, 'record') as record:
+                try:
+                    business.bootstrap_verify()
+                except AssertionError:
+                    assert label != 'accepted', label
+                    record.assert_not_called()
+                else:
+                    assert label == 'accepted', 'bootstrap evidence accepted: ' + label
+                    assert record.call_args.args[0] == 'bootstrap_token_consumed_and_bound_pending'
 
 
 if __name__ == '__main__':
